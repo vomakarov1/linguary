@@ -25,6 +25,7 @@ _CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
 _MEDIA_TYPES = {
     ".xhtml": "application/xhtml+xml",
     ".css": "text/css",
+    ".js": "application/javascript",
     ".png": "image/png",
     ".jpg": "image/jpeg",
 }
@@ -39,6 +40,7 @@ def build_epub(
     title: str = "Test Book",
     language: str = "en",
     extra_files: Mapping[str, bytes] | None = None,
+    archive_files: Mapping[str, bytes] | None = None,
     include_container: bool = True,
     include_package: bool = True,
     omit_from_archive: Sequence[str] = (),
@@ -46,7 +48,9 @@ def build_epub(
     """Собирает EPUB3 из готовых XHTML-документов и отдаёт путь к нему.
 
     `omit_from_archive` объявляет файл в манифесте, но не кладёт его в архив: так
-    получается книга с потерянным документом порядка чтения.
+    получается книга с потерянным документом порядка чтения или потерянным ресурсом.
+    `archive_files` кладёт файл в архив по указанному пути, не добавляя каталог пакета
+    и не объявляя его в манифесте: так получается ресурс, лежащий вне каталога книги.
     """
     order = list(spine) if spine is not None else list(documents)
     with zipfile.ZipFile(path, "w") as archive:
@@ -72,7 +76,11 @@ def build_epub(
                 continue
             archive.writestr(f"{PACKAGE_DIRECTORY}/{href}", content)
         for href, payload in (extra_files or {}).items():
+            if href in omit_from_archive:
+                continue
             archive.writestr(f"{PACKAGE_DIRECTORY}/{href}", payload)
+        for name, payload in (archive_files or {}).items():
+            archive.writestr(name, payload)
     return path
 
 

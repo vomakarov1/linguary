@@ -1,21 +1,24 @@
 """Сценарий импорта книги из EPUB.
 
-Сценарий читает книгу через порт `EpubReader` и одной короткой транзакцией сохраняет
-каноническую модель, запись книги и предупреждения импорта (ADR § 3: чтение файла
-выполняется вне транзакции). О формате EPUB, файловой системе и SQLite сценарий не знает.
-
-Копии ресурсов на диск сохраняет отдельный шаг импорта, поэтому отображение
-«исходный путь ресурса → сохранённая копия» здесь пустое.
+Сценарий читает книгу через порт `EpubReader`, сохраняет её ресурсы через порт
+`EpubResourceStore` и одной короткой транзакцией сохраняет каноническую модель, запись
+книги и предупреждения импорта (ADR § 3: чтение файла и запись ресурсов выполняются
+вне транзакции). О формате EPUB, файловой системе и SQLite сценарий не знает.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from linguary.application.errors import ApplicationError
-from linguary.application.ports.epub import EpubReader, EpubReadRequest
+from linguary.application.ports.epub import (
+    EpubReader,
+    EpubReadRequest,
+    EpubResourceStore,
+    StoreResourcesRequest,
+)
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
     BookEvent,
@@ -57,10 +60,12 @@ class ImportBook:
         *,
         unit_of_work: UnitOfWork,
         reader: EpubReader,
+        resource_store: EpubResourceStore | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._reader = reader
+        self._resource_store = resource_store
         self._clock = clock or _utc_now
 
     def __call__(self, command: ImportBookCommand) -> ImportBookResult:
@@ -74,6 +79,7 @@ class ImportBook:
             )
         )
         document = imported.document
+        stored_resource_paths = self._store_resources(command, document)
         with self._unit_of_work.transaction() as transaction:
             existing = transaction.books.get(command.book_id)
             record = BookRecord(
@@ -92,7 +98,9 @@ class ImportBook:
                 transaction.books.add(record)
             else:
                 transaction.books.save(record)
-            transaction.documents.save(document, stored_resource_paths={})
+            transaction.documents.save(
+                document, stored_resource_paths=stored_resource_paths
+            )
             if imported.warnings:
                 transaction.documents.add_import_warnings(
                     command.book_id, imported.warnings
@@ -100,6 +108,24 @@ class ImportBook:
         return ImportBookResult(
             book=record, document=document, warnings=imported.warnings
         )
+
+    def _store_resources(
+        self, command: ImportBookCommand, document: CanonicalDocument
+    ) -> Mapping[str, str]:
+        """Сохраняет ресурсы книги, если хранилище подключено.
+
+        Без хранилища книга импортируется одной моделью документа: диагностический разбор
+        книги и импорт без последующего экспорта копий ресурсов не требуют.
+        """
+        if self._resource_store is None:
+            return {}
+        return self._resource_store.store(
+            StoreResourcesRequest(
+                book_id=command.book_id,
+                source_path=command.source_epub_path,
+                document=document,
+            )
+        ).paths
 
 
 def _status_after_import(existing: BookRecord | None) -> BookStatus:

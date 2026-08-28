@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from linguary.domain import BookImportWarning, CanonicalDocument, DomainError
@@ -58,9 +59,49 @@ class EpubReader(Protocol):
         """
 
 
+@dataclass(frozen=True, slots=True)
+class StoreResourcesRequest:
+    """Запрос на сохранение ресурсов книги в локальное хранилище.
+
+    Каноническая модель нужна целиком: по ней хранилище знает и состав ресурсов вместе
+    с их статусом поддержки, и то, какие из них обязательны для книги.
+    """
+
+    book_id: str
+    source_path: str
+    document: CanonicalDocument
+
+
+@dataclass(frozen=True, slots=True)
+class StoredResources:
+    """Результат сохранения: копия каждого ресурса по его исходному пути в книге."""
+
+    paths: Mapping[str, str] = field(default_factory=dict)
+
+
+class EpubResourceStore(Protocol):
+    """Локальное хранилище ресурсов книги (PRD § 22).
+
+    Сценарий импорта знает только то, что ресурсы книги где-то сохранены и что копию
+    каждого можно найти по исходному пути ресурса; каталог хранилища, распаковка архива
+    и защита от выхода за его пределы остаются ответственностью адаптера.
+    """
+
+    def store(self, request: StoreResourcesRequest) -> StoredResources:
+        """Сохраняет ресурсы книги и отдаёт пути их копий.
+
+        Реализация обязана поднимать `EpubImportFatalError` там, где по матрице поддержки
+        наступает `FATAL`: потерян ресурс книги, путь ведёт за пределы хранилища книги,
+        архив превышает допустимые лимиты распаковки.
+        """
+
+
 __all__ = [
     "EpubImportFatalError",
     "EpubReadRequest",
     "EpubReader",
+    "EpubResourceStore",
     "ImportedBook",
+    "StoreResourcesRequest",
+    "StoredResources",
 ]

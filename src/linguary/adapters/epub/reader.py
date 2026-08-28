@@ -31,6 +31,14 @@ from linguary.adapters.epub.inline import (
     local_name,
     resolve_link_target,
 )
+from linguary.adapters.epub.resources import package_path
+from linguary.adapters.epub.support_matrix import (
+    DroppedBlockLog,
+    DropReason,
+    block_support_status,
+    dropped_resource_warning,
+    resource_support_status,
+)
 from linguary.application.ports.epub import (
     EpubImportFatalError,
     EpubReader,
@@ -107,9 +115,6 @@ _VERSE_MARKERS = frozenset({"l", "line", "verse", "poem", "stanza", "linegroup"}
 #: Признаки разрыва страницы и номера страницы печатного оригинала.
 _PAGE_BREAK_MARKERS = frozenset({"pagebreak", "pageno", "page-break", "pagenum"})
 
-#: Типы блоков, которые переносятся в итоговый EPUB без внутренней обработки (PRD § 6).
-_PRESERVE_OPAQUE_TYPES = frozenset({BlockType.TABLE, BlockType.OTHER, BlockType.PAGE_BREAK})
-
 #: Тип содержимого для ресурса, у которого манифест его не задал.
 _DEFAULT_MEDIA_TYPE = "application/octet-stream"
 
@@ -175,6 +180,7 @@ class EbookLibEpubReader(EpubReader):
             )
         )
         resources = _resources(book, book_id=request.book_id)
+        warnings.extend(_dropped_resource_warnings(resources))
         manifest_paths = frozenset(resource.source_path for resource in resources)
 
         sections: list[DocumentSection] = []
@@ -286,7 +292,7 @@ class _ArchiveContents:
         self._source_path = source_path
         try:
             self._archive = zipfile.ZipFile(source_path)
-            self._directory = posixpath.dirname(_package_path(self._archive))
+            self._directory = posixpath.dirname(package_path(self._archive))
         except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError) as error:
             raise EpubImportFatalError(
                 f"EPUB {source_path} нельзя прочитать: {error}"
@@ -310,15 +316,6 @@ class _ArchiveContents:
             f"документ {resource_path} объявлен в EPUB {self._source_path}, "
             f"но отсутствует в архиве"
         )
-
-
-def _package_path(archive: zipfile.ZipFile) -> str:
-    """Путь к OPF внутри архива по `META-INF/container.xml`."""
-    container = etree.fromstring(archive.read("META-INF/container.xml"))
-    for element in container.iter():
-        if local_name(element) == "rootfile" and element.get("full-path"):
-            return element.get("full-path", "")
-    raise EpubImportFatalError("в EPUB не объявлен файл пакета OPF")
 
 
 def _toc_titles(book: epub.EpubBook) -> Mapping[str, tuple[str, ...]]:
@@ -416,9 +413,23 @@ def _resources(book: epub.EpubBook, *, book_id: str) -> tuple[DocumentResource, 
                 id=f"{book_id}:{source_path}",
                 source_path=source_path,
                 media_type=media_type,
+                support_status=resource_support_status(media_type),
             )
         )
     return tuple(resources)
+
+
+def _dropped_resource_warnings(
+    resources: Sequence[DocumentResource],
+) -> list[BookImportWarning]:
+    """Предупреждения о ресурсах, которые в итоговую книгу не переносятся (PRD § 6)."""
+    return [
+        dropped_resource_warning(
+            source_path=resource.source_path, media_type=resource.media_type
+        )
+        for resource in resources
+        if resource.support_status is SupportStatus.DROP_WITH_WARNING
+    ]
 
 
 def _metadata(book: epub.EpubBook, *, source_path: str) -> BookMetadata:
@@ -484,7 +495,7 @@ def _build_section(
         source_resource_path=document.resource_path,
         blocks=blocks,
     )
-    return section, builder.warnings
+    return section, builder.import_warnings()
 
 
 def _parse_document(document: _SpineDocument) -> etree._Element:
@@ -565,6 +576,14 @@ class _SectionBuilder:
         self._manifest_paths = manifest_paths
         self._order = 0
         self._pending_anchor_ids: list[str] = []
+        self._last_block: DocumentBlock | None = None
+        self._drops = DroppedBlockLog(
+            resource_path=resource_path, section_id=section_id
+        )
+
+    def import_warnings(self) -> list[BookImportWarning]:
+        """Замечания раздела: потерянные ресурсы и пропущенные конструкции."""
+        return [*self.warnings, *self._drops.warnings()]
 
     def walk(self, container: etree._Element, context: _BlockContext) -> None:
         """Обходит содержимое контейнера, сохраняя порядок документа."""
@@ -619,14 +638,17 @@ class _SectionBuilder:
         builder.add_children(element)
         content = builder.build()
         block_type = _leaf_type(element, context=context, content=content)
-        if not self._is_worth_keeping(element, content=content, block_type=block_type):
+        structural_path = _structural_path(element)
+        reason = self._drop_reason(element, content=content, block_type=block_type)
+        if reason is not None:
+            self._drops.record(reason, structural_path)
             return
         self._add_block(
             element=element,
-            structural_path=_structural_path(element),
+            structural_path=structural_path,
             type=block_type,
             content=content,
-            support_status=_support_status(block_type),
+            support_status=block_support_status(block_type),
             context=context,
         )
 
@@ -639,12 +661,13 @@ class _SectionBuilder:
         run.builder = self._new_content_builder()
         if not content.text:
             return
+        block_type = context.inherited_type or BlockType.PARAGRAPH
         self._add_block(
             element=None,
             structural_path=f"{_structural_path(container)}/text()[{run.index}]",
-            type=context.inherited_type or BlockType.PARAGRAPH,
+            type=block_type,
             content=content,
-            support_status=SupportStatus.SUPPORTED,
+            support_status=block_support_status(block_type),
             context=context,
         )
 
@@ -678,6 +701,7 @@ class _SectionBuilder:
         )
         self.blocks.append(block)
         self._order += 1
+        self._last_block = block
         self._pending_anchor_ids.clear()
         return block
 
@@ -724,25 +748,38 @@ class _SectionBuilder:
             attributes["alt"] = alternative.strip()
         return attributes
 
-    def _is_worth_keeping(
+    def _drop_reason(
         self,
         element: etree._Element,
         *,
         content: InlineContent,
         block_type: BlockType,
-    ) -> bool:
-        """Нужен ли блок для элемента без текста.
+    ) -> DropReason | None:
+        """Причина, по которой блок для элемента не создаётся, либо `None`.
 
         Пустой элемент сохраняется, если он сам является структурой (изображение,
-        разделитель, таблица) либо служит целью внутренней ссылки книги.
+        разделитель, таблица) либо служит целью внутренней ссылки книги. Разрыв страницы
+        сохраняется первым в цепочке: подряд идущие разрывы описывают одну и ту же границу
+        печатной страницы, и в книге для чтения второй из них лишний (PRD § 6).
         """
+        if block_type is BlockType.PAGE_BREAK and not content.text:
+            return (
+                DropReason.DUPLICATE_PAGE_BREAK
+                if self._follows_empty_page_break()
+                else None
+            )
         if content.text:
-            return True
+            return None
         if local_name(element) in _KEEP_EMPTY_TAGS:
-            return True
-        if block_type is BlockType.PAGE_BREAK:
-            return True
-        return bool(element.get("id") or content.anchor_ids)
+            return None
+        if element.get("id") or content.anchor_ids:
+            return None
+        return DropReason.EMPTY_DECORATION
+
+    def _follows_empty_page_break(self) -> bool:
+        """Был ли последний добавленный блок раздела пустым разрывом страницы."""
+        last = self._last_block
+        return last is not None and last.type is BlockType.PAGE_BREAK and not last.text
 
     def _new_content_builder(self) -> InlineContentBuilder:
         return InlineContentBuilder(
@@ -816,15 +853,6 @@ def _leaf_type(
     if context.inherited_type is not None:
         return context.inherited_type
     return BlockType.PARAGRAPH if content.text else BlockType.OTHER
-
-
-def _support_status(block_type: BlockType) -> SupportStatus:
-    """Статус поддержки конструкции по её типу (PRD § 6)."""
-    return (
-        SupportStatus.PRESERVE_OPAQUE
-        if block_type in _PRESERVE_OPAQUE_TYPES
-        else SupportStatus.SUPPORTED
-    )
 
 
 def _is_page_break(element: etree._Element) -> bool:
