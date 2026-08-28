@@ -1,1 +1,10 @@
-"""Импорт и экспорт EPUB: контейнер через EbookLib, разбор XHTML через lxml."""
+"""Адаптеры формата EPUB: импорт книги в каноническую модель документа.
+
+Публичный вход адаптера — `EbookLibEpubReader`, реализация порта
+`linguary.application.ports.epub.EpubReader`. Прикладной слой видит только порт
+и о EbookLib, lxml и файлах книги ничего не знает (ADR § 3).
+"""
+
+from linguary.adapters.epub.reader import EbookLibEpubReader
+
+__all__ = ["EbookLibEpubReader"]
