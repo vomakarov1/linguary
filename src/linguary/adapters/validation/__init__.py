@@ -7,8 +7,9 @@
 """
 
 from linguary.adapters.validation.epubcheck import (
+    EpubCheckAvailability,
     EpubCheckSettings,
     EpubCheckValidator,
 )
 
-__all__ = ["EpubCheckSettings", "EpubCheckValidator"]
+__all__ = ["EpubCheckAvailability", "EpubCheckSettings", "EpubCheckValidator"]

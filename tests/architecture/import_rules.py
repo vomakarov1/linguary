@@ -140,6 +140,39 @@ ADAPTERS_RULE = LayerRule(
     allow_third_party=True,
 )
 
+#: Composition root: единственное место, которое знает и порты, и конкретные адаптеры.
+#: Представления ему неизвестны — зависимость идёт от них к нему, а не наоборот.
+COMPOSITION_RULE = LayerRule(
+    layer="composition",
+    package=f"{ROOT_PACKAGE}.composition",
+    allowed_internal=frozenset(
+        {
+            f"{ROOT_PACKAGE}.domain",
+            f"{ROOT_PACKAGE}.application",
+            f"{ROOT_PACKAGE}.adapters",
+            f"{ROOT_PACKAGE}.composition",
+        }
+    ),
+    allow_third_party=True,
+)
+
+#: Web UI: состав зависимостей берёт из `composition` и не зависит от CLI — другого
+#: представления того же приложения.
+WEB_RULE = LayerRule(
+    layer="web",
+    package=f"{ROOT_PACKAGE}.web",
+    allowed_internal=frozenset(
+        {
+            f"{ROOT_PACKAGE}.domain",
+            f"{ROOT_PACKAGE}.application",
+            f"{ROOT_PACKAGE}.adapters",
+            f"{ROOT_PACKAGE}.composition",
+            f"{ROOT_PACKAGE}.web",
+        }
+    ),
+    allow_third_party=True,
+)
+
 
 def iter_modules(directory: Path) -> list[Path]:
     """Все `.py`-файлы слоя, отсортированные для стабильного вывода."""

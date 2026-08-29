@@ -7,15 +7,26 @@
 
 Репозитории существуют только внутри транзакции: обращение к ним снаружи — ошибка
 контракта, а не молчаливое открытие собственной транзакции.
+
+Один экземпляр обслуживает всё приложение, поэтому активная сессия хранится не в самом
+объекте, а в контексте исполнения (`ContextVar`): веб-запрос в рабочем потоке FastAPI,
+фоновая задача воркера и корутина сценария работают одновременно, и каждая ведёт свою
+транзакцию. Общее поле сделало бы их одной транзакцией на всех, а вторая одновременная
+работа получала бы отказ «транзакция уже открыта».
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
+from itertools import count
 
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
+
+#: Счётчик экземпляров: имя `ContextVar` служит только диагностике.
+_INSTANCES = count(1)
 
 from linguary.adapters.db.engine import create_session_factory
 from linguary.adapters.db.repositories import (
@@ -36,7 +47,9 @@ class SqlAlchemyUnitOfWork:
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
-        self._session: Session | None = None
+        self._current: ContextVar[Session | None] = ContextVar(
+            f"linguary_unit_of_work_{next(_INSTANCES)}", default=None
+        )
 
     @classmethod
     def for_engine(cls, engine: Engine) -> SqlAlchemyUnitOfWork:
@@ -45,18 +58,23 @@ class SqlAlchemyUnitOfWork:
 
     @contextmanager
     def transaction(self) -> Iterator[SqlAlchemyUnitOfWork]:
-        """Открывает транзакцию и делает репозитории доступными."""
-        if self._session is not None:
+        """Открывает транзакцию и делает репозитории доступными.
+
+        Вложенная транзакция того же исполнения по-прежнему запрещена: она означала бы,
+        что сценарий не выбрал транзакционную границу явно. Одновременная транзакция
+        другого запроса или фоновой задачи вложенной не считается — у неё свой контекст.
+        """
+        if self._current.get() is not None:
             raise PersistenceError(
                 "транзакция уже открыта: вложенные транзакции не поддерживаются"
             )
         session = self._session_factory()
+        token = self._current.set(session)
         try:
             with session.begin():
-                self._session = session
                 yield self
         finally:
-            self._session = None
+            self._current.reset(token)
             session.close()
 
     @property
@@ -100,13 +118,14 @@ class SqlAlchemyUnitOfWork:
         return SqlAlchemyLLMCallLogRepository(self._active_session())
 
     def _active_session(self) -> Session:
-        """Сессия открытой транзакции."""
-        if self._session is None:
+        """Сессия транзакции, открытой в текущем исполнении."""
+        session = self._current.get()
+        if session is None:
             raise PersistenceError(
                 "репозиторий доступен только внутри transaction(): "
                 "прикладной сценарий обязан задать транзакционную границу явно"
             )
-        return self._session
+        return session
 
 
 __all__ = ["SqlAlchemyUnitOfWork"]

@@ -102,11 +102,36 @@ class EpubCheckSettings:
             raise ValueError("предел ожидания EPUBCheck должен быть положительным")
 
 
+@dataclass(frozen=True, slots=True)
+class EpubCheckAvailability:
+    """Готовность внешней проверки на этой машине (PRD § 21.6).
+
+    Экран конфигурации и `doctor` показывают её до всякого экспорта, поэтому ответ
+    отделён от самой проверки: собирать книгу ради него не нужно. Найденные пути
+    попадают в ответ, чтобы пользователь видел, какой именно инструмент будет вызван.
+    """
+
+    available: bool
+    reason: str | None = None
+    java_path: str | None = None
+    jar_path: str | None = None
+
+
 class EpubCheckValidator(ExportValidator):
     """Внешняя проверка экспортированного EPUB инструментом EPUBCheck."""
 
     def __init__(self, *, settings: EpubCheckSettings | None = None) -> None:
         self._settings = settings or EpubCheckSettings()
+
+    def availability(self) -> EpubCheckAvailability:
+        """Ищет Java и `epubcheck.jar`, ничего не проверяя."""
+        try:
+            tool = _locate(self._settings)
+        except _ToolUnavailable as unavailable:
+            return EpubCheckAvailability(available=False, reason=str(unavailable))
+        return EpubCheckAvailability(
+            available=True, java_path=tool.java, jar_path=tool.jar
+        )
 
     def validate(self, request: ExportValidationRequest) -> ExportValidationReport:
         """Проверяет собранный файл; недоступный инструмент — не ошибка."""
@@ -353,4 +378,4 @@ def _text(value: object) -> str | None:
     return value.strip() or None if isinstance(value, str) else None
 
 
-__all__ = ["EpubCheckSettings", "EpubCheckValidator"]
+__all__ = ["EpubCheckAvailability", "EpubCheckSettings", "EpubCheckValidator"]

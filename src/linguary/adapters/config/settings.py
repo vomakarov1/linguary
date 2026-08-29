@@ -34,6 +34,21 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 #: Сколько раз задача повторяется автоматически до перехода в `failed` (PRD § 16).
 DEFAULT_MAX_ATTEMPTS = 3
 
+#: Каталог, в котором приложение держит базу, исходные книги, их ресурсы и собранные EPUB
+#: (PRD § 22). Лежит рядом с файлом настроек, вне репозитория.
+DEFAULT_DATA_ROOT = "~/.linguary"
+
+#: Имя файла базы внутри каталога данных.
+DEFAULT_DATABASE_NAME = "linguary.db"
+
+#: Адрес, на котором работает локальный Web UI. Приложение хранит ключ провайдера и полный
+#: текст книги, поэтому по умолчанию оно доступно только с этой же машины; выставить его
+#: наружу можно единственным способом — явно задав другой адрес в локальной конфигурации.
+DEFAULT_SERVER_HOST = "127.0.0.1"
+
+#: Порт локального Web UI.
+DEFAULT_SERVER_PORT = 8000
+
 
 class SettingsError(ApplicationError):
     """Локальная конфигурация непригодна: неразбираемый файл или недопустимое значение."""
@@ -140,20 +155,74 @@ class CheckSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class StorageSettings:
+    """Где приложение держит свои данные (PRD § 22).
+
+    Пустой `database_path` означает базу внутри каталога данных: пользователю достаточно
+    перенести один каталог, чтобы перенести всё приложение. Отдельный путь нужен там, где
+    база лежит не с книгами, — например на другом диске.
+    """
+
+    data_root: str = DEFAULT_DATA_ROOT
+    database_path: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.data_root.strip():
+            raise SettingsError("каталог данных приложения не задан")
+
+
+@dataclass(frozen=True, slots=True)
+class ServerSettings:
+    """Адрес локального Web UI (PRD § 21, § 4.1)."""
+
+    host: str = DEFAULT_SERVER_HOST
+    port: int = DEFAULT_SERVER_PORT
+
+    def __post_init__(self) -> None:
+        if not self.host.strip():
+            raise SettingsError("адрес локального сервера не задан")
+        if not 1 <= self.port <= 65535:
+            raise SettingsError(f"порт локального сервера вне диапазона: {self.port}")
+
+    @property
+    def is_local_only(self) -> bool:
+        """Доступен ли сервер только с этой машины.
+
+        Пользователь должен видеть, что приложение с ключом провайдера и полным текстом
+        книги открыто в сеть, если он сам задал такой адрес.
+        """
+        return self.host.strip() in ("127.0.0.1", "::1", "localhost")
+
+    @property
+    def base_url(self) -> str:
+        """Адрес, по которому открывается Web UI."""
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"http://{host}:{self.port}"
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     """Локальная конфигурация приложения целиком."""
 
     llm: LLMSettings = field(default_factory=LLMSettings)
     checks: CheckSettings = field(default_factory=CheckSettings)
+    storage: StorageSettings = field(default_factory=StorageSettings)
+    server: ServerSettings = field(default_factory=ServerSettings)
 
 
 __all__ = [
     "DEFAULT_BASE_URL",
+    "DEFAULT_DATABASE_NAME",
+    "DEFAULT_DATA_ROOT",
     "DEFAULT_MAX_ATTEMPTS",
+    "DEFAULT_SERVER_HOST",
+    "DEFAULT_SERVER_PORT",
     "DEFAULT_TIMEOUT_SECONDS",
     "OPENAI_COMPATIBLE_PROVIDER",
     "AppSettings",
     "CheckSettings",
     "LLMSettings",
+    "ServerSettings",
     "SettingsError",
+    "StorageSettings",
 ]

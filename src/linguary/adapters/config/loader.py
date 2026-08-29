@@ -25,7 +25,9 @@ from linguary.adapters.config.settings import (
     AppSettings,
     CheckSettings,
     LLMSettings,
+    ServerSettings,
     SettingsError,
+    StorageSettings,
 )
 
 #: Переменная окружения с путём к файлу настроек.
@@ -88,6 +90,18 @@ _CHECK_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "repetition_min_repeats": _as_int,
 }
 
+#: Разбор значений секции `[storage]`.
+_STORAGE_FIELDS: Mapping[str, Callable[[object, str], object]] = {
+    "data_root": _as_str,
+    "database_path": _as_str,
+}
+
+#: Разбор значений секции `[server]`.
+_SERVER_FIELDS: Mapping[str, Callable[[object, str], object]] = {
+    "host": _as_str,
+    "port": _as_int,
+}
+
 
 def load_settings(
     *,
@@ -116,6 +130,22 @@ def load_settings(
                 document,
                 name="checks",
                 fields=_CHECK_FIELDS,
+                variables=variables,
+            )
+        ),
+        storage=StorageSettings(
+            **_section(
+                document,
+                name="storage",
+                fields=_STORAGE_FIELDS,
+                variables=variables,
+            )
+        ),
+        server=ServerSettings(
+            **_section(
+                document,
+                name="server",
+                fields=_SERVER_FIELDS,
                 variables=variables,
             )
         ),

@@ -12,8 +12,10 @@ import pytest
 from import_rules import (
     ADAPTERS_RULE,
     APPLICATION_RULE,
+    COMPOSITION_RULE,
     DOMAIN_RULE,
     PACKAGE_ROOT,
+    WEB_RULE,
     LayerRule,
     SourceModule,
     check_layer,
@@ -25,6 +27,10 @@ from import_rules import (
 LAYER_PACKAGES = ("domain", "application", "adapters", "web", "cli")
 
 INNER_RULES = (DOMAIN_RULE, APPLICATION_RULE)
+
+#: Внешние слои: им разрешены сторонние библиотеки, но не зависимость от соседа
+#: и не зависимость внутрь себя из более внутреннего слоя.
+OUTER_RULES = (ADAPTERS_RULE, COMPOSITION_RULE, WEB_RULE)
 
 
 def source_module(source: str) -> SourceModule:
@@ -66,6 +72,19 @@ def test_adapters_do_not_depend_on_web_and_cli() -> None:
     )
 
 
+@pytest.mark.parametrize("rule", OUTER_RULES, ids=lambda rule: rule.layer)
+def test_outer_layer_dependencies(rule: LayerRule) -> None:
+    """Внешние слои зависят только внутрь: `composition` и `web` не знают о CLI.
+
+    Состав зависимостей собирается один раз в `composition`, а представления берут его
+    оттуда: Web UI не собирает адаптеры сам и не зависит от CLI.
+    """
+    violations = check_layer(rule)
+    assert not violations, (
+        f"нарушены границы слоя {rule.layer}:\n{format_violations(violations)}"
+    )
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -85,6 +104,34 @@ def test_adapters_do_not_depend_on_web_and_cli() -> None:
 def test_rules_detect_violation(source: str) -> None:
     """Правила действительно ловят запрещённый код, а не молчат на любом входе."""
     violations = check_module(source_module(source), DOMAIN_RULE)
+    assert violations, f"нарушение не обнаружено в исходнике:\n{source}"
+
+
+@pytest.mark.parametrize(
+    ("rule", "package", "source"),
+    [
+        pytest.param(
+            WEB_RULE,
+            "linguary.web",
+            "from linguary.cli import main\n",
+            id="web-imports-cli",
+        ),
+        pytest.param(
+            COMPOSITION_RULE,
+            "linguary.composition",
+            "from linguary.web.app import create_app\n",
+            id="composition-imports-web",
+        ),
+    ],
+)
+def test_outer_rules_detect_dependency_on_a_sibling_layer(
+    rule: LayerRule, package: str, source: str
+) -> None:
+    """Внешний слой не может зависеть от соседнего представления того же приложения."""
+    module = SourceModule(module=f"{package}.sample", package=package, source=source)
+
+    violations = check_module(module, rule)
+
     assert violations, f"нарушение не обнаружено в исходнике:\n{source}"
 
 
