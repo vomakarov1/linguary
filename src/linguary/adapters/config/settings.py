@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_BLOCKS
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
+from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
 
 #: Провайдер первой реализации: HTTP API, совместимый с OpenAI chat completions
 #: и структурированными ответами (ADR § 3). Тот же адаптер обслуживает совместимые
@@ -50,6 +51,11 @@ class LLMSettings:
     Настройка стоит рядом с `max_output_tokens`, потому что определяется тем же пределом:
     глава, ответ на которую не помещается в лимит вывода модели, анализируется
     последовательными фрагментами (PRD § 14).
+
+    `max_unit_source_chars` — сколько символов оригинала уходит в один запрос обработки
+    (PRD § 10). Анализ и обработка меряются разными величинами не случайно: ответ анализа
+    стоит примерно одинаково для блока любой длины, а ответ обработки — это полный
+    перевод, объём которого пропорционален объёму оригинала.
     """
 
     provider: str = OPENAI_COMPATIBLE_PROVIDER
@@ -61,6 +67,7 @@ class LLMSettings:
     temperature: float | None = None
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS
+    max_unit_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS
 
     def __post_init__(self) -> None:
         if not self.provider.strip():
@@ -75,6 +82,8 @@ class LLMSettings:
             raise SettingsError("число попыток вызова модели должно быть положительным")
         if self.max_fragment_blocks < 1:
             raise SettingsError("размер фрагмента главы должен быть положительным")
+        if self.max_unit_source_chars < 1:
+            raise SettingsError("размер группы блоков должен быть положительным")
 
     @property
     def is_ready(self) -> bool:

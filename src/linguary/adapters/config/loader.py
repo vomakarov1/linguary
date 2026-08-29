@@ -76,6 +76,7 @@ _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "temperature": _as_float,
     "max_attempts": _as_int,
     "max_fragment_blocks": _as_int,
+    "max_unit_source_chars": _as_int,
 }
 
 #: Разбор значений секции `[checks]`.
