@@ -10,20 +10,26 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from linguary.adapters.config import CheckSettings
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
-from linguary.adapters.llm import FakeReply
-from linguary.application.context_builder import textual_blocks
-from linguary.application.ports.llm import LLMClient
+from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.application.context_builder import ContextBuilder, textual_blocks
+from linguary.application.ports.llm import (
+    LLMClient,
+    LLMPayload,
+    LLMRequest,
+    LLMResponse,
+)
 from linguary.application.ports.persistence import BookRecord
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
 from linguary.application.use_cases.process_chapter import ProcessChapter
+from linguary.application.use_cases.regenerate_block import RegenerateBlock
 from linguary.application.validators import TranslationResultValidator
 from linguary.domain import (
     BlockTreatment,
@@ -115,6 +121,31 @@ def store_processing_book(
     return ProcessingScenario(document=document, run_id=run_id)
 
 
+@dataclass(slots=True)
+class InterruptingLLMClient(LLMClient):
+    """Клиент, который перед ответом даёт случиться событию у пользователя.
+
+    Так воспроизводится гонка ALG-04: ответ модели уже в пути, а книга за это время
+    изменилась — например, пользователь вернулся к проверке глоссария. Иначе такую
+    последовательность пришлось бы имитировать заглушкой хранилища, а проверка активного
+    запуска живёт как раз в настоящей транзакции.
+    """
+
+    inner: FakeLLMClient
+    interrupt: Callable[[], None]
+
+    @property
+    def call_count(self) -> int:
+        """Сколько запросов клиент получил."""
+        return self.inner.call_count
+
+    async def generate[PayloadT: LLMPayload](
+        self, request: LLMRequest[PayloadT]
+    ) -> LLMResponse[PayloadT]:
+        self.interrupt()
+        return await self.inner.generate(request)
+
+
 def make_process_chapter(
     unit_of_work: SqlAlchemyUnitOfWork,
     client: LLMClient,
@@ -125,26 +156,58 @@ def make_process_chapter(
 ) -> tuple[ProcessChapter, list[float]]:
     """Сценарий обработки главы вместе со списком выдержанных пауз повторов."""
     delays: list[float] = []
-
-    async def sleep(seconds: float) -> None:
-        delays.append(seconds)
-
-    settings = checks or CheckSettings()
     scenario = ProcessChapter(
         unit_of_work=unit_of_work,
         llm_client=client,
         retry_policy=RetryPolicy(max_attempts=max_attempts),
-        validator=TranslationResultValidator(
-            target_language_min_share=settings.target_language_min_share,
-            language_check_min_length=settings.language_check_min_length,
-            repetition_ngram_size=settings.repetition_ngram_size,
-            repetition_min_repeats=settings.repetition_min_repeats,
-        ),
+        validator=make_validator(checks),
         max_unit_source_chars=max_unit_source_chars,
         id_factory=sequential_ids("unit"),
-        sleep=sleep,
+        sleep=_recording_sleep(delays),
     )
     return scenario, delays
+
+
+def make_regenerate_block(
+    unit_of_work: SqlAlchemyUnitOfWork,
+    client: LLMClient,
+    *,
+    max_attempts: int = 3,
+    checks: CheckSettings | None = None,
+    context_builder: ContextBuilder | None = None,
+) -> tuple[RegenerateBlock, list[float]]:
+    """Сценарий повторной генерации блока вместе со списком выдержанных пауз повторов."""
+    delays: list[float] = []
+    scenario = RegenerateBlock(
+        unit_of_work=unit_of_work,
+        llm_client=client,
+        retry_policy=RetryPolicy(max_attempts=max_attempts),
+        validator=make_validator(checks),
+        context_builder=context_builder,
+        id_factory=sequential_ids("regeneration"),
+        sleep=_recording_sleep(delays),
+    )
+    return scenario, delays
+
+
+def make_validator(checks: CheckSettings | None = None) -> TranslationResultValidator:
+    """Проверки результата с порогами настроек приложения."""
+    settings = checks or CheckSettings()
+    return TranslationResultValidator(
+        target_language_min_share=settings.target_language_min_share,
+        language_check_min_length=settings.language_check_min_length,
+        repetition_ngram_size=settings.repetition_ngram_size,
+        repetition_min_repeats=settings.repetition_min_repeats,
+    )
+
+
+def _recording_sleep(delays: list[float]) -> Callable[[float], Awaitable[None]]:
+    """Пауза повтора, которая ничего не ждёт, но записывает свою длительность."""
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    return sleep
 
 
 def sequential_ids(prefix: str) -> Callable[[], str]:

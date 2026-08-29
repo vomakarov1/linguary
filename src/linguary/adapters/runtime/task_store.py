@@ -97,9 +97,18 @@ class SqliteTaskStore:
             session.close()
 
     def save(self, task: ProcessingTask) -> None:
-        """Сохраняет новое состояние задачи."""
+        """Сохраняет новое состояние задачи; отменённую задачу не воскрешает.
+
+        Возврат к проверке глоссария удаляет задачи отменённого запуска, в том числе ту,
+        которая выполняется прямо сейчас (PRD § 21.5). Её итог фиксировать уже некуда:
+        отсутствие строки здесь — нормальный конец отменённой работы, а не сбой очереди,
+        и воркер из-за него останавливаться не должен.
+        """
         with self._session_factory.begin() as session:
-            SqlAlchemyTaskRepository(session).save(task)
+            repository = SqlAlchemyTaskRepository(session)
+            if repository.get(task.id) is None:
+                return
+            repository.save(task)
 
     def list_running(self) -> tuple[ProcessingTask, ...]:
         """Задачи в состоянии `running` в порядке их создания."""

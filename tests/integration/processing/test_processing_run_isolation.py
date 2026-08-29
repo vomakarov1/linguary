@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 from processing_scenario import (
     BOOK_ID,
     RUN_ID,
     SOURCE_TEXT,
+    InterruptingLLMClient,
     make_process_chapter,
     store_processing_book,
     translated_reply,
@@ -22,7 +23,6 @@ from processing_scenario import (
 
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.llm import FakeLLMClient
-from linguary.application.ports.llm import LLMClient, LLMPayload, LLMRequest, LLMResponse
 from linguary.application.use_cases.process_chapter import ProcessChapterCommand
 from linguary.domain import (
     BookEvent,
@@ -35,30 +35,6 @@ from linguary.domain import (
     TermStatus,
     apply_book_event,
 )
-
-
-@dataclass(slots=True)
-class InterruptingLLMClient(LLMClient):
-    """Клиент, который перед ответом даёт случиться событию у пользователя.
-
-    Так воспроизводится гонка ALG-04: ответ модели уже в пути, а запуск книги за это
-    время исчез. Иначе такую последовательность пришлось бы имитировать заглушкой
-    хранилища, а проверка активного запуска живёт как раз в настоящей транзакции.
-    """
-
-    inner: FakeLLMClient
-    interrupt: Callable[[], None]
-
-    @property
-    def call_count(self) -> int:
-        """Сколько запросов клиент получил."""
-        return self.inner.call_count
-
-    async def generate[PayloadT: LLMPayload](
-        self, request: LLMRequest[PayloadT]
-    ) -> LLMResponse[PayloadT]:
-        self.interrupt()
-        return await self.inner.generate(request)
 
 
 def command() -> ProcessChapterCommand:

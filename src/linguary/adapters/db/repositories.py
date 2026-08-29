@@ -453,6 +453,13 @@ class SqlAlchemyTaskRepository:
         ).all()
         return tuple(mapping.to_task(row) for row in rows)
 
+    def delete(self, task_id: str) -> None:
+        """Удаляет задачу вместе с её идемпотентным ключом."""
+        self._session.execute(
+            delete(ProcessingTaskRow).where(ProcessingTaskRow.id == task_id)
+        )
+        self._session.flush()
+
 
 class SqlAlchemyLLMCallLogRepository:
     """Технический журнал вызовов LLM."""

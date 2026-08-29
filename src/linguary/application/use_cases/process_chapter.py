@@ -27,19 +27,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
-from linguary.application.context_builder import (
-    ContextBuilder,
-    TranslationContext,
-    textual_blocks,
+from linguary.application.block_processing import (
+    BlockProcessingError,
+    Sleep,
+    TranslationCall,
+    chapter_number,
+    complete_processing,
+    note_id_factory,
+    total_usage,
 )
-from linguary.application.errors import ApplicationError
+from linguary.application.context_builder import ContextBuilder, textual_blocks
 from linguary.application.ports.llm import LLMClient
-from linguary.application.ports.persistence import BookRecord, UnitOfWork
-from linguary.application.retry_policy import ResultValidationError, RetryPolicy
+from linguary.application.ports.persistence import UnitOfWork
+from linguary.application.retry_policy import RetryPolicy
 from linguary.application.task_runner import TaskQueue
 from linguary.application.translation_units import (
     DEFAULT_MAX_UNIT_SOURCE_CHARS,
@@ -47,32 +51,22 @@ from linguary.application.translation_units import (
 )
 from linguary.application.validators import TranslationResultValidator
 from linguary.domain import (
-    BlockProcessingResult,
-    BookEvent,
-    BookStatus,
     CanonicalDocument,
     ChapterAnalysis,
     DocumentSection,
     ProcessingRun,
     ProcessingTask,
     TaskIdentity,
-    TaskStatus,
     TaskType,
     TokenUsage,
     TranslationUnit,
-    apply_book_event,
-    build_language_note_id,
 )
-
-#: Пауза между попытками вызова модели: политика повторов её вычисляет, выдерживает
-#: сценарий — прикладной слой циклом событий не владеет (ALG-05).
-type Sleep = Callable[[float], Awaitable[None]]
 
 #: Фабрика идентификаторов групп блоков.
 type IdFactory = Callable[[], str]
 
 
-class ProcessChapterError(ApplicationError):
+class ProcessChapterError(BlockProcessingError):
     """Главу нельзя обработать в её текущем состоянии."""
 
 
@@ -123,15 +117,7 @@ class _ChapterWork:
     @property
     def chapter_number(self) -> int:
         """Номер главы в порядке чтения: он входит в идентификаторы заметок (PRD § 19.3)."""
-        sections = self.document.ordered_sections
-        return next(
-            (
-                number
-                for number, section in enumerate(sections, start=1)
-                if section.id == self.section.id
-            ),
-            self.section.order + 1,
-        )
+        return chapter_number(self.document, self.section)
 
 
 class ProcessChapter:
@@ -150,13 +136,16 @@ class ProcessChapter:
         sleep: Sleep | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
-        self._llm_client = llm_client
-        self._retry_policy = retry_policy
-        self._validator = validator
+        self._call = TranslationCall(
+            unit_of_work=unit_of_work,
+            llm_client=llm_client,
+            retry_policy=retry_policy,
+            validator=validator,
+            sleep=sleep or asyncio.sleep,
+        )
         self._max_unit_source_chars = max_unit_source_chars
         self._context_builder = context_builder or ContextBuilder()
         self._id_factory = id_factory or _new_id
-        self._sleep = sleep or asyncio.sleep
 
     async def __call__(self, command: ProcessChapterCommand) -> ProcessChapterResult:
         """Обрабатывает все группы блоков главы (PRD § 10, § 14).
@@ -171,7 +160,7 @@ class ProcessChapter:
             id_factory=self._id_factory,
             max_source_chars=self._max_unit_source_chars,
         )
-        note_ids = _note_ids(
+        note_ids = note_id_factory(
             chapter_number=work.chapter_number, used=work.used_note_ids
         )
         result = ProcessChapterResult(
@@ -201,58 +190,20 @@ class ProcessChapter:
             analysis=work.analysis,
             glossary=work.run.glossary_snapshot,
         )
-        results, attempts, usage = await self._request_results(
+        call = await self._call.request(
             context, unit=unit, target_language=work.target_language, note_ids=note_ids
         )
-        saved = self._save(book_id=work.document.id, run_id=work.run.id, results=results)
+        saved = self._call.save(
+            book_id=work.document.id, run_id=work.run.id, results=call.results
+        )
         return replace(
             result,
             processed_units=result.processed_units + 1,
-            saved_blocks=result.saved_blocks + (len(results) if saved else 0),
-            attempts=result.attempts + attempts,
-            usage=_total_usage((result.usage, usage)),
+            saved_blocks=result.saved_blocks + (len(call.results) if saved else 0),
+            attempts=result.attempts + call.attempts,
+            usage=total_usage((result.usage, call.usage)),
             discarded=not saved,
         )
-
-    async def _request_results(
-        self,
-        context: TranslationContext,
-        *,
-        unit: TranslationUnit,
-        target_language: str,
-        note_ids: Callable[[], str],
-    ) -> tuple[tuple[BlockProcessingResult, ...], int, TokenUsage | None]:
-        """Вызывает модель и проверяет ответ, повторяя по политике (ALG-04, ALG-05).
-
-        Проверки идут внутри цикла: отбраковка ответа — обычный повод для повтора
-        с уточняющей инструкцией, а не отказ задачи. Исчерпав попытки, сценарий поднимает
-        исходную ошибку: типизировать её и перевести задачу в `failed` — работа runner-а.
-        """
-        request = context.request
-        attempts = 0
-        while True:
-            attempts += 1
-            try:
-                response = await self._llm_client.generate(request)
-                results = self._validator.validate(
-                    context.to_block_ids(response.payload),
-                    unit=unit,
-                    target_language=target_language,
-                    note_id_factory=note_ids,
-                    truncated=response.truncated,
-                    expectation=context.expectation,
-                )
-            except Exception as error:
-                decision = self._retry_policy.decide(
-                    _worded_for_the_model(error, context), attempts=attempts
-                )
-                if not decision.should_retry:
-                    raise
-                if decision.backoff_seconds > 0:
-                    await self._sleep(decision.backoff_seconds)
-                request = decision.next_request(request)
-                continue
-            return results, attempts, response.usage
 
     def _load(self, command: ProcessChapterCommand) -> _ChapterWork:
         """Читает книгу, анализ главы и активный запуск одной транзакцией."""
@@ -303,26 +254,6 @@ class ProcessChapter:
         блоков означало бы другую разбивку главы — её нужно обработать заново.
         """
         return set(unit.block_ids) <= work.processed_block_ids
-
-    def _save(
-        self,
-        *,
-        book_id: str,
-        run_id: str,
-        results: Sequence[BlockProcessingResult],
-    ) -> bool:
-        """Атомарно заменяет результаты блоков группы (ALG-04, PRD § 17).
-
-        Возвращает `False`, если сохранять уже некуда: активного запуска у книги нет
-        или это другой запуск. Так отбрасывается поздний результат вызова, начатого
-        до возврата к проверке глоссария.
-        """
-        with self._unit_of_work.transaction() as transaction:
-            run = transaction.runs.active_for_book(book_id)
-            if run is None or run.id != run_id:
-                return False
-            transaction.results.replace_results(run_id, results)
-        return True
 
 
 class ChapterProcessingSequence:
@@ -392,39 +323,13 @@ class ChapterProcessingSequence:
         )
 
     def _complete_processing(self, book_id: str, *, finished_task_id: str | None) -> None:
-        """Переводит книгу в `READY_TO_EXPORT`, когда обработаны все главы (ALG-06).
-
-        Задача, которая выполняется прямо сейчас, ещё числится `running`: её итог
-        фиксирует runner уже после обработчика, поэтому она исключается из проверки
-        по идентификатору. Книга, ушедшая из `PROCESSING`, состояние не меняет: пока
-        вызов был в пути, пользователь мог вернуться к проверке глоссария.
-        """
-        with self._unit_of_work.transaction() as transaction:
-            book = self._book(transaction, book_id)
-            if book.status is not BookStatus.PROCESSING:
-                return
-            unfinished = tuple(
-                task
-                for task in transaction.tasks.list_for_book(book_id)
-                if task.task_type is TaskType.PROCESS_TRANSLATION_UNIT
-                and task.id != finished_task_id
-                and task.status is not TaskStatus.SUCCEEDED
-            )
-            if unfinished:
-                return
-            transaction.books.save(
-                replace(
-                    book,
-                    status=apply_book_event(book.status, BookEvent.PROCESSING_COMPLETED),
-                )
-            )
-
-    def _book(self, transaction: UnitOfWork, book_id: str) -> BookRecord:
-        """Запись книги в открытой транзакции."""
-        book = transaction.books.get(book_id)
-        if book is None:
-            raise ProcessChapterError(f"книги {book_id} нет в хранилище")
-        return book
+        """Переводит книгу в `READY_TO_EXPORT`, когда обработаны все главы (ALG-06)."""
+        complete_processing(
+            self._unit_of_work,
+            book_id=book_id,
+            finished_task_id=finished_task_id,
+            task_types=(TaskType.PROCESS_TRANSLATION_UNIT,),
+        )
 
 
 def _section_of(
@@ -437,65 +342,6 @@ def _section_of(
     raise ProcessChapterError(
         f"главы {command.section_id} нет в книге {command.book_id}"
     )
-
-
-def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exception:
-    """Та же ошибка, но названная именами блоков, которые видела модель (ALG-05).
-
-    Причина отклонения уходит в уточняющую инструкцию повтора, а проверки формулируют
-    её стабильными идентификаторами блоков. Перечень ожидаемых блоков остаётся тот,
-    который заполнил валидатор. Наружу — в журнал и в состояние задачи — уходит исходная
-    ошибка с настоящими идентификаторами.
-    """
-    if not isinstance(error, ResultValidationError):
-        return error
-    return ResultValidationError(
-        context.to_aliases(str(error)), expectation=error.expectation
-    )
-
-
-def _note_ids(*, chapter_number: int, used: frozenset[str]) -> Callable[[], str]:
-    """Фабрика идентификаторов учебных заметок главы вида `ln-ch03-001` (PRD § 19.3).
-
-    Идентификаторы уникальны в пределах запуска, поэтому нумерация продолжается за уже
-    сохранёнными заметками этой главы: повтор частично обработанной главы не должен
-    столкнуться с заметками групп, которые он пропустил. Пропуски в нумерации
-    допустимы — идентификатор обязан быть уникальным, а не подряд идущим.
-    """
-    ordinal = 0
-
-    def next_id() -> str:
-        nonlocal ordinal
-        while True:
-            ordinal += 1
-            note_id = build_language_note_id(
-                chapter_number=chapter_number, ordinal=ordinal
-            )
-            if note_id not in used:
-                return note_id
-
-    return next_id
-
-
-def _total_usage(usages: Iterable[TokenUsage | None]) -> TokenUsage | None:
-    """Суммарный расход токенов главы: провайдер считает каждый вызов отдельно.
-
-    Провайдер, не сообщающий объём токенов, оставляет `None`: ноль означал бы бесплатный
-    вызов, а не отсутствие данных (PRD § 24).
-    """
-    reported = [usage for usage in usages if usage is not None]
-    if not reported:
-        return None
-    return TokenUsage(
-        prompt_tokens=_total_tokens(usage.prompt_tokens for usage in reported),
-        completion_tokens=_total_tokens(usage.completion_tokens for usage in reported),
-    )
-
-
-def _total_tokens(values: Iterable[int | None]) -> int | None:
-    """Сумма тех значений, которые провайдер сообщил."""
-    reported = [value for value in values if value is not None]
-    return sum(reported) if reported else None
 
 
 def _new_id() -> str:

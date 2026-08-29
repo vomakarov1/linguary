@@ -18,6 +18,11 @@
 отдельно от необязательных подсказок: `locked` — решение пользователя, которое модель
 обязана соблюдать, остальное — подсказка (PRD § 11).
 
+Контекст повторной генерации отличается от контекста группы двумя вещами: блок в нём
+один и рядом с ним стоят несколько соседних абзацев главы. Соседи нужны, чтобы понять
+сцену; псевдонимов они не получают, поэтому результат по ним модель вернуть не может
+(PRD § 13, § 21.5).
+
 Блоки нумеруются в запросе короткими псевдонимами `b1..bN`, а не своими стабильными
 идентификаторами. Идентификатор блока — UUID: в главе на две сотни абзацев такие ключи
 занимают заметную часть и запроса, и ответа, а модель обязана вернуть каждый из них
@@ -61,6 +66,11 @@ from linguary.domain import (
 #: повторяются: список ограничивается сверху, чтобы контекст не рос вместе с книгой
 #: (PRD § 13: ограничение контекста настраивается).
 DEFAULT_MAX_ACCUMULATED_CANDIDATES = 200
+
+#: Сколько соседних текстовых блоков с каждой стороны видит модель при повторной генерации
+#: одного блока. PRD § 13 просит «несколько соседних абзацев»: они нужны, чтобы понять сцену,
+#: и не должны превращать запрос одного блока в запрос главы.
+DEFAULT_REGENERATION_CONTEXT_BLOCKS = 2
 
 #: Типы блоков, которые не являются текстом для чтения даже при полной поддержке импортёром.
 #: Изображение поддержано целиком, но читателю оно даёт не текст, а картинку.
@@ -201,17 +211,33 @@ class TranslationContext(AliasedBlocksContext):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _NeighbourBlocks:
+    """Соседний исходный текст одной стороны: абзацы до блока или после него."""
+
+    title: str
+    blocks: tuple[DocumentBlock, ...]
+
+
 class ContextBuilder:
     """Собирает контекст запросов к модели по политике PRD § 13."""
 
     def __init__(
-        self, *, max_accumulated_candidates: int = DEFAULT_MAX_ACCUMULATED_CANDIDATES
+        self,
+        *,
+        max_accumulated_candidates: int = DEFAULT_MAX_ACCUMULATED_CANDIDATES,
+        regeneration_context_blocks: int = DEFAULT_REGENERATION_CONTEXT_BLOCKS,
     ) -> None:
         if max_accumulated_candidates < 0:
             raise ContextBuildError(
                 "ограничение числа накопленных кандидатов не может быть отрицательным"
             )
+        if regeneration_context_blocks < 0:
+            raise ContextBuildError(
+                "число соседних блоков контекста не может быть отрицательным"
+            )
         self._max_accumulated_candidates = max_accumulated_candidates
+        self._regeneration_context_blocks = regeneration_context_blocks
 
     def for_chapter_analysis(
         self,
@@ -290,6 +316,65 @@ class ContextBuilder:
         запуска, инструкции перевода главы и её сводка. Результатов других групп и текста
         соседних глав в контексте нет.
         """
+        return self._translation_context(
+            document=document,
+            section=section,
+            unit=unit,
+            analysis=analysis,
+            glossary=glossary,
+            instructions=translation_unit_instructions(
+                source_language=document.source_language,
+                target_language=document.target_language,
+            ),
+            neighbours=(),
+        )
+
+    def for_block_regeneration(
+        self,
+        *,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        unit: TranslationUnit,
+        analysis: ChapterAnalysis,
+        glossary: GlossarySnapshot,
+    ) -> TranslationContext:
+        """Контекст повторной генерации одного блока (PRD § 13, § 19.3, § 21.5).
+
+        Исходная группа блоков не пересчитывается: модель получает выбранный блок с его
+        режимом из плана, ту же выжимку анализа главы и глоссарий, что и обычная обработка,
+        и вдобавок несколько соседних абзацев — они нужны, чтобы понять сцену, псевдонимов
+        не получают и результата по ним не ждут.
+        """
+        if len(unit.items) != 1:
+            raise ContextBuildError(
+                f"повторная генерация выполняется по одному блоку, а группа {unit.id} "
+                f"содержит {len(unit.items)}"
+            )
+        return self._translation_context(
+            document=document,
+            section=section,
+            unit=unit,
+            analysis=analysis,
+            glossary=glossary,
+            instructions=block_regeneration_instructions(
+                source_language=document.source_language,
+                target_language=document.target_language,
+            ),
+            neighbours=self._neighbours(section, unit),
+        )
+
+    def _translation_context(
+        self,
+        *,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        unit: TranslationUnit,
+        analysis: ChapterAnalysis,
+        glossary: GlossarySnapshot,
+        instructions: str,
+        neighbours: Sequence[_NeighbourBlocks],
+    ) -> TranslationContext:
+        """Готовый запрос обработки переданных блоков вместе с разбором ответа."""
         if unit.section_id != section.id:
             raise ContextBuildError(
                 f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
@@ -303,16 +388,14 @@ class ContextBuilder:
             section_id=section.id,
             unit_id=unit.id,
             request=LLMRequest.for_translation(
-                instructions=translation_unit_instructions(
-                    source_language=document.source_language,
-                    target_language=document.target_language,
-                ),
+                instructions=instructions,
                 input_text=self._translation_input(
                     document=document,
                     section=section,
                     unit=unit,
                     analysis=analysis,
                     glossary=glossary,
+                    neighbours=neighbours,
                 ),
             ),
             block_ids_by_alias=aliases,
@@ -333,6 +416,7 @@ class ContextBuilder:
         unit: TranslationUnit,
         analysis: ChapterAnalysis,
         glossary: GlossarySnapshot,
+        neighbours: Sequence[_NeighbourBlocks],
     ) -> str:
         """Текст запроса обработки: шапка, выжимка анализа главы, глоссарий и блоки."""
         parts = [
@@ -345,9 +429,36 @@ class ContextBuilder:
                 self._suggested_entries(glossary),
                 target_language=document.target_language,
             ),
+            _neighbour_context(neighbours),
             _unit_blocks(unit),
         ]
         return "\n\n".join(part for part in parts if part)
+
+    def _neighbours(
+        self, section: DocumentSection, unit: TranslationUnit
+    ) -> tuple[_NeighbourBlocks, ...]:
+        """Соседний исходный текст вокруг блока: несколько абзацев до и после (PRD § 13).
+
+        В соседи идут только текстовые блоки той же главы: соседняя глава — уже другая
+        сцена, а перенесённые как есть конструкции и иллюстрации модели не передаются.
+        """
+        limit = self._regeneration_context_blocks
+        if limit == 0:
+            return ()
+        blocks = textual_blocks(section)
+        requested = set(unit.block_ids)
+        positions = [
+            index for index, block in enumerate(blocks) if block.id in requested
+        ]
+        if not positions:
+            return ()
+        before = blocks[max(positions[0] - limit, 0) : positions[0]]
+        after = blocks[positions[-1] + 1 : positions[-1] + 1 + limit]
+        return tuple(
+            _NeighbourBlocks(title=title, blocks=tuple(found))
+            for title, found in (("До блока:", before), ("После блока:", after))
+            if found
+        )
 
     def _suggested_entries(
         self, glossary: GlossarySnapshot
@@ -463,7 +574,25 @@ def chapter_fragment_instructions(*, source_language: str, target_language: str)
 def translation_unit_instructions(*, source_language: str, target_language: str) -> str:
     """Постоянная инструкция обработки группы блоков (PRD § 10.1, § 15, § 19.3)."""
     return _TRANSLATION_INSTRUCTIONS.format(
-        source_language=source_language, target_language=target_language
+        source_language=source_language,
+        target_language=target_language,
+        scope=_UNIT_SCOPE,
+    )
+
+
+def block_regeneration_instructions(
+    *, source_language: str, target_language: str
+) -> str:
+    """Инструкция повторной генерации одного блока (PRD § 13, § 19.3, § 21.5).
+
+    От инструкции группы отличается ровно тем, что меняет повторная генерация: модель
+    обрабатывает один блок и видит соседние абзацы, которые заменять не нужно. Правила
+    режимов, перевода и заметок остаются те же.
+    """
+    return _TRANSLATION_INSTRUCTIONS.format(
+        source_language=source_language,
+        target_language=target_language,
+        scope=_REGENERATION_SCOPE,
     )
 
 
@@ -578,7 +707,22 @@ _ANALYSIS_INSTRUCTIONS = """\
 Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
 
 
-#: Инструкция обработки группы блоков. Один запрос отвечает и за перевод, и за словарные
+#: Что именно модель обрабатывает: группу идущих подряд блоков или один выбранный блок,
+#: которому повторная генерация даёт соседние абзацы как контекст сцены (PRD § 13, § 21.5).
+_UNIT_SCOPE = """\
+Тебе дают несколько идущих подряд текстовых блоков одной главы. У каждого блока указан \
+режим обработки: он выбран заранее, и менять его нельзя. Соседних глав и результатов \
+по другим блокам ты не видишь."""
+
+_REGENERATION_SCOPE = """\
+Тебе дают один текстовый блок одной главы и несколько соседних абзацев как контекст \
+сцены. Обработать нужно только этот блок: соседние абзацы даны для понимания \
+происходящего, переводить их и возвращать в ответе не нужно. У блока указан режим \
+обработки: он выбран заранее, и менять его нельзя. Соседних глав и результатов \
+по другим блокам ты не видишь."""
+
+
+#: Инструкция обработки блоков. Один запрос отвечает и за перевод, и за словарные
 #: подсказки, и за языковые заметки (PRD § 14, § 19.3): отдельного прохода модели ради
 #: заметок не выполняется — модель уже видит оригинал, режим блока и свой результат.
 _TRANSLATION_INSTRUCTIONS = """\
@@ -586,9 +730,7 @@ _TRANSLATION_INSTRUCTIONS = """\
 владеет языком {target_language} и учит язык {source_language}, читать эту книгу \
 в оригинале.
 
-Тебе дают несколько идущих подряд текстовых блоков одной главы. У каждого блока указан \
-режим обработки: он выбран заранее, и менять его нельзя. Соседних глав и результатов \
-по другим блокам ты не видишь.
+{scope}
 
 1. blocks — результат по каждому блоку.
 
@@ -676,6 +818,20 @@ def _glossary_line(entry: GlossarySnapshotEntry) -> str:
     return f"- {entry.source_text} [{entry.type}] -> {entry.translation}"
 
 
+def _neighbour_context(neighbours: Sequence[_NeighbourBlocks]) -> str:
+    """Соседний исходный текст блока: контекст сцены, который не обрабатывается (PRD § 13)."""
+    if not neighbours:
+        return ""
+    lines = [
+        "Соседние абзацы главы — только для понимания сцены. Их не переводи, "
+        "словарных подсказок к ним не давай и в ответ не включай:"
+    ]
+    for side in neighbours:
+        lines.append(side.title)
+        lines.extend(block.text.strip() for block in side.blocks)
+    return "\n\n".join(lines)
+
+
 def _unit_blocks(unit: TranslationUnit) -> str:
     """Блоки группы под псевдонимами вместе с их режимом обработки."""
     lines = ["Блоки для обработки:"]
@@ -760,11 +916,13 @@ def _chapter_blocks(blocks: Sequence[DocumentBlock]) -> str:
 
 __all__ = [
     "DEFAULT_MAX_ACCUMULATED_CANDIDATES",
+    "DEFAULT_REGENERATION_CONTEXT_BLOCKS",
     "AliasedBlocksContext",
     "ChapterAnalysisContext",
     "ContextBuildError",
     "ContextBuilder",
     "TranslationContext",
+    "block_regeneration_instructions",
     "chapter_analysis_instructions",
     "chapter_fragment_instructions",
     "is_textual",
