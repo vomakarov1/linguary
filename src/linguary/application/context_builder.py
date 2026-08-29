@@ -11,6 +11,13 @@
 `DROP_WITH_WARNING` не попадают ни в основной контекст, ни в соседний: они остаются
 ответственностью импортёра и экспортёра (ADR § 3).
 
+Контекст обработки группы блоков состоит из самой группы, снимка глоссария запуска,
+инструкций перевода главы и её сводки — выжимки анализа этой главы. Результаты обработки
+других групп в него не входят: так задачи остаются независимыми, а результат
+воспроизводимым (PRD § 13). Обязательные переводческие указания стоят в контексте
+отдельно от необязательных подсказок: `locked` — решение пользователя, которое модель
+обязана соблюдать, остальное — подсказка (PRD § 11).
+
 Блоки нумеруются в запросе короткими псевдонимами `b1..bN`, а не своими стабильными
 идентификаторами. Идентификатор блока — UUID: в главе на две сотни абзацев такие ключи
 занимают заметную часть и запроса, и ответа, а модель обязана вернуть каждый из них
@@ -24,21 +31,29 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from linguary.application.analysis_merge import ChapterFragment
 from linguary.application.errors import ApplicationError
-from linguary.application.llm_dto import ChapterAnalysisResponse
+from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMRequest
-from linguary.application.retry_policy import ExpectedBlock, ResultExpectation
+from linguary.application.retry_policy import (
+    ExpectedBlock,
+    ResultExpectation,
+    ResultValidationError,
+)
 from linguary.domain import (
     BlockType,
     CanonicalDocument,
+    ChapterAnalysis,
     DocumentBlock,
     DocumentSection,
     GlossaryCandidate,
+    GlossarySnapshot,
+    GlossarySnapshotEntry,
     SupportStatus,
+    TranslationUnit,
 )
 
 #: Сколько уже принятых решений книги попадает в контекст анализа очередной главы.
@@ -75,8 +90,32 @@ def textual_blocks(section: DocumentSection) -> tuple[DocumentBlock, ...]:
     return tuple(block for block in section.ordered_blocks if is_textual(block))
 
 
+class AliasedBlocksContext:
+    """Общая часть контекстов, адресующих блоки псевдонимами `b1..bN`.
+
+    Отображение псевдонимов заполняет наследник: здесь только разбор ответа модели,
+    одинаковый и для анализа главы, и для обработки группы блоков.
+    """
+
+    __slots__ = ()
+
+    block_ids_by_alias: Mapping[str, str]
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        """Псевдонимы переданных блоков в порядке исходного документа."""
+        return tuple(self.block_ids_by_alias)
+
+    def block_id_for(self, alias: str) -> str:
+        """Стабильный идентификатор блока по псевдониму из ответа модели."""
+        block_id = self.block_ids_by_alias.get(alias)
+        if block_id is None:
+            raise ContextBuildError(f"блок {alias} в запрос не передавался")
+        return block_id
+
+
 @dataclass(frozen=True, slots=True)
-class ChapterAnalysisContext:
+class ChapterAnalysisContext(AliasedBlocksContext):
     """Готовый запрос анализа главы вместе с тем, что нужно для разбора ответа.
 
     `block_ids_by_alias` возвращает ответ модели к стабильным идентификаторам блоков,
@@ -94,17 +133,72 @@ class ChapterAnalysisContext:
             self, "block_ids_by_alias", MappingProxyType(dict(self.block_ids_by_alias))
         )
 
-    @property
-    def aliases(self) -> tuple[str, ...]:
-        """Псевдонимы блоков главы в порядке исходного документа."""
-        return tuple(self.block_ids_by_alias)
 
-    def block_id_for(self, alias: str) -> str:
-        """Стабильный идентификатор блока по псевдониму из ответа модели."""
-        block_id = self.block_ids_by_alias.get(alias)
-        if block_id is None:
-            raise ContextBuildError(f"блок {alias} в запрос главы не передавался")
-        return block_id
+@dataclass(frozen=True, slots=True)
+class TranslationContext(AliasedBlocksContext):
+    """Готовый запрос обработки одной группы блоков (PRD § 13, ALG-04).
+
+    `expectation` перечисляет псевдонимы вместе с режимами обработки из сохранённого
+    плана: уточняющая инструкция повтора называет блоки так, как их видела модель,
+    и повторяет требование режима (ALG-05).
+    """
+
+    section_id: str
+    unit_id: str
+    request: LLMRequest[TranslationResultResponse]
+    block_ids_by_alias: Mapping[str, str]
+    expectation: ResultExpectation
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "block_ids_by_alias", MappingProxyType(dict(self.block_ids_by_alias))
+        )
+
+    def to_aliases(self, message: str) -> str:
+        """Сообщение проверки, в котором идентификаторы блоков заменены псевдонимами.
+
+        Причина отбраковки уходит модели вместе с уточняющей инструкцией (ALG-05), а
+        проверки формулируют её идентификаторами блоков группы — тех имён модель
+        не видела.
+        """
+        for alias, block_id in self.block_ids_by_alias.items():
+            message = message.replace(block_id, alias)
+        return message
+
+    def to_block_ids(
+        self, payload: TranslationResultResponse
+    ) -> TranslationResultResponse:
+        """Ответ модели, переведённый с псевдонимов на идентификаторы блоков группы.
+
+        Псевдоним, которого в запросе не было, — это результат для чужого блока
+        (PRD § 15). Проверки состава работают уже с идентификаторами группы, поэтому
+        такой ответ отбраковывается здесь и с тем же ожиданием, что и остальные
+        блокирующие проверки: повтор получит перечень блоков, а не голое сообщение.
+        """
+        unknown = sorted(
+            {
+                alias
+                for alias in (*payload.block_ids, *(
+                    note.source_block_id for note in payload.language_notes
+                ))
+                if alias not in self.block_ids_by_alias
+            }
+        )
+        if unknown:
+            raise ResultValidationError(
+                f"ответ группы {self.unit_id} относится к блокам вне запроса: {unknown}",
+                expectation=self.expectation,
+            )
+        return TranslationResultResponse(
+            blocks=tuple(
+                replace(block, source_block_id=self.block_id_for(block.source_block_id))
+                for block in payload.blocks
+            ),
+            language_notes=tuple(
+                replace(note, source_block_id=self.block_id_for(note.source_block_id))
+                for note in payload.language_notes
+            ),
+        )
 
 
 class ContextBuilder:
@@ -180,6 +274,94 @@ class ContextBuilder:
             ),
             fragment_label=_fragment_label(fragment.order, fragment_count),
         )
+
+    def for_translation_unit(
+        self,
+        *,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        unit: TranslationUnit,
+        analysis: ChapterAnalysis,
+        glossary: GlossarySnapshot,
+    ) -> TranslationContext:
+        """Контекст обработки одной группы блоков (PRD § 10, § 13, § 19.3, ALG-04).
+
+        В запрос идут сама группа с режимами из сохранённого плана, снимок глоссария
+        запуска, инструкции перевода главы и её сводка. Результатов других групп и текста
+        соседних глав в контексте нет.
+        """
+        if unit.section_id != section.id:
+            raise ContextBuildError(
+                f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
+                f"а не {section.id}"
+            )
+        aliases = {
+            _alias(index): item.block.id
+            for index, item in enumerate(unit.items, start=1)
+        }
+        return TranslationContext(
+            section_id=section.id,
+            unit_id=unit.id,
+            request=LLMRequest.for_translation(
+                instructions=translation_unit_instructions(
+                    source_language=document.source_language,
+                    target_language=document.target_language,
+                ),
+                input_text=self._translation_input(
+                    document=document,
+                    section=section,
+                    unit=unit,
+                    analysis=analysis,
+                    glossary=glossary,
+                ),
+            ),
+            block_ids_by_alias=aliases,
+            expectation=ResultExpectation(
+                target_language=document.target_language,
+                blocks=tuple(
+                    ExpectedBlock(block_id=alias, treatment=item.treatment)
+                    for alias, item in zip(aliases, unit.items, strict=True)
+                ),
+            ),
+        )
+
+    def _translation_input(
+        self,
+        *,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        unit: TranslationUnit,
+        analysis: ChapterAnalysis,
+        glossary: GlossarySnapshot,
+    ) -> str:
+        """Текст запроса обработки: шапка, выжимка анализа главы, глоссарий и блоки."""
+        parts = [
+            _chapter_header(document=document, section=section),
+            _chapter_digest(analysis),
+            _mandatory_decisions(
+                glossary.mandatory_entries, target_language=document.target_language
+            ),
+            _glossary_suggestions(
+                self._suggested_entries(glossary),
+                target_language=document.target_language,
+            ),
+            _unit_blocks(unit),
+        ]
+        return "\n\n".join(part for part in parts if part)
+
+    def _suggested_entries(
+        self, glossary: GlossarySnapshot
+    ) -> tuple[GlossarySnapshotEntry, ...]:
+        """Необязательные подсказки снимка глоссария в пределах ограничения контекста.
+
+        Обязательные указания в это ограничение не входят: они решение пользователя,
+        и урезать их приложение не вправе (PRD § 11).
+        """
+        mandatory = set(glossary.mandatory_entries)
+        suggested = tuple(
+            entry for entry in glossary.entries if entry not in mandatory
+        )
+        return suggested[: self._max_accumulated_candidates]
 
     def _chapter_context(
         self,
@@ -275,6 +457,13 @@ def chapter_fragment_instructions(*, source_language: str, target_language: str)
         target_language=target_language,
         scope=_FRAGMENT_SCOPE,
         summary=_FRAGMENT_SUMMARY,
+    )
+
+
+def translation_unit_instructions(*, source_language: str, target_language: str) -> str:
+    """Постоянная инструкция обработки группы блоков (PRD § 10.1, § 15, § 19.3)."""
+    return _TRANSLATION_INSTRUCTIONS.format(
+        source_language=source_language, target_language=target_language
     )
 
 
@@ -389,6 +578,114 @@ _ANALYSIS_INSTRUCTIONS = """\
 Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
 
 
+#: Инструкция обработки группы блоков. Один запрос отвечает и за перевод, и за словарные
+#: подсказки, и за языковые заметки (PRD § 14, § 19.3): отдельного прохода модели ради
+#: заметок не выполняется — модель уже видит оригинал, режим блока и свой результат.
+_TRANSLATION_INSTRUCTIONS = """\
+Ты готовишь учебное издание художественной книги. Издание помогает читателю, который \
+владеет языком {target_language} и учит язык {source_language}, читать эту книгу \
+в оригинале.
+
+Тебе дают несколько идущих подряд текстовых блоков одной главы. У каждого блока указан \
+режим обработки: он выбран заранее, и менять его нельзя. Соседних глав и результатов \
+по другим блокам ты не видишь.
+
+1. blocks — результат по каждому блоку.
+
+Верни ровно один элемент на каждый блок, который тебе дали: с тем же идентификатором \
+и в том же порядке. Не пропускай блоки, не добавляй чужих, не объединяй и не дели их. \
+Поле treatment повторяет режим блока из запроса — это подтверждение, а не твой выбор: \
+другой режим отклоняет весь ответ.
+
+- TRANSLATE — верни в translated_text полный литературный перевод блока на язык \
+{target_language}. Список glossary_hints для такого блока обычно пуст: перевод уже дан.
+- GLOSSARY_ONLY — полного перевода не давай, translated_text оставь пустым. Верни \
+в glossary_hints одно-три слова или выражения этого блока, без которых его трудно \
+читать в оригинале: original — как в тексте, translation — на языке {target_language}, \
+note — короткое пояснение, если оно нужно.
+- READ_AS_IS — блок читается в оригинале без помощи: ни перевода, ни словарных \
+подсказок. Оставь translated_text пустым, а glossary_hints — пустым списком.
+
+Перевод пиши целиком на языке {target_language} и доводи до конца: оборванная фраза, \
+незакрытая кавычка или скобка отклоняют весь ответ. Абзац переводи как одно целое — \
+не дели его и не склеивай с соседним. Обязательные переводческие решения книги соблюдай \
+дословно; менять допустимо только грамматическую форму.
+
+2. language_notes — языковые заметки для читателя (PRD: учебный материал).
+
+Заметка объясняет то, что реально помогает читать оригинал или понять переводческое \
+решение: идиому, сленг, игру слов, нестандартную грамматику, диалект, культурную \
+особенность, необычное употребление. Заметки не пересказывают смысл предложения, \
+не разбирают простую грамматику, не описывают атмосферу сцены и не повторяют словарную \
+подсказку.
+
+Каждая заметка привязана ровно к одному блоку из этого запроса: source_block_id — его \
+идентификатор, original_excerpt — фрагмент оригинала, translated_excerpt — его перевод, \
+если он уместен, note — объяснение на языке {target_language}. Заметки допустимы при \
+любом режиме, включая READ_AS_IS. Ориентир — три-восемь заметок на главу, а не на \
+каждый блок; если объяснять нечего, верни пустой список.
+
+Служебных сообщений, извинений и рассуждений о самой задаче в ответе быть не должно. \
+Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
+
+
+def _chapter_digest(analysis: ChapterAnalysis) -> str:
+    """Выжимка анализа главы: её сводка и указания переводчику (PRD § 13).
+
+    Кандидаты глоссария сюда не идут: утверждённые решения книги приходят снимком
+    запуска, а неутверждённых после старта обработки не существует.
+    """
+    lines: list[str] = []
+    if summary := analysis.chapter_summary.strip():
+        lines.append(f"О чём эта глава:\n{summary}")
+    if instructions := analysis.translation_instructions.strip():
+        lines.append(f"Указания переводчику этой главы:\n{instructions}")
+    return "\n\n".join(lines)
+
+
+def _mandatory_decisions(
+    entries: Sequence[GlossarySnapshotEntry], *, target_language: str
+) -> str:
+    """Обязательные переводческие указания книги (PRD § 11)."""
+    if not entries:
+        return "Обязательных переводческих указаний по этой книге нет."
+    lines = [
+        f"Обязательные переводческие решения книги ({target_language}). Соблюдай их "
+        f"дословно, меняя только грамматическую форму:"
+    ]
+    lines.extend(_glossary_line(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+def _glossary_suggestions(
+    entries: Sequence[GlossarySnapshotEntry], *, target_language: str
+) -> str:
+    """Необязательные подсказки глоссария книги (PRD § 11-12)."""
+    if not entries:
+        return ""
+    lines = [
+        f"Необязательные подсказки глоссария ({target_language}). При прочих равных "
+        f"держись их, но точность важнее:"
+    ]
+    lines.extend(_glossary_line(entry) for entry in entries)
+    return "\n".join(lines)
+
+
+def _glossary_line(entry: GlossarySnapshotEntry) -> str:
+    """Строка записи снимка глоссария."""
+    return f"- {entry.source_text} [{entry.type}] -> {entry.translation}"
+
+
+def _unit_blocks(unit: TranslationUnit) -> str:
+    """Блоки группы под псевдонимами вместе с их режимом обработки."""
+    lines = ["Блоки для обработки:"]
+    lines.extend(
+        f"[{_alias(index)}] режим {item.treatment}\n{item.block.text.strip()}"
+        for index, item in enumerate(unit.items, start=1)
+    )
+    return "\n\n".join(lines)
+
+
 def _alias(index: int) -> str:
     """Короткий псевдоним блока в запросе."""
     return f"b{index}"
@@ -463,11 +760,14 @@ def _chapter_blocks(blocks: Sequence[DocumentBlock]) -> str:
 
 __all__ = [
     "DEFAULT_MAX_ACCUMULATED_CANDIDATES",
+    "AliasedBlocksContext",
     "ChapterAnalysisContext",
     "ContextBuildError",
     "ContextBuilder",
+    "TranslationContext",
     "chapter_analysis_instructions",
     "chapter_fragment_instructions",
     "is_textual",
     "textual_blocks",
+    "translation_unit_instructions",
 ]
