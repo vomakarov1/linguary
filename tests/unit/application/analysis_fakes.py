@@ -30,12 +30,16 @@ from linguary.domain import (
     DocumentBlock,
     DocumentSection,
     GlossaryCandidate,
+    ProcessingRun,
     ProcessingTask,
     SourceReference,
     SupportStatus,
     TaskIdentity,
     TaskStatus,
+    TermConcept,
     TokenUsage,
+    TreatmentPlan,
+    active_run,
 )
 
 BOOK_ID = "book-1"
@@ -193,17 +197,36 @@ def make_analysis_candidate(
     type: ConceptType = ConceptType.PERSON,
     analysis_id: str = "analysis-1",
     confidence: float = 0.9,
+    model_flagged_review: bool = False,
 ) -> GlossaryCandidate:
     """Кандидат глоссария, накопленный предыдущей главой."""
     return GlossaryCandidate.create(
-        id=f"candidate-{source_text}",
+        id=f"candidate-{analysis_id}-{source_text}",
         analysis_id=analysis_id,
         source_text=source_text,
         type=type,
         suggested_translation=suggested_translation,
         confidence=confidence,
-        model_flagged_review=False,
-        confidence_threshold=0.8,
+        model_flagged_review=model_flagged_review,
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+    )
+
+
+def make_chapter_analysis(
+    *,
+    id: str = "analysis-1",
+    section_id: str = "section-1",
+    candidates: Sequence[GlossaryCandidate] = (),
+) -> ChapterAnalysis:
+    """Анализ главы, из которого важны только кандидаты глоссария."""
+    return ChapterAnalysis.create(
+        id=id,
+        section_id=section_id,
+        treatment_plan=TreatmentPlan(section_id=section_id),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(),
+        glossary_candidates=candidates,
     )
 
 
@@ -300,6 +323,55 @@ class FakeChapterAnalysisRepository:
         )
 
 
+@dataclass(slots=True)
+class FakeGlossaryRepository:
+    """Понятия глоссария книги в памяти."""
+
+    concepts: dict[str, TermConcept] = field(default_factory=dict)
+
+    def save(self, concept: TermConcept) -> None:
+        self.concepts[concept.id] = concept
+
+    def get(self, concept_id: str) -> TermConcept | None:
+        return self.concepts.get(concept_id)
+
+    def list_for_book(self, book_id: str) -> tuple[TermConcept, ...]:
+        return tuple(
+            concept for concept in self.concepts.values() if concept.book_id == book_id
+        )
+
+    def delete(self, concept_id: str) -> None:
+        self.concepts.pop(concept_id, None)
+
+
+@dataclass(slots=True)
+class FakeProcessingRunRepository:
+    """Запуски обработки книги в памяти.
+
+    Единственность активного запуска проверяет тот же доменный `active_run`, что и
+    репозиторий SQLAlchemy: двойник не должен быть мягче настоящего хранилища.
+    """
+
+    runs: dict[str, ProcessingRun] = field(default_factory=dict)
+
+    def add(self, run: ProcessingRun) -> None:
+        self.runs[run.id] = run
+
+    def save(self, run: ProcessingRun) -> None:
+        self.runs[run.id] = run
+
+    def get(self, run_id: str) -> ProcessingRun | None:
+        return self.runs.get(run_id)
+
+    def active_for_book(self, book_id: str) -> ProcessingRun | None:
+        return active_run(
+            run for run in self.runs.values() if run.book_id == book_id
+        )
+
+    def delete(self, run_id: str) -> None:
+        self.runs.pop(run_id, None)
+
+
 class FakeUnitOfWork:
     """Транзакционная граница в памяти: коммит и откат не имитируются."""
 
@@ -312,6 +384,8 @@ class FakeUnitOfWork:
         self._books = FakeBookRepository()
         self._documents = FakeDocumentRepository()
         self._analyses = FakeChapterAnalysisRepository(documents=self._documents)
+        self._glossary = FakeGlossaryRepository()
+        self._runs = FakeProcessingRunRepository()
         if document is not None:
             self._documents.save(document)
         if book is not None:
@@ -328,6 +402,14 @@ class FakeUnitOfWork:
     @property
     def analyses(self) -> FakeChapterAnalysisRepository:
         return self._analyses
+
+    @property
+    def glossary(self) -> FakeGlossaryRepository:
+        return self._glossary
+
+    @property
+    def runs(self) -> FakeProcessingRunRepository:
+        return self._runs
 
     @contextmanager
     def transaction(self) -> Iterator[FakeUnitOfWork]:
@@ -399,3 +481,25 @@ class FakeTaskQueue:
         return next(
             (task for task in self.tasks if task.identity == identity), None
         )
+
+
+def make_glossary_book(
+    analyses: Sequence[ChapterAnalysis] = (),
+    *,
+    status: BookStatus = BookStatus.GLOSSARY_REVIEW,
+) -> FakeUnitOfWork:
+    """Книга с сохранёнными анализами глав, дошедшая до проверки глоссария.
+
+    Каждому анализу отводится своя глава документа: репозиторий анализов отдаёт их
+    в порядке чтения книги, и без документа он вернул бы пустой список.
+    """
+    document = make_analysis_document(
+        tuple(
+            make_analysis_section(section_id=analysis.section_id, order=order)
+            for order, analysis in enumerate(analyses)
+        )
+    )
+    unit_of_work = FakeUnitOfWork(document=document, book=make_book_record(status))
+    for analysis in analyses:
+        unit_of_work.analyses.save(BOOK_ID, analysis)
+    return unit_of_work
