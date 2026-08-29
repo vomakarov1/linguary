@@ -53,6 +53,10 @@ class GlossaryReviewIncompleteError(GlossaryReviewError):
     """Среди требующих внимания элементов остались необработанные (PRD § 12)."""
 
 
+class GlossaryNotFoundError(GlossaryReviewError):
+    """Книга или элемент её глоссария не найден."""
+
+
 @dataclass(frozen=True, slots=True)
 class GlossaryReviewItem:
     """Один исходный текст глоссария книги вместе с решением пользователя.
@@ -61,6 +65,7 @@ class GlossaryReviewItem:
     то, что о нём сказал пользователь.
     """
 
+    concept_id: str
     source_text: str
     type: ConceptType
     suggested_translation: str
@@ -87,6 +92,7 @@ class GlossaryReview:
 
     book_id: str
     items: tuple[GlossaryReviewItem, ...] = ()
+    is_editable: bool = True
 
     @property
     def requiring_review(self) -> tuple[GlossaryReviewItem, ...]:
@@ -107,6 +113,12 @@ class GlossaryReview:
         """Элемент проверки по исходному тексту либо `None`, если такого в книге нет."""
         return next(
             (item for item in self.items if item.source_text == source_text), None
+        )
+
+    def item_for_concept(self, concept_id: str) -> GlossaryReviewItem | None:
+        """Элемент проверки по внешнему идентификатору понятия."""
+        return next(
+            (item for item in self.items if item.concept_id == concept_id), None
         )
 
     def ensure_complete(self) -> None:
@@ -192,6 +204,7 @@ def _review_item(
         candidate.suggested_translation for candidate in group
     )
     return GlossaryReviewItem(
+        concept_id=decision.id if decision is not None else leading.id,
         source_text=leading.source_text,
         type=concept_type,
         suggested_translation=leading.suggested_translation,
@@ -250,6 +263,7 @@ __all__ = [
     "GlossaryReview",
     "GlossaryReviewError",
     "GlossaryReviewIncompleteError",
+    "GlossaryNotFoundError",
     "GlossaryReviewItem",
     "build_glossary_review",
     "glossary_snapshot",

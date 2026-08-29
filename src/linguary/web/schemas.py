@@ -12,8 +12,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from linguary.adapters.config import AppSettings
 from linguary.adapters.validation import EpubCheckAvailability
@@ -26,9 +27,145 @@ from linguary.application.book_overview import (
     ResultWarningEntry,
     TaskFailure,
 )
+from linguary.application.glossary_review import GlossaryReview, GlossaryReviewItem
 from linguary.application.ports.persistence import BookRecord
-from linguary.domain import BlockTreatment, BookImportWarning, CoverageStatus
+from linguary.application.use_cases.approve_glossary import GlossaryDecision
+from linguary.application.use_cases.reset_processing import ResetProcessingResult
+from linguary.domain import (
+    BlockTreatment,
+    BookImportWarning,
+    BookStatus,
+    CoverageStatus,
+    ProcessingRun,
+    ProcessingTask,
+)
 from linguary.web import labels
+
+
+class GlossaryDecisionRequest(BaseModel):
+    """Form-команда решения по одному элементу глоссария."""
+
+    action: GlossaryDecision
+    text: str | None = None
+
+    @model_validator(mode="after")
+    def validate_text_for_action(self) -> Self:
+        """Текст обязателен только для исправления варианта."""
+        has_text = bool(self.text and self.text.strip())
+        if self.action is GlossaryDecision.CORRECT and not has_text:
+            raise ValueError("для исправления укажите новый вариант перевода")
+        if self.action is not GlossaryDecision.CORRECT and has_text:
+            raise ValueError("текст принимается только для действия correct")
+        return self
+
+
+class ResetProcessingRequest(BaseModel):
+    """Form-команда сброса с обязательным положительным подтверждением."""
+
+    confirmed: bool
+
+    @model_validator(mode="after")
+    def require_confirmation(self) -> Self:
+        """Отрицательный флаг не разрешает разрушающее действие."""
+        if not self.confirmed:
+            raise ValueError("возврат к проверке глоссария нужно подтвердить")
+        return self
+
+
+class GlossaryItemResponse(BaseModel):
+    """Один элемент проверки глоссария (PRD § 12, § 21.3)."""
+
+    concept_id: str
+    source_text: str
+    type: str
+    suggested_translation: str
+    translation: str | None = None
+    status: str | None = None
+    confidence: float
+    model_flagged_review: bool
+    has_translation_conflict: bool
+    requires_review: bool
+    is_decided: bool
+
+    @classmethod
+    def of_item(cls, item: GlossaryReviewItem) -> GlossaryItemResponse:
+        """Собирает элемент вместе с текущим решением пользователя."""
+        decision = item.decision
+        variant = decision.variants[0] if decision and decision.variants else None
+        return cls(
+            concept_id=item.concept_id,
+            source_text=item.source_text,
+            type=item.type.value,
+            suggested_translation=item.suggested_translation,
+            translation=variant.text if variant is not None else None,
+            status=decision.status.value if decision is not None else None,
+            confidence=item.confidence,
+            model_flagged_review=item.model_flagged_review,
+            has_translation_conflict=item.has_translation_conflict,
+            requires_review=item.requires_review,
+            is_decided=item.is_decided,
+        )
+
+
+class GlossaryReviewResponse(BaseModel):
+    """Проверка глоссария книги и доступность редактирования."""
+
+    book_id: str
+    read_only: bool
+    is_complete: bool
+    pending_count: int
+    items: tuple[GlossaryItemResponse, ...] = ()
+
+    @classmethod
+    def of_review(cls, review: GlossaryReview) -> GlossaryReviewResponse:
+        """Собирает ответ в прикладном порядке: ожидающие решения уже идут первыми."""
+        return cls(
+            book_id=review.book_id,
+            read_only=not review.is_editable,
+            is_complete=review.is_complete,
+            pending_count=len(review.awaiting_decision),
+            items=tuple(GlossaryItemResponse.of_item(item) for item in review.items),
+        )
+
+
+class ProcessingStartResponse(BaseModel):
+    """Открытый запуск обработки и поставленные задачи глав."""
+
+    book_id: str
+    run_id: str
+    task_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def of_start(
+        cls, run: ProcessingRun, tasks: Sequence[ProcessingTask]
+    ) -> ProcessingStartResponse:
+        """Собирает подтверждение асинхронного запуска."""
+        return cls(
+            book_id=run.book_id,
+            run_id=run.id,
+            task_ids=tuple(task.id for task in tasks),
+        )
+
+
+class ResetProcessingResponse(BaseModel):
+    """Результат подтверждённого возврата к проверке глоссария."""
+
+    book_id: str
+    status: str
+    removed_run_id: str | None = None
+    removed_results: int
+    removed_tasks: int
+
+    @classmethod
+    def of_result(cls, result: ResetProcessingResult) -> ResetProcessingResponse:
+        """Собирает ответ по атомарному результату сброса."""
+        return cls(
+            book_id=result.book_id,
+            status=BookStatus.GLOSSARY_REVIEW.value,
+            removed_run_id=result.run_id,
+            removed_results=result.removed_results,
+            removed_tasks=result.removed_tasks,
+        )
 
 
 class TreatmentCount(BaseModel):
@@ -392,9 +529,15 @@ __all__ = [
     "ChapterPlanResponse",
     "EpubCheckConfigResponse",
     "ErrorResponse",
+    "GlossaryDecisionRequest",
+    "GlossaryItemResponse",
+    "GlossaryReviewResponse",
     "ImportWarningResponse",
     "LLMConfigResponse",
     "ProcessingPlanResponse",
+    "ProcessingStartResponse",
+    "ResetProcessingRequest",
+    "ResetProcessingResponse",
     "ResultWarningResponse",
     "ServerConfigResponse",
     "StorageConfigResponse",

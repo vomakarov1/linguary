@@ -29,7 +29,10 @@ from linguary.application.book_overview import (
 )
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
-from linguary.application.use_cases.approve_glossary import GlossaryReviewError
+from linguary.application.glossary_review import (
+    GlossaryNotFoundError,
+    GlossaryReviewError,
+)
 from linguary.application.use_cases.export_book import ExportBookError
 from linguary.application.use_cases.import_book import ImportBookError
 from linguary.application.use_cases.regenerate_block import RegenerateBlockError
@@ -43,7 +46,7 @@ from linguary.domain.errors import (
     TaskTransitionError,
 )
 from linguary.web.dependencies import APPLICATION_STATE_ATTRIBUTE
-from linguary.web.routes import books, system
+from linguary.web.routes import books, glossary, processing, system
 from linguary.web.schemas import ErrorResponse
 from linguary.web.uploads import UploadRejectedError
 
@@ -58,6 +61,7 @@ TITLE = "Linguary"
 #: Порядок значим: наследник указывается раньше своего базового класса.
 _ERROR_STATUSES: tuple[tuple[type[Exception], int], ...] = (
     (BookNotFoundError, status.HTTP_404_NOT_FOUND),
+    (GlossaryNotFoundError, status.HTTP_404_NOT_FOUND),
     (UploadRejectedError, status.HTTP_400_BAD_REQUEST),
     (RegisterBookError, status.HTTP_400_BAD_REQUEST),
     (ProcessingPlanUnavailableError, status.HTTP_409_CONFLICT),
@@ -86,6 +90,8 @@ def create_app(
     """
     app = FastAPI(title=TITLE, lifespan=_lifespan(application, run_background_worker))
     app.include_router(books.router)
+    app.include_router(glossary.router)
+    app.include_router(processing.router)
     app.include_router(system.router)
     _register_error_handlers(app)
     return app

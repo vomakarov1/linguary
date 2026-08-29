@@ -25,9 +25,11 @@ from linguary.domain import (
     BookStatus,
     CanonicalDocument,
     ChapterAnalysis,
+    ConceptType,
     DocumentBlock,
     DocumentSection,
     ErrorType,
+    GlossaryCandidate,
     GlossaryHint,
     ImportWarningKind,
     LLMSettingsSnapshot,
@@ -84,6 +86,7 @@ def store_book(
     book_id: str = BOOK_ID,
     title: str = "Pride and Prejudice",
     import_warnings: Sequence[BookImportWarning] = (),
+    glossary_candidates: Mapping[int, Sequence[GlossaryCandidate]] | None = None,
 ) -> WebScenario:
     """Кладёт книгу в хранилище приложения вместе с её анализом и предупреждениями.
 
@@ -99,11 +102,41 @@ def store_book(
             if analysed_chapters is not None and index not in analysed_chapters:
                 continue
             uow.analyses.save(
-                book_id, _analysis(section, treatments=(treatments or {}).get(index))
+                book_id,
+                _analysis(
+                    section,
+                    treatments=(treatments or {}).get(index),
+                    glossary_candidates=(glossary_candidates or {}).get(index, ()),
+                ),
             )
         if import_warnings:
             uow.documents.add_import_warnings(book_id, list(import_warnings))
     return WebScenario(document=document, book_id=book_id)
+
+
+def glossary_candidate(
+    *,
+    book_id: str = BOOK_ID,
+    section_index: int = 0,
+    candidate_id: str = "candidate-mr-bennet",
+    source_text: str = "Mr. Bennet",
+    suggested_translation: str = "мистер Беннет",
+    concept_type: ConceptType = ConceptType.PERSON,
+    confidence: float = 0.95,
+    model_flagged_review: bool = False,
+) -> GlossaryCandidate:
+    """Кандидат глоссария, принадлежащий анализу заданной главы."""
+    section_id = section_id_of(book_id, section_index)
+    return GlossaryCandidate.create(
+        id=candidate_id,
+        analysis_id=f"analysis-{section_id}",
+        source_text=source_text,
+        type=concept_type,
+        suggested_translation=suggested_translation,
+        confidence=confidence,
+        model_flagged_review=model_flagged_review,
+        confidence_threshold=0.8,
+    )
 
 
 def start_run(
@@ -272,6 +305,7 @@ def _analysis(
     section: DocumentSection,
     *,
     treatments: Sequence[BlockTreatment] | None,
+    glossary_candidates: Sequence[GlossaryCandidate] = (),
 ) -> ChapterAnalysis:
     """Полный анализ главы: план обработки покрывает все её текстовые блоки."""
     blocks = section.ordered_blocks
@@ -286,6 +320,7 @@ def _analysis(
         translation_instructions="Сохранять иронию рассказчика.",
         chapter_summary="Mr. Bennet visits the new neighbour.",
         expected_block_ids=[block.id for block in blocks],
+        glossary_candidates=glossary_candidates,
     )
 
 

@@ -24,6 +24,7 @@ from enum import StrEnum
 from uuid import uuid4
 
 from linguary.application.glossary_review import (
+    GlossaryNotFoundError,
     GlossaryReview,
     GlossaryReviewError,
     GlossaryReviewItem,
@@ -77,13 +78,16 @@ class GlossaryDecisionCommand:
     """Решение пользователя по одному элементу глоссария книги.
 
     `translation` несёт только исправление: остальные действия работают с уже известным
-    вариантом — предложенным моделью или сохранённым прежним решением.
+    вариантом — предложенным моделью или сохранённым прежним решением. `concept_id`
+    связывает HTTP-команду с показанным элементом и сохраняет его идентификатор при
+    первом решении; прямые вызовы сценария могут по-прежнему работать по исходному тексту.
     """
 
     book_id: str
     source_text: str
     decision: GlossaryDecision
     translation: str | None = None
+    concept_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +114,14 @@ class ApproveGlossary:
     def review(self, book_id: str) -> GlossaryReview:
         """Глоссарий книги вместе с уже принятыми решениями."""
         with self._unit_of_work.transaction() as transaction:
-            _book(transaction, book_id)
-            return _load_review(
-                transaction,
-                book_id,
-                confidence_threshold=self._glossary_confidence_threshold,
+            book = _book(transaction, book_id)
+            return replace(
+                _load_review(
+                    transaction,
+                    book_id,
+                    confidence_threshold=self._glossary_confidence_threshold,
+                ),
+                is_editable=book.status in EDITABLE_STATUSES,
             )
 
     def __call__(self, command: GlossaryDecisionCommand) -> TermConcept:
@@ -129,9 +136,17 @@ class ApproveGlossary:
             )
             item = review.item_for(command.source_text)
             if item is None:
-                raise GlossaryReviewError(
+                raise GlossaryNotFoundError(
                     f"в глоссарии книги {command.book_id} нет элемента "
                     f"{command.source_text!r}"
+                )
+            if (
+                command.concept_id is not None
+                and command.concept_id != item.concept_id
+            ):
+                raise GlossaryNotFoundError(
+                    f"в глоссарии книги {command.book_id} нет понятия "
+                    f"{command.concept_id!r}"
                 )
             concept = self._decide(item, command, book=book)
             transaction.glossary.save(concept)
@@ -150,8 +165,8 @@ class ApproveGlossary:
         идентификатор сохраняется, статус и вариант перевода заменяются.
         """
         status = DECISION_STATUSES[command.decision]
-        concept_id = (
-            item.decision.id if item.decision is not None else self._id_factory()
+        concept_id = item.decision.id if item.decision is not None else (
+            command.concept_id or self._id_factory()
         )
         return TermConcept(
             id=concept_id,
@@ -234,7 +249,7 @@ def _book(transaction: UnitOfWork, book_id: str) -> BookRecord:
     """Запись книги в открытой транзакции."""
     book = transaction.books.get(book_id)
     if book is None:
-        raise GlossaryReviewError(f"книги {book_id} нет в хранилище")
+        raise GlossaryNotFoundError(f"книги {book_id} нет в хранилище")
     return book
 
 
