@@ -12,14 +12,25 @@ from analysis_fakes import (
     make_analysis_section,
 )
 
+from linguary.application.analysis_merge import plan_fragments
 from linguary.application.context_builder import (
     ContextBuildError,
     ContextBuilder,
+    chapter_analysis_instructions,
+    chapter_fragment_instructions,
     textual_blocks,
 )
 from linguary.domain import BlockTreatment, BlockType, ConceptType, SupportStatus
 
 NEIGHBOUR_TEXT = "The neighbouring chapter must never reach the model."
+
+#: Глава из четырёх абзацев: при пределе в два блока она делится на два фрагмента.
+FRAGMENTED_TEXTS = (
+    "Paragraph one.",
+    "Paragraph two.",
+    "Paragraph three.",
+    "Paragraph four.",
+)
 
 
 def build_context(
@@ -41,6 +52,24 @@ def build_context(
         document=document,
         section=section,
         accumulated_candidates=candidates,  # type: ignore[arg-type]  # фабрика двойников
+    )
+
+
+def build_fragment_context(*, order: int = 0, fragment_count: int = 2):
+    """Контекст одного фрагмента главы, поделённой по два блока."""
+    section = make_analysis_section(
+        section_id="section-1", title="Chapter 1", order=0, texts=FRAGMENTED_TEXTS
+    )
+    neighbour = make_analysis_section(
+        section_id="section-2", title="Chapter 2", order=1, texts=(NEIGHBOUR_TEXT,)
+    )
+    document = make_analysis_document((section, neighbour))
+    fragments = plan_fragments(textual_blocks(section), max_blocks=2)
+    return ContextBuilder().for_chapter_fragment(
+        document=document,
+        section=section,
+        fragment=fragments[order],
+        fragment_count=fragment_count,
     )
 
 
@@ -256,3 +285,66 @@ def test_negative_candidate_limit_is_rejected() -> None:
     """Отрицательный предел числа накопленных решений — ошибка настройки."""
     with pytest.raises(ContextBuildError):
         ContextBuilder(max_accumulated_candidates=-1)
+
+
+def test_fragment_context_contains_only_its_own_blocks() -> None:
+    """Фрагмент главы видит свои блоки и не видит ни остальной главы, ни соседней."""
+    context = build_fragment_context(order=1)
+
+    input_text = context.request.input_text
+
+    assert context.aliases == ("b1", "b2")
+    assert "[b1]\nParagraph three." in input_text
+    assert "[b2]\nParagraph four." in input_text
+    assert "Paragraph one." not in input_text
+    assert NEIGHBOUR_TEXT not in input_text
+
+
+def test_fragment_context_names_its_place_in_the_chapter() -> None:
+    """Запрос фрагмента называет его номер в главе: сводки соединяются по порядку."""
+    input_text = build_fragment_context(order=0).request.input_text
+
+    assert "Фрагмент главы: 1-й из 2" in input_text
+    assert "Chapter 1" in input_text
+
+
+def test_fragment_instructions_describe_a_part_of_the_chapter() -> None:
+    """Фрагменту сказано, что он видит часть главы, а сводка описывает только её."""
+    whole = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE
+    )
+    fragment = chapter_fragment_instructions(
+        source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE
+    )
+
+    assert "Тебе дают одну главу" in whole
+    assert "что произошло в этой главе" in whole
+    assert "Тебе дают часть одной главы" in fragment
+    assert "что произошло в этом фрагменте" in fragment
+    assert "Тебе дают одну главу" not in fragment
+
+
+def test_fragment_instructions_keep_the_rest_of_the_chapter_instruction() -> None:
+    """Кроме границ фрагмента и сводки инструкция та же: выверенный текст не теряется."""
+    whole = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE
+    ).splitlines()
+    fragment = chapter_fragment_instructions(
+        source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE
+    ).splitlines()
+
+    differing = [
+        index
+        for index, (chapter_line, fragment_line) in enumerate(
+            zip(whole, fragment, strict=True)
+        )
+        if chapter_line != fragment_line
+    ]
+
+    assert differing == [2, 33, 35]
+
+
+def test_fragment_outside_the_chapter_is_rejected() -> None:
+    """Фрагмент, номер которого выходит за число фрагментов главы, не собирается."""
+    with pytest.raises(ContextBuildError):
+        build_fragment_context(order=1, fragment_count=1)

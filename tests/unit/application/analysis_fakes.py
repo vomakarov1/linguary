@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from linguary.adapters.llm import FakeReply
+from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_BLOCKS
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord
 from linguary.application.retry_policy import RetryPolicy
@@ -93,6 +94,7 @@ def make_analyze_chapter(
     client: LLMClient,
     *,
     max_attempts: int = 3,
+    max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
 ) -> tuple[AnalyzeChapter, list[float]]:
     """Сценарий анализа главы вместе со списком выдержанных пауз повторов."""
     delays: list[float] = []
@@ -105,6 +107,7 @@ def make_analyze_chapter(
         llm_client=client,
         retry_policy=RetryPolicy(max_attempts=max_attempts),
         glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+        max_fragment_blocks=max_fragment_blocks,
         id_factory=sequential_ids(),
         sleep=sleep,
     )

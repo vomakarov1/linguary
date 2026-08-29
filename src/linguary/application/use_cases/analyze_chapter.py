@@ -7,6 +7,11 @@
 тоже нет: раздел `Previously in Chapter ...` собирает экспортёр из сводки главы `N-1`
 (PRD § 19.2).
 
+Глава, которая в один запрос не помещается, — резервный сценарий (PRD § 14): она уходит
+в модель последовательными фрагментами, и её анализ собирается из ответов фрагментов
+(`analysis_merge`, ALG-03). Порог дробления — настройка, а не свойство сценария: он зависит
+от предела вывода конкретной модели.
+
 Вызов модели выполняется вне транзакции, а результат сохраняется одной короткой
 транзакцией (ADR § 3). Повторы ведёт `RetryPolicy` (ALG-05): цикл здесь выдерживает
 паузу перед повтором временной ошибки и дописывает уточняющую инструкцию к исходному
@@ -23,10 +28,17 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
+from linguary.application.analysis_merge import (
+    DEFAULT_MAX_FRAGMENT_BLOCKS,
+    ChapterFragment,
+    FragmentAnalysis,
+    merge_chapter_analysis,
+    plan_fragments,
+)
 from linguary.application.context_builder import (
     ChapterAnalysisContext,
     ContextBuilder,
@@ -99,6 +111,7 @@ class AnalyzeChapter:
         llm_client: LLMClient,
         retry_policy: RetryPolicy,
         glossary_confidence_threshold: float,
+        max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
         context_builder: ContextBuilder | None = None,
         id_factory: IdFactory | None = None,
         sleep: Sleep | None = None,
@@ -107,12 +120,18 @@ class AnalyzeChapter:
         self._llm_client = llm_client
         self._retry_policy = retry_policy
         self._glossary_confidence_threshold = glossary_confidence_threshold
+        self._max_fragment_blocks = max_fragment_blocks
         self._context_builder = context_builder or ContextBuilder()
         self._id_factory = id_factory or _new_id
         self._sleep = sleep or asyncio.sleep
 
     async def __call__(self, command: AnalyzeChapterCommand) -> AnalyzeChapterResult:
-        """Анализирует главу и сохраняет результат."""
+        """Анализирует главу и сохраняет результат.
+
+        Глава, которая помещается в один запрос, им и анализируется. Более длинная
+        уходит в модель последовательными фрагментами, и её анализ собирается из их
+        ответов (PRD § 14, ALG-03).
+        """
         document, accumulated = self._load(command)
         section = _section_of(document, command)
         blocks = textual_blocks(section)
@@ -120,6 +139,34 @@ class AnalyzeChapter:
             analysis = _empty_analysis(section, id=self._id_factory())
             self._save(command.book_id, analysis)
             return AnalyzeChapterResult(analysis=analysis)
+        fragments = plan_fragments(blocks, max_blocks=self._max_fragment_blocks)
+        if len(fragments) == 1:
+            analysis, attempts, usage = await self._analyze_whole_chapter(
+                document=document,
+                section=section,
+                blocks=blocks,
+                accumulated=accumulated,
+            )
+        else:
+            analysis, attempts, usage = await self._analyze_by_fragments(
+                document=document,
+                section=section,
+                blocks=blocks,
+                fragments=fragments,
+                accumulated=accumulated,
+            )
+        self._save(command.book_id, analysis)
+        return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
+
+    async def _analyze_whole_chapter(
+        self,
+        *,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        blocks: Sequence[DocumentBlock],
+        accumulated: Sequence[GlossaryCandidate],
+    ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
+        """Основной сценарий: вся глава одним запросом (PRD § 14)."""
         context = self._context_builder.for_chapter_analysis(
             document=document, section=section, accumulated_candidates=accumulated
         )
@@ -127,8 +174,54 @@ class AnalyzeChapter:
         analysis = self._to_analysis(
             payload, context=context, section=section, blocks=blocks
         )
-        self._save(command.book_id, analysis)
-        return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
+        return analysis, attempts, usage
+
+    async def _analyze_by_fragments(
+        self,
+        *,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        blocks: Sequence[DocumentBlock],
+        fragments: Sequence[ChapterFragment],
+        accumulated: Sequence[GlossaryCandidate],
+    ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
+        """Резервный сценарий: длинная глава по фрагментам (PRD § 14, ALG-03).
+
+        Фрагменты запрашиваются подряд, каждый со своими блоками и своим циклом повторов.
+        Фрагмент, не выполненный за отведённые попытки, поднимает исходную ошибку: анализ
+        главы не сохраняется вовсе, а не сохраняется неполным, иначе неполнота досталась
+        бы пользователю как готовый результат (ALG-03).
+        """
+        analysed: list[FragmentAnalysis] = []
+        attempts = 0
+        usages: list[TokenUsage | None] = []
+        for fragment in fragments:
+            context = self._context_builder.for_chapter_fragment(
+                document=document,
+                section=section,
+                fragment=fragment,
+                fragment_count=len(fragments),
+                accumulated_candidates=accumulated,
+            )
+            payload, fragment_attempts, usage = await self._request_analysis(context)
+            attempts += fragment_attempts
+            usages.append(usage)
+            analysed.append(
+                FragmentAnalysis.of_response(
+                    payload,
+                    order=fragment.order,
+                    block_ids_by_alias=context.block_ids_by_alias,
+                )
+            )
+        analysis = merge_chapter_analysis(
+            analysed,
+            id=self._id_factory(),
+            section_id=section.id,
+            expected_block_ids=[block.id for block in blocks],
+            glossary_confidence_threshold=self._glossary_confidence_threshold,
+            id_factory=self._id_factory,
+        )
+        return analysis, attempts, _total_usage(usages)
 
     def _load(
         self, command: AnalyzeChapterCommand
@@ -418,6 +511,27 @@ def _before_you_read(
         )
         for entry in payload.before_you_read
     )
+
+
+def _total_usage(usages: Sequence[TokenUsage | None]) -> TokenUsage | None:
+    """Суммарный расход токенов главы: провайдер считает каждый вызов отдельно.
+
+    Провайдер, не сообщающий объём токенов, оставляет `None` — суммой это не подменяется:
+    ноль означал бы бесплатный вызов, а не отсутствие данных (PRD § 24).
+    """
+    reported = [usage for usage in usages if usage is not None]
+    if not reported:
+        return None
+    return TokenUsage(
+        prompt_tokens=_total_tokens(usage.prompt_tokens for usage in reported),
+        completion_tokens=_total_tokens(usage.completion_tokens for usage in reported),
+    )
+
+
+def _total_tokens(values: Iterable[int | None]) -> int | None:
+    """Сумма тех значений, которые провайдер сообщил."""
+    reported = [value for value in values if value is not None]
+    return sum(reported) if reported else None
 
 
 def _with_status(book: BookRecord, status: BookStatus) -> BookRecord:

@@ -27,6 +27,7 @@ model = "gateway/model"
 timeout_seconds = 30.0
 max_output_tokens = 4096
 max_attempts = 5
+max_fragment_blocks = 25
 
 [checks]
 glossary_confidence_threshold = 0.5
@@ -81,6 +82,7 @@ def test_settings_are_read_from_file(tmp_path: Path) -> None:
     assert settings.llm.timeout_seconds == 30.0
     assert settings.llm.max_output_tokens == 4096
     assert settings.llm.max_attempts == 5
+    assert settings.llm.max_fragment_blocks == 25
     assert settings.checks.glossary_confidence_threshold == 0.5
     assert settings.checks.language_check_min_length == 120
 
@@ -130,6 +132,7 @@ def test_api_key_is_read_from_environment(tmp_path: Path) -> None:
         pytest.param("[llm]\nmodell = 'x'\n", id="unknown-key"),
         pytest.param("[llm]\ntimeout_seconds = 'долго'\n", id="wrong-type"),
         pytest.param("[llm]\nmax_attempts = 0\n", id="invalid-value"),
+        pytest.param("[llm]\nmax_fragment_blocks = 0\n", id="empty-fragment"),
         pytest.param("[llm]\n= сломано\n", id="broken-toml"),
         pytest.param("llm = 'строка'\n", id="section-is-not-a-table"),
     ],

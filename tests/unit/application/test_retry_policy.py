@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.application.analysis_merge import AnalysisMergeError
 from linguary.application.llm_dto import LLMPayloadError, TranslationResultResponse
 from linguary.application.ports.epub import EpubExportFatalError, EpubImportFatalError
 from linguary.application.ports.llm import (
@@ -157,6 +158,11 @@ def reply_for(block_ids: tuple[str, ...]) -> FakeReply:
             ResultValidationError("доля целевого алфавита ниже порога"),
             ErrorType.VALIDATION,
             id="wrong-language",
+        ),
+        pytest.param(
+            AnalysisMergeError("фрагмент 1 вернул режимы для чужих блоков"),
+            ErrorType.VALIDATION,
+            id="fragments-do-not-merge",
         ),
         pytest.param(
             EpubImportFatalError("EPUB нечитаем"),

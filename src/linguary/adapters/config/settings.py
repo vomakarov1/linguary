@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_BLOCKS
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
 
@@ -44,6 +45,11 @@ class LLMSettings:
     Пустые `model` и `api_key` означают ненастроенную LLM — обычное состояние первого
     запуска, а не ошибка: приложение показывает состояние конфигурации и не отправляет
     запросов. Ошибкой оно становится в момент попытки создать клиент.
+
+    `max_fragment_blocks` — сколько текстовых блоков главы уходит в один запрос анализа.
+    Настройка стоит рядом с `max_output_tokens`, потому что определяется тем же пределом:
+    глава, ответ на которую не помещается в лимит вывода модели, анализируется
+    последовательными фрагментами (PRD § 14).
     """
 
     provider: str = OPENAI_COMPATIBLE_PROVIDER
@@ -54,6 +60,7 @@ class LLMSettings:
     max_output_tokens: int | None = None
     temperature: float | None = None
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS
 
     def __post_init__(self) -> None:
         if not self.provider.strip():
@@ -66,6 +73,8 @@ class LLMSettings:
             raise SettingsError("лимит выходных токенов должен быть положительным")
         if self.max_attempts < 1:
             raise SettingsError("число попыток вызова модели должно быть положительным")
+        if self.max_fragment_blocks < 1:
+            raise SettingsError("размер фрагмента главы должен быть положительным")
 
     @property
     def is_ready(self) -> bool:

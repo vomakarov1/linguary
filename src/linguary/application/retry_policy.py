@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
+from linguary.application.analysis_merge import AnalysisMergeError
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import LLMPayloadError
 from linguary.application.ports.epub import EpubExportFatalError, EpubImportFatalError
@@ -245,6 +246,8 @@ _ERROR_TYPES: tuple[tuple[type[Exception], ErrorType], ...] = (
     (LLMPayloadError, ErrorType.MODEL_OUTPUT),
     # ответ разобран, но не годится: нет блока, неизвестный блок, режим, язык
     (ResultValidationError, ErrorType.VALIDATION),
+    # фрагменты длинной главы не складываются в главу: чужие блоки, спорные номера
+    (AnalysisMergeError, ErrorType.VALIDATION),
     (TranslationUnitError, ErrorType.VALIDATION),
     (UnknownBlockError, ErrorType.VALIDATION),
     (NonTextualBlockError, ErrorType.VALIDATION),

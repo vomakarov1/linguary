@@ -27,6 +27,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from linguary.application.analysis_merge import ChapterFragment
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse
 from linguary.application.ports.llm import LLMRequest
@@ -135,19 +136,73 @@ class ContextBuilder:
             raise ContextBuildError(
                 f"глава {section.id} не содержит текстовых блоков: анализировать нечего"
             )
+        return self._chapter_context(
+            document=document,
+            section=section,
+            blocks=blocks,
+            accumulated_candidates=accumulated_candidates,
+            instructions=chapter_analysis_instructions(
+                source_language=document.source_language,
+                target_language=document.target_language,
+            ),
+            fragment_label=None,
+        )
+
+    def for_chapter_fragment(
+        self,
+        *,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        fragment: ChapterFragment,
+        fragment_count: int,
+        accumulated_candidates: Iterable[GlossaryCandidate] = (),
+    ) -> ChapterAnalysisContext:
+        """Контекст анализа одного фрагмента длинной главы (PRD § 14, ALG-03).
+
+        Резервный сценарий: главу, которая не помещается в один запрос, модель видит
+        по частям. Фрагмент получает только свои блоки — ни остальной главы, ни соседних
+        глав в запросе нет, — и знает своё место в главе, потому что сводки фрагментов
+        соединяются в сводку главы в порядке чтения.
+        """
+        if fragment_count < 1 or fragment.order >= fragment_count:
+            raise ContextBuildError(
+                f"фрагмент {fragment.order} не входит в главу {section.id} "
+                f"из {fragment_count} фрагментов"
+            )
+        return self._chapter_context(
+            document=document,
+            section=section,
+            blocks=fragment.blocks,
+            accumulated_candidates=accumulated_candidates,
+            instructions=chapter_fragment_instructions(
+                source_language=document.source_language,
+                target_language=document.target_language,
+            ),
+            fragment_label=_fragment_label(fragment.order, fragment_count),
+        )
+
+    def _chapter_context(
+        self,
+        *,
+        document: CanonicalDocument,
+        section: DocumentSection,
+        blocks: Sequence[DocumentBlock],
+        accumulated_candidates: Iterable[GlossaryCandidate],
+        instructions: str,
+        fragment_label: str | None,
+    ) -> ChapterAnalysisContext:
+        """Готовый запрос по переданным блокам главы вместе с разбором ответа."""
         aliases = {_alias(index): block.id for index, block in enumerate(blocks, start=1)}
         return ChapterAnalysisContext(
             section_id=section.id,
             request=LLMRequest.for_chapter_analysis(
-                instructions=chapter_analysis_instructions(
-                    source_language=document.source_language,
-                    target_language=document.target_language,
-                ),
+                instructions=instructions,
                 input_text=self._chapter_input(
                     document=document,
                     section=section,
                     blocks=blocks,
                     accumulated_candidates=accumulated_candidates,
+                    fragment_label=fragment_label,
                 ),
             ),
             block_ids_by_alias=aliases,
@@ -164,10 +219,13 @@ class ContextBuilder:
         section: DocumentSection,
         blocks: Sequence[DocumentBlock],
         accumulated_candidates: Iterable[GlossaryCandidate],
+        fragment_label: str | None,
     ) -> str:
         """Текст запроса: шапка главы, принятые решения книги и блоки под псевдонимами."""
         parts = [
-            _chapter_header(document=document, section=section),
+            _chapter_header(
+                document=document, section=section, fragment_label=fragment_label
+            ),
             _known_decisions(
                 self._selected_candidates(accumulated_candidates),
                 target_language=document.target_language,
@@ -196,9 +254,67 @@ class ContextBuilder:
 
 def chapter_analysis_instructions(*, source_language: str, target_language: str) -> str:
     """Постоянная инструкция анализа главы (PRD § 10.1, § 11, § 14, § 19)."""
-    return _ANALYSIS_INSTRUCTIONS.format(
-        source_language=source_language, target_language=target_language
+    return _instructions(
+        source_language=source_language,
+        target_language=target_language,
+        scope=_WHOLE_CHAPTER_SCOPE,
+        summary=_WHOLE_CHAPTER_SUMMARY,
     )
+
+
+def chapter_fragment_instructions(*, source_language: str, target_language: str) -> str:
+    """Инструкция анализа фрагмента длинной главы (PRD § 14, ALG-03).
+
+    От инструкции целой главы отличается ровно тем, что меняет резервный сценарий:
+    модель видит часть главы, а её `chapter_summary` описывает события только этой части.
+    Остальные правила — план обработки, кандидаты глоссария, инструкции перевода и
+    учебный материал — те же самые.
+    """
+    return _instructions(
+        source_language=source_language,
+        target_language=target_language,
+        scope=_FRAGMENT_SCOPE,
+        summary=_FRAGMENT_SUMMARY,
+    )
+
+
+def _instructions(
+    *, source_language: str, target_language: str, scope: str, summary: str
+) -> str:
+    """Инструкция анализа, собранная под целую главу или под её фрагмент."""
+    languages = {"source_language": source_language, "target_language": target_language}
+    return _ANALYSIS_INSTRUCTIONS.format(
+        scope=scope.format(**languages), summary=summary.format(**languages), **languages
+    )
+
+
+#: Что именно модель видит в запросе: главу целиком или её последовательный фрагмент.
+_WHOLE_CHAPTER_SCOPE = """\
+Тебе дают одну главу, разбитую на пронумерованные текстовые блоки. Анализируй только эту \
+главу: соседних глав ты не видишь и догадок о них не строишь."""
+
+_FRAGMENT_SCOPE = """\
+Тебе дают часть одной главы — последовательный фрагмент её текста, разбитый на \
+пронумерованные текстовые блоки. Анализируй только этот фрагмент: ни остальной главы, \
+ни соседних глав ты не видишь и догадок о них не строишь."""
+
+#: Что описывает `chapter_summary`. У фрагмента — события только его части: сводки
+#: фрагментов соединяются в сводку главы в порядке чтения (ALG-03).
+_WHOLE_CHAPTER_SUMMARY = """\
+5. chapter_summary — что произошло в этой главе.
+
+Пиши на языке оригинала книги ({source_language}), три-шесть предложений. Только события \
+самой этой главы: что случилось, с кем, что изменилось. Предыдущие главы не пересказывай, \
+о будущих не рассуждай, текст не оценивай. Этот пересказ увидит читатель перед следующей \
+главой, чтобы вспомнить, на чём остановился."""
+
+_FRAGMENT_SUMMARY = """\
+5. chapter_summary — что произошло в этом фрагменте.
+
+Пиши на языке оригинала книги ({source_language}), два-четыре предложения. Только события \
+самого этого фрагмента: что случилось, с кем, что изменилось. Сводки фрагментов главы \
+соединяются подряд в один пересказ главы, поэтому не повторяй то, что было до твоего \
+фрагмента, и не рассуждай о том, что будет после. Текст не оценивай."""
 
 
 #: Инструкция анализа главы. Один запрос отвечает сразу за план обработки, кандидатов
@@ -209,8 +325,7 @@ _ANALYSIS_INSTRUCTIONS = """\
 владеет языком {target_language} и учит язык {source_language}, читать эту книгу \
 в оригинале.
 
-Тебе дают одну главу, разбитую на пронумерованные текстовые блоки. Анализируй только эту \
-главу: соседних глав ты не видишь и догадок о них не строишь. Переводить текст сейчас не \
+{scope} Переводить текст сейчас не \
 нужно — перевод блоков выполняется отдельными запросами позже.
 
 1. treatment_plan — режим обработки каждого блока.
@@ -269,12 +384,7 @@ _ANALYSIS_INSTRUCTIONS = """\
 не объясняют. Меньше пяти выражений — нормально, если больше в главе нет; добирать \
 список ради количества не нужно.
 
-5. chapter_summary — что произошло в этой главе.
-
-Пиши на языке оригинала книги ({source_language}), три-шесть предложений. Только события \
-самой этой главы: что случилось, с кем, что изменилось. Предыдущие главы не пересказывай, \
-о будущих не рассуждай, текст не оценивай. Этот пересказ увидит читатель перед следующей \
-главой, чтобы вспомнить, на чём остановился.
+{summary}
 
 Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
 
@@ -284,8 +394,21 @@ def _alias(index: int) -> str:
     return f"b{index}"
 
 
-def _chapter_header(*, document: CanonicalDocument, section: DocumentSection) -> str:
-    """Шапка запроса: книга, глава и языки издания."""
+def _fragment_label(order: int, fragment_count: int) -> str:
+    """Строка шапки о месте фрагмента в главе."""
+    return (
+        f"Фрагмент главы: {order + 1}-й из {fragment_count}. "
+        f"Остальные фрагменты главы тебе не показаны."
+    )
+
+
+def _chapter_header(
+    *,
+    document: CanonicalDocument,
+    section: DocumentSection,
+    fragment_label: str | None = None,
+) -> str:
+    """Шапка запроса: книга, глава, место фрагмента и языки издания."""
     sections = document.ordered_sections
     position = next(
         (
@@ -296,16 +419,18 @@ def _chapter_header(*, document: CanonicalDocument, section: DocumentSection) ->
         section.order + 1,
     )
     authors = ", ".join(document.metadata.authors)
-    return "\n".join(
-        (
-            f"Книга: {document.metadata.title}."
-            + (f" Автор: {authors}." if authors else ""),
-            f"Глава: {section.title} ({position}-я по порядку чтения "
-            f"из {len(sections)}).",
-            f"Язык оригинала: {document.source_language}. "
-            f"Язык перевода: {document.target_language}.",
-        )
+    lines = [
+        f"Книга: {document.metadata.title}."
+        + (f" Автор: {authors}." if authors else ""),
+        f"Глава: {section.title} ({position}-я по порядку чтения из {len(sections)}).",
+    ]
+    if fragment_label is not None:
+        lines.append(fragment_label)
+    lines.append(
+        f"Язык оригинала: {document.source_language}. "
+        f"Язык перевода: {document.target_language}."
     )
+    return "\n".join(lines)
 
 
 def _known_decisions(
@@ -342,6 +467,7 @@ __all__ = [
     "ContextBuildError",
     "ContextBuilder",
     "chapter_analysis_instructions",
+    "chapter_fragment_instructions",
     "is_textual",
     "textual_blocks",
 ]
