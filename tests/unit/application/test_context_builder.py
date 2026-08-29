@@ -17,7 +17,7 @@ from linguary.application.context_builder import (
     ContextBuilder,
     textual_blocks,
 )
-from linguary.domain import BlockTreatment, BlockType, SupportStatus
+from linguary.domain import BlockTreatment, BlockType, ConceptType, SupportStatus
 
 NEIGHBOUR_TEXT = "The neighbouring chapter must never reach the model."
 
@@ -217,6 +217,14 @@ def test_instructions_describe_every_textual_treatment() -> None:
     assert BlockTreatment.PRESERVE_ONLY.value not in instructions
     assert f"учит язык {SOURCE_LANGUAGE}" in instructions
     assert f"владеет языком {TARGET_LANGUAGE}" in instructions
+
+
+def test_instructions_name_every_glossary_concept_type() -> None:
+    """Инструкция называет каждый тип понятия глоссария (PRD § 12)."""
+    instructions = build_context().request.instructions
+
+    for concept_type in ConceptType:
+        assert concept_type.value in instructions
 
 
 def test_instructions_require_chapter_summary_in_source_language() -> None:
