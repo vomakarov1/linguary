@@ -14,8 +14,8 @@ Runner асинхронный: в фазах 3-4 его запускают FastA
 ввода-вывода. Синхронные сценарии подключаются обёрткой `to_async_handler` из адаптера.
 
 Классификация ошибок обработчика — отдельная политика (PRD § 16), и здесь она не решается:
-`classify_error` подменяется при сборке приложения, а умолчание честно считает неизвестную
-ошибку временной.
+умолчание берётся из `linguary.application.retry_policy`, а сборка приложения может
+подменить его через `classify_error`.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Protocol
 
+from linguary.application.retry_policy import classify_error as classify_task_error
 from linguary.domain import (
     ErrorType,
     ProcessingTask,
@@ -79,7 +80,7 @@ class TaskRunner:
     ) -> None:
         self._queue = queue
         self._handlers = dict(handlers)
-        self._classify_error = classify_error or classify_unexpected_error
+        self._classify_error = classify_error or classify_task_error
 
     async def recover_interrupted(self) -> tuple[ProcessingTask, ...]:
         """Переводит задачи `running` в `failed` при старте приложения (ALG-02).
@@ -123,20 +124,6 @@ class TaskRunner:
         return task
 
 
-def classify_unexpected_error(error: Exception) -> TaskError:
-    """Типизированная ошибка задачи по умолчанию.
-
-    Неизвестная ошибка считается временной: так пользователь сохраняет право повторить
-    задачу. Правила разбора ошибок провайдера и ответов модели (PRD § 16) — отдельная
-    политика, она подключается через `classify_error`.
-    """
-    return TaskError(
-        type=ErrorType.TRANSIENT,
-        message=str(error).strip() or type(error).__name__,
-        detail=f"{type(error).__module__}.{type(error).__qualname__}",
-    )
-
-
 def _unregistered_handler_error(task: ProcessingTask) -> TaskError:
     """Ошибка задачи, для типа которой не зарегистрирован обработчик.
 
@@ -155,5 +142,4 @@ __all__ = [
     "TaskHandler",
     "TaskQueue",
     "TaskRunner",
-    "classify_unexpected_error",
 ]
