@@ -1,18 +1,26 @@
-"""Порт чтения EPUB.
+"""Порты чтения и записи EPUB.
 
 Прикладной слой не знает ни о контейнере EPUB, ни о XHTML, ни о файловой системе:
-сценарий импорта получает готовую каноническую модель документа и предупреждения импорта.
-Конкретная реализация живёт в `linguary.adapters.epub` (ADR § 3: логика EPUB находится
-только во внешних компонентах импорта и экспорта).
+сценарий импорта получает готовую каноническую модель документа и предупреждения импорта,
+а сценарий экспорта отдаёт модель вместе с результатами обработки и получает путь
+к собранному файлу. Конкретная реализация живёт в `linguary.adapters.epub` (ADR § 3:
+логика EPUB находится только во внешних компонентах импорта и экспорта).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Protocol
 
-from linguary.domain import BookImportWarning, CanonicalDocument, DomainError
+from linguary.domain import (
+    BlockProcessingResult,
+    BookImportWarning,
+    CanonicalDocument,
+    DomainError,
+    LearningMaterial,
+)
 
 
 class EpubImportFatalError(DomainError):
@@ -96,11 +104,90 @@ class EpubResourceStore(Protocol):
         """
 
 
+class EpubExportFatalError(DomainError):
+    """Собрать корректный EPUB нельзя (`SupportStatus.FATAL`, PRD § 6, § 20).
+
+    Ошибка возникает, когда потерян обязательный ресурс книги или когда собранный файл
+    не прошёл встроенные технические проверки экспортёра. Экспортная задача в этом случае
+    получает `failed`, а недособранный артефакт не остаётся на диске.
+    """
+
+
+class ExportWarningKind(StrEnum):
+    """Виды непреградных замечаний экспорта, которые пользователь видит в интерфейсе."""
+
+    UNRESOLVED_LINK = "unresolved_link"
+    MISSING_RESOURCE = "missing_resource"
+    OPAQUE_FRAGMENT_LOST = "opaque_fragment_lost"
+
+
+@dataclass(frozen=True, slots=True)
+class ExportWarning:
+    """Замечание сборки: что именно в итоговой книге отличается от исходной."""
+
+    kind: ExportWarningKind
+    message: str
+    section_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.message.strip():
+            raise EpubExportFatalError("текст предупреждения экспорта пуст")
+
+
+@dataclass(frozen=True, slots=True)
+class EpubWriteRequest:
+    """Запрос на сборку итогового EPUB.
+
+    Состав главы определяется тем, что передал сценарий: без `block_results`
+    и `learning_materials` получается книга режима `structure_only` — только оригинал
+    (PRD § 20). `stored_resource_paths` сопоставляет пути ресурсов внутри книги их копиям
+    в локальном хранилище, а `source_epub_path` нужен для переноса конструкций
+    `PRESERVE_OPAQUE` исходной разметкой.
+    """
+
+    document: CanonicalDocument
+    target_path: str
+    stored_resource_paths: Mapping[str, str] = field(default_factory=dict)
+    source_epub_path: str | None = None
+    block_results: Mapping[str, BlockProcessingResult] = field(default_factory=dict)
+    learning_materials: Mapping[str, LearningMaterial] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.target_path.strip():
+            raise EpubExportFatalError("путь к собираемому файлу книги пуст")
+
+
+@dataclass(frozen=True, slots=True)
+class ExportedBook:
+    """Результат сборки: путь к готовому файлу и замечания сборки."""
+
+    path: str
+    warnings: tuple[ExportWarning, ...] = ()
+
+
+class EpubWriter(Protocol):
+    """Сборка итогового EPUB из канонической модели и результатов обработки."""
+
+    def write(self, request: EpubWriteRequest) -> ExportedBook:
+        """Собирает книгу и выполняет встроенные технические проверки (PRD § 20).
+
+        Реализация обязана поднимать `EpubExportFatalError`, если книгу нельзя собрать
+        или собранный файл не прошёл встроенные проверки; всё, что не мешает книге быть
+        корректной, складывается в `ExportedBook.warnings`.
+        """
+
+
 __all__ = [
+    "EpubExportFatalError",
     "EpubImportFatalError",
     "EpubReadRequest",
     "EpubReader",
     "EpubResourceStore",
+    "EpubWriteRequest",
+    "EpubWriter",
+    "ExportWarning",
+    "ExportWarningKind",
+    "ExportedBook",
     "ImportedBook",
     "StoreResourcesRequest",
     "StoredResources",

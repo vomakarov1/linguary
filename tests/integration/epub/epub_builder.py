@@ -44,11 +44,14 @@ def build_epub(
     include_container: bool = True,
     include_package: bool = True,
     omit_from_archive: Sequence[str] = (),
+    omit_from_manifest: Sequence[str] = (),
 ) -> Path:
     """Собирает EPUB3 из готовых XHTML-документов и отдаёт путь к нему.
 
     `omit_from_archive` объявляет файл в манифесте, но не кладёт его в архив: так
     получается книга с потерянным документом порядка чтения или потерянным ресурсом.
+    `omit_from_manifest`, наоборот, кладёт файл в архив и оставляет его в порядке чтения,
+    но не объявляет в манифесте: так получается книга с битым манифестом.
     `archive_files` кладёт файл в архив по указанному пути, не добавляя каталог пакета
     и не объявляя его в манифесте: так получается ресурс, лежащий вне каталога книги.
     """
@@ -67,6 +70,7 @@ def build_epub(
                     title=title,
                     language=language,
                     extra_files=extra_files or {},
+                    omit_from_manifest=omit_from_manifest,
                 ),
             )
         if toc is not None:
@@ -104,12 +108,14 @@ def _package(
     title: str,
     language: str,
     extra_files: Mapping[str, bytes],
+    omit_from_manifest: Sequence[str] = (),
 ) -> str:
     """Файл пакета OPF с манифестом и порядком чтения."""
     items = [
         f'<item id="{_item_id(href)}" href="{href}" '
         f'media-type="{_media_type(href)}"/>'
         for href in (*documents, *extra_files)
+        if href not in omit_from_manifest
     ]
     if toc is not None:
         items.insert(
