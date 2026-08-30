@@ -50,6 +50,7 @@ from linguary.domain import (
     ChapterAnalysis,
     DocumentBlock,
     DocumentSection,
+    LLMCallStage,
     ProcessingRun,
     ProcessingTask,
     TaskIdentity,
@@ -72,12 +73,17 @@ class RegenerateBlockError(BlockProcessingError):
     """Блок нельзя сгенерировать заново в текущем состоянии книги."""
 
 
+class RegenerateBlockNotFoundError(RegenerateBlockError):
+    """Книга или выбранный блок не найдены."""
+
+
 @dataclass(frozen=True, slots=True)
 class RegenerateBlockCommand:
     """Команда повторной генерации: какой блок какой книги обработать заново."""
 
     book_id: str
     block_id: str
+    task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +111,7 @@ class _BlockWork:
     analysis: ChapterAnalysis
     run: ProcessingRun
     used_note_ids: frozenset[str]
+    task_id: str | None = None
 
     @property
     def target_language(self) -> str:
@@ -157,6 +164,14 @@ class RegenerateBlock:
             analysis=work.analysis,
             glossary=work.run.glossary_snapshot,
         )
+        context = replace(
+            context,
+            request=context.request.with_logging(
+                book_id=work.document.id,
+                stage=LLMCallStage.BLOCK_REGENERATION,
+                task_id=work.task_id,
+            ),
+        )
         call = await self._call.request(
             context,
             unit=unit,
@@ -176,12 +191,18 @@ class RegenerateBlock:
             usage=call.usage,
         )
 
+    def ensure_regeneratable(self, command: RegenerateBlockCommand) -> None:
+        """Проверяет запрос до постановки фоновой задачи."""
+        self._load(command)
+
     def _load(self, command: RegenerateBlockCommand) -> _BlockWork:
         """Читает книгу, блок, анализ его главы и активный запуск одной транзакцией."""
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(command.book_id)
             if document is None:
-                raise RegenerateBlockError(f"книги {command.book_id} нет в хранилище")
+                raise RegenerateBlockNotFoundError(
+                    f"книги {command.book_id} нет в хранилище"
+                )
             block = _block_of(document, command)
             section = document.section(block.section_id)
             analysis = transaction.analyses.get_for_section(
@@ -212,6 +233,7 @@ class RegenerateBlock:
                 for note in result.language_notes
                 if result.block_id in section_block_ids
             ),
+            task_id=command.task_id,
         )
 
 
@@ -237,6 +259,9 @@ class BlockRegenerationSequence:
         иначе её идемпотентный ключ навсегда запомнил бы первый результат и второй раз
         блок сгенерировать было бы нельзя.
         """
+        self._regenerate_block.ensure_regeneratable(
+            RegenerateBlockCommand(book_id=book_id, block_id=block_id)
+        )
         identity = TaskIdentity(
             book_id=book_id, task_type=TaskType.REGENERATE_BLOCK, scope_id=block_id
         )
@@ -249,7 +274,9 @@ class BlockRegenerationSequence:
             if existing is not None:
                 transaction.tasks.delete(existing.id)
             if status is not book.status:
-                transaction.books.save(replace(book, status=status))
+                transaction.books.save(
+                    replace(book, status=status, export_validation_status=None)
+                )
         return await self._queue.enqueue(identity)
 
     async def run_task(self, task: ProcessingTask) -> None:
@@ -259,7 +286,11 @@ class BlockRegenerationSequence:
                 f"задача {task.id} типа {task.task_type} не является повторной генерацией"
             )
         await self._regenerate_block(
-            RegenerateBlockCommand(book_id=task.book_id, block_id=task.scope_id)
+            RegenerateBlockCommand(
+                book_id=task.book_id,
+                block_id=task.scope_id,
+                task_id=task.id,
+            )
         )
         complete_processing(
             self._unit_of_work,
@@ -305,7 +336,7 @@ def _block_of(
         (item for item in document.blocks() if item.id == command.block_id), None
     )
     if block is None:
-        raise RegenerateBlockError(
+        raise RegenerateBlockNotFoundError(
             f"блока {command.block_id} нет в книге {command.book_id}"
         )
     if not is_textual(block):
@@ -335,5 +366,6 @@ __all__ = [
     "RegenerateBlock",
     "RegenerateBlockCommand",
     "RegenerateBlockError",
+    "RegenerateBlockNotFoundError",
     "RegenerateBlockResult",
 ]

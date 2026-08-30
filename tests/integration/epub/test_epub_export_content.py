@@ -241,3 +241,73 @@ def test_glossary_hints_keep_original_and_translation(
     item = next(iter(elements(hints, "li")))
 
     assert "".join(item.itertext()) == "marsh lights — болотные огни (блуждающие огни на болоте)"
+
+
+def test_help_for_list_items_stays_inside_the_list_item(tmp_path: Path) -> None:
+    """Подсказки пункта списка не становятся соседями `li`: XHTML запрещает это."""
+    source = build_epub(
+        tmp_path / "source.epub",
+        documents={
+            "chapter1.xhtml": xhtml_document(
+                "<h1>Chapter One</h1>"
+                "<ul>"
+                "<li>a brass pocket compass that pointed roughly north</li>"
+                "<li>a heel of dried bread wrapped in cloth</li>"
+                "</ul>"
+            )
+        },
+        toc=[("chapter1.xhtml", "Chapter One")],
+    )
+    dry = run_export(source, tmp_path=tmp_path / "dry", book_id="book-1")
+    section = dry.imported.document.ordered_sections[0]
+    first, _second = (
+        block
+        for block in section.ordered_blocks
+        if block.type is BlockType.LIST_ITEM
+    )
+    results: Mapping[str, BlockProcessingResult] = {
+        first.id: BlockProcessingResult(
+            block_id=first.id,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(
+                GlossaryHint(
+                    original="pointed roughly north",
+                    translation="указывал примерно на север",
+                    note="ироничная оговорка о ненадёжном компасе",
+                ),
+            ),
+            language_notes=(
+                LanguageNote(
+                    id="note-1",
+                    block_id=first.id,
+                    original_excerpt="roughly north",
+                    note="Roughly подчёркивает приблизительность.",
+                ),
+            ),
+        )
+    }
+    run = run_export(
+        source,
+        tmp_path=tmp_path / "full",
+        book_id="book-1",
+        block_results=results,
+        learning_materials={
+            section.id: LearningMaterial.for_chapter(
+                section_id=section.id,
+                before_you_read=(),
+                chapter_summary="",
+                language_notes=results[first.id].language_notes,
+            )
+        },
+    )
+    chapter = documents_of(run.path)["OEBPS/chapter1.xhtml"]
+    original_list = next(
+        element for element in elements(chapter, "ul") if element.get("class") is None
+    )
+    first_item = next(iter(elements(original_list, "li")))
+
+    assert [child.tag.rpartition("}")[2] for child in original_list] == ["li", "li"]
+    assert next(iter(elements(first_item, "ul"))).get("class") == "linguary-glossary"
+    assert next(iter(elements(first_item, "aside"))).get("class") == (
+        "linguary-language-note"
+    )

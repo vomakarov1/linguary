@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Предупреждения - Linguary{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Предупреждения</h1>
+    <p>Всего: {{ data.total }}.</p>
+  </div>
+</section>
+
+{% set active_tab = "warnings" %}
+{% include "partials/book_tabs.html" %}
+
+<section class="list">
+  {% for warning in data.import_warnings %}
+    <article class="row-card"><strong>{{ warning.kind_label }}</strong><p>{{ warning.message }}</p></article>
+  {% endfor %}
+  {% for warning in data.result_warnings %}
+    <article class="row-card"><strong>{{ warning.kind_label }}</strong><p>{{ warning.message }}</p></article>
+  {% endfor %}
+  {% if data.total == 0 %}<p class="empty">Предупреждений нет.</p>{% endif %}
+</section>
+{% endblock %}

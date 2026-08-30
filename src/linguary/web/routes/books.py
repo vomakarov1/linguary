@@ -15,10 +15,11 @@ import asyncio
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, Query, UploadFile, status
+from fastapi import APIRouter, File, Form, Query, Request, UploadFile, status
 from fastapi.responses import RedirectResponse
 
 from linguary.application.book_overview import (
+    ProcessingPlanUnavailableError,
     book_overview,
     book_warnings,
     list_books,
@@ -38,6 +39,8 @@ from linguary.web.uploads import (
     ensure_epub_filename,
     save_upload,
 )
+from linguary.web import labels
+from linguary.web.views import render, wants_html
 
 router = APIRouter(tags=["books"])
 
@@ -48,16 +51,20 @@ _LanguageCode = Annotated[str, Form(min_length=2, max_length=32)]
 
 @router.get("/books", response_model=BookListResponse)
 def get_books(
+    request: Request,
     application: CurrentApplication,
     book_status: Annotated[
         BookStatus | None,
         Query(alias="status", description="Показать только книги в этом состоянии"),
     ] = None,
-) -> BookListResponse:
+) -> BookListResponse | object:
     """Список книг и их состояний (PRD § 21.1)."""
-    return BookListResponse.of_books(
+    response = BookListResponse.of_books(
         list_books(application.unit_of_work, status=book_status)
     )
+    if wants_html(request):
+        return render(request, "books/list.html", page="books", data=response)
+    return response
 
 
 @router.post(
@@ -101,31 +108,73 @@ async def upload_book(
 
 
 @router.get("/books/{book_id}", response_model=BookDetailResponse)
-def get_book(application: CurrentApplication, book_id: str) -> BookDetailResponse:
+def get_book(
+    request: Request, application: CurrentApplication, book_id: str
+) -> BookDetailResponse | object:
     """Карточка книги: состояние, прогресс, счётчики режимов и ошибки (PRD § 21.4)."""
-    return BookDetailResponse.of_overview(
+    response = BookDetailResponse.of_overview(
         book_overview(application.unit_of_work, book_id)
     )
+    if wants_html(request):
+        return render(
+            request,
+            "books/detail.html",
+            page="detail",
+            data=response,
+            auto_refresh=_needs_refresh(response),
+            llm_ready=application.settings.llm.is_ready,
+            llm_hint=labels.LLM_NOT_CONFIGURED_HINT,
+        )
+    return response
 
 
 @router.get("/books/{book_id}/plan", response_model=ProcessingPlanResponse)
 def get_book_plan(
-    application: CurrentApplication, book_id: str
-) -> ProcessingPlanResponse:
+    request: Request, application: CurrentApplication, book_id: str
+) -> ProcessingPlanResponse | object:
     """Сводка плана обработки книги по главам (PRD § 21, UX notes)."""
-    return ProcessingPlanResponse.of_plan(
+    if wants_html(request):
+        try:
+            response = ProcessingPlanResponse.of_plan(
+                processing_plan(application.unit_of_work, book_id)
+            )
+        except ProcessingPlanUnavailableError:
+            return render(
+                request, "books/plan.html", page="plan", data=None, book_id=book_id
+            )
+        return render(
+            request, "books/plan.html", page="plan", data=response, book_id=book_id
+        )
+    response = ProcessingPlanResponse.of_plan(
         processing_plan(application.unit_of_work, book_id)
     )
+    return response
 
 
 @router.get("/books/{book_id}/warnings", response_model=BookWarningsResponse)
 def get_book_warnings(
-    application: CurrentApplication, book_id: str
-) -> BookWarningsResponse:
+    request: Request, application: CurrentApplication, book_id: str
+) -> BookWarningsResponse | object:
     """Предупреждения импорта и замечания к результату обработки (PRD § 21.6)."""
-    return BookWarningsResponse.of_warnings(
+    response = BookWarningsResponse.of_warnings(
         book_warnings(application.unit_of_work, book_id)
     )
+    if wants_html(request):
+        return render(
+            request,
+            "books/warnings.html",
+            page="warnings",
+            data=response,
+            book_id=book_id,
+        )
+    return response
 
 
 __all__ = ["router"]
+
+
+def _needs_refresh(response: BookDetailResponse) -> bool:
+    """Нужно ли периодически перечитывать карточку книги."""
+    return response.book.status in {"IMPORTING", "ANALYZING", "PROCESSING"} or (
+        response.progress.pending_tasks + response.progress.running_tasks > 0
+    )

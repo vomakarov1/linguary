@@ -23,6 +23,10 @@ class RetryTaskError(ApplicationError):
     """Задачу нельзя запустить повторно в её текущем состоянии."""
 
 
+class TaskNotFoundError(RetryTaskError):
+    """Задачи с таким идентификатором нет в хранилище."""
+
+
 @dataclass(frozen=True, slots=True)
 class RetryTaskCommand:
     """Команда повтора: какую задачу вернуть в очередь."""
@@ -41,7 +45,7 @@ class RetryTask:
         with self._unit_of_work.transaction() as transaction:
             task = transaction.tasks.get(command.task_id)
             if task is None:
-                raise RetryTaskError(f"задачи {command.task_id} нет в хранилище")
+                raise TaskNotFoundError(f"задачи {command.task_id} нет в хранилище")
             _ensure_retryable(task)
             restarted = task.retry()
             transaction.tasks.save(restarted)
@@ -69,4 +73,5 @@ __all__ = [
     "RetryTask",
     "RetryTaskCommand",
     "RetryTaskError",
+    "TaskNotFoundError",
 ]

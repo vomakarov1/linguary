@@ -163,9 +163,11 @@ class RetryDecision:
                 "политика запретила повтор: следующей попытки у этого вызова нет"
             )
         if self.repair_instruction is None:
-            return request
+            return replace(request, attempt=request.attempt + 1)
         return replace(
-            request, instructions=f"{request.instructions}\n\n{self.repair_instruction}"
+            request,
+            instructions=f"{request.instructions}\n\n{self.repair_instruction}",
+            attempt=request.attempt + 1,
         )
 
 

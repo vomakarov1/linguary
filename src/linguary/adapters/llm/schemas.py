@@ -34,13 +34,18 @@ class _ResponseModel(BaseModel):
 
 
 class GlossaryCandidateSchema(_ResponseModel):
-    """Кандидат глоссария, найденный моделью в главе."""
+    """Кандидат глоссария, найденный моделью в главе.
+
+    `note` — переводческое указание по решению, которое одним вариантом перевода
+    не выражается: род персонажа в целевом языке, склонение названия, регистр речи.
+    """
 
     source_text: str = Field(min_length=1)
     type: ConceptType
     suggested_translation: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
     model_flagged_review: bool
+    note: str | None
 
 
 class TreatmentPlanItemSchema(_ResponseModel):

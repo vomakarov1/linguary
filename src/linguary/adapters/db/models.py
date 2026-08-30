@@ -193,6 +193,7 @@ class TermConceptRow(Base):
     type: Mapped[str] = mapped_column(String)
     canonical_source_text: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String)
+    note: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
 class TermVariantRow(Base):
@@ -254,6 +255,7 @@ class GlossaryCandidateRow(Base):
     confidence: Mapped[float] = mapped_column()
     model_flagged_review: Mapped[bool] = mapped_column()
     requires_review: Mapped[bool] = mapped_column(index=True)
+    note: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
 class ProcessingRunRow(Base):

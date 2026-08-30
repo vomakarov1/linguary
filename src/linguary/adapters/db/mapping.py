@@ -283,6 +283,7 @@ def to_concept_row(concept: TermConcept) -> TermConceptRow:
         type=concept.type.value,
         canonical_source_text=concept.canonical_source_text,
         status=concept.status.value,
+        note=concept.note,
     )
 
 
@@ -304,6 +305,7 @@ def to_concept(row: TermConceptRow, variants: Sequence[TermVariantRow]) -> TermC
         type=ConceptType(row.type),
         canonical_source_text=row.canonical_source_text,
         status=TermStatus(row.status),
+        note=row.note or "",
         variants=tuple(
             TermVariant(
                 concept_id=variant.concept_id,
@@ -359,6 +361,7 @@ def to_candidate_row(candidate: GlossaryCandidate) -> GlossaryCandidateRow:
         confidence=candidate.confidence,
         model_flagged_review=candidate.model_flagged_review,
         requires_review=candidate.requires_review,
+        note=candidate.note,
     )
 
 
@@ -393,6 +396,7 @@ def to_analysis(
                 confidence=candidate.confidence,
                 model_flagged_review=candidate.model_flagged_review,
                 requires_review=candidate.requires_review,
+                note=candidate.note or "",
             )
             for candidate in candidates
         ),
@@ -421,6 +425,7 @@ def to_run_row(run: ProcessingRun, created_at: datetime) -> ProcessingRunRow:
                 "translation": entry.translation,
                 "type": entry.type.value,
                 "status": entry.status.value,
+                "note": entry.note,
             }
             for entry in run.glossary_snapshot.entries
         ],
@@ -447,6 +452,7 @@ def to_run(row: ProcessingRunRow) -> ProcessingRun:
                     translation=entry["translation"],
                     type=ConceptType(entry["type"]),
                     status=TermStatus(entry["status"]),
+                    note=entry.get("note", ""),
                 )
                 for entry in row.glossary_snapshot_json
             )

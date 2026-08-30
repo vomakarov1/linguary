@@ -54,6 +54,7 @@ from linguary.domain import (
     CanonicalDocument,
     ChapterAnalysis,
     DocumentSection,
+    LLMCallStage,
     ProcessingRun,
     ProcessingTask,
     TaskIdentity,
@@ -76,6 +77,7 @@ class ProcessChapterCommand:
 
     book_id: str
     section_id: str
+    task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +110,7 @@ class _ChapterWork:
     run: ProcessingRun
     processed_block_ids: frozenset[str]
     used_note_ids: frozenset[str]
+    task_id: str | None = None
 
     @property
     def target_language(self) -> str:
@@ -190,6 +193,14 @@ class ProcessChapter:
             analysis=work.analysis,
             glossary=work.run.glossary_snapshot,
         )
+        context = replace(
+            context,
+            request=context.request.with_logging(
+                book_id=work.document.id,
+                stage=LLMCallStage.TRANSLATION_UNIT,
+                task_id=work.task_id,
+            ),
+        )
         call = await self._call.request(
             context, unit=unit, target_language=work.target_language, note_ids=note_ids
         )
@@ -244,6 +255,7 @@ class ProcessChapter:
                 for note in result.language_notes
                 if result.block_id in section_block_ids
             ),
+            task_id=command.task_id,
         )
 
     def _is_processed(self, unit: TranslationUnit, *, work: _ChapterWork) -> bool:
@@ -301,7 +313,11 @@ class ChapterProcessingSequence:
                 f"задача {task.id} типа {task.task_type} не является обработкой главы"
             )
         await self._process_chapter(
-            ProcessChapterCommand(book_id=task.book_id, section_id=task.scope_id)
+            ProcessChapterCommand(
+                book_id=task.book_id,
+                section_id=task.scope_id,
+                task_id=task.id,
+            )
         )
         self._complete_processing(task.book_id, finished_task_id=task.id)
 

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Результат - Linguary{% endblock %}
+{% block content %}
+{% include "partials/result_header.html" %}
+
+{% set book_id = data.book_id %}
+{% set active_tab = "result" %}
+{% include "partials/book_tabs.html" %}
+
+{% for chapter in data.chapters %}
+  <section class="chapter">
+    <h2>Глава {{ chapter.chapter_number }} - {{ chapter.title }}</h2>
+    {% for block in chapter.blocks %}
+      {% set book_id = data.book_id %}
+      {% include "partials/result_block.html" %}
+    {% endfor %}
+  </section>
+{% endfor %}
+{% endblock %}

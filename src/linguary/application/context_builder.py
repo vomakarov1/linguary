@@ -57,6 +57,7 @@ from linguary.domain import (
     GlossaryCandidate,
     GlossarySnapshot,
     GlossarySnapshotEntry,
+    InlineAnnotationType,
     SupportStatus,
     TranslationUnit,
 )
@@ -429,6 +430,7 @@ class ContextBuilder:
                 self._suggested_entries(glossary),
                 target_language=document.target_language,
             ),
+            _explained_expressions(analysis),
             _neighbour_context(neighbours),
             _unit_blocks(unit),
         ]
@@ -680,7 +682,19 @@ _ANALYSIS_INSTRUCTIONS = """\
 в скобках и без вторых вариантов через слэш: этот текст подставляется в перевод как есть;
 - confidence — твоя уверенность в этом варианте от 0 до 1;
 - model_flagged_review — true, если решение спорное, зависит от дальнейших глав или \
-требует человека.
+требует человека;
+- note — короткое переводческое указание на языке {target_language}, если одного \
+варианта перевода мало, иначе пустая строка.
+
+Указание нужно там, где выбор придётся повторять в каждом предложении, а сам вариант \
+перевода его не несёт. Главный случай — грамматический род персонажа: если язык \
+{source_language} рода не показывает, а {target_language} требует его в глаголах и \
+определениях, назови род прямо («женский род») — иначе одна глава сделает персонажа \
+мужчиной, другая женщиной. Так же указывай несклоняемость названия, обращение на «ты» \
+или «вы», устойчивый регистр речи. Общих слов о стиле в указании не пиши.
+
+Если такое решение по персонажу или названию уже принято в предыдущих главах, повтори \
+его указание дословно и своего не выдумывай.
 
 Если термин уже есть в принятых решениях книги, повтори принятый перевод и нового \
 варианта не предлагай.
@@ -757,9 +771,17 @@ note — короткое пояснение, если оно нужно.
 
 Заметка объясняет то, что реально помогает читать оригинал или понять переводческое \
 решение: идиому, сленг, игру слов, нестандартную грамматику, диалект, культурную \
-особенность, необычное употребление. Заметки не пересказывают смысл предложения, \
-не разбирают простую грамматику, не описывают атмосферу сцены и не повторяют словарную \
-подсказку.
+особенность, необычное употребление.
+
+Заметка отвечает на вопрос «как устроен язык здесь», а не «какое здесь настроение». \
+Разбор образа, тона, символики и авторского замысла — это литературоведение, и \
+читателю оригинала оно не помогает: такие заметки не пиши. «Сравнение создаёт \
+тревожное ощущение» — не заметка; «have no business + Ving — идиома со значением \
+„не положено, незачем“» — заметка.
+
+Одно и то же место объясняется читателю один раз. Не повторяй заметкой то, что уже \
+сказано словарной подсказкой этого блока или подготовкой к чтению этой главы: если \
+подсказка выражение уже перевела, заметка добавляет к ней новое или её не будет.
 
 Каждая заметка привязана ровно к одному блоку из этого запроса: source_block_id — его \
 идентификатор, original_excerpt — фрагмент оригинала, translated_excerpt — его перевод, \
@@ -785,6 +807,29 @@ def _chapter_digest(analysis: ChapterAnalysis) -> str:
     return "\n\n".join(lines)
 
 
+def _explained_expressions(analysis: ChapterAnalysis) -> str:
+    """Выражения главы, уже объяснённые в `Before You Read` (PRD § 19.1, § 19.3).
+
+    Материал подготовки к чтению собран на анализе главы, а подсказки и заметки
+    рождаются позже и о нём не знают. Без этого списка один и тот же оборот
+    объясняется читателю трижды — в `Before You Read`, в словарной подсказке блока
+    и в языковой заметке, — а § 19.3 прямо запрещает заметке повторять подсказку.
+    """
+    expressions = [
+        entry.expression.strip()
+        for entry in analysis.before_you_read
+        if entry.expression.strip()
+    ]
+    if not expressions:
+        return ""
+    lines = [
+        "Эти выражения главы читателю уже объяснены до начала чтения. Не объясняй их "
+        "заново ни словарной подсказкой, ни языковой заметкой:"
+    ]
+    lines.extend(f"- {expression}" for expression in expressions)
+    return "\n".join(lines)
+
+
 def _mandatory_decisions(
     entries: Sequence[GlossarySnapshotEntry], *, target_language: str
 ) -> str:
@@ -796,7 +841,8 @@ def _mandatory_decisions(
         f"дословно, меняя только грамматическую форму:"
     ]
     lines.extend(_glossary_line(entry) for entry in entries)
-    return "\n".join(lines)
+    lines.append(_notes_legend(entries))
+    return "\n".join(line for line in lines if line)
 
 
 def _glossary_suggestions(
@@ -810,12 +856,28 @@ def _glossary_suggestions(
         f"держись их, но точность важнее:"
     ]
     lines.extend(_glossary_line(entry) for entry in entries)
-    return "\n".join(lines)
+    lines.append(_notes_legend(entries))
+    return "\n".join(line for line in lines if line)
+
+
+def _notes_legend(entries: Sequence[GlossarySnapshotEntry]) -> str:
+    """Пояснение к скобкам списка, если хоть одно решение несёт указание.
+
+    Указание — решение уровня всей книги, а не подсказка для этого запроса: род
+    персонажа, названный один раз, обязан держаться во всех главах (PRD § 11).
+    """
+    if not any(entry.note.strip() for entry in entries):
+        return ""
+    return (
+        "В скобках — переводческое указание по решению. Оно принято для всей книги: "
+        "соблюдай его в каждом предложении, где оно применимо."
+    )
 
 
 def _glossary_line(entry: GlossarySnapshotEntry) -> str:
-    """Строка записи снимка глоссария."""
-    return f"- {entry.source_text} [{entry.type}] -> {entry.translation}"
+    """Строка записи снимка глоссария вместе с её переводческим указанием."""
+    line = f"- {entry.source_text} [{entry.type}] -> {entry.translation}"
+    return f"{line} ({entry.note.strip()})" if entry.note.strip() else line
 
 
 def _neighbour_context(neighbours: Sequence[_NeighbourBlocks]) -> str:
@@ -828,15 +890,53 @@ def _neighbour_context(neighbours: Sequence[_NeighbourBlocks]) -> str:
     ]
     for side in neighbours:
         lines.append(side.title)
-        lines.extend(block.text.strip() for block in side.blocks)
+        lines.extend(source_text_for_model(block) for block in side.blocks)
     return "\n\n".join(lines)
+
+
+def source_text_for_model(block: DocumentBlock) -> str:
+    """Текст блока в том виде, в каком его стоит показывать модели.
+
+    Отличается от `block.text` ровно одним: у сноски отброшена ссылка возврата
+    к месту вызова — «↩», «back» и подобный хвост, которым книга уводит читателя
+    обратно в текст. Для книги это навигация, а не текст сноски: экспортёр
+    восстанавливает её из разметки блока сам. Модель же видит хвост как часть текста
+    и переносит его в перевод, где он становится мёртвым символом — вторым значком
+    возврата, который никуда не ведёт.
+
+    Ссылку возврата опознаём по разметке, а не по символам: это ссылка в конце текста
+    сноски, ведущая на якорь того же ресурса.
+    """
+    text = block.text
+    if block.type is not BlockType.FOOTNOTE:
+        return text.strip()
+    resource_path = block.source_reference.resource_path
+    tail = max(
+        (
+            annotation.start
+            for annotation in block.inline_annotations
+            if annotation.type is InlineAnnotationType.LINK
+            and annotation.end >= len(text.rstrip())
+            and _points_inside(annotation.target, resource_path=resource_path)
+        ),
+        default=None,
+    )
+    return (text if tail is None else text[:tail]).strip()
+
+
+def _points_inside(target: str | None, *, resource_path: str) -> bool:
+    """Ведёт ли ссылка на якорь внутри того же ресурса книги."""
+    if not target:
+        return False
+    path, separator, fragment = target.partition("#")
+    return bool(separator and fragment) and path in ("", resource_path)
 
 
 def _unit_blocks(unit: TranslationUnit) -> str:
     """Блоки группы под псевдонимами вместе с их режимом обработки."""
     lines = ["Блоки для обработки:"]
     lines.extend(
-        f"[{_alias(index)}] режим {item.treatment}\n{item.block.text.strip()}"
+        f"[{_alias(index)}] режим {item.treatment}\n{source_text_for_model(item.block)}"
         for index, item in enumerate(unit.items, start=1)
     )
     return "\n\n".join(lines)
@@ -896,19 +996,24 @@ def _known_decisions(
         f"Принятые переводческие решения книги ({target_language}). "
         f"Повторяй их дословно:"
     ]
-    lines.extend(
+    lines.extend(_known_decision_line(candidate) for candidate in candidates)
+    return "\n".join(lines)
+
+
+def _known_decision_line(candidate: GlossaryCandidate) -> str:
+    """Строка принятого решения книги вместе с его переводческим указанием."""
+    line = (
         f"- {candidate.source_text} [{candidate.type}] -> "
         f"{candidate.suggested_translation}"
-        for candidate in candidates
     )
-    return "\n".join(lines)
+    return f"{line} ({candidate.note.strip()})" if candidate.note.strip() else line
 
 
 def _chapter_blocks(blocks: Sequence[DocumentBlock]) -> str:
     """Текстовые блоки главы под псевдонимами."""
     lines = ["Текстовые блоки главы:"]
     lines.extend(
-        f"[{_alias(index)}]\n{block.text.strip()}"
+        f"[{_alias(index)}]\n{source_text_for_model(block)}"
         for index, block in enumerate(blocks, start=1)
     )
     return "\n\n".join(lines)
@@ -926,6 +1031,7 @@ __all__ = [
     "chapter_analysis_instructions",
     "chapter_fragment_instructions",
     "is_textual",
+    "source_text_for_model",
     "textual_blocks",
     "translation_unit_instructions",
 ]

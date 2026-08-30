@@ -90,6 +90,7 @@ async def test_requires_review_is_computed_by_application() -> None:
                         "suggested_translation": "мистер Беннет",
                         "confidence": 1.0,
                         "model_flagged_review": False,
+                        "note": None,
                     },
                     {
                         "source_text": "entail",
@@ -97,6 +98,7 @@ async def test_requires_review_is_computed_by_application() -> None:
                         "suggested_translation": "майорат",
                         "confidence": 0.95,
                         "model_flagged_review": False,
+                        "note": None,
                     },
                 ]
             )
@@ -126,6 +128,7 @@ async def test_low_confidence_candidate_requires_review() -> None:
                         "suggested_translation": "майорат",
                         "confidence": CONFIDENCE_THRESHOLD - 0.1,
                         "model_flagged_review": False,
+                        "note": None,
                     }
                 ]
             )

@@ -33,6 +33,7 @@ from linguary.adapters.epub import (
     EpubExportWriter,
     FilesystemEpubResourceStore,
 )
+from linguary.adapters.llm import LoggingLLMClient
 from linguary.adapters.runtime import (
     SqliteTaskQueue,
     TaskWorkerPool,
@@ -55,6 +56,7 @@ from linguary.application.use_cases.approve_glossary import (
 from linguary.application.use_cases.export_book import (
     ExportBook,
     ExportBookCommand,
+    ExportBookSequence,
     ExportMode,
 )
 from linguary.application.use_cases.import_book import (
@@ -107,6 +109,7 @@ class Application:
     register_book: RegisterBook
     import_book: ImportBook
     export_book: ExportBook
+    export_sequence: ExportBookSequence
     approve_glossary: ApproveGlossary
     reset_processing: ResetProcessing
     retry_task: RetryTask
@@ -140,9 +143,7 @@ class Application:
 
     async def start_export(self, book_id: str) -> ProcessingTask:
         """Ставит задачу сборки итогового EPUB (PRD § 20)."""
-        return await self.task_queue.enqueue(
-            TaskIdentity(book_id=book_id, task_type=TaskType.EXPORT_BOOK)
-        )
+        return await self.export_sequence.start(book_id)
 
     async def aclose(self) -> None:
         """Закрывает соединения приложения: провайдера LLM и базу."""
@@ -165,6 +166,7 @@ def build_application(
     llm_client: LLMClient | None = None,
     worker_settings: WorkerSettings | None = None,
     task_id_factory: Callable[[], str] | None = None,
+    epubcheck: EpubCheckValidator | None = None,
     migrate: bool = True,
 ) -> Application:
     """Собирает приложение по локальной конфигурации.
@@ -183,8 +185,13 @@ def build_application(
     unit_of_work = SqlAlchemyUnitOfWork.for_engine(engine)
     task_queue = SqliteTaskQueue.for_engine(engine, id_factory=task_id_factory)
     configured_client = ConfiguredLLMClient(app_settings.llm)
-    model = llm_client or configured_client
-    epubcheck = EpubCheckValidator(settings=EpubCheckSettings())
+    model = LoggingLLMClient(
+        inner=llm_client or configured_client,
+        unit_of_work=unit_of_work,
+        provider=app_settings.llm.provider,
+        model=app_settings.llm.model or "not_configured",
+    )
+    epubcheck = epubcheck or EpubCheckValidator(settings=EpubCheckSettings())
 
     import_book = ImportBook(
         unit_of_work=unit_of_work,
@@ -237,6 +244,11 @@ def build_application(
         register_book=RegisterBook(unit_of_work=unit_of_work),
         import_book=import_book,
         export_book=export_book,
+        export_sequence=ExportBookSequence(
+            unit_of_work=unit_of_work,
+            queue=task_queue,
+            export_book=export_book,
+        ),
         approve_glossary=ApproveGlossary(
             unit_of_work=unit_of_work,
             glossary_confidence_threshold=(

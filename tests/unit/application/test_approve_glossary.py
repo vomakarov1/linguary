@@ -14,6 +14,7 @@ from analysis_fakes import (
 )
 
 from linguary.application.glossary_review import (
+    GlossaryNotFoundError,
     GlossaryReviewError,
     GlossaryReviewIncompleteError,
 )
@@ -21,6 +22,7 @@ from linguary.application.use_cases.approve_glossary import (
     ApproveGlossary,
     GlossaryDecision,
     GlossaryDecisionCommand,
+    GlossaryNoteCommand,
     StartProcessing,
     StartProcessingCommand,
 )
@@ -321,3 +323,82 @@ def test_second_active_run_is_rejected() -> None:
         start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
 
     assert len(unit_of_work.runs.runs) == 1
+
+
+def test_suggested_note_of_the_chapter_reaches_the_review() -> None:
+    """Указание, предложенное анализом главы, видно в проверке глоссария."""
+    unit_of_work = glossary_book(make_analysis_candidate(note="женский род"))
+
+    item = approve(unit_of_work).review(BOOK_ID).item_for("Mr. Bennet")
+
+    assert item is not None
+    assert item.note == "женский род"
+
+
+def test_decision_keeps_the_note_of_the_chapter() -> None:
+    """Решение без своего указания сохраняет то, что предложила глава."""
+    unit_of_work = glossary_book(make_analysis_candidate(note="женский род"))
+
+    concept = approve(unit_of_work)(command(GlossaryDecision.ACCEPT))
+
+    assert concept.note == "женский род"
+
+
+def test_note_of_the_user_replaces_the_note_of_the_chapter() -> None:
+    """Указание пользователя старше предложенного главой, в том числе пустое."""
+    unit_of_work = glossary_book(make_analysis_candidate(note="женский род"))
+
+    corrected = approve(unit_of_work).set_note(
+        GlossaryNoteCommand(
+            book_id=BOOK_ID, concept_id="candidate-analysis-1-Mr. Bennet", note="мужской род"
+        )
+    )
+    cleared = approve(unit_of_work).set_note(
+        GlossaryNoteCommand(book_id=BOOK_ID, concept_id=corrected.id, note="  ")
+    )
+
+    assert corrected.note == "мужской род"
+    assert cleared.note == ""
+
+
+def test_note_edit_keeps_the_corrected_translation() -> None:
+    """Правка указания не возвращает вариант модели поверх исправления пользователя.
+
+    Ради этого указание и правится отдельным действием: род персонажа виден позже,
+    чем принимается перевод имени, и исправленный вариант терять нельзя.
+    """
+    unit_of_work = glossary_book(make_analysis_candidate())
+    decided = approve(unit_of_work)(
+        command(GlossaryDecision.CORRECT, translation="мистер Беннетт")
+    )
+
+    concept = approve(unit_of_work).set_note(
+        GlossaryNoteCommand(book_id=BOOK_ID, concept_id=decided.id, note="мужской род")
+    )
+
+    variant = concept.variant_for("ru")
+    assert variant is not None
+    assert variant.text == "мистер Беннетт"
+    assert concept.status is TermStatus.APPROVED
+    assert concept.note == "мужской род"
+
+
+def test_note_edit_of_unknown_concept_is_rejected() -> None:
+    """Указание по понятию, которого в книге нет, не сохраняется."""
+    unit_of_work = glossary_book(make_analysis_candidate())
+
+    with pytest.raises(GlossaryNotFoundError):
+        approve(unit_of_work).set_note(
+            GlossaryNoteCommand(book_id=BOOK_ID, concept_id="missing", note="женский род")
+        )
+
+
+def test_note_is_frozen_in_the_snapshot_of_the_run() -> None:
+    """Снимок запуска несёт указание вместе с вариантом перевода (PRD § 11)."""
+    unit_of_work = glossary_book(make_analysis_candidate(note="женский род"), hint_candidate())
+    approve(unit_of_work)(command(GlossaryDecision.LOCK))
+
+    run = start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
+
+    entries = {entry.source_text: entry for entry in run.glossary_snapshot.entries}
+    assert entries["Mr. Bennet"].note == "женский род"

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ data.book.title }} - Linguary{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>{{ data.book.title }}</h1>
+    <p>{{ data.book.source_language }} -> {{ data.book.target_language }}</p>
+  </div>
+  <span class="status">{{ data.book.status_label }}</span>
+</section>
+
+{% set book_id = data.book.id %}
+{% set active_tab = "overview" %}
+{% include "partials/book_tabs.html" %}
+
+<section class="metrics">
+  <div><strong>{{ data.progress.percent_complete }}%</strong><span>Готово</span></div>
+  <div><strong>{{ data.progress.analyzed_sections }}/{{ data.progress.total_sections }}</strong><span>Главы</span></div>
+  <div><strong>{{ data.progress.processed_blocks }}/{{ data.progress.planned_blocks }}</strong><span>Блоки</span></div>
+  <div><strong>{{ data.warning_count }}</strong><span>Предупреждения</span></div>
+</section>
+
+<section class="panel">
+  <h2>Обработка</h2>
+  {% if data.book.status == "IMPORTING" %}
+    <p>Файл принят. Импорт выполняется в фоне, страница обновится автоматически.</p>
+  {% elif data.book.status == "IMPORTED" %}
+    <p>Импорт завершён. Следующий шаг — анализ глав через LLM.</p>
+    {% if llm_ready %}
+      <form class="actions" method="post" action="/books/{{ data.book.id }}/analyze">
+        <button type="submit">Начать анализ</button>
+      </form>
+    {% else %}
+      <div class="notice">
+        <strong>LLM не настроена</strong>
+        <p>{{ llm_hint }}</p>
+        <a href="/system/config">Открыть конфигурацию</a>
+      </div>
+    {% endif %}
+  {% elif data.book.status == "ANALYZING" %}
+    <p>Анализ глав выполняется в фоне, страница обновится автоматически.</p>
+  {% elif data.book.status == "GLOSSARY_REVIEW" %}
+    <p>Анализ завершён. Проверьте глоссарий перед запуском обработки.</p>
+    <a class="button-link" href="/books/{{ data.book.id }}/glossary">Открыть глоссарий</a>
+  {% elif data.book.status == "READY_TO_PROCESS" %}
+    <p>Глоссарий готов. Можно запускать обработку книги.</p>
+    <form class="actions" method="post" action="/books/{{ data.book.id }}/process">
+      <button type="submit">Начать обработку</button>
+    </form>
+  {% elif data.book.status == "PROCESSING" %}
+    <p>Обработка выполняется в фоне, страница обновится автоматически.</p>
+  {% elif data.book.status == "READY_TO_EXPORT" %}
+    <p>Обработка завершена. Книга готова к сборке EPUB.</p>
+  {% elif data.book.status == "COMPLETED" %}
+    <p>Итоговый EPUB собран.</p>
+  {% endif %}
+  {% if data.progress.current_chapter %}
+    <p>Сейчас: глава {{ data.progress.current_chapter }} - {{ data.progress.current_chapter_title }}</p>
+  {% endif %}
+  <div class="treatments">
+    {% for item in data.progress.treatment_counts %}
+      <span>{{ item.label }}: {{ item.count }}</span>
+    {% endfor %}
+  </div>
+  {% if data.progress.failures %}
+    <h3>Ошибки</h3>
+    {% for failure in data.progress.failures %}
+      <form class="failure" method="post" action="/tasks/{{ failure.task_id }}/retry">
+        <span>{{ failure.task_type_label }}: {{ failure.message }}</span>
+        <button type="submit" {% if not failure.is_retryable %}disabled{% endif %}>Повторить</button>
+      </form>
+    {% endfor %}
+  {% endif %}
+</section>
+{% endblock %}

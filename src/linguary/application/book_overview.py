@@ -17,12 +17,14 @@ from dataclasses import dataclass, field
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
+    BlockProcessingResult,
     BlockTreatment,
     BookImportWarning,
     BookStatus,
     CanonicalDocument,
     ChapterAnalysis,
     CoverageStatus,
+    DocumentBlock,
     DocumentSection,
     ErrorType,
     ProcessingTask,
@@ -38,6 +40,10 @@ class BookNotFoundError(ApplicationError):
 
 class ProcessingPlanUnavailableError(ApplicationError):
     """План обработки ещё не готов: ни одна глава книги не проанализирована."""
+
+
+class ResultBlockNotFoundError(ApplicationError):
+    """Запрошенного блока нет в каноническом документе книги."""
 
 
 #: Типы задач, чья глава показывается как текущая (PRD § 21.4). Импорт и экспорт —
@@ -96,6 +102,14 @@ class BookOverview:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanBlockSummary:
+    """Один блок главы с выбранным режимом обработки."""
+
+    block: DocumentBlock
+    treatment: BlockTreatment | None
+
+
+@dataclass(frozen=True, slots=True)
 class ChapterPlanSummary:
     """Сводка плана обработки одной главы (PRD § 21, UX notes)."""
 
@@ -105,6 +119,7 @@ class ChapterPlanSummary:
     coverage_status: CoverageStatus
     textual_blocks: int
     treatment_counts: Mapping[BlockTreatment, int]
+    blocks: tuple[PlanBlockSummary, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +161,35 @@ class BookWarnings:
     def total(self) -> int:
         """Сколько всего предупреждений накопила книга."""
         return len(self.import_warnings) + len(self.result_warnings)
+
+
+@dataclass(frozen=True, slots=True)
+class ResultBlockSummary:
+    """Исходный блок, запланированный режим и сохранённый результат обработки."""
+
+    block: DocumentBlock
+    chapter_number: int
+    treatment: BlockTreatment | None = None
+    result: BlockProcessingResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResultChapterSummary:
+    """Глава результата с блоками в порядке чтения."""
+
+    section_id: str
+    chapter_number: int
+    title: str
+    blocks: tuple[ResultBlockSummary, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class BookResultSummary:
+    """Результат книги по главам вместе с предупреждениями и состоянием экспорта."""
+
+    book: BookRecord
+    chapters: tuple[ResultChapterSummary, ...] = ()
+    warnings: BookWarnings = field(default_factory=BookWarnings)
 
 
 def list_books(
@@ -238,6 +282,64 @@ def book_warnings(unit_of_work: UnitOfWork, book_id: str) -> BookWarnings:
     )
 
 
+def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
+    """Результат обработки по блокам в постоянном порядке исходного документа."""
+    with unit_of_work.transaction() as transaction:
+        book = _book(transaction, book_id)
+        document = transaction.documents.get(book_id)
+        analyses = transaction.analyses.list_for_book(book_id)
+        run = transaction.runs.active_for_book(book_id)
+        stored_results = (
+            transaction.results.list_for_run(run.id) if run is not None else ()
+        )
+    treatments = {
+        item.block_id: item.treatment
+        for analysis in analyses
+        for item in analysis.treatment_plan.items
+    }
+    results = {result.block_id: result for result in stored_results}
+    chapters = (
+        tuple(
+            ResultChapterSummary(
+                section_id=section.id,
+                chapter_number=number,
+                title=section.title,
+                blocks=tuple(
+                    ResultBlockSummary(
+                        block=block,
+                        chapter_number=number,
+                        treatment=treatments.get(block.id),
+                        result=results.get(block.id),
+                    )
+                    for block in section.ordered_blocks
+                ),
+            )
+            for number, section in enumerate(document.ordered_sections, start=1)
+        )
+        if document is not None
+        else ()
+    )
+    return BookResultSummary(
+        book=book,
+        chapters=chapters,
+        warnings=book_warnings(unit_of_work, book_id),
+    )
+
+
+def result_block(
+    unit_of_work: UnitOfWork, book_id: str, block_id: str
+) -> ResultBlockSummary:
+    """Один блок результата для HTMX-фрагмента или JSON-ответа перегенерации."""
+    result = book_result(unit_of_work, book_id)
+    for chapter in result.chapters:
+        for block in chapter.blocks:
+            if block.block.id == block_id:
+                return block
+    raise ResultBlockNotFoundError(
+        f"блока {block_id} нет в книге {book_id}"
+    )
+
+
 def _progress(
     *,
     document: CanonicalDocument | None,
@@ -304,6 +406,9 @@ def _chapter_plan(
     *, section: DocumentSection, number: int, analysis: ChapterAnalysis
 ) -> ChapterPlanSummary:
     """Сводка плана одной главы."""
+    treatments = {
+        item.block_id: item.treatment for item in analysis.treatment_plan.items
+    }
     return ChapterPlanSummary(
         section_id=analysis.section_id,
         chapter_number=number,
@@ -311,6 +416,10 @@ def _chapter_plan(
         coverage_status=analysis.coverage_status,
         textual_blocks=len(analysis.treatment_plan.textual_block_ids),
         treatment_counts=_treatment_counts(analysis),
+        blocks=tuple(
+            PlanBlockSummary(block=block, treatment=treatments.get(block.id))
+            for block in section.ordered_blocks
+        ),
     )
 
 
@@ -382,14 +491,21 @@ __all__ = [
     "BookNotFoundError",
     "BookOverview",
     "BookProgress",
+    "BookResultSummary",
     "BookWarnings",
     "ChapterPlanSummary",
+    "PlanBlockSummary",
     "ProcessingPlanSummary",
     "ProcessingPlanUnavailableError",
+    "ResultBlockNotFoundError",
+    "ResultBlockSummary",
+    "ResultChapterSummary",
     "ResultWarningEntry",
     "TaskFailure",
     "book_overview",
+    "book_result",
     "book_warnings",
     "list_books",
     "processing_plan",
+    "result_block",
 ]

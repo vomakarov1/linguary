@@ -63,6 +63,7 @@ from linguary.domain import (
     TaskIdentity,
     TaskType,
     TokenUsage,
+    LLMCallStage,
     TreatmentPlan,
     apply_book_event,
 )
@@ -85,6 +86,7 @@ class AnalyzeChapterCommand:
 
     book_id: str
     section_id: str
+    task_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +148,7 @@ class AnalyzeChapter:
                 section=section,
                 blocks=blocks,
                 accumulated=accumulated,
+                command=command,
             )
         else:
             analysis, attempts, usage = await self._analyze_by_fragments(
@@ -154,6 +157,7 @@ class AnalyzeChapter:
                 blocks=blocks,
                 fragments=fragments,
                 accumulated=accumulated,
+                command=command,
             )
         self._save(command.book_id, analysis)
         return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
@@ -165,10 +169,19 @@ class AnalyzeChapter:
         section: DocumentSection,
         blocks: Sequence[DocumentBlock],
         accumulated: Sequence[GlossaryCandidate],
+        command: AnalyzeChapterCommand,
     ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
         """Основной сценарий: вся глава одним запросом (PRD § 14)."""
         context = self._context_builder.for_chapter_analysis(
             document=document, section=section, accumulated_candidates=accumulated
+        )
+        context = replace(
+            context,
+            request=context.request.with_logging(
+                book_id=command.book_id,
+                stage=LLMCallStage.CHAPTER_ANALYSIS,
+                task_id=command.task_id,
+            ),
         )
         payload, attempts, usage = await self._request_analysis(context)
         analysis = self._to_analysis(
@@ -184,6 +197,7 @@ class AnalyzeChapter:
         blocks: Sequence[DocumentBlock],
         fragments: Sequence[ChapterFragment],
         accumulated: Sequence[GlossaryCandidate],
+        command: AnalyzeChapterCommand,
     ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
         """Резервный сценарий: длинная глава по фрагментам (PRD § 14, ALG-03).
 
@@ -202,6 +216,14 @@ class AnalyzeChapter:
                 fragment=fragment,
                 fragment_count=len(fragments),
                 accumulated_candidates=accumulated,
+            )
+            context = replace(
+                context,
+                request=context.request.with_logging(
+                    book_id=command.book_id,
+                    stage=LLMCallStage.CHAPTER_ANALYSIS,
+                    task_id=command.task_id,
+                ),
             )
             payload, fragment_attempts, usage = await self._request_analysis(context)
             attempts += fragment_attempts
@@ -317,6 +339,7 @@ class AnalyzeChapter:
                 confidence=candidate.confidence,
                 model_flagged_review=candidate.model_flagged_review,
                 confidence_threshold=self._glossary_confidence_threshold,
+                note=candidate.note,
             )
             for candidate in payload.glossary_candidates
         )
@@ -362,7 +385,11 @@ class ChapterAnalysisSequence:
                 f"задача {task.id} типа {task.task_type} не является анализом главы"
             )
         await self._analyze_chapter(
-            AnalyzeChapterCommand(book_id=task.book_id, section_id=task.scope_id)
+            AnalyzeChapterCommand(
+                book_id=task.book_id,
+                section_id=task.scope_id,
+                task_id=task.id,
+            )
         )
         await self._enqueue_next(task.book_id)
 

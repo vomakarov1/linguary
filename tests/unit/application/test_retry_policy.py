@@ -267,7 +267,10 @@ def test_model_output_error_is_retried_with_the_same_request() -> None:
 
     assert decision.action is RetryAction.RETRY_SAME_REQUEST
     assert decision.repair_instruction is None
-    assert decision.next_request(request) == request
+    retried = decision.next_request(request)
+    assert retried.instructions == request.instructions
+    assert retried.input_text == request.input_text
+    assert retried.attempt == 2
 
 
 def test_validation_error_is_retried_with_repair_instruction() -> None:
@@ -288,6 +291,7 @@ def test_repair_instruction_is_appended_to_the_original_request() -> None:
 
     assert repaired.instructions.startswith(request.instructions)
     assert len(repaired.instructions) > len(request.instructions)
+    assert repaired.attempt == 2
     assert repaired.input_text == request.input_text
     assert repaired.kind is request.kind
 

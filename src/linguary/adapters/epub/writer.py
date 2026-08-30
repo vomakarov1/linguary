@@ -436,7 +436,12 @@ class _ChapterRenderer:
                 state=state,
                 parent_type=block.type,
             )
-        self._append_help(parent, block, state=state)
+        help_parent = (
+            element
+            if block.type is BlockType.LIST_ITEM and element is not None
+            else parent
+        )
+        self._append_help(help_parent, block, state=state)
 
     def _append_original(
         self,

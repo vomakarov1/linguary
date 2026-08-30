@@ -158,6 +158,7 @@ def make_concept(*, book_id: str = BOOK_ID, concept_id: str = "concept-1") -> Te
         type=ConceptType.PERSON,
         canonical_source_text="Winston Smith",
         status=TermStatus.LOCKED,
+        note="мужской род",
         variants=(
             TermVariant(
                 concept_id=concept_id,
@@ -202,6 +203,7 @@ def make_analysis(*, analysis_id: str = ANALYSIS_ID) -> ChapterAnalysis:
                 confidence=0.92,
                 model_flagged_review=False,
                 requires_review=True,
+                note="мужской род",
             ),
         ),
         before_you_read=(
@@ -231,6 +233,7 @@ def make_run(
                     translation="Уинстон Смит",
                     type=ConceptType.PERSON,
                     status=TermStatus.LOCKED,
+                    note="мужской род",
                 ),
             )
         ),

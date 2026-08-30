@@ -298,6 +298,10 @@ def _merged_candidate(
     объединяются: пометка модели хотя бы от одного фрагмента, тип, требующий решения
     всегда, и расхождение вариантов перевода делают кандидата требующим внимания.
     Согласие фрагментов на одном варианте, наоборот, само по себе внимания не требует.
+
+    Переводческое указание берётся у самого уверенного фрагмента, который его дал:
+    пустое указание не должно вытеснять непустое, потому что фрагменты видят разные
+    части главы и признак, требующий указания, встречается не в каждой из них.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
     return GlossaryCandidate.create(
@@ -318,6 +322,16 @@ def _merged_candidate(
         confidence_threshold=confidence_threshold,
         has_translation_conflict=translations_conflict(
             candidate.suggested_translation for candidate in group
+        ),
+        note=next(
+            (
+                candidate.note
+                for candidate in sorted(
+                    group, key=lambda candidate: candidate.confidence, reverse=True
+                )
+                if candidate.note.strip()
+            ),
+            "",
         ),
     )
 

@@ -70,6 +70,7 @@ def analysis_reply(
                 "suggested_translation": "мистер Беннет",
                 "confidence": 0.9,
                 "model_flagged_review": False,
+                "note": None,
             }
         ],
         "translation_instructions": "Сохранять иронию рассказчика.",
@@ -198,6 +199,7 @@ def make_analysis_candidate(
     analysis_id: str = "analysis-1",
     confidence: float = 0.9,
     model_flagged_review: bool = False,
+    note: str = "",
 ) -> GlossaryCandidate:
     """Кандидат глоссария, накопленный предыдущей главой."""
     return GlossaryCandidate.create(
@@ -209,6 +211,7 @@ def make_analysis_candidate(
         confidence=confidence,
         model_flagged_review=model_flagged_review,
         confidence_threshold=CONFIDENCE_THRESHOLD,
+        note=note,
     )
 
 

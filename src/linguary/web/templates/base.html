@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% if auto_refresh %}
+      <meta http-equiv="refresh" content="2">
+    {% endif %}
+    <title>{% block title %}Linguary{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/linguary.css') }}">
+    <script src="{{ url_for('static', path='/linguary.js') }}" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/books">Linguary</a>
+      <nav class="nav">
+        <a href="/books" {% if page == "books" %}aria-current="page"{% endif %}>Книги</a>
+        <a href="/system/config" {% if page == "system" %}aria-current="page"{% endif %}>Конфигурация</a>
+      </nav>
+    </header>
+    <main class="shell">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

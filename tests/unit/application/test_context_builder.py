@@ -334,14 +334,16 @@ def test_fragment_instructions_keep_the_rest_of_the_chapter_instruction() -> Non
     ).splitlines()
 
     differing = [
-        index
-        for index, (chapter_line, fragment_line) in enumerate(
-            zip(whole, fragment, strict=True)
-        )
+        (chapter_line, fragment_line)
+        for chapter_line, fragment_line in zip(whole, fragment, strict=True)
         if chapter_line != fragment_line
     ]
 
-    assert differing == [2, 33, 35]
+    assert len(differing) == 3
+    assert all(
+        "глав" in chapter_line and "фрагмент" in fragment_line
+        for chapter_line, fragment_line in differing
+    )
 
 
 def test_fragment_outside_the_chapter_is_rejected() -> None:

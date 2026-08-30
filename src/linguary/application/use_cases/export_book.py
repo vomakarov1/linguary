@@ -33,6 +33,7 @@ from linguary.application.ports.persistence import (
     ExportValidationStatus,
     UnitOfWork,
 )
+from linguary.application.task_runner import TaskQueue
 from linguary.domain import (
     BlockProcessingResult,
     BookEvent,
@@ -42,6 +43,7 @@ from linguary.domain import (
     LanguageNote,
     LearningMaterial,
     ProcessingTask,
+    TaskIdentity,
     TaskStatus,
     TaskType,
     apply_book_event,
@@ -50,6 +52,14 @@ from linguary.domain import (
 
 class ExportBookError(ApplicationError):
     """Экспорт невозможен в текущем состоянии книги."""
+
+
+class ExportBookNotFoundError(ExportBookError):
+    """Книга для экспорта или скачивания не найдена."""
+
+
+class ExportArtifactNotFoundError(ExportBookError):
+    """Успешная экспортная задача не оставила ожидаемый файл."""
 
 
 class ExportValidationRejectedError(ExportBookError):
@@ -86,6 +96,8 @@ _MANDATORY_TASK_TYPES = frozenset(
 _UNFINISHED_STATUSES = frozenset(
     {TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.FAILED}
 )
+
+_ACTIVE_EXPORT_TASK_STATUSES = frozenset({TaskStatus.PENDING, TaskStatus.RUNNING})
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,12 +167,54 @@ class ExportBook:
             validation_report_path=validation.report_path,
         )
 
+    def ensure_ready(self, book_id: str) -> None:
+        """Проверяет полный экспорт до постановки фоновой задачи."""
+        with self._unit_of_work.transaction() as transaction:
+            book = transaction.books.get(book_id)
+            if book is None:
+                raise ExportBookNotFoundError(f"книги {book_id} нет в хранилище")
+            document = transaction.documents.get(book_id)
+            if document is None or not document.sections:
+                raise ExportBookError(
+                    f"книга {book_id} не импортирована: экспортировать нечего"
+                )
+            _ensure_ready(book, transaction.tasks.list_for_book(book_id))
+            if transaction.runs.active_for_book(book_id) is None:
+                raise ExportBookError(
+                    f"у книги {book_id} нет запуска обработки: полный экспорт "
+                    f"собирать не из чего"
+                )
+
+    def downloadable_task(self, book_id: str) -> ProcessingTask:
+        """Последняя успешная задача, чей файл разрешено скачать."""
+        with self._unit_of_work.transaction() as transaction:
+            book = transaction.books.get(book_id)
+            if book is None:
+                raise ExportBookNotFoundError(f"книги {book_id} нет в хранилище")
+            export_tasks = tuple(
+                task
+                for task in transaction.tasks.list_for_book(book_id)
+                if task.task_type is TaskType.EXPORT_BOOK
+            )
+        latest = export_tasks[-1] if export_tasks else None
+        if (
+            book.status is not BookStatus.COMPLETED
+            or latest is None
+            or latest.status is not TaskStatus.SUCCEEDED
+        ):
+            raise ExportBookError(
+                f"готового файла книги {book_id} ещё нет: экспорт не завершён"
+            )
+        return latest
+
     def _plan(self, command: ExportBookCommand) -> _ExportPlan:
         """Читает всё, что нужно экспортёру, одной короткой транзакцией."""
         with self._unit_of_work.transaction() as transaction:
             book = transaction.books.get(command.book_id)
             if book is None:
-                raise ExportBookError(f"книги {command.book_id} нет в хранилище")
+                raise ExportBookNotFoundError(
+                    f"книги {command.book_id} нет в хранилище"
+                )
             document = transaction.documents.get(command.book_id)
             if document is None or not document.sections:
                 raise ExportBookError(
@@ -236,7 +290,7 @@ class ExportBook:
         with self._unit_of_work.transaction() as transaction:
             book = transaction.books.get(book_id)
             if book is None:
-                raise ExportBookError(f"книги {book_id} нет в хранилище")
+                raise ExportBookNotFoundError(f"книги {book_id} нет в хранилище")
             transaction.books.save(
                 replace(
                     book,
@@ -244,6 +298,36 @@ class ExportBook:
                     export_validation_status=validation.status,
                 )
             )
+
+
+class ExportBookSequence:
+    """Проверяет экспорт и управляет его идемпотентной фоновой задачей."""
+
+    def __init__(
+        self,
+        *,
+        unit_of_work: UnitOfWork,
+        queue: TaskQueue,
+        export_book: ExportBook,
+    ) -> None:
+        self._unit_of_work = unit_of_work
+        self._queue = queue
+        self._export_book = export_book
+
+    async def start(self, book_id: str) -> ProcessingTask:
+        """Ставит экспорт после проверки, заменяя только завершённую старую задачу."""
+        self._export_book.ensure_ready(book_id)
+        identity = TaskIdentity(book_id=book_id, task_type=TaskType.EXPORT_BOOK)
+        with self._unit_of_work.transaction() as transaction:
+            existing = transaction.tasks.find_by_identity(identity)
+            if (
+                existing is not None
+                and existing.status in _ACTIVE_EXPORT_TASK_STATUSES
+            ):
+                return existing
+            if existing is not None:
+                transaction.tasks.delete(existing.id)
+        return await self._queue.enqueue(identity)
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,7 +428,10 @@ __all__ = [
     "ExportBook",
     "ExportBookCommand",
     "ExportBookError",
+    "ExportBookNotFoundError",
     "ExportBookResult",
+    "ExportBookSequence",
+    "ExportArtifactNotFoundError",
     "ExportMode",
     "ExportValidationRejectedError",
 ]

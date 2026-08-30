@@ -62,7 +62,12 @@ class TermVariant:
 
 @dataclass(frozen=True, slots=True)
 class TermConcept:
-    """Понятие глоссария, объединяющее варианты одного смысла."""
+    """Понятие глоссария, объединяющее варианты одного смысла.
+
+    `note` — переводческое указание по этому понятию, которое передаётся модели вместе
+    с вариантом перевода: одного варианта мало там, где решение уровня книги влияет
+    на согласование в тексте (PRD § 11).
+    """
 
     id: str
     book_id: str
@@ -70,6 +75,7 @@ class TermConcept:
     canonical_source_text: str
     status: TermStatus = TermStatus.SUGGESTED
     variants: tuple[TermVariant, ...] = ()
+    note: str = ""
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -105,6 +111,12 @@ class GlossaryCandidate:
 
     `model_flagged_review` — собственная пометка модели, входной сигнал. Итоговое
     `requires_review` вычисляет приложение и после сохранения модель его не редактирует.
+
+    `note` — переводческое указание по этому решению, которое нельзя выразить одним
+    вариантом перевода: грамматический род персонажа, склонение названия, регистр
+    речи. Без него решение уровня книги распадается на решения отдельных глав
+    (PRD § 11): имя приходит из глоссария одинаковым, а согласуемые с ним слова
+    расходятся от главы к главе.
     """
 
     id: str
@@ -115,6 +127,7 @@ class GlossaryCandidate:
     confidence: float
     model_flagged_review: bool
     requires_review: bool
+    note: str = ""
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -143,6 +156,7 @@ class GlossaryCandidate:
         model_flagged_review: bool,
         confidence_threshold: float,
         has_translation_conflict: bool = False,
+        note: str = "",
     ) -> GlossaryCandidate:
         """Создаёт кандидата с вычисленным признаком `requires_review`."""
         return cls(
@@ -153,6 +167,7 @@ class GlossaryCandidate:
             suggested_translation=suggested_translation,
             confidence=confidence,
             model_flagged_review=model_flagged_review,
+            note=note,
             requires_review=compute_requires_review(
                 type=type,
                 confidence=confidence,

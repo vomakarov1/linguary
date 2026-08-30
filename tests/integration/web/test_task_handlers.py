@@ -80,7 +80,9 @@ async def test_export_task_reaches_the_export_use_case(
     """
     scenario = store_book(application)
 
-    task = await application.start_export(scenario.book_id)
+    task = await application.task_queue.enqueue(
+        TaskIdentity(book_id=scenario.book_id, task_type=TaskType.EXPORT_BOOK)
+    )
     finished = await drain_tasks(application)
 
     assert task.task_type is TaskType.EXPORT_BOOK

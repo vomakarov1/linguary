@@ -26,13 +26,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
-from linguary.domain import TokenUsage
+from linguary.domain import LLMCallStage, TokenUsage
 
 #: Структурированные ответы, которые умеет возвращать модель (PRD § 23).
 type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse
@@ -91,12 +91,36 @@ class LLMRequest[PayloadT: LLMPayload]:
     kind: LLMResponseKind
     instructions: str
     input_text: str
+    book_id: str | None = None
+    stage: LLMCallStage | None = None
+    task_id: str | None = None
+    attempt: int = 1
 
     def __post_init__(self) -> None:
         if not self.instructions.strip():
             raise LLMError("инструкция запроса к модели пуста")
         if not self.input_text.strip():
             raise LLMError("содержимое запроса к модели пусто")
+        if self.attempt < 1:
+            raise LLMError("номер попытки вызова модели начинается с единицы")
+        if (self.book_id is None) != (self.stage is None):
+            raise LLMError("журналируемый запрос должен содержать книгу и этап")
+        if self.book_id is not None and not self.book_id.strip():
+            raise LLMError("идентификатор книги для журнала LLM пуст")
+        if self.task_id is not None and not self.task_id.strip():
+            raise LLMError("идентификатор задачи для журнала LLM пуст")
+
+    def with_logging(
+        self,
+        *,
+        book_id: str,
+        stage: LLMCallStage,
+        task_id: str | None = None,
+    ) -> LLMRequest[PayloadT]:
+        """Возвращает тот же запрос с метаданными для журнала вызовов."""
+        return replace(
+            self, book_id=book_id, stage=stage, task_id=task_id, attempt=1
+        )
 
     @classmethod
     def for_chapter_analysis(

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from linguary.web import labels
 from linguary.web.dependencies import CurrentApplication
@@ -19,16 +19,19 @@ from linguary.web.schemas import (
     StorageConfigResponse,
     SystemConfigResponse,
 )
+from linguary.web.views import render, wants_html
 
 router = APIRouter(tags=["system"])
 
 
 @router.get("/system/config", response_model=SystemConfigResponse)
-def get_system_config(application: CurrentApplication) -> SystemConfigResponse:
+def get_system_config(
+    request: Request, application: CurrentApplication
+) -> SystemConfigResponse | object:
     """Готовность приложения к работе (PRD § 21.6)."""
     settings = application.settings
     server = settings.server
-    return SystemConfigResponse(
+    response = SystemConfigResponse(
         llm=LLMConfigResponse.of_settings(settings),
         epubcheck=EpubCheckConfigResponse.of_availability(
             application.epubcheck.availability()
@@ -48,6 +51,9 @@ def get_system_config(application: CurrentApplication) -> SystemConfigResponse:
             ),
         ),
     )
+    if wants_html(request):
+        return render(request, "system/config.html", page="system", data=response)
+    return response
 
 
 __all__ = ["router"]

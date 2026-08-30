@@ -14,6 +14,7 @@ from linguary.adapters.llm.fake import (
     FakeScenarioStep,
 )
 from linguary.adapters.llm.json_schema import strict_json_schema
+from linguary.adapters.llm.logging import LoggingLLMClient
 from linguary.adapters.llm.openai_compatible import OpenAICompatibleLLMClient
 from linguary.adapters.llm.payloads import parse_payload, schema_for
 
@@ -24,6 +25,7 @@ __all__ = [
     "FakeReply",
     "FakeScenarioError",
     "FakeScenarioStep",
+    "LoggingLLMClient",
     "OpenAICompatibleLLMClient",
     "parse_payload",
     "schema_for",

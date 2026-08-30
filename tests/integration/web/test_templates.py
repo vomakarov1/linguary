@@ -1,0 +1,326 @@
+"""HTML-экраны серверного Web UI (P4.T4)."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from fastapi.testclient import TestClient
+from web_scenario import (
+    glossary_candidate,
+    hinted_result,
+    start_run,
+    store_book,
+    translated_result,
+)
+
+from linguary.application.ports.persistence import ExportValidationStatus
+from linguary.application.use_cases.approve_glossary import (
+    GlossaryDecision,
+    GlossaryDecisionCommand,
+)
+from linguary.composition import Application
+from linguary.domain import BlockTreatment, BookStatus
+
+HTML_HEADERS = {"accept": "text/html"}
+
+
+def test_root_redirects_to_books_screen(client: TestClient) -> None:
+    """Корень локального сервера открывает первый экран UI."""
+    redirect = client.get("/", headers=HTML_HEADERS, follow_redirects=False)
+    response = client.get("/", headers=HTML_HEADERS)
+
+    assert redirect.status_code == 303
+    assert redirect.headers["location"] == "/books"
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Загрузить" in response.text
+
+
+def test_books_screen_renders_upload_and_existing_books(
+    client: TestClient, application: Application
+) -> None:
+    """Список книг отдаёт HTML с загрузкой и строкой книги."""
+    store_book(application, status=BookStatus.GLOSSARY_REVIEW)
+
+    response = client.get("/books", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Pride and Prejudice" in response.text
+    assert "Загрузить" in response.text
+
+
+def test_book_detail_screen_renders_progress_and_failed_actions(
+    client: TestClient, application: Application
+) -> None:
+    """Карточка показывает прогресс, навигацию и действия над книгой."""
+    scenario = store_book(
+        application,
+        status=BookStatus.PROCESSING,
+        treatments={0: (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)},
+    )
+    start_run(
+        application,
+        scenario,
+        results=(translated_result(scenario.block_ids()[0]),),
+    )
+
+    response = client.get(f"/books/{scenario.book_id}", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "50%" in response.text
+    assert "Глоссарий" in response.text
+    assert "Результат" in response.text
+
+
+def test_imported_book_screen_explains_missing_llm_configuration(
+    client: TestClient, application: Application
+) -> None:
+    """После импорта без LLM экран явно показывает, почему анализ не идёт дальше."""
+    scenario = store_book(
+        application,
+        status=BookStatus.IMPORTED,
+        analysed_chapters=(),
+    )
+
+    response = client.get(f"/books/{scenario.book_id}", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Импорт завершён" in response.text
+    assert "LLM не настроена" in response.text
+    assert "Начать анализ" not in response.text
+
+
+def test_start_analysis_form_redirects_back_to_the_book(
+    configured_client: TestClient, configured_application: Application
+) -> None:
+    """HTML-команда анализа ставит задачу и возвращает браузер в карточку книги."""
+    scenario = store_book(
+        configured_application,
+        status=BookStatus.IMPORTED,
+        analysed_chapters=(),
+    )
+
+    response = configured_client.post(
+        f"/books/{scenario.book_id}/analyze",
+        headers=HTML_HEADERS,
+        follow_redirects=False,
+    )
+
+    with configured_application.unit_of_work.transaction() as uow:
+        tasks = uow.tasks.list_for_book(scenario.book_id)
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/books/{scenario.book_id}"
+    assert len(tasks) == 1
+
+
+def test_glossary_screen_renders_read_only_state_after_processing_started(
+    client: TestClient, application: Application
+) -> None:
+    """После старта обработки HTML-глоссарий показывает режим только для чтения."""
+    scenario = store_book(
+        application,
+        status=BookStatus.PROCESSING,
+        glossary_candidates={0: (glossary_candidate(),)},
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Только чтение" in response.text
+    assert "Принять" not in response.text
+
+
+def test_glossary_screen_explains_analysis_read_only_state(
+    client: TestClient, application: Application
+) -> None:
+    """Во время анализа HTML-глоссарий объясняет временный режим только для чтения."""
+    scenario = store_book(
+        application,
+        status=BookStatus.ANALYZING,
+        glossary_candidates={0: (glossary_candidate(),)},
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Анализ ещё идёт" in response.text
+    assert "редактирование откроется после анализа" in response.text
+    assert "Принять" not in response.text
+
+
+def test_glossary_screen_hides_actions_for_decided_items(
+    client: TestClient, application: Application
+) -> None:
+    """После принятия решения HTML-глоссарий не оставляет действий решения.
+
+    Правка переводческого указания при этом остаётся доступной: род персонажа
+    и другие указания уровня книги видны позже, чем принимается перевод имени
+    (PRD § 11).
+    """
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+    application.approve_glossary(
+        GlossaryDecisionCommand(
+            book_id=scenario.book_id,
+            source_text=candidate.source_text,
+            concept_id=candidate.id,
+            decision=GlossaryDecision.ACCEPT,
+        )
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Требуют решения: 0" in response.text
+    assert "Решение принято" in response.text
+    assert "Принять все требующие решения" not in response.text
+    assert 'name="action"' not in response.text
+    assert 'name="text"' not in response.text
+    assert "Сохранить указание" in response.text
+
+
+def test_book_detail_screen_starts_processing_after_glossary_is_complete(
+    client: TestClient, application: Application
+) -> None:
+    """После закрытия глоссария карточка книги предлагает запуск обработки."""
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+    application.approve_glossary(
+        GlossaryDecisionCommand(
+            book_id=scenario.book_id,
+            source_text=candidate.source_text,
+            concept_id=candidate.id,
+            decision=GlossaryDecision.ACCEPT,
+        )
+    )
+
+    response = client.get(f"/books/{scenario.book_id}", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Глоссарий готов" in response.text
+    assert "Начать обработку" in response.text
+    assert "Открыть глоссарий" not in response.text
+
+
+def test_plan_and_warnings_screens_render_book_diagnostics(
+    client: TestClient, application: Application
+) -> None:
+    """HTML-экраны плана и предупреждений используют те же данные, что JSON API."""
+    scenario = store_book(
+        application,
+        chapters=(("Первый абзац.", "Второй абзац."),),
+        treatments={0: (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)},
+    )
+
+    plan = client.get(f"/books/{scenario.book_id}/plan", headers=HTML_HEADERS)
+    warnings = client.get(f"/books/{scenario.book_id}/warnings", headers=HTML_HEADERS)
+
+    assert plan.status_code == 200
+    assert "План обработки" in plan.text
+    assert "Chapter 1" in plan.text
+    assert "Первый абзац." in plan.text
+    assert "Словарные подсказки" in plan.text
+    assert warnings.status_code == 200
+    assert "Предупреждений нет" in warnings.text
+
+
+def test_plan_screen_renders_empty_state_before_analysis(
+    client: TestClient, application: Application
+) -> None:
+    """До анализа HTML-вкладка плана объясняет, почему данных ещё нет."""
+    scenario = store_book(
+        application,
+        status=BookStatus.IMPORTED,
+        analysed_chapters=(),
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/plan", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "План появится после анализа книги" in response.text
+    assert "Пока нет данных анализа" in response.text
+
+
+def test_result_screen_renders_blocks_and_export_status(
+    client: TestClient, application: Application
+) -> None:
+    """Результат показывает оригинал, перевод, подсказки и состояние EPUBCheck."""
+    scenario = store_book(
+        application,
+        status=BookStatus.COMPLETED,
+        treatments={0: (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)},
+    )
+    block_ids = scenario.block_ids()
+    start_run(
+        application,
+        scenario,
+        results=(translated_result(block_ids[0]), hinted_result(block_ids[1])),
+    )
+    with application.unit_of_work.transaction() as uow:
+        book = uow.books.get(scenario.book_id)
+        assert book is not None
+        uow.books.save(
+            replace(book, export_validation_status=ExportValidationStatus.NOT_VALIDATED)
+        )
+
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Общепризнанная истина" in response.text
+    assert "truth" in response.text
+    assert "EPUBCheck не выполнялся" in response.text
+    assert "Скачать EPUB" in response.text
+    assert f"/books/{scenario.book_id}/download" in response.text
+    assert "/static/linguary.js" in response.text
+    assert "data-regenerate-form" in response.text
+
+
+def test_result_screen_hides_export_action_before_processing_finishes(
+    client: TestClient, application: Application
+) -> None:
+    """До завершения обработки HTML-результат не предлагает собрать EPUB."""
+    scenario = store_book(
+        application,
+        status=BookStatus.READY_TO_PROCESS,
+        treatments={0: (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)},
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "EPUB можно собрать после завершения обработки книги" in response.text
+    assert "Собрать EPUB" not in response.text
+
+
+def test_result_screen_explains_that_epub_is_stale_after_changes(
+    client: TestClient, application: Application
+) -> None:
+    """Готовый результат без актуального EPUB явно просит собрать книгу заново."""
+    scenario = store_book(
+        application,
+        status=BookStatus.READY_TO_EXPORT,
+        treatments={0: (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)},
+    )
+    block_ids = scenario.block_ids()
+    start_run(
+        application,
+        scenario,
+        results=(translated_result(block_ids[0]), hinted_result(block_ids[1])),
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "EPUB нужно собрать после последних изменений" in response.text
+    assert "Собрать EPUB" in response.text
+    assert "Скачать EPUB" not in response.text
+
+
+def test_system_config_screen_renders_first_run_state(client: TestClient) -> None:
+    """Экран конфигурации показывает ненастроенную LLM и не раскрывает ключ."""
+    response = client.get("/system/config", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "LLM не настроена" in response.text
+    assert "test-key" not in response.text

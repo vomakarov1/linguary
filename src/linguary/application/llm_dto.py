@@ -32,6 +32,9 @@ class GlossaryCandidateResponse:
 
     `model_flagged_review` — собственная пометка модели, входной сигнал. Итоговое
     `requires_review` вычисляет приложение по DTO-01 (`domain.compute_requires_review`).
+
+    `note` — переводческое указание, которое одним вариантом перевода не выражается:
+    род персонажа в целевом языке, склонение названия, регистр речи (PRD § 11).
     """
 
     source_text: str
@@ -39,6 +42,7 @@ class GlossaryCandidateResponse:
     suggested_translation: str
     confidence: float
     model_flagged_review: bool
+    note: str = ""
 
     def __post_init__(self) -> None:
         if not self.source_text.strip():

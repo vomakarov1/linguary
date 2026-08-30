@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}План обработки - Linguary{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>План обработки</h1>
+    {% if data %}
+      <p>{{ data.analyzed_sections }}/{{ data.total_sections }} глав проанализировано.</p>
+    {% else %}
+      <p>План появится после анализа книги.</p>
+    {% endif %}
+  </div>
+  {% if data %}
+    {% if data.is_complete %}<span class="status ok">Полный</span>{% else %}<span class="status">Неполный</span>{% endif %}
+  {% else %}
+    <span class="status">Ожидает анализа</span>
+  {% endif %}
+</section>
+
+{% set active_tab = "plan" %}
+{% include "partials/book_tabs.html" %}
+
+<section class="list">
+  {% if data %}
+    {% for chapter in data.chapters %}
+      <article class="row-card">
+        <div>
+          <h2>Глава {{ chapter.chapter_number }} - {{ chapter.title }}</h2>
+          <p>{{ chapter.textual_blocks }} текстовых блоков</p>
+        </div>
+        <div class="treatments">
+          {% for item in chapter.treatment_counts %}
+            <span>{{ item.label }}: {{ item.count }}</span>
+          {% endfor %}
+        </div>
+        <div class="plan-blocks">
+          {% for block in chapter.blocks %}
+            <section class="plan-block">
+              <header>
+                <span>{{ loop.index }}</span>
+                <strong>{{ block.treatment_label or "Без режима" }}</strong>
+              </header>
+              <p>{{ block.text }}</p>
+            </section>
+          {% endfor %}
+        </div>
+      </article>
+    {% endfor %}
+  {% else %}
+    <p class="empty">Пока нет данных анализа.</p>
+  {% endif %}
+</section>
+{% endblock %}

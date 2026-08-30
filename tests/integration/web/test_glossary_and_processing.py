@@ -43,6 +43,7 @@ def test_glossary_review_exposes_pending_items(
                 "has_translation_conflict": False,
                 "requires_review": True,
                 "is_decided": False,
+                "note": "",
             }
         ],
     }
@@ -84,6 +85,73 @@ def test_glossary_decision_returns_updated_item(
     assert response.json()["translation"] == expected_translation
     assert response.json()["status"] == expected_status
     assert response.json()["is_decided"] is True
+    with application.unit_of_work.transaction() as uow:
+        assert uow.books.get(scenario.book_id).status is BookStatus.READY_TO_PROCESS
+
+
+def test_glossary_decision_redirects_browser_back_to_review(
+    client: TestClient, application: Application
+) -> None:
+    """HTML-действие по одному элементу оставляет пользователя на экране глоссария."""
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.post(
+        f"/books/{scenario.book_id}/glossary/{candidate.id}",
+        data={"action": "accept"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/books/{scenario.book_id}/glossary"
+
+
+def test_accept_all_required_glossary_items(
+    client: TestClient, application: Application
+) -> None:
+    """Bulk-действие принимает все обязательные нерешённые элементы."""
+    first = glossary_candidate(candidate_id="candidate-first")
+    second = glossary_candidate(
+        candidate_id="candidate-second",
+        source_text="Longbourn",
+        suggested_translation="Лонгборн",
+    )
+    scenario = store_book(
+        application,
+        glossary_candidates={0: (first, second)},
+    )
+
+    response = client.post(f"/books/{scenario.book_id}/glossary/accept-all")
+
+    assert response.status_code == 200
+    assert response.json()["pending_count"] == 0
+    assert {
+        (item["source_text"], item["translation"], item["status"])
+        for item in response.json()["items"]
+    } == {
+        ("Mr. Bennet", "мистер Беннет", "approved"),
+        ("Longbourn", "Лонгборн", "approved"),
+    }
+    with application.unit_of_work.transaction() as uow:
+        assert uow.books.get(scenario.book_id).status is BookStatus.READY_TO_PROCESS
+
+
+def test_accept_all_redirects_browser_back_to_review(
+    client: TestClient, application: Application
+) -> None:
+    """HTML bulk-действие возвращает пользователя к глоссарию."""
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.post(
+        f"/books/{scenario.book_id}/glossary/accept-all",
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/books/{scenario.book_id}/glossary"
 
 
 def test_glossary_correction_requires_text(
@@ -99,6 +167,42 @@ def test_glossary_correction_requires_text(
     )
 
     assert response.status_code == 422
+
+
+def test_glossary_note_is_saved_and_shown(
+    client: TestClient, application: Application
+) -> None:
+    """Указание переводчику сохраняется отдельным действием и возвращается в элементе."""
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.post(
+        f"/books/{scenario.book_id}/glossary/{candidate.id}/note",
+        data={"note": "женский род"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["note"] == "женский род"
+    assert response.json()["translation"] == "мистер Беннет"
+
+
+def test_glossary_note_is_rejected_after_processing_started(
+    client: TestClient, application: Application
+) -> None:
+    """После старта обработки указание тоже заморожено: глоссарий только для чтения."""
+    candidate = glossary_candidate()
+    scenario = store_book(
+        application,
+        status=BookStatus.PROCESSING,
+        glossary_candidates={0: (candidate,)},
+    )
+
+    response = client.post(
+        f"/books/{scenario.book_id}/glossary/{candidate.id}/note",
+        data={"note": "женский род"},
+    )
+
+    assert response.status_code == 409
 
 
 def test_glossary_edit_is_rejected_after_processing_started(

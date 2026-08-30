@@ -36,6 +36,13 @@ def test_plan_summarises_chapters_and_treatments(
     assert plan["is_complete"] is True
     assert [chapter["chapter_number"] for chapter in plan["chapters"]] == [1, 2]
     assert plan["chapters"][0]["textual_blocks"] == 2
+    assert [
+        (block["text"], block["treatment_label"])
+        for block in plan["chapters"][0]["blocks"]
+    ] == [
+        ("Первый абзац.", "Полный перевод"),
+        ("Второй абзац.", "Словарные подсказки"),
+    ]
     assert plan["treatment_counts"] == [
         {"treatment": BlockTreatment.TRANSLATE.value, "label": "Полный перевод", "count": 1},
         {

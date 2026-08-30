@@ -141,6 +141,7 @@ async def test_candidates_of_every_fragment_reach_the_chapter_analysis() -> None
                         "suggested_translation": "мистер Беннет",
                         "confidence": 0.9,
                         "model_flagged_review": False,
+                        "note": None,
                     }
                 ]
             ),
@@ -152,6 +153,7 @@ async def test_candidates_of_every_fragment_reach_the_chapter_analysis() -> None
                         "suggested_translation": "Незерфилд",
                         "confidence": 0.9,
                         "model_flagged_review": False,
+                        "note": None,
                     }
                 ]
             ),

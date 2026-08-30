@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from linguary.application.errors import ApplicationError
 from linguary.domain import (
+    BookStatus,
     ChapterAnalysis,
     ConceptType,
     GlossaryCandidate,
@@ -63,6 +64,9 @@ class GlossaryReviewItem:
 
     Поля до `requires_review` описывают то, что о тексте сказали главы; `decision` —
     то, что о нём сказал пользователь.
+
+    `suggested_note` — переводческое указание, предложенное главами; решение
+    пользователя несёт своё указание в `decision.note`.
     """
 
     concept_id: str
@@ -74,6 +78,18 @@ class GlossaryReviewItem:
     has_translation_conflict: bool
     requires_review: bool
     decision: TermConcept | None = None
+    suggested_note: str = ""
+
+    @property
+    def note(self) -> str:
+        """Переводческое указание, действующее для этого элемента.
+
+        Решение пользователя старше предложения глав: пустое указание в решении
+        означает, что указания не нужно, а не что нужно вернуться к предложенному.
+        """
+        if self.decision is not None:
+            return self.decision.note
+        return self.suggested_note
 
     @property
     def is_decided(self) -> bool:
@@ -91,6 +107,7 @@ class GlossaryReview:
     """Глоссарий книги в том виде, в каком его проверяет пользователь."""
 
     book_id: str
+    book_status: BookStatus | None = None
     items: tuple[GlossaryReviewItem, ...] = ()
     is_editable: bool = True
 
@@ -203,6 +220,16 @@ def _review_item(
     conflict = translations_conflict(
         candidate.suggested_translation for candidate in group
     )
+    suggested_note = next(
+        (
+            candidate.note
+            for candidate in sorted(
+                group, key=lambda candidate: candidate.confidence, reverse=True
+            )
+            if candidate.note.strip()
+        ),
+        "",
+    )
     return GlossaryReviewItem(
         concept_id=decision.id if decision is not None else leading.id,
         source_text=leading.source_text,
@@ -219,6 +246,7 @@ def _review_item(
             has_translation_conflict=conflict,
         ),
         decision=decision,
+        suggested_note=suggested_note,
     )
 
 
@@ -246,6 +274,7 @@ def _snapshot_entry(
             translation=item.suggested_translation,
             type=item.type,
             status=TermStatus.SUGGESTED,
+            note=item.note,
         )
     variant = item.decision.variant_for(language)
     if variant is None:
@@ -255,6 +284,7 @@ def _snapshot_entry(
         translation=variant.text,
         type=item.decision.type,
         status=item.decision.status,
+        note=item.note,
     )
 
 

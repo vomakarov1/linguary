@@ -236,12 +236,17 @@ class ProcessingRunStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class GlossarySnapshotEntry:
-    """Утверждённое переводческое решение на момент запуска обработки."""
+    """Утверждённое переводческое решение на момент запуска обработки.
+
+    `note` — переводческое указание по этому решению: то, что нельзя выразить одним
+    вариантом перевода, но обязано совпадать во всей книге (PRD § 11).
+    """
 
     source_text: str
     translation: str
     type: ConceptType
     status: TermStatus
+    note: str = ""
 
     def __post_init__(self) -> None:
         if not self.source_text.strip():

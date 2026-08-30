@@ -21,11 +21,13 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from linguary.application.book_overview import (
     BookNotFoundError,
     ProcessingPlanUnavailableError,
+    ResultBlockNotFoundError,
 )
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
@@ -33,12 +35,19 @@ from linguary.application.glossary_review import (
     GlossaryNotFoundError,
     GlossaryReviewError,
 )
-from linguary.application.use_cases.export_book import ExportBookError
+from linguary.application.use_cases.export_book import (
+    ExportArtifactNotFoundError,
+    ExportBookError,
+    ExportBookNotFoundError,
+)
 from linguary.application.use_cases.import_book import ImportBookError
-from linguary.application.use_cases.regenerate_block import RegenerateBlockError
+from linguary.application.use_cases.regenerate_block import (
+    RegenerateBlockError,
+    RegenerateBlockNotFoundError,
+)
 from linguary.application.use_cases.register_book import RegisterBookError
 from linguary.application.use_cases.reset_processing import ResetProcessingError
-from linguary.application.use_cases.retry_task import RetryTaskError
+from linguary.application.use_cases.retry_task import RetryTaskError, TaskNotFoundError
 from linguary.composition import Application, build_application, run_worker
 from linguary.domain.errors import (
     BookStatusTransitionError,
@@ -46,9 +55,10 @@ from linguary.domain.errors import (
     TaskTransitionError,
 )
 from linguary.web.dependencies import APPLICATION_STATE_ATTRIBUTE
-from linguary.web.routes import books, glossary, processing, system
+from linguary.web.routes import books, export, glossary, processing, result, system
 from linguary.web.schemas import ErrorResponse
 from linguary.web.uploads import UploadRejectedError
+from linguary.web.views import STATIC_DIRECTORY
 
 #: Название приложения в документации API.
 TITLE = "Linguary"
@@ -61,7 +71,12 @@ TITLE = "Linguary"
 #: Порядок значим: наследник указывается раньше своего базового класса.
 _ERROR_STATUSES: tuple[tuple[type[Exception], int], ...] = (
     (BookNotFoundError, status.HTTP_404_NOT_FOUND),
+    (ResultBlockNotFoundError, status.HTTP_404_NOT_FOUND),
     (GlossaryNotFoundError, status.HTTP_404_NOT_FOUND),
+    (TaskNotFoundError, status.HTTP_404_NOT_FOUND),
+    (RegenerateBlockNotFoundError, status.HTTP_404_NOT_FOUND),
+    (ExportBookNotFoundError, status.HTTP_404_NOT_FOUND),
+    (ExportArtifactNotFoundError, status.HTTP_404_NOT_FOUND),
     (UploadRejectedError, status.HTTP_400_BAD_REQUEST),
     (RegisterBookError, status.HTTP_400_BAD_REQUEST),
     (ProcessingPlanUnavailableError, status.HTTP_409_CONFLICT),
@@ -89,12 +104,28 @@ def create_app(
     выключает фоновый воркер там, где задачи выполняются явно.
     """
     app = FastAPI(title=TITLE, lifespan=_lifespan(application, run_background_worker))
+    _register_root_route(app)
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(STATIC_DIRECTORY)),
+        name="static",
+    )
     app.include_router(books.router)
     app.include_router(glossary.router)
     app.include_router(processing.router)
+    app.include_router(result.router)
+    app.include_router(export.router)
     app.include_router(system.router)
     _register_error_handlers(app)
     return app
+
+
+def _register_root_route(app: FastAPI) -> None:
+    """Открывает главный экран по корневому адресу сервера."""
+
+    @app.get("/", include_in_schema=False)
+    async def redirect_to_books() -> RedirectResponse:
+        return RedirectResponse("/books", status_code=status.HTTP_303_SEE_OTHER)
 
 
 def _lifespan(

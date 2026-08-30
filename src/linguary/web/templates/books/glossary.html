@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Глоссарий - Linguary{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Глоссарий</h1>
+    {% if data.read_only and book_status == "ANALYZING" %}
+      <p>Анализ ещё идёт: глоссарий пополняется, редактирование откроется после анализа.</p>
+    {% elif data.read_only %}
+      <p>Только чтение: вернитесь к проверке глоссария через сброс обработки.</p>
+    {% else %}
+      <p>Требуют решения: {{ data.pending_count }}.</p>
+    {% endif %}
+  </div>
+  {% if data.is_complete %}<span class="status ok">Проверен</span>{% else %}<span class="status">На проверке</span>{% endif %}
+</section>
+
+{% set book_id = data.book_id %}
+{% set active_tab = "glossary" %}
+{% include "partials/book_tabs.html" %}
+
+{% if not data.read_only and data.pending_count > 0 %}
+  <section class="panel action-panel">
+    <p>Можно принять предложенные переводы для всех обязательных элементов.</p>
+    <form method="post" action="/books/{{ data.book_id }}/glossary/accept-all">
+      <button type="submit">Принять все требующие решения</button>
+    </form>
+  </section>
+{% endif %}
+
+<section class="list">
+  {% for item in data.items %}
+    <article class="row-card">
+      <div>
+        <h2>{{ item.source_text }}</h2>
+        <p>{{ item.suggested_translation }}{% if item.translation %} -> {{ item.translation }}{% endif %}</p>
+        {% if item.is_decided %}
+          <p class="task-state">Решение принято: {{ item.status }}.</p>
+        {% elif not item.requires_review %}
+          <p class="task-state">Не требует решения.</p>
+        {% endif %}
+        {% if item.note %}
+          <p class="task-state">Указание переводчику: {{ item.note }}</p>
+        {% endif %}
+        {% if not data.read_only %}
+          <form class="note-form" method="post" action="/books/{{ data.book_id }}/glossary/{{ item.concept_id }}/note">
+            <input name="note" value="{{ item.note }}" placeholder="Указание переводчику: род, склонение, обращение">
+            <button type="submit">Сохранить указание</button>
+          </form>
+        {% endif %}
+      </div>
+      {% if not data.read_only and item.requires_review and not item.is_decided %}
+        <form class="actions" method="post" action="/books/{{ data.book_id }}/glossary/{{ item.concept_id }}">
+          <button name="action" value="accept">Принять</button>
+          <button name="action" value="lock">Зафиксировать</button>
+          <button name="action" value="skip">Пропустить</button>
+          <input name="text" placeholder="Исправленный вариант">
+          <button name="action" value="correct">Исправить</button>
+        </form>
+      {% endif %}
+    </article>
+  {% else %}
+    <p class="empty">Кандидатов глоссария нет.</p>
+  {% endfor %}
+</section>
+{% endblock %}

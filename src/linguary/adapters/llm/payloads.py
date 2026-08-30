@@ -115,6 +115,7 @@ def _glossary_candidate(schema: GlossaryCandidateSchema) -> GlossaryCandidateRes
         suggested_translation=schema.suggested_translation,
         confidence=schema.confidence,
         model_flagged_review=schema.model_flagged_review,
+        note=(schema.note or "").strip(),
     )
 
 

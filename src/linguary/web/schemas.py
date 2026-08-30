@@ -21,9 +21,13 @@ from linguary.adapters.validation import EpubCheckAvailability
 from linguary.application.book_overview import (
     BookOverview,
     BookProgress,
+    BookResultSummary,
     BookWarnings,
     ChapterPlanSummary,
+    PlanBlockSummary,
     ProcessingPlanSummary,
+    ResultBlockSummary,
+    ResultChapterSummary,
     ResultWarningEntry,
     TaskFailure,
 )
@@ -36,17 +40,25 @@ from linguary.domain import (
     BookImportWarning,
     BookStatus,
     CoverageStatus,
+    GlossaryHint,
+    LanguageNote,
     ProcessingRun,
     ProcessingTask,
+    ResultWarning,
 )
 from linguary.web import labels
 
 
 class GlossaryDecisionRequest(BaseModel):
-    """Form-команда решения по одному элементу глоссария."""
+    """Form-команда решения по одному элементу глоссария.
+
+    `note` — переводческое указание по элементу. Поля нет в форме — указание
+    остаётся прежним; пустое поле снимает его (PRD § 11).
+    """
 
     action: GlossaryDecision
     text: str | None = None
+    note: str | None = None
 
     @model_validator(mode="after")
     def validate_text_for_action(self) -> Self:
@@ -57,6 +69,12 @@ class GlossaryDecisionRequest(BaseModel):
         if self.action is not GlossaryDecision.CORRECT and has_text:
             raise ValueError("текст принимается только для действия correct")
         return self
+
+
+class GlossaryNoteRequest(BaseModel):
+    """Form-команда правки переводческого указания по элементу глоссария."""
+
+    note: str = ""
 
 
 class ResetProcessingRequest(BaseModel):
@@ -86,6 +104,7 @@ class GlossaryItemResponse(BaseModel):
     has_translation_conflict: bool
     requires_review: bool
     is_decided: bool
+    note: str = ""
 
     @classmethod
     def of_item(cls, item: GlossaryReviewItem) -> GlossaryItemResponse:
@@ -104,6 +123,7 @@ class GlossaryItemResponse(BaseModel):
             has_translation_conflict=item.has_translation_conflict,
             requires_review=item.requires_review,
             is_decided=item.is_decided,
+            note=item.note,
         )
 
 
@@ -222,6 +242,35 @@ class TaskFailureResponse(BaseModel):
         )
 
 
+class TaskResponse(BaseModel):
+    """Текущее состояние фоновой задачи после команды пользователя."""
+
+    id: str
+    book_id: str
+    task_type: str
+    task_type_label: str
+    scope_id: str
+    status: str
+    status_label: str
+    attempts: int
+    is_retryable: bool
+
+    @classmethod
+    def of_task(cls, task: ProcessingTask) -> TaskResponse:
+        """Собирает безопасный фрагмент задачи без технической детали ошибки."""
+        return cls(
+            id=task.id,
+            book_id=task.book_id,
+            task_type=task.task_type.value,
+            task_type_label=labels.task_type_label(task.task_type),
+            scope_id=task.scope_id,
+            status=task.status.value,
+            status_label=labels.task_status_label(task.status),
+            attempts=task.attempts,
+            is_retryable=task.is_retryable,
+        )
+
+
 class BookProgressResponse(BaseModel):
     """Прогресс обработки книги (PRD § 21.4)."""
 
@@ -329,6 +378,7 @@ class ChapterPlanResponse(BaseModel):
     is_complete: bool
     textual_blocks: int
     treatment_counts: tuple[TreatmentCount, ...] = ()
+    blocks: tuple["PlanBlockResponse", ...] = ()
 
     @classmethod
     def of_chapter(cls, chapter: ChapterPlanSummary) -> ChapterPlanResponse:
@@ -341,6 +391,32 @@ class ChapterPlanResponse(BaseModel):
             is_complete=chapter.coverage_status is CoverageStatus.COMPLETE,
             textual_blocks=chapter.textual_blocks,
             treatment_counts=TreatmentCount.of_counts(chapter.treatment_counts),
+            blocks=tuple(PlanBlockResponse.of_block(block) for block in chapter.blocks),
+        )
+
+
+class PlanBlockResponse(BaseModel):
+    """Блок главы с режимом, выбранным анализом."""
+
+    block_id: str
+    block_type: str
+    text: str
+    treatment: str | None = None
+    treatment_label: str | None = None
+
+    @classmethod
+    def of_block(cls, block: PlanBlockSummary) -> PlanBlockResponse:
+        """Собирает строку плана по одному исходному блоку."""
+        return cls(
+            block_id=block.block.id,
+            block_type=block.block.type.value,
+            text=block.block.text,
+            treatment=block.treatment.value if block.treatment is not None else None,
+            treatment_label=(
+                labels.treatment_label(block.treatment)
+                if block.treatment is not None
+                else None
+            ),
         )
 
 
@@ -401,13 +477,30 @@ class ResultWarningResponse(BaseModel):
     @classmethod
     def of_entry(cls, entry: ResultWarningEntry) -> ResultWarningResponse:
         """Собирает замечание результата."""
-        return cls(
-            kind=entry.warning.kind.value,
-            kind_label=labels.result_warning_label(entry.warning.kind),
-            message=entry.warning.message,
+        return cls.of_warning(
+            entry.warning,
             block_id=entry.block_id,
             section_id=entry.section_id,
             chapter_number=entry.chapter_number,
+        )
+
+    @classmethod
+    def of_warning(
+        cls,
+        warning: ResultWarning,
+        *,
+        block_id: str,
+        section_id: str | None,
+        chapter_number: int | None,
+    ) -> ResultWarningResponse:
+        """Собирает замечание уже известного блока результата."""
+        return cls(
+            kind=warning.kind.value,
+            kind_label=labels.result_warning_label(warning.kind),
+            message=warning.message,
+            block_id=block_id,
+            section_id=section_id,
+            chapter_number=chapter_number,
         )
 
 
@@ -431,6 +524,162 @@ class BookWarningsResponse(BaseModel):
                 for entry in warnings.result_warnings
             ),
             total=warnings.total,
+        )
+
+
+class GlossaryHintResponse(BaseModel):
+    """Короткая словарная подсказка внутри блока."""
+
+    original: str
+    translation: str
+    note: str | None = None
+
+    @classmethod
+    def of_hint(cls, hint: GlossaryHint) -> GlossaryHintResponse:
+        return cls(
+            original=hint.original,
+            translation=hint.translation,
+            note=hint.note,
+        )
+
+
+class LanguageNoteResponse(BaseModel):
+    """Учебная заметка, привязанная к результату блока."""
+
+    id: str
+    original_excerpt: str
+    translated_excerpt: str | None = None
+    note: str
+
+    @classmethod
+    def of_note(cls, note: LanguageNote) -> LanguageNoteResponse:
+        return cls(
+            id=note.id,
+            original_excerpt=note.original_excerpt,
+            translated_excerpt=note.translated_excerpt,
+            note=note.note,
+        )
+
+
+class ResultBlockResponse(BaseModel):
+    """Оригинал и помощь модели для одного стабильного блока книги."""
+
+    block_id: str
+    section_id: str
+    chapter_number: int
+    block_type: str
+    treatment: str | None = None
+    treatment_label: str | None = None
+    original_text: str
+    translated_text: str | None = None
+    glossary_hints: tuple[GlossaryHintResponse, ...] = ()
+    language_notes: tuple[LanguageNoteResponse, ...] = ()
+    warnings: tuple[ResultWarningResponse, ...] = ()
+    regeneration_task: TaskResponse | None = None
+
+    @classmethod
+    def of_block(
+        cls,
+        summary: ResultBlockSummary,
+        *,
+        regeneration_task: ProcessingTask | None = None,
+    ) -> ResultBlockResponse:
+        """Собирает блок результата или целевой фрагмент перегенерации."""
+        result = summary.result
+        treatment = summary.treatment
+        return cls(
+            block_id=summary.block.id,
+            section_id=summary.block.section_id,
+            chapter_number=summary.chapter_number,
+            block_type=summary.block.type.value,
+            treatment=treatment.value if treatment is not None else None,
+            treatment_label=(
+                labels.treatment_label(treatment) if treatment is not None else None
+            ),
+            original_text=summary.block.text,
+            translated_text=result.translated_text if result is not None else None,
+            glossary_hints=(
+                tuple(GlossaryHintResponse.of_hint(hint) for hint in result.glossary_hints)
+                if result is not None
+                else ()
+            ),
+            language_notes=(
+                tuple(LanguageNoteResponse.of_note(note) for note in result.language_notes)
+                if result is not None
+                else ()
+            ),
+            warnings=(
+                tuple(
+                    ResultWarningResponse.of_warning(
+                        warning,
+                        block_id=summary.block.id,
+                        section_id=summary.block.section_id,
+                        chapter_number=summary.chapter_number,
+                    )
+                    for warning in result.warnings
+                )
+                if result is not None
+                else ()
+            ),
+            regeneration_task=(
+                TaskResponse.of_task(regeneration_task)
+                if regeneration_task is not None
+                else None
+            ),
+        )
+
+
+class ResultChapterResponse(BaseModel):
+    """Одна глава результата в порядке чтения."""
+
+    section_id: str
+    chapter_number: int
+    title: str
+    blocks: tuple[ResultBlockResponse, ...] = ()
+
+    @classmethod
+    def of_chapter(cls, chapter: ResultChapterSummary) -> ResultChapterResponse:
+        return cls(
+            section_id=chapter.section_id,
+            chapter_number=chapter.chapter_number,
+            title=chapter.title,
+            blocks=tuple(ResultBlockResponse.of_block(block) for block in chapter.blocks),
+        )
+
+
+class BookResultResponse(BaseModel):
+    """Просмотр результата по блокам с предупреждениями и итогом EPUBCheck."""
+
+    book_id: str
+    status: str
+    export_validation_status: str | None = None
+    export_validation_status_label: str | None = None
+    epubcheck_hint: str | None = None
+    warnings: BookWarningsResponse
+    chapters: tuple[ResultChapterResponse, ...] = ()
+
+    @classmethod
+    def of_result(cls, result: BookResultSummary) -> BookResultResponse:
+        validation = result.book.export_validation_status
+        return cls(
+            book_id=result.book.id,
+            status=result.book.status.value,
+            export_validation_status=(validation.value if validation is not None else None),
+            export_validation_status_label=(
+                labels.export_validation_status_label(validation)
+                if validation is not None
+                else None
+            ),
+            epubcheck_hint=(
+                labels.EPUBCHECK_HINT
+                if validation is not None and validation.value == "not_validated"
+                else None
+            ),
+            warnings=BookWarningsResponse.of_warnings(result.warnings),
+            chapters=tuple(
+                ResultChapterResponse.of_chapter(chapter)
+                for chapter in result.chapters
+            ),
         )
 
 
@@ -531,6 +780,7 @@ __all__ = [
     "ErrorResponse",
     "GlossaryDecisionRequest",
     "GlossaryItemResponse",
+    "GlossaryNoteRequest",
     "GlossaryReviewResponse",
     "ImportWarningResponse",
     "LLMConfigResponse",

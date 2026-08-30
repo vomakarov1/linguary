@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from processing_fakes import (
     BOOK_ID,
@@ -22,7 +24,9 @@ from linguary.application.llm_dto import (
 from linguary.application.ports.llm import LLMResponseKind
 from linguary.application.retry_policy import ResultValidationError
 from linguary.domain import (
+    BeforeYouReadEntry,
     BlockTreatment,
+    BlockType,
     BookMetadata,
     CanonicalDocument,
     ChapterAnalysis,
@@ -31,6 +35,9 @@ from linguary.domain import (
     DocumentSection,
     GlossarySnapshot,
     GlossarySnapshotEntry,
+    InlineAnnotation,
+    InlineAnnotationType,
+    SourceReference,
     TermStatus,
     TranslationUnit,
     TreatmentPlan,
@@ -300,3 +307,141 @@ def test_unit_of_another_chapter_is_rejected() -> None:
             analysis=make_analysis(make_unit(blocks)),
             glossary=make_snapshot(),
         )
+
+
+def test_glossary_note_reaches_the_model_with_its_decision() -> None:
+    """Переводческое указание идёт модели рядом со своим вариантом перевода.
+
+    Одного варианта перевода мало там, где решение уровня книги влияет на согласование:
+    имя приходит из глоссария одинаковым, а род персонажа без указания каждая глава
+    выбирает заново (PRD § 11).
+    """
+    snapshot = GlossarySnapshot(
+        entries=(
+            GlossarySnapshotEntry(
+                source_text="Wren Calder",
+                translation="Рен Колдер",
+                type=ConceptType.PERSON,
+                status=TermStatus.LOCKED,
+                note="женский род",
+            ),
+        )
+    )
+
+    context, _ = build_context(snapshot=snapshot)
+
+    assert "Рен Колдер (женский род)" in context.request.input_text
+    assert "принято для всей книги" in context.request.input_text
+
+
+def test_glossary_without_notes_keeps_the_list_clean() -> None:
+    """Без указаний список решений не обрастает пояснением про скобки."""
+    context, _ = build_context()
+
+    assert "принято для всей книги" not in context.request.input_text
+
+
+def test_expressions_of_before_you_read_are_not_explained_twice() -> None:
+    """Объяснённые до чтения выражения главы модель получает как запрет повтора.
+
+    `Before You Read` собран на анализе, а подсказки и заметки рождаются позже:
+    без этого списка один оборот объясняется читателю трижды, что запрещает § 19.3.
+    """
+    blocks = make_blocks(1)
+    unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section(blocks)
+    analysis = replace(
+        make_analysis(unit),
+        before_you_read=(
+            BeforeYouReadEntry(
+                expression="on a good day", explanation="если повезёт"
+            ),
+        ),
+    )
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+
+    assert "уже объяснены до начала чтения" in context.request.input_text
+    assert "- on a good day" in context.request.input_text
+
+
+def test_footnote_backlink_does_not_reach_the_model() -> None:
+    """Ссылку возврата сноски модель не видит и в перевод не переносит.
+
+    Для книги «↩» — навигация, которую экспортёр восстановит из разметки блока сам.
+    Модель же принимает её за текст сноски и копирует значок в перевод, где он
+    никуда не ведёт.
+    """
+    text = "A starglass is a lens ground from marsh quartz. ↩"
+    footnote = DocumentBlock.create(
+        document_id=BOOK_ID,
+        section_id=SECTION_ID,
+        type=BlockType.FOOTNOTE,
+        order=0,
+        text=text,
+        source_reference=SourceReference(
+            resource_path=f"{SECTION_ID}.xhtml", structural_path="/body/aside[1]/p[1]"
+        ),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.LINK,
+                start=text.index("↩"),
+                end=len(text),
+                target=f"{SECTION_ID}.xhtml#fnref1",
+            ),
+        ),
+    )
+    unit = make_unit((footnote,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((footnote,))
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+    assert "marsh quartz." in context.request.input_text
+    assert "↩" not in context.request.input_text
+
+
+def test_link_inside_a_paragraph_survives_for_the_model() -> None:
+    """Отсечение хвоста касается только сноски: обычная ссылка абзаца остаётся текстом."""
+    text = "Netherfield Park is let at last."
+    paragraph = DocumentBlock.create(
+        document_id=BOOK_ID,
+        section_id=SECTION_ID,
+        type=BlockType.PARAGRAPH,
+        order=0,
+        text=text,
+        source_reference=SourceReference(
+            resource_path=f"{SECTION_ID}.xhtml", structural_path="/body/p[1]"
+        ),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.LINK,
+                start=text.index("at last."),
+                end=len(text),
+                target=f"{SECTION_ID}.xhtml#note-1",
+            ),
+        ),
+    )
+    unit = make_unit((paragraph,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((paragraph,))
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+    assert "at last." in context.request.input_text

@@ -20,6 +20,7 @@ def analysis_payload(**overrides: Any) -> dict[str, Any]:
                 "suggested_translation": "мистер Беннет",
                 "confidence": 0.9,
                 "model_flagged_review": False,
+                "note": None,
             }
         ],
         "translation_instructions": "Сохранять иронию рассказчика.",

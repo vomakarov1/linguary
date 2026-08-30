@@ -81,6 +81,10 @@ class GlossaryDecisionCommand:
     вариантом — предложенным моделью или сохранённым прежним решением. `concept_id`
     связывает HTTP-команду с показанным элементом и сохраняет его идентификатор при
     первом решении; прямые вызовы сценария могут по-прежнему работать по исходному тексту.
+
+    `note` — переводческое указание по элементу. `None` означает «оставить действующее»,
+    а переданная строка заменяет его целиком, в том числе пустая: снять указание
+    пользователь вправе так же, как и задать (PRD § 11).
     """
 
     book_id: str
@@ -88,6 +92,16 @@ class GlossaryDecisionCommand:
     decision: GlossaryDecision
     translation: str | None = None
     concept_id: str | None = None
+    note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GlossaryNoteCommand:
+    """Правка переводческого указания по одному элементу глоссария (PRD § 11)."""
+
+    book_id: str
+    concept_id: str
+    note: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +135,7 @@ class ApproveGlossary:
                     book_id,
                     confidence_threshold=self._glossary_confidence_threshold,
                 ),
+                book_status=book.status,
                 is_editable=book.status in EDITABLE_STATUSES,
             )
 
@@ -150,7 +165,78 @@ class ApproveGlossary:
                 )
             concept = self._decide(item, command, book=book)
             transaction.glossary.save(concept)
+            _complete_review_if_ready(
+                transaction,
+                book,
+                confidence_threshold=self._glossary_confidence_threshold,
+            )
         return concept
+
+    def set_note(self, command: GlossaryNoteCommand) -> TermConcept:
+        """Меняет переводческое указание по элементу, не трогая само решение.
+
+        Указание правится отдельно от решения, потому что живёт дольше него: род
+        персонажа виден только после нескольких глав, а перевод имени к этому моменту
+        уже принят. Через обычное решение это не сделать — повторное `accept` вернуло бы
+        вариант, предложенный моделью, и стёрло исправление пользователя.
+        """
+        with self._unit_of_work.transaction() as transaction:
+            book = _book(transaction, command.book_id)
+            _ensure_editable(book)
+            review = _load_review(
+                transaction,
+                command.book_id,
+                confidence_threshold=self._glossary_confidence_threshold,
+            )
+            item = review.item_for_concept(command.concept_id)
+            if item is None:
+                raise GlossaryNotFoundError(
+                    f"в глоссарии книги {command.book_id} нет понятия "
+                    f"{command.concept_id!r}"
+                )
+            concept = self._with_note(item, command.note.strip(), book=book)
+            transaction.glossary.save(concept)
+        return concept
+
+    def _with_note(
+        self, item: GlossaryReviewItem, note: str, *, book: BookRecord
+    ) -> TermConcept:
+        """Понятие глоссария с новым указанием.
+
+        Решения по элементу может ещё не быть: указание к предложенному моделью
+        варианту — это уже решение пользователя, поэтому элемент становится принятым
+        с тем же вариантом, который был предложен.
+        """
+        if item.decision is not None:
+            return replace(item.decision, note=note)
+        concept_id = item.concept_id
+        return TermConcept(
+            id=concept_id,
+            book_id=book.id,
+            type=item.type,
+            canonical_source_text=item.source_text,
+            status=TermStatus.APPROVED,
+            note=note,
+            variants=(
+                TermVariant(
+                    concept_id=concept_id,
+                    language=book.target_language,
+                    text=item.suggested_translation,
+                    status=TermStatus.APPROVED,
+                ),
+            ),
+        )
+
+    def complete_if_ready(self, book_id: str) -> None:
+        """Завершает проверку глоссария, если обязательных решений больше нет."""
+        with self._unit_of_work.transaction() as transaction:
+            book = _book(transaction, book_id)
+            _ensure_editable(book)
+            _complete_review_if_ready(
+                transaction,
+                book,
+                confidence_threshold=self._glossary_confidence_threshold,
+            )
 
     def _decide(
         self,
@@ -174,6 +260,7 @@ class ApproveGlossary:
             type=item.type,
             canonical_source_text=item.source_text,
             status=status,
+            note=item.note if command.note is None else command.note.strip(),
             variants=(
                 TermVariant(
                     concept_id=concept_id,
@@ -253,6 +340,31 @@ def _book(transaction: UnitOfWork, book_id: str) -> BookRecord:
     return book
 
 
+def _complete_review_if_ready(
+    transaction: UnitOfWork,
+    book: BookRecord,
+    *,
+    confidence_threshold: float,
+) -> None:
+    """Переводит книгу к запуску обработки после закрытия всех обязательных решений."""
+    if book.status is not BookStatus.GLOSSARY_REVIEW:
+        return
+    review = _load_review(
+        transaction,
+        book.id,
+        confidence_threshold=confidence_threshold,
+    )
+    if review.is_complete:
+        transaction.books.save(
+            replace(
+                book,
+                status=apply_book_event(
+                    book.status, BookEvent.GLOSSARY_REVIEW_COMPLETED
+                ),
+            )
+        )
+
+
 def _ensure_editable(book: BookRecord) -> None:
     """Проверяет, что глоссарий книги ещё редактируется (PRD § 11, § 21.3).
 
@@ -317,6 +429,7 @@ __all__ = [
     "ApproveGlossary",
     "GlossaryDecision",
     "GlossaryDecisionCommand",
+    "GlossaryNoteCommand",
     "IdFactory",
     "StartProcessing",
     "StartProcessingCommand",

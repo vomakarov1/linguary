@@ -12,12 +12,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from linguary.application.ports.persistence import ExportValidationStatus
 from linguary.domain import (
     BlockTreatment,
     BookStatus,
     ErrorType,
     ImportWarningKind,
     ResultWarningKind,
+    TaskStatus,
     TaskType,
 )
 
@@ -77,6 +79,13 @@ TASK_TYPE_LABELS: Mapping[TaskType, str] = {
     TaskType.EXPORT_BOOK: "Сборка EPUB",
 }
 
+TASK_STATUS_LABELS: Mapping[TaskStatus, str] = {
+    TaskStatus.PENDING: "Ожидает выполнения",
+    TaskStatus.RUNNING: "Выполняется",
+    TaskStatus.SUCCEEDED: "Готово",
+    TaskStatus.FAILED: "Не удалось выполнить",
+}
+
 #: Что означает тип ошибки для пользователя: можно ли повторить и от чего это зависит
 #: (PRD § 16).
 ERROR_TYPE_LABELS: Mapping[ErrorType, str] = {
@@ -98,6 +107,12 @@ RESULT_WARNING_LABELS: Mapping[ResultWarningKind, str] = {
     ResultWarningKind.DROPPED_BLOCK: "Фрагмент книги пропущен",
 }
 
+EXPORT_VALIDATION_STATUS_LABELS: Mapping[ExportValidationStatus, str] = {
+    ExportValidationStatus.NOT_VALIDATED: "EPUBCheck не выполнялся",
+    ExportValidationStatus.PASSED: "EPUBCheck пройден",
+    ExportValidationStatus.FAILED: "EPUBCheck нашёл ошибки",
+}
+
 
 def book_status_label(status: BookStatus) -> str:
     """Название состояния книги для списка и карточки."""
@@ -112,6 +127,11 @@ def treatment_label(treatment: BlockTreatment) -> str:
 def task_type_label(task_type: TaskType) -> str:
     """Название типа фоновой задачи."""
     return TASK_TYPE_LABELS[task_type]
+
+
+def task_status_label(status: TaskStatus) -> str:
+    """Название состояния фоновой задачи."""
+    return TASK_STATUS_LABELS[status]
 
 
 def error_type_label(error_type: ErrorType) -> str:
@@ -129,21 +149,30 @@ def result_warning_label(kind: ResultWarningKind) -> str:
     return RESULT_WARNING_LABELS[kind]
 
 
+def export_validation_status_label(status: ExportValidationStatus) -> str:
+    """Пользовательский итог внешней проверки собранного EPUB."""
+    return EXPORT_VALIDATION_STATUS_LABELS[status]
+
+
 __all__ = [
     "BOOK_STATUS_LABELS",
     "EPUBCHECK_HINT",
     "ERROR_TYPE_LABELS",
+    "EXPORT_VALIDATION_STATUS_LABELS",
     "EXTERNAL_LLM_WARNING",
     "IMPORT_WARNING_LABELS",
     "LLM_NOT_CONFIGURED_HINT",
     "NON_LOCAL_SERVER_WARNING",
     "RESULT_WARNING_LABELS",
+    "TASK_STATUS_LABELS",
     "TASK_TYPE_LABELS",
     "TREATMENT_LABELS",
     "book_status_label",
     "error_type_label",
+    "export_validation_status_label",
     "import_warning_label",
     "result_warning_label",
+    "task_status_label",
     "task_type_label",
     "treatment_label",
 ]
