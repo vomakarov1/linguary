@@ -103,9 +103,13 @@ def configured_application(
 
 @pytest.fixture
 def client(application: Application) -> Iterator[TestClient]:
-    """Тестовый клиент Web UI без фонового воркера."""
+    """Тестовый клиент Web UI без фонового воркера.
+
+    Клиент обращается по адресу самого приложения: сервер отвечает только по своим
+    именам, как и при настоящем запуске (PRD § 4.1).
+    """
     app = create_app(application=application, run_background_worker=False)
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url=application.settings.server.base_url) as test_client:
         yield test_client
 
 
@@ -117,5 +121,7 @@ def configured_client(
     app = create_app(
         application=configured_application, run_background_worker=False
     )
-    with TestClient(app) as test_client:
+    with TestClient(
+        app, base_url=configured_application.settings.server.base_url
+    ) as test_client:
         yield test_client

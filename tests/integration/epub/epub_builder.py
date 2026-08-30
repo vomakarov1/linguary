@@ -45,6 +45,7 @@ def build_epub(
     include_package: bool = True,
     omit_from_archive: Sequence[str] = (),
     omit_from_manifest: Sequence[str] = (),
+    compression: int = zipfile.ZIP_STORED,
 ) -> Path:
     """Собирает EPUB3 из готовых XHTML-документов и отдаёт путь к нему.
 
@@ -54,9 +55,11 @@ def build_epub(
     но не объявляет в манифесте: так получается книга с битым манифестом.
     `archive_files` кладёт файл в архив по указанному пути, не добавляя каталог пакета
     и не объявляя его в манифесте: так получается ресурс, лежащий вне каталога книги.
+    `compression` сжимает записи архива: так получается книга, маленькая на диске
+    и огромная в распакованном виде.
     """
     order = list(spine) if spine is not None else list(documents)
-    with zipfile.ZipFile(path, "w") as archive:
+    with zipfile.ZipFile(path, "w", compression) as archive:
         archive.writestr("mimetype", "application/epub+zip", zipfile.ZIP_STORED)
         if include_container:
             archive.writestr("META-INF/container.xml", _CONTAINER_XML)

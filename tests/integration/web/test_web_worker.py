@@ -34,7 +34,7 @@ _POLL_SECONDS = 0.02
 def working_client(application: Application) -> Iterator[TestClient]:
     """Клиент приложения с работающим фоновым воркером."""
     app = create_app(application=application, run_background_worker=True)
-    with TestClient(app) as client:
+    with TestClient(app, base_url=application.settings.server.base_url) as client:
         yield client
 
 

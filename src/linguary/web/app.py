@@ -11,19 +11,23 @@ CLI остаётся возможной: очередь атомарно зах�
 ошибок общий для всех экранов, и он же достаётся следующим пакетам endpoints.
 
 Сервер слушает адрес из локальной конфигурации, по умолчанию `127.0.0.1` (PRD § 4.1):
-приложение хранит ключ провайдера и полный текст книг.
+приложение хранит ключ провайдера и полный текст книг. Аутентификации у него нет
+намеренно, поэтому единственное, чем страница самого приложения отличается от чужой
+страницы, открытой в том же браузере, — происхождение запроса: `Host`, `Origin`
+и `Sec-Fetch-Site` проверяются здесь одной middleware сразу для всех endpoints.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from linguary.adapters.config import ServerSettings
 from linguary.application.book_overview import (
     BookNotFoundError,
     ProcessingPlanUnavailableError,
@@ -62,6 +66,14 @@ from linguary.web.views import STATIC_DIRECTORY
 
 #: Название приложения в документации API.
 TITLE = "Linguary"
+
+#: Методы, которые состояния не меняют: у них проверяется только `Host`. Межсайтовое
+#: чтение браузер и без того не отдаёт чужой странице — ответ ей не виден.
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: Значения `Sec-Fetch-Site`, при которых запрос пришёл со страницы самого приложения
+#: либо прямо от пользователя — переходом по закладке или из адресной строки.
+_SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
 
 #: Отказы сценариев и домена в кодах HTTP (API-01).
 #:
@@ -104,6 +116,7 @@ def create_app(
     выключает фоновый воркер там, где задачи выполняются явно.
     """
     app = FastAPI(title=TITLE, lifespan=_lifespan(application, run_background_worker))
+    _register_request_guard(app)
     _register_root_route(app)
     app.mount(
         "/static",
@@ -118,6 +131,106 @@ def create_app(
     app.include_router(system.router)
     _register_error_handlers(app)
     return app
+
+
+def _register_request_guard(app: FastAPI) -> None:
+    """Отклоняет обращения по чужому имени и запросы чужого происхождения (PRD § 4.1).
+
+    Проверки две, и закрывают они разные пути к приложению.
+
+    `Host` отвечает за перепривязку DNS: страница атакующего доходит до сервера только
+    под своим именем, а приложение отвечает лишь по тем именам, по которым его открывает
+    владелец (`ServerSettings.allowed_hosts`). Без этой проверки браузер считает страницу
+    атакующего тем же источником, и ей становятся доступны и чтение книг, и действия.
+
+    `Origin` и `Sec-Fetch-Site` отвечают за межсайтовый запрос, меняющий состояние:
+    заголовки проставляет сам браузер, страница их не подделает, поэтому чужая страница
+    не выполнит ни загрузку книги, ни сброс обработки, ни трату ключа провайдера.
+    Запрос, у которого нет обоих заголовков, проходит: так приходит не-браузерный
+    клиент (curl, тест), а браузер межсайтовый запрос помечает всегда.
+
+    Настройки берутся из собранного приложения на каждом запросе: набор middleware
+    строится раньше, чем `lifespan` собирает состав зависимостей, и на момент сборки
+    адрес сервера ещё неизвестен.
+    """
+
+    @app.middleware("http")
+    async def guard_request_origin(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        rejection = _request_rejection(request)
+        if rejection is not None:
+            return rejection
+        return await call_next(request)
+
+
+def _request_rejection(request: Request) -> JSONResponse | None:
+    """Ответ, которым запрос отклоняется, либо `None`, если он принимается."""
+    server = _server_settings(request)
+    if not _host_allowed(request.headers.get("host", ""), server):
+        return _rejection(
+            status.HTTP_400_BAD_REQUEST,
+            f"приложение отвечает только по адресу {server.base_url}",
+        )
+    if request.method in _SAFE_METHODS:
+        return None
+    if not _origin_allowed(request):
+        return _rejection(
+            status.HTTP_403_FORBIDDEN,
+            "запрос отклонён: действие принимается только со страницы приложения",
+        )
+    return None
+
+
+def _server_settings(request: Request) -> ServerSettings:
+    """Адрес сервера из собранного приложения; до его сборки — значения по умолчанию."""
+    application: Application | None = getattr(
+        request.app.state, APPLICATION_STATE_ATTRIBUTE, None
+    )
+    return application.settings.server if application is not None else ServerSettings()
+
+
+def _host_allowed(header: str, server: ServerSettings) -> bool:
+    """Отвечает ли приложение по имени из заголовка `Host`."""
+    allowed = server.allowed_hosts
+    if "*" in allowed:
+        return True
+    return _header_host(header) in {name.strip().lower() for name in allowed}
+
+
+def _header_host(header: str) -> str:
+    """Имя из заголовка `Host` без порта; адрес IPv6 — без скобок."""
+    value = header.strip().lower()
+    if value.startswith("["):
+        return value[1:].partition("]")[0]
+    return value.partition(":")[0]
+
+
+def _origin_allowed(request: Request) -> bool:
+    """Пришёл ли меняющий состояние запрос со страницы самого приложения."""
+    origin = request.headers.get("origin")
+    if origin is not None and origin.strip().lower() != _request_origin(request):
+        return False
+    fetch_site = request.headers.get("sec-fetch-site")
+    return fetch_site is None or fetch_site.strip().lower() in _SAME_ORIGIN_FETCH_SITES
+
+
+def _request_origin(request: Request) -> str:
+    """Происхождение, которым приложение открыто у пользователя прямо сейчас.
+
+    Имя берётся из заголовка `Host` — того самого, который уже сверен со списком имён
+    приложения. Так принимаются оба обычных адреса локального запуска, `127.0.0.1`
+    и `localhost`, и не принимается никакой третий.
+    """
+    host = request.headers.get("host", "").strip().lower()
+    return f"{request.url.scheme}://{host}"
+
+
+def _rejection(code: int, detail: str) -> JSONResponse:
+    """Отказ проверки происхождения в том же виде, что и отказы сценариев."""
+    return JSONResponse(
+        status_code=code, content=ErrorResponse(detail=detail).model_dump()
+    )
 
 
 def _register_root_route(app: FastAPI) -> None:

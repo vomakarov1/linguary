@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import shutil
-import zipfile
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lxml import etree
+from pipeline_support import (
+    SYNTHETIC_EPUB,
+    exported_text,
+    llm_replies,
+    sequential_ids,
+)
 
 from linguary.adapters.config import AppSettings, CheckSettings, LLMSettings, StorageSettings
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeLLMClient
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
 from linguary.application.context_builder import textual_blocks
 from linguary.application.ports.llm import LLMClient, LLMPayload, LLMRequest, LLMResponse
@@ -24,17 +26,7 @@ from linguary.application.use_cases.approve_glossary import (
 )
 from linguary.application.use_cases.register_book import RegisterBookCommand
 from linguary.composition import Application, build_application, drain_tasks
-from linguary.domain import (
-    BookStatus,
-    ErrorType,
-    LLMCallStage,
-    TaskType,
-    TokenUsage,
-)
-
-FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
-SYNTHETIC_EPUB = FIXTURE_ROOT / "epub" / "synthetic_story.epub"
-LLM_FIXTURE_ROOT = FIXTURE_ROOT / "llm"
+from linguary.domain import BookStatus, ErrorType, LLMCallStage, TaskType
 
 
 @dataclass(slots=True)
@@ -58,7 +50,9 @@ def test_full_mvp_pipeline_exports_translated_epub(tmp_path: Path) -> None:
     try:
         _register_and_import(application, tmp_path)
         document = _document(application)
-        client.inner.replies = _llm_replies(document)
+        client.inner.replies = llm_replies(
+            document, broken_reply_before_processing=True
+        )
 
         first_analysis = _run(application.analysis.start("book-e2e"))
         assert first_analysis is not None
@@ -111,13 +105,10 @@ def test_full_mvp_pipeline_exports_translated_epub(tmp_path: Path) -> None:
         assert logs[3].error is not None
         assert logs[3].error.type is ErrorType.MODEL_OUTPUT
         assert application.paths.export_epub("book-e2e").is_file()
-        exported_text = "\n".join(
-            "".join(root.itertext())
-            for root in _documents_of(application.paths.export_epub("book-e2e")).values()
-        )
-        assert "Русский перевод блока" in exported_text
-        assert "Составное существительное передаёт образ света и стекла." in exported_text
-        assert "Previously in Chapter" in exported_text
+        book_text = exported_text(application.paths.export_epub("book-e2e"))
+        assert "Русский перевод блока" in book_text
+        assert "Составное существительное передаёт образ света и стекла." in book_text
+        assert "Previously in Chapter" in book_text
         assert any(
             "Рен Колдер (женский род)" in text for text in client.requests
         ), "переводческое указание глоссария не дошло до запроса обработки"
@@ -140,7 +131,7 @@ def _application(tmp_path: Path, client: LLMClient) -> Application:
     return build_application(
         settings=settings,
         llm_client=client,
-        task_id_factory=_ids("task"),
+        task_id_factory=sequential_ids("task"),
         epubcheck=EpubCheckValidator(
             settings=EpubCheckSettings(java_executable="missing-linguary-java")
         ),
@@ -173,98 +164,6 @@ def _document(application: Application):
         document = transaction.documents.get("book-e2e")
     assert document is not None
     return document
-
-
-def _llm_replies(document) -> tuple[FakeReply | Exception, ...]:
-    """Ответы анализа и обработки под реальные размеры глав."""
-    analysis = _read_fixture("analysis-template.json")
-    translation = _read_fixture("translation-template.json")
-    replies: list[FakeReply | Exception] = []
-    for section in document.ordered_sections:
-        aliases = [f"b{index}" for index, _ in enumerate(textual_blocks(section), start=1)]
-        replies.append(
-            FakeReply.of_payload(
-                {
-                    "translation_instructions": analysis["translation_instructions"],
-                    "chapter_summary": (
-                        f"{analysis['chapter_summary']} Chapter: {section.title}."
-                    ),
-                    "glossary_candidates": analysis["glossary_candidates"],
-                    "before_you_read": analysis["before_you_read"],
-                    "treatment_plan": [
-                        {
-                            "source_block_id": alias,
-                            "treatment": "TRANSLATE",
-                            "reason": analysis["treatment_reason"],
-                        }
-                        for alias in aliases
-                    ],
-                }
-            )
-        )
-    replies.append(FakeReply(content="{"))
-    for section in document.ordered_sections:
-        aliases = [f"b{index}" for index, _ in enumerate(textual_blocks(section), start=1)]
-        replies.append(_translation_reply(aliases, translation))
-    return tuple(replies)
-
-
-def _translation_reply(aliases: list[str], fixture: dict[str, object]) -> FakeReply:
-    """Ответ обработки одной главы с переводом, подсказками и заметкой."""
-    hint = fixture["glossary_hint"]
-    note = fixture["language_note"]
-    assert isinstance(hint, dict)
-    assert isinstance(note, dict)
-    return FakeReply.of_payload(
-        {
-            "blocks": [
-                {
-                    "source_block_id": alias,
-                    "treatment": "TRANSLATE",
-                    "translated_text": f"{fixture['translated_text']} ({alias}).",
-                    "glossary_hints": [hint],
-                }
-                for alias in aliases
-            ],
-            "language_notes": [
-                {
-                    "source_block_id": aliases[0],
-                    "original_excerpt": note["original_excerpt"],
-                    "translated_excerpt": note["translated_excerpt"],
-                    "note": note["note"],
-                }
-            ],
-        },
-        usage=TokenUsage(prompt_tokens=100, completion_tokens=200),
-    )
-
-
-def _read_fixture(name: str) -> dict[str, object]:
-    """JSON-fixture ответа модели."""
-    return json.loads((LLM_FIXTURE_ROOT / name).read_text(encoding="utf-8"))
-
-
-def _ids(prefix: str) -> Callable[[], str]:
-    """Предсказуемые идентификаторы задач."""
-    counter = 0
-
-    def next_id() -> str:
-        nonlocal counter
-        counter += 1
-        return f"{prefix}-{counter}"
-
-    return next_id
-
-
-def _documents_of(path: Path) -> dict[str, etree._Element]:
-    """XHTML-документы собранного EPUB."""
-    parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
-    with zipfile.ZipFile(path) as archive:
-        return {
-            name: etree.fromstring(archive.read(name), parser=parser)
-            for name in archive.namelist()
-            if name.endswith((".xhtml", ".html", ".htm"))
-        }
 
 
 def _run(awaitable):

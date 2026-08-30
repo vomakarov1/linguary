@@ -45,13 +45,22 @@ class ExtractionLimits:
     Значения по умолчанию рассчитаны на художественную книгу с иллюстрациями и заведомо
     больше любой книги набора; они существуют не ради экономии диска, а чтобы архив,
     распаковывающийся в десятки гигабайт, не занял машину пользователя.
+
+    `max_document_bytes` ограничивает одну запись архива, которую импорт поднимает
+    в память: глава художественной книги заведомо меньше десятков мегабайт, и запись
+    такого размера читать незачем даже в пределах общего объёма.
     """
 
     max_entries: int = 10_000
     max_total_bytes: int = 256 * 1024 * 1024
+    max_document_bytes: int = 32 * 1024 * 1024
 
     def __post_init__(self) -> None:
-        if self.max_entries <= 0 or self.max_total_bytes <= 0:
+        if (
+            self.max_entries <= 0
+            or self.max_total_bytes <= 0
+            or self.max_document_bytes <= 0
+        ):
             raise ValueError("лимиты распаковки должны быть положительными")
 
 
@@ -106,13 +115,12 @@ class _ResourceArchive:
         self._limits = limits
         try:
             self._archive = zipfile.ZipFile(source_path)
+            self._check_limits()
             self._directory = posixpath.dirname(package_path(self._archive))
         except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError) as error:
             raise EpubImportFatalError(
                 f"EPUB {source_path} нельзя прочитать: {error}"
             ) from error
-        try:
-            self._check_limits()
         except EpubImportFatalError:
             self._archive.close()
             raise
@@ -186,23 +194,44 @@ class _ResourceArchive:
 
     def _check_limits(self) -> None:
         """Проверяет объявленные архивом число файлов и размер распаковки."""
-        entries = self._archive.infolist()
-        if len(entries) > self._limits.max_entries:
-            raise EpubImportFatalError(
-                f"EPUB {self._source_path} содержит {len(entries)} файлов "
-                f"при допустимых {self._limits.max_entries}"
-            )
-        declared = sum(entry.file_size for entry in entries)
-        if declared > self._limits.max_total_bytes:
-            raise EpubImportFatalError(
-                f"распакованное содержимое EPUB {self._source_path} заявлено "
-                f"как {declared} байт при допустимых {self._limits.max_total_bytes}"
-            )
+        check_extraction_limits(
+            self._archive, source_path=self._source_path, limits=self._limits
+        )
+
+
+def check_extraction_limits(
+    archive: zipfile.ZipFile, *, source_path: str, limits: ExtractionLimits
+) -> None:
+    """Сверяет объявленные архивом число файлов и объём распаковки с пределами.
+
+    Проверка идёт по оглавлению архива, до чтения хотя бы одной его записи: архив,
+    распаковывающийся в десятки гигабайт, не должен успеть занять память машины.
+    Объявленному размеру доверия нет, поэтому тот, кто читает записи, считает
+    прочитанные байты и сам.
+    """
+    entries = archive.infolist()
+    if len(entries) > limits.max_entries:
+        raise EpubImportFatalError(
+            f"EPUB {source_path} содержит {len(entries)} файлов "
+            f"при допустимых {limits.max_entries}"
+        )
+    declared = sum(entry.file_size for entry in entries)
+    if declared > limits.max_total_bytes:
+        raise EpubImportFatalError(
+            f"распакованное содержимое EPUB {source_path} заявлено "
+            f"как {declared} байт при допустимых {limits.max_total_bytes}"
+        )
 
 
 def package_path(archive: zipfile.ZipFile) -> str:
-    """Путь к файлу пакета OPF внутри архива по `META-INF/container.xml`."""
-    container = etree.fromstring(archive.read("META-INF/container.xml"))
+    """Путь к файлу пакета OPF внутри архива по `META-INF/container.xml`.
+
+    Контейнер приходит из недоверенного архива, поэтому разбирается тем же ужесточённым
+    парсером, что и остальной XML книги: внешние сущности не подставляются, DTD не
+    загружается, в сеть парсер не ходит.
+    """
+    parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
+    container = etree.fromstring(archive.read("META-INF/container.xml"), parser=parser)
     for element in container.iter():
         if local_name(element) == "rootfile" and element.get("full-path"):
             return element.get("full-path", "")
@@ -275,4 +304,9 @@ def _contained_path(base: Path, relative: str, *, message: str) -> Path:
     return candidate
 
 
-__all__ = ["ExtractionLimits", "FilesystemEpubResourceStore", "package_path"]
+__all__ = [
+    "ExtractionLimits",
+    "FilesystemEpubResourceStore",
+    "check_extraction_limits",
+    "package_path",
+]

@@ -31,7 +31,11 @@ from linguary.adapters.epub.inline import (
     local_name,
     resolve_link_target,
 )
-from linguary.adapters.epub.resources import package_path
+from linguary.adapters.epub.resources import (
+    ExtractionLimits,
+    check_extraction_limits,
+    package_path,
+)
 from linguary.adapters.epub.support_matrix import (
     DroppedBlockLog,
     DropReason,
@@ -165,13 +169,22 @@ class EbookLibEpubReader(EpubReader):
 
     Читатель не пишет файлы: копии ресурсов на диск сохраняет отдельный шаг импорта,
     здесь фиксируется только сам факт ресурса и ссылка на него из блока `Image`.
+
+    Архив — недоверенный вход, и объём распаковки ограничен теми же `ExtractionLimits`,
+    что и в хранилище ресурсов: читатель поднимает содержимое книги в память, поэтому
+    архив, распаковывающийся в десятки гигабайт, не должен дойти до чтения (PRD § 6).
     """
+
+    def __init__(self, *, limits: ExtractionLimits | None = None) -> None:
+        self._limits = limits or ExtractionLimits()
 
     def read(self, request: EpubReadRequest) -> ImportedBook:
         """Читает книгу целиком; критичная структура даёт `EpubImportFatalError`."""
-        book = _open_epub(request.source_path)
+        book = _open_epub(request.source_path, limits=self._limits)
         warnings: list[BookImportWarning] = []
-        documents = _reading_order(book, request.source_path, warnings)
+        documents = _reading_order(
+            book, request.source_path, warnings, limits=self._limits
+        )
         toc_titles = _toc_titles(book)
         warnings.extend(
             _toc_mismatch_warnings(
@@ -208,8 +221,14 @@ class EbookLibEpubReader(EpubReader):
         )
 
 
-def _open_epub(source_path: str) -> epub.EpubBook:
-    """Открывает контейнер EPUB; нечитаемый файл — `FATAL` (PRD § 6)."""
+def _open_epub(source_path: str, *, limits: ExtractionLimits) -> epub.EpubBook:
+    """Открывает контейнер EPUB; нечитаемый файл — `FATAL` (PRD § 6).
+
+    Пределы распаковки проверяются раньше самого чтения: EbookLib поднимает содержимое
+    манифеста в память целиком, и превышение должно останавливать импорт до первой
+    прочитанной записи архива.
+    """
+    _check_archive_limits(source_path, limits=limits)
     try:
         return epub.read_epub(source_path)
     except (
@@ -224,8 +243,23 @@ def _open_epub(source_path: str) -> epub.EpubBook:
         ) from error
 
 
+def _check_archive_limits(source_path: str, *, limits: ExtractionLimits) -> None:
+    """Сверяет оглавление архива с пределами распаковки, ничего из него не читая."""
+    try:
+        with zipfile.ZipFile(source_path) as archive:
+            check_extraction_limits(archive, source_path=source_path, limits=limits)
+    except (OSError, zipfile.BadZipFile) as error:
+        raise EpubImportFatalError(
+            f"EPUB {source_path} нельзя прочитать: {error}"
+        ) from error
+
+
 def _reading_order(
-    book: epub.EpubBook, source_path: str, warnings: list[BookImportWarning]
+    book: epub.EpubBook,
+    source_path: str,
+    warnings: list[BookImportWarning],
+    *,
+    limits: ExtractionLimits,
 ) -> tuple[_SpineDocument, ...]:
     """Документы порядка чтения; пустой spine — `FATAL` (PRD § 6).
 
@@ -233,7 +267,7 @@ def _reading_order(
     пересобирает XHTML при чтении и теряет часть разметки, а структурный путь блока
     обязан совпадать с исходным документом книги.
     """
-    with _ArchiveContents(source_path) as contents:
+    with _ArchiveContents(source_path, limits=limits) as contents:
         documents = _spine_documents(book, contents, warnings)
     if not documents:
         raise EpubImportFatalError(
@@ -286,17 +320,30 @@ def _spine_documents(
 
 
 class _ArchiveContents:
-    """Доступ к файлам EPUB по пути относительно каталога OPF."""
+    """Доступ к файлам EPUB по пути относительно каталога OPF.
 
-    def __init__(self, source_path: str) -> None:
+    Объём распаковки ограничен: пределы сверяются с оглавлением архива до первого
+    чтения, а прочитанные байты считаются по мере чтения — объявленному размеру записи
+    архив обязать говорить правду нельзя.
+    """
+
+    def __init__(self, source_path: str, *, limits: ExtractionLimits) -> None:
         self._source_path = source_path
+        self._limits = limits
+        self._read_bytes = 0
         try:
             self._archive = zipfile.ZipFile(source_path)
+            check_extraction_limits(
+                self._archive, source_path=source_path, limits=limits
+            )
             self._directory = posixpath.dirname(package_path(self._archive))
         except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError) as error:
             raise EpubImportFatalError(
                 f"EPUB {source_path} нельзя прочитать: {error}"
             ) from error
+        except EpubImportFatalError:
+            self._archive.close()
+            raise
 
     def __enter__(self) -> _ArchiveContents:
         return self
@@ -309,13 +356,34 @@ class _ArchiveContents:
         name = posixpath.normpath(posixpath.join(self._directory, resource_path))
         for candidate in (name, unquote(name)):
             try:
-                return self._archive.read(candidate)
+                return self._read_entry(candidate)
             except KeyError:
                 continue
         raise EpubImportFatalError(
             f"документ {resource_path} объявлен в EPUB {self._source_path}, "
             f"но отсутствует в архиве"
         )
+
+    def _read_entry(self, name: str) -> bytes:
+        """Содержимое записи архива в пределах распаковки; отсутствующая — `KeyError`.
+
+        Документ порядка чтения ограничен отдельно: художественная глава заведомо
+        меньше десятков мегабайт, и запись такого размера читать незачем.
+        """
+        declared = self._archive.getinfo(name).file_size
+        if declared > self._limits.max_document_bytes:
+            raise EpubImportFatalError(
+                f"документ {name} книги {self._source_path} заявлен "
+                f"как {declared} байт при допустимых {self._limits.max_document_bytes}"
+            )
+        payload = self._archive.read(name)
+        self._read_bytes += len(payload)
+        if self._read_bytes > self._limits.max_total_bytes:
+            raise EpubImportFatalError(
+                f"распакованное содержимое EPUB {self._source_path} превышает "
+                f"допустимые {self._limits.max_total_bytes} байт"
+            )
+        return payload
 
 
 def _toc_titles(book: epub.EpubBook) -> Mapping[str, tuple[str, ...]]:
