@@ -111,22 +111,17 @@ class _ResourceArchive:
     """Архив книги: поиск записей по пути ресурса и извлечение их в хранилище."""
 
     def __init__(self, source_path: str, *, limits: ExtractionLimits) -> None:
-        self._source_path = source_path
         self._limits = limits
         try:
             self._archive = zipfile.ZipFile(source_path)
         except (OSError, zipfile.BadZipFile) as error:
-            raise EpubImportFatalError(
-                f"EPUB {source_path} нельзя прочитать: {error}"
-            ) from error
+            raise EpubImportFatalError(unreadable_epub_message(error)) from error
         try:
             self._check_limits()
             self._directory = posixpath.dirname(package_path(self._archive))
         except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError) as error:
             self._archive.close()
-            raise EpubImportFatalError(
-                f"EPUB {source_path} нельзя прочитать: {error}"
-            ) from error
+            raise EpubImportFatalError(unreadable_epub_message(error)) from error
         except EpubImportFatalError:
             self._archive.close()
             raise
@@ -170,8 +165,8 @@ class _ResourceArchive:
             if written > self._limits.max_total_bytes:
                 shutil.rmtree(cleanup, ignore_errors=True)
                 raise EpubImportFatalError(
-                    f"распакованное содержимое EPUB {self._source_path} превышает "
-                    f"допустимые {self._limits.max_total_bytes} байт"
+                    f"Распакованный объём книги превышает допустимые "
+                    f"{format_size(self._limits.max_total_bytes)}"
                 )
             item.target.parent.mkdir(parents=True, exist_ok=True)
             item.target.write_bytes(payload)
@@ -184,8 +179,7 @@ class _ResourceArchive:
         normalized = posixpath.normpath(joined)
         if normalized.startswith(("..", "/")):
             raise EpubImportFatalError(
-                f"ресурс {resource_path} книги {self._source_path} ведёт за пределы "
-                f"архива: {joined!r}"
+                f"ресурс {resource_path} ведёт за пределы архива книги"
             )
         return normalized
 
@@ -195,18 +189,16 @@ class _ResourceArchive:
             return self._archive.read(name)
         except (KeyError, OSError, zipfile.BadZipFile) as error:
             raise EpubImportFatalError(
-                f"ресурс {name} книги {self._source_path} нельзя прочитать: {error}"
+                f"ресурс {name} книги нельзя прочитать: {failure_reason(error)}"
             ) from error
 
     def _check_limits(self) -> None:
         """Проверяет объявленные архивом число файлов и размер распаковки."""
-        check_extraction_limits(
-            self._archive, source_path=self._source_path, limits=self._limits
-        )
+        check_extraction_limits(self._archive, limits=self._limits)
 
 
 def check_extraction_limits(
-    archive: zipfile.ZipFile, *, source_path: str, limits: ExtractionLimits
+    archive: zipfile.ZipFile, *, limits: ExtractionLimits
 ) -> None:
     """Сверяет объявленные архивом число файлов и объём распаковки с пределами.
 
@@ -218,15 +210,44 @@ def check_extraction_limits(
     entries = archive.infolist()
     if len(entries) > limits.max_entries:
         raise EpubImportFatalError(
-            f"EPUB {source_path} содержит {len(entries)} файлов "
-            f"при допустимых {limits.max_entries}"
+            f"Книга содержит {len(entries)} файлов при допустимых {limits.max_entries}"
         )
     declared = sum(entry.file_size for entry in entries)
     if declared > limits.max_total_bytes:
         raise EpubImportFatalError(
-            f"распакованное содержимое EPUB {source_path} заявлено "
-            f"как {declared} байт при допустимых {limits.max_total_bytes}"
+            f"Распакованный объём книги {format_size(declared)} (заявлено в архиве) "
+            f"превышает допустимые {format_size(limits.max_total_bytes)}"
         )
+
+
+def unreadable_epub_message(error: Exception) -> str:
+    """Сообщение о нечитаемом архиве книги для пользователя.
+
+    Сообщение показывается в интерфейсе, поэтому пути к файлу в каталоге данных в нём
+    нет: ошибка файловой системы называет только причину, а полный путь остаётся
+    в цепочке исключений.
+    """
+    return f"EPUB нельзя прочитать: {failure_reason(error)}"
+
+
+def failure_reason(error: Exception) -> str:
+    """Причина сбоя чтения без пути к файлу.
+
+    `OSError` включает в текст имя файла, и это внутренний путь каталога данных; его
+    причина берётся из `strerror`. Остальные ошибки архива путей не содержат.
+    """
+    if isinstance(error, OSError):
+        return error.strerror or type(error).__name__
+    return str(error).strip() or type(error).__name__
+
+
+def format_size(size: int) -> str:
+    """Объём в байтах в привычных пользователю единицах: байты, КБ или МБ."""
+    for unit, name in ((1024 * 1024, "МБ"), (1024, "КБ")):
+        if size >= unit:
+            value = f"{size / unit:.1f}".rstrip("0").rstrip(".").replace(".", ",")
+            return f"{value} {name}"
+    return f"{size} байт"
 
 
 def package_path(archive: zipfile.ZipFile) -> str:
@@ -314,5 +335,8 @@ __all__ = [
     "ExtractionLimits",
     "FilesystemEpubResourceStore",
     "check_extraction_limits",
+    "failure_reason",
+    "format_size",
     "package_path",
+    "unreadable_epub_message",
 ]

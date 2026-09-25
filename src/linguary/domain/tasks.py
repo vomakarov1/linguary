@@ -38,6 +38,7 @@ class ErrorType(StrEnum):
     TRANSIENT = "TransientError"
     MODEL_OUTPUT = "ModelOutputError"
     VALIDATION = "ValidationError"
+    CONFIGURATION = "ConfigurationError"
     PERMANENT = "PermanentError"
 
     @property
@@ -45,9 +46,21 @@ class ErrorType(StrEnum):
         """Можно ли повторить задачу, упавшую с такой ошибкой.
 
         `PermanentError` (нечитаемый EPUB, неподдержанный вход) повтору не подлежит:
-        пользователю предлагается загрузить другой файл.
+        пользователю предлагается загрузить другой файл. `ConfigurationError` (ключ
+        провайдера не принят, модель не найдена) автоматически не повторяется, но
+        пользователь запускает задачу заново, исправив настройки LLM: книга при этом
+        остаётся прежней, и другой файл не нужен.
         """
         return self is not ErrorType.PERMANENT
+
+    @property
+    def is_retried_automatically(self) -> bool:
+        """Имеет ли смысл повторять вызов без вмешательства пользователя.
+
+        Ни постоянная ошибка, ни ошибка настройки от новой попытки не исчезают: первая
+        требует другого файла, вторая — исправленной конфигурации.
+        """
+        return self not in {ErrorType.PERMANENT, ErrorType.CONFIGURATION}
 
 
 @dataclass(frozen=True, slots=True)

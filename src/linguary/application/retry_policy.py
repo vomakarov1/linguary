@@ -213,7 +213,7 @@ class RetryPolicy:
         task_error = classify_error(error)
         if _truncated_by_output_limit(error):
             return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
-        if task_error.type is ErrorType.PERMANENT:
+        if not task_error.type.is_retried_automatically:
             return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
         if attempts >= self._max_attempts:
             return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
@@ -241,9 +241,10 @@ class RetryPolicy:
 #: Отображение исключений в типы ошибок задачи (ALG-05). Порядок значим: наследник
 #: указывается раньше своего базового класса.
 _ERROR_TYPES: tuple[tuple[type[Exception], ErrorType], ...] = (
-    # вызывать нечем или провайдер отверг сам запрос: повтор даст тот же отказ
-    (LLMConfigurationError, ErrorType.PERMANENT),
-    (LLMProviderError, ErrorType.PERMANENT),
+    # вызывать нечем или провайдер отверг сам запрос: автоматический повтор даст тот же
+    # отказ, а после исправления настроек LLM пользователь повторяет задачу сам
+    (LLMConfigurationError, ErrorType.CONFIGURATION),
+    (LLMProviderError, ErrorType.CONFIGURATION),
     # книга непригодна: нужен другой файл, а не другая попытка
     (EpubImportFatalError, ErrorType.PERMANENT),
     (EpubExportFatalError, ErrorType.PERMANENT),

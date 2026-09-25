@@ -176,12 +176,12 @@ def reply_for(block_ids: tuple[str, ...]) -> FakeReply:
         ),
         pytest.param(
             LLMConfigurationError("LLM не настроена"),
-            ErrorType.PERMANENT,
+            ErrorType.CONFIGURATION,
             id="missing-llm-config",
         ),
         pytest.param(
             LLMProviderError("провайдер отверг запрос"),
-            ErrorType.PERMANENT,
+            ErrorType.CONFIGURATION,
             id="provider-rejected-request",
         ),
         pytest.param(
@@ -216,6 +216,29 @@ def test_permanent_error_is_not_retried_on_the_first_attempt() -> None:
     assert decision.action is RetryAction.GIVE_UP
     assert not decision.should_retry
     assert decision.error.type is ErrorType.PERMANENT
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(LLMConfigurationError("ключ не принят: 401"), id="rejected-key"),
+        pytest.param(LLMProviderError("модель не найдена: 404"), id="unknown-model"),
+    ],
+)
+def test_configuration_error_is_not_retried_but_stays_retryable_by_user(
+    error: Exception,
+) -> None:
+    """Ошибка настройки LLM не повторяется сама, но задачу можно повторить (QA-01).
+
+    Новая попытка с тем же ключом получит тот же отказ, поэтому политика её не делает.
+    Книга же пригодна: после исправления настроек пользователь повторяет задачу, и
+    другой файл для этого не нужен.
+    """
+    decision = policy().decide(error, attempts=1)
+
+    assert decision.action is RetryAction.GIVE_UP
+    assert decision.error.type is ErrorType.CONFIGURATION
+    assert decision.error.type.is_retryable
 
 
 def test_exhausted_attempts_stop_retrying_a_retryable_error() -> None:

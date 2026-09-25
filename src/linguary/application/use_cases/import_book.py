@@ -9,11 +9,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.epub import (
+    EpubImportFatalError,
     EpubReader,
     EpubReadRequest,
     EpubResourceStore,
@@ -25,7 +26,10 @@ from linguary.domain import (
     BookImportWarning,
     BookStatus,
     CanonicalDocument,
+    ErrorType,
+    TaskType,
     apply_book_event,
+    status_after_task_failure,
 )
 
 
@@ -69,17 +73,27 @@ class ImportBook:
         self._clock = clock or _utc_now
 
     def __call__(self, command: ImportBookCommand) -> ImportBookResult:
-        """Читает EPUB и сохраняет книгу целиком."""
-        imported = self._reader.read(
-            EpubReadRequest(
-                book_id=command.book_id,
-                source_path=command.source_epub_path,
-                target_language=command.target_language,
-                source_language=command.source_language,
+        """Читает EPUB и сохраняет книгу целиком.
+
+        Книга, которую импортировать нельзя (`EpubImportFatalError`), переходит в `FAILED`:
+        повтор той же задачи ничего не изменит, и карточка должна показать итог, а не
+        бесконечный импорт (ALG-06). Ошибка после этого поднимается дальше — задачу
+        неуспешной делает runner.
+        """
+        try:
+            imported = self._reader.read(
+                EpubReadRequest(
+                    book_id=command.book_id,
+                    source_path=command.source_epub_path,
+                    target_language=command.target_language,
+                    source_language=command.source_language,
+                )
             )
-        )
-        document = imported.document
-        stored_resource_paths = self._store_resources(command, document)
+            document = imported.document
+            stored_resource_paths = self._store_resources(command, document)
+        except EpubImportFatalError:
+            self._mark_failed(command.book_id)
+            raise
         with self._unit_of_work.transaction() as transaction:
             existing = transaction.books.get(command.book_id)
             record = BookRecord(
@@ -108,6 +122,23 @@ class ImportBook:
         return ImportBookResult(
             book=record, document=document, warnings=imported.warnings
         )
+
+    def _mark_failed(self, book_id: str) -> None:
+        """Переводит импортируемую книгу в `FAILED` после постоянной ошибки импорта."""
+        with self._unit_of_work.transaction() as transaction:
+            book = transaction.books.get(book_id)
+            if book is None or book.status is not BookStatus.IMPORTING:
+                return
+            transaction.books.save(
+                replace(
+                    book,
+                    status=status_after_task_failure(
+                        book.status,
+                        task_type=TaskType.IMPORT_BOOK,
+                        error_type=ErrorType.PERMANENT,
+                    ),
+                )
+            )
 
     def _store_resources(
         self, command: ImportBookCommand, document: CanonicalDocument

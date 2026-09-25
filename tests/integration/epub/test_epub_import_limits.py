@@ -82,6 +82,39 @@ def test_compressed_bomb_is_rejected_before_it_is_read(tmp_path: Path) -> None:
         _read(source, ExtractionLimits(max_total_bytes=1024 * 1024))
 
 
+def test_limit_rejection_names_sizes_and_hides_the_file_path(tmp_path: Path) -> None:
+    """Сообщение о пределе понятно пользователю и не раскрывает путь к файлу (QA-02).
+
+    Текст показывается в карточке книги, а файл лежит в каталоге данных приложения:
+    вместо пути и байтов пользователь видит объём книги и предел в мегабайтах.
+    """
+    source = build_epub(
+        tmp_path / "bomb.epub",
+        documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
+        extra_files={"bomb.bin": b"\0" * BOMB_BYTES},
+        compression=zipfile.ZIP_DEFLATED,
+    )
+
+    with pytest.raises(EpubImportFatalError) as error:
+        _read(source, ExtractionLimits(max_total_bytes=1024 * 1024))
+
+    message = str(error.value)
+    assert message.startswith("Распакованный объём книги 32 МБ")
+    assert message.endswith("превышает допустимые 1 МБ")
+    assert str(tmp_path) not in message
+
+
+def test_missing_file_rejection_hides_the_file_path(tmp_path: Path) -> None:
+    """Ошибка файловой системы называет причину, а не путь в каталоге данных (QA-02)."""
+    missing = tmp_path / "books" / "book-1" / "source.epub"
+
+    with pytest.raises(EpubImportFatalError) as error:
+        _read(missing, ExtractionLimits())
+
+    assert str(error.value).startswith("EPUB нельзя прочитать")
+    assert str(tmp_path) not in str(error.value)
+
+
 def test_spine_document_over_its_limit_is_rejected(tmp_path: Path) -> None:
     """Документ порядка чтения крупнее своего предела отвергается отдельно."""
     source = build_epub(

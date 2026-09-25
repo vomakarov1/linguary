@@ -23,7 +23,11 @@
 <section class="panel">
   <h2>Обработка</h2>
   {% if data.book.status == "IMPORTING" %}
-    <p>Файл принят. Импорт выполняется в фоне, страница обновится автоматически.</p>
+    {% if stalled %}
+      <p>Импорт остановлен ошибкой. Повторите задачу импорта.</p>
+    {% else %}
+      <p>Файл принят. Импорт выполняется в фоне, страница обновится автоматически.</p>
+    {% endif %}
   {% elif data.book.status == "IMPORTED" %}
     <p>Импорт завершён. Следующий шаг — анализ глав через LLM.</p>
     {% if llm_ready %}
@@ -38,7 +42,11 @@
       </div>
     {% endif %}
   {% elif data.book.status == "ANALYZING" %}
-    <p>Анализ глав выполняется в фоне, страница обновится автоматически.</p>
+    {% if stalled %}
+      <p>Анализ остановлен ошибкой. Устраните причину и повторите задачу: анализ продолжится с той же главы.</p>
+    {% else %}
+      <p>Анализ глав выполняется в фоне, страница обновится автоматически.</p>
+    {% endif %}
   {% elif data.book.status == "GLOSSARY_REVIEW" %}
     <p>Анализ завершён. Проверьте глоссарий перед запуском обработки.</p>
     <a class="button-link" href="/books/{{ data.book.id }}/glossary">Открыть глоссарий</a>
@@ -48,11 +56,18 @@
       <button type="submit">Начать обработку</button>
     </form>
   {% elif data.book.status == "PROCESSING" %}
-    <p>Обработка выполняется в фоне, страница обновится автоматически.</p>
+    {% if stalled %}
+      <p>Обработка остановлена ошибкой. Устраните причину и повторите неуспешные задачи.</p>
+    {% else %}
+      <p>Обработка выполняется в фоне, страница обновится автоматически.</p>
+    {% endif %}
   {% elif data.book.status == "READY_TO_EXPORT" %}
     <p>Обработка завершена. Книга готова к сборке EPUB.</p>
   {% elif data.book.status == "COMPLETED" %}
     <p>Итоговый EPUB собран.</p>
+  {% elif data.book.status == "FAILED" %}
+    <p>Импорт не удался: книгу из этого файла обработать нельзя. Причина указана ниже.</p>
+    <a class="button-link" href="/books">Загрузить другой файл</a>
   {% endif %}
   {% if data.progress.current_chapter %}
     <p>Сейчас: глава {{ data.progress.current_chapter }} - {{ data.progress.current_chapter_title }}</p>
@@ -65,10 +80,24 @@
   {% if data.progress.failures %}
     <h3>Ошибки</h3>
     {% for failure in data.progress.failures %}
-      <form class="failure" method="post" action="/tasks/{{ failure.task_id }}/retry">
-        <span>{{ failure.task_type_label }}: {{ failure.message }}</span>
-        <button type="submit" {% if not failure.is_retryable %}disabled{% endif %}>Повторить</button>
-      </form>
+      {% if failure.is_retryable %}
+        <form class="failure" method="post" action="/tasks/{{ failure.task_id }}/retry">
+          <span>{{ failure.task_type_label }}: {{ failure.message }}</span>
+          {% if failure.error_type == "ConfigurationError" %}
+            <span>{{ failure.error_type_label }}. <a href="/system/config">Открыть конфигурацию</a></span>
+          {% endif %}
+          <button type="submit">Повторить</button>
+        </form>
+      {% else %}
+        <div class="failure">
+          <span>{{ failure.task_type_label }}: {{ failure.message }}</span>
+          {% if failure.task_type == "import_book" %}
+            <span>Повтор не поможет. <a href="/books">Загрузить другой файл</a></span>
+          {% else %}
+            <span>{{ failure.error_type_label }}.</span>
+          {% endif %}
+        </div>
+      {% endif %}
     {% endfor %}
   {% endif %}
 </section>

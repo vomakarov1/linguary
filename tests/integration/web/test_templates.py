@@ -215,7 +215,7 @@ def test_glossary_screen_hides_actions_for_decided_items(
 
     assert response.status_code == 200
     assert "Требуют решения: 0" in response.text
-    assert "Решение принято" in response.text
+    assert "Решение: принято." in response.text
     assert "Принять все требующие решения" not in response.text
     assert 'name="action"' not in response.text
     assert 'name="text"' not in response.text
@@ -461,3 +461,81 @@ def test_system_config_screen_explains_how_to_enable_epubcheck(
     assert response.status_code == 200
     assert "Внешняя проверка EPUBCheck необязательна" in response.text
     assert "~/.linguary/epubcheck" in response.text
+
+
+@pytest.mark.parametrize(
+    ("decision", "translation", "label"),
+    [
+        pytest.param(GlossaryDecision.ACCEPT, None, "принято", id="accept"),
+        pytest.param(
+            GlossaryDecision.CORRECT, "господин Беннет", "исправлено", id="correct"
+        ),
+        pytest.param(GlossaryDecision.LOCK, None, "зафиксировано", id="lock"),
+        pytest.param(GlossaryDecision.SKIP, None, "пропущено", id="skip"),
+    ],
+)
+def test_glossary_screen_names_the_decision_in_russian(
+    client: TestClient,
+    application: Application,
+    decision: GlossaryDecision,
+    translation: str | None,
+    label: str,
+) -> None:
+    """Решение по элементу подписано по-русски, а не статусом `approved` (QA-06)."""
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+    application.approve_glossary(
+        GlossaryDecisionCommand(
+            book_id=scenario.book_id,
+            source_text=candidate.source_text,
+            concept_id=candidate.id,
+            decision=decision,
+            translation=translation,
+        )
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert f"Решение: {label}." in response.text
+    for status in ("approved", "locked", "suggested"):
+        assert status not in response.text
+
+
+def test_glossary_screen_shows_model_confidence(
+    client: TestClient, application: Application
+) -> None:
+    """Уверенность модели видна у каждого элемента глоссария (QA-14)."""
+    candidate = glossary_candidate(confidence=0.62, model_flagged_review=True)
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert "Уверенность модели: 62%" in response.text
+    assert "модель просит проверить вариант" in response.text
+
+
+def test_plan_screen_explains_what_a_complete_plan_means(
+    client: TestClient, application: Application
+) -> None:
+    """Полнота плана подписана понятно и с пояснением, а не одним словом (QA-14)."""
+    scenario = store_book(application)
+
+    response = client.get(f"/books/{scenario.book_id}/plan", headers=HTML_HEADERS)
+
+    assert "План полный" in response.text
+    assert "Все главы проанализированы" in response.text
+    assert ">Полный<" not in response.text
+
+
+def test_plan_screen_explains_what_an_incomplete_plan_means(
+    client: TestClient, application: Application
+) -> None:
+    """Неполный план объясняет, чего в нём не хватает (QA-14)."""
+    scenario = store_book(
+        application, chapters=(("First.",), ("Second.",)), analysed_chapters=(0,)
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/plan", headers=HTML_HEADERS)
+
+    assert "План неполный" in response.text
+    assert "ещё не проанализирована" in response.text

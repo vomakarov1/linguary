@@ -34,8 +34,9 @@
       <div>
         <h2>{{ item.source_text }}</h2>
         <p>{{ item.suggested_translation }}{% if item.translation %} -> {{ item.translation }}{% endif %}</p>
+        <p class="task-state">Уверенность модели: {{ (item.confidence * 100) | round | int }}%{% if item.model_flagged_review %}; модель просит проверить вариант{% endif %}.</p>
         {% if item.is_decided %}
-          <p class="task-state">Решение принято: {{ item.status }}.</p>
+          <p class="task-state">Решение: {{ item.status_label }}.</p>
         {% elif not item.requires_review %}
           <p class="task-state">Не требует решения.</p>
         {% endif %}

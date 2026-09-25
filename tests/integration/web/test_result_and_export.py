@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from urllib.parse import quote
+
+import pytest
 
 from fastapi.testclient import TestClient
 from web_scenario import (
@@ -18,6 +21,7 @@ from web_scenario import (
 
 from linguary.application.ports.persistence import ExportValidationStatus
 from linguary.composition import Application, drain_tasks
+from linguary.web.routes.export import download_filename
 from linguary.domain import (
     BlockTreatment,
     BookStatus,
@@ -282,6 +286,33 @@ def test_fragment_regeneration_returns_the_updated_result_block(
     assert "<!doctype html>" not in response.text
 
 
+def test_regenerating_block_shows_progress_right_after_refresh_is_requested(
+    client: TestClient, application: Application
+) -> None:
+    """Сразу после «Обновить» блок показывает, что перегенерация идёт (QA-14).
+
+    Блок помечен занятым, кнопка неактивна и называет происходящее, а не остаётся
+    обычным «Обновить», по которому легко нажать ещё раз.
+    """
+    scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
+    block_ids = scenario.block_ids()
+    start_run(
+        application,
+        scenario,
+        results=tuple(translated_result(block_id) for block_id in block_ids),
+    )
+
+    response = client.post(
+        f"/books/{scenario.book_id}/blocks/{block_ids[0]}/regenerate",
+        headers={"accept": "text/html", "x-linguary-fragment": "result-block"},
+    )
+
+    assert 'aria-busy="true"' in response.text
+    assert "<button type=\"submit\" disabled>Обновляется</button>" in response.text
+    assert "Блок обновится автоматически" in response.text
+    assert 'class="spinner"' in response.text
+
+
 def test_fragment_result_block_polling_returns_the_current_block(
     client: TestClient, application: Application
 ) -> None:
@@ -454,3 +485,43 @@ def test_unknown_book_download_returns_404(client: TestClient) -> None:
     response = client.get("/books/unknown/download")
 
     assert response.status_code == 404
+
+
+async def test_download_is_named_after_the_book_and_target_language(
+    client: TestClient, application: Application
+) -> None:
+    """Скачанная книга называется по названию и целевому языку, а не `translated.epub`."""
+    scenario = store_book(
+        application, status=BookStatus.READY_TO_EXPORT, title="The Keeper's Light"
+    )
+    start_run(
+        application,
+        scenario,
+        results=tuple(
+            translated_result(block_id) for block_id in scenario.block_ids()
+        ),
+    )
+    client.post(f"/books/{scenario.book_id}/export")
+    await drain_tasks(application)
+
+    download = client.get(f"/books/{scenario.book_id}/download")
+
+    assert download.status_code == 200
+    disposition = download.headers["content-disposition"]
+    expected = quote("The Keeper's Light (ru).epub")
+    assert f"filename*=utf-8''{expected}" in disposition
+    assert "translated.epub" not in disposition
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        pytest.param("The Keeper's Light", "The Keeper's Light (ru).epub", id="plain"),
+        pytest.param("../../etc/passwd", "etc passwd (ru).epub", id="path-like"),
+        pytest.param('A: "B"?\n', "A B (ru).epub", id="reserved-characters"),
+        pytest.param(" ... ", "book (ru).epub", id="nothing-left"),
+    ],
+)
+def test_download_filename_is_safe_for_the_file_system(title: str, expected: str) -> None:
+    """Название из метаданных EPUB не выводит имя файла за пределы одного имени."""
+    assert download_filename(title, "ru") == expected

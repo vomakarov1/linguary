@@ -25,8 +25,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request, Response, status
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from linguary.adapters.config import ServerSettings
 from linguary.application.book_overview import (
@@ -63,7 +69,7 @@ from linguary.web.dependencies import APPLICATION_STATE_ATTRIBUTE
 from linguary.web.routes import books, export, glossary, processing, result, system
 from linguary.web.schemas import ErrorResponse
 from linguary.web.uploads import UploadRejectedError
-from linguary.web.views import STATIC_DIRECTORY
+from linguary.web.views import STATIC_DIRECTORY, render_error, wants_html
 
 #: Название приложения в документации API.
 TITLE = "Linguary"
@@ -165,11 +171,12 @@ def _register_request_guard(app: FastAPI) -> None:
         return await call_next(request)
 
 
-def _request_rejection(request: Request) -> JSONResponse | None:
+def _request_rejection(request: Request) -> Response | None:
     """Ответ, которым запрос отклоняется, либо `None`, если он принимается."""
     server = _server_settings(request)
     if not _host_allowed(request.headers.get("host", ""), server):
         return _rejection(
+            request,
             status.HTTP_400_BAD_REQUEST,
             f"приложение отвечает только по адресу {server.base_url}",
         )
@@ -177,6 +184,7 @@ def _request_rejection(request: Request) -> JSONResponse | None:
         return None
     if not _origin_allowed(request):
         return _rejection(
+            request,
             status.HTTP_403_FORBIDDEN,
             "запрос отклонён: действие принимается только со страницы приложения",
         )
@@ -227,11 +235,9 @@ def _request_origin(request: Request) -> str:
     return f"{request.url.scheme}://{host}"
 
 
-def _rejection(code: int, detail: str) -> JSONResponse:
+def _rejection(request: Request, code: int, detail: str) -> Response:
     """Отказ проверки происхождения в том же виде, что и отказы сценариев."""
-    return JSONResponse(
-        status_code=code, content=ErrorResponse(detail=detail).model_dump()
-    )
+    return _error_response(request, code, detail)
 
 
 def _register_root_route(app: FastAPI) -> None:
@@ -275,27 +281,66 @@ def _register_error_handlers(app: FastAPI) -> None:
     Обработчиков два, по одному на базовый класс: прикладные ошибки и нарушения доменных
     инвариантов. Конкретный код выбирается по таблице, поэтому новый endpoint получает
     её поведение, ничего не регистрируя.
+
+    Вид ответа выбирает клиент: браузер, отправивший форму, получает страницу ошибки
+    со ссылкой назад, а клиент JSON — прежний `{"detail": ...}`. Так же обрабатываются
+    неверно заполненная форма (`422`) и неизвестный адрес (`404`) — иначе браузер
+    показал бы пользователю сырой JSON.
     """
 
     @app.exception_handler(ApplicationError)
     async def handle_application_error(
         request: Request, error: ApplicationError
-    ) -> JSONResponse:
-        return _error_response(error)
+    ) -> Response:
+        return _error_response(request, _status_for(error), str(error))
 
     @app.exception_handler(DomainError)
-    async def handle_domain_error(
-        request: Request, error: DomainError
-    ) -> JSONResponse:
-        return _error_response(error)
+    async def handle_domain_error(request: Request, error: DomainError) -> Response:
+        return _error_response(request, _status_for(error), str(error))
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(
+        request: Request, error: RequestValidationError
+    ) -> Response:
+        if not wants_html(request):
+            return await request_validation_exception_handler(request, error)
+        return render_error(
+            request,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            messages=_validation_messages(error),
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def handle_http_error(
+        request: Request, error: StarletteHTTPException
+    ) -> Response:
+        if not wants_html(request):
+            return await http_exception_handler(request, error)
+        return render_error(
+            request, status_code=error.status_code, messages=(str(error.detail),)
+        )
 
 
-def _error_response(error: Exception) -> JSONResponse:
-    """Ответ на отказ сценария: код по типу ошибки и её текст для пользователя."""
+def _error_response(request: Request, code: int, detail: str) -> Response:
+    """Отказ с кодом и текстом для пользователя: страница для браузера, иначе JSON."""
+    if wants_html(request):
+        return render_error(request, status_code=code, messages=(detail,))
     return JSONResponse(
-        status_code=_status_for(error),
-        content=ErrorResponse(detail=str(error)).model_dump(),
+        status_code=code, content=ErrorResponse(detail=detail).model_dump()
     )
+
+
+def _validation_messages(error: RequestValidationError) -> tuple[str, ...]:
+    """Понятные пользователю причины, по которым форма не принята."""
+    messages: list[str] = []
+    for issue in error.errors():
+        field = str(issue.get("loc", ("",))[-1])
+        if issue.get("type") == "missing":
+            messages.append(f"Не заполнено поле «{field}»")
+            continue
+        message = str(issue.get("msg", "")).removeprefix("Value error, ").strip()
+        messages.append(message or f"Неверное значение поля «{field}»")
+    return tuple(messages) or ("Форма заполнена неверно",)
 
 
 def _status_for(error: Exception) -> int:

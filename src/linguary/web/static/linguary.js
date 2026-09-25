@@ -213,3 +213,11 @@ function pollResultHeader(attempt = 1) {
     }
   }, 1500);
 }
+
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll("[data-result-block]").forEach((block) => {
+    if (block instanceof HTMLElement) {
+      pollResultBlock(block);
+    }
+  });
+});

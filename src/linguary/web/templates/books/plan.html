@@ -6,12 +6,17 @@
     <h1>План обработки</h1>
     {% if data %}
       <p>{{ data.analyzed_sections }}/{{ data.total_sections }} глав проанализировано.</p>
+      <p>{% if data.is_complete %}{{ plan_complete_hint }}{% else %}{{ plan_incomplete_hint }}{% endif %}</p>
     {% else %}
       <p>План появится после анализа книги.</p>
     {% endif %}
   </div>
   {% if data %}
-    {% if data.is_complete %}<span class="status ok">Полный</span>{% else %}<span class="status">Неполный</span>{% endif %}
+    {% if data.is_complete %}
+      <span class="status ok" title="{{ plan_complete_hint }}">{{ plan_complete_label }}</span>
+    {% else %}
+      <span class="status" title="{{ plan_incomplete_hint }}">{{ plan_incomplete_label }}</span>
+    {% endif %}
   {% else %}
     <span class="status">Ожидает анализа</span>
   {% endif %}

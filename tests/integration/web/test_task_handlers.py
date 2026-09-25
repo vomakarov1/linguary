@@ -8,11 +8,23 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
+from conftest import FIXTURE_DIRECTORY
 from web_scenario import store_book
 
 from linguary.composition import Application, drain_tasks
-from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus, TaskType
+from linguary.domain import (
+    BookStatus,
+    ProcessingTask,
+    TaskIdentity,
+    TaskStatus,
+    TaskType,
+)
+
+#: Книга набора фикстур, путь к которой задаётся только в записи книги.
+SYNTHETIC_BOOK = FIXTURE_DIRECTORY / "synthetic_story.epub"
 
 #: Область задачи, которой в книге нет: сценарий обязан объяснить это по-своему,
 #: а не сообщить, что обработчика такого типа в приложении не собрано.
@@ -99,11 +111,18 @@ async def test_import_task_uses_the_path_from_the_book_record(
     Runner знает о задаче только идемпотентный ключ, поэтому команду сценария строит
     состав зависимостей — иначе импортировать было бы нечего.
     """
-    scenario = store_book(application)
+    scenario = store_book(application, status=BookStatus.IMPORTING)
+    with application.unit_of_work.transaction() as uow:
+        book = uow.books.get(scenario.book_id)
+        assert book is not None
+        uow.books.save(replace(book, source_epub_path=str(SYNTHETIC_BOOK)))
     await application.task_queue.enqueue(
         TaskIdentity(book_id=scenario.book_id, task_type=TaskType.IMPORT_BOOK)
     )
 
     finished = await drain_tasks(application)
 
-    assert f"/library/{scenario.book_id}.epub" in error_message(finished[0])
+    assert [task.status for task in finished] == [TaskStatus.SUCCEEDED]
+    with application.unit_of_work.transaction() as uow:
+        imported = uow.books.get(scenario.book_id)
+    assert imported is not None and imported.status is BookStatus.IMPORTED

@@ -35,7 +35,9 @@ from linguary.adapters.epub.inline import (
 from linguary.adapters.epub.resources import (
     ExtractionLimits,
     check_extraction_limits,
+    format_size,
     package_path,
+    unreadable_epub_message,
 )
 from linguary.adapters.epub.support_matrix import (
     DroppedBlockLog,
@@ -247,20 +249,16 @@ def _open_epub(source_path: str, *, limits: ExtractionLimits) -> epub.EpubBook:
         etree.XMLSyntaxError,
         zipfile.BadZipFile,
     ) as error:
-        raise EpubImportFatalError(
-            f"EPUB {source_path} нельзя прочитать: {error}"
-        ) from error
+        raise EpubImportFatalError(unreadable_epub_message(error)) from error
 
 
 def _check_archive_limits(source_path: str, *, limits: ExtractionLimits) -> None:
     """Сверяет оглавление архива с пределами распаковки, ничего из него не читая."""
     try:
         with zipfile.ZipFile(source_path) as archive:
-            check_extraction_limits(archive, source_path=source_path, limits=limits)
+            check_extraction_limits(archive, limits=limits)
     except (OSError, zipfile.BadZipFile) as error:
-        raise EpubImportFatalError(
-            f"EPUB {source_path} нельзя прочитать: {error}"
-        ) from error
+        raise EpubImportFatalError(unreadable_epub_message(error)) from error
 
 
 def _reading_order(
@@ -337,25 +335,18 @@ class _ArchiveContents:
     """
 
     def __init__(self, source_path: str, *, limits: ExtractionLimits) -> None:
-        self._source_path = source_path
         self._limits = limits
         self._read_bytes = 0
         try:
             self._archive = zipfile.ZipFile(source_path)
         except (OSError, zipfile.BadZipFile) as error:
-            raise EpubImportFatalError(
-                f"EPUB {source_path} нельзя прочитать: {error}"
-            ) from error
+            raise EpubImportFatalError(unreadable_epub_message(error)) from error
         try:
-            check_extraction_limits(
-                self._archive, source_path=source_path, limits=limits
-            )
+            check_extraction_limits(self._archive, limits=limits)
             self._directory = posixpath.dirname(package_path(self._archive))
         except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError) as error:
             self._archive.close()
-            raise EpubImportFatalError(
-                f"EPUB {source_path} нельзя прочитать: {error}"
-            ) from error
+            raise EpubImportFatalError(unreadable_epub_message(error)) from error
         except EpubImportFatalError:
             self._archive.close()
             raise
@@ -375,8 +366,7 @@ class _ArchiveContents:
             except KeyError:
                 continue
         raise EpubImportFatalError(
-            f"документ {resource_path} объявлен в EPUB {self._source_path}, "
-            f"но отсутствует в архиве"
+            f"документ {resource_path} объявлен в книге, но отсутствует в архиве"
         )
 
     def _read_entry(self, name: str) -> bytes:
@@ -388,15 +378,15 @@ class _ArchiveContents:
         declared = self._archive.getinfo(name).file_size
         if declared > self._limits.max_document_bytes:
             raise EpubImportFatalError(
-                f"документ {name} книги {self._source_path} заявлен "
-                f"как {declared} байт при допустимых {self._limits.max_document_bytes}"
+                f"документ {name} заявлен как {format_size(declared)} при допустимых "
+                f"{format_size(self._limits.max_document_bytes)}"
             )
         payload = self._archive.read(name)
         self._read_bytes += len(payload)
         if self._read_bytes > self._limits.max_total_bytes:
             raise EpubImportFatalError(
-                f"распакованное содержимое EPUB {self._source_path} превышает "
-                f"допустимые {self._limits.max_total_bytes} байт"
+                f"Распакованный объём книги превышает допустимые "
+                f"{format_size(self._limits.max_total_bytes)}"
             )
         return payload
 

@@ -61,6 +61,7 @@ from linguary.domain import (
     GlossaryCandidate,
     ProcessingTask,
     TaskIdentity,
+    TaskStatus,
     TaskType,
     TokenUsage,
     LLMCallStage,
@@ -377,9 +378,18 @@ class ChapterAnalysisSequence:
         Возвращает `None`, если анализировать больше нечего: книга без глав или уже
         полностью проанализированная. Повторный запуск после перезапуска приложения
         продолжает с первой непроанализированной главы.
+
+        Если анализ этой главы уже падал с ошибкой, которую имеет смысл повторить
+        (например, провайдер не принял ключ, а пользователь его исправил), повторный
+        запуск возвращает её задачу в очередь: иначе книга осталась бы в `ANALYZING`
+        без единой задачи в работе. Задача с постоянной ошибкой остаётся как есть.
         """
         self._begin_analysis(book_id)
-        return await self._enqueue_next(book_id)
+        task = await self._enqueue_next(book_id)
+        if task is not None and task.status is TaskStatus.FAILED and task.is_retryable:
+            task = task.retry()
+            await self._queue.save(task)
+        return task
 
     async def run_task(self, task: ProcessingTask) -> None:
         """Обработчик задачи `ANALYZE_CHAPTER` для локального runner-а (ALG-02).

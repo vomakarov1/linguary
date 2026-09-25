@@ -17,7 +17,13 @@ from analysis_fakes import (
 )
 
 from linguary.adapters.llm import FakeLLMClient
-from linguary.application.ports.llm import LLMClient, LLMPayload, LLMRequest, LLMResponse
+from linguary.application.ports.llm import (
+    LLMClient,
+    LLMConfigurationError,
+    LLMPayload,
+    LLMRequest,
+    LLMResponse,
+)
 from linguary.application.task_runner import TaskRunner
 from linguary.application.use_cases.analyze_chapter import (
     AnalyzeChapterError,
@@ -26,7 +32,10 @@ from linguary.application.use_cases.analyze_chapter import (
 from linguary.domain import (
     BookStatus,
     BookStatusTransitionError,
+    ErrorType,
     ProcessingTask,
+    TaskError,
+    TaskStatus,
     TaskType,
 )
 
@@ -203,3 +212,60 @@ async def test_unknown_book_cannot_start_analysis() -> None:
 
     with pytest.raises(AnalyzeChapterError):
         await sequence.start("unknown-book")
+
+
+async def test_repeated_start_retries_analysis_stopped_by_llm_configuration() -> None:
+    """Анализ, упавший на ключе провайдера, продолжается повторным запуском (QA-01).
+
+    Первая глава падает с `LLMConfigurationError`: остальные главы в очередь не ставятся,
+    и книга остаётся в `ANALYZING`. Пользователь исправляет ключ и снова запускает анализ —
+    та же задача возвращается в очередь, и книга доходит до проверки глоссария без
+    повторной загрузки файла.
+    """
+    unit_of_work = make_book()
+    queue = FakeTaskQueue()
+    client = FakeLLMClient(
+        replies=(LLMConfigurationError("провайдер не принял ключ: 401"),),
+        default=analysis_reply(aliases=("b1",)),
+    )
+    sequence = make_sequence(unit_of_work, queue, client)
+    runner = TaskRunner(
+        queue=queue,  # type: ignore[arg-type]  # двойник порта очереди
+        handlers={TaskType.ANALYZE_CHAPTER: sequence.run_task},
+    )
+    first = await sequence.start(BOOK_ID)
+    failed = await runner.run_next()
+    assert first is not None and failed is not None
+    assert failed.status is TaskStatus.FAILED
+    assert failed.is_retryable
+
+    restarted = await sequence.start(BOOK_ID)
+    await drain(runner, queue)
+
+    assert restarted is not None
+    assert restarted.id == first.id
+    assert restarted.status is TaskStatus.PENDING
+    assert unit_of_work.analyses.saved_section_ids == [
+        f"section-{number}" for number in range(1, CHAPTER_COUNT + 1)
+    ]
+    stored = unit_of_work.books.get(BOOK_ID)
+    assert stored is not None and stored.status is BookStatus.GLOSSARY_REVIEW
+
+
+async def test_repeated_start_keeps_a_permanently_failed_analysis_task() -> None:
+    """Повторный запуск не возвращает в очередь задачу с постоянной ошибкой."""
+    unit_of_work = make_book()
+    queue = FakeTaskQueue()
+    sequence = make_sequence(
+        unit_of_work, queue, FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    )
+    first = await sequence.start(BOOK_ID)
+    assert first is not None
+    permanent = first.start().fail(
+        TaskError(type=ErrorType.PERMANENT, message="обработчик не зарегистрирован")
+    )
+    await queue.save(permanent)
+
+    again = await sequence.start(BOOK_ID)
+
+    assert again == permanent

@@ -1,8 +1,13 @@
-<article class="result-block" id="block-{{ block.block_id|replace(':', '-')|replace('/', '-') }}" data-result-block>
+{% set regenerating = block.regeneration_task and block.regeneration_task.status in ("pending", "running") %}
+<article class="result-block" id="block-{{ block.block_id|replace(':', '-')|replace('/', '-') }}" data-result-block{% if regenerating %} aria-busy="true"{% endif %}>
   <header>
     <span>{{ block.treatment_label or block.block_type }}</span>
     <form method="post" action="/books/{{ book_id }}/blocks/{{ block.block_id }}/regenerate" data-regenerate-form>
-      <button type="submit">Обновить</button>
+      {% if regenerating %}
+        <button type="submit" disabled>Обновляется</button>
+      {% else %}
+        <button type="submit">Обновить</button>
+      {% endif %}
     </form>
   </header>
   <p class="source">{{ block.original_text }}</p>
@@ -17,7 +22,9 @@
   {% for note in block.language_notes %}
     <aside class="note">{{ note.original_excerpt }} — {{ note.note }}</aside>
   {% endfor %}
-  {% if block.regeneration_task %}
-    <p class="task-state" role="status" {% if block.regeneration_task.status in ("pending", "running") %}data-active-task="true"{% endif %}>Задача: {{ block.regeneration_task.task_type_label }} / {{ block.regeneration_task.status_label }}</p>
+  {% if regenerating %}
+    <p class="task-state" role="status" data-active-task="true"><span class="spinner" aria-hidden="true"></span>{{ block.regeneration_task.task_type_label }}: {{ block.regeneration_task.status_label }}. Блок обновится автоматически.</p>
+  {% elif block.regeneration_task %}
+    <p class="task-state" role="status">Задача: {{ block.regeneration_task.task_type_label }} / {{ block.regeneration_task.status_label }}</p>
   {% endif %}
 </article>

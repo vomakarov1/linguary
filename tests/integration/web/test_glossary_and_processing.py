@@ -38,6 +38,7 @@ def test_glossary_review_exposes_pending_items(
                 "suggested_translation": "мистер Беннет",
                 "translation": None,
                 "status": None,
+                "status_label": None,
                 "confidence": 0.95,
                 "model_flagged_review": False,
                 "has_translation_conflict": False,
@@ -50,14 +51,25 @@ def test_glossary_review_exposes_pending_items(
 
 
 @pytest.mark.parametrize(
-    ("action", "text", "expected_translation", "expected_status"),
+    ("action", "text", "expected_translation", "expected_status", "expected_label"),
     [
-        pytest.param("accept", None, "мистер Беннет", "approved", id="accept"),
         pytest.param(
-            "correct", "господин Беннет", "господин Беннет", "approved", id="correct"
+            "accept", None, "мистер Беннет", "approved", "принято", id="accept"
         ),
-        pytest.param("lock", None, "мистер Беннет", "locked", id="lock"),
-        pytest.param("skip", None, "мистер Беннет", "suggested", id="skip"),
+        pytest.param(
+            "correct",
+            "господин Беннет",
+            "господин Беннет",
+            "approved",
+            "исправлено",
+            id="correct",
+        ),
+        pytest.param(
+            "lock", None, "мистер Беннет", "locked", "зафиксировано", id="lock"
+        ),
+        pytest.param(
+            "skip", None, "мистер Беннет", "suggested", "пропущено", id="skip"
+        ),
     ],
 )
 def test_glossary_decision_returns_updated_item(
@@ -67,6 +79,7 @@ def test_glossary_decision_returns_updated_item(
     text: str | None,
     expected_translation: str,
     expected_status: str,
+    expected_label: str,
 ) -> None:
     """Каждое действие сохраняет решение и возвращает обновлённый элемент."""
     candidate = glossary_candidate()
@@ -84,6 +97,7 @@ def test_glossary_decision_returns_updated_item(
     assert response.json()["concept_id"] == candidate.id
     assert response.json()["translation"] == expected_translation
     assert response.json()["status"] == expected_status
+    assert response.json()["status_label"] == expected_label
     assert response.json()["is_decided"] is True
     with application.unit_of_work.transaction() as uow:
         assert uow.books.get(scenario.book_id).status is BookStatus.READY_TO_PROCESS

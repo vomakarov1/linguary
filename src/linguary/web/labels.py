@@ -21,6 +21,7 @@ from linguary.domain import (
     ResultWarningKind,
     TaskStatus,
     TaskType,
+    TermStatus,
 )
 
 #: Предупреждение о передаче текста книги внешнему провайдеру (PRD § 4.1, § 21.6).
@@ -49,6 +50,20 @@ NON_LOCAL_SERVER_WARNING = (
     "Приложение доступно не только с этой машины. Оно хранит ключ провайдера и полный "
     "текст книг, поэтому открывать его в сеть стоит только осознанно."
 )
+
+#: Заголовки страницы ошибки для браузера по коду ответа (API-01). Страница показывается
+#: вместо сырого JSON, когда форма отправлена из браузера.
+ERROR_PAGE_TITLES: Mapping[int, str] = {
+    400: "Запрос не принят",
+    403: "Действие запрещено",
+    404: "Не найдено",
+    405: "Действие недоступно",
+    409: "Действие сейчас недоступно",
+    422: "Форма заполнена неверно",
+}
+
+#: Заголовок страницы ошибки, код которой в таблице не описан.
+DEFAULT_ERROR_PAGE_TITLE = "Не удалось выполнить действие"
 
 BOOK_STATUS_LABELS: Mapping[BookStatus, str] = {
     BookStatus.IMPORTING: "Импортируется",
@@ -92,8 +107,35 @@ ERROR_TYPE_LABELS: Mapping[ErrorType, str] = {
     ErrorType.TRANSIENT: "Временный сбой — попробуйте повторить",
     ErrorType.MODEL_OUTPUT: "Модель вернула негодный ответ",
     ErrorType.VALIDATION: "Результат не прошёл проверку",
+    ErrorType.CONFIGURATION: (
+        "Провайдер LLM не принял настройки — проверьте ключ и модель, затем повторите"
+    ),
     ErrorType.PERMANENT: "Ошибка, которую повтор не исправит",
 }
+
+#: Решение пользователя по элементу глоссария (PRD § 12). Исправление хранится тем же
+#: статусом `approved`, что и принятие, и отличается только текстом варианта, поэтому
+#: для него подпись своя.
+GLOSSARY_DECISION_LABELS: Mapping[TermStatus, str] = {
+    TermStatus.APPROVED: "принято",
+    TermStatus.LOCKED: "зафиксировано",
+    TermStatus.SUGGESTED: "пропущено",
+}
+
+#: Подпись исправленного пользователем варианта перевода.
+GLOSSARY_CORRECTED_LABEL = "исправлено"
+
+#: Полнота плана обработки книги на экране плана (PRD § 14): короткая подпись
+#: и пояснение, что она означает.
+PLAN_COMPLETE_LABEL = "План полный"
+PLAN_COMPLETE_HINT = (
+    "Все главы проанализированы, и у каждого текстового блока есть режим обработки."
+)
+PLAN_INCOMPLETE_LABEL = "План неполный"
+PLAN_INCOMPLETE_HINT = (
+    "Часть глав ещё не проанализирована или не у всех текстовых блоков есть режим "
+    "обработки."
+)
 
 IMPORT_WARNING_LABELS: Mapping[ImportWarningKind, str] = {
     ImportWarningKind.DROPPED_BLOCK: "Фрагмент книги пропущен",
@@ -112,6 +154,11 @@ EXPORT_VALIDATION_STATUS_LABELS: Mapping[ExportValidationStatus, str] = {
     ExportValidationStatus.PASSED: "EPUBCheck пройден",
     ExportValidationStatus.FAILED: "EPUBCheck нашёл ошибки",
 }
+
+
+def error_page_title(status_code: int) -> str:
+    """Заголовок страницы ошибки для кода ответа."""
+    return ERROR_PAGE_TITLES.get(status_code, DEFAULT_ERROR_PAGE_TITLE)
 
 
 def book_status_label(status: BookStatus) -> str:
@@ -139,6 +186,15 @@ def error_type_label(error_type: ErrorType) -> str:
     return ERROR_TYPE_LABELS[error_type]
 
 
+def glossary_decision_label(
+    status: TermStatus, *, translation: str | None, suggested_translation: str
+) -> str:
+    """Решение по элементу глоссария по-русски: принято, исправлено и так далее."""
+    if status is TermStatus.APPROVED and translation not in (None, suggested_translation):
+        return GLOSSARY_CORRECTED_LABEL
+    return GLOSSARY_DECISION_LABELS[status]
+
+
 def import_warning_label(kind: ImportWarningKind) -> str:
     """Название вида предупреждения импорта."""
     return IMPORT_WARNING_LABELS[kind]
@@ -156,20 +212,30 @@ def export_validation_status_label(status: ExportValidationStatus) -> str:
 
 __all__ = [
     "BOOK_STATUS_LABELS",
+    "DEFAULT_ERROR_PAGE_TITLE",
     "EPUBCHECK_HINT",
+    "ERROR_PAGE_TITLES",
     "ERROR_TYPE_LABELS",
     "EXPORT_VALIDATION_STATUS_LABELS",
     "EXTERNAL_LLM_WARNING",
+    "GLOSSARY_CORRECTED_LABEL",
+    "GLOSSARY_DECISION_LABELS",
     "IMPORT_WARNING_LABELS",
     "LLM_NOT_CONFIGURED_HINT",
     "NON_LOCAL_SERVER_WARNING",
+    "PLAN_COMPLETE_HINT",
+    "PLAN_COMPLETE_LABEL",
+    "PLAN_INCOMPLETE_HINT",
+    "PLAN_INCOMPLETE_LABEL",
     "RESULT_WARNING_LABELS",
     "TASK_STATUS_LABELS",
     "TASK_TYPE_LABELS",
     "TREATMENT_LABELS",
     "book_status_label",
+    "error_page_title",
     "error_type_label",
     "export_validation_status_label",
+    "glossary_decision_label",
     "import_warning_label",
     "result_warning_label",
     "task_status_label",

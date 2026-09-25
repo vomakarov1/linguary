@@ -122,6 +122,7 @@ def get_book(
             page="detail",
             data=response,
             auto_refresh=_needs_refresh(response),
+            stalled=_is_stalled(response),
             llm_ready=application.settings.llm.is_ready,
             llm_hint=labels.LLM_NOT_CONFIGURED_HINT,
         )
@@ -143,7 +144,15 @@ def get_book_plan(
                 request, "books/plan.html", page="plan", data=None, book_id=book_id
             )
         return render(
-            request, "books/plan.html", page="plan", data=response, book_id=book_id
+            request,
+            "books/plan.html",
+            page="plan",
+            data=response,
+            book_id=book_id,
+            plan_complete_label=labels.PLAN_COMPLETE_LABEL,
+            plan_complete_hint=labels.PLAN_COMPLETE_HINT,
+            plan_incomplete_label=labels.PLAN_INCOMPLETE_LABEL,
+            plan_incomplete_hint=labels.PLAN_INCOMPLETE_HINT,
         )
     response = ProcessingPlanResponse.of_plan(
         processing_plan(application.unit_of_work, book_id)
@@ -174,7 +183,23 @@ __all__ = ["router"]
 
 
 def _needs_refresh(response: BookDetailResponse) -> bool:
-    """Нужно ли периодически перечитывать карточку книги."""
-    return response.book.status in {"IMPORTING", "ANALYZING", "PROCESSING"} or (
-        response.progress.pending_tasks + response.progress.running_tasks > 0
+    """Нужно ли периодически перечитывать карточку книги.
+
+    Книга, работа над которой остановлена ошибкой, сама не продвинется: страница
+    с ошибкой не перечитывается, чтобы пользователь успел её прочесть.
+    """
+    if _has_active_tasks(response):
+        return True
+    return response.book.status in {"IMPORTING", "ANALYZING", "PROCESSING"} and not (
+        _is_stalled(response)
     )
+
+
+def _is_stalled(response: BookDetailResponse) -> bool:
+    """Остановлена ли работа над книгой: задач в работе нет, а неуспешные есть."""
+    return bool(response.progress.failures) and not _has_active_tasks(response)
+
+
+def _has_active_tasks(response: BookDetailResponse) -> bool:
+    """Есть ли у книги задачи в очереди или в работе."""
+    return response.progress.pending_tasks + response.progress.running_tasks > 0

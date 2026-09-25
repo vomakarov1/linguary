@@ -99,6 +99,7 @@ class GlossaryItemResponse(BaseModel):
     suggested_translation: str
     translation: str | None = None
     status: str | None = None
+    status_label: str | None = None
     confidence: float
     model_flagged_review: bool
     has_translation_conflict: bool
@@ -111,13 +112,23 @@ class GlossaryItemResponse(BaseModel):
         """Собирает элемент вместе с текущим решением пользователя."""
         decision = item.decision
         variant = decision.variants[0] if decision and decision.variants else None
+        translation = variant.text if variant is not None else None
         return cls(
             concept_id=item.concept_id,
             source_text=item.source_text,
             type=item.type.value,
             suggested_translation=item.suggested_translation,
-            translation=variant.text if variant is not None else None,
+            translation=translation,
             status=decision.status.value if decision is not None else None,
+            status_label=(
+                labels.glossary_decision_label(
+                    decision.status,
+                    translation=translation,
+                    suggested_translation=item.suggested_translation,
+                )
+                if decision is not None
+                else None
+            ),
             confidence=item.confidence,
             model_flagged_review=item.model_flagged_review,
             has_translation_conflict=item.has_translation_conflict,
