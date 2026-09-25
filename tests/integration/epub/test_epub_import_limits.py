@@ -9,13 +9,16 @@
 from __future__ import annotations
 
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 from epub_builder import build_epub, xhtml_document
 
 from linguary.adapters.epub import EbookLibEpubReader, ExtractionLimits
+from linguary.adapters.epub.reader import _ArchiveContents
+from linguary.adapters.epub.resources import _ResourceArchive
 from linguary.application.ports.epub import (
     EpubImportFatalError,
     EpubReadRequest,
@@ -26,6 +29,13 @@ ReadFixture = Callable[..., ImportedBook]
 
 #: Сколько байт объявляет запись-бомба: на диске она занимает единицы килобайт.
 BOMB_BYTES = 32 * 1024 * 1024
+
+#: Контейнер, в котором не объявлен файл пакета OPF.
+CONTAINER_WITHOUT_ROOTFILE = (
+    b'<?xml version="1.0" encoding="UTF-8"?>\n'
+    b'<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" '
+    b'version="1.0"><rootfiles/></container>\n'
+)
 
 
 def test_archive_declaring_more_than_the_limit_is_rejected(tmp_path: Path) -> None:
@@ -109,6 +119,70 @@ def test_book_of_the_fixture_set_is_imported_with_default_limits(
     document = read_fixture("synthetic_story").document
 
     assert len(document.ordered_sections) == 3
+
+
+@pytest.mark.parametrize(
+    "archive_class",
+    [
+        pytest.param(_ArchiveContents, id="reading-order"),
+        pytest.param(_ResourceArchive, id="resources"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("build_options", "limits"),
+    [
+        pytest.param(
+            {"include_container": False}, ExtractionLimits(), id="no-container"
+        ),
+        pytest.param(
+            {
+                "include_container": False,
+                "archive_files": {"META-INF/container.xml": b"<container"},
+            },
+            ExtractionLimits(),
+            id="broken-container",
+        ),
+        pytest.param(
+            {
+                "include_container": False,
+                "archive_files": {
+                    "META-INF/container.xml": CONTAINER_WITHOUT_ROOTFILE
+                },
+            },
+            ExtractionLimits(),
+            id="no-rootfile",
+        ),
+        pytest.param({}, ExtractionLimits(max_entries=1), id="over-limit"),
+    ],
+)
+def test_rejected_archive_is_closed(
+    archive_class: Callable[..., Any],
+    build_options: Mapping[str, Any],
+    limits: ExtractionLimits,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Архив, отвергнутый при открытии, закрывается сразу, а не ждёт сборки мусора."""
+    source = build_epub(
+        tmp_path / "rejected.epub",
+        documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
+        **build_options,
+    )
+    opened: list[zipfile.ZipFile] = []
+    open_archive = zipfile.ZipFile
+
+    def recording_zip_file(*args: Any, **kwargs: Any) -> zipfile.ZipFile:
+        archive = open_archive(*args, **kwargs)
+        opened.append(archive)
+        return archive
+
+    monkeypatch.setattr(zipfile, "ZipFile", recording_zip_file)
+
+    with pytest.raises(EpubImportFatalError):
+        archive_class(str(source), limits=limits)
+
+    assert len(opened) == 1
+    assert opened[0].fp is None
 
 
 def _read(source: Path, limits: ExtractionLimits) -> ImportedBook:

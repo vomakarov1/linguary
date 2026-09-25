@@ -18,7 +18,8 @@ from conftest import FIXTURE_DIRECTORY
 from fastapi.testclient import TestClient
 from web_scenario import store_book
 
-from linguary.composition import Application
+from linguary.adapters.runtime import ExecutorLock
+from linguary.composition import Application, drain_tasks, run_worker
 from linguary.domain import BookStatus, ProcessingTask, TaskStatus, TaskType
 from linguary.web import create_app
 
@@ -36,6 +37,29 @@ def working_client(application: Application) -> Iterator[TestClient]:
     app = create_app(application=application, run_background_worker=True)
     with TestClient(app, base_url=application.settings.server.base_url) as client:
         yield client
+
+
+def store_running_task(application: Application) -> str:
+    """Задача `running`, какой её оставляет исполнитель посреди работы."""
+    scenario = store_book(application, analysed_chapters=())
+    with application.unit_of_work.transaction() as uow:
+        uow.tasks.add(
+            ProcessingTask(
+                id="task-running",
+                book_id=scenario.book_id,
+                task_type=TaskType.ANALYZE_CHAPTER,
+                scope_id=scenario.section(0).id,
+            ).start()
+        )
+    return "task-running"
+
+
+def task_status(application: Application, task_id: str) -> TaskStatus:
+    """Текущее состояние задачи в базе."""
+    with application.unit_of_work.transaction() as uow:
+        task = uow.tasks.get(task_id)
+    assert task is not None
+    return task.status
 
 
 def wait_until[T](probe: Callable[[], T | None]) -> T:
@@ -103,3 +127,65 @@ def test_interrupted_task_is_recovered_on_startup(
     assert task.last_error is not None
     assert task.last_error.detail == "Interrupted"
     assert task.is_retryable
+
+
+async def test_worker_started_next_to_another_executor_keeps_its_running_task(
+    application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Задачу живого исполнителя второй исполнитель прерванной не объявляет.
+
+    Иначе пользователь повторил бы её, пока она ещё выполняется, и тот же фрагмент
+    ушёл бы в модель дважды.
+    """
+    task_id = store_running_task(application)
+    other = ExecutorLock(application.paths.executor_lock)
+    other.join()
+    other.share()
+
+    async def stop_at_once() -> None:
+        return None
+
+    monkeypatch.setattr(application.worker_pool, "run_forever", stop_at_once)
+    try:
+        await run_worker(application)
+    finally:
+        other.leave()
+
+    assert task_status(application, task_id) is TaskStatus.RUNNING
+
+
+async def test_worker_releases_its_mark_when_it_stops(
+    application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Остановленный воркер больше не считается живым исполнителем."""
+
+    async def stop_at_once() -> None:
+        return None
+
+    monkeypatch.setattr(application.worker_pool, "run_forever", stop_at_once)
+    await run_worker(application)
+
+    following = ExecutorLock(application.paths.executor_lock)
+    try:
+        assert following.join() is True
+    finally:
+        following.leave()
+
+
+async def test_draining_marks_itself_as_a_working_executor(
+    application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пока идёт разовая прогонка, стартующий рядом исполнитель видит её живой."""
+    observed: list[bool] = []
+
+    async def probe_while_draining() -> tuple[ProcessingTask, ...]:
+        probe = ExecutorLock(application.paths.executor_lock)
+        observed.append(probe.join())
+        probe.leave()
+        return ()
+
+    monkeypatch.setattr(application.worker_pool, "drain", probe_while_draining)
+
+    await drain_tasks(application)
+
+    assert observed == [False]

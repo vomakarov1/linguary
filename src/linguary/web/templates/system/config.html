@@ -17,10 +17,22 @@
 </section>
 
 <section class="panel">
+  <h2>Внешний провайдер LLM</h2>
+  <p class="notice">{{ data.external_llm_warning }}</p>
+  {% if data.llm.hint %}<p>{{ data.llm.hint }}</p>{% endif %}
+</section>
+
+<section class="panel">
   <h2>Хранилище</h2>
   <p>{{ data.storage.data_root }}</p>
-  {% if data.llm.warning %}<p>{{ data.llm.warning }}</p>{% endif %}
   {% if data.server.warning %}<p>{{ data.server.warning }}</p>{% endif %}
-  {% if data.epubcheck.reason %}<p>{{ data.epubcheck.reason }}</p>{% endif %}
 </section>
+
+{% if not data.epubcheck.available %}
+<section class="panel">
+  <h2>Проверка EPUB</h2>
+  {% if data.epubcheck.reason %}<p>{{ data.epubcheck.reason }}</p>{% endif %}
+  {% if data.epubcheck.hint %}<p>{{ data.epubcheck.hint }}</p>{% endif %}
+</section>
+{% endif %}
 {% endblock %}

@@ -10,6 +10,7 @@
 
 <section class="panel">
   <h2>Новая книга</h2>
+  <p class="notice">{{ external_llm_warning }}</p>
   <form class="upload-form" action="/books/upload" method="post" enctype="multipart/form-data">
     <label>EPUB <input type="file" name="file" accept=".epub" required></label>
     <label>Исходный язык <input name="source_language" value="en" required></label>

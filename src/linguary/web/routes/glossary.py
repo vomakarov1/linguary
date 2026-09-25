@@ -9,7 +9,6 @@ from fastapi.responses import RedirectResponse
 
 from linguary.application.glossary_review import GlossaryNotFoundError
 from linguary.application.use_cases.approve_glossary import (
-    GlossaryDecision,
     GlossaryDecisionCommand,
     GlossaryNoteCommand,
 )
@@ -48,17 +47,7 @@ def accept_all_required_items(
     request: Request, application: CurrentApplication, book_id: str
 ) -> GlossaryReviewResponse | RedirectResponse:
     """Принимает предложенные переводы для всех обязательных нерешённых элементов."""
-    review = application.approve_glossary.review(book_id)
-    for item in review.awaiting_decision:
-        application.approve_glossary(
-            GlossaryDecisionCommand(
-                book_id=book_id,
-                source_text=item.source_text,
-                concept_id=item.concept_id,
-                decision=GlossaryDecision.ACCEPT,
-            )
-        )
-    application.approve_glossary.complete_if_ready(book_id)
+    application.approve_glossary.accept_all_awaiting(book_id)
     if wants_html(request):
         return RedirectResponse(
             url=f"/books/{book_id}/glossary", status_code=303

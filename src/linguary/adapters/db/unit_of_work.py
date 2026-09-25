@@ -25,9 +25,6 @@ from itertools import count
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-#: Счётчик экземпляров: имя `ContextVar` служит только диагностике.
-_INSTANCES = count(1)
-
 from linguary.adapters.db.engine import create_session_factory
 from linguary.adapters.db.repositories import (
     SqlAlchemyBlockResultRepository,
@@ -40,6 +37,9 @@ from linguary.adapters.db.repositories import (
     SqlAlchemyTaskRepository,
 )
 from linguary.application.ports.persistence import PersistenceError
+
+#: Счётчик экземпляров: имя `ContextVar` служит только диагностике.
+_INSTANCES = count(1)
 
 
 class SqlAlchemyUnitOfWork:

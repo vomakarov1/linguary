@@ -212,7 +212,7 @@ def book_overview(unit_of_work: UnitOfWork, book_id: str) -> BookOverview:
         tasks = transaction.tasks.list_for_book(book_id)
         run = transaction.runs.active_for_book(book_id)
         processed_blocks = (
-            len(transaction.results.list_for_run(run.id)) if run is not None else 0
+            transaction.results.count_for_run(run.id) if run is not None else 0
         )
         warning_count = len(transaction.documents.import_warnings(book_id))
     return BookOverview(
@@ -265,29 +265,22 @@ def book_warnings(unit_of_work: UnitOfWork, book_id: str) -> BookWarnings:
         document = transaction.documents.get(book_id)
         run = transaction.runs.active_for_book(book_id)
         results = transaction.results.list_for_run(run.id) if run is not None else ()
-    sections_by_block = _sections_by_block(document)
-    numbers = _chapter_numbers(document)
-    return BookWarnings(
-        import_warnings=import_warnings,
-        result_warnings=tuple(
-            ResultWarningEntry(
-                warning=warning,
-                block_id=result.block_id,
-                section_id=sections_by_block.get(result.block_id),
-                chapter_number=numbers.get(sections_by_block.get(result.block_id, "")),
-            )
-            for result in results
-            for warning in result.warnings
-        ),
+    return _warnings_of(
+        document=document, import_warnings=import_warnings, results=results
     )
 
 
 def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
-    """Результат обработки по блокам в постоянном порядке исходного документа."""
+    """Результат обработки по блокам в постоянном порядке исходного документа.
+
+    Документ, план и результаты читаются один раз в одной транзакции: предупреждения
+    книги собираются из тех же данных, а не отдельным вторым чтением.
+    """
     with unit_of_work.transaction() as transaction:
         book = _book(transaction, book_id)
         document = transaction.documents.get(book_id)
         analyses = transaction.analyses.list_for_book(book_id)
+        import_warnings = transaction.documents.import_warnings(book_id)
         run = transaction.runs.active_for_book(book_id)
         stored_results = (
             transaction.results.list_for_run(run.id) if run is not None else ()
@@ -322,21 +315,90 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
     return BookResultSummary(
         book=book,
         chapters=chapters,
-        warnings=book_warnings(unit_of_work, book_id),
+        warnings=_warnings_of(
+            document=document,
+            import_warnings=import_warnings,
+            results=stored_results,
+        ),
     )
 
 
 def result_block(
     unit_of_work: UnitOfWork, book_id: str, block_id: str
 ) -> ResultBlockSummary:
-    """Один блок результата для HTMX-фрагмента или JSON-ответа перегенерации."""
-    result = book_result(unit_of_work, book_id)
-    for chapter in result.chapters:
-        for block in chapter.blocks:
-            if block.block.id == block_id:
-                return block
-    raise ResultBlockNotFoundError(
-        f"блока {block_id} нет в книге {book_id}"
+    """Один блок результата для HTMX-фрагмента или JSON-ответа перегенерации.
+
+    Читается только запрошенный блок: фрагмент опрашивается раз в полторы-две секунды
+    до конца перегенерации, и собирать ради него результат всей книги нельзя.
+    """
+    with unit_of_work.transaction() as transaction:
+        _book(transaction, book_id)
+        document = transaction.documents.get(book_id)
+        located = _locate_block(document, block_id)
+        if located is None:
+            raise ResultBlockNotFoundError(f"блока {block_id} нет в книге {book_id}")
+        chapter_number, section_id, block = located
+        analysis = transaction.analyses.get_for_section(book_id, section_id)
+        run = transaction.runs.active_for_book(book_id)
+        result = transaction.results.get(run.id, block_id) if run is not None else None
+    return ResultBlockSummary(
+        block=block,
+        chapter_number=chapter_number,
+        treatment=_planned_treatment(analysis, block_id),
+        result=result,
+    )
+
+
+def _warnings_of(
+    *,
+    document: CanonicalDocument | None,
+    import_warnings: Sequence[BookImportWarning],
+    results: Sequence[BlockProcessingResult],
+) -> BookWarnings:
+    """Предупреждения книги по уже прочитанным документу и результатам обработки."""
+    sections_by_block = _sections_by_block(document)
+    numbers = _chapter_numbers(document)
+    return BookWarnings(
+        import_warnings=tuple(import_warnings),
+        result_warnings=tuple(
+            ResultWarningEntry(
+                warning=warning,
+                block_id=result.block_id,
+                section_id=sections_by_block.get(result.block_id),
+                chapter_number=numbers.get(sections_by_block.get(result.block_id, "")),
+            )
+            for result in results
+            for warning in result.warnings
+        ),
+    )
+
+
+def _locate_block(
+    document: CanonicalDocument | None, block_id: str
+) -> tuple[int, str, DocumentBlock] | None:
+    """Блок книги вместе с номером и идентификатором его главы."""
+    if document is None:
+        return None
+    for number, section in enumerate(document.ordered_sections, start=1):
+        for block in section.ordered_blocks:
+            if block.id == block_id:
+                return number, section.id, block
+    return None
+
+
+def _planned_treatment(
+    analysis: ChapterAnalysis | None, block_id: str
+) -> BlockTreatment | None:
+    """Режим обработки блока из плана его главы либо `None`, если плана ещё нет."""
+    if analysis is None:
+        return None
+    return next(
+        (
+            item.treatment
+            for item in analysis.treatment_plan.items
+            if item.block_id == block_id
+        ),
+        None,
     )
 
 

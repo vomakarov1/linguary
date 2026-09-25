@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
+import uvicorn
+
+from linguary.adapters.config import CONFIG_PATH_VARIABLE
 from linguary.cli import main
 
 FIXTURE_DIRECTORY = Path(__file__).resolve().parents[2] / "fixtures" / "epub"
@@ -103,8 +108,38 @@ def test_analyze_without_llm_configuration_fails_before_queueing(
     assert "LLM не настроена" in captured.err
 
 
+def test_serve_starts_the_web_ui_on_the_configured_address(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`serve` слушает адрес из секции `[server]`, а не зашитый в команду запуска.
+
+    Файл настроек уходит в окружение: фабрика создаёт приложение уже внутри сервера
+    и аргументов командной строки не видит.
+    """
+    config = _config(tmp_path, server_host="0.0.0.0", server_port=9100)
+    started: dict[str, object] = {}
+    monkeypatch.setenv(CONFIG_PATH_VARIABLE, "")
+    monkeypatch.setattr(
+        uvicorn, "run", lambda target, **options: started.update(options, target=target)
+    )
+
+    exit_code = main(["--config", str(config), "serve"])
+
+    assert exit_code == 0
+    assert started["target"] == "linguary.web.app:create_app"
+    assert started["factory"] is True
+    assert started["host"] == "0.0.0.0"
+    assert started["port"] == 9100
+    assert os.environ[CONFIG_PATH_VARIABLE] == str(config)
+
+
 def _config(
-    tmp_path: Path, *, llm_model: str = "", api_key: str | None = None
+    tmp_path: Path,
+    *,
+    llm_model: str = "",
+    api_key: str | None = None,
+    server_host: str | None = None,
+    server_port: int | None = None,
 ) -> Path:
     """Пишет изолированный конфиг CLI-теста."""
     lines = [
@@ -116,6 +151,12 @@ def _config(
     ]
     if api_key is not None:
         lines.append(f"api_key = {api_key!r}")
+    if server_host is not None or server_port is not None:
+        lines.extend(("", "[server]"))
+    if server_host is not None:
+        lines.append(f"host = {server_host!r}")
+    if server_port is not None:
+        lines.append(f"port = {server_port}")
     path = tmp_path / "config.toml"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path

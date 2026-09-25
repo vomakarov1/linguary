@@ -38,6 +38,7 @@ from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.resources import package_path
 from linguary.application.ports.epub import (
     EpubExportFatalError,
+    EpubImportFatalError,
     EpubWriteRequest,
     EpubWriter,
     ExportedBook,
@@ -615,8 +616,18 @@ class _OpaqueSource:
             return
         try:
             archive = zipfile.ZipFile(source_path)
+        except (OSError, zipfile.BadZipFile):
+            return
+        try:
             self._directory = posixpath.dirname(package_path(archive))
-        except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError):
+        except (
+            OSError,
+            KeyError,
+            zipfile.BadZipFile,
+            etree.XMLSyntaxError,
+            EpubImportFatalError,
+        ):
+            archive.close()
             return
         self._archive = archive
 
@@ -1741,6 +1752,7 @@ def _media_type(href: str) -> str:
 _MEDIA_TYPES: Mapping[str, str] = {
     ".xhtml": "application/xhtml+xml",
     ".html": "application/xhtml+xml",
+    ".htm": "application/xhtml+xml",
     ".css": "text/css",
     ".png": "image/png",
     ".jpg": "image/jpeg",

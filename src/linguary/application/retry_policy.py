@@ -203,10 +203,16 @@ class RetryPolicy:
 
         `attempts` — сколько попыток уже сделано, включая эту. Счётчик ведёт цикл вызова:
         `ProcessingTask.attempts` считает запуски задачи, а не обращения к модели.
+
+        Обрыв ответа по лимиту вывода — единственная ошибка модели, которую политика
+        не повторяет: тот же запрос упирается в тот же предел (`ports/llm.py`), и каждая
+        оставшаяся попытка была бы оплаченным вызовом с заранее известным итогом.
         """
         if attempts < 1:
             raise RetryPolicyError("попытка вызова модели нумеруется с единицы")
         task_error = classify_error(error)
+        if _truncated_by_output_limit(error):
+            return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
         if task_error.type is ErrorType.PERMANENT:
             return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
         if attempts >= self._max_attempts:
@@ -302,6 +308,16 @@ def _block_lines(expectation: ResultExpectation) -> list[str]:
         else f"- {block.block_id}: режим обработки {block.treatment}"
         for block in expectation.blocks
     ]
+
+
+def _truncated_by_output_limit(error: Exception) -> bool:
+    """Оборван ли ответ пределом вывода модели, а не самой моделью по смыслу.
+
+    Признак приходит от провайдера и попадает в `LLMResponseFormatError.truncated`.
+    Лечится он другим лимитом вывода или меньшим запросом, поэтому повтор — того же
+    запроса или с уточняющей инструкцией — здесь смысла не имеет.
+    """
+    return isinstance(error, LLMResponseFormatError) and error.truncated
 
 
 def _expectation_of(error: Exception) -> ResultExpectation | None:

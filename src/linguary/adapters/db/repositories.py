@@ -10,10 +10,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from linguary.adapters.db import mapping
@@ -363,7 +363,12 @@ class SqlAlchemyBlockResultRepository:
         )
 
     def list_for_run(self, run_id: str) -> tuple[BlockProcessingResult, ...]:
-        """Все результаты запуска в порядке блоков исходного документа."""
+        """Все результаты запуска в порядке блоков исходного документа.
+
+        Заметки и замечания читаются двумя запросами на весь запуск и раскладываются
+        по блокам в памяти: запрос на каждый результат превращал бы чтение книги
+        в тысячи обращений к базе.
+        """
         rows = self._session.scalars(
             select(BlockResultRow)
             .join(DocumentBlockRow, DocumentBlockRow.id == BlockResultRow.block_id)
@@ -371,13 +376,30 @@ class SqlAlchemyBlockResultRepository:
             .where(BlockResultRow.run_id == run_id)
             .order_by(SectionRow.order, DocumentBlockRow.order)
         ).all()
+        notes = _by_block(self._run_notes(run_id))
+        warnings = _by_block(self._run_warnings(run_id))
         return tuple(
             mapping.to_block_result(
                 row,
-                self._notes(run_id, row.block_id),
-                self._warnings(run_id, row.block_id),
+                notes.get(row.block_id, ()),
+                warnings.get(row.block_id, ()),
             )
             for row in rows
+        )
+
+    def count_for_run(self, run_id: str) -> int:
+        """Сколько блоков запуска уже обработано.
+
+        Карточка книги обновляется опросом и берёт из результатов только их число,
+        поэтому счёт выполняется базой, а не сборкой доменных результатов.
+        """
+        return (
+            self._session.scalar(
+                select(func.count())
+                .select_from(BlockResultRow)
+                .where(BlockResultRow.run_id == run_id)
+            )
+            or 0
         )
 
     def _notes(self, run_id: str, block_id: str) -> Sequence[LanguageNoteRow]:
@@ -395,6 +417,22 @@ class SqlAlchemyBlockResultRepository:
             .where(
                 ResultWarningRow.run_id == run_id, ResultWarningRow.block_id == block_id
             )
+            .order_by(ResultWarningRow.id)
+        ).all()
+
+    def _run_notes(self, run_id: str) -> Sequence[LanguageNoteRow]:
+        """Заметки всех блоков запуска в том же порядке, что и заметки одного блока."""
+        return self._session.scalars(
+            select(LanguageNoteRow)
+            .where(LanguageNoteRow.run_id == run_id)
+            .order_by(LanguageNoteRow.id)
+        ).all()
+
+    def _run_warnings(self, run_id: str) -> Sequence[ResultWarningRow]:
+        """Замечания ко всем блокам запуска в том же порядке, что и замечания блока."""
+        return self._session.scalars(
+            select(ResultWarningRow)
+            .where(ResultWarningRow.run_id == run_id)
             .order_by(ResultWarningRow.id)
         ).all()
 
@@ -480,6 +518,16 @@ class SqlAlchemyLLMCallLogRepository:
             .order_by(LLMCallLogRow.started_at, LLMCallLogRow.id)
         ).all()
         return tuple(mapping.to_llm_call(row) for row in rows)
+
+
+def _by_block[RowT: (LanguageNoteRow, ResultWarningRow)](
+    rows: Iterable[RowT],
+) -> Mapping[str, Sequence[RowT]]:
+    """Строки, разложенные по блокам с сохранением исходного порядка."""
+    grouped: dict[str, list[RowT]] = {}
+    for row in rows:
+        grouped.setdefault(row.block_id, []).append(row)
+    return grouped
 
 
 __all__ = [

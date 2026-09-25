@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from fastapi.testclient import TestClient
 from web_scenario import (
+    SOURCE_TEXT,
     failed_task,
     hinted_result,
     repetition_warning,
@@ -76,6 +77,50 @@ def test_result_exposes_blocks_warnings_and_epubcheck_status(
     assert blocks[0]["warnings"][0]["kind"] == "repetition"
     assert blocks[1]["translated_text"] is None
     assert blocks[1]["glossary_hints"][0]["original"] == "truth"
+
+
+def test_result_block_keeps_its_chapter_number_and_planned_treatment(
+    client: TestClient, application: Application
+) -> None:
+    """Отдельный блок читается со своим номером главы, режимом и сохранённым результатом."""
+    scenario = store_book(
+        application,
+        status=BookStatus.COMPLETED,
+        chapters=((SOURCE_TEXT, SOURCE_TEXT), (SOURCE_TEXT,)),
+        treatments={1: (BlockTreatment.GLOSSARY_ONLY,)},
+    )
+    block_id = scenario.block_ids(1)[0]
+    start_run(application, scenario, results=(hinted_result(block_id),))
+
+    response = client.get(f"/books/{scenario.book_id}/blocks/{block_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["block_id"] == block_id
+    assert body["section_id"] == scenario.section(1).id
+    assert body["chapter_number"] == 2
+    assert body["treatment"] == BlockTreatment.GLOSSARY_ONLY.value
+    assert body["translated_text"] is None
+    assert body["glossary_hints"][0]["original"] == "truth"
+
+
+def test_result_block_without_stored_result_shows_only_its_plan(
+    client: TestClient, application: Application
+) -> None:
+    """Ещё не обработанный блок отдаётся с режимом из плана и без результата."""
+    scenario = store_book(application, status=BookStatus.PROCESSING)
+    block_id = scenario.block_ids()[0]
+    start_run(application, scenario)
+
+    response = client.get(f"/books/{scenario.book_id}/blocks/{block_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["treatment"] == BlockTreatment.TRANSLATE.value
+    assert body["original_text"] == SOURCE_TEXT
+    assert body["translated_text"] is None
+    assert body["language_notes"] == []
+    assert body["warnings"] == []
 
 
 def test_unknown_book_result_returns_404(client: TestClient) -> None:

@@ -59,12 +59,20 @@ async def start_processing(
 
 @router.post("/reset", response_model=ResetProcessingResponse)
 def reset_processing(
+    http_request: Request,
     application: CurrentApplication,
     book_id: str,
     request: Annotated[ResetProcessingRequest, Form()],
-) -> ResetProcessingResponse:
-    """Удаляет результаты только после явного подтверждения пользователя."""
+) -> ResetProcessingResponse | RedirectResponse:
+    """Удаляет результаты только после явного подтверждения пользователя.
+
+    Браузер возвращается на экран глоссария: ради него сброс и выполняется.
+    """
     result = application.reset_processing(ResetProcessingCommand(book_id=book_id))
+    if wants_html(http_request):
+        return RedirectResponse(
+            url=f"/books/{book_id}/glossary", status_code=status.HTTP_303_SEE_OTHER
+        )
     return ResetProcessingResponse.of_result(result)
 
 

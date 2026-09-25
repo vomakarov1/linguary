@@ -35,6 +35,7 @@ from linguary.adapters.epub import (
 )
 from linguary.adapters.llm import LoggingLLMClient
 from linguary.adapters.runtime import (
+    ExecutorLock,
     SqliteTaskQueue,
     TaskWorkerPool,
     WorkerSettings,
@@ -438,18 +439,39 @@ async def run_worker(application: Application) -> None:
 
     Перед первой задачей задачи, оставшиеся `running` после аварийного завершения,
     помечаются прерванными: их уже никто не исполняет, и пользователь запускает их
-    повторно (ALG-02, PRD § 17).
+    повторно (ALG-02, PRD § 17). Это верно, только если рядом нет другого исполнителя
+    той же базы — Web UI и `linguary worker` могут работать одновременно, — поэтому
+    восстановление выполняет лишь исполнитель, стартовавший в одиночестве.
+
+    Отметка берётся прямо в цикле событий, а не в потоке: ждать она может только чужого
+    восстановления, а отменённое ожидание в потоке оставило бы отметку висеть до конца
+    процесса.
     """
-    await application.runner.recover_interrupted()
-    await application.worker_pool.run_forever()
+    lock = ExecutorLock(application.paths.executor_lock)
+    alone = lock.join()
+    try:
+        if alone:
+            await application.runner.recover_interrupted()
+            lock.share()
+        await application.worker_pool.run_forever()
+    finally:
+        lock.leave()
 
 
 async def drain_tasks(application: Application) -> tuple[ProcessingTask, ...]:
     """Выполняет накопленные задачи и возвращается, когда очередь пуста.
 
     Режим разовой прогонки: им пользуются CLI и тесты, где ждать новых задач незачем.
+    Прерванные задачи он не восстанавливает, но отмечается исполнителем: Web UI,
+    запущенный во время прогонки, не должен принять её задачи за брошенные.
     """
-    return await application.worker_pool.drain()
+    lock = ExecutorLock(application.paths.executor_lock)
+    lock.join()
+    try:
+        lock.share()
+        return await application.worker_pool.drain()
+    finally:
+        lock.leave()
 
 
 __all__ = [

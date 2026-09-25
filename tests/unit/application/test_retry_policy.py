@@ -273,6 +273,19 @@ def test_model_output_error_is_retried_with_the_same_request() -> None:
     assert retried.attempt == 2
 
 
+def test_output_limit_truncation_is_not_retried() -> None:
+    """Обрыв по лимиту вывода повтору не подлежит: тот же запрос даст тот же обрыв."""
+    decision = policy(max_attempts=3).decide(
+        LLMResponseFormatError("обрыв ответа по лимиту токенов", truncated=True),
+        attempts=1,
+    )
+
+    assert decision.action is RetryAction.GIVE_UP
+    assert not decision.should_retry
+    assert decision.error.type is ErrorType.MODEL_OUTPUT
+    assert decision.backoff_seconds == 0.0
+
+
 def test_validation_error_is_retried_with_repair_instruction() -> None:
     """Отбракованный результат повторяется с уточняющей инструкцией (ALG-05)."""
     decision = policy().decide(validation_error(), attempts=1)

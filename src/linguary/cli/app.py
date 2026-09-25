@@ -1,21 +1,25 @@
 """Командная строка приложения.
 
-CLI нужен для диагностики и локального выполнения тех же сценариев, что использует Web UI:
-импорт книги, запуск очереди задач, повтор неуспешной задачи, запуск анализа и обработки,
-а также технический экспорт в режиме `structure_only`.
+CLI поднимает локальный Web UI (`serve`) и нужен для диагностики и локального выполнения
+тех же сценариев, что использует сам Web UI: импорт книги, запуск очереди задач, повтор
+неуспешной задачи, запуск анализа и обработки, а также технический экспорт в режиме
+`structure_only`.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
-from linguary.adapters.config import SettingsError, load_settings
+import uvicorn
+
+from linguary.adapters.config import CONFIG_PATH_VARIABLE, SettingsError, load_settings
 from linguary.application.errors import ApplicationError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.export_book import ExportBookCommand, ExportMode
@@ -41,6 +45,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="linguary")
     parser.add_argument("--config", help="путь к TOML-файлу настроек")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    serve = subparsers.add_parser("serve", help="запустить локальный Web UI")
+    serve.set_defaults(handler=_serve)
 
     doctor = subparsers.add_parser("doctor", help="проверить локальную конфигурацию")
     doctor.set_defaults(handler=_doctor)
@@ -73,6 +80,29 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("--output", required=True, help="куда записать EPUB")
     export.set_defaults(handler=_export)
     return parser
+
+
+def _serve(args: argparse.Namespace) -> int:
+    """Поднимает локальный Web UI на адресе из настроек (PRD § 4.1, § 21.6).
+
+    Адрес берётся из секции `[server]`, а не из аргументов запуска: тот же адрес
+    приложение показывает на экране конфигурации и по нему же ограничивает имена
+    в заголовке `Host`, поэтому расходиться им нельзя.
+
+    Приложение собирает фабрика уже внутри сервера, и аргументов командной строки она
+    не видит: явно указанный файл настроек доходит до неё переменной окружения — тем же
+    способом, каким его задают любому другому запуску.
+    """
+    settings = load_settings(config_path=args.config)
+    if args.config:
+        os.environ[CONFIG_PATH_VARIABLE] = args.config
+    uvicorn.run(
+        "linguary.web.app:create_app",
+        factory=True,
+        host=settings.server.host,
+        port=settings.server.port,
+    )
+    return 0
 
 
 def _doctor(args: argparse.Namespace) -> int:

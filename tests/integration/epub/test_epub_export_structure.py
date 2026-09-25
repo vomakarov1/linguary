@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import FIXTURE_DIRECTORY
+from epub_builder import build_epub, xhtml_document
 from export_pipeline import documents_of, elements, package_of, run_export, spine_hrefs
 
 from linguary.adapters.epub import EbookLibEpubReader, verify_exported_epub
@@ -159,6 +160,58 @@ def test_export_without_the_source_file_keeps_the_book_valid(tmp_path: Path) -> 
     }
     assert len(warnings) <= len(run.imported.document.sections)
     assert any("Всего таких случаев" in warning.message for warning in warnings)
+
+
+def test_source_without_package_file_does_not_stop_export(tmp_path: Path) -> None:
+    """Исходный EPUB, потерявший объявление пакета после импорта, экспорт не обрывает.
+
+    Разметка `PRESERVE_OPAQUE` из такого архива не достаётся, и книга собирается так же,
+    как без исходного файла: блок переносится текстом с предупреждением.
+    """
+    source = build_epub(
+        tmp_path / "book.epub",
+        documents={
+            "chapter1.xhtml": xhtml_document(
+                "<p>Text.</p><table><tr><td>Cell</td></tr></table>"
+            )
+        },
+    )
+    replaced = build_epub(
+        tmp_path / "replaced.epub",
+        documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
+        include_container=False,
+        archive_files={
+            "META-INF/container.xml": (
+                b'<?xml version="1.0" encoding="UTF-8"?>\n'
+                b'<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" '
+                b'version="1.0"><rootfiles/></container>\n'
+            )
+        },
+    )
+
+    run = run_export(source, tmp_path=tmp_path, export_source=replaced)
+
+    assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
+    assert {warning.kind for warning in run.exported.warnings} == {
+        ExportWarningKind.OPAQUE_FRAGMENT_LOST
+    }
+
+
+def test_htm_chapter_is_declared_as_xhtml(tmp_path: Path) -> None:
+    """Глава с расширением `.htm` объявляется в манифесте как XHTML-документ."""
+    source = build_epub(
+        tmp_path / "htm_chapter.epub",
+        documents={"chapter01.htm": xhtml_document("<p>Text.</p>")},
+    )
+
+    run = run_export(source, tmp_path=tmp_path)
+
+    media_types = {
+        item.get("href"): item.get("media-type")
+        for item in package_of(run.path).iter("{http://www.idpf.org/2007/opf}item")
+    }
+    assert media_types["chapter01.htm"] == "application/xhtml+xml"
+    assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
 
 
 def _resolve(name: str, href: str) -> tuple[str, str]:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import replace
 
+import pytest
 from fastapi.testclient import TestClient
 from web_scenario import (
     glossary_candidate,
@@ -13,15 +15,44 @@ from web_scenario import (
     translated_result,
 )
 
+from linguary.adapters.config import AppSettings
+from linguary.adapters.llm import FakeLLMClient
+from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
 from linguary.application.ports.persistence import ExportValidationStatus
 from linguary.application.use_cases.approve_glossary import (
     GlossaryDecision,
     GlossaryDecisionCommand,
 )
-from linguary.composition import Application
+from linguary.composition import Application, build_application
 from linguary.domain import BlockTreatment, BookStatus
+from linguary.web import create_app
 
 HTML_HEADERS = {"accept": "text/html"}
+
+#: Имя, которого заведомо нет в `PATH`: так машина теста выглядит машиной без Java.
+MISSING_JAVA = "linguary-java-that-does-not-exist"
+
+
+@pytest.fixture
+def client_without_epubcheck(
+    settings: AppSettings, llm_client: FakeLLMClient
+) -> Iterator[TestClient]:
+    """Клиент приложения на машине, где внешней проверки EPUB нет."""
+    application = build_application(
+        settings=settings,
+        llm_client=llm_client,
+        epubcheck=EpubCheckValidator(
+            settings=EpubCheckSettings(java_executable=MISSING_JAVA)
+        ),
+    )
+    try:
+        with TestClient(
+            create_app(application=application, run_background_worker=False),
+            base_url=application.settings.server.base_url,
+        ) as test_client:
+            yield test_client
+    finally:
+        application.dispose()
 
 
 def test_root_redirects_to_books_screen(client: TestClient) -> None:
@@ -48,6 +79,16 @@ def test_books_screen_renders_upload_and_existing_books(
     assert "text/html" in response.headers["content-type"]
     assert "Pride and Prejudice" in response.text
     assert "Загрузить" in response.text
+
+
+def test_books_screen_warns_about_sending_the_book_to_an_external_provider(
+    client: TestClient,
+) -> None:
+    """Форма загрузки предупреждает, что текст книги уходит наружу (PRD § 4.1, § 21.2)."""
+    response = client.get("/books", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Текст книги целиком отправляется внешнему провайдеру LLM" in response.text
 
 
 def test_book_detail_screen_renders_progress_and_failed_actions(
@@ -128,6 +169,7 @@ def test_glossary_screen_renders_read_only_state_after_processing_started(
 
     assert response.status_code == 200
     assert "Только чтение" in response.text
+    assert "экране результата" in response.text
     assert "Принять" not in response.text
 
 
@@ -317,6 +359,69 @@ def test_result_screen_explains_that_epub_is_stale_after_changes(
     assert "Скачать EPUB" not in response.text
 
 
+def test_result_screen_offers_return_to_glossary_review(
+    client: TestClient, application: Application
+) -> None:
+    """Экран результата даёт подтверждаемый возврат к проверке глоссария (PRD § 21.5)."""
+    scenario = store_book(
+        application,
+        status=BookStatus.PROCESSING,
+        treatments={0: (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)},
+    )
+    start_run(
+        application,
+        scenario,
+        results=(translated_result(scenario.block_ids()[0]),),
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert (
+        "Возврат к проверке глоссария удалит текущие результаты обработки"
+        in response.text
+    )
+    assert f'action="/books/{scenario.book_id}/reset"' in response.text
+    assert 'name="confirmed"' in response.text
+
+
+def test_result_screen_hides_return_to_glossary_before_processing_starts(
+    client: TestClient, application: Application
+) -> None:
+    """До старта обработки возвращать нечего, и действия на экране нет."""
+    scenario = store_book(application, status=BookStatus.READY_TO_PROCESS)
+
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Вернуться к проверке глоссария" not in response.text
+
+
+def test_reset_form_returns_the_browser_to_glossary_review(
+    client: TestClient, application: Application
+) -> None:
+    """Подтверждённый возврат из браузера снимает запуск и открывает глоссарий."""
+    scenario = store_book(application, status=BookStatus.PROCESSING)
+    start_run(
+        application,
+        scenario,
+        results=(translated_result(scenario.block_ids()[0]),),
+    )
+
+    response = client.post(
+        f"/books/{scenario.book_id}/reset",
+        data={"confirmed": "true"},
+        headers=HTML_HEADERS,
+        follow_redirects=False,
+    )
+
+    with application.unit_of_work.transaction() as uow:
+        assert uow.runs.active_for_book(scenario.book_id) is None
+        assert uow.books.get(scenario.book_id).status is BookStatus.GLOSSARY_REVIEW
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/books/{scenario.book_id}/glossary"
+
+
 def test_system_config_screen_renders_first_run_state(client: TestClient) -> None:
     """Экран конфигурации показывает ненастроенную LLM и не раскрывает ключ."""
     response = client.get("/system/config", headers=HTML_HEADERS)
@@ -324,3 +429,35 @@ def test_system_config_screen_renders_first_run_state(client: TestClient) -> Non
     assert response.status_code == 200
     assert "LLM не настроена" in response.text
     assert "test-key" not in response.text
+
+
+def test_system_config_screen_explains_how_to_configure_the_llm(
+    client: TestClient,
+) -> None:
+    """Рядом со статусом «LLM не настроена» экран показывает, что задать (PRD § 23)."""
+    response = client.get("/system/config", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "config.toml" in response.text
+    assert "LINGUARY_LLM_MODEL" in response.text
+
+
+def test_system_config_screen_warns_about_the_external_provider(
+    client: TestClient,
+) -> None:
+    """Экран конфигурации предупреждает о передаче текста книги наружу (PRD § 21.6)."""
+    response = client.get("/system/config", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Текст книги целиком отправляется внешнему провайдеру LLM" in response.text
+
+
+def test_system_config_screen_explains_how_to_enable_epubcheck(
+    client_without_epubcheck: TestClient,
+) -> None:
+    """Экран показывает, как включить недоступную проверку EPUB (PRD § 21.6)."""
+    response = client_without_epubcheck.get("/system/config", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Внешняя проверка EPUBCheck необязательна" in response.text
+    assert "~/.linguary/epubcheck" in response.text

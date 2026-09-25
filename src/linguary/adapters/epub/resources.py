@@ -115,9 +115,15 @@ class _ResourceArchive:
         self._limits = limits
         try:
             self._archive = zipfile.ZipFile(source_path)
+        except (OSError, zipfile.BadZipFile) as error:
+            raise EpubImportFatalError(
+                f"EPUB {source_path} нельзя прочитать: {error}"
+            ) from error
+        try:
             self._check_limits()
             self._directory = posixpath.dirname(package_path(self._archive))
         except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError) as error:
+            self._archive.close()
             raise EpubImportFatalError(
                 f"EPUB {source_path} нельзя прочитать: {error}"
             ) from error

@@ -248,15 +248,22 @@ class AnalyzeChapter:
     def _load(
         self, command: AnalyzeChapterCommand
     ) -> tuple[CanonicalDocument, tuple[GlossaryCandidate, ...]]:
-        """Читает книгу и кандидатов глоссария уже проанализированных глав."""
+        """Читает книгу и кандидатов глоссария проанализированных предыдущих глав.
+
+        Берутся только главы, стоящие в порядке чтения раньше текущей: повторный анализ
+        главы в середине книги не должен видеть решений следующих глав. Порядок чтения
+        сохраняет сам `list_for_book`.
+        """
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(command.book_id)
             if document is None:
                 raise AnalyzeChapterError(f"книги {command.book_id} нет в хранилище")
+            current_order = _section_of(document, command).order
+            orders = {section.id: section.order for section in document.sections}
             accumulated = tuple(
                 candidate
                 for analysis in transaction.analyses.list_for_book(command.book_id)
-                if analysis.section_id != command.section_id
+                if orders.get(analysis.section_id, current_order) < current_order
                 for candidate in analysis.glossary_candidates
             )
         return document, accumulated

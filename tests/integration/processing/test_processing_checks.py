@@ -22,8 +22,8 @@ from processing_scenario import (
 )
 
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
-from linguary.adapters.llm import FakeLLMClient
-from linguary.application.ports.llm import LLMTransportError
+from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.application.ports.llm import LLMResponseFormatError, LLMTransportError
 from linguary.application.retry_policy import ResultValidationError
 from linguary.application.use_cases.process_chapter import ProcessChapterCommand
 from linguary.domain import BlockTreatment
@@ -38,6 +38,9 @@ ENGLISH_TRANSLATION = (
 UNFINISHED_TRANSLATION = (
     "Общепризнанная истина гласит, что мужчина, располагающий средствами, непременно"
 )
+
+#: Ответ, оборванный пределом вывода: JSON не закрыт, и провайдер сообщил об обрыве.
+TRUNCATED_CONTENT = '{"blocks": [{"source_block_id": "b1", "treatment": "TRANSL'
 
 #: Отказ модели вместо перевода: формально корректный ответ, который в книгу не годится.
 SERVICE_MESSAGE = (
@@ -212,3 +215,36 @@ async def test_transient_failure_of_one_unit_keeps_the_saved_one(
         results = uow.results.list_for_run(scenario.run_id)
     assert [item.block_id for item in results] == list(scenario.block_ids()[:2])
     assert all(item.translated_text == TRANSLATED_TEXT for item in results)
+
+
+async def test_output_limit_truncation_is_not_retried_by_the_same_request(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    """Обрыв по лимиту вывода повтором не лечится: второго оплаченного вызова нет."""
+    scenario = store_processing_book(unit_of_work)
+    client = FakeLLMClient.always(FakeReply(content=TRUNCATED_CONTENT, truncated=True))
+    process, delays = make_process_chapter(unit_of_work, client, max_attempts=3)
+
+    with pytest.raises(LLMResponseFormatError) as failure:
+        await process(command())
+
+    assert failure.value.truncated is True
+    assert client.call_count == 1
+    assert delays == []
+    assert_nothing_saved(unit_of_work, scenario.run_id)
+
+
+async def test_unparsable_answer_without_truncation_is_still_retried(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    """Поломка формата без обрыва остаётся поводом для повтора: она случайна."""
+    store_processing_book(unit_of_work)
+    client = FakeLLMClient.replying(
+        [FakeReply(content=TRUNCATED_CONTENT), translated_reply()]
+    )
+    process, _ = make_process_chapter(unit_of_work, client, max_attempts=3)
+
+    result = await process(command())
+
+    assert (result.attempts, result.saved_blocks) == (2, 2)
+    assert client.call_count == 2

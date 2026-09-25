@@ -52,13 +52,15 @@ def run_export(
     block_results: Mapping[str, BlockProcessingResult] | None = None,
     learning_materials: Mapping[str, LearningMaterial] | None = None,
     keep_source: bool = True,
+    export_source: Path | None = None,
 ) -> ExportRun:
     """Импортирует книгу и собирает её заново.
 
     Без `block_results` и `learning_materials` получается режим `structure_only`:
     книга собирается без результатов обработки и без учебных материалов.
     `keep_source = False` прячет исходный архив от экспортёра — так проверяется книга,
-    у которой исходного файла на машине уже нет.
+    у которой исходного файла на машине уже нет. `export_source` отдаёт экспортёру другой
+    архив вместо исходного — так проверяется книга, подменённая между импортом и экспортом.
     """
     imported = EbookLibEpubReader().read(
         EpubReadRequest(
@@ -75,7 +77,7 @@ def run_export(
             document=imported.document,
             target_path=str(tmp_path / f"{book_id}-export.epub"),
             stored_resource_paths=stored.paths,
-            source_epub_path=str(source) if keep_source else None,
+            source_epub_path=str(export_source or source) if keep_source else None,
             block_results=block_results or {},
             learning_materials=learning_materials or {},
         )

@@ -187,6 +187,13 @@ class BlockResultRepository(Protocol):
     def list_for_run(self, run_id: str) -> tuple[BlockProcessingResult, ...]:
         """Все результаты запуска в порядке блоков исходного документа."""
 
+    def count_for_run(self, run_id: str) -> int:
+        """Сколько блоков запуска уже обработано.
+
+        Отдельный метод нужен прогрессу обработки: карточка книги обновляется опросом,
+        и собирать ради одного числа все результаты запуска незачем.
+        """
+
 
 class TaskRepository(Protocol):
     """Локальные возобновляемые задачи обработки."""

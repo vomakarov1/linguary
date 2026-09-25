@@ -77,7 +77,7 @@ class ResetProcessing:
             status = apply_book_event(book.status, BookEvent.PROCESSING_RESET_CONFIRMED)
             run = transaction.runs.active_for_book(book.id)
             removed_results = (
-                len(transaction.results.list_for_run(run.id)) if run is not None else 0
+                transaction.results.count_for_run(run.id) if run is not None else 0
             )
             removed_tasks = _remove_tasks(transaction, book.id)
             if run is not None:

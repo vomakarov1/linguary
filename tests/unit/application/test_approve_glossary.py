@@ -117,6 +117,49 @@ def test_accept_stores_approved_decision() -> None:
     assert approve(unit_of_work).review(BOOK_ID).is_complete
 
 
+def test_accept_all_awaiting_decides_every_pending_item() -> None:
+    """Массовое принятие закрывает все ждущие решения элементы за один вызов."""
+    unit_of_work = glossary_book(
+        make_analysis_candidate(),
+        make_analysis_candidate(
+            source_text="Longbourn",
+            type=ConceptType.PLACE,
+            suggested_translation="Лонгборн",
+        ),
+        hint_candidate(),
+    )
+
+    concepts = approve(unit_of_work).accept_all_awaiting(BOOK_ID)
+
+    translations = {
+        concept.canonical_source_text: variant.text
+        for concept in concepts
+        if (variant := concept.variant_for("ru")) is not None
+    }
+    review = approve(unit_of_work).review(BOOK_ID)
+    hint = review.item_for(HINT)
+    book = unit_of_work.books.get(BOOK_ID)
+    assert translations == {"Mr. Bennet": "мистер Беннет", "Longbourn": "Лонгборн"}
+    assert all(concept.status is TermStatus.APPROVED for concept in concepts)
+    assert review.is_complete
+    assert hint is not None
+    assert not hint.is_decided
+    assert book is not None
+    assert book.status is BookStatus.READY_TO_PROCESS
+
+
+def test_accept_all_awaiting_is_rejected_after_processing_started() -> None:
+    """Массовое принятие подчиняется тому же запрету, что и решение по элементу."""
+    unit_of_work = glossary_book(
+        make_analysis_candidate(), status=BookStatus.PROCESSING
+    )
+
+    with pytest.raises(GlossaryReviewError, match="только"):
+        approve(unit_of_work).accept_all_awaiting(BOOK_ID)
+
+    assert unit_of_work.glossary.list_for_book(BOOK_ID) == ()
+
+
 def test_correct_stores_user_translation() -> None:
     """Исправление сохраняет вариант пользователя вместо предложенного моделью."""
     unit_of_work = glossary_book(make_analysis_candidate())

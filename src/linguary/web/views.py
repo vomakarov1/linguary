@@ -14,11 +14,18 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+from linguary.web import labels
+
 PACKAGE_ROOT = Path(__file__).resolve().parent
 TEMPLATE_DIRECTORY = PACKAGE_ROOT / "templates"
 STATIC_DIRECTORY = PACKAGE_ROOT / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
+
+#: Предупреждение о передаче текста книги внешнему провайдеру нужно экранам, которые
+#: сами по себе ничего о конфигурации LLM не показывают (PRD § 4.1, § 21.2), поэтому оно
+#: доступно любому шаблону, а не приходит отдельным полем каждого ответа.
+templates.env.globals["external_llm_warning"] = labels.EXTERNAL_LLM_WARNING
 
 
 def wants_html(request: Request) -> bool:

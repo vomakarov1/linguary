@@ -24,6 +24,7 @@ _CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
 
 _MEDIA_TYPES = {
     ".xhtml": "application/xhtml+xml",
+    ".htm": "application/xhtml+xml",
     ".css": "text/css",
     ".js": "application/javascript",
     ".png": "image/png",

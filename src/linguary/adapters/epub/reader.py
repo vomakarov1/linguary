@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import posixpath
+import re
 import zipfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -118,6 +119,14 @@ _VERSE_MARKERS = frozenset({"l", "line", "verse", "poem", "stanza", "linegroup"}
 
 #: Признаки разрыва страницы и номера страницы печатного оригинала.
 _PAGE_BREAK_MARKERS = frozenset({"pagebreak", "pageno", "page-break", "pagenum"})
+
+#: Признак разрыва страницы как самостоятельная часть токена: целиком или отделённый
+#: дефисом, подчёркиванием или двоеточием (`x-ebookmaker-pageno`, `z3998:pagebreak`).
+_PAGE_BREAK_PATTERN = re.compile(
+    r"(?:^|[-_:])(?:"
+    + "|".join(re.escape(marker) for marker in sorted(_PAGE_BREAK_MARKERS))
+    + r")(?:$|[-_:])"
+)
 
 #: Тип содержимого для ресурса, у которого манифест его не задал.
 _DEFAULT_MEDIA_TYPE = "application/octet-stream"
@@ -333,11 +342,17 @@ class _ArchiveContents:
         self._read_bytes = 0
         try:
             self._archive = zipfile.ZipFile(source_path)
+        except (OSError, zipfile.BadZipFile) as error:
+            raise EpubImportFatalError(
+                f"EPUB {source_path} нельзя прочитать: {error}"
+            ) from error
+        try:
             check_extraction_limits(
                 self._archive, source_path=source_path, limits=limits
             )
             self._directory = posixpath.dirname(package_path(self._archive))
         except (OSError, KeyError, zipfile.BadZipFile, etree.XMLSyntaxError) as error:
+            self._archive.close()
             raise EpubImportFatalError(
                 f"EPUB {source_path} нельзя прочитать: {error}"
             ) from error
@@ -926,11 +941,10 @@ def _leaf_type(
 def _is_page_break(element: etree._Element) -> bool:
     """Помечен ли элемент как разрыв страницы печатного оригинала.
 
-    Совпадение ищется по вхождению: издатели пишут и `pagebreak`, и собственные классы
-    вида `x-ebookmaker-pageno`.
+    Признак ищется как отдельная часть токена: издатели пишут и `pagebreak`, и собственные
+    классы вида `x-ebookmaker-pageno`, но `pagenote` разрывом страницы не является.
     """
-    tokens = _markers(element)
-    return any(marker in token for token in tokens for marker in _PAGE_BREAK_MARKERS)
+    return any(_PAGE_BREAK_PATTERN.search(token) for token in _markers(element))
 
 
 def _is_verse(element: etree._Element) -> bool:

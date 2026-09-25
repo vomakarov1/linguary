@@ -172,6 +172,42 @@ class ApproveGlossary:
             )
         return concept
 
+    def accept_all_awaiting(self, book_id: str) -> tuple[TermConcept, ...]:
+        """Принимает предложенный вариант по всем элементам, ждущим решения (PRD § 12).
+
+        Массовое действие идёт одной транзакцией и по одному собранному глоссарию:
+        поэлементный вызов пересобирал бы глоссарий всей книги на каждый элемент.
+        """
+        with self._unit_of_work.transaction() as transaction:
+            book = _book(transaction, book_id)
+            _ensure_editable(book)
+            review = _load_review(
+                transaction,
+                book_id,
+                confidence_threshold=self._glossary_confidence_threshold,
+            )
+            concepts = tuple(
+                self._decide(
+                    item,
+                    GlossaryDecisionCommand(
+                        book_id=book_id,
+                        source_text=item.source_text,
+                        concept_id=item.concept_id,
+                        decision=GlossaryDecision.ACCEPT,
+                    ),
+                    book=book,
+                )
+                for item in review.awaiting_decision
+            )
+            for concept in concepts:
+                transaction.glossary.save(concept)
+            _complete_review_if_ready(
+                transaction,
+                book,
+                confidence_threshold=self._glossary_confidence_threshold,
+            )
+        return concepts
+
     def set_note(self, command: GlossaryNoteCommand) -> TermConcept:
         """Меняет переводческое указание по элементу, не трогая само решение.
 

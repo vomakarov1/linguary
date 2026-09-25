@@ -28,6 +28,9 @@ SOURCE_FILE_NAME = "source.epub"
 EXPORT_DIRECTORY = "export"
 EXPORT_FILE_NAME = "translated.epub"
 
+#: Суффикс файла отметки исполнителей очереди рядом с базой.
+EXECUTOR_LOCK_SUFFIX = ".executors.lock"
+
 
 @dataclass(frozen=True, slots=True)
 class DataPaths:
@@ -71,6 +74,17 @@ class DataPaths:
         """
         return self.book_directory(book_id) / EXPORT_DIRECTORY / EXPORT_FILE_NAME
 
+    @property
+    def executor_lock(self) -> Path:
+        """Файл отметки исполнителей очереди.
+
+        Лежит рядом с базой, а не в корне данных: исполнители делят очередь задач,
+        то есть базу, и путь к ней может быть задан отдельно от каталога данных.
+        """
+        return self.database_path.with_name(
+            f"{self.database_path.name}{EXECUTOR_LOCK_SUFFIX}"
+        )
+
     def prepare(self) -> None:
         """Создаёт каталоги приложения, если их ещё нет."""
         self.books_root.mkdir(parents=True, exist_ok=True)
@@ -79,6 +93,7 @@ class DataPaths:
 
 __all__ = [
     "BOOKS_DIRECTORY",
+    "EXECUTOR_LOCK_SUFFIX",
     "EXPORT_DIRECTORY",
     "EXPORT_FILE_NAME",
     "SOURCE_FILE_NAME",

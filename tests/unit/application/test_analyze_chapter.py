@@ -9,9 +9,11 @@ from analysis_fakes import (
     FakeUnitOfWork,
     analysis_reply,
     make_analysis_block,
+    make_analysis_candidate,
     make_analysis_document,
     make_analysis_section,
     make_analyze_chapter,
+    make_chapter_analysis,
 )
 
 from linguary.adapters.llm import FakeLLMClient
@@ -159,6 +161,44 @@ async def test_request_carries_previous_chapter_candidates_only() -> None:
     assert "Mr. Bennet" in second_request
     assert "First chapter text." not in second_request
     assert "Second chapter text." in second_request
+
+
+async def test_repeated_analysis_skips_candidates_of_following_chapters() -> None:
+    """Повторный анализ главы в середине книги не видит решений следующих глав."""
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Chapter {number} text.",),
+        )
+        for number in (1, 2, 3)
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    for section_id, analysis_id, source_text in (
+        ("section-1", "analysis-1", "Mr. Bennet"),
+        ("section-3", "analysis-3", "Mr. Darcy"),
+    ):
+        unit_of_work.analyses.save(
+            BOOK_ID,
+            make_chapter_analysis(
+                id=analysis_id,
+                section_id=section_id,
+                candidates=(
+                    make_analysis_candidate(
+                        analysis_id=analysis_id, source_text=source_text
+                    ),
+                ),
+            ),
+        )
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    await scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-2"))
+
+    request = client.requests[0].input_text
+    assert "Mr. Bennet" in request
+    assert "Mr. Darcy" not in request
 
 
 async def test_chapter_without_text_is_analysed_without_the_model() -> None:

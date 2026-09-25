@@ -163,6 +163,40 @@ def test_repeated_page_break_is_dropped_with_warning(
     ]
 
 
+@pytest.mark.parametrize(
+    ("markup", "expected_type"),
+    [
+        pytest.param("<div class='pagebreak' id='p1'></div>", "PageBreak", id="class"),
+        pytest.param(
+            "<div class='x-ebookmaker-pageno' id='p1'></div>",
+            "PageBreak",
+            id="publisher-class",
+        ),
+        pytest.param(
+            "<div epub:type='pagebreak' id='p1'></div>", "PageBreak", id="epub-type"
+        ),
+        pytest.param(
+            "<p class='pagenote'>Note text.</p>", "Paragraph", id="similar-class"
+        ),
+    ],
+)
+def test_page_break_is_recognised_by_whole_marker(
+    markup: str, expected_type: str, reader: EbookLibEpubReader, tmp_path: Path
+) -> None:
+    """Разрыв страницы опознаётся по отдельному признаку, а не по части чужого класса."""
+    source = build_epub(
+        tmp_path / "page_break_marker.epub",
+        documents={"chapter1.xhtml": xhtml_document(f"<p>Text.</p>{markup}")},
+    )
+
+    imported = reader.read(_request(source))
+
+    assert [block.type.value for block in imported.document.blocks()] == [
+        "Paragraph",
+        expected_type,
+    ]
+
+
 def test_lost_manifest_resource_is_fatal(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
