@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 
 from linguary.application.llm_dto import (
     BlockResultResponse,
@@ -31,8 +32,10 @@ from linguary.application.retry_policy import (
 from linguary.application.validators.coverage import coverage_violation
 from linguary.application.validators.language import language_violation
 from linguary.application.validators.mixed_script import mixed_script_violation
+from linguary.application.validators.paragraphs import paragraph_violation
 from linguary.application.validators.repetition import repetition_warning
 from linguary.application.validators.service_messages import service_message_violation
+from linguary.application.validators.tails import normalized_tail
 from linguary.application.validators.treatment import (
     content_violation,
     treatment_violation,
@@ -97,8 +100,21 @@ class TranslationResultValidator:
         self._ensure(coverage_violation(payload, unit=unit), expected)
         self._ensure(treatment_violation(payload, unit=unit), expected)
         self._ensure(content_violation(payload, unit=unit), expected)
+        self._ensure(paragraph_violation(payload, unit=unit), expected)
+        normalized_payload = replace(
+            payload,
+            blocks=tuple(
+                replace(
+                    block,
+                    translated_text=normalized_tail(block.translated_text),
+                )
+                if block.translated_text is not None
+                else block
+                for block in payload.blocks
+            ),
+        )
         self._ensure(
-            truncation_violation(payload, unit=unit, truncated=truncated), expected
+            truncation_violation(normalized_payload, unit=unit, truncated=truncated), expected
         )
         self._ensure(
             language_violation(
@@ -144,7 +160,7 @@ class TranslationResultValidator:
             block_id=block.source_block_id,
             treatment=unit.treatment_for(block.source_block_id),
             translated_text=(
-                known_markers_only(block.translated_text, source)
+                known_markers_only(normalized_tail(block.translated_text), source)
                 if block.translated_text is not None
                 else None
             ),

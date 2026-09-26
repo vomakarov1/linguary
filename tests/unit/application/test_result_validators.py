@@ -33,6 +33,7 @@ from linguary.application.retry_policy import (
     ResultExpectation,
     ResultValidationError,
 )
+from linguary.application.validators.tails import normalized_tail
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
@@ -100,6 +101,99 @@ def test_valid_result_is_accepted() -> None:
 
     assert tuple(result.block_id for result in results) == unit.block_ids
     assert all(result.translated_text == TRANSLATED_TEXT for result in results)
+
+
+def test_translation_with_extra_paragraphs_rejected() -> None:
+    block = make_block(order=0)
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text="Первый.\n\nВторой."),)
+    )
+
+    error = rejection(payload, unit=unit)
+
+    assert f"перевод блока {block.id} содержит 2 абзацев, а оригинал — 1" in str(error)
+    assert "не включай соседние" in str(error)
+
+
+def test_translation_with_equal_paragraphs_accepted() -> None:
+    block = make_block(order=0)
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text="Перевод.\n\n"),)
+    )
+
+    assert validate(payload, unit=unit)[0].translated_text == "Перевод.\n\n"
+
+
+def test_multiline_source_allows_same_line_count() -> None:
+    block = make_block(order=0, text="First.\n\nSecond.")
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text="Первый.\n\nВторой."),)
+    )
+
+    assert validate(payload, unit=unit)[0].translated_text == "Первый.\n\nВторой."
+
+
+def test_blocks_without_translation_skipped() -> None:
+    block = make_block(order=0)
+    unit = make_unit((block,), treatments=(BlockTreatment.GLOSSARY_ONLY,))
+    payload = make_response(
+        (
+            make_block_result(
+                block,
+                treatment=BlockTreatment.GLOSSARY_ONLY,
+                translated_text=None,
+                glossary_hints=(make_hint(),),
+            ),
+        )
+    )
+
+    assert validate(payload, unit=unit)[0].translated_text is None
+
+
+def test_colon_dash_tail_becomes_colon() -> None:
+    block = make_block(order=0, text="He said:")
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text="Он сказал: —  "),)
+    )
+
+    assert validate(payload, unit=unit)[0].translated_text == "Он сказал:"
+
+
+def test_four_dots_tail_becomes_ellipsis() -> None:
+    block = make_block(order=0)
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text="Он замолчал....  "),)
+    )
+
+    assert validate(payload, unit=unit)[0].translated_text == "Он замолчал…"
+
+
+def test_inner_dash_untouched() -> None:
+    block = make_block(order=0)
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text="Он сказал: — я вернусь."),)
+    )
+
+    assert validate(payload, unit=unit)[0].translated_text == "Он сказал: — я вернусь."
+
+
+def test_normalized_result_passes_truncation_check() -> None:
+    block = make_block(order=0)
+    unit = make_unit((block,))
+    payload = make_response((make_block_result(block, translated_text="Он сказал:—"),))
+
+    assert validate(payload, unit=unit)[0].translated_text == "Он сказал:"
+
+
+@pytest.mark.parametrize("text", ["«Он замолчал....»", "«Он сказал:—»"])
+def test_tail_before_closing_quote_untouched(text: str) -> None:
+    assert normalized_tail(text) == text
 
 
 def test_result_takes_treatment_from_plan() -> None:
