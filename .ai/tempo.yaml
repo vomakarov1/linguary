@@ -1,0 +1,16 @@
+platforms:
+  backend:
+    paths: [src/, tests/, alembic/]
+    tests: "uv run pytest"
+shared_paths: [uv.lock, pyproject.toml, alembic/versions/]
+slots:
+  scenarios: ""
+  tests: ""
+  security: security-check
+  accessibility: ""
+  performance: ""
+  review: review-master
+  localization: localize
+  translations: order-translations
+extra_skills: []
+sync: local
