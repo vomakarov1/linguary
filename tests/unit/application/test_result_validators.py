@@ -564,6 +564,9 @@ def test_mixed_word_in_language_note_is_rejected() -> None:
             "Весил он 5kg, как сказано на www.example.com[^1].", id="units-url"
         ),
         pytest.param("Кафе́ «Café» и Straße.", id="diacritics"),
+        pytest.param(
+            "Слово восходит к праславянскому vьlkodlakъ.", id="slavic-yers"
+        ),
     ],
 )
 def test_latin_words_in_russian_text_are_allowed(translated_text: str) -> None:
