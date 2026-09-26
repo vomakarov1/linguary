@@ -1,4 +1,7 @@
 .ai
+!/.ai/
+/.ai/*
+!/.ai/tempo.yaml
 .ai-core
 .idea
 .claude
@@ -17,3 +20,6 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+.ai/develop-context.local/
+.worktrees/
+/.ai/tempo.local.yaml
