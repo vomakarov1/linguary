@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -17,6 +17,7 @@ from linguary.application.ports.llm import (
     LLMPayload,
     LLMRequest,
     LLMResponse,
+    LLMResponseFormatError,
 )
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.application.retry_policy import classify_error
@@ -36,6 +37,7 @@ class LoggingLLMClient(LLMClient):
     model: str
     id_factory: IdFactory | None = None
     clock: Clock | None = None
+    debug_payloads: bool = False
 
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
@@ -54,8 +56,14 @@ class LoggingLLMClient(LLMClient):
                 model=self.model,
                 success=False,
                 error=error,
+                response_text=(
+                    error.raw_content
+                    if self.debug_payloads and isinstance(error, LLMResponseFormatError)
+                    else None
+                ),
             )
             raise
+        call_id = self._new_id()
         self._log(
             request=request,
             started_at=started_at,
@@ -63,8 +71,14 @@ class LoggingLLMClient(LLMClient):
             model=response.model,
             success=True,
             usage=response.usage,
+            call_id=call_id,
+            response_text=response.raw_content if self.debug_payloads else None,
         )
-        return response
+        return replace(
+            response,
+            call_id=call_id,
+            raw_content=response.raw_content if self.debug_payloads else None,
+        )
 
     def _log(
         self,
@@ -76,6 +90,8 @@ class LoggingLLMClient(LLMClient):
         success: bool,
         error: Exception | None = None,
         usage: TokenUsage | None = None,
+        call_id: str | None = None,
+        response_text: str | None = None,
     ) -> None:
         """Записывает одну строку журнала в короткой транзакции."""
         if request.book_id is None or request.stage is None:
@@ -83,7 +99,7 @@ class LoggingLLMClient(LLMClient):
         with self.unit_of_work.transaction() as transaction:
             transaction.llm_calls.add(
                 LLMCallLog(
-                    id=self._new_id(),
+                    id=call_id or self._new_id(),
                     book_id=request.book_id,
                     task_id=request.task_id,
                     stage=request.stage,
@@ -95,7 +111,8 @@ class LoggingLLMClient(LLMClient):
                     success=success,
                     error=None if error is None else classify_error(error),
                     usage=usage,
-                )
+                ),
+                response_text=response_text,
             )
 
     def _duration_ms(self, started_at: datetime) -> int:

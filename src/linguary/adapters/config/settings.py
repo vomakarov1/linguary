@@ -101,6 +101,7 @@ class LLMSettings:
     max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS
     max_unit_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS
     requests_per_minute: int | None = None
+    debug_llm_payloads: bool = False
 
     def __post_init__(self) -> None:
         if not self.provider.strip():

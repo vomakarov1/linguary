@@ -176,6 +176,8 @@ async def test_truncated_content_gives_format_error_with_token_limit_flag() -> N
         )
 
     assert error.value.truncated is True
+    assert error.value.raw_content == '{"blocks": [{"source'
+    assert '{"blocks"' not in str(error.value)
 
 
 async def test_missing_usage_is_not_invented() -> None:

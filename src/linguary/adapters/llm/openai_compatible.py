@@ -80,15 +80,15 @@ class OpenAICompatibleLLMClient(LLMClient):
         document = await self._post(_body(request, settings=self._settings))
         choice = _choice(document)
         truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
-        payload = parse_payload(
-            request.kind, _content(choice), truncated=truncated
-        )
+        content = _content(choice)
+        payload = parse_payload(request.kind, content, truncated=truncated)
         return LLMResponse(
             payload=payload,  # type: ignore[arg-type]  # схему выбирает request.kind
             provider=self._settings.provider,
             model=_model(document, fallback=self._settings.model),
             truncated=truncated,
             usage=_usage(document),
+            raw_content=content,
         )
 
     async def aclose(self) -> None:
@@ -223,11 +223,11 @@ def _document(response: httpx.Response) -> dict[str, Any]:
         document = response.json()
     except ValueError as error:
         raise LLMResponseFormatError(
-            f"ответ провайдера не является JSON{_detail(response)}"
+            "ответ провайдера не является JSON", raw_content=response.text
         ) from error
     if not isinstance(document, dict):
         raise LLMResponseFormatError(
-            f"ответ провайдера не похож на ответ генерации{_detail(response)}"
+            "ответ провайдера не похож на ответ генерации", raw_content=response.text
         )
     return document
 

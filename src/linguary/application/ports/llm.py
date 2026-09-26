@@ -26,7 +26,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -76,9 +76,12 @@ class LLMResponseFormatError(LLMError):
     только с другим лимитом.
     """
 
-    def __init__(self, message: str, *, truncated: bool = False) -> None:
+    def __init__(
+        self, message: str, *, truncated: bool = False, raw_content: str | None = None
+    ) -> None:
         super().__init__(message)
         self.truncated = truncated
+        self.raw_content = raw_content
 
 
 class LLMResponseKind(StrEnum):
@@ -168,6 +171,8 @@ class LLMResponse[PayloadT: LLMPayload]:
     model: str
     truncated: bool = False
     usage: TokenUsage | None = None
+    call_id: str | None = None
+    raw_content: str | None = field(default=None, repr=False)
 
 
 class LLMClient(Protocol):

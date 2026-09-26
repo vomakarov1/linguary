@@ -47,6 +47,7 @@ from linguary.application.context_builder import (
 from linguary.application.errors import ApplicationError
 from linguary.application.glossary_review import candidates_with_decisions
 from linguary.application.llm_dto import ChapterAnalysisResponse
+from linguary.application.llm_rejections import record_rejection
 from linguary.application.ports.llm import LLMClient, LLMRequest
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
@@ -299,11 +300,14 @@ class AnalyzeChapter:
         attempts = 0
         while True:
             attempts += 1
+            response = None
             try:
                 response = await self._llm_client.generate(request)
                 _ensure_plan_covers_chapter(response.payload, context)
                 _ensure_candidates_single_script(response.payload, context)
             except Exception as error:
+                if response is not None:
+                    record_rejection(self._unit_of_work, response, error)
                 decision = self._retry_policy.decide(error, attempts=attempts)
                 if not decision.should_retry:
                     raise
@@ -534,8 +538,10 @@ def _ensure_plan_covers_chapter(
         )
     missing = sorted(set(expected) - set(returned))
     if missing:
+        missing_block_ids = [context.block_id_for(alias) for alias in missing]
         raise ResultValidationError(
-            f"план обработки главы {context.section_id} не покрывает блоки: {missing}",
+            f"план обработки главы {context.section_id} не покрывает блоки: "
+            f"{missing_block_ids}",
             expectation=context.expectation,
         )
     duplicated = sorted({block for block in returned if returned.count(block) > 1})

@@ -361,7 +361,7 @@ class ProcessingTaskRow(Base):
 class LLMCallLogRow(Base):
     """Запись технического журнала об одном вызове модели.
 
-    Полных текстов запроса и ответа в схеме нет: они содержат текст книги (PRD § 24).
+    Текст ответа записывается отдельно только при включённой отладке.
     """
 
     __tablename__ = "llm_call_logs"
@@ -383,6 +383,7 @@ class LLMCallLogRow(Base):
     error_type: Mapped[str | None] = mapped_column(String)
     error_message: Mapped[str | None] = mapped_column(Text)
     error_detail: Mapped[str | None] = mapped_column(Text)
+    response_text: Mapped[str | None] = mapped_column(Text)
     prompt_tokens: Mapped[int | None] = mapped_column()
     completion_tokens: Mapped[int | None] = mapped_column()
     cost: Mapped[Decimal | None] = mapped_column(DecimalAsText)

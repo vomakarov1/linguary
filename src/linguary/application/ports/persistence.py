@@ -30,6 +30,7 @@ from linguary.domain import (
     ProcessingTask,
     TaskIdentity,
     TermConcept,
+    TaskError,
 )
 
 
@@ -227,11 +228,19 @@ class TaskRepository(Protocol):
 class LLMCallLogRepository(Protocol):
     """Технический журнал вызовов LLM (PRD § 24).
 
-    Полные тексты запросов и ответов в журнал не попадают: они содержат текст книги.
+    Текст ответа хранится отдельно только при включённой отладке.
     """
 
-    def add(self, entry: LLMCallLog) -> None:
+    def add(self, entry: LLMCallLog, *, response_text: str | None = None) -> None:
         """Добавляет запись журнала."""
+
+    def mark_rejected(
+        self, call_id: str, *, error: TaskError, response_text: str | None
+    ) -> None:
+        """Помечает ответ, отвергнутый проверкой после успешного вызова."""
+
+    def response_text_for(self, call_id: str) -> str | None:
+        """Сохранённый для диагностики текст ответа либо `None`."""
 
     def list_for_book(self, book_id: str) -> tuple[LLMCallLog, ...]:
         """Записи журнала по книге в порядке выполнения вызовов."""

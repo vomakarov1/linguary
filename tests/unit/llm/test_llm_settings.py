@@ -52,7 +52,22 @@ def test_defaults_are_used_without_file_and_environment(tmp_path: Path) -> None:
     assert settings.llm.max_attempts == DEFAULT_MAX_ATTEMPTS
     assert settings.llm.model == ""
     assert settings.llm.api_key is None
+    assert settings.llm.debug_llm_payloads is False
     assert settings.checks == CheckSettings()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("true", True), ("1", True), ("yes", True), ("false", False), ("0", False), ("no", False)],
+)
+def test_debug_llm_payloads_parsed_from_env(
+    tmp_path: Path, value: str, expected: bool
+) -> None:
+    settings = load_settings(
+        environ={"LINGUARY_LLM_DEBUG_LLM_PAYLOADS": value},
+        config_path=write_config(tmp_path, ""),
+    )
+    assert settings.llm.debug_llm_payloads is expected
 
 
 def test_missing_default_file_is_not_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

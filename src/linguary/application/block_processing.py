@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from linguary.application.context_builder import TranslationContext
 from linguary.application.errors import ApplicationError
 from linguary.application.explained_expressions import ExplainedExpressions
+from linguary.application.llm_rejections import record_rejection
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
@@ -99,6 +100,7 @@ class TranslationCall:
         attempts = 0
         while True:
             attempts += 1
+            response = None
             try:
                 response = await self._llm_client.generate(request)
                 results = self._validator.validate(
@@ -110,6 +112,8 @@ class TranslationCall:
                     expectation=context.expectation,
                 )
             except Exception as error:
+                if response is not None:
+                    record_rejection(self._unit_of_work, response, error)
                 decision = self._retry_policy.decide(
                     _worded_for_the_model(error, context), attempts=attempts
                 )

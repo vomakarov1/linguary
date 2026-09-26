@@ -50,11 +50,6 @@ SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
     LLMResponseKind.TRANSLATION_RESULT: TranslationResultSchema,
 }
 
-#: Сколько символов ответа попадает в текст ошибки разбора. Полный ответ содержит текст
-#: книги и в диагностику не выводится (PRD § 24).
-_EXCERPT_LIMIT = 200
-
-
 def schema_for(kind: LLMResponseKind) -> type[BaseModel]:
     """Схема структурированного ответа для вида запроса."""
     return SCHEMAS[kind]
@@ -73,15 +68,18 @@ def parse_payload(
         validated = schema.model_validate_json(content)
     except ValidationError as error:
         raise LLMResponseFormatError(
-            _format_error(kind, content=content, error=error, truncated=truncated),
+            _format_error(kind, error=error, truncated=truncated),
             truncated=truncated,
+            raw_content=content,
         ) from error
     try:
         return _to_dto(validated)
     except LLMPayloadError as error:
         raise LLMResponseFormatError(
-            f"ответ модели ({kind.value}) не соответствует внутреннему контракту: {error}",
+            f"ответ модели ({kind.value}) не соответствует внутреннему контракту: "
+            f"{type(error).__name__}",
             truncated=truncated,
+            raw_content=content,
         ) from error
 
 
@@ -170,27 +168,21 @@ def _language_note(schema: LanguageNoteSchema) -> LanguageNoteResponse:
 
 
 def _format_error(
-    kind: LLMResponseKind, *, content: str, error: ValidationError, truncated: bool
+    kind: LLMResponseKind, *, error: ValidationError, truncated: bool
 ) -> str:
     """Сообщение об ошибке разбора: чем именно ответ не подошёл.
 
     Обрыв по лимиту токенов называется прямо: иначе он выглядит как случайная поломка
     формата, хотя лечится другим лимитом, а не повтором того же запроса.
     """
-    reason = "обрыв ответа по лимиту токенов" if truncated else _excerpt(content)
+    violations = ", ".join(
+        sorted({str(item["type"]) for item in error.errors(include_input=False)})
+    )
+    reason = "обрыв ответа по лимиту токенов" if truncated else "ответ не оборван"
     return (
         f"ответ модели ({kind.value}) не соответствует схеме: "
-        f"{error.error_count()} нарушений; {reason}"
+        f"{error.error_count()} нарушений ({violations}); {reason}"
     )
-
-
-def _excerpt(content: str) -> str:
-    """Короткое начало ответа для диагностики."""
-    text = content.strip()
-    if not text:
-        return "ответ пуст"
-    excerpt = text[:_EXCERPT_LIMIT]
-    return f"начало ответа: {excerpt}…" if len(text) > _EXCERPT_LIMIT else f"ответ: {excerpt}"
 
 
 __all__ = ["SCHEMAS", "parse_payload", "schema_for"]

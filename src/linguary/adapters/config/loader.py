@@ -68,6 +68,19 @@ def _as_int(value: object, name: str) -> int:
         raise SettingsError(f"настройка {name} должна быть целым числом") from error
 
 
+def _as_bool(value: object, name: str) -> bool:
+    """Логическое значение из TOML или окружения."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    raise SettingsError(f"настройка {name} должна быть логическим значением")
+
+
 #: Разбор значений секции `[llm]`: имя настройки и способ привести её значение к типу.
 _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "provider": _as_str,
@@ -81,6 +94,7 @@ _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "max_fragment_blocks": _as_int,
     "max_unit_source_chars": _as_int,
     "requests_per_minute": _as_int,
+    "debug_llm_payloads": _as_bool,
 }
 
 #: Разбор значений секции `[checks]`.

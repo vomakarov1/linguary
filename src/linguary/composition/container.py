@@ -287,6 +287,7 @@ def _model_client(
         unit_of_work=unit_of_work,
         provider=settings.llm.provider,
         model=settings.llm.model or "not_configured",
+        debug_payloads=settings.llm.debug_llm_payloads,
     )
     if settings.llm.requests_per_minute is None:
         return model

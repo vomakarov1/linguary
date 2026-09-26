@@ -47,6 +47,7 @@ from linguary.domain import (
     ProcessingTask,
     TaskIdentity,
     TermConcept,
+    TaskError,
 )
 
 
@@ -505,10 +506,31 @@ class SqlAlchemyLLMCallLogRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def add(self, entry: LLMCallLog) -> None:
+    def add(self, entry: LLMCallLog, *, response_text: str | None = None) -> None:
         """Добавляет запись журнала."""
-        self._session.add(mapping.to_llm_call_row(entry))
+        row = mapping.to_llm_call_row(entry)
+        row.response_text = response_text
+        self._session.add(row)
         self._session.flush()
+
+    def mark_rejected(
+        self, call_id: str, *, error: TaskError, response_text: str | None
+    ) -> None:
+        """Помечает отбракованный ответ, сохраняя расход токенов и стоимость."""
+        row = self._session.get(LLMCallLogRow, call_id)
+        if row is None:
+            raise PersistenceError(f"запись вызова LLM {call_id} не найдена")
+        row.success = False
+        row.error_type = error.type.value
+        row.error_message = error.message
+        row.error_detail = error.detail
+        row.response_text = response_text
+        self._session.flush()
+
+    def response_text_for(self, call_id: str) -> str | None:
+        """Сохранённый текст ответа, если он был записан."""
+        row = self._session.get(LLMCallLogRow, call_id)
+        return None if row is None else row.response_text
 
     def list_for_book(self, book_id: str) -> tuple[LLMCallLog, ...]:
         """Записи журнала по книге в порядке выполнения вызовов."""
