@@ -201,6 +201,7 @@ async def test_missing_usage_is_not_invented() -> None:
         pytest.param(503, LLMTransportError, id="provider-unavailable"),
         pytest.param(400, LLMProviderError, id="rejected-request"),
         pytest.param(404, LLMProviderError, id="unknown-model"),
+        pytest.param(402, LLMProviderError, id="payment-required"),
     ],
 )
 async def test_provider_status_is_mapped_to_port_error(
@@ -210,6 +211,16 @@ async def test_provider_status_is_mapped_to_port_error(
     client = client_over(responding({"error": {"message": "нет"}}, status_code=status_code))
 
     with pytest.raises(expected):
+        await client.generate(
+            LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
+        )
+
+
+async def test_payment_required_names_the_balance() -> None:
+    """Отказ из-за нехватки средств называет причину, а не ключ или модель (PRD § 16)."""
+    client = client_over(responding({"error": {"message": "нет"}}, status_code=402))
+
+    with pytest.raises(LLMProviderError, match="не хватает средств"):
         await client.generate(
             LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
         )

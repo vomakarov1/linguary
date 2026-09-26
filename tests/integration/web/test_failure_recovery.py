@@ -56,7 +56,7 @@ async def test_rejected_key_fails_analysis_with_a_retryable_configuration_error(
     [failure] = detail["progress"]["failures"]
     assert failure["error_type"] == ErrorType.CONFIGURATION.value
     assert failure["is_retryable"] is True
-    assert "проверьте ключ и модель" in failure["error_type_label"]
+    assert "проверьте ключ, модель и баланс" in failure["error_type_label"]
 
 
 async def test_configuration_failure_is_retried_by_the_retry_button(

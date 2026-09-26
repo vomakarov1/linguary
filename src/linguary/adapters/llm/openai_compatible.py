@@ -46,6 +46,9 @@ _AUTHORIZATION_STATUSES = frozenset({401, 403})
 #: Код ограничения частоты запросов: временная неудача (PRD § 16).
 _RATE_LIMIT_STATUS = 429
 
+#: Код нехватки средств на счёте провайдера: повтор без пополнения ответит тем же.
+_PAYMENT_REQUIRED_STATUS = 402
+
 #: Причина завершения, которой провайдер сообщает об обрыве по лимиту токенов.
 _LENGTH_FINISH_REASON = "length"
 
@@ -167,6 +170,10 @@ def _raise_for_status(response: httpx.Response, *, provider: str) -> None:
     if status in _AUTHORIZATION_STATUSES:
         raise LLMConfigurationError(
             f"провайдер {provider} не принял ключ или доступ к модели: {detail}"
+        )
+    if status == _PAYMENT_REQUIRED_STATUS:
+        raise LLMProviderError(
+            f"у провайдера {provider} не хватает средств на счёте: {detail}"
         )
     if status == _RATE_LIMIT_STATUS or status >= 500:
         raise LLMTransportError(
