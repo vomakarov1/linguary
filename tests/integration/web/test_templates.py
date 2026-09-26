@@ -24,7 +24,7 @@ from linguary.application.use_cases.approve_glossary import (
     GlossaryDecisionCommand,
 )
 from linguary.composition import Application, build_application
-from linguary.domain import BlockTreatment, BookStatus
+from linguary.domain import BlockTreatment, BookStatus, ConceptType
 from linguary.web import create_app
 
 HTML_HEADERS = {"accept": "text/html"}
@@ -191,17 +191,27 @@ def test_glossary_screen_explains_analysis_read_only_state(
     assert "Принять" not in response.text
 
 
-def test_glossary_screen_hides_actions_for_decided_items(
-    client: TestClient, application: Application
+@pytest.mark.parametrize(
+    "status",
+    [
+        pytest.param(BookStatus.GLOSSARY_REVIEW, id="after-reset-to-review"),
+        pytest.param(BookStatus.READY_TO_PROCESS, id="before-start"),
+    ],
+)
+def test_glossary_screen_folds_decision_actions_of_decided_items(
+    client: TestClient, application: Application, status: BookStatus
 ) -> None:
-    """После принятия решения HTML-глоссарий не оставляет действий решения.
+    """Решение по элементу можно изменить, пока глоссарий редактируется (QA-07).
 
-    Правка переводческого указания при этом остаётся доступной: род персонажа
+    Действия решения у решённого элемента свёрнуты под «Изменить решение», чтобы
+    экран не разрастался, а правка указания остаётся доступной отдельно: род персонажа
     и другие указания уровня книги видны позже, чем принимается перевод имени
-    (PRD § 11).
+    (PRD § 11, § 21.3).
     """
     candidate = glossary_candidate()
-    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+    scenario = store_book(
+        application, status=status, glossary_candidates={0: (candidate,)}
+    )
     application.approve_glossary(
         GlossaryDecisionCommand(
             book_id=scenario.book_id,
@@ -217,9 +227,85 @@ def test_glossary_screen_hides_actions_for_decided_items(
     assert "Требуют решения: 0" in response.text
     assert "Решение: принято." in response.text
     assert "Принять все требующие решения" not in response.text
-    assert 'name="action"' not in response.text
-    assert 'name="text"' not in response.text
+    folded = response.text[response.text.index("<details"):response.text.index("</details>")]
+    assert "<summary>Изменить решение</summary>" in folded
+    for action in ("accept", "correct", "lock", "skip"):
+        assert f'name="action" value="{action}"' in folded
+    assert 'name="text"' in folded
+    assert response.text.count('name="action"') == 4
     assert "Сохранить указание" in response.text
+
+
+def test_glossary_screen_offers_to_change_an_optional_hint(
+    client: TestClient, application: Application
+) -> None:
+    """Неудачную подсказку, не требующую внимания, тоже можно исправить (QA-07)."""
+    candidate = glossary_candidate(
+        source_text="entailed estate",
+        suggested_translation="заповедное имение",
+        concept_type=ConceptType.TERM,
+    )
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert "Не требует решения." in response.text
+    assert "<summary>Изменить решение</summary>" in response.text
+    assert 'name="action" value="correct"' in response.text
+
+
+def test_glossary_screen_names_return_to_the_model_variant_for_corrected_item(
+    client: TestClient, application: Application
+) -> None:
+    """У исправленного элемента «Принять» подписано как возврат к варианту модели."""
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+    application.approve_glossary(
+        GlossaryDecisionCommand(
+            book_id=scenario.book_id,
+            source_text=candidate.source_text,
+            concept_id=candidate.id,
+            decision=GlossaryDecision.CORRECT,
+            translation="господин Беннет",
+        )
+    )
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert "Вернуть вариант модели: мистер Беннет" in response.text
+    assert 'value="господин Беннет"' in response.text
+
+
+def test_glossary_screen_offers_to_change_the_concept_type(
+    client: TestClient, application: Application
+) -> None:
+    """Тип понятия виден по-русски и меняется в форме исправления (QA-11, T2)."""
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert "Тип: действующее лицо." in response.text
+    assert '<select name="type"' in response.text
+    assert '<option value="person" selected>действующее лицо</option>' in response.text
+    assert '<option value="term">термин</option>' in response.text
+
+
+def test_glossary_screen_shows_other_spellings_of_the_item(
+    client: TestClient, application: Application
+) -> None:
+    """Объединённые написания одного имени видны в его элементе (QA-11)."""
+    first = glossary_candidate(candidate_id="candidate-first", source_text="Mr. Bennet")
+    second = glossary_candidate(
+        candidate_id="candidate-second", source_text="MR BENNET", confidence=0.9
+    )
+    scenario = store_book(application, glossary_candidates={0: (first, second)})
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert "<h2>Mr. Bennet</h2>" in response.text
+    assert "Другие написания: MR BENNET." in response.text
+    assert "Требуют решения: 1" in response.text
 
 
 def test_book_detail_screen_starts_processing_after_glossary_is_complete(

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -204,6 +206,73 @@ def compute_requires_review(
     )
 
 
+#: Типографские апострофы и кавычки, которые в ключе становятся прямыми.
+_STRAIGHT_QUOTES = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u02bc": "'",
+        "\u2032": "'",
+        "`": "'",
+        "\u00b4": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\u00ab": '"',
+        "\u00bb": '"',
+        "\u2033": '"',
+    }
+)
+
+#: Точка после сокращённого обращения: `Mr. Wonka` и `Mr Wonka` — одно имя.
+_TITLE_DOT = re.compile(r"\b(mr|mrs|ms|dr|st)\.\s*")
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def glossary_key(text: str) -> str:
+    """Ключ, по которому написания одного понятия собираются в один элемент (PRD § 11).
+
+    Объединяются только очевидные варианты: регистр, совместимые формы Unicode,
+    типографские апострофы и кавычки, лишние пробелы и точка после `Mr`, `Mrs`, `Ms`,
+    `Dr`, `St`. Притяжательная форма и части имени ключ не меняют: `Wonka's factory`
+    и `Wonka factory`, `Charlie` и `Charlie Bucket` — разные элементы, потому что
+    неоднозначное автоматически не объединяется.
+    """
+    normalized = unicodedata.normalize("NFKC", text).translate(_STRAIGHT_QUOTES)
+    normalized = _WHITESPACE.sub(" ", normalized).strip().casefold()
+    return _WHITESPACE.sub(" ", _TITLE_DOT.sub(r"\1 ", normalized)).strip()
+
+
+def spellings_by_preference(mentions: Iterable[tuple[str, float]]) -> tuple[str, ...]:
+    """Различные написания одного понятия, начиная с того, которое показывается.
+
+    `mentions` — пары «написание, уверенность модели» по каждому упоминанию. Первым
+    идёт самое частое написание, при равенстве — самое уверенное, затем — встреченное
+    раньше: так на экране проверки стоит та форма, которой книга пользуется чаще всего.
+    """
+    counts: dict[str, int] = {}
+    confidence: dict[str, float] = {}
+    for text, mention_confidence in mentions:
+        spelling = text.strip()
+        counts[spelling] = counts.get(spelling, 0) + 1
+        confidence[spelling] = max(confidence.get(spelling, 0.0), mention_confidence)
+    order = {spelling: index for index, spelling in enumerate(counts)}
+    return tuple(
+        sorted(
+            counts,
+            key=lambda spelling: (-counts[spelling], -confidence[spelling], order[spelling]),
+        )
+    )
+
+
 def translations_conflict(translations: Iterable[str]) -> bool:
-    """Дают ли фрагменты анализа разные варианты перевода одного исходного текста."""
-    return len({translation.strip() for translation in translations}) > 1
+    """Дают ли фрагменты анализа разные варианты перевода одного понятия.
+
+    Варианты сравниваются тем же ключом, что и написания исходного текста: регистр
+    и типографика перевода решением не являются.
+    """
+    return len({glossary_key(translation) for translation in translations}) > 1

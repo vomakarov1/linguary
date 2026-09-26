@@ -78,6 +78,7 @@ def decide_glossary_item(
             decision=request.action,
             translation=request.text,
             note=request.note,
+            type=request.type,
         )
     )
     updated = application.approve_glossary.review(book_id).item_for_concept(concept_id)

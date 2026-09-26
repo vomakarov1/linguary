@@ -234,6 +234,27 @@ p {
   justify-content: flex-end;
 }
 
+.row-card > .decision {
+  flex: 0 1 30rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.row-card > .decision > .actions,
+.row-card > details.decision .actions {
+  justify-content: flex-end;
+}
+
+details.decision > summary {
+  cursor: pointer;
+  text-align: right;
+  color: var(--muted);
+}
+
+details.decision[open] > summary {
+  margin-bottom: 0.6rem;
+}
+
 .result-actions {
   flex: 0 0 auto;
   justify-content: flex-end;

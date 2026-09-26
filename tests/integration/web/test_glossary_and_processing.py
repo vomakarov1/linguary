@@ -45,6 +45,8 @@ def test_glossary_review_exposes_pending_items(
                 "requires_review": True,
                 "is_decided": False,
                 "note": "",
+                "other_spellings": [],
+                "has_decision_conflict": False,
             }
         ],
     }
@@ -178,6 +180,40 @@ def test_glossary_correction_requires_text(
     response = client.post(
         f"/books/{scenario.book_id}/glossary/{candidate.id}",
         data={"action": "correct"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_glossary_correction_changes_the_concept_type(
+    client: TestClient, application: Application
+) -> None:
+    """Исправление принимает тип понятия и возвращает его в элементе (QA-11, T2)."""
+    candidate = glossary_candidate(
+        source_text="Charlotte Russe", suggested_translation="Шарлотта Русс"
+    )
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.post(
+        f"/books/{scenario.book_id}/glossary/{candidate.id}",
+        data={"action": "correct", "text": "шарлотка по-русски", "type": "term"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["type"] == "term"
+    assert response.json()["translation"] == "шарлотка по-русски"
+
+
+def test_glossary_type_is_rejected_without_correction(
+    client: TestClient, application: Application
+) -> None:
+    """Тип понятия, как и текст варианта, принимается только исправлением."""
+    candidate = glossary_candidate()
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.post(
+        f"/books/{scenario.book_id}/glossary/{candidate.id}",
+        data={"action": "accept", "type": "term"},
     )
 
     assert response.status_code == 422

@@ -6,6 +6,13 @@
 на исходный текст, пересчитывает признак `requires_review` доменным правилом (DTO-01)
 и присоединяет к элементу уже принятое пользователем решение.
 
+Исходные тексты сравниваются ключом `glossary_key`: очевидные варианты написания
+(`Mr Wonka` и `Mr. Wonka`, `WONKA'S FACTORY` и `Wonka's factory`) — один элемент,
+показанный самым частым написанием, а остальные написания видны в самом элементе.
+Решения ищутся тем же ключом. Если по разным написаниям одного элемента раньше были
+приняты разные решения, они молча не сливаются: действует зафиксированное, а элемент
+помечается конфликтом решений, пока пользователь не примет по нему решение заново.
+
 Решением пользователя владеет `TermConcept`: понятие существует ровно у тех исходных
 текстов, по которым пользователь высказался. Элемент, требующий внимания и не получивший
 понятия, остаётся необработанным и не даёт запустить обработку (PRD § 12). Элемент,
@@ -31,6 +38,8 @@ from linguary.domain import (
     TermConcept,
     TermStatus,
     compute_requires_review,
+    glossary_key,
+    spellings_by_preference,
     translations_conflict,
 )
 
@@ -67,6 +76,11 @@ class GlossaryReviewItem:
 
     `suggested_note` — переводческое указание, предложенное главами; решение
     пользователя несёт своё указание в `decision.note`.
+
+    `spellings` — все написания элемента в книге, первым идёт показанное
+    `source_text`. `superseded_decisions` — прежние решения по другим написаниям того
+    же элемента: действует `decision`, а они удаляются при следующем решении
+    пользователя.
     """
 
     concept_id: str
@@ -79,6 +93,30 @@ class GlossaryReviewItem:
     requires_review: bool
     decision: TermConcept | None = None
     suggested_note: str = ""
+    spellings: tuple[str, ...] = ()
+    superseded_decisions: tuple[TermConcept, ...] = ()
+
+    @property
+    def other_spellings(self) -> tuple[str, ...]:
+        """Написания элемента, кроме показанного."""
+        return tuple(
+            spelling for spelling in self.spellings if spelling != self.source_text
+        )
+
+    @property
+    def concept_type(self) -> ConceptType:
+        """Тип понятия с учётом решения: пользователь вправе исправить тип модели."""
+        return self.decision.type if self.decision is not None else self.type
+
+    @property
+    def has_decision_conflict(self) -> bool:
+        """Расходятся ли решения, принятые раньше по разным написаниям элемента."""
+        if self.decision is None:
+            return False
+        chosen = _decision_signature(self.decision)
+        return any(
+            _decision_signature(other) != chosen for other in self.superseded_decisions
+        )
 
     @property
     def note(self) -> str:
@@ -127,9 +165,10 @@ class GlossaryReview:
         return not self.awaiting_decision
 
     def item_for(self, source_text: str) -> GlossaryReviewItem | None:
-        """Элемент проверки по исходному тексту либо `None`, если такого в книге нет."""
+        """Элемент проверки по любому его написанию либо `None`, если такого в книге нет."""
+        key = glossary_key(source_text)
         return next(
-            (item for item in self.items if item.source_text == source_text), None
+            (item for item in self.items if glossary_key(item.source_text) == key), None
         )
 
     def item_for_concept(self, concept_id: str) -> GlossaryReviewItem | None:
@@ -164,15 +203,17 @@ def build_glossary_review(
     grouped: dict[str, list[GlossaryCandidate]] = {}
     for analysis in analyses:
         for candidate in analysis.glossary_candidates:
-            grouped.setdefault(candidate.source_text, []).append(candidate)
-    decided = {concept.canonical_source_text: concept for concept in decisions}
+            grouped.setdefault(glossary_key(candidate.source_text), []).append(candidate)
+    decided: dict[str, list[TermConcept]] = {}
+    for concept in decisions:
+        decided.setdefault(glossary_key(concept.canonical_source_text), []).append(concept)
     items = (
         _review_item(
             group,
-            decision=decided.get(source_text),
+            decisions=decided.get(key, ()),
             confidence_threshold=confidence_threshold,
         )
-        for source_text, group in grouped.items()
+        for key, group in grouped.items()
     )
     return GlossaryReview(book_id=book_id, items=tuple(sorted(items, key=_display_order)))
 
@@ -196,7 +237,7 @@ def glossary_snapshot(review: GlossaryReview, *, language: str) -> GlossarySnaps
 def _review_item(
     group: Sequence[GlossaryCandidate],
     *,
-    decision: TermConcept | None,
+    decisions: Sequence[TermConcept],
     confidence_threshold: float,
 ) -> GlossaryReviewItem:
     """Элемент проверки из упоминаний одного исходного текста в разных главах.
@@ -208,6 +249,10 @@ def _review_item(
     об одной главе, здесь — сохранённые кандидаты разных глав.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
+    spellings = spellings_by_preference(
+        (candidate.source_text, candidate.confidence) for candidate in group
+    )
+    decision, superseded = _chosen_decision(decisions, shown=spellings[0])
     concept_type = next(
         (
             candidate.type
@@ -232,7 +277,7 @@ def _review_item(
     )
     return GlossaryReviewItem(
         concept_id=decision.id if decision is not None else leading.id,
-        source_text=leading.source_text,
+        source_text=spellings[0],
         type=concept_type,
         suggested_translation=leading.suggested_translation,
         confidence=leading.confidence,
@@ -247,6 +292,58 @@ def _review_item(
         ),
         decision=decision,
         suggested_note=suggested_note,
+        spellings=spellings,
+        superseded_decisions=superseded,
+    )
+
+
+#: Порядок, в котором выбирается действующее решение среди решений по разным
+#: написаниям одного элемента: зафиксированное пользователем сильнее принятого,
+#: принятое — пропущенного.
+_DECISION_PRIORITY: dict[TermStatus, int] = {
+    TermStatus.LOCKED: 0,
+    TermStatus.APPROVED: 1,
+    TermStatus.SUGGESTED: 2,
+}
+
+
+def _chosen_decision(
+    decisions: Sequence[TermConcept], *, shown: str
+) -> tuple[TermConcept | None, tuple[TermConcept, ...]]:
+    """Действующее решение элемента и прежние решения по другим его написаниям.
+
+    Решение по каждому элементу одно; несколько решений у одного ключа остаются
+    от глоссария, в котором написания ещё не объединялись. Времени принятия решение
+    не хранит, поэтому «последнее» определить нельзя: побеждает самый сильный статус,
+    затем решение по показанному написанию, затем первое сохранённое. Расхождение
+    с остальными решениями не прячется — его показывает `has_decision_conflict`.
+    """
+    if not decisions:
+        return None, ()
+    ordered = sorted(
+        enumerate(decisions),
+        key=lambda pair: (
+            _DECISION_PRIORITY[pair[1].status],
+            pair[1].canonical_source_text.strip() != shown,
+            pair[0],
+        ),
+    )
+    chosen = ordered[0][1]
+    return chosen, tuple(concept for _, concept in ordered[1:])
+
+
+def _decision_signature(concept: TermConcept) -> tuple[object, ...]:
+    """То, чем решения различаются для пользователя: статус, тип, указание, перевод."""
+    return (
+        concept.status,
+        concept.type,
+        concept.note.strip(),
+        tuple(
+            sorted(
+                (variant.language, variant.text.strip(), variant.status)
+                for variant in concept.variants
+            )
+        ),
     )
 
 
@@ -259,7 +356,7 @@ def _display_order(item: GlossaryReviewItem) -> tuple[bool, bool, int, str]:
     return (
         not item.awaits_decision,
         not item.requires_review,
-        REVIEW_TYPE_ORDER.index(item.type),
+        REVIEW_TYPE_ORDER.index(item.concept_type),
         item.source_text.casefold(),
     )
 

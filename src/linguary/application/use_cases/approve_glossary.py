@@ -1,10 +1,11 @@
 """Проверка глоссария пользователем и старт обработки книги (PRD § 11-12, § 21.3).
 
 `ApproveGlossary` показывает глоссарий книги и ведёт четыре действия пользователя по
-элементу, требующему внимания: принять предложенный вариант, исправить его, зафиксировать
-как обязательный и пропустить элемент как неважный для единообразия перевода. Каждое
-действие сохраняет `TermConcept` — принятое решение; различаются они статусом понятия
-и его варианта.
+элементу: принять предложенный вариант, исправить его, зафиксировать как обязательный
+и пропустить элемент как неважный для единообразия перевода. Каждое действие сохраняет
+`TermConcept` — принятое решение; различаются они статусом понятия и его варианта.
+Пока глоссарий редактируется, решение можно принять заново — и по элементу, который
+уже решён, и по подсказке, внимания не требовавшей (PRD § 11, § 21.3).
 
 `StartProcessing` завершает проверку: он отказывает, пока среди требующих внимания
 остались необработанные элементы (PRD § 12), а иначе замораживает решения снимком
@@ -35,6 +36,7 @@ from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
     BookEvent,
     BookStatus,
+    ConceptType,
     LLMSettingsSnapshot,
     ProcessingRun,
     ProcessingRunStatus,
@@ -54,7 +56,7 @@ EDITABLE_STATUSES: frozenset[BookStatus] = frozenset(
 
 
 class GlossaryDecision(StrEnum):
-    """Действие пользователя по элементу, требующему внимания (PRD § 12)."""
+    """Действие пользователя по элементу глоссария (PRD § 12)."""
 
     ACCEPT = "accept"
     CORRECT = "correct"
@@ -84,7 +86,13 @@ class GlossaryDecisionCommand:
 
     `note` — переводческое указание по элементу. `None` означает «оставить действующее»,
     а переданная строка заменяет его целиком, в том числе пустая: снять указание
-    пользователь вправе так же, как и задать (PRD § 11).
+    пользователь вправе так же, как и задать (PRD § 11). Исключение — пропуск элемента
+    без решения: указание, предложенное моделью, пользователь не подтверждал, и
+    пропуск его не сохраняет.
+
+    `type` — тип понятия, исправленный пользователем. Как и `translation`, он
+    принимается только исправлением: ошибку модели в типе («десерт — персонаж»)
+    пользователь исправляет тем же действием, что и вариант перевода.
     """
 
     book_id: str
@@ -93,6 +101,7 @@ class GlossaryDecisionCommand:
     translation: str | None = None
     concept_id: str | None = None
     note: str | None = None
+    type: ConceptType | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +174,7 @@ class ApproveGlossary:
                 )
             concept = self._decide(item, command, book=book)
             transaction.glossary.save(concept)
+            _drop_superseded(transaction, item)
             _complete_review_if_ready(
                 transaction,
                 book,
@@ -284,7 +294,8 @@ class ApproveGlossary:
         """Понятие глоссария, каким его делает решение пользователя.
 
         Повторное решение по тому же элементу переписывает прежнее понятие целиком:
-        идентификатор сохраняется, статус и вариант перевода заменяются.
+        идентификатор сохраняется, статус и вариант перевода заменяются. Тип понятия
+        меняет только исправление; остальные решения сохраняют тип прежнего решения.
         """
         status = DECISION_STATUSES[command.decision]
         concept_id = item.decision.id if item.decision is not None else (
@@ -293,10 +304,10 @@ class ApproveGlossary:
         return TermConcept(
             id=concept_id,
             book_id=book.id,
-            type=item.type,
+            type=_concept_type(item, command),
             canonical_source_text=item.source_text,
             status=status,
-            note=item.note if command.note is None else command.note.strip(),
+            note=_decision_note(item, command),
             variants=(
                 TermVariant(
                     concept_id=concept_id,
@@ -413,6 +424,46 @@ def _ensure_editable(book: BookRecord) -> None:
             f"глоссарий книги {book.id} в состоянии {book.status} доступен только "
             f"для чтения: чтобы изменить решения, вернитесь к проверке глоссария"
         )
+
+
+def _drop_superseded(transaction: UnitOfWork, item: GlossaryReviewItem) -> None:
+    """Удаляет прежние решения по другим написаниям элемента после нового решения.
+
+    Пока пользователь не высказался заново, расходящиеся решения видны конфликтом;
+    новое решение принято по элементу целиком, и прежние больше не действуют.
+    """
+    for concept in item.superseded_decisions:
+        transaction.glossary.delete(concept.id)
+
+
+def _concept_type(
+    item: GlossaryReviewItem, command: GlossaryDecisionCommand
+) -> ConceptType:
+    """Тип понятия после решения: исправленный пользователем или прежний."""
+    if command.type is not None and command.decision is not GlossaryDecision.CORRECT:
+        raise GlossaryReviewError(
+            f"действие {command.decision} по элементу {item.source_text!r} типа понятия "
+            f"не принимает: тип меняется исправлением"
+        )
+    return command.type or item.concept_type
+
+
+def _decision_note(item: GlossaryReviewItem, command: GlossaryDecisionCommand) -> str:
+    """Переводческое указание после решения пользователя.
+
+    Переданное указание заменяет действующее. Без него решение сохраняет указание
+    прежнего решения, а первое решение — указание, предложенное главами: принять
+    элемент вместе с показанным указанием значит согласиться и с ним. Пропуск
+    элемента без решения предложенное указание не сохраняет: пользователь его не
+    подтверждал, и в обработку оно уйти не должно.
+    """
+    if command.note is not None:
+        return command.note.strip()
+    if item.decision is not None:
+        return item.decision.note
+    if command.decision is GlossaryDecision.SKIP:
+        return ""
+    return item.suggested_note
 
 
 def _translation(

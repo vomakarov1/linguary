@@ -325,3 +325,122 @@ def test_snapshot_skips_decision_without_target_language_variant() -> None:
     )
 
     assert glossary_snapshot(book, language=TARGET_LANGUAGE).entries == ()
+
+
+def chapter_three(*candidates: GlossaryCandidate) -> ChapterAnalysis:
+    """Анализ третьей главы книги с её кандидатами глоссария."""
+    return make_chapter_analysis(
+        id="analysis-3", section_id="section-3", candidates=candidates
+    )
+
+
+def wonka(spelling: str, *, analysis_id: str, confidence: float = 0.9) -> GlossaryCandidate:
+    """Упоминание мистера Вонки в одной главе под заданным написанием."""
+    return make_analysis_candidate(
+        source_text=spelling,
+        suggested_translation="мистер Вонка",
+        analysis_id=analysis_id,
+        confidence=confidence,
+    )
+
+
+def test_obvious_spellings_of_one_name_are_one_item() -> None:
+    """Написания с точкой и без, в разном регистре — один элемент проверки (QA-11).
+
+    Элемент показан самым частым написанием, остальные написания видны в нём.
+    """
+    book = review(
+        chapter_one(wonka("Mr Wonka", analysis_id="analysis-1", confidence=0.99)),
+        chapter_two(
+            wonka("Mr. Wonka", analysis_id="analysis-2"),
+            make_analysis_candidate(
+                source_text="Wonka's factory",
+                type=ConceptType.PLACE,
+                suggested_translation="фабрика Вонки",
+                analysis_id="analysis-2",
+                confidence=0.95,
+            ),
+        ),
+        chapter_three(
+            wonka("Mr. Wonka", analysis_id="analysis-3"),
+            make_analysis_candidate(
+                source_text="WONKA’S FACTORY",
+                type=ConceptType.PLACE,
+                suggested_translation="Фабрика Вонки",
+                analysis_id="analysis-3",
+            ),
+        ),
+    )
+
+    assert [item.source_text for item in book.items] == ["Mr. Wonka", "Wonka's factory"]
+    person = book.items[0]
+    assert person.spellings == ("Mr. Wonka", "Mr Wonka")
+    assert person.other_spellings == ("Mr Wonka",)
+    assert book.item_for("MR WONKA") is person
+    assert len(book.awaiting_decision) == 2
+    assert not book.items[1].has_translation_conflict
+
+
+def test_decision_made_under_another_spelling_is_found() -> None:
+    """Решение, принятое по одному написанию, действует для всего элемента."""
+    book = review(
+        chapter_one(wonka("Mr Wonka", analysis_id="analysis-1")),
+        chapter_two(wonka("Mr. Wonka", analysis_id="analysis-2")),
+        chapter_three(wonka("Mr. Wonka", analysis_id="analysis-3")),
+        decisions=(decision("Mr Wonka", text="мистер Вонка"),),
+    )
+
+    (item,) = book.items
+    assert item.decision is not None
+    assert item.decision.canonical_source_text == "Mr Wonka"
+    assert book.is_complete
+    assert not item.has_decision_conflict
+
+
+def test_diverging_decisions_of_spellings_are_not_merged_silently() -> None:
+    """Разные прежние решения по написаниям одного элемента помечаются конфликтом.
+
+    Действует зафиксированное решение, прочие видны как вытесненные и в снимок
+    запуска не попадают: снимок получает ровно одно решение на элемент.
+    """
+    book = review(
+        chapter_one(wonka("Mr Wonka", analysis_id="analysis-1")),
+        chapter_two(wonka("Mr. Wonka", analysis_id="analysis-2")),
+        decisions=(
+            decision("Mr. Wonka", text="мистер Вонка", concept_id="concept-1"),
+            decision(
+                "Mr Wonka",
+                text="господин Вонка",
+                status=TermStatus.LOCKED,
+                concept_id="concept-2",
+            ),
+        ),
+    )
+
+    (item,) = book.items
+    assert item.decision is not None
+    assert item.decision.id == "concept-2"
+    assert item.has_decision_conflict
+    assert [concept.id for concept in item.superseded_decisions] == ["concept-1"]
+    snapshot = glossary_snapshot(book, language=TARGET_LANGUAGE)
+    assert [(entry.source_text, entry.translation) for entry in snapshot.entries] == [
+        ("Mr Wonka", "господин Вонка")
+    ]
+
+
+def test_matching_decisions_of_spellings_are_not_a_conflict() -> None:
+    """Одинаковые решения по разным написаниям конфликтом не считаются."""
+    book = review(
+        chapter_one(wonka("Mr Wonka", analysis_id="analysis-1")),
+        chapter_two(wonka("Mr. Wonka", analysis_id="analysis-2")),
+        chapter_three(wonka("Mr. Wonka", analysis_id="analysis-3")),
+        decisions=(
+            decision("Mr Wonka", text="мистер Вонка", concept_id="concept-1"),
+            decision("Mr. Wonka", text="мистер Вонка", concept_id="concept-2"),
+        ),
+    )
+
+    (item,) = book.items
+    assert not item.has_decision_conflict
+    assert item.decision is not None
+    assert item.decision.canonical_source_text == "Mr. Wonka"

@@ -321,6 +321,91 @@ def test_review_signals_of_every_fragment_are_kept() -> None:
     assert candidate.requires_review is True
 
 
+def test_obvious_spellings_of_one_name_become_one_candidate() -> None:
+    """Регистр и точка после `Mr` не делают из одного имени разных кандидатов (QA-11).
+
+    Кандидат показывается самым частым написанием, а вариант перевода остаётся
+    за самым уверенным фрагментом.
+    """
+    expected = block_ids(3)
+
+    analysis = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            candidates=(
+                make_candidate(
+                    source_text="Mr Wonka",
+                    type=ConceptType.PERSON,
+                    suggested_translation="мистер Вонка",
+                    confidence=0.99,
+                ),
+            ),
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:2],
+            candidates=(
+                make_candidate(
+                    source_text="Mr. Wonka",
+                    type=ConceptType.PERSON,
+                    suggested_translation="мистер Вонка",
+                    confidence=0.9,
+                ),
+            ),
+        ),
+        make_fragment(
+            2,
+            blocks=expected[2:],
+            candidates=(
+                make_candidate(
+                    source_text="MR. WONKA",
+                    type=ConceptType.PERSON,
+                    suggested_translation="Мистер  Вонка",
+                    confidence=0.8,
+                ),
+                make_candidate(
+                    source_text="Mr. Wonka",
+                    type=ConceptType.PERSON,
+                    suggested_translation="мистер Вонка",
+                    confidence=0.7,
+                ),
+            ),
+        ),
+        expected=expected,
+    )
+
+    candidates = analysis.glossary_candidates
+    assert len(candidates) == 1
+    assert candidates[0].source_text == "Mr. Wonka"
+    assert candidates[0].suggested_translation == "мистер Вонка"
+    assert candidates[0].confidence == 0.99
+
+
+def test_possessive_form_stays_a_separate_candidate() -> None:
+    """Притяжательная форма очевидным вариантом не считается и не объединяется."""
+    expected = block_ids(2)
+
+    analysis = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            candidates=(make_candidate(source_text="Wonka's factory"),),
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:],
+            candidates=(make_candidate(source_text="Wonka factory"),),
+        ),
+        expected=expected,
+    )
+
+    assert {candidate.source_text for candidate in analysis.glossary_candidates} == {
+        "Wonka's factory",
+        "Wonka factory",
+    }
+
+
 def test_chapter_summary_joins_fragment_summaries_in_reading_order() -> None:
     """Сводка разбитой главы собирается из сводок фрагментов в порядке чтения (ALG-03)."""
     expected = block_ids(2)

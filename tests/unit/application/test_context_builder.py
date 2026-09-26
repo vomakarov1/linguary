@@ -201,6 +201,40 @@ def test_accumulated_candidates_are_deduplicated_and_limited() -> None:
     assert "Netherfield" not in decisions
 
 
+def test_obvious_spellings_of_one_decision_reach_the_request_once() -> None:
+    """Написания одного имени с точкой и без передаются одним решением (QA-11)."""
+    context = build_context(
+        candidates=(
+            make_analysis_candidate(
+                source_text="Mr. Wonka",
+                suggested_translation="мистер Вонка",
+                analysis_id="analysis-1",
+            ),
+            make_analysis_candidate(
+                source_text="MR WONKA",
+                suggested_translation="мистер Вонка",
+                analysis_id="analysis-2",
+            ),
+        ),
+    )
+
+    assert context.request.input_text.count("мистер Вонка") == 1
+    assert "MR WONKA" not in context.request.input_text
+
+
+def test_instructions_keep_named_things_out_of_persons() -> None:
+    """Предметы и блюда, названные в честь людей, модель не делает персонажами (QA-11).
+
+    Перевод предлагается ровно для той формы, что стоит в тексте: короткое имя не
+    подменяется полным из принятых решений.
+    """
+    instructions = build_context().request.instructions
+
+    assert "названные в честь людей" in instructions
+    assert "перевод именно этой формы" in instructions
+    assert "не подставляй полное имя" in instructions
+
+
 def test_aliases_map_back_to_stable_block_ids() -> None:
     """Псевдоним запроса возвращается к стабильному идентификатору блока."""
     section = make_analysis_section(texts=("First.", "Second."))

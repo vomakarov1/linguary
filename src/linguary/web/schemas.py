@@ -38,6 +38,7 @@ from linguary.application.use_cases.reset_processing import ResetProcessingResul
 from linguary.domain import (
     BlockTreatment,
     BookImportWarning,
+    ConceptType,
     BookStatus,
     CoverageStatus,
     GlossaryHint,
@@ -55,20 +56,26 @@ class GlossaryDecisionRequest(BaseModel):
 
     `note` — переводческое указание по элементу. Поля нет в форме — указание
     остаётся прежним; пустое поле снимает его (PRD § 11).
+
+    `type` — исправленный тип понятия; как и текст варианта, принимается только
+    исправлением.
     """
 
     action: GlossaryDecision
     text: str | None = None
     note: str | None = None
+    type: ConceptType | None = None
 
     @model_validator(mode="after")
     def validate_text_for_action(self) -> Self:
-        """Текст обязателен только для исправления варианта."""
+        """Текст обязателен только для исправления варианта, тип — только с ним."""
         has_text = bool(self.text and self.text.strip())
         if self.action is GlossaryDecision.CORRECT and not has_text:
             raise ValueError("для исправления укажите новый вариант перевода")
         if self.action is not GlossaryDecision.CORRECT and has_text:
             raise ValueError("текст принимается только для действия correct")
+        if self.action is not GlossaryDecision.CORRECT and self.type is not None:
+            raise ValueError("тип понятия принимается только для действия correct")
         return self
 
 
@@ -92,7 +99,12 @@ class ResetProcessingRequest(BaseModel):
 
 
 class GlossaryItemResponse(BaseModel):
-    """Один элемент проверки глоссария (PRD § 12, § 21.3)."""
+    """Один элемент проверки глоссария (PRD § 12, § 21.3).
+
+    `type` — тип понятия с учётом решения пользователя. `other_spellings` — прочие
+    написания элемента в книге, объединённые с показанным. `has_decision_conflict` —
+    по разным написаниям раньше были приняты разные решения, и действует одно из них.
+    """
 
     concept_id: str
     source_text: str
@@ -107,6 +119,8 @@ class GlossaryItemResponse(BaseModel):
     requires_review: bool
     is_decided: bool
     note: str = ""
+    other_spellings: tuple[str, ...] = ()
+    has_decision_conflict: bool = False
 
     @classmethod
     def of_item(cls, item: GlossaryReviewItem) -> GlossaryItemResponse:
@@ -117,7 +131,7 @@ class GlossaryItemResponse(BaseModel):
         return cls(
             concept_id=item.concept_id,
             source_text=item.source_text,
-            type=item.type.value,
+            type=item.concept_type.value,
             suggested_translation=item.suggested_translation,
             translation=translation,
             status=decision.status.value if decision is not None else None,
@@ -136,6 +150,8 @@ class GlossaryItemResponse(BaseModel):
             requires_review=item.requires_review,
             is_decided=item.is_decided,
             note=item.note,
+            other_spellings=item.other_spellings,
+            has_decision_conflict=item.has_decision_conflict,
         )
 
 

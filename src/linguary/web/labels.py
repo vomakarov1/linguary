@@ -16,6 +16,7 @@ from linguary.application.ports.persistence import ExportValidationStatus
 from linguary.domain import (
     BlockTreatment,
     BookStatus,
+    ConceptType,
     ErrorType,
     ImportWarningKind,
     ResultWarningKind,
@@ -125,6 +126,15 @@ GLOSSARY_DECISION_LABELS: Mapping[TermStatus, str] = {
 #: Подпись исправленного пользователем варианта перевода.
 GLOSSARY_CORRECTED_LABEL = "исправлено"
 
+#: Тип понятия глоссария (PRD § 12): в карточке элемента и в списке исправления типа.
+CONCEPT_TYPE_LABELS: Mapping[ConceptType, str] = {
+    ConceptType.PERSON: "действующее лицо",
+    ConceptType.PLACE: "место",
+    ConceptType.ORGANIZATION: "организация",
+    ConceptType.FICTIONAL_CONCEPT: "вымышленное понятие",
+    ConceptType.TERM: "термин",
+}
+
 #: Полнота плана обработки книги на экране плана (PRD § 14): короткая подпись
 #: и пояснение, что она означает.
 PLAN_COMPLETE_LABEL = "План полный"
@@ -186,6 +196,11 @@ def error_type_label(error_type: ErrorType) -> str:
     return ERROR_TYPE_LABELS[error_type]
 
 
+def concept_type_label(concept_type: ConceptType) -> str:
+    """Название типа понятия глоссария."""
+    return CONCEPT_TYPE_LABELS[concept_type]
+
+
 def glossary_decision_label(
     status: TermStatus, *, translation: str | None, suggested_translation: str
 ) -> str:
@@ -212,6 +227,7 @@ def export_validation_status_label(status: ExportValidationStatus) -> str:
 
 __all__ = [
     "BOOK_STATUS_LABELS",
+    "CONCEPT_TYPE_LABELS",
     "DEFAULT_ERROR_PAGE_TITLE",
     "EPUBCHECK_HINT",
     "ERROR_PAGE_TITLES",
@@ -232,6 +248,7 @@ __all__ = [
     "TASK_TYPE_LABELS",
     "TREATMENT_LABELS",
     "book_status_label",
+    "concept_type_label",
     "error_page_title",
     "error_type_label",
     "export_validation_status_label",

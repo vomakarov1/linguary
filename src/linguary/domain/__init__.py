@@ -69,6 +69,8 @@ from linguary.domain.glossary import (
     TermStatus,
     TermVariant,
     compute_requires_review,
+    glossary_key,
+    spellings_by_preference,
     translations_conflict,
 )
 from linguary.domain.identifiers import (
@@ -188,8 +190,10 @@ __all__ = [
     "ensure_transition_allowed",
     "footnote_marker",
     "footnote_references",
+    "glossary_key",
     "is_transition_allowed",
     "known_markers_only",
+    "spellings_by_preference",
     "status_after_task_failure",
     "translation_segments",
     "translations_conflict",

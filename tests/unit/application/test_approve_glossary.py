@@ -32,7 +32,9 @@ from linguary.domain import (
     ConceptType,
     GlossaryCandidate,
     LLMSettingsSnapshot,
+    TermConcept,
     TermStatus,
+    TermVariant,
 )
 
 LLM_SETTINGS = LLMSettingsSnapshot(provider="openai_compatible", model="gpt-test")
@@ -445,3 +447,180 @@ def test_note_is_frozen_in_the_snapshot_of_the_run() -> None:
 
     entries = {entry.source_text: entry for entry in run.glossary_snapshot.entries}
     assert entries["Mr. Bennet"].note == "женский род"
+
+
+def test_decision_can_be_changed_after_implicit_acceptance_by_note() -> None:
+    """Принятое вместе с указанием решение можно исправить до старта обработки (QA-07)."""
+    unit_of_work = glossary_book(make_analysis_candidate())
+    implicit = approve(unit_of_work).set_note(
+        GlossaryNoteCommand(
+            book_id=BOOK_ID,
+            concept_id="candidate-analysis-1-Mr. Bennet",
+            note="мужской род",
+        )
+    )
+
+    corrected = approve(unit_of_work)(
+        command(GlossaryDecision.CORRECT, translation="мистер Беннетт")
+    )
+    returned = approve(unit_of_work)(command(GlossaryDecision.ACCEPT))
+
+    assert corrected.id == implicit.id
+    corrected_variant = corrected.variant_for("ru")
+    assert corrected_variant is not None
+    assert corrected_variant.text == "мистер Беннетт"
+    assert corrected.note == "мужской род"
+    returned_variant = returned.variant_for("ru")
+    assert returned_variant is not None
+    assert returned_variant.text == "мистер Беннет"
+
+
+def test_correction_changes_the_concept_type() -> None:
+    """Исправление меняет тип понятия, ошибочно выбранный моделью (QA-11, T2).
+
+    Тип держится и при следующих решениях и уходит в снимок запуска.
+    """
+    unit_of_work = glossary_book(
+        make_analysis_candidate(
+            source_text="Charlotte Russe", suggested_translation="Шарлотта Русс"
+        )
+    )
+    corrected = approve(unit_of_work)(
+        GlossaryDecisionCommand(
+            book_id=BOOK_ID,
+            source_text="Charlotte Russe",
+            decision=GlossaryDecision.CORRECT,
+            translation="шарлотка по-русски",
+            type=ConceptType.TERM,
+        )
+    )
+    locked = approve(unit_of_work)(
+        command(GlossaryDecision.LOCK, source_text="Charlotte Russe")
+    )
+
+    run = start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
+
+    assert corrected.type is ConceptType.TERM
+    assert locked.type is ConceptType.TERM
+    (entry,) = run.glossary_snapshot.entries
+    assert entry.type is ConceptType.TERM
+    assert entry.translation == "шарлотка по-русски"
+
+
+def test_type_is_accepted_only_with_correction() -> None:
+    """Тип понятия меняется только исправлением, как и вариант перевода."""
+    unit_of_work = glossary_book(make_analysis_candidate())
+
+    with pytest.raises(GlossaryReviewError):
+        approve(unit_of_work)(
+            GlossaryDecisionCommand(
+                book_id=BOOK_ID,
+                source_text="Mr. Bennet",
+                decision=GlossaryDecision.ACCEPT,
+                type=ConceptType.TERM,
+            )
+        )
+
+
+def test_skip_does_not_pass_the_unconfirmed_note_of_the_model() -> None:
+    """Пропуск не передаёт обработке указание, которого пользователь не подтверждал.
+
+    Иначе «женский род», ошибочно предложенный десерту, уходит модели обработки
+    вместе с пропущенным элементом (QA-11).
+    """
+    unit_of_work = glossary_book(
+        make_analysis_candidate(
+            source_text="Charlotte Russe",
+            suggested_translation="Шарлотта Русс",
+            note="женский род",
+        )
+    )
+
+    skipped = approve(unit_of_work)(
+        command(GlossaryDecision.SKIP, source_text="Charlotte Russe")
+    )
+    run = start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
+
+    assert skipped.note == ""
+    (entry,) = run.glossary_snapshot.entries
+    assert entry.note == ""
+
+
+def test_skip_keeps_the_note_saved_by_the_user() -> None:
+    """Указание, которое пользователь сохранил сам, пропуск не снимает."""
+    unit_of_work = glossary_book(make_analysis_candidate(note="женский род"))
+    approve(unit_of_work).set_note(
+        GlossaryNoteCommand(
+            book_id=BOOK_ID,
+            concept_id="candidate-analysis-1-Mr. Bennet",
+            note="мужской род",
+        )
+    )
+
+    skipped = approve(unit_of_work)(command(GlossaryDecision.SKIP))
+    typed = approve(unit_of_work)(
+        GlossaryDecisionCommand(
+            book_id=BOOK_ID,
+            source_text="Mr. Bennet",
+            decision=GlossaryDecision.SKIP,
+            note="обращаться на «вы»",
+        )
+    )
+
+    assert skipped.note == "мужской род"
+    assert typed.note == "обращаться на «вы»"
+
+
+def test_decision_replaces_diverging_decisions_of_other_spellings() -> None:
+    """Новое решение по элементу убирает прежние решения по его другим написаниям."""
+    unit_of_work = glossary_book(
+        make_analysis_candidate(source_text="Mr Bennet"),
+        make_analysis_candidate(source_text="Mr. Bennet"),
+    )
+    unit_of_work.glossary.save(
+        TermConcept(
+            id="legacy-1",
+            book_id=BOOK_ID,
+            type=ConceptType.PERSON,
+            canonical_source_text="Mr Bennet",
+            status=TermStatus.APPROVED,
+            variants=(
+                TermVariant(
+                    concept_id="legacy-1",
+                    language="ru",
+                    text="господин Беннет",
+                    status=TermStatus.APPROVED,
+                ),
+            ),
+        )
+    )
+    unit_of_work.glossary.save(
+        TermConcept(
+            id="legacy-2",
+            book_id=BOOK_ID,
+            type=ConceptType.PERSON,
+            canonical_source_text="Mr. Bennet",
+            status=TermStatus.APPROVED,
+            variants=(
+                TermVariant(
+                    concept_id="legacy-2",
+                    language="ru",
+                    text="мистер Беннет",
+                    status=TermStatus.APPROVED,
+                ),
+            ),
+        )
+    )
+    before = approve(unit_of_work).review(BOOK_ID).item_for("Mr. Bennet")
+    assert before is not None
+    assert before.has_decision_conflict
+
+    concept = approve(unit_of_work)(command(GlossaryDecision.LOCK))
+
+    after = approve(unit_of_work).review(BOOK_ID).item_for("Mr Bennet")
+    assert after is not None
+    assert not after.has_decision_conflict
+    assert after.superseded_decisions == ()
+    assert [stored.id for stored in unit_of_work.glossary.list_for_book(BOOK_ID)] == [
+        concept.id
+    ]

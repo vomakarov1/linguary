@@ -37,6 +37,8 @@ from linguary.domain import (
     GlossaryCandidate,
     TreatmentPlan,
     TreatmentPlanItem,
+    glossary_key,
+    spellings_by_preference,
     translations_conflict,
 )
 
@@ -269,11 +271,16 @@ def _merged_candidates(
     confidence_threshold: float,
     id_factory: Callable[[], str],
 ) -> tuple[GlossaryCandidate, ...]:
-    """Кандидаты глоссария главы, объединённые по исходному тексту (PRD § 11-12)."""
+    """Кандидаты глоссария главы, объединённые по исходному тексту (PRD § 11-12).
+
+    Очевидные варианты написания одного текста — регистр, типографика, точка после
+    `Mr` — объединяются ключом `glossary_key`: иначе каждое написание имени стало бы
+    отдельным обязательным решением, а решения по ним могли бы разойтись.
+    """
     groups: dict[str, list[GlossaryCandidateResponse]] = {}
     for fragment in fragments:
         for candidate in fragment.glossary_candidates:
-            groups.setdefault(candidate.source_text, []).append(candidate)
+            groups.setdefault(glossary_key(candidate.source_text), []).append(candidate)
     return tuple(
         _merged_candidate(
             group,
@@ -299,6 +306,8 @@ def _merged_candidate(
     всегда, и расхождение вариантов перевода делают кандидата требующим внимания.
     Согласие фрагментов на одном варианте, наоборот, само по себе внимания не требует.
 
+    Исходный текст — самое частое написание среди фрагментов (`spellings_by_preference`).
+
     Переводческое указание берётся у самого уверенного фрагмента, который его дал:
     пустое указание не должно вытеснять непустое, потому что фрагменты видят разные
     части главы и признак, требующий указания, встречается не в каждой из них.
@@ -307,7 +316,9 @@ def _merged_candidate(
     return GlossaryCandidate.create(
         id=id,
         analysis_id=analysis_id,
-        source_text=leading.source_text,
+        source_text=spellings_by_preference(
+            (candidate.source_text, candidate.confidence) for candidate in group
+        )[0],
         type=next(
             (
                 candidate.type

@@ -30,6 +30,12 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
 #: доступно любому шаблону, а не приходит отдельным полем каждого ответа.
 templates.env.globals["external_llm_warning"] = labels.EXTERNAL_LLM_WARNING
 
+#: Типы понятий глоссария по-русски: список исправления типа на экране глоссария.
+templates.env.globals["concept_types"] = tuple(
+    (concept_type.value, label)
+    for concept_type, label in labels.CONCEPT_TYPE_LABELS.items()
+)
+
 
 def wants_html(request: Request) -> bool:
     """Просит ли клиент HTML, а не JSON."""
