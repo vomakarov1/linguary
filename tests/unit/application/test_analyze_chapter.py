@@ -285,6 +285,88 @@ async def test_user_decision_outranks_model_candidate_in_next_chapter(
     assert absent not in request
 
 
+def _decision(
+    concept_id: str, source_text: str, translation: str, status: TermStatus
+) -> TermConcept:
+    """Решение пользователя по элементу глоссария книги."""
+    return TermConcept(
+        id=concept_id,
+        book_id=BOOK_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text=source_text,
+        status=status,
+        variants=(
+            TermVariant(
+                concept_id=concept_id,
+                language=TARGET_LANGUAGE,
+                text=translation,
+                status=status,
+            ),
+        ),
+    )
+
+
+async def test_repeated_analysis_sees_user_decisions_of_whole_book() -> None:
+    """Повторный анализ главы видит решения пользователя по всей книге (Н-3).
+
+    Решения по понятиям этой и следующих глав приходят в анализ так же, как решения
+    предыдущих глав; кандидаты следующих глав без решения и пропущенные элементы —
+    нет: вариант модели следующей главы этой главе ничего не даёт.
+    """
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Chapter {number} text.",),
+        )
+        for number in (1, 2, 3)
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    for number, candidates in (
+        (1, (("Mr. Bennet", "мистер Беннет"),)),
+        (2, (("Selene Row", "Селин Роу"), ("gatehouse", "привратный домик"))),
+        (3, (("Mr. Darcy", "мистер Дарси"), ("Lady Grey", "леди Грэй"))),
+    ):
+        analysis_id = f"analysis-{number}"
+        unit_of_work.analyses.save(
+            BOOK_ID,
+            make_chapter_analysis(
+                id=analysis_id,
+                section_id=f"section-{number}",
+                candidates=tuple(
+                    make_analysis_candidate(
+                        analysis_id=analysis_id,
+                        source_text=source_text,
+                        suggested_translation=translation,
+                    )
+                    for source_text, translation in candidates
+                ),
+            ),
+        )
+    for concept in (
+        _decision("concept-1", "Selene Row", "Селена Роу", TermStatus.LOCKED),
+        _decision("concept-2", "gatehouse", "дом привратника", TermStatus.APPROVED),
+        _decision("concept-3", "Lady Grey", "леди Грей", TermStatus.APPROVED),
+        _decision("concept-4", "Mr. Darcy", "мистер Дарси", TermStatus.SUGGESTED),
+    ):
+        unit_of_work.glossary.save(concept)
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    await scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-2"))
+
+    request = client.requests[0].input_text
+    assert "Mr. Bennet" in request
+    assert "Селена Роу" in request
+    assert "дом привратника" in request
+    assert "леди Грей" in request
+    assert "Селин Роу" not in request
+    assert "привратный домик" not in request
+    assert "Mr. Darcy" not in request
+    assert request.index("Селена Роу") < request.index("Mr. Bennet")
+
+
 async def test_chapter_without_text_is_analysed_without_the_model() -> None:
     """Глава без текстовых блоков не даёт вызова модели, но получает полный анализ."""
     section = make_analysis_section(

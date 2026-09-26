@@ -250,14 +250,16 @@ class AnalyzeChapter:
     def _load(
         self, command: AnalyzeChapterCommand
     ) -> tuple[CanonicalDocument, tuple[GlossaryCandidate, ...]]:
-        """Читает книгу и кандидатов глоссария проанализированных предыдущих глав.
+        """Читает книгу и накопленные решения глоссария книги.
 
         Решение пользователя по кандидату заменяет вариант модели: анализ повторяет
         накопленные решения дословно и не должен возвращать исправленный вариант.
 
-        Берутся только главы, стоящие в порядке чтения раньше текущей: повторный анализ
-        главы в середине книги не должен видеть решений следующих глав. Порядок чтения
-        сохраняет сам `list_for_book`.
+        Кандидаты предыдущих глав идут все, с вариантом модели там, где решения нет.
+        Кандидаты самой главы и следующих глав — только с решением пользователя:
+        решение действует на всю книгу, и повторный анализ главы после проверки
+        глоссария обязан его видеть (PRD § 11), а вариант модели следующей главы
+        этой главе ничего не даёт. Порядок чтения сохраняет сам `list_for_book`.
         """
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(command.book_id)
@@ -265,15 +267,22 @@ class AnalyzeChapter:
                 raise AnalyzeChapterError(f"книги {command.book_id} нет в хранилище")
             current_order = _section_of(document, command).order
             orders = {section.id: section.order for section in document.sections}
+            analyses = transaction.analyses.list_for_book(command.book_id)
             accumulated = candidates_with_decisions(
                 (
                     candidate
-                    for analysis in transaction.analyses.list_for_book(command.book_id)
+                    for analysis in analyses
                     if orders.get(analysis.section_id, current_order) < current_order
                     for candidate in analysis.glossary_candidates
                 ),
                 transaction.glossary.list_for_book(command.book_id),
                 language=document.target_language,
+                decided_only=(
+                    candidate
+                    for analysis in analyses
+                    if orders.get(analysis.section_id, current_order) >= current_order
+                    for candidate in analysis.glossary_candidates
+                ),
             )
         return document, accumulated
 

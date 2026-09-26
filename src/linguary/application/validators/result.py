@@ -30,6 +30,7 @@ from linguary.application.retry_policy import (
 )
 from linguary.application.validators.coverage import coverage_violation
 from linguary.application.validators.language import language_violation
+from linguary.application.validators.mixed_script import mixed_script_violation
 from linguary.application.validators.repetition import repetition_warning
 from linguary.application.validators.service_messages import service_message_violation
 from linguary.application.validators.treatment import (
@@ -109,6 +110,7 @@ class TranslationResultValidator:
             expected,
         )
         self._ensure(service_message_violation(payload), expected)
+        self._ensure(mixed_script_violation(payload), expected)
         results = tuple(
             self._result(
                 block,

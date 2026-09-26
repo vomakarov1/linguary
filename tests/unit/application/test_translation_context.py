@@ -802,3 +802,44 @@ def test_footnote_that_is_a_link_entirely_keeps_its_text() -> None:
     )
 
     assert "See chapter two." in context.request.input_text
+
+
+def test_glossary_note_naming_rejected_variant_of_other_concept_is_dropped() -> None:
+    """Указание элемента глоссария не приносит в контекст отвергнутый вариант (Н-2).
+
+    Живой прогон: указание `marsh gate`, принятое через «Принять все», дословно
+    уходило в блок обязательных решений с «Даскмир» рядом с «Duskmere -> Даскмер».
+    """
+    decisions = user_decisions_snapshot()
+    snapshot = GlossarySnapshot(
+        entries=(
+            *decisions.entries,
+            GlossarySnapshotEntry(
+                source_text="marsh gate",
+                translation="болотные ворота",
+                type=ConceptType.FICTIONAL_CONCEPT,
+                status=TermStatus.APPROVED,
+                note=(
+                    "Функциональный пост стража болота при въезде в Даскмир; "
+                    "уточнить устойчивый вариант перевода для всей книги."
+                ),
+            ),
+            GlossarySnapshotEntry(
+                source_text="boardwalk",
+                translation="деревянный настил",
+                type=ConceptType.TERM,
+                status=TermStatus.SUGGESTED,
+                note="Настил ведёт через болото к Даскмиру.",
+            ),
+        )
+    )
+
+    text = context_with_instructions(CHAPTER_INSTRUCTIONS, snapshot)
+
+    assert "Даскмир" not in text
+    assert (
+        "- marsh gate [fictional_concept] -> болотные ворота "
+        "(уточнить устойчивый вариант перевода для всей книги.)"
+    ) in text
+    assert "- boardwalk [term] -> деревянный настил\n" in text
+    assert "Рен Колдер (Женский род во всех главах)" in text

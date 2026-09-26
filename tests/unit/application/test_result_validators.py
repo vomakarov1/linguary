@@ -519,3 +519,61 @@ def test_footnote_markers_stay_only_in_translation_and_only_known_ones() -> None
     assert result.translated_text == "Никому не нравилось её лицо,[^1] и жаль."
     assert [hint.original for hint in result.glossary_hints] == ["her face"]
     assert [note.original_excerpt for note in result.language_notes] == ["her face."]
+
+
+@pytest.mark.parametrize(
+    "translated_text",
+    [
+        pytest.param("И стала ждать вместе с Selenой Роу.", id="latin-stem"),
+        pytest.param("Рен посмотрела на Селенy.", id="latin-homoglyph"),
+    ],
+)
+def test_word_mixing_latin_and_cyrillic_is_rejected(translated_text: str) -> None:
+    """Слово из смеси латиницы и кириллицы отбраковывает группу (Н-1)."""
+    blocks = (make_block(order=0, text=SOURCE_TEXT),)
+    unit = make_unit(blocks)
+    payload = make_response(
+        (make_block_result(blocks[0], translated_text=translated_text),)
+    )
+
+    error = rejection(payload, unit=unit)
+
+    assert "смеси латиницы и кириллицы" in str(error)
+    assert error.expectation is not None
+
+
+def test_mixed_word_in_language_note_is_rejected() -> None:
+    """Заметка пишется на целевом языке и проверяется так же, как перевод."""
+    blocks = (make_block(order=0, text=SOURCE_TEXT),)
+    unit = make_unit(blocks)
+    payload = make_response(
+        (make_block_result(blocks[0]),),
+        language_notes=(make_note(blocks[0], note="Обращение к Selenой звучит сухо."),),
+    )
+
+    assert "смеси латиницы и кириллицы" in str(rejection(payload, unit=unit))
+
+
+@pytest.mark.parametrize(
+    "translated_text",
+    [
+        pytest.param("Рен Колдер пришла в Duskmere к Selene Row.", id="latin-names"),
+        pytest.param("Это была настоящая Wonka-фабрика и mp3-плеер.", id="hyphen"),
+        pytest.param("Мистер O'Брайен сказал: «Don't».", id="apostrophe"),
+        pytest.param(
+            "Весил он 5kg, как сказано на www.example.com[^1].", id="units-url"
+        ),
+        pytest.param("Кафе́ «Café» и Straße.", id="diacritics"),
+    ],
+)
+def test_latin_words_in_russian_text_are_allowed(translated_text: str) -> None:
+    """Целиком латинские слова и дефисные соединения — не нарушение (Н-1)."""
+    blocks = (make_block(order=0, text=SOURCE_TEXT),)
+    unit = make_unit(blocks)
+    payload = make_response(
+        (make_block_result(blocks[0], translated_text=translated_text),)
+    )
+
+    results = validate(payload, unit=unit)
+
+    assert results[0].translated_text is not None

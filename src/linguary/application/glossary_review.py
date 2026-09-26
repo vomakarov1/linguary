@@ -240,6 +240,7 @@ def candidates_with_decisions(
     decisions: Iterable[TermConcept],
     *,
     language: str,
+    decided_only: Iterable[GlossaryCandidate] = (),
 ) -> tuple[GlossaryCandidate, ...]:
     """Кандидаты предыдущих глав, в которых решение пользователя заменило вариант модели.
 
@@ -249,20 +250,30 @@ def candidates_with_decisions(
     с кандидатом ключом `glossary_key` и заменяет вариант перевода, тип и указание;
     пропущенный элемент решением не считается, и у него остаётся вариант модели.
     Кандидаты с решением идут первыми: ограничение контекста их не отрезает.
+
+    `decided_only` — кандидаты, которые нужны только вместе с решением пользователя:
+    при повторном анализе это кандидаты самой главы и следующих глав. Решение
+    пользователя действует на всю книгу, а вариант модели из следующей главы этой
+    главе ничего не даёт, поэтому кандидат без решения отсюда не попадает.
     """
     decided: dict[str, list[TermConcept]] = {}
     for concept in decisions:
         decided.setdefault(glossary_key(concept.canonical_source_text), []).append(concept)
     with_decision: list[GlossaryCandidate] = []
     without_decision: list[GlossaryCandidate] = []
-    for candidate in candidates:
+    marked = [
+        *((candidate, False) for candidate in candidates),
+        *((candidate, True) for candidate in decided_only),
+    ]
+    for candidate, needs_decision in marked:
         decision, _ = _chosen_decision(
             decided.get(glossary_key(candidate.source_text), ()),
             shown=candidate.source_text.strip(),
         )
         variant = decision.variant_for(language) if decision is not None else None
         if decision is None or variant is None or not decision.status.is_user_decision:
-            without_decision.append(candidate)
+            if not needs_decision:
+                without_decision.append(candidate)
             continue
         with_decision.append(
             replace(

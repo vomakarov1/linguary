@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from linguary.application.chapter_instructions import instructions_respecting_glossary
+from linguary.application.chapter_instructions import (
+    instructions_respecting_glossary,
+    note_respecting_glossary,
+)
 from linguary.domain import (
     ConceptType,
     GlossaryCandidate,
@@ -148,3 +151,96 @@ def test_without_decisions_instructions_are_unchanged() -> None:
     instructions = "1. Рен Колдер — мужской род.\n2. Duskmere — «Даскмир»."
 
     assert kept(instructions) == instructions
+
+
+MARSH_GATE = GlossarySnapshotEntry(
+    source_text="marsh gate",
+    translation="болотные ворота",
+    type=ConceptType.FICTIONAL_CONCEPT,
+    status=TermStatus.APPROVED,
+    note=(
+        "Функциональный пост стража болота при въезде в Даскмир; уточнить устойчивый "
+        "вариант перевода для всей книги."
+    ),
+)
+
+
+def kept_note(
+    entry: GlossarySnapshotEntry, *decisions: GlossarySnapshotEntry, candidates=()
+) -> str:
+    """Указание элемента глоссария после согласования с решениями других понятий."""
+    return note_respecting_glossary(
+        entry, decisions=decisions, chapter_candidates=candidates
+    )
+
+
+def test_note_naming_rejected_variant_of_other_concept_is_dropped() -> None:
+    """Указание элемента не передаёт отвергнутый вариант другого понятия (Н-2).
+
+    Живой прогон: указание `marsh gate`, принятое через «Принять все», называло
+    «Даскмир», хотя решение пользователя по Duskmere — «Даскмер».
+    """
+    note = kept_note(
+        MARSH_GATE,
+        MARSH_GATE,
+        DUSKMERE,
+        candidates=(chapter_candidate("Duskmere", "Даскмир"),),
+    )
+
+    assert "Даскмир" not in note
+    assert note == "уточнить устойчивый вариант перевода для всей книги."
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("Пост стражи у въезда в Даскмер.", id="decision"),
+        pytest.param("Пост стражи у стен Даскмера.", id="decision-form"),
+        pytest.param("Пост стражи на болоте.", id="unrelated"),
+    ],
+)
+def test_note_agreeing_with_other_decisions_is_kept(text: str) -> None:
+    """Указание, называющее решение или его форму, остаётся как есть."""
+    entry = GlossarySnapshotEntry(
+        source_text="marsh gate",
+        translation="болотные ворота",
+        type=ConceptType.FICTIONAL_CONCEPT,
+        status=TermStatus.APPROVED,
+        note=text,
+    )
+
+    assert (
+        kept_note(
+            entry, DUSKMERE, candidates=(chapter_candidate("Duskmere", "Даскмир"),)
+        )
+        == text
+    )
+
+
+def test_note_is_not_checked_against_its_own_decision() -> None:
+    """Своё указание может обсуждать решение: отвергнутый вариант в нём уместен."""
+    entry = GlossarySnapshotEntry(
+        source_text="Duskmere",
+        translation="Даскмер",
+        type=ConceptType.PLACE,
+        status=TermStatus.APPROVED,
+        note="Не «Даскмир»: название несклоняемое.",
+    )
+
+    assert (
+        kept_note(entry, entry, candidates=(chapter_candidate("Duskmere", "Даскмир"),))
+        == entry.note
+    )
+
+
+def test_note_with_other_gender_of_other_person_is_dropped() -> None:
+    """Указание, спорящее с родом, названным решением по персонажу, тоже отсеивается."""
+    entry = GlossarySnapshotEntry(
+        source_text="gatehouse",
+        translation="дом привратника",
+        type=ConceptType.TERM,
+        status=TermStatus.APPROVED,
+        note="Сюда Рен пришёл один — мужской род. Дом стоит на сваях.",
+    )
+
+    assert kept_note(entry, entry, WREN) == "Дом стоит на сваях."

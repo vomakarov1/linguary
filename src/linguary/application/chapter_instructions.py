@@ -81,6 +81,7 @@ class _Decision:
     translation: tuple[str, ...]
     source_key: str
     rejected: frozenset[str]
+    rejected_words: tuple[tuple[str, ...], ...]
     genders: frozenset[str]
 
 
@@ -100,6 +101,58 @@ def instructions_respecting_glossary(
     prepared = _prepare(decisions, chapter_candidates)
     kept = [item for item in _items(instructions) if not _contradicts(item, prepared)]
     return "\n".join(kept).strip()
+
+
+def note_respecting_glossary(
+    entry: GlossarySnapshotEntry,
+    *,
+    decisions: Sequence[GlossarySnapshotEntry],
+    chapter_candidates: Iterable[GlossaryCandidate] = (),
+) -> str:
+    """Указание элемента глоссария без фрагментов, спорящих с решениями других понятий.
+
+    Указание элемента, принятого через «Принять все», написала модель на анализе, и оно
+    пересказывает её варианты других понятий: «пост при въезде в Даскмир», хотя
+    решение пользователя по Duskmere — «Даскмер». Такой фрагмент уходил бы в блок
+    обязательных решений рядом с самим решением и спорил с ним.
+
+    Хранилище не различает указание, введённое пользователем, и указание модели,
+    принятое без правки, поэтому отсеивается только противоречие решению пользователя
+    по другому понятию: собственное решение элемента его указание вправе обсуждать.
+    Кроме правил указаний главы здесь противоречием считается и упоминание без кавычек
+    отвергнутого варианта модели (`chapter_candidates`) — в указании элемента другое
+    понятие называют вариантом перевода, а не исходным написанием.
+    """
+    note = entry.note.strip()
+    key = glossary_key(entry.source_text)
+    others = [
+        decision
+        for decision in decisions
+        if decision.status.is_user_decision
+        and glossary_key(decision.source_text) != key
+    ]
+    if not others or not note:
+        return note
+    prepared = _prepare(others, chapter_candidates)
+    items = _items(note)
+    kept = [
+        item
+        for item in items
+        if not _contradicts(item, prepared) and not _names_rejected(item, prepared)
+    ]
+    if len(kept) == len(items):
+        return note
+    return " ".join(line.strip() for item in kept for line in item.splitlines()).strip()
+
+
+def _names_rejected(item: str, decisions: Sequence[_Decision]) -> bool:
+    """Называет ли фрагмент, хотя бы без кавычек, вариант, отвергнутый пользователем."""
+    words = _words(item)
+    return any(
+        _contains(words, rejected)
+        for decision in decisions
+        for rejected in decision.rejected_words
+    )
 
 
 def _prepare(
@@ -138,6 +191,13 @@ def _prepare(
                 translation=_words(entry.translation),
                 source_key=key,
                 rejected=frozenset(rejected),
+                rejected_words=tuple(
+                    words
+                    for text in suggested.get(key, ())
+                    if glossary_key(text) in rejected
+                    and (words := _words(text))
+                    and not _is_form_of(words, _words(entry.translation))
+                ),
                 genders=_genders(entry.note),
             )
         )
@@ -250,4 +310,4 @@ def _genders(text: str) -> frozenset[str]:
     return frozenset(match.group(1).casefold() for match in _GENDER.finditer(text))
 
 
-__all__ = ["instructions_respecting_glossary"]
+__all__ = ["instructions_respecting_glossary", "note_respecting_glossary"]

@@ -44,7 +44,10 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from linguary.application.analysis_merge import ChapterFragment
-from linguary.application.chapter_instructions import instructions_respecting_glossary
+from linguary.application.chapter_instructions import (
+    instructions_respecting_glossary,
+    note_respecting_glossary,
+)
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMRequest
@@ -438,10 +441,13 @@ class ContextBuilder:
             _chapter_header(document=document, section=section),
             _chapter_digest(analysis, glossary),
             _mandatory_decisions(
-                glossary.mandatory_entries, target_language=document.target_language
+                _with_agreed_notes(glossary.mandatory_entries, glossary, analysis),
+                target_language=document.target_language,
             ),
             _glossary_suggestions(
-                self._suggested_entries(glossary),
+                _with_agreed_notes(
+                    self._suggested_entries(glossary), glossary, analysis
+                ),
                 target_language=document.target_language,
             ),
             _explained_expressions(analysis, section),
@@ -837,6 +843,30 @@ def _chapter_digest(analysis: ChapterAnalysis, glossary: GlossarySnapshot) -> st
     return "\n\n".join(lines)
 
 
+def _with_agreed_notes(
+    entries: Sequence[GlossarySnapshotEntry],
+    glossary: GlossarySnapshot,
+    analysis: ChapterAnalysis,
+) -> tuple[GlossarySnapshotEntry, ...]:
+    """Записи снимка с указаниями, не спорящими с решениями других понятий (PRD § 11).
+
+    Указание элемента, принятого без правки, написала модель на анализе, и оно может
+    называть вариант другого понятия, который пользователь отверг. Отвергнутые варианты
+    известны из кандидатов анализа этой главы — теми же, что и для указаний главы.
+    """
+    return tuple(
+        replace(
+            entry,
+            note=note_respecting_glossary(
+                entry,
+                decisions=glossary.mandatory_entries,
+                chapter_candidates=analysis.glossary_candidates,
+            ),
+        )
+        for entry in entries
+    )
+
+
 def _explained_expressions(analysis: ChapterAnalysis, section: DocumentSection) -> str:
     """Выражения главы, уже объяснённые в `Before You Read` (PRD § 19.1, § 19.3).
 
@@ -1070,7 +1100,7 @@ def _chapter_header(
 def _known_decisions(
     candidates: Sequence[GlossaryCandidate], *, target_language: str
 ) -> str:
-    """Уже принятые решения книги: кандидаты глоссария предыдущих глав."""
+    """Уже принятые решения книги: кандидаты предыдущих глав и решения пользователя."""
     if not candidates:
         return "Предыдущие главы переводческих решений пока не дали."
     lines = [
