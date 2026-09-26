@@ -102,6 +102,8 @@ class LLMSettings:
     max_unit_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS
     requests_per_minute: int | None = None
     debug_llm_payloads: bool = False
+    input_price_per_mtok: float | None = None
+    output_price_per_mtok: float | None = None
 
     def __post_init__(self) -> None:
         if not self.provider.strip():
@@ -120,6 +122,12 @@ class LLMSettings:
             raise SettingsError("размер группы блоков должен быть положительным")
         if self.requests_per_minute is not None and self.requests_per_minute < 1:
             raise SettingsError("предел частоты запросов к модели должен быть положительным")
+        if (self.input_price_per_mtok is None) != (self.output_price_per_mtok is None):
+            raise SettingsError("цены входных и выходных токенов задаются вместе")
+        if self.input_price_per_mtok is not None and self.input_price_per_mtok < 0:
+            raise SettingsError("цена входных токенов не может быть отрицательной")
+        if self.output_price_per_mtok is not None and self.output_price_per_mtok < 0:
+            raise SettingsError("цена выходных токенов не может быть отрицательной")
 
     @property
     def is_ready(self) -> bool:

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 
 from linguary.adapters.config import AppSettings, load_settings
 from linguary.adapters.db.engine import create_database_engine
@@ -37,6 +38,7 @@ from linguary.adapters.epub import (
     FilesystemEpubResourceStore,
 )
 from linguary.adapters.llm import LoggingLLMClient, RateLimitedLLMClient
+from linguary.domain.llm_log import TokenPricing
 from linguary.adapters.runtime import (
     ExecutorLock,
     SqliteTaskQueue,
@@ -288,6 +290,15 @@ def _model_client(
         provider=settings.llm.provider,
         model=settings.llm.model or "not_configured",
         debug_payloads=settings.llm.debug_llm_payloads,
+        pricing=(
+            TokenPricing(
+                input_per_mtok=Decimal(str(settings.llm.input_price_per_mtok)),
+                output_per_mtok=Decimal(str(settings.llm.output_price_per_mtok)),
+            )
+            if settings.llm.input_price_per_mtok is not None
+            and settings.llm.output_price_per_mtok is not None
+            else None
+        ),
     )
     if settings.llm.requests_per_minute is None:
         return model

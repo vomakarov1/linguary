@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -13,7 +14,8 @@ from linguary.adapters.llm import FakeLLMClient, FakeReply
 from linguary.adapters.llm.logging import LoggingLLMClient
 from linguary.application.ports.llm import LLMRequest, LLMResponse, LLMResponseFormatError
 from linguary.composition import Application, build_application, drain_tasks
-from linguary.domain import ErrorType, LLMCallStage, TaskIdentity, TaskType, TokenUsage
+from linguary.domain.llm_log import TokenPricing
+from linguary.domain import ErrorType, LLMCallStage, TaskError, TaskIdentity, TaskType, TokenUsage
 from processing_scenario import BOOK_ID, store_processing_book, translated_reply
 
 
@@ -143,5 +145,129 @@ async def test_success_response_carries_call_id_and_debug_content(
             assert transaction.llm_calls.response_text_for(response.call_id) == (
                 raw if debug else None
             )
+    finally:
+        built.dispose()
+
+
+async def _logged_cost(
+    tmp_path: Path, *, provider_cost: Decimal | None,
+    pricing: TokenPricing | None, usage: TokenUsage | None,
+) -> Decimal | None:
+    built = build_application(
+        settings=AppSettings(
+            llm=LLMSettings(model="fake-model", api_key="test-key"),
+            storage=StorageSettings(data_root=str(tmp_path / "data")),
+        ),
+        llm_client=FakeLLMClient.replying([]),
+    )
+    try:
+        store_processing_book(built.unit_of_work)
+        inner = AsyncMock()
+        inner.generate.return_value = LLMResponse(
+            payload=object(), provider="fake", model="fake-model",
+            usage=usage, cost=provider_cost,
+        )
+        logger = LoggingLLMClient(
+            inner=inner, unit_of_work=built.unit_of_work,
+            provider="fake", model="fake-model", pricing=pricing,
+        )
+        request = LLMRequest.for_translation(
+            instructions="Переведи", input_text="Исходный текст"
+        ).with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT)
+        await logger.generate(request)
+        with built.unit_of_work.transaction() as transaction:
+            (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
+        return entry.cost
+    finally:
+        built.dispose()
+
+
+async def test_log_prefers_provider_cost(tmp_path: Path) -> None:
+    cost = await _logged_cost(
+        tmp_path, provider_cost=Decimal("0.007"),
+        pricing=TokenPricing(Decimal("3"), Decimal("15")),
+        usage=TokenUsage(prompt_tokens=1000, completion_tokens=1000),
+    )
+    assert cost == Decimal("0.007")
+
+
+async def test_log_computes_cost_from_pricing(tmp_path: Path) -> None:
+    cost = await _logged_cost(
+        tmp_path, provider_cost=None,
+        pricing=TokenPricing(Decimal("3"), Decimal("15")),
+        usage=TokenUsage(prompt_tokens=1000, completion_tokens=1000),
+    )
+    assert cost == Decimal("0.018")
+
+
+async def test_log_cost_none_without_data(tmp_path: Path) -> None:
+    cost = await _logged_cost(
+        tmp_path, provider_cost=None,
+        pricing=TokenPricing(Decimal("3"), Decimal("15")), usage=None,
+    )
+    assert cost is None
+
+
+async def test_rejected_call_keeps_cost(tmp_path: Path) -> None:
+    built = build_application(
+        settings=AppSettings(
+            llm=LLMSettings(model="fake-model", api_key="test-key"),
+            storage=StorageSettings(data_root=str(tmp_path / "data")),
+        ),
+        llm_client=FakeLLMClient.replying([]),
+    )
+    try:
+        store_processing_book(built.unit_of_work)
+        inner = AsyncMock()
+        inner.generate.return_value = LLMResponse(
+            payload=object(), provider="fake", model="fake-model",
+            cost=Decimal("0.007"),
+        )
+        logger = LoggingLLMClient(
+            inner=inner, unit_of_work=built.unit_of_work,
+            provider="fake", model="fake-model",
+        )
+        request = LLMRequest.for_translation(
+            instructions="Переведи", input_text="Исходный текст"
+        ).with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT)
+        response = await logger.generate(request)
+        assert response.call_id is not None
+        with built.unit_of_work.transaction() as transaction:
+            transaction.llm_calls.mark_rejected(
+                response.call_id,
+                error=TaskError(type=ErrorType.VALIDATION, message="неверный блок"),
+                response_text=None,
+            )
+        with built.unit_of_work.transaction() as transaction:
+            (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
+        assert entry.success is False
+        assert entry.cost == Decimal("0.007")
+    finally:
+        built.dispose()
+
+
+async def test_reference_pricing_fills_cost_without_provider_cost(tmp_path: Path) -> None:
+    built = build_application(
+        settings=AppSettings(
+            llm=LLMSettings(
+                model="anthropic/claude-sonnet-4.6", api_key="test-key",
+                input_price_per_mtok=3, output_price_per_mtok=15,
+            ),
+            storage=StorageSettings(data_root=str(tmp_path / "data")),
+        ),
+        llm_client=FakeLLMClient.replying([
+            translated_reply(usage=TokenUsage(prompt_tokens=1000, completion_tokens=1000))
+        ]),
+    )
+    try:
+        scenario = store_processing_book(built.unit_of_work)
+        await built.task_queue.enqueue(TaskIdentity(
+            book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+            scope_id=scenario.section().id,
+        ))
+        await drain_tasks(built)
+        with built.unit_of_work.transaction() as transaction:
+            (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
+        assert entry.cost == Decimal("0.018")
     finally:
         built.dispose()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -78,6 +79,24 @@ async def test_successful_call_returns_parsed_payload() -> None:
     assert response.truncated is False
     assert response.usage is not None
     assert response.usage.total_tokens == 460
+
+
+async def test_client_reads_provider_cost() -> None:
+    document = completion(as_content(translation_payload()))
+    document["usage"]["cost"] = 0.00123
+    client = client_over(responding(document))
+    response = await client.generate(
+        LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
+    )
+    assert response.cost == Decimal("0.00123")
+
+
+async def test_client_without_provider_cost_leaves_none() -> None:
+    client = client_over(responding(completion(as_content(translation_payload()))))
+    response = await client.generate(
+        LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
+    )
+    assert response.cost is None
 
 
 async def test_chapter_analysis_call_returns_analysis_payload() -> None:

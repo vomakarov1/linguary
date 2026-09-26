@@ -46,6 +46,27 @@ class TokenUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenPricing:
+    """Цена миллиона входных и выходных токенов для оценки стоимости вызова."""
+
+    input_per_mtok: Decimal
+    output_per_mtok: Decimal
+
+    def __post_init__(self) -> None:
+        if self.input_per_mtok < 0 or self.output_per_mtok < 0:
+            raise LLMCallLogError("стоимость токенов не может быть отрицательной")
+
+    def cost_of(self, usage: TokenUsage | None) -> Decimal | None:
+        """Стоимость известных токенов; отсутствие всех данных не означает ноль."""
+        if usage is None or usage.total_tokens is None:
+            return None
+        return (
+            self.input_per_mtok * (usage.prompt_tokens or 0)
+            + self.output_per_mtok * (usage.completion_tokens or 0)
+        ) / Decimal(1_000_000)
+
+
+@dataclass(frozen=True, slots=True)
 class LLMCallLog:
     """Запись журнала об одном вызове модели."""
 

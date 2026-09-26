@@ -70,6 +70,25 @@ def test_debug_llm_payloads_parsed_from_env(
     assert settings.llm.debug_llm_payloads is expected
 
 
+def test_prices_must_be_set_together() -> None:
+    with pytest.raises(SettingsError):
+        LLMSettings(input_price_per_mtok=3)
+    with pytest.raises(SettingsError):
+        LLMSettings(output_price_per_mtok=15)
+
+
+def test_prices_are_read_from_environment(tmp_path: Path) -> None:
+    settings = load_settings(
+        environ={
+            "LINGUARY_LLM_INPUT_PRICE_PER_MTOK": "3",
+            "LINGUARY_LLM_OUTPUT_PRICE_PER_MTOK": "15",
+        },
+        config_path=write_config(tmp_path, ""),
+    )
+    assert settings.llm.input_price_per_mtok == 3
+    assert settings.llm.output_price_per_mtok == 15
+
+
 def test_missing_default_file_is_not_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Отсутствие файла настроек по умолчанию — обычное состояние первого запуска."""
     monkeypatch.setenv("HOME", str(tmp_path))

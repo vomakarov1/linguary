@@ -95,6 +95,8 @@ _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "max_unit_source_chars": _as_int,
     "requests_per_minute": _as_int,
     "debug_llm_payloads": _as_bool,
+    "input_price_per_mtok": _as_float,
+    "output_price_per_mtok": _as_float,
 }
 
 #: Разбор значений секции `[checks]`.

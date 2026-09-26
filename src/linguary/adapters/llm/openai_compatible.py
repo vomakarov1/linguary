@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -88,6 +89,7 @@ class OpenAICompatibleLLMClient(LLMClient):
             model=_model(document, fallback=self._settings.model),
             truncated=truncated,
             usage=_usage(document),
+            cost=_cost(document),
             raw_content=content,
         )
 
@@ -281,6 +283,18 @@ def _usage(document: dict[str, Any]) -> TokenUsage | None:
         prompt_tokens=prompt if isinstance(prompt, int) else None,
         completion_tokens=completion if isinstance(completion, int) else None,
     )
+
+
+def _cost(document: dict[str, Any]) -> Decimal | None:
+    """Стоимость вызова по данным провайдера, если шлюз сообщил число."""
+    usage = document.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    value = usage.get("cost")
+    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+        return None
+    cost = Decimal(str(value))
+    return cost if cost.is_finite() and cost >= 0 else None
 
 
 def _detail(response: httpx.Response) -> str:

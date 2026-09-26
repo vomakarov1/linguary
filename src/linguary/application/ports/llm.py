@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 
@@ -173,6 +174,7 @@ class LLMResponse[PayloadT: LLMPayload]:
     usage: TokenUsage | None = None
     call_id: str | None = None
     raw_content: str | None = field(default=None, repr=False)
+    cost: Decimal | None = None
 
 
 class LLMClient(Protocol):

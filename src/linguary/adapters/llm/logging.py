@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 from linguary.application.ports.llm import (
@@ -22,6 +23,7 @@ from linguary.application.ports.llm import (
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.application.retry_policy import classify_error
 from linguary.domain import LLMCallLog, TokenUsage
+from linguary.domain.llm_log import TokenPricing
 
 type Clock = Callable[[], datetime]
 type IdFactory = Callable[[], str]
@@ -38,6 +40,7 @@ class LoggingLLMClient(LLMClient):
     id_factory: IdFactory | None = None
     clock: Clock | None = None
     debug_payloads: bool = False
+    pricing: TokenPricing | None = None
 
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
@@ -71,6 +74,11 @@ class LoggingLLMClient(LLMClient):
             model=response.model,
             success=True,
             usage=response.usage,
+            cost=(
+                response.cost
+                if response.cost is not None
+                else self.pricing.cost_of(response.usage) if self.pricing is not None else None
+            ),
             call_id=call_id,
             response_text=response.raw_content if self.debug_payloads else None,
         )
@@ -90,6 +98,7 @@ class LoggingLLMClient(LLMClient):
         success: bool,
         error: Exception | None = None,
         usage: TokenUsage | None = None,
+        cost: Decimal | None = None,
         call_id: str | None = None,
         response_text: str | None = None,
     ) -> None:
@@ -111,6 +120,7 @@ class LoggingLLMClient(LLMClient):
                     success=success,
                     error=None if error is None else classify_error(error),
                     usage=usage,
+                    cost=cost,
                 ),
                 response_text=response_text,
             )
