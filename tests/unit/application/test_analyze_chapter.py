@@ -517,6 +517,31 @@ async def test_duplicated_block_in_plan_is_rejected() -> None:
     assert (await scenario(command())).attempts == 2
 
 
+async def test_mixed_script_glossary_variant_is_rejected() -> None:
+    """Вариант глоссария из смеси алфавитов отбраковывается и повторяется (ALG-04)."""
+    unit_of_work = two_block_book()
+    mixed = {
+        "source_text": "PGLAF",
+        "type": "organization",
+        "suggested_translation": "PГЛАФ",
+        "confidence": 0.9,
+        "model_flagged_review": False,
+        "note": None,
+    }
+    client = FakeLLMClient.replying(
+        (
+            analysis_reply(candidates=[mixed]),
+            analysis_reply(candidates=[{**mixed, "suggested_translation": "PGLAF"}]),
+        )
+    )
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    result = await scenario(command())
+
+    assert result.attempts == 2
+    assert "PГЛАФ" in client.requests[1].instructions
+
+
 async def test_transient_error_is_retried_after_backoff() -> None:
     """Временная ошибка повторяется, и цикл выдерживает паузу политики (ALG-05)."""
     unit_of_work = two_block_book()

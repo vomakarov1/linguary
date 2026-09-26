@@ -50,6 +50,7 @@ from linguary.application.llm_dto import ChapterAnalysisResponse
 from linguary.application.ports.llm import LLMClient, LLMRequest
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
+from linguary.application.validators.mixed_script import mixed_script_word
 from linguary.application.task_runner import TaskQueue
 from linguary.domain import (
     BeforeYouReadEntry,
@@ -301,6 +302,7 @@ class AnalyzeChapter:
             try:
                 response = await self._llm_client.generate(request)
                 _ensure_plan_covers_chapter(response.payload, context)
+                _ensure_candidates_single_script(response.payload, context)
             except Exception as error:
                 decision = self._retry_policy.decide(error, attempts=attempts)
                 if not decision.should_retry:
@@ -543,6 +545,25 @@ def _ensure_plan_covers_chapter(
             f"{duplicated}",
             expectation=context.expectation,
         )
+
+
+def _ensure_candidates_single_script(
+    payload: ChapterAnalysisResponse, context: ChapterAnalysisContext
+) -> None:
+    """Вариант перевода кандидата глоссария не содержит слов из смеси алфавитов (ALG-04).
+
+    Вариант глоссария уходит во все главы книги, поэтому слово вроде «PГЛАФ» отбраковывается
+    здесь же, до сохранения анализа, а не всплывает потом в каждом блоке с этим термином.
+    """
+    for candidate in payload.glossary_candidates:
+        word = mixed_script_word(candidate.suggested_translation)
+        if word is not None:
+            raise ResultValidationError(
+                f"вариант перевода кандидата глоссария {candidate.source_text!r} "
+                f"содержит слово из смеси латиницы и кириллицы: {word!r}. Каждое слово "
+                f"пиши одним алфавитом",
+                expectation=context.expectation,
+            )
 
 
 def _empty_analysis(section: DocumentSection, *, id: str) -> ChapterAnalysis:
