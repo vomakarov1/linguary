@@ -117,7 +117,7 @@ async def test_web_pipeline_from_upload_to_download(tmp_path: Path) -> None:
         book_text = exported_text(application.paths.export_epub(book_id))
         assert "Русский перевод блока" in book_text
         assert "Составное существительное передаёт образ света и стекла." in book_text
-        assert "Вымышленный небольшой оптический предмет" in book_text
+        assert "Оборот «не должно было быть»" in book_text
         assert "Previously in Chapter" in book_text
     finally:
         application.dispose()

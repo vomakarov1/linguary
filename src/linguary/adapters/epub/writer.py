@@ -55,6 +55,7 @@ from linguary.domain import (
     InlineAnnotationType,
     SupportStatus,
     build_language_note_id,
+    translation_segments,
 )
 
 _XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
@@ -297,15 +298,19 @@ def _resource_media_types(request: EpubWriteRequest) -> Mapping[str, str]:
 def _render_chapters(
     request: EpubWriteRequest, *, opaque: _OpaqueSource, warnings: _ExportWarnings
 ) -> tuple[_Chapter, ...]:
-    """Документы глав в порядке чтения."""
+    """Документы глав в порядке чтения.
+
+    Предыдущая глава — последний раздел перед этим, который сам является главой:
+    страница сносок пересказа не имеет, и глава после неё вспоминает главу до неё.
+    """
     renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings)
-    sections = request.document.ordered_sections
-    return tuple(
-        renderer.render(section, number=number, previous=previous)
-        for number, (previous, section) in enumerate(
-            zip((None, *sections), sections, strict=False), start=1
-        )
-    )
+    chapters: list[_Chapter] = []
+    previous: DocumentSection | None = None
+    for number, section in enumerate(request.document.ordered_sections, start=1):
+        chapters.append(renderer.render(section, number=number, previous=previous))
+        if not section.is_notes_only:
+            previous = section
+    return tuple(chapters)
 
 
 class _ChapterRenderer:
@@ -326,7 +331,11 @@ class _ChapterRenderer:
     def render(
         self, section: DocumentSection, *, number: int, previous: DocumentSection | None
     ) -> _Chapter:
-        """Собирает главу целиком: учебные разделы, блоки и слои помощи."""
+        """Собирает главу целиком: учебные разделы, блоки и слои помощи.
+
+        Страница сносок собирается без разметки главы и без учебных разделов перед
+        текстом: её сноски переводятся, но главой она не является.
+        """
         href = _contained_name(section.source_resource_path)
         root = _xhtml_document(
             title=section.title,
@@ -334,10 +343,13 @@ class _ChapterRenderer:
             stylesheet=_relative_href(href, _STYLESHEET_FILE),
         )
         body = root.find(f"{{{_XHTML_NAMESPACE}}}body")
-        container = _sub(body, "section", {f"{{{_EPUB_NAMESPACE}}}type": "chapter"})
-        self._append_previously(container, previous)
-        self._append_before_you_read(container, section)
-        self._append_blocks(container, section, href=href, number=number)
+        if section.is_notes_only:
+            self._append_blocks(body, section, href=href, number=number)
+        else:
+            container = _sub(body, "section", {f"{{{_EPUB_NAMESPACE}}}type": "chapter"})
+            self._append_previously(container, previous)
+            self._append_before_you_read(container, section)
+            self._append_blocks(container, section, href=href, number=number)
         return _Chapter(
             section_id=section.id, href=href, title=section.title, root=root
         )
@@ -535,7 +547,7 @@ class _ChapterRenderer:
         """Перевод либо словарные подсказки и `Language Notes` этого блока (PRD § 20)."""
         result = self._request.block_results.get(block.id)
         if result is not None:
-            self._append_result(parent, result, state=state)
+            self._append_result(parent, result, block=block, state=state)
         material = self._request.learning_materials.get(state.section.id)
         if material is None:
             return
@@ -564,9 +576,15 @@ class _ChapterRenderer:
         parent: etree._Element,
         result: BlockProcessingResult,
         *,
+        block: DocumentBlock,
         state: _SectionState,
     ) -> None:
-        """Перевод блока либо его словарные подсказки."""
+        """Перевод блока либо его словарные подсказки.
+
+        Метка `[^N]` в переводе становится ссылкой на ту же сноску, что и `N`-я ссылка
+        на сноску оригинала, с тем же видимым текстом. Идентификатор ссылки оригинала
+        не повторяется: обратная ссылка из сноски по-прежнему ведёт к оригиналу.
+        """
         if result.translated_text:
             translation = _sub(
                 parent,
@@ -576,7 +594,12 @@ class _ChapterRenderer:
                     "lang": self._document.target_language,
                 },
             )
-            _append_text(translation, result.translated_text)
+            for segment in translation_segments(result.translated_text, block):
+                if isinstance(segment, str):
+                    _append_text(translation, segment)
+                    continue
+                link = _sub(translation, "a", _target_attributes(segment, state))
+                link.text = block.text[segment.start : segment.end]
         if not result.glossary_hints:
             return
         hints = _sub(parent, "ul", {"class": "linguary-glossary"})

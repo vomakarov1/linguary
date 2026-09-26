@@ -445,3 +445,121 @@ def test_link_inside_a_paragraph_survives_for_the_model() -> None:
     )
 
     assert "at last." in context.request.input_text
+
+
+def _paragraph_with_noteref(
+    text: str = "Nobody liked her face.1 It was a pity.", *, order: int = 0
+) -> DocumentBlock:
+    """Абзац с единственной ссылкой на сноску «1» посреди текста, как её снимает импорт."""
+    start = text.index("1")
+    return DocumentBlock.create(
+        document_id=BOOK_ID,
+        section_id=SECTION_ID,
+        type=BlockType.PARAGRAPH,
+        order=order,
+        text=text,
+        source_reference=SourceReference(
+            resource_path=f"{SECTION_ID}.xhtml", structural_path=f"/body/p[{order + 1}]"
+        ),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=start,
+                end=start + 1,
+                target=f"{SECTION_ID}.xhtml#fn1",
+            ),
+        ),
+    )
+
+
+def test_footnote_reference_reaches_the_model_as_a_marker() -> None:
+    """Номер ссылки на сноску модель видит меткой, а не цифрой текста (QA-08)."""
+    paragraph = _paragraph_with_noteref()
+    unit = make_unit((paragraph,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((paragraph,))
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+    assert "Nobody liked her face.[^1] It was a pity." in context.request.input_text
+    assert "face.1" not in context.request.input_text
+    assert "[^1]" in context.request.instructions
+
+
+def test_footnote_reference_is_dropped_from_neighbour_context() -> None:
+    """В соседних абзацах повторной генерации ссылки на сноску нет вовсе."""
+    neighbour = _paragraph_with_noteref("Before the storm 1 came, they slept.")
+    target = DocumentBlock.create(
+        document_id=BOOK_ID,
+        section_id=SECTION_ID,
+        type=BlockType.PARAGRAPH,
+        order=1,
+        text="The storm passed by morning.",
+        source_reference=SourceReference(
+            resource_path=f"{SECTION_ID}.xhtml", structural_path="/body/p[2]"
+        ),
+    )
+    section = make_section((neighbour, target))
+    unit = make_unit((target,), treatments=(BlockTreatment.TRANSLATE,))
+
+    context = ContextBuilder().for_block_regeneration(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+    assert "Before the storm came, they slept." in context.request.input_text
+
+
+def test_translation_context_carries_expressions_of_before_you_read() -> None:
+    """Выражения «Before You Read» доходят до сценария для отсева повторов (QA-03)."""
+    blocks = make_blocks(1)
+    unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section(blocks)
+    analysis = replace(
+        make_analysis(unit),
+        before_you_read=(
+            BeforeYouReadEntry(expression=" on a good day ", explanation="если повезёт"),
+        ),
+    )
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+
+    assert context.explained_expressions == ("on a good day",)
+
+
+def test_notes_page_has_no_before_you_read_to_protect() -> None:
+    """У страницы сносок нет «Before You Read» в книге: повторять её подсказкам нечего."""
+    note = make_block(order=0, type=BlockType.FOOTNOTE, text="1 A plain face, of course.")
+    unit = make_unit((note,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((note,))
+    analysis = replace(
+        make_analysis(unit),
+        before_you_read=(
+            BeforeYouReadEntry(expression="of course", explanation="конечно"),
+        ),
+    )
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+
+    assert context.explained_expressions == ()
+    assert "уже объяснены до начала чтения" not in context.request.input_text

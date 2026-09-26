@@ -87,14 +87,18 @@ def store_book(
     title: str = "Pride and Prejudice",
     import_warnings: Sequence[BookImportWarning] = (),
     glossary_candidates: Mapping[int, Sequence[GlossaryCandidate]] | None = None,
+    notes_chapters: Sequence[int] = (),
 ) -> WebScenario:
     """Кладёт книгу в хранилище приложения вместе с её анализом и предупреждениями.
 
     `treatments` задаёт режимы блоков главы по её номеру от нуля; без них все блоки
     получают полный перевод. `analysed_chapters` оставляет анализ только у перечисленных
-    глав: пустой набор означает книгу, которую ещё не анализировали.
+    глав: пустой набор означает книгу, которую ещё не анализировали. `notes_chapters` —
+    номера глав, которые состоят только из сносок книги.
     """
-    document = _document(book_id=book_id, title=title, chapters=chapters)
+    document = _document(
+        book_id=book_id, title=title, chapters=chapters, notes_chapters=notes_chapters
+    )
     with application.unit_of_work.transaction() as uow:
         uow.books.add(_book(book_id=book_id, title=title, status=status))
         uow.documents.save(document)
@@ -253,7 +257,11 @@ def section_id_of(book_id: str, order: int) -> str:
 
 
 def _document(
-    *, book_id: str, title: str, chapters: Sequence[Sequence[str]]
+    *,
+    book_id: str,
+    title: str,
+    chapters: Sequence[Sequence[str]],
+    notes_chapters: Sequence[int] = (),
 ) -> CanonicalDocument:
     """Книга из глав, заданных текстами их абзацев."""
     return CanonicalDocument(
@@ -262,14 +270,25 @@ def _document(
         source_language=SOURCE_LANGUAGE,
         target_language=TARGET_LANGUAGE,
         sections=tuple(
-            _section(book_id=book_id, order=order, texts=texts)
+            _section(
+                book_id=book_id,
+                order=order,
+                texts=texts,
+                block_type=(
+                    BlockType.FOOTNOTE if order in notes_chapters else BlockType.PARAGRAPH
+                ),
+            )
             for order, texts in enumerate(chapters)
         ),
     )
 
 
 def _section(
-    *, book_id: str, order: int, texts: Sequence[str]
+    *,
+    book_id: str,
+    order: int,
+    texts: Sequence[str],
+    block_type: BlockType = BlockType.PARAGRAPH,
 ) -> DocumentSection:
     """Глава книги из абзацев.
 
@@ -287,7 +306,7 @@ def _section(
             DocumentBlock.create(
                 document_id=book_id,
                 section_id=section_id,
-                type=BlockType.PARAGRAPH,
+                type=block_type,
                 order=index,
                 text=text,
                 source_reference=SourceReference(

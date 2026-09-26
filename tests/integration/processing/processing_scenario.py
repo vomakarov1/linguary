@@ -32,6 +32,7 @@ from linguary.application.use_cases.process_chapter import ProcessChapter
 from linguary.application.use_cases.regenerate_block import RegenerateBlock
 from linguary.application.validators import TranslationResultValidator
 from linguary.domain import (
+    BeforeYouReadEntry,
     BlockTreatment,
     BlockType,
     BookMetadata,
@@ -103,11 +104,13 @@ def store_processing_book(
     locked_terms: bool = True,
     run_id: str = RUN_ID,
     analysed_sections: Sequence[str] | None = None,
+    before_you_read: Sequence[tuple[str, str]] = (),
 ) -> ProcessingScenario:
     """Кладёт в хранилище книгу, готовую к обработке, вместе с активным запуском.
 
     `analysed_sections` оставляет анализ только у перечисленных глав: обработка главы
     без сохранённого анализа — отдельный запрещённый случай (PRD § 14).
+    `before_you_read` — пары «выражение, объяснение» подготовки к чтению каждой главы.
     """
     document = build_document(chapters)
     with unit_of_work.transaction() as uow:
@@ -116,7 +119,12 @@ def store_processing_book(
         for section in document.ordered_sections:
             if analysed_sections is not None and section.id not in analysed_sections:
                 continue
-            uow.analyses.save(BOOK_ID, _analysis(section, treatments=treatments))
+            uow.analyses.save(
+                BOOK_ID,
+                _analysis(
+                    section, treatments=treatments, before_you_read=before_you_read
+                ),
+            )
         uow.runs.add(_run(run_id, locked_terms=locked_terms))
     return ProcessingScenario(document=document, run_id=run_id)
 
@@ -320,6 +328,7 @@ def _analysis(
     section: DocumentSection,
     *,
     treatments: Mapping[str, Sequence[BlockTreatment]] | None,
+    before_you_read: Sequence[tuple[str, str]] = (),
 ) -> ChapterAnalysis:
     """Полный анализ главы: план обработки покрывает все её текстовые блоки.
 
@@ -341,6 +350,10 @@ def _analysis(
         translation_instructions="Сохранять иронию рассказчика.",
         chapter_summary="Mr. Bennet visits the new neighbour.",
         expected_block_ids=[block.id for block in blocks],
+        before_you_read=[
+            BeforeYouReadEntry(expression=expression, explanation=explanation)
+            for expression, explanation in before_you_read
+        ],
     )
 
 

@@ -605,9 +605,13 @@ def _section_title(
     toc_titles: Mapping[str, tuple[str, ...]],
     blocks: Sequence[DocumentBlock],
 ) -> str:
-    """Заголовок главы: из nav/toc, иначе из `<title>`, иначе из первого заголовка."""
-    titles = toc_titles.get(resource_path)
-    if titles:
+    """Заголовок главы: из nav/toc, иначе из `<title>`, иначе из первого заголовка.
+
+    Пробельные символы внутри заголовка схлопываются: вёрстка исходника часто разносит
+    номер и название главы отступами и переводами строк.
+    """
+    titles = [_collapse_whitespace(title) for title in toc_titles.get(resource_path, ())]
+    if titles and titles[0]:
         return titles[0]
     for path in (
         f"./{{{_XHTML_NAMESPACE}}}head/{{{_XHTML_NAMESPACE}}}title",
@@ -615,11 +619,16 @@ def _section_title(
     ):
         element = root.find(path)
         if element is not None and element.text and element.text.strip():
-            return element.text.strip()
+            return _collapse_whitespace(element.text)
     for block in blocks:
-        if block.type is BlockType.HEADING and block.text:
-            return block.text
+        if block.type is BlockType.HEADING and block.text.strip():
+            return _collapse_whitespace(block.text)
     return resource_path
+
+
+def _collapse_whitespace(text: str) -> str:
+    """Схлопывает любые пробельные символы в одиночные пробелы и обрезает края."""
+    return " ".join(text.split())
 
 
 class _SectionBuilder:

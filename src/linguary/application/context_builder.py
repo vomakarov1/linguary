@@ -60,6 +60,8 @@ from linguary.domain import (
     InlineAnnotationType,
     SupportStatus,
     TranslationUnit,
+    footnote_marker,
+    footnote_references,
 )
 
 #: Сколько уже принятых решений книги попадает в контекст анализа очередной главы.
@@ -152,6 +154,10 @@ class TranslationContext(AliasedBlocksContext):
     `expectation` перечисляет псевдонимы вместе с режимами обработки из сохранённого
     плана: уточняющая инструкция повтора называет блоки так, как их видела модель,
     и повторяет требование режима (ALG-05).
+
+    `explained_expressions` — выражения `Before You Read` этой главы: модель получает их
+    в запросе как запрет повтора, а сценарий отсеивает повтор, если модель его всё же
+    вернула (PRD § 19.3).
     """
 
     section_id: str
@@ -159,6 +165,7 @@ class TranslationContext(AliasedBlocksContext):
     request: LLMRequest[TranslationResultResponse]
     block_ids_by_alias: Mapping[str, str]
     expectation: ResultExpectation
+    explained_expressions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -407,6 +414,7 @@ class ContextBuilder:
                     for alias, item in zip(aliases, unit.items, strict=True)
                 ),
             ),
+            explained_expressions=_before_you_read_expressions(analysis, section),
         )
 
     def _translation_input(
@@ -430,7 +438,7 @@ class ContextBuilder:
                 self._suggested_entries(glossary),
                 target_language=document.target_language,
             ),
-            _explained_expressions(analysis),
+            _explained_expressions(analysis, section),
             _neighbour_context(neighbours),
             _unit_blocks(unit),
         ]
@@ -767,6 +775,10 @@ note — короткое пояснение, если оно нужно.
 не дели его и не склеивай с соседним. Обязательные переводческие решения книги соблюдай \
 дословно; менять допустимо только грамматическую форму.
 
+Метка вида [^1] в тексте блока — ссылка на сноску книги. Перенеси каждую такую метку \
+в translated_text без изменений, в то место перевода, к которому она относится. Цифрой \
+или словом её не заменяй, в словарные подсказки и языковые заметки не включай.
+
 2. language_notes — языковые заметки для читателя (PRD: учебный материал).
 
 Заметка объясняет то, что реально помогает читать оригинал или понять переводческое \
@@ -807,7 +819,7 @@ def _chapter_digest(analysis: ChapterAnalysis) -> str:
     return "\n\n".join(lines)
 
 
-def _explained_expressions(analysis: ChapterAnalysis) -> str:
+def _explained_expressions(analysis: ChapterAnalysis, section: DocumentSection) -> str:
     """Выражения главы, уже объяснённые в `Before You Read` (PRD § 19.1, § 19.3).
 
     Материал подготовки к чтению собран на анализе главы, а подсказки и заметки
@@ -815,11 +827,7 @@ def _explained_expressions(analysis: ChapterAnalysis) -> str:
     объясняется читателю трижды — в `Before You Read`, в словарной подсказке блока
     и в языковой заметке, — а § 19.3 прямо запрещает заметке повторять подсказку.
     """
-    expressions = [
-        entry.expression.strip()
-        for entry in analysis.before_you_read
-        if entry.expression.strip()
-    ]
+    expressions = _before_you_read_expressions(analysis, section)
     if not expressions:
         return ""
     lines = [
@@ -828,6 +836,23 @@ def _explained_expressions(analysis: ChapterAnalysis) -> str:
     ]
     lines.extend(f"- {expression}" for expression in expressions)
     return "\n".join(lines)
+
+
+def _before_you_read_expressions(
+    analysis: ChapterAnalysis, section: DocumentSection
+) -> tuple[str, ...]:
+    """Непустые выражения `Before You Read` главы в порядке анализа.
+
+    Страница сносок `Before You Read` в книге не получает, поэтому и повторять
+    её подсказкам и заметкам нечего.
+    """
+    if section.is_notes_only:
+        return ()
+    return tuple(
+        entry.expression.strip()
+        for entry in analysis.before_you_read
+        if entry.expression.strip()
+    )
 
 
 def _mandatory_decisions(
@@ -894,22 +919,46 @@ def _neighbour_context(neighbours: Sequence[_NeighbourBlocks]) -> str:
     return "\n\n".join(lines)
 
 
-def source_text_for_model(block: DocumentBlock) -> str:
+def source_text_for_model(block: DocumentBlock, *, footnote_markers: bool = False) -> str:
     """Текст блока в том виде, в каком его стоит показывать модели.
 
-    Отличается от `block.text` ровно одним: у сноски отброшена ссылка возврата
-    к месту вызова — «↩», «back» и подобный хвост, которым книга уводит читателя
-    обратно в текст. Для книги это навигация, а не текст сноски: экспортёр
+    Отличается от `block.text` двумя вещами. Во-первых, у сноски отброшена ссылка
+    возврата к месту вызова — «↩», «back» и подобный хвост, которым книга уводит
+    читателя обратно в текст. Для книги это навигация, а не текст сноски: экспортёр
     восстанавливает её из разметки блока сам. Модель же видит хвост как часть текста
     и переносит его в перевод, где он становится мёртвым символом — вторым значком
-    возврата, который никуда не ведёт.
+    возврата, который никуда не ведёт. Ссылку возврата опознаём по разметке, а не по
+    символам: это ссылка в конце текста сноски, ведущая на якорь того же ресурса.
 
-    Ссылку возврата опознаём по разметке, а не по символам: это ссылка в конце текста
-    сноски, ведущая на якорь того же ресурса.
+    Во-вторых, номер ссылки на сноску посреди абзаца модели как текст не показывается:
+    иначе он переходит в перевод голой цифрой. Блоку, который модель обрабатывает,
+    ссылка передаётся меткой `[^N]` (`footnote_markers`): модель переносит её в перевод,
+    и экспортёр ставит на её место ссылку оригинала. В остальных случаях — анализ главы,
+    соседние абзацы — ссылка просто убирается.
     """
     text = block.text
-    if block.type is not BlockType.FOOTNOTE:
-        return text.strip()
+    end = _back_link_start(block) if block.type is BlockType.FOOTNOTE else len(text)
+    pieces: list[str] = []
+    position = 0
+    for ordinal, reference in enumerate(footnote_references(block), start=1):
+        if reference.start < position or reference.end > end:
+            continue
+        before = text[position : reference.start]
+        if not footnote_markers and before.endswith(" ") and (
+            reference.end == end or text[reference.end] == " "
+        ):
+            before = before[:-1]
+        pieces.append(before)
+        if footnote_markers:
+            pieces.append(footnote_marker(ordinal))
+        position = reference.end
+    pieces.append(text[position:end])
+    return "".join(pieces).strip()
+
+
+def _back_link_start(block: DocumentBlock) -> int:
+    """Начало ссылки возврата в конце сноски либо длина текста, если её нет."""
+    text = block.text
     resource_path = block.source_reference.resource_path
     tail = max(
         (
@@ -921,7 +970,7 @@ def source_text_for_model(block: DocumentBlock) -> str:
         ),
         default=None,
     )
-    return (text if tail is None else text[:tail]).strip()
+    return len(text) if tail is None else tail
 
 
 def _points_inside(target: str | None, *, resource_path: str) -> bool:
@@ -936,7 +985,8 @@ def _unit_blocks(unit: TranslationUnit) -> str:
     """Блоки группы под псевдонимами вместе с их режимом обработки."""
     lines = ["Блоки для обработки:"]
     lines.extend(
-        f"[{_alias(index)}] режим {item.treatment}\n{source_text_for_model(item.block)}"
+        f"[{_alias(index)}] режим {item.treatment}\n"
+        f"{source_text_for_model(item.block, footnote_markers=True)}"
         for index, item in enumerate(unit.items, start=1)
     )
     return "\n\n".join(lines)

@@ -30,7 +30,7 @@
     {% for chapter in data.chapters %}
       <article class="row-card">
         <div>
-          <h2>Глава {{ chapter.chapter_number }} - {{ chapter.title }}</h2>
+          <h2>{% if chapter.is_notes %}Сноски - {{ chapter.title }}{% else %}Глава {{ chapter.chapter_number }} - {{ chapter.title }}{% endif %}</h2>
           <p>{{ chapter.textual_blocks }} текстовых блоков</p>
         </div>
         <div class="treatments">

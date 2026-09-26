@@ -183,6 +183,13 @@ class DocumentBlock:
         )
 
 
+#: Блоки, которые страницу сносок не делают главой: её заголовок и разрывы страниц.
+_NOTES_PAGE_EXTRAS = frozenset({BlockType.HEADING, BlockType.PAGE_BREAK})
+
+#: Блоки, которые несут содержимое и без текста.
+_CONTENT_WITHOUT_TEXT = frozenset({BlockType.IMAGE, BlockType.TABLE})
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentSection:
     """Глава книги: один XHTML-документ порядка чтения (PRD § 6)."""
@@ -224,6 +231,28 @@ class DocumentSection:
     def ordered_blocks(self) -> tuple[DocumentBlock, ...]:
         """Блоки раздела в порядке исходного документа."""
         return tuple(sorted(self.blocks, key=lambda block: block.order))
+
+    @property
+    def is_notes_only(self) -> bool:
+        """Состоит ли раздел только из сносок и примечаний книги.
+
+        Такой документ — страница сносок (`notes.xhtml`), а не глава: его текст
+        переводится, но пересказа предыдущей главы, `Before You Read` и разметки главы
+        он не получает, и сам предыдущей главой для следующего раздела не считается
+        (PRD § 19.1, § 19.2). Заголовок страницы, разрывы страниц и пустые служебные
+        блоки на решение не влияют: важно, что кроме сносок читать на странице нечего.
+        """
+        has_notes = False
+        for block in self.blocks:
+            if block.parent_id is not None:
+                continue
+            if block.type is BlockType.FOOTNOTE:
+                has_notes = True
+            elif block.type in _NOTES_PAGE_EXTRAS:
+                continue
+            elif block.text.strip() or block.type in _CONTENT_WITHOUT_TEXT:
+                return False
+        return has_notes
 
     def block(self, block_id: str) -> DocumentBlock:
         """Блок раздела по идентификатору."""

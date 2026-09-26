@@ -19,16 +19,24 @@ from web_scenario import (
     translated_result,
 )
 
+from linguary.application.book_overview import ResultBlockSummary
 from linguary.application.ports.persistence import ExportValidationStatus
 from linguary.composition import Application, drain_tasks
 from linguary.web.routes.export import download_filename
 from linguary.domain import (
+    BlockProcessingResult,
     BlockTreatment,
+    BlockType,
     BookStatus,
+    DocumentBlock,
+    InlineAnnotation,
+    InlineAnnotationType,
     ProcessingTask,
+    SourceReference,
     TaskStatus,
     TaskType,
 )
+from linguary.web.schemas import ResultBlockResponse
 
 
 def test_result_exposes_blocks_warnings_and_epubcheck_status(
@@ -525,3 +533,42 @@ async def test_download_is_named_after_the_book_and_target_language(
 def test_download_filename_is_safe_for_the_file_system(title: str, expected: str) -> None:
     """Название из метаданных EPUB не выводит имя файла за пределы одного имени."""
     assert download_filename(title, "ru") == expected
+
+
+def test_result_block_shows_footnote_marker_as_the_original_label() -> None:
+    """Экран результата показывает ссылку на сноску так же, как в оригинале (QA-08)."""
+    text = "Her face.[1] A pity."
+    block = DocumentBlock.create(
+        document_id="book-1",
+        section_id="section-1",
+        type=BlockType.PARAGRAPH,
+        order=0,
+        text=text,
+        source_reference=SourceReference(
+            resource_path="chapter1.xhtml", structural_path="/body/p[1]"
+        ),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=text.index("[1]"),
+                end=text.index("[1]") + 3,
+                target="chapter1.xhtml#fn1",
+            ),
+        ),
+    )
+    result = BlockProcessingResult(
+        block_id=block.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Её лицо.[^1] Жаль.",
+    )
+
+    response = ResultBlockResponse.of_block(
+        ResultBlockSummary(
+            block=block,
+            chapter_number=1,
+            treatment=BlockTreatment.TRANSLATE,
+            result=result,
+        )
+    )
+
+    assert response.translated_text == "Её лицо.[1] Жаль."

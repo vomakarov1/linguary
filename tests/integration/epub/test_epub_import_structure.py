@@ -54,6 +54,44 @@ def test_section_titles_come_from_navigation(read_fixture: ReadFixture) -> None:
 
 
 @pytest.mark.parametrize(
+    ("toc", "head_title", "heading"),
+    [
+        pytest.param(
+            [("chapter1.xhtml", "1    Here Comes\n  Charlie")],
+            "Ignored",
+            "Ignored",
+            id="from-navigation",
+        ),
+        pytest.param(None, "1 \t Here Comes\n Charlie ", "Ignored", id="from-head-title"),
+        pytest.param(None, " ", "1\n    Here <em>Comes</em>   Charlie", id="from-heading"),
+    ],
+)
+def test_section_title_whitespace_is_collapsed(
+    reader: EbookLibEpubReader,
+    tmp_path: Path,
+    toc: list[tuple[str, str]] | None,
+    head_title: str,
+    heading: str,
+) -> None:
+    """Пробельные символы внутри заголовка раздела схлопываются до одного пробела."""
+    source = build_epub(
+        tmp_path / "book.epub",
+        documents={
+            "chapter1.xhtml": xhtml_document(
+                f"<h1>{heading}</h1><p>Text.</p>", title=head_title
+            )
+        },
+        toc=toc,
+    )
+
+    document = reader.read(_request(source)).document
+
+    assert [section.title for section in document.ordered_sections] == [
+        "1 Here Comes Charlie"
+    ]
+
+
+@pytest.mark.parametrize(
     "name",
     [
         pytest.param("synthetic_story", id="epub3-synthetic"),

@@ -45,6 +45,7 @@ from linguary.domain import (
     ProcessingRun,
     ProcessingTask,
     ResultWarning,
+    with_reference_labels,
 )
 from linguary.web import labels
 
@@ -385,6 +386,7 @@ class ChapterPlanResponse(BaseModel):
     section_id: str
     chapter_number: int
     title: str
+    is_notes: bool = False
     coverage_status: str
     is_complete: bool
     textual_blocks: int
@@ -398,6 +400,7 @@ class ChapterPlanResponse(BaseModel):
             section_id=chapter.section_id,
             chapter_number=chapter.chapter_number,
             title=chapter.title,
+            is_notes=chapter.is_notes,
             coverage_status=chapter.coverage_status.value,
             is_complete=chapter.coverage_status is CoverageStatus.COMPLETE,
             textual_blocks=chapter.textual_blocks,
@@ -608,7 +611,11 @@ class ResultBlockResponse(BaseModel):
                 labels.treatment_label(treatment) if treatment is not None else None
             ),
             original_text=summary.block.text,
-            translated_text=result.translated_text if result is not None else None,
+            translated_text=(
+                with_reference_labels(result.translated_text, summary.block)
+                if result is not None and result.translated_text is not None
+                else None
+            ),
             glossary_hints=(
                 tuple(GlossaryHintResponse.of_hint(hint) for hint in result.glossary_hints)
                 if result is not None
@@ -646,6 +653,7 @@ class ResultChapterResponse(BaseModel):
     section_id: str
     chapter_number: int
     title: str
+    is_notes: bool = False
     blocks: tuple[ResultBlockResponse, ...] = ()
 
     @classmethod
@@ -654,6 +662,7 @@ class ResultChapterResponse(BaseModel):
             section_id=chapter.section_id,
             chapter_number=chapter.chapter_number,
             title=chapter.title,
+            is_notes=chapter.is_notes,
             blocks=tuple(ResultBlockResponse.of_block(block) for block in chapter.blocks),
         )
 

@@ -539,3 +539,25 @@ def test_plan_screen_explains_what_an_incomplete_plan_means(
 
     assert "План неполный" in response.text
     assert "ещё не проанализирована" in response.text
+
+
+def test_notes_page_is_not_shown_as_an_ordinary_chapter(
+    client: TestClient, application: Application
+) -> None:
+    """Страница, где одни сноски, на экранах плана и результата не называется главой (QA-04)."""
+    scenario = store_book(
+        application,
+        status=BookStatus.COMPLETED,
+        chapters=(("Первый абзац.",), ("Текст сноски.",)),
+        notes_chapters=(1,),
+    )
+    start_run(application, scenario)
+
+    plan = client.get(f"/books/{scenario.book_id}/plan", headers=HTML_HEADERS)
+    result = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+
+    for page in (plan, result):
+        assert page.status_code == 200
+        assert "Глава 1 - Chapter 1" in page.text
+        assert "Сноски - Chapter 2" in page.text
+        assert "Глава 2" not in page.text

@@ -120,6 +120,7 @@ class ChapterPlanSummary:
     textual_blocks: int
     treatment_counts: Mapping[BlockTreatment, int]
     blocks: tuple[PlanBlockSummary, ...] = ()
+    is_notes: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +182,7 @@ class ResultChapterSummary:
     chapter_number: int
     title: str
     blocks: tuple[ResultBlockSummary, ...] = ()
+    is_notes: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +299,7 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
                 section_id=section.id,
                 chapter_number=number,
                 title=section.title,
+                is_notes=section.is_notes_only,
                 blocks=tuple(
                     ResultBlockSummary(
                         block=block,
@@ -475,6 +478,7 @@ def _chapter_plan(
         section_id=analysis.section_id,
         chapter_number=number,
         title=section.title,
+        is_notes=section.is_notes_only,
         coverage_status=analysis.coverage_status,
         textual_blocks=len(analysis.treatment_plan.textual_block_ids),
         treatment_counts=_treatment_counts(analysis),

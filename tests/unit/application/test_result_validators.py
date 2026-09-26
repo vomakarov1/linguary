@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 from processing_fakes import (
@@ -35,6 +36,8 @@ from linguary.application.retry_policy import (
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
+    InlineAnnotation,
+    InlineAnnotationType,
     ResultWarningKind,
     TranslationUnit,
 )
@@ -483,3 +486,36 @@ def test_results_keep_the_order_of_the_unit() -> None:
     )
 
     assert [result.block_id for result in results] == list(unit.block_ids)
+
+
+def test_footnote_markers_stay_only_in_translation_and_only_known_ones() -> None:
+    """В переводе остаются метки существующих ссылок на сноски, в помощи меток нет (QA-08)."""
+    text = "Nobody liked her face.1 It was a pity."
+    block = replace(
+        make_block(order=0, text=text),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=text.index("1"),
+                end=text.index("1") + 1,
+                target="section-1.xhtml#fn1",
+            ),
+        ),
+    )
+    unit = make_unit((block,))
+    payload = make_response(
+        (
+            make_block_result(
+                block,
+                translated_text="Никому не нравилось её лицо,[^1] и жаль [^7].",
+                glossary_hints=(make_hint(original="her face[^1]"),),
+            ),
+        ),
+        language_notes=(make_note(block, original_excerpt="her face.[^1]"),),
+    )
+
+    (result,) = validate(payload, unit=unit)
+
+    assert result.translated_text == "Никому не нравилось её лицо,[^1] и жаль."
+    assert [hint.original for hint in result.glossary_hints] == ["her face"]
+    assert [note.original_excerpt for note in result.language_notes] == ["her face."]

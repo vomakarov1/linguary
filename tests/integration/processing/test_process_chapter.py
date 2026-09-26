@@ -121,6 +121,84 @@ async def test_glossary_only_block_gets_hints_without_translation(
     assert plain.translated_text is None and plain.glossary_hints == ()
 
 
+async def test_hints_and_notes_repeating_before_you_read_are_not_saved(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    """Выражение из «Before You Read» не повторяется ни подсказкой, ни заметкой (QA-03)."""
+    scenario = store_processing_book(
+        unit_of_work,
+        treatments={
+            "section-1": (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE)
+        },
+        before_you_read=(("heaved and groaned", "вздымался и стонал"),),
+    )
+    client = FakeLLMClient.replying(
+        [
+            translation_reply(
+                [
+                    block_reply(
+                        "b1",
+                        treatment=BlockTreatment.GLOSSARY_ONLY,
+                        hints=(
+                            ("Heaved and  groaned,", "вздымалось и стонало"),
+                            ("entailed", "заповедный"),
+                        ),
+                    ),
+                    block_reply("b2"),
+                ],
+                notes=(
+                    note_reply("b1", original_excerpt="heaved and groaned"),
+                    note_reply("b2", original_excerpt="the house heaved and groaned"),
+                    note_reply("b2"),
+                ),
+            )
+        ]
+    )
+    process, _ = make_process_chapter(unit_of_work, client)
+
+    await process(command())
+
+    hinted, translated = stored_results(unit_of_work, scenario.run_id)
+    assert [hint.original for hint in hinted.glossary_hints] == ["entailed"]
+    assert hinted.language_notes == ()
+    assert [note.original_excerpt for note in translated.language_notes] == [
+        "a truth universally acknowledged"
+    ]
+
+
+async def test_glossary_only_block_keeps_its_only_hint_even_if_explained(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    """Обязательная подсказка блока GLOSSARY_ONLY не отсеивается до пустого списка."""
+    scenario = store_processing_book(
+        unit_of_work,
+        treatments={
+            "section-1": (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS)
+        },
+        before_you_read=(("entailed", "заповедный"),),
+    )
+    client = FakeLLMClient.replying(
+        [
+            translation_reply(
+                [
+                    block_reply(
+                        "b1",
+                        treatment=BlockTreatment.GLOSSARY_ONLY,
+                        hints=(("entailed", "заповедный"),),
+                    ),
+                    block_reply("b2", treatment=BlockTreatment.READ_AS_IS),
+                ]
+            )
+        ]
+    )
+    process, _ = make_process_chapter(unit_of_work, client)
+
+    await process(command())
+
+    hinted, _ = stored_results(unit_of_work, scenario.run_id)
+    assert [hint.original for hint in hinted.glossary_hints] == ["entailed"]
+
+
 async def test_chapter_without_textual_blocks_does_not_call_the_model(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:

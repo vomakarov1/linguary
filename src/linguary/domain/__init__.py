@@ -54,6 +54,14 @@ from linguary.domain.errors import (
     UnknownBlockError,
     UnknownBlockTypeError,
 )
+from linguary.domain.footnote_markers import (
+    footnote_marker,
+    footnote_references,
+    known_markers_only,
+    translation_segments,
+    with_reference_labels,
+    without_footnote_markers,
+)
 from linguary.domain.glossary import (
     ConceptType,
     GlossaryCandidate,
@@ -178,7 +186,13 @@ __all__ = [
     "build_language_note_id",
     "compute_requires_review",
     "ensure_transition_allowed",
+    "footnote_marker",
+    "footnote_references",
     "is_transition_allowed",
+    "known_markers_only",
     "status_after_task_failure",
+    "translation_segments",
     "translations_conflict",
+    "with_reference_labels",
+    "without_footnote_markers",
 ]

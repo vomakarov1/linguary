@@ -45,6 +45,8 @@ from linguary.domain import (
     ResultWarning,
     ResultWarningKind,
     TranslationUnit,
+    known_markers_only,
+    without_footnote_markers,
 )
 
 
@@ -127,14 +129,28 @@ class TranslationResultValidator:
         notes: Sequence[LanguageNoteResponse],
         note_id_factory: Callable[[], str],
     ) -> BlockProcessingResult:
-        """Результат одного блока: режим из плана, тексты модели, предупреждения."""
+        """Результат одного блока: режим из плана, тексты модели, предупреждения.
+
+        Метки ссылок на сноски (`[^1]`) остаются только в переводе и только те, которым
+        у исходного блока есть ссылка: в подсказке и заметке ссылка не нужна, а
+        выдуманная моделью метка вела бы в никуда.
+        """
+        source = next(
+            item.block for item in unit.items if item.block.id == block.source_block_id
+        )
         return BlockProcessingResult(
             block_id=block.source_block_id,
             treatment=unit.treatment_for(block.source_block_id),
-            translated_text=block.translated_text,
+            translated_text=(
+                known_markers_only(block.translated_text, source)
+                if block.translated_text is not None
+                else None
+            ),
             glossary_hints=tuple(
                 GlossaryHint(
-                    original=hint.original, translation=hint.translation, note=hint.note
+                    original=_unmarked(hint.original),
+                    translation=_unmarked(hint.translation),
+                    note=_unmarked(hint.note) if hint.note is not None else None,
                 )
                 for hint in block.glossary_hints
             ),
@@ -142,9 +158,13 @@ class TranslationResultValidator:
                 LanguageNote(
                     id=note_id_factory(),
                     block_id=note.source_block_id,
-                    original_excerpt=note.original_excerpt,
-                    note=note.note,
-                    translated_excerpt=note.translated_excerpt,
+                    original_excerpt=_unmarked(note.original_excerpt),
+                    note=_unmarked(note.note),
+                    translated_excerpt=(
+                        _unmarked(note.translated_excerpt)
+                        if note.translated_excerpt is not None
+                        else None
+                    ),
                 )
                 for note in notes
             ),
@@ -187,6 +207,14 @@ class TranslationResultValidator:
             unit.validate_results(results)
         except DomainError as error:
             raise ResultValidationError(str(error), expectation=expectation) from error
+
+
+def _unmarked(text: str) -> str:
+    """Текст без меток ссылок на сноски; поле из одной метки остаётся как было."""
+    unmarked = without_footnote_markers(text)
+    if unmarked == text:
+        return text
+    return unmarked.strip() or text
 
 
 def expectation_for_unit(

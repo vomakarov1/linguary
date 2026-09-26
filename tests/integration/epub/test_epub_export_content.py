@@ -311,3 +311,140 @@ def test_help_for_list_items_stays_inside_the_list_item(tmp_path: Path) -> None:
     assert next(iter(elements(first_item, "aside"))).get("class") == (
         "linguary-language-note"
     )
+
+
+def test_footnote_reference_in_translation_stays_a_link(tmp_path: Path) -> None:
+    """Ссылка на сноску в переводе остаётся ссылкой, а не голой цифрой текста (QA-08)."""
+    source = build_epub(
+        tmp_path / "source.epub",
+        documents={
+            "chapter1.xhtml": xhtml_document(
+                "<h1>Chapter One</h1>"
+                '<p>Nobody liked her face.<a epub:type="noteref" href="#fn1" id="fnref1">1</a>'
+                " It was a pity.</p>"
+                '<aside epub:type="footnote" id="fn1"><p>A plain face. '
+                '<a href="#fnref1">↩</a></p></aside>'
+            )
+        },
+        toc=[("chapter1.xhtml", "Chapter One")],
+    )
+    dry = run_export(source, tmp_path=tmp_path / "dry", book_id="book-1")
+    (paragraph,) = paragraphs_of(dry.imported.document, 0)
+    results: Mapping[str, BlockProcessingResult] = {
+        paragraph.id: BlockProcessingResult(
+            block_id=paragraph.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Никому не нравилось её лицо.[^1] Жаль.",
+        )
+    }
+
+    run = run_export(
+        source, tmp_path=tmp_path / "full", book_id="book-1", block_results=results
+    )
+
+    chapter = documents_of(run.path)["OEBPS/chapter1.xhtml"]
+    translation = next(
+        element
+        for element in elements(chapter, "p")
+        if element.get("class") == "linguary-translation"
+    )
+    original = next(
+        link
+        for element in elements(chapter, "p")
+        if element.get("class") is None and "her face" in "".join(element.itertext())
+        for link in elements(element, "a")
+    )
+    (link,) = elements(translation, "a")
+    assert "".join(translation.itertext()) == "Никому не нравилось её лицо.1 Жаль."
+    assert translation.text == "Никому не нравилось её лицо."
+    assert link.text == "1"
+    assert link.get("href") == original.get("href")
+    assert link.get("href").endswith("#fn1")
+    assert link.get("{http://www.idpf.org/2007/ops}type") == "noteref"
+    assert link.get("id") is None
+
+
+@pytest.fixture
+def book_with_notes_page(tmp_path: Path) -> Path:
+    """Две главы, между которыми стоит страница, где одни сноски."""
+    return build_epub(
+        tmp_path / "notes-source.epub",
+        documents={
+            "chapter1.xhtml": xhtml_document(
+                "<h1>Chapter One</h1>"
+                '<p>Nobody liked her face.<a epub:type="noteref" href="notes.xhtml#fn1"'
+                ' id="fnref1">1</a> It was a pity.</p>'
+            ),
+            "notes.xhtml": xhtml_document(
+                "<h1>Notes</h1>"
+                '<aside epub:type="footnote" id="fn1"><p>A plain face. '
+                '<a href="chapter1.xhtml#fnref1">↩</a></p></aside>',
+                title="Notes",
+            ),
+            "chapter2.xhtml": xhtml_document(
+                "<h1>Chapter Two</h1><p>The town appeared at dusk.</p>"
+            ),
+        },
+        toc=[
+            ("chapter1.xhtml", "Chapter One"),
+            ("notes.xhtml", "Notes"),
+            ("chapter2.xhtml", "Chapter Two"),
+        ],
+    )
+
+
+def test_notes_page_is_translated_but_not_dressed_as_a_chapter(
+    book_with_notes_page: Path, tmp_path: Path
+) -> None:
+    """Страница сносок: перевод есть, пересказа, «Before You Read» и разметки главы нет (QA-04)."""
+    dry = run_export(book_with_notes_page, tmp_path=tmp_path / "dry", book_id="book-1")
+    document = dry.imported.document
+    first, notes, second = document.ordered_sections
+    footnote = next(
+        block
+        for block in notes.ordered_blocks
+        if block.type is BlockType.FOOTNOTE and block.text
+    )
+    results: Mapping[str, BlockProcessingResult] = {
+        footnote.id: BlockProcessingResult(
+            block_id=footnote.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Некрасивое лицо.",
+        )
+    }
+    materials = {
+        section.id: LearningMaterial.for_chapter(
+            section_id=section.id,
+            before_you_read=(
+                BeforeYouReadEntry(expression=f"idiom of {section.title}", explanation="оборот"),
+            ),
+            chapter_summary=f"Summary of {section.title}.",
+            language_notes=(),
+        )
+        for section in (first, notes, second)
+    }
+
+    run = run_export(
+        book_with_notes_page,
+        tmp_path=tmp_path / "full",
+        book_id="book-1",
+        block_results=results,
+        learning_materials=materials,
+    )
+
+    chapters = documents_of(run.path)
+    notes_page = chapters["OEBPS/notes.xhtml"]
+    notes_text = "".join(notes_page.itertext())
+    assert not [
+        element
+        for element in elements(notes_page, "section")
+        if element.get("{http://www.idpf.org/2007/ops}type") == "chapter"
+    ]
+    assert "Previously" not in notes_text
+    assert "Before You Read" not in notes_text
+    assert "Некрасивое лицо." in notes_text
+    assert "A plain face." in notes_text
+    following = "".join(chapters["OEBPS/chapter2.xhtml"].itertext())
+    assert "Summary of Chapter One." in following
+    assert "Summary of Notes." not in following
+    assert "idiom of Chapter Two" in following

@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 
 from linguary.application.context_builder import TranslationContext
 from linguary.application.errors import ApplicationError
+from linguary.application.explained_expressions import ExplainedExpressions
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
@@ -89,8 +90,12 @@ class TranslationCall:
         Проверки идут внутри цикла: отбраковка ответа — обычный повод для повтора
         с уточняющей инструкцией, а не отказ задачи. Исчерпав попытки, вызов поднимает
         исходную ошибку: типизировать её и перевести задачу в `failed` — работа runner-а.
+
+        Из проверенного результата отсеиваются подсказки и заметки, которые повторяют
+        `Before You Read` главы (PRD § 19.3): повтор не повод отбраковывать ответ.
         """
         request = context.request
+        explained = ExplainedExpressions(context.explained_expressions)
         attempts = 0
         while True:
             attempts += 1
@@ -115,7 +120,9 @@ class TranslationCall:
                 request = decision.next_request(request)
                 continue
             return TranslationCallResult(
-                results=results, attempts=attempts, usage=response.usage
+                results=tuple(explained.without_repeats(result) for result in results),
+                attempts=attempts,
+                usage=response.usage,
             )
 
     def save(

@@ -183,3 +183,65 @@ def test_block_rejects_fatal_support_status() -> None:
             ),
             support_status=SupportStatus.FATAL,
         )
+
+
+@pytest.mark.parametrize(
+    ("types", "texts", "expected"),
+    [
+        pytest.param(
+            (BlockType.HEADING, BlockType.FOOTNOTE, BlockType.FOOTNOTE),
+            ("Notes", "1 A plain face.", "2 A storm."),
+            True,
+            id="heading-and-footnotes",
+        ),
+        pytest.param(
+            (BlockType.FOOTNOTE, BlockType.PAGE_BREAK, BlockType.OTHER),
+            ("1 A plain face.", "", ""),
+            True,
+            id="footnotes-with-empty-service-blocks",
+        ),
+        pytest.param(
+            (BlockType.PARAGRAPH, BlockType.FOOTNOTE),
+            ("Her face.", "1 A plain face."),
+            False,
+            id="chapter-with-footnote",
+        ),
+        pytest.param(
+            (BlockType.IMAGE, BlockType.FOOTNOTE),
+            ("", "1 A plain face."),
+            False,
+            id="illustration-with-footnote",
+        ),
+        pytest.param(
+            (BlockType.HEADING,), ("Notes",), False, id="heading-only"
+        ),
+    ],
+)
+def test_section_of_only_footnotes_is_a_notes_page(
+    types: tuple[BlockType, ...], texts: tuple[str, ...], expected: bool
+) -> None:
+    """Раздел из одних сносок — страница сносок, а не глава (QA-04)."""
+    blocks = [
+        make_block(order=index, type=type_, text=text)
+        for index, (type_, text) in enumerate(zip(types, texts, strict=True))
+    ]
+
+    assert make_section(blocks).is_notes_only is expected
+
+
+def test_nested_paragraph_of_a_footnote_does_not_make_it_a_chapter() -> None:
+    """Абзацы внутри сноски — её часть, а не текст главы."""
+    note = make_block(order=0, type=BlockType.FOOTNOTE, text="")
+    inner = DocumentBlock(
+        id="inner",
+        section_id=SECTION_ID,
+        type=BlockType.PARAGRAPH,
+        order=1,
+        text="A plain face.",
+        source_reference=SourceReference(
+            resource_path=RESOURCE_PATH, structural_path="/body/aside[1]/p[1]"
+        ),
+        parent_id=note.id,
+    )
+
+    assert make_section([note, inner]).is_notes_only
