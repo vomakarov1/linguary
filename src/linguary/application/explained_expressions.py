@@ -86,7 +86,7 @@ class ExplainedExpressions:
         )
 
     def without_repeats(self, result: BlockProcessingResult) -> BlockProcessingResult:
-        """Результат блока без подсказок и заметок, повторяющих `Before You Read`.
+        """Результат без повторов подготовки к чтению и подсказок того же блока.
 
         Повторная заметка отбрасывается целиком. Подсказка — тоже, кроме одного случая:
         блоку `GLOSSARY_ONLY` подсказки обязательны, и если повторами оказались все его
@@ -94,7 +94,7 @@ class ExplainedExpressions:
         остался бы у трудного абзаца без помощи, а обработка главы из-за учебного
         повтора не должна срываться.
         """
-        if not self:
+        if not self and not result.glossary_hints:
             return result
         hints = tuple(
             hint for hint in result.glossary_hints if not self.covers(hint.original)
@@ -105,10 +105,24 @@ class ExplainedExpressions:
             note
             for note in result.language_notes
             if not self.repeated_by(note)
+            and not _repeats_block_hint(note, result)
         )
         if hints == result.glossary_hints and notes == result.language_notes:
             return result
         return replace(result, glossary_hints=hints, language_notes=notes)
+
+
+def _repeats_block_hint(note: LanguageNote, result: BlockProcessingResult) -> bool:
+    """Содержит ли отрывок заметки выражение подсказки того же блока."""
+    excerpt = expression_words(note.original_excerpt)
+    return any(
+        (hint_words := expression_words(hint.original))
+        and any(
+            excerpt[start : start + len(hint_words)] == hint_words
+            for start in range(len(excerpt) - len(hint_words) + 1)
+        )
+        for hint in result.glossary_hints
+    )
 
 
 def _overlaps(first: Sequence[str], second: Sequence[str]) -> bool:

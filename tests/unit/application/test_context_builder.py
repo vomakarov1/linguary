@@ -282,6 +282,23 @@ def test_instructions_describe_every_textual_treatment() -> None:
     assert f"владеет языком {TARGET_LANGUAGE}" in instructions
 
 
+def test_analysis_instructions_name_reader_level_b1_b2() -> None:
+    assert "B1–B2" in build_context().request.instructions
+
+
+def test_analysis_instructions_give_long_block_examples_for_lighter_modes() -> None:
+    instructions = build_context().request.instructions
+    assert "длинный абзац" in instructions
+    assert "READ_AS_IS" in instructions
+    assert "GLOSSARY_ONLY" in instructions
+    assert "сомневаешься" in instructions
+    assert "половине блоков" in instructions
+
+
+def test_analysis_instructions_state_length_is_not_criterion() -> None:
+    assert "Длина блока не определяет режим" in build_context().request.instructions
+
+
 def test_instructions_name_every_glossary_concept_type() -> None:
     """Инструкция называет каждый тип понятия глоссария (PRD § 12)."""
     instructions = build_context().request.instructions

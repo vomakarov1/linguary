@@ -324,7 +324,7 @@ def _analysis_sequence(
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             glossary_confidence_threshold=settings.checks.glossary_confidence_threshold,
             max_fragment_blocks=settings.llm.effective_max_fragment_blocks,
-            context_builder=_context_builder(),
+            context_builder=_context_builder(settings),
         ),
     )
 
@@ -346,7 +346,7 @@ def _processing_sequence(
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
             max_unit_source_chars=settings.llm.max_unit_source_chars,
-            context_builder=_context_builder(),
+            context_builder=_context_builder(settings),
         ),
     )
 
@@ -367,7 +367,7 @@ def _regeneration_sequence(
             llm_client=model,
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
-            context_builder=_context_builder(),
+            context_builder=_context_builder(settings),
         ),
     )
 
@@ -387,10 +387,11 @@ def _llm_snapshot(settings: AppSettings) -> LLMSettingsSnapshot:
     )
 
 
-def _context_builder() -> ContextBuilder:
+def _context_builder(settings: AppSettings) -> ContextBuilder:
     """Политика контекста запросов к модели (PRD § 13)."""
     return ContextBuilder(
-        regeneration_context_blocks=DEFAULT_REGENERATION_CONTEXT_BLOCKS
+        regeneration_context_blocks=DEFAULT_REGENERATION_CONTEXT_BLOCKS,
+        language_notes_per_chapter=settings.checks.language_notes_per_chapter,
     )
 
 

@@ -161,6 +161,34 @@ def test_without_expressions_result_is_unchanged() -> None:
     assert ExplainedExpressions([" "]).without_repeats(result) is result
 
 
+def test_note_repeating_block_hint_dropped() -> None:
+    result = BlockProcessingResult(
+        block_id="block-1", treatment=BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint(original="Heaved and groaned", translation="стонал"),),
+        language_notes=(_note("ln-1", "heaved, and groaned!"),),
+    )
+    assert ExplainedExpressions([]).without_repeats(result).language_notes == ()
+
+
+def test_note_containing_hint_expression_dropped() -> None:
+    result = BlockProcessingResult(
+        block_id="block-1", treatment=BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint(original="heaved and groaned", translation="стонал"),),
+        language_notes=(_note("ln-1", "The house heaved and groaned all night"),),
+    )
+    assert ExplainedExpressions([]).without_repeats(result).language_notes == ()
+
+
+def test_unrelated_note_kept() -> None:
+    note = _note("ln-1", "another phrase")
+    result = BlockProcessingResult(
+        block_id="block-1", treatment=BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint(original="heaved and groaned", translation="стонал"),),
+        language_notes=(note,),
+    )
+    assert ExplainedExpressions([]).without_repeats(result).language_notes == (note,)
+
+
 def _translated(*notes: LanguageNote) -> BlockProcessingResult:
     """Результат блока `TRANSLATE` с переданными заметками."""
     return BlockProcessingResult(

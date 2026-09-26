@@ -107,7 +107,7 @@ def test_full_mvp_pipeline_exports_translated_epub(tmp_path: Path) -> None:
         assert application.paths.export_epub("book-e2e").is_file()
         book_text = exported_text(application.paths.export_epub("book-e2e"))
         assert "Русский перевод блока" in book_text
-        assert "Составное существительное передаёт образ света и стекла." in book_text
+        assert "Причастие humming описывает непрерывный звук предмета." in book_text
         assert "Previously in Chapter" in book_text
         assert any(
             "Рен Колдер (женский род)" in text for text in client.requests

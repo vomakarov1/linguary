@@ -177,6 +177,7 @@ class CheckSettings:
     language_check_min_length: int = 80
     repetition_ngram_size: int = 6
     repetition_min_repeats: int = 3
+    language_notes_per_chapter: int = 8
 
     def __post_init__(self) -> None:
         for name in ("glossary_confidence_threshold", "target_language_min_share"):
@@ -189,6 +190,8 @@ class CheckSettings:
             raise SettingsError("размер n-граммы проверки повторов должен быть положительным")
         if self.repetition_min_repeats < 2:
             raise SettingsError("повтором считается не менее двух вхождений n-граммы")
+        if self.language_notes_per_chapter < 0:
+            raise SettingsError("число языковых заметок на главу не может быть отрицательным")
 
 
 @dataclass(frozen=True, slots=True)

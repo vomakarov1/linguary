@@ -106,6 +106,7 @@ _CHECK_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "language_check_min_length": _as_int,
     "repetition_ngram_size": _as_int,
     "repetition_min_repeats": _as_int,
+    "language_notes_per_chapter": _as_int,
 }
 
 #: Разбор значений секции `[storage]`.

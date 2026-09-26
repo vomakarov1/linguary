@@ -15,7 +15,7 @@ from processing_fakes import (
     make_unit,
 )
 
-from linguary.application.context_builder import ContextBuilder, ContextBuildError
+from linguary.application.context_builder import ContextBuilder, ContextBuildError, notes_budget
 from linguary.application.llm_dto import (
     BlockResultResponse,
     LanguageNoteResponse,
@@ -144,6 +144,54 @@ def test_request_asks_for_translation_result() -> None:
     context, _ = build_context()
 
     assert context.request.kind is LLMResponseKind.TRANSLATION_RESULT
+
+
+def test_notes_budget_proportional_to_unit_share() -> None:
+    assert notes_budget(unit_chars=250, chapter_chars=1000, per_chapter=8) == 2
+
+
+def test_notes_budget_at_least_one() -> None:
+    assert notes_budget(unit_chars=1, chapter_chars=1000, per_chapter=0) == 1
+
+
+def test_translation_input_states_notes_budget() -> None:
+    blocks = make_blocks(2)
+    section = make_section(blocks)
+    unit = make_unit(blocks[:1], treatments=(BlockTreatment.TRANSLATE,))
+    builder = ContextBuilder(language_notes_per_chapter=8)
+    context = builder.for_translation_unit(
+        document=make_document(section), section=section, unit=unit,
+        analysis=make_analysis(unit), glossary=make_snapshot(),
+    )
+    expected = notes_budget(
+        unit_chars=len(blocks[0].text),
+        chapter_chars=sum(len(block.text) for block in blocks),
+        per_chapter=8,
+    )
+    assert f"В этом запросе — не больше {expected} языковых заметок" in context.request.input_text
+    regenerated = builder.for_block_regeneration(
+        document=make_document(section), section=section, unit=unit,
+        analysis=make_analysis(unit), glossary=make_snapshot(),
+    )
+    assert (
+        f"В этом запросе — не больше {expected} языковых заметок"
+        in regenerated.request.input_text
+    )
+
+
+def test_translation_instructions_require_preserving_character_speech() -> None:
+    instructions = build_context()[0].request.instructions
+    assert "ломаную грамматику" in instructions
+    assert "акцент" in instructions
+    assert "диалект" in instructions
+    assert "не выправляй" in instructions
+    assert "если перевод её не передаёт" in instructions
+
+
+def test_translation_instructions_forbid_plot_retelling_notes() -> None:
+    instructions = build_context()[0].request.instructions
+    assert "не пересказывает сюжет" in instructions
+    assert "уже переданы переводом" in instructions
 
 
 def test_context_carries_blocks_under_aliases_with_their_treatment() -> None:
