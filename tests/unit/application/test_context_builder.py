@@ -354,8 +354,14 @@ def test_fragment_instructions_describe_a_part_of_the_chapter() -> None:
     assert "Тебе дают одну главу" in whole
     assert "что произошло в этой главе" in whole
     assert "Тебе дают часть одной главы" in fragment
-    assert "что произошло в этом фрагменте" in fragment
+    assert "что произошло в главе от начала до конца этого фрагмента" in fragment
     assert "Тебе дают одну главу" not in fragment
+
+
+def test_analysis_instructions_forbid_block_labels() -> None:
+    assert "не ссылайся на блоки по идентификаторам" in chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE
+    )
 
 
 def test_fragment_instructions_keep_the_rest_of_the_chapter_instruction() -> None:

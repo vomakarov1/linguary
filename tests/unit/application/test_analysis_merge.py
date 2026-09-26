@@ -10,6 +10,8 @@ from linguary.application.analysis_merge import (
     FragmentAnalysis,
     merge_chapter_analysis,
     plan_fragments,
+    fragment_blocks_for,
+    before_you_read_entries,
 )
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
@@ -403,8 +405,8 @@ def test_possessive_form_stays_a_separate_candidate() -> None:
     }
 
 
-def test_chapter_summary_joins_fragment_summaries_in_reading_order() -> None:
-    """Сводка разбитой главы собирается из сводок фрагментов в порядке чтения (ALG-03)."""
+def test_merged_summary_is_last_fragment_summary() -> None:
+    """Последний фрагмент возвращает сводку всей доступной главы."""
     expected = block_ids(2)
 
     analysis = merge(
@@ -413,7 +415,7 @@ def test_chapter_summary_joins_fragment_summaries_in_reading_order() -> None:
         expected=expected,
     )
 
-    assert analysis.chapter_summary == "Mr. Bennet stays silent. Bingley takes the house."
+    assert analysis.chapter_summary == "Bingley takes the house."
 
 
 def test_merged_instructions_keep_each_directive_once() -> None:
@@ -428,8 +430,51 @@ def test_merged_instructions_keep_each_directive_once() -> None:
     )
 
     assert analysis.translation_instructions == (
-        "Сохранять иронию.\n\nРечь Коллинза — витиевата."
+        "1. Сохранять иронию.\n2. Речь Коллинза — витиевата."
     )
+
+
+def test_merged_instructions_single_list_without_repeats() -> None:
+    expected = block_ids(2)
+    analysis = merge(
+        make_fragment(0, blocks=expected[:1], translation_instructions="- Сохранять иронию.\n• Передать акцент."),
+        make_fragment(1, blocks=expected[1:], translation_instructions="1. сохранять иронию\n2. Не сглаживать речь."),
+        expected=expected,
+    )
+    assert analysis.translation_instructions == "1. Сохранять иронию.\n2. Передать акцент.\n3. Не сглаживать речь."
+
+
+def test_merged_instructions_have_no_block_labels() -> None:
+    expected = block_ids(1)
+    analysis = merge(make_fragment(0, blocks=expected, translation_instructions="- Сохранить паузу в блоке b3."), expected=expected)
+    assert "b3" not in analysis.translation_instructions
+
+
+def test_before_you_read_deduplicated_by_normalized_expression() -> None:
+    entries = (
+        BeforeYouReadEntryResponse(expression="  Entailed  estate! ", explanation="первое"),
+        BeforeYouReadEntryResponse(expression="entailed estate", explanation="второе"),
+    )
+    assert len(before_you_read_entries(entries)) == 1
+    assert before_you_read_entries(entries)[0].explanation == "первое"
+
+
+def test_before_you_read_capped_at_ten() -> None:
+    entries = tuple(BeforeYouReadEntryResponse(expression=f"phrase {n}", explanation="значение") for n in range(12))
+    assert len(before_you_read_entries(entries)) == 10
+
+
+def test_fragment_blocks_for_32000_is_160() -> None:
+    assert fragment_blocks_for(32000) == 160
+    assert len(plan_fragments(chapter_blocks(106), max_blocks=fragment_blocks_for(32000))) == 1
+
+
+def test_fragment_blocks_for_8000_is_40() -> None:
+    assert fragment_blocks_for(8000) == 40
+
+
+def test_fragment_blocks_without_limit_is_default() -> None:
+    assert fragment_blocks_for(None) == 40
 
 
 def test_before_you_read_keeps_each_expression_once() -> None:

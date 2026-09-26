@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_BLOCKS
+from linguary.application.analysis_merge import fragment_blocks_for
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
 from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
@@ -29,7 +29,9 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 #: Сколько ждать ответа модели на один вызов. Литературный перевод главы длинный,
 #: поэтому предел щедрый: он защищает от зависшего соединения, а не экономит время.
-DEFAULT_TIMEOUT_SECONDS = 180.0
+# 10 000 выходных токенов при 53 токенах/с занимают около трёх минут;
+# резерв оставляет время для задержки провайдера и передачи ответа.
+DEFAULT_TIMEOUT_SECONDS = 600.0
 
 #: Сколько раз задача повторяется автоматически до перехода в `failed` (PRD § 16).
 DEFAULT_MAX_ATTEMPTS = 3
@@ -98,7 +100,7 @@ class LLMSettings:
     max_output_tokens: int | None = None
     temperature: float | None = None
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
-    max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS
+    max_fragment_blocks: int | None = None
     max_unit_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS
     requests_per_minute: int | None = None
     debug_llm_payloads: bool = False
@@ -116,8 +118,9 @@ class LLMSettings:
             raise SettingsError("лимит выходных токенов должен быть положительным")
         if self.max_attempts < 1:
             raise SettingsError("число попыток вызова модели должно быть положительным")
-        if self.max_fragment_blocks < 1:
+        if self.max_fragment_blocks is not None and self.max_fragment_blocks < 1:
             raise SettingsError("размер фрагмента главы должен быть положительным")
+
         if self.max_unit_source_chars < 1:
             raise SettingsError("размер группы блоков должен быть положительным")
         if self.requests_per_minute is not None and self.requests_per_minute < 1:
@@ -128,6 +131,11 @@ class LLMSettings:
             raise SettingsError("цена входных токенов не может быть отрицательной")
         if self.output_price_per_mtok is not None and self.output_price_per_mtok < 0:
             raise SettingsError("цена выходных токенов не может быть отрицательной")
+
+    @property
+    def effective_max_fragment_blocks(self) -> int:
+        """Явный предел или размер, рассчитанный по доступному выводу."""
+        return self.max_fragment_blocks or fragment_blocks_for(self.max_output_tokens)
 
     @property
     def is_ready(self) -> bool:

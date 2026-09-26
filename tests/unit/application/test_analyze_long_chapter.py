@@ -84,10 +84,48 @@ async def test_long_chapter_is_analysed_by_fragments_and_merged() -> None:
     assert analysis.treatment_plan.block_ids == tuple(
         block.id for block in section.ordered_blocks
     )
-    assert analysis.chapter_summary == (
-        "Mr. Bennet stays silent. Bingley takes the house."
-    )
+    assert analysis.chapter_summary == "Bingley takes the house."
     assert unit_of_work.analyses.get_for_section(BOOK_ID, "section-1") == analysis
+
+
+async def test_second_fragment_request_contains_previous_findings() -> None:
+    client = FakeLLMClient.replying((
+        fragment_reply(chapter_summary="First event.", translation_instructions="Сохранять иронию."),
+        fragment_reply(chapter_summary="First event. Second event."),
+    ))
+    scenario, _ = make_analyze_chapter(four_block_book(), client, max_fragment_blocks=2)
+    await scenario(command())
+    assert "Уже найдено в предыдущих частях главы" in client.requests[1].input_text
+    assert "First event." in client.requests[1].input_text
+    assert "Сохранять иронию." in client.requests[1].input_text
+
+
+async def test_first_fragment_request_has_no_findings() -> None:
+    client = FakeLLMClient.always(fragment_reply())
+    scenario, _ = make_analyze_chapter(four_block_book(), client, max_fragment_blocks=2)
+    await scenario(command())
+    assert "Уже найдено в предыдущих частях главы" not in client.requests[0].input_text
+
+
+async def test_whole_chapter_analysis_strips_block_labels() -> None:
+    client = FakeLLMClient.always(analysis_reply(
+        aliases=("b1", "b2", "b3", "b4"),
+        chapter_summary="Событие в блоке b3.",
+        translation_instructions="Сохранить паузу в блоке b4.",
+    ))
+    scenario, _ = make_analyze_chapter(four_block_book(), client, max_fragment_blocks=4)
+    analysis = (await scenario(command())).analysis
+    assert "b3" not in analysis.chapter_summary
+    assert "b4" not in analysis.translation_instructions
+
+
+async def test_whole_chapter_before_you_read_capped() -> None:
+    entries = [{"expression": f"phrase {n}", "explanation": "значение"} for n in range(12)]
+    client = FakeLLMClient.always(analysis_reply(
+        aliases=("b1", "b2", "b3", "b4"), before_you_read=entries,
+    ))
+    scenario, _ = make_analyze_chapter(four_block_book(), client, max_fragment_blocks=4)
+    assert len((await scenario(command())).analysis.before_you_read) == 10
 
 
 async def test_fragment_request_carries_only_its_own_blocks() -> None:

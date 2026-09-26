@@ -44,6 +44,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from linguary.application.analysis_merge import ChapterFragment
+from linguary.application.block_labels import without_block_labels
 from linguary.application.chapter_instructions import (
     instructions_respecting_glossary,
     note_respecting_glossary,
@@ -91,6 +92,15 @@ _NON_TEXTUAL_BLOCK_TYPES = frozenset({BlockType.IMAGE, BlockType.PAGE_BREAK})
 
 class ContextBuildError(ApplicationError):
     """Контекст запроса собрать нельзя."""
+
+
+@dataclass(frozen=True, slots=True)
+class FragmentFindings:
+    """Найденное в уже обработанных частях главы."""
+
+    summary: str
+    instructions: str
+    expressions: tuple[str, ...]
 
 
 def is_textual(block: DocumentBlock) -> bool:
@@ -293,13 +303,14 @@ class ContextBuilder:
         fragment: ChapterFragment,
         fragment_count: int,
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
+        findings: FragmentFindings | None = None,
     ) -> ChapterAnalysisContext:
         """Контекст анализа одного фрагмента длинной главы (PRD § 14, ALG-03).
 
         Резервный сценарий: главу, которая не помещается в один запрос, модель видит
         по частям. Фрагмент получает только свои блоки — ни остальной главы, ни соседних
-        глав в запросе нет, — и знает своё место в главе, потому что сводки фрагментов
-        соединяются в сводку главы в порядке чтения.
+        глав в запросе нет. Найденное в предыдущих частях помогает вернуть сводку главы
+        от начала до конца текущего фрагмента.
         """
         if fragment_count < 1 or fragment.order >= fragment_count:
             raise ContextBuildError(
@@ -316,6 +327,7 @@ class ContextBuilder:
                 target_language=document.target_language,
             ),
             fragment_label=_fragment_label(fragment.order, fragment_count),
+            findings=findings if fragment.order > 0 else None,
         )
 
     def for_translation_unit(
@@ -518,6 +530,7 @@ class ContextBuilder:
         accumulated_candidates: Iterable[GlossaryCandidate],
         instructions: str,
         fragment_label: str | None,
+        findings: FragmentFindings | None = None,
     ) -> ChapterAnalysisContext:
         """Готовый запрос по переданным блокам главы вместе с разбором ответа."""
         aliases = {_alias(index): block.id for index, block in enumerate(blocks, start=1)}
@@ -531,6 +544,7 @@ class ContextBuilder:
                     blocks=blocks,
                     accumulated_candidates=accumulated_candidates,
                     fragment_label=fragment_label,
+                    findings=findings,
                 ),
             ),
             block_ids_by_alias=aliases,
@@ -548,6 +562,7 @@ class ContextBuilder:
         blocks: Sequence[DocumentBlock],
         accumulated_candidates: Iterable[GlossaryCandidate],
         fragment_label: str | None,
+        findings: FragmentFindings | None = None,
     ) -> str:
         """Текст запроса: шапка главы, принятые решения книги и блоки под псевдонимами."""
         parts = [
@@ -558,8 +573,15 @@ class ContextBuilder:
                 self._selected_candidates(accumulated_candidates),
                 target_language=document.target_language,
             ),
-            _chapter_blocks(blocks),
         ]
+        if findings is not None:
+            parts.append(
+                "Уже найдено в предыдущих частях главы:\n"
+                f"Сводка: {findings.summary}\n"
+                f"Указания: {findings.instructions}\n"
+                f"Выражения: {', '.join(findings.expressions)}"
+            )
+        parts.append(_chapter_blocks(blocks))
         return "\n\n".join(parts)
 
     def _selected_candidates(
@@ -595,7 +617,7 @@ def chapter_fragment_instructions(*, source_language: str, target_language: str)
     """Инструкция анализа фрагмента длинной главы (PRD § 14, ALG-03).
 
     От инструкции целой главы отличается ровно тем, что меняет резервный сценарий:
-    модель видит часть главы, а её `chapter_summary` описывает события только этой части.
+    модель видит часть главы, а её `chapter_summary` охватывает события от начала главы.
     Остальные правила — план обработки, кандидаты глоссария, инструкции перевода и
     учебный материал — те же самые.
     """
@@ -652,8 +674,7 @@ _FRAGMENT_SCOPE = """\
 пронумерованные текстовые блоки. Анализируй только этот фрагмент: ни остальной главы, \
 ни соседних глав ты не видишь и догадок о них не строишь."""
 
-#: Что описывает `chapter_summary`. У фрагмента — события только его части: сводки
-#: фрагментов соединяются в сводку главы в порядке чтения (ALG-03).
+#: Что описывает `chapter_summary`. У фрагмента — события от начала главы до него.
 _WHOLE_CHAPTER_SUMMARY = """\
 5. chapter_summary — что произошло в этой главе.
 
@@ -663,12 +684,12 @@ _WHOLE_CHAPTER_SUMMARY = """\
 главой, чтобы вспомнить, на чём остановился."""
 
 _FRAGMENT_SUMMARY = """\
-5. chapter_summary — что произошло в этом фрагменте.
+5. chapter_summary — что произошло в главе от начала до конца этого фрагмента.
 
-Пиши на языке оригинала книги ({source_language}), два-четыре предложения. Только события \
-самого этого фрагмента: что случилось, с кем, что изменилось. Сводки фрагментов главы \
-соединяются подряд в один пересказ главы, поэтому не повторяй то, что было до твоего \
-фрагмента, и не рассуждай о том, что будет после. Текст не оценивай."""
+Пиши на языке оригинала книги ({source_language}), три-шесть предложений. Верни сводку \
+всей главы от начала до конца своего фрагмента, включая уже найденное в предыдущих \
+частях. Не рассуждай о том, что будет после. Текст не оценивай. Указания переводчику \
+и выражения before_you_read возвращай только новые, не повторяя предыдущие части."""
 
 
 #: Инструкция анализа главы. Один запрос отвечает сразу за план обработки, кандидатов
@@ -742,6 +763,8 @@ _ANALYSIS_INSTRUCTIONS = """\
 что видно в этой главе, три-восемь пунктов. Переводы имён и терминов здесь не назначай: \
 их выбирает глоссарий — при необходимости просто сошлись на него. Общие слова \
 о качественном художественном переводе не нужны.
+
+В указаниях и сводке не ссылайся на блоки по идентификаторам (например, b1).
 
 4. before_you_read — пять-десять выражений главы, для которых обычного словаря мало: \
 идиомы, непрозрачные фразовые глаголы, сленг, разговорные конструкции, устойчивые \
@@ -858,7 +881,7 @@ def _chapter_digest(
         chapter_candidates=candidates,
     )
     if instructions:
-        lines.append(f"Указания переводчику этой главы:\n{instructions}")
+        lines.append(f"Указания переводчику этой главы:\n{without_block_labels(instructions)}")
     return "\n\n".join(lines)
 
 

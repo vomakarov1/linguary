@@ -323,7 +323,7 @@ def _analysis_sequence(
             llm_client=model,
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             glossary_confidence_threshold=settings.checks.glossary_confidence_threshold,
-            max_fragment_blocks=settings.llm.max_fragment_blocks,
+            max_fragment_blocks=settings.llm.effective_max_fragment_blocks,
             context_builder=_context_builder(),
         ),
     )

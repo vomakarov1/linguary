@@ -3,8 +3,9 @@
 Анализ главы одним запросом — основной сценарий. Глава, которая не помещается в лимиты
 модели или технически представлена слишком крупным XHTML-документом, делится на
 последовательные фрагменты: каждый фрагмент анализируется отдельным запросом и возвращает
-кандидатов глоссария, локальные инструкции и план обработки только для своего диапазона
-блоков. Этот модуль отвечает за обе границы резервного сценария — как глава распадается
+кандидатов глоссария, новые инструкции и план обработки только для своего диапазона
+блоков. Сводка описывает главу от начала до конца фрагмента. Этот модуль отвечает за
+обе границы резервного сценария — как глава распадается
 на фрагменты и как ответы фрагментов снова становятся одним `ChapterAnalysis`.
 
 Слияние ничего не решает за домен: конфликт вариантов перевода передаётся в
@@ -20,9 +21,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
@@ -42,12 +45,18 @@ from linguary.domain import (
     translations_conflict,
 )
 
-#: Сколько текстовых блоков главы уходит в один запрос анализа. Ориентир взят из живого
-#: прогона: глава в 40 текстовых блоков стоила 4 000-7 900 токенов ответа, то есть порядка
-#: 100-200 токенов на блок. При обычном пределе структурированного ответа около 8 000
-#: токенов больше сорока блоков за один запрос модель не дописывает, и ответ обрывается
-#: по лимиту вместо того, чтобы покрыть главу.
+#: Резервный предел, если провайдер не сообщает доступный объём вывода.
 DEFAULT_MAX_FRAGMENT_BLOCKS = 40
+#: Верхняя оценка расхода ответа на один анализируемый блок из живого прогона.
+TOKENS_PER_ANALYSED_BLOCK = 200
+MAX_BEFORE_YOU_READ = 10
+
+
+def fragment_blocks_for(max_output_tokens: int | None) -> int:
+    """Число блоков анализа, которое допускает предел ответа модели."""
+    if max_output_tokens is None:
+        return DEFAULT_MAX_FRAGMENT_BLOCKS
+    return max(1, max_output_tokens // TOKENS_PER_ANALYSED_BLOCK)
 
 
 class AnalysisMergeError(ApplicationError):
@@ -58,8 +67,7 @@ class AnalysisMergeError(ApplicationError):
 class ChapterFragment:
     """Последовательный фрагмент длинной главы: часть её текстовых блоков.
 
-    `order` задаёт место фрагмента в порядке чтения главы: в этом же порядке собирается
-    сводка разбитой главы.
+    `order` задаёт место фрагмента в порядке чтения главы.
     """
 
     order: int
@@ -120,8 +128,8 @@ class FragmentAnalysis:
             )
         return cls(
             order=order,
-            translation_instructions=payload.translation_instructions,
-            chapter_summary=payload.chapter_summary,
+            translation_instructions=without_block_labels(payload.translation_instructions),
+            chapter_summary=without_block_labels(payload.chapter_summary),
             treatments=tuple(
                 TreatmentPlanItem(block_id=block_id, treatment=treatments[alias])
                 for alias, block_id in block_ids_by_alias.items()
@@ -244,23 +252,43 @@ def _merged_instructions(fragments: Sequence[FragmentAnalysis]) -> str:
     особенности персонажей модель замечает в каждом фрагменте, а переводчику главы этот
     пункт нужен один раз.
     """
-    return "\n\n".join(
-        dict.fromkeys(
-            instructions
-            for fragment in fragments
-            if (instructions := fragment.translation_instructions.strip())
-        )
+    points: dict[str, str] = {}
+    for fragment in fragments:
+        for point in _instruction_points(fragment.translation_instructions):
+            cleaned = without_block_labels(point)
+            key = re.sub(r"\s+", " ", cleaned).casefold().strip(" \t.,;:!?")
+            if key:
+                points.setdefault(key, cleaned)
+    return "\n".join(
+        f"{index}. {point}" for index, point in enumerate(points.values(), 1)
     )
 
 
-def _merged_summary(fragments: Sequence[FragmentAnalysis]) -> str:
-    """Сводка разбитой главы: сводки фрагментов подряд в порядке чтения (ALG-03).
+def _instruction_points(text: str) -> tuple[str, ...]:
+    """Разбирает пункты с маркерами и обычные абзацы."""
+    points: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text.strip()):
+        lines = paragraph.splitlines()
+        if len(lines) > 1 and any(re.match(r"^\s*(?:[-•]|\d+\.)\s+", line) for line in lines):
+            points.extend(
+                re.sub(r"^\s*(?:[-•]|\d+\.)\s+", "", line).strip()
+                for line in lines
+                if line.strip()
+            )
+        elif paragraph.strip():
+            points.append(re.sub(r"^\s*(?:[-•]|\d+\.)\s+", "", paragraph).strip())
+    return tuple(points)
 
-    Отдельного запроса ради общей сводки не выполняется: читатель увидит события главы
-    в том порядке, в каком они в ней произошли (PRD § 19.2).
-    """
-    return " ".join(
-        summary for fragment in fragments if (summary := fragment.chapter_summary.strip())
+
+def _merged_summary(fragments: Sequence[FragmentAnalysis]) -> str:
+    """Последняя непустая сводка охватывает главу до конца своего фрагмента."""
+    return next(
+        (
+            summary
+            for fragment in reversed(fragments)
+            if (summary := fragment.chapter_summary.strip())
+        ),
+        "",
     )
 
 
@@ -351,20 +379,37 @@ def _merged_before_you_read(
     fragments: Sequence[FragmentAnalysis],
 ) -> tuple[BeforeYouReadEntry, ...]:
     """Материал `Before You Read` главы: выражения фрагментов без повторов (PRD § 19.1)."""
-    entries: dict[str, BeforeYouReadEntry] = {}
-    for fragment in fragments:
-        for entry in fragment.before_you_read:
-            entries.setdefault(
-                entry.expression,
-                BeforeYouReadEntry(
-                    expression=entry.expression, explanation=entry.explanation
-                ),
+    return before_you_read_entries(
+        entry for fragment in fragments for entry in fragment.before_you_read
+    )
+
+
+def before_you_read_entries(
+    entries: Iterable[BeforeYouReadEntryResponse],
+) -> tuple[BeforeYouReadEntry, ...]:
+    """Оставляет первые десять различных выражений главы."""
+    selected: dict[str, BeforeYouReadEntry] = {}
+    for entry in entries:
+        key = (
+            re.sub(r"\s+", " ", entry.expression)
+            .casefold()
+            .strip(" \t.,;:!?\"'«»()[]")
+        )
+        if key and key not in selected:
+            selected[key] = BeforeYouReadEntry(
+                expression=entry.expression, explanation=entry.explanation
             )
-    return tuple(entries.values())
+        if len(selected) >= MAX_BEFORE_YOU_READ:
+            break
+    return tuple(selected.values())
 
 
 __all__ = [
     "DEFAULT_MAX_FRAGMENT_BLOCKS",
+    "MAX_BEFORE_YOU_READ",
+    "TOKENS_PER_ANALYSED_BLOCK",
+    "before_you_read_entries",
+    "fragment_blocks_for",
     "AnalysisMergeError",
     "ChapterFragment",
     "FragmentAnalysis",

@@ -165,6 +165,18 @@ def test_context_carries_chapter_digest() -> None:
     assert CHAPTER_INSTRUCTIONS in context.request.input_text
 
 
+def test_chapter_digest_has_no_block_labels() -> None:
+    blocks = make_blocks(1)
+    unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section(blocks)
+    analysis = replace(make_analysis(unit), translation_instructions="Сохранить паузу в блоке b3.")
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section), section=section, unit=unit,
+        analysis=analysis, glossary=make_snapshot(),
+    )
+    assert "b3" not in context.request.input_text
+
+
 def test_mandatory_glossary_entries_are_separated_from_suggestions() -> None:
     """Зафиксированные решения стоят обязательными указаниями, остальные — подсказками."""
     context, _ = build_context()

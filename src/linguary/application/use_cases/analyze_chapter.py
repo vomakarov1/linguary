@@ -36,12 +36,15 @@ from linguary.application.analysis_merge import (
     DEFAULT_MAX_FRAGMENT_BLOCKS,
     ChapterFragment,
     FragmentAnalysis,
+    before_you_read_entries,
     merge_chapter_analysis,
     plan_fragments,
 )
+from linguary.application.block_labels import without_block_labels
 from linguary.application.context_builder import (
     ChapterAnalysisContext,
     ContextBuilder,
+    FragmentFindings,
     textual_blocks,
 )
 from linguary.application.errors import ApplicationError
@@ -214,12 +217,35 @@ class AnalyzeChapter:
         attempts = 0
         usages: list[TokenUsage | None] = []
         for fragment in fragments:
+            previous = None
+            if analysed:
+                previous = FragmentFindings(
+                    summary=next(
+                        (
+                            part.chapter_summary
+                            for part in reversed(analysed)
+                            if part.chapter_summary
+                        ),
+                        "",
+                    ),
+                    instructions="\n".join(
+                        part.translation_instructions
+                        for part in analysed
+                        if part.translation_instructions
+                    ),
+                    expressions=tuple(
+                        entry.expression
+                        for part in analysed
+                        for entry in part.before_you_read
+                    ),
+                )
             context = self._context_builder.for_chapter_fragment(
                 document=document,
                 section=section,
                 fragment=fragment,
                 fragment_count=len(fragments),
                 accumulated_candidates=accumulated,
+                findings=previous,
             )
             context = replace(
                 context,
@@ -345,8 +371,8 @@ class AnalyzeChapter:
                     for alias in context.aliases
                 ),
             ),
-            translation_instructions=payload.translation_instructions,
-            chapter_summary=payload.chapter_summary,
+            translation_instructions=without_block_labels(payload.translation_instructions),
+            chapter_summary=without_block_labels(payload.chapter_summary),
             expected_block_ids=[block.id for block in blocks],
             glossary_candidates=self._candidates(payload, analysis_id=analysis_id),
             before_you_read=_before_you_read(payload),
@@ -593,12 +619,7 @@ def _before_you_read(
     payload: ChapterAnalysisResponse,
 ) -> tuple[BeforeYouReadEntry, ...]:
     """Материал `Before You Read` главы (PRD § 19.1)."""
-    return tuple(
-        BeforeYouReadEntry(
-            expression=entry.expression, explanation=entry.explanation
-        )
-        for entry in payload.before_you_read
-    )
+    return before_you_read_entries(payload.before_you_read)
 
 
 def _total_usage(usages: Sequence[TokenUsage | None]) -> TokenUsage | None:

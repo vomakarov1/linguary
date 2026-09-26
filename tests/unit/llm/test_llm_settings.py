@@ -16,6 +16,7 @@ from linguary.adapters.config import (
 from linguary.adapters.config.settings import (
     DEFAULT_BASE_URL,
     DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_TIMEOUT_SECONDS,
     OPENAI_COMPATIBLE_PROVIDER,
 )
 from linguary.application.ports.llm import LLMConfigurationError
@@ -75,6 +76,16 @@ def test_prices_must_be_set_together() -> None:
         LLMSettings(input_price_per_mtok=3)
     with pytest.raises(SettingsError):
         LLMSettings(output_price_per_mtok=15)
+
+
+def test_explicit_max_fragment_blocks_wins() -> None:
+    assert LLMSettings(max_output_tokens=32000, max_fragment_blocks=25).effective_max_fragment_blocks == 25
+    assert LLMSettings(max_output_tokens=32000).effective_max_fragment_blocks == 160
+
+
+def test_default_timeout_is_600() -> None:
+    assert DEFAULT_TIMEOUT_SECONDS == 600.0
+    assert LLMSettings().timeout_seconds == 600.0
 
 
 def test_prices_are_read_from_environment(tmp_path: Path) -> None:
