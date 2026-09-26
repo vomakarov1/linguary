@@ -110,7 +110,7 @@ ERROR_TYPE_LABELS: Mapping[ErrorType, str] = {
     ErrorType.MODEL_OUTPUT: "Модель вернула негодный ответ",
     ErrorType.VALIDATION: "Результат не прошёл проверку",
     ErrorType.CONFIGURATION: (
-        "Провайдер LLM не принял настройки — проверьте ключ и модель, затем повторите"
+        "Провайдер LLM отверг запрос — проверьте ключ, модель и баланс, затем повторите"
     ),
     ErrorType.PERMANENT: "Ошибка, которую повтор не исправит",
 }

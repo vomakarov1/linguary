@@ -9,7 +9,9 @@
 тексте («Wren», «Duskmere»), метки сносок `[^1]`, адреса, числа с единицами («5kg»)
 и дефисные соединения двух слов («Wonka-фабрика», «mp3-плеер») нарушением не считаются:
 в них каждое слово целиком написано одним алфавитом. Отбраковывается только слово,
-в котором буквы двух алфавитов стоят вплотную.
+в котором буквы двух алфавитов стоят вплотную. Исключение — латинское слово, где из
+кириллицы есть только еры «ь» и «ъ»: так в научной латинице пишут праславянские формы
+(«vьlkodlakъ»), и языковая заметка о происхождении слова законно их цитирует.
 
 Проверяются все тексты результата, которые модель пишет на целевом языке: перевод,
 перевод и пояснение словарной подсказки, заметка и её перевод отрывка. Исходные
@@ -25,6 +27,9 @@ from linguary.application.llm_dto import BlockResultResponse, TranslationResultR
 
 #: Слово: непрерывная последовательность букв без цифр и знаков.
 _LETTERS = re.compile(r"[^\W\d_]+")
+
+#: Еры — единственные кириллические буквы научной латиницы для славянских форм.
+_YERS = frozenset("ьъ")
 
 
 def mixed_script_violation(payload: TranslationResultResponse) -> str | None:
@@ -46,9 +51,8 @@ def mixed_script_word(text: str) -> str | None:
     """Первое слово текста, в котором стоят и латинские, и кириллические буквы."""
     for match in _LETTERS.finditer(text):
         word = match.group()
-        if any(_is_latin(letter) for letter in word) and any(
-            _is_cyrillic(letter) for letter in word
-        ):
+        cyrillic = {letter for letter in word if _is_cyrillic(letter)}
+        if any(_is_latin(letter) for letter in word) and cyrillic - _YERS:
             return word
     return None
 
