@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from linguary.application.errors import ApplicationError
+from linguary.application.gutenberg import preserve_gutenberg_boilerplate
 from linguary.application.ports.epub import (
     EpubImportFatalError,
     EpubReader,
@@ -89,7 +90,10 @@ class ImportBook:
                     source_language=command.source_language,
                 )
             )
-            document = imported.document
+            document, gutenberg_warnings = preserve_gutenberg_boilerplate(
+                imported.document
+            )
+            warnings = (*imported.warnings, *gutenberg_warnings)
             stored_resource_paths = self._store_resources(command, document)
         except EpubImportFatalError:
             self._mark_failed(command.book_id)
@@ -115,12 +119,12 @@ class ImportBook:
             transaction.documents.save(
                 document, stored_resource_paths=stored_resource_paths
             )
-            if imported.warnings:
+            if warnings:
                 transaction.documents.add_import_warnings(
-                    command.book_id, imported.warnings
+                    command.book_id, warnings
                 )
         return ImportBookResult(
-            book=record, document=document, warnings=imported.warnings
+            book=record, document=document, warnings=warnings
         )
 
     def _mark_failed(self, book_id: str) -> None:
