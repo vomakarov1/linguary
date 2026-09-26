@@ -29,6 +29,7 @@ from linguary.application.book_overview import (
     ResultBlockSummary,
     ResultChapterSummary,
     ResultWarningEntry,
+    RunningChapter,
     TaskFailure,
 )
 from linguary.application.glossary_review import GlossaryReview, GlossaryReviewItem
@@ -299,8 +300,26 @@ class TaskResponse(BaseModel):
         )
 
 
+class RunningChapterResponse(BaseModel):
+    """Глава, задача которой выполняется прямо сейчас."""
+
+    chapter_number: int
+    title: str
+
+    @classmethod
+    def of_chapter(cls, chapter: RunningChapter) -> RunningChapterResponse:
+        """Собирает ответ по выполняющейся главе."""
+        return cls(chapter_number=chapter.chapter_number, title=chapter.title)
+
+
 class BookProgressResponse(BaseModel):
-    """Прогресс обработки книги (PRD § 21.4)."""
+    """Прогресс обработки книги (PRD § 21.4).
+
+    `current_chapter` и `current_chapter_title` — первая из `running_chapters`: при
+    параллельной обработке глав выполняется несколько. `remaining_seconds` — грубая
+    оценка оставшегося времени идущего этапа, `remaining_time_label` — она же словами;
+    оба пусты, когда этап не идёт.
+    """
 
     percent_complete: int
     total_sections: int
@@ -310,6 +329,9 @@ class BookProgressResponse(BaseModel):
     treatment_counts: tuple[TreatmentCount, ...] = ()
     current_chapter: int | None = None
     current_chapter_title: str | None = None
+    running_chapters: tuple[RunningChapterResponse, ...] = ()
+    remaining_seconds: int | None = None
+    remaining_time_label: str | None = None
     pending_tasks: int
     running_tasks: int
     failures: tuple[TaskFailureResponse, ...] = ()
@@ -326,6 +348,20 @@ class BookProgressResponse(BaseModel):
             treatment_counts=TreatmentCount.of_counts(progress.treatment_counts),
             current_chapter=progress.current_chapter,
             current_chapter_title=progress.current_chapter_title,
+            running_chapters=tuple(
+                RunningChapterResponse.of_chapter(chapter)
+                for chapter in progress.running_chapters
+            ),
+            remaining_seconds=(
+                progress.remaining_time.seconds
+                if progress.remaining_time is not None
+                else None
+            ),
+            remaining_time_label=(
+                labels.remaining_time_label(progress.remaining_time.seconds)
+                if progress.remaining_time is not None
+                else None
+            ),
             pending_tasks=progress.pending_tasks,
             running_tasks=progress.running_tasks,
             failures=tuple(

@@ -42,6 +42,11 @@ class TaskWorkerPool:
         self._settings = settings or WorkerSettings()
         self._stop = asyncio.Event()
 
+    @property
+    def concurrency(self) -> int:
+        """Сколько задач воркер выполняет одновременно."""
+        return self._settings.concurrency
+
     async def drain(self) -> tuple[ProcessingTask, ...]:
         """Выполняет задачи, пока очередь не опустеет, и возвращает завершённые.
 

@@ -78,7 +78,6 @@ def analysis_reply(
             {
                 "source_block_id": alias,
                 "treatment": treatment,
-                "reason": "сюжетный абзац",
             }
             for alias in aliases
         ],

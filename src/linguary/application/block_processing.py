@@ -187,12 +187,17 @@ def complete_processing(
 ) -> None:
     """Переводит книгу в `READY_TO_EXPORT`, когда её работа закончена (ALG-06).
 
-    Задача, которая выполняется прямо сейчас, ещё числится `running`: её итог фиксирует
-    runner уже после обработчика, поэтому она исключается из проверки по идентификатору.
+    Задача, которая выполняется прямо сейчас, ещё числится `running`: runner фиксирует
+    её итог уже после обработчика. Поэтому её успех записывается здесь же, в одной
+    транзакции с проверкой соседей: иначе при параллельной обработке (PRD § 25) две
+    главы, закончившие почти одновременно, видят друг друга ещё выполняющимися, и книга
+    навсегда остаётся в `PROCESSING`. Повторная запись того же итога runner-ом ничего
+    не меняет.
     Книга, ушедшая из `PROCESSING`, состояние не меняет: пока вызов был в пути,
     пользователь мог вернуться к проверке глоссария.
     """
     with unit_of_work.transaction() as transaction:
+        _record_success(transaction, finished_task_id)
         book = book_record(transaction, book_id)
         if book.status is not BookStatus.PROCESSING:
             return
@@ -211,6 +216,18 @@ def complete_processing(
                 status=apply_book_event(book.status, BookEvent.PROCESSING_COMPLETED),
             )
         )
+
+
+def _record_success(transaction: UnitOfWork, task_id: str | None) -> None:
+    """Отмечает выполняющуюся задачу успешной, если она ещё существует и выполняется.
+
+    Задачи отменённого запуска удаляются вместе с ним, поэтому отсутствие строки — не ошибка.
+    """
+    if task_id is None:
+        return
+    task = transaction.tasks.get(task_id)
+    if task is not None and task.status is TaskStatus.RUNNING:
+        transaction.tasks.save(task.succeed())
 
 
 def book_record(transaction: UnitOfWork, book_id: str) -> BookRecord:

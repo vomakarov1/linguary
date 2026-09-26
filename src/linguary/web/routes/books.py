@@ -113,7 +113,12 @@ def get_book(
 ) -> BookDetailResponse | object:
     """Карточка книги: состояние, прогресс, счётчики режимов и ошибки (PRD § 21.4)."""
     response = BookDetailResponse.of_overview(
-        book_overview(application.unit_of_work, book_id)
+        book_overview(
+            application.unit_of_work,
+            book_id,
+            concurrency=application.worker_pool.concurrency,
+            requests_per_minute=application.settings.llm.requests_per_minute,
+        )
     )
     if wants_html(request):
         return render(

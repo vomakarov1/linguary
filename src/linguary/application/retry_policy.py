@@ -56,6 +56,11 @@ DEFAULT_BACKOFF_SECONDS = 1.0
 #: результат, и честнее исчерпать попытки, чем растянуть одну задачу на минуты.
 DEFAULT_MAX_BACKOFF_SECONDS = 30.0
 
+#: Предел паузы, которую провайдер может попросить заголовком `Retry-After`. Просьбу
+#: провайдера политика выполняет и сверх `DEFAULT_MAX_BACKOFF_SECONDS` — иначе повтор
+#: снова получит отказ, — но не бесконечно: задача не должна ждать часами.
+DEFAULT_MAX_RETRY_AFTER_SECONDS = 120.0
+
 
 class RetryPolicyError(ApplicationError):
     """Политика повторов настроена или вызвана недопустимым образом."""
@@ -184,14 +189,16 @@ class RetryPolicy:
         max_attempts: int,
         backoff_seconds: float = DEFAULT_BACKOFF_SECONDS,
         max_backoff_seconds: float = DEFAULT_MAX_BACKOFF_SECONDS,
+        max_retry_after_seconds: float = DEFAULT_MAX_RETRY_AFTER_SECONDS,
     ) -> None:
         if max_attempts < 1:
             raise RetryPolicyError("число попыток вызова модели должно быть положительным")
-        if backoff_seconds < 0 or max_backoff_seconds < 0:
+        if backoff_seconds < 0 or max_backoff_seconds < 0 or max_retry_after_seconds < 0:
             raise RetryPolicyError("задержка перед повтором не может быть отрицательной")
         self._max_attempts = max_attempts
         self._backoff_seconds = backoff_seconds
         self._max_backoff_seconds = max_backoff_seconds
+        self._max_retry_after_seconds = max_retry_after_seconds
 
     @property
     def max_attempts(self) -> int:
@@ -221,7 +228,7 @@ class RetryPolicy:
             return RetryDecision(
                 action=RetryAction.RETRY_AFTER_BACKOFF,
                 error=task_error,
-                backoff_seconds=self._backoff_for(attempts),
+                backoff_seconds=self._backoff_for(attempts, error),
             )
         if task_error.type is ErrorType.MODEL_OUTPUT:
             return RetryDecision(action=RetryAction.RETRY_SAME_REQUEST, error=task_error)
@@ -233,9 +240,20 @@ class RetryPolicy:
             ),
         )
 
-    def _backoff_for(self, attempts: int) -> float:
-        """Задержка перед повтором временной ошибки: удвоение до предела."""
-        return min(self._backoff_seconds * 2 ** (attempts - 1), self._max_backoff_seconds)
+    def _backoff_for(self, attempts: int, error: Exception) -> float:
+        """Задержка перед повтором временной ошибки: удвоение до предела.
+
+        Если провайдер сам назвал паузу (`Retry-After`), задержка не короче её.
+        """
+        backoff = min(
+            self._backoff_seconds * 2 ** (attempts - 1), self._max_backoff_seconds
+        )
+        retry_after = (
+            error.retry_after_seconds if isinstance(error, LLMTransportError) else None
+        )
+        if retry_after is None:
+            return backoff
+        return max(backoff, min(retry_after, self._max_retry_after_seconds))
 
 
 #: Отображение исключений в типы ошибок задачи (ALG-05). Порядок значим: наследник
@@ -340,6 +358,7 @@ def _task_error(error_type: ErrorType, error: Exception) -> TaskError:
 __all__ = [
     "DEFAULT_BACKOFF_SECONDS",
     "DEFAULT_MAX_BACKOFF_SECONDS",
+    "DEFAULT_MAX_RETRY_AFTER_SECONDS",
     "ExpectedBlock",
     "ResultExpectation",
     "ResultValidationError",

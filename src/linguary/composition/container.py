@@ -8,6 +8,9 @@ Web UI, CLI и сквозной тест: второго места сборки
 Что собирается:
 
 - хранилище — движок SQLite, unit of work и очередь задач поверх одной базы;
+- воркер — параллелизм фоновых задач из секции `[worker]` (PRD § 25);
+- клиент модели — журнал вызовов и, если задан предел частоты, общий для всех воркеров
+  ограничитель запросов;
 - импорт — читатель EPUB вместе с хранилищем ресурсов книги;
 - экспорт — писатель EPUB и внешняя проверка EPUBCheck;
 - LLM-сценарии — анализ главы, обработка главы и повторная генерация блока с порогами
@@ -33,7 +36,7 @@ from linguary.adapters.epub import (
     EpubExportWriter,
     FilesystemEpubResourceStore,
 )
-from linguary.adapters.llm import LoggingLLMClient
+from linguary.adapters.llm import LoggingLLMClient, RateLimitedLLMClient
 from linguary.adapters.runtime import (
     ExecutorLock,
     SqliteTaskQueue,
@@ -174,8 +177,8 @@ def build_application(
 
     `llm_client` подменяется в тестах и в сквозном сценарии (`FakeLLMClient`); без него
     берётся клиент провайдера, который создаётся при первом обращении к модели.
-    `worker_settings` задаёт параллелизм фоновых задач (PRD § 25). `migrate` отключает
-    применение схемы там, где базу готовит вызывающий код.
+    `worker_settings` перекрывает параллелизм фоновых задач, заданный секцией `[worker]`
+    (PRD § 25). `migrate` отключает применение схемы там, где базу готовит вызывающий код.
     """
     app_settings = settings or load_settings()
     paths = DataPaths.of_settings(app_settings.storage)
@@ -186,11 +189,10 @@ def build_application(
     unit_of_work = SqlAlchemyUnitOfWork.for_engine(engine)
     task_queue = SqliteTaskQueue.for_engine(engine, id_factory=task_id_factory)
     configured_client = ConfiguredLLMClient(app_settings.llm)
-    model = LoggingLLMClient(
+    model = _model_client(
+        app_settings,
         inner=llm_client or configured_client,
         unit_of_work=unit_of_work,
-        provider=app_settings.llm.provider,
-        model=app_settings.llm.model or "not_configured",
     )
     epubcheck = epubcheck or EpubCheckValidator(settings=EpubCheckSettings())
 
@@ -240,7 +242,11 @@ def build_application(
         unit_of_work=unit_of_work,
         task_queue=task_queue,
         runner=runner,
-        worker_pool=TaskWorkerPool(runner, worker_settings),
+        worker_pool=TaskWorkerPool(
+            runner,
+            worker_settings
+            or WorkerSettings(concurrency=app_settings.worker.concurrency),
+        ),
         epubcheck=epubcheck,
         register_book=RegisterBook(unit_of_work=unit_of_work),
         import_book=import_book,
@@ -263,6 +269,29 @@ def build_application(
         regeneration=regeneration,
         _llm_client=configured_client,
         _dispose=engine.dispose,
+    )
+
+
+def _model_client(
+    settings: AppSettings, *, inner: LLMClient, unit_of_work: SqlAlchemyUnitOfWork
+) -> LLMClient:
+    """Клиент модели, которым пользуются все LLM-сценарии.
+
+    Ограничитель частоты стоит снаружи журнала: в журнал попадает длительность самого
+    вызова провайдера, а не ожидание своей очереди, — по ней оценивается оставшееся
+    время обработки. Ограничитель один на приложение, поэтому предел общий для всех
+    воркеров.
+    """
+    model: LLMClient = LoggingLLMClient(
+        inner=inner,
+        unit_of_work=unit_of_work,
+        provider=settings.llm.provider,
+        model=settings.llm.model or "not_configured",
+    )
+    if settings.llm.requests_per_minute is None:
+        return model
+    return RateLimitedLLMClient(
+        inner=model, requests_per_minute=settings.llm.requests_per_minute
     )
 
 

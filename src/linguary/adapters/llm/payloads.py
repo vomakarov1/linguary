@@ -124,7 +124,6 @@ def _plan_item(schema: TreatmentPlanItemSchema) -> TreatmentPlanItemResponse:
     return TreatmentPlanItemResponse(
         source_block_id=schema.source_block_id,
         treatment=BlockTreatment(schema.treatment),
-        reason=schema.reason,
     )
 
 

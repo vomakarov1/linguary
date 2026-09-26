@@ -69,8 +69,19 @@
     <p>Импорт не удался: книгу из этого файла обработать нельзя. Причина указана ниже.</p>
     <a class="button-link" href="/books">Загрузить другой файл</a>
   {% endif %}
-  {% if data.progress.current_chapter %}
-    <p>Сейчас: глава {{ data.progress.current_chapter }} - {{ data.progress.current_chapter_title }}</p>
+  {% if data.progress.running_chapters | length == 1 %}
+    {% set chapter = data.progress.running_chapters[0] %}
+    <p>Сейчас: глава {{ chapter.chapter_number }} - {{ chapter.title }}</p>
+  {% elif data.progress.running_chapters %}
+    <p>Сейчас выполняются главы:</p>
+    <ul class="running-chapters">
+      {% for chapter in data.progress.running_chapters %}
+        <li>глава {{ chapter.chapter_number }} - {{ chapter.title }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+  {% if data.progress.remaining_time_label %}
+    <p>{{ data.progress.remaining_time_label }}</p>
   {% endif %}
   <div class="treatments">
     {% for item in data.progress.treatment_counts %}

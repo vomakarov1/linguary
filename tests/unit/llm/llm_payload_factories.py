@@ -28,12 +28,10 @@ def analysis_payload(**overrides: Any) -> dict[str, Any]:
             {
                 "source_block_id": "block-1",
                 "treatment": "TRANSLATE",
-                "reason": "обычный повествовательный абзац",
             },
             {
                 "source_block_id": "block-2",
                 "treatment": "GLOSSARY_ONLY",
-                "reason": "короткая реплика с редкой лексикой",
             },
         ],
         "before_you_read": [

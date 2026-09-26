@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 
 import pytest
 from processing_scenario import (
@@ -21,7 +22,7 @@ from processing_scenario import (
 
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.llm import FakeLLMClient
-from linguary.adapters.runtime import SqliteTaskQueue, TaskWorkerPool
+from linguary.adapters.runtime import SqliteTaskQueue, TaskWorkerPool, WorkerSettings
 from linguary.application.ports.llm import (
     LLMClient,
     LLMConfigurationError,
@@ -37,6 +38,7 @@ from linguary.application.use_cases.process_chapter import (
 from linguary.domain import (
     BookStatus,
     ProcessingTask,
+    TaskIdentity,
     TaskStatus,
     TaskType,
 )
@@ -76,15 +78,71 @@ def make_sequence(
     )
 
 
+@dataclass(slots=True)
+class SlowLLMClient(LLMClient):
+    """Клиент, отвечающий с задержкой сети и считающий одновременные вызовы.
+
+    Мгновенный ответ не отдаёт управление циклу событий, и воркеры отработали бы
+    по очереди: параллельной обработки тест бы не увидел.
+    """
+
+    inner: FakeLLMClient
+    delay_seconds: float = 0.02
+    in_flight: int = 0
+    max_in_flight: int = 0
+
+    async def generate[PayloadT: LLMPayload](
+        self, request: LLMRequest[PayloadT]
+    ) -> LLMResponse[PayloadT]:
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay_seconds)
+            return await self.inner.generate(request)
+        finally:
+            self.in_flight -= 1
+
+
+@dataclass(slots=True)
+class SlowSavingQueue:
+    """Очередь, итог задачи в которой фиксируется с задержкой.
+
+    Так воспроизводится окно между концом обработчика и записью итога задачи runner-ом:
+    при параллельной обработке в это окно успевает закончиться соседняя глава.
+    """
+
+    inner: SqliteTaskQueue
+    delay_seconds: float = 0.05
+    saved: list[str] = field(default_factory=list)
+
+    async def enqueue(self, identity: TaskIdentity) -> ProcessingTask:
+        return await self.inner.enqueue(identity)
+
+    async def claim_next_pending(self) -> ProcessingTask | None:
+        return await self.inner.claim_next_pending()
+
+    async def save(self, task: ProcessingTask) -> None:
+        await asyncio.sleep(self.delay_seconds)
+        await self.inner.save(task)
+        self.saved.append(task.id)
+
+    async def list_running(self) -> tuple[ProcessingTask, ...]:
+        return await self.inner.list_running()
+
+
 def make_pool(
-    task_queue: SqliteTaskQueue, sequence: ChapterProcessingSequence
+    task_queue: SqliteTaskQueue | SlowSavingQueue,
+    sequence: ChapterProcessingSequence,
+    *,
+    concurrency: int = 1,
 ) -> TaskWorkerPool:
     """Воркер с единственным обработчиком — задачей обработки главы."""
     return TaskWorkerPool(
         TaskRunner(
-            queue=task_queue,
+            queue=task_queue,  # type: ignore[arg-type]
             handlers={TaskType.PROCESS_TRANSLATION_UNIT: sequence.run_task},
-        )
+        ),
+        WorkerSettings(concurrency=concurrency),
     )
 
 
@@ -144,6 +202,57 @@ async def test_processed_book_becomes_ready_to_export(
         results = uow.results.list_for_run(scenario.run_id)
         assert uow.runs.active_for_book(BOOK_ID) is not None
     assert len(results) == 4
+
+
+async def test_parallel_processing_handles_every_chapter_once(
+    unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
+) -> None:
+    """Несколько воркеров над одной базой обрабатывают каждую главу ровно один раз (PRD § 25).
+
+    Захват задач и запись результатов идут в SQLite одновременно из нескольких
+    воркеров: ни одна глава не должна достаться двоим, ни одна запись — потеряться.
+    """
+    chapters = tuple((SOURCE_TEXT, SOURCE_TEXT) for _ in range(6))
+    scenario = store_processing_book(unit_of_work, chapters=chapters)
+    client = SlowLLMClient(inner=FakeLLMClient.always(translated_reply()))
+    sequence = make_sequence(unit_of_work, task_queue, client)
+    await sequence.start(BOOK_ID)
+
+    finished = await make_pool(task_queue, sequence, concurrency=4).drain()
+
+    assert client.max_in_flight > 1
+    assert sorted(task.scope_id for task in finished) == sorted(
+        section.id for section in scenario.document.ordered_sections
+    )
+    assert all(task.status is TaskStatus.SUCCEEDED for task in finished)
+    assert all(task.attempts == 1 for task in finished)
+    assert client.inner.call_count == len(chapters)
+    with unit_of_work.transaction() as uow:
+        results = uow.results.list_for_run(scenario.run_id)
+    assert len(results) == 2 * len(chapters)
+    assert book_status(unit_of_work) is BookStatus.READY_TO_EXPORT
+
+
+async def test_chapters_finishing_together_complete_the_book(
+    unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
+) -> None:
+    """Последние главы, закончившиеся одновременно, всё равно завершают обработку (ALG-06).
+
+    Каждая глава проверяет, остались ли незавершённые соседи, пока её собственный итог
+    ещё не записан. Если соседи проверяют друг друга в это окно, каждая видит другую
+    выполняющейся, и книга навсегда остаётся в `PROCESSING`.
+    """
+    store_processing_book(unit_of_work, chapters=TWO_CHAPTERS)
+    queue = SlowSavingQueue(task_queue)
+    sequence = make_sequence(
+        unit_of_work, queue, FakeLLMClient.always(translated_reply())  # type: ignore[arg-type]
+    )
+    await sequence.start(BOOK_ID)
+
+    finished = await make_pool(queue, sequence, concurrency=2).drain()
+
+    assert [task.status for task in finished] == [TaskStatus.SUCCEEDED] * 2
+    assert book_status(unit_of_work) is BookStatus.READY_TO_EXPORT
 
 
 async def test_failed_chapter_keeps_the_book_in_processing(

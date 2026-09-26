@@ -205,3 +205,54 @@ def test_invalid_check_thresholds_are_rejected(overrides: dict[str, object]) -> 
     """Пороги проверок вне допустимых диапазонов не принимаются (PRD § 15)."""
     with pytest.raises(SettingsError):
         CheckSettings(**overrides)  # type: ignore[arg-type]
+
+
+def test_worker_and_rate_limit_are_off_by_default(tmp_path: Path) -> None:
+    """Без настроек обработка идёт одной задачей, а частота запросов не ограничена (PRD § 25)."""
+    settings = load_settings(environ={}, config_path=write_config(tmp_path, ""))
+
+    assert settings.worker.concurrency == 1
+    assert settings.llm.requests_per_minute is None
+
+
+def test_worker_concurrency_and_rate_limit_are_read_from_file(tmp_path: Path) -> None:
+    """Параллелизм обработки меняется одной настройкой, ограничение частоты — другой."""
+    settings = load_settings(
+        environ={},
+        config_path=write_config(
+            tmp_path, "[worker]\nconcurrency = 4\n\n[llm]\nrequests_per_minute = 30\n"
+        ),
+    )
+
+    assert settings.worker.concurrency == 4
+    assert settings.llm.requests_per_minute == 30
+
+
+def test_worker_concurrency_is_read_from_environment(tmp_path: Path) -> None:
+    """Параллелизм задаётся и переменной окружения, перекрывая файл."""
+    settings = load_settings(
+        environ={
+            "LINGUARY_WORKER_CONCURRENCY": "3",
+            "LINGUARY_LLM_REQUESTS_PER_MINUTE": "12",
+        },
+        config_path=write_config(tmp_path, "[worker]\nconcurrency = 2\n"),
+    )
+
+    assert settings.worker.concurrency == 3
+    assert settings.llm.requests_per_minute == 12
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("[worker]\nconcurrency = 0\n", id="zero-concurrency"),
+        pytest.param("[worker]\nconcurrency = 'много'\n", id="concurrency-not-a-number"),
+        pytest.param("[worker]\nparallel = 2\n", id="unknown-worker-key"),
+        pytest.param("[llm]\nrequests_per_minute = 0\n", id="zero-rate"),
+        pytest.param("[llm]\nrequests_per_minute = -5\n", id="negative-rate"),
+    ],
+)
+def test_invalid_worker_and_rate_settings_are_reported(tmp_path: Path, content: str) -> None:
+    """Бессмысленный параллелизм или предел частоты — ошибка конфигурации."""
+    with pytest.raises(SettingsError):
+        load_settings(environ={}, config_path=write_config(tmp_path, content))

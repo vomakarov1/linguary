@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 from linguary.application.ports.persistence import ExportValidationStatus
@@ -164,6 +165,28 @@ EXPORT_VALIDATION_STATUS_LABELS: Mapping[ExportValidationStatus, str] = {
     ExportValidationStatus.PASSED: "EPUBCheck пройден",
     ExportValidationStatus.FAILED: "EPUBCheck нашёл ошибки",
 }
+
+
+#: Что показывает карточка книги, пока у этапа нет ни одного завершённого вызова модели.
+REMAINING_TIME_PENDING_LABEL = "Оценка оставшегося времени появится после первой главы"
+
+
+def remaining_time_label(seconds: int | None) -> str:
+    """Оставшееся время этапа словами (QA-13).
+
+    Оценка грубая — медиана вызовов, повторы и длина глав её сдвигают, — поэтому она
+    называется «примерно» и округляется до минут вверх: обещать меньше, чем выйдет, хуже.
+    """
+    if seconds is None:
+        return REMAINING_TIME_PENDING_LABEL
+    if seconds < 60:
+        return "Осталось меньше минуты"
+    hours, minutes = divmod(math.ceil(seconds / 60), 60)
+    if hours == 0:
+        return f"Осталось примерно {minutes} мин"
+    if minutes == 0:
+        return f"Осталось примерно {hours} ч"
+    return f"Осталось примерно {hours} ч {minutes} мин"
 
 
 def error_page_title(status_code: int) -> str:

@@ -69,9 +69,7 @@ def test_non_textual_treatment_has_no_model_result(treatment: BlockTreatment) ->
     with pytest.raises(LLMPayloadError):
         BlockResultResponse(source_block_id="block-1", treatment=treatment)
     with pytest.raises(LLMPayloadError):
-        TreatmentPlanItemResponse(
-            source_block_id="block-1", treatment=treatment, reason="служебный блок"
-        )
+        TreatmentPlanItemResponse(source_block_id="block-1", treatment=treatment)
 
 
 def test_glossary_candidate_confidence_is_bounded() -> None:

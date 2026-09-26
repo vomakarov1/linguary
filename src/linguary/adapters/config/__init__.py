@@ -1,7 +1,7 @@
 """Локальная конфигурация приложения: настройки адаптеров и их чтение.
 
 Секции настроек описаны датаклассами (`LLMSettings`, `CheckSettings`, `StorageSettings`,
-`ServerSettings`), а источники — файл `~/.linguary/config.toml` и переменные окружения —
+`ServerSettings`, `WorkerPoolSettings`), а источники — файл `~/.linguary/config.toml` и переменные окружения —
 знает только загрузчик. Так адаптеры и прикладные сценарии получают готовые значения
 и не читают ни файлов, ни окружения сами.
 """
@@ -20,6 +20,7 @@ from linguary.adapters.config.settings import (
     DEFAULT_SERVER_HOST,
     DEFAULT_SERVER_PORT,
     DEFAULT_TIMEOUT_SECONDS,
+    DEFAULT_WORKER_CONCURRENCY,
     OPENAI_COMPATIBLE_PROVIDER,
     AppSettings,
     CheckSettings,
@@ -27,6 +28,7 @@ from linguary.adapters.config.settings import (
     ServerSettings,
     SettingsError,
     StorageSettings,
+    WorkerPoolSettings,
 )
 
 __all__ = [
@@ -39,6 +41,7 @@ __all__ = [
     "DEFAULT_SERVER_HOST",
     "DEFAULT_SERVER_PORT",
     "DEFAULT_TIMEOUT_SECONDS",
+    "DEFAULT_WORKER_CONCURRENCY",
     "ENVIRONMENT_PREFIX",
     "OPENAI_COMPATIBLE_PROVIDER",
     "AppSettings",
@@ -47,5 +50,6 @@ __all__ = [
     "ServerSettings",
     "SettingsError",
     "StorageSettings",
+    "WorkerPoolSettings",
     "load_settings",
 ]

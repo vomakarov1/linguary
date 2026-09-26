@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi.testclient import TestClient
 from web_scenario import (
     dropped_block_warning,
@@ -16,7 +18,43 @@ from web_scenario import (
 )
 
 from linguary.composition import Application
-from linguary.domain import BlockTreatment, BookStatus, ErrorType
+from linguary.domain import (
+    BlockTreatment,
+    BookStatus,
+    ErrorType,
+    LLMCallLog,
+    LLMCallStage,
+    ProcessingTask,
+    TaskType,
+)
+
+HTML_HEADERS = {"accept": "text/html"}
+
+
+def store_call(
+    application: Application,
+    *,
+    task_id: str,
+    duration_ms: int,
+    stage: LLMCallStage = LLMCallStage.TRANSLATION_UNIT,
+    call_id: str = "call-1",
+) -> None:
+    """Запись журнала об успешном вызове модели задачей книги."""
+    with application.unit_of_work.transaction() as uow:
+        uow.llm_calls.add(
+            LLMCallLog(
+                id=call_id,
+                book_id="book-web-1",
+                stage=stage,
+                provider="fake",
+                model="fake-model",
+                started_at=datetime(2026, 9, 26, 12, 0, tzinfo=UTC),
+                duration_ms=duration_ms,
+                attempt=1,
+                success=True,
+                task_id=task_id,
+            )
+        )
 
 
 def test_books_list_is_empty_before_the_first_upload(client: TestClient) -> None:
@@ -130,6 +168,108 @@ def test_book_detail_names_the_current_chapter(
     assert progress["current_chapter"] == 2
     assert progress["current_chapter_title"] == "Chapter 2"
     assert progress["running_tasks"] == 1
+
+
+def test_book_detail_lists_every_running_chapter(
+    client: TestClient, application: Application
+) -> None:
+    """При параллельной обработке карточка показывает все выполняющиеся главы (QA-13)."""
+    scenario = store_book(
+        application,
+        status=BookStatus.PROCESSING,
+        chapters=(("Первый абзац.",), ("Второй абзац.",), ("Третий абзац.",)),
+    )
+    store_task(application, task=running_task(scenario, task_id="t-3", section_index=2))
+    store_task(application, task=running_task(scenario, task_id="t-1", section_index=0))
+
+    progress = client.get(f"/books/{scenario.book_id}").json()["progress"]
+    page = client.get(f"/books/{scenario.book_id}", headers=HTML_HEADERS).text
+
+    assert progress["running_chapters"] == [
+        {"chapter_number": 1, "title": "Chapter 1"},
+        {"chapter_number": 3, "title": "Chapter 3"},
+    ]
+    assert "Chapter 1" in page
+    assert "Chapter 3" in page
+
+
+def test_book_detail_promises_an_estimate_after_the_first_chapter(
+    client: TestClient, application: Application
+) -> None:
+    """До первого вызова модели оценки нет — карточка говорит, когда она появится."""
+    scenario = store_book(
+        application, status=BookStatus.ANALYZING, analysed_chapters=()
+    )
+    store_task(
+        application,
+        task=running_task(scenario, task_type=TaskType.ANALYZE_CHAPTER),
+    )
+
+    progress = client.get(f"/books/{scenario.book_id}").json()["progress"]
+    page = client.get(f"/books/{scenario.book_id}", headers=HTML_HEADERS).text
+
+    assert progress["remaining_seconds"] is None
+    assert progress["remaining_time_label"] == (
+        "Оценка оставшегося времени появится после первой главы"
+    )
+    assert "появится после первой главы" in page
+
+
+def test_book_detail_estimates_remaining_processing_time(
+    client: TestClient, application: Application
+) -> None:
+    """Оценка по медиане вызовов книги × оставшаяся работа ÷ параллелизм (QA-13)."""
+    scenario = store_book(
+        application,
+        status=BookStatus.PROCESSING,
+        chapters=(("Первый абзац.", "Второй абзац."), ("Третий абзац.", "Четвёртый.")),
+    )
+    start_run(
+        application,
+        scenario,
+        results=tuple(translated_result(block_id) for block_id in scenario.block_ids(0)),
+    )
+    done = ProcessingTask(
+        id="t-done",
+        book_id=scenario.book_id,
+        task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+        scope_id=scenario.section(0).id,
+    ).start().succeed()
+    store_task(application, task=done)
+    store_task(application, task=running_task(scenario, section_index=1))
+    store_call(application, task_id="t-done", duration_ms=150_000)
+
+    progress = client.get(f"/books/{scenario.book_id}").json()["progress"]
+    page = client.get(f"/books/{scenario.book_id}", headers=HTML_HEADERS).text
+
+    assert progress["remaining_seconds"] == 150
+    assert progress["remaining_time_label"] == "Осталось примерно 3 мин"
+    assert "Осталось примерно 3 мин" in page
+
+
+def test_book_detail_ignores_calls_of_a_cancelled_run(
+    client: TestClient, application: Application
+) -> None:
+    """Вызовы задач, удалённых возвратом к проверке глоссария, в оценку не входят."""
+    scenario = store_book(application, status=BookStatus.PROCESSING)
+    start_run(application, scenario)
+    store_task(application, task=running_task(scenario))
+    store_call(application, task_id="task-of-a-cancelled-run", duration_ms=60_000)
+
+    progress = client.get(f"/books/{scenario.book_id}").json()["progress"]
+
+    assert progress["remaining_seconds"] is None
+
+
+def test_finished_book_has_no_estimate(
+    client: TestClient, application: Application
+) -> None:
+    """Книга, над которой ничего не выполняется, оценки не получает."""
+    scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
+
+    progress = client.get(f"/books/{scenario.book_id}").json()["progress"]
+
+    assert progress["remaining_time_label"] is None
 
 
 def test_book_detail_reports_failed_task_with_retry_flag(

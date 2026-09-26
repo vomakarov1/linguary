@@ -1,4 +1,4 @@
-"""Локальные настройки приложения: LLM и пороги автоматических проверок.
+"""Локальные настройки приложения: LLM, воркер и пороги автоматических проверок.
 
 Настройки описаны секциями и собраны в `AppSettings`. Каждый адаптер получает свою секцию,
 поэтому новый адаптер добавляет секцию, а не меняет общий контракт: настройки, которые
@@ -56,6 +56,10 @@ _WILDCARD_HOSTS = ("0.0.0.0", "::", "*")
 #: Порт локального Web UI.
 DEFAULT_SERVER_PORT = 8000
 
+#: Сколько задач воркер выполняет одновременно (PRD § 25). Одна задача предсказуема
+#: и не упирается в ограничения частоты провайдера; ускорение — изменение этой настройки.
+DEFAULT_WORKER_CONCURRENCY = 1
+
 
 class SettingsError(ApplicationError):
     """Локальная конфигурация непригодна: неразбираемый файл или недопустимое значение."""
@@ -78,6 +82,12 @@ class LLMSettings:
     (PRD § 10). Анализ и обработка меряются разными величинами не случайно: ответ анализа
     стоит примерно одинаково для блока любой длины, а ответ обработки — это полный
     перевод, объём которого пропорционален объёму оригинала.
+
+    `requests_per_minute` — сколько запросов к модели приложение отправляет за минуту
+    всеми воркерами вместе. Не задано — частота не ограничивается: пределы у провайдеров
+    разные, и угадывать их приложение не берётся. Настройка живёт в секции LLM, потому
+    что это свойство провайдера и тарифа, а не воркера: тот же предел действует при любом
+    параллелизме.
     """
 
     provider: str = OPENAI_COMPATIBLE_PROVIDER
@@ -90,6 +100,7 @@ class LLMSettings:
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS
     max_unit_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS
+    requests_per_minute: int | None = None
 
     def __post_init__(self) -> None:
         if not self.provider.strip():
@@ -106,6 +117,8 @@ class LLMSettings:
             raise SettingsError("размер фрагмента главы должен быть положительным")
         if self.max_unit_source_chars < 1:
             raise SettingsError("размер группы блоков должен быть положительным")
+        if self.requests_per_minute is not None and self.requests_per_minute < 1:
+            raise SettingsError("предел частоты запросов к модели должен быть положительным")
 
     @property
     def is_ready(self) -> bool:
@@ -226,6 +239,23 @@ class ServerSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerPoolSettings:
+    """Фоновый воркер: сколько задач очереди выполняется одновременно (PRD § 25).
+
+    Параллелизм ускоряет обработку глав, которые независимы по данным. Анализ глав
+    от него не ускоряется: следующая глава ставится в очередь только после сохранения
+    предыдущей (PRD § 13). Чем больше значение, тем скорее провайдер ответит отказом
+    по частоте запросов, — от этого защищает `LLMSettings.requests_per_minute`.
+    """
+
+    concurrency: int = DEFAULT_WORKER_CONCURRENCY
+
+    def __post_init__(self) -> None:
+        if self.concurrency < 1:
+            raise SettingsError("параллелизм воркера должен быть положительным")
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     """Локальная конфигурация приложения целиком."""
 
@@ -233,6 +263,7 @@ class AppSettings:
     checks: CheckSettings = field(default_factory=CheckSettings)
     storage: StorageSettings = field(default_factory=StorageSettings)
     server: ServerSettings = field(default_factory=ServerSettings)
+    worker: WorkerPoolSettings = field(default_factory=WorkerPoolSettings)
 
 
 __all__ = [
@@ -243,6 +274,7 @@ __all__ = [
     "DEFAULT_SERVER_HOST",
     "DEFAULT_SERVER_PORT",
     "DEFAULT_TIMEOUT_SECONDS",
+    "DEFAULT_WORKER_CONCURRENCY",
     "OPENAI_COMPATIBLE_PROVIDER",
     "AppSettings",
     "CheckSettings",
@@ -250,4 +282,5 @@ __all__ = [
     "ServerSettings",
     "SettingsError",
     "StorageSettings",
+    "WorkerPoolSettings",
 ]

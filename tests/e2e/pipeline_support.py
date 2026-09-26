@@ -178,7 +178,6 @@ def _analysis_reply(
                 {
                     "source_block_id": alias,
                     "treatment": "TRANSLATE",
-                    "reason": fixture["treatment_reason"],
                 }
                 for alias in _block_aliases(section)
             ],

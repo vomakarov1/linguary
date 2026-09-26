@@ -28,6 +28,7 @@ from linguary.adapters.config.settings import (
     ServerSettings,
     SettingsError,
     StorageSettings,
+    WorkerPoolSettings,
 )
 
 #: Переменная окружения с путём к файлу настроек.
@@ -79,6 +80,7 @@ _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "max_attempts": _as_int,
     "max_fragment_blocks": _as_int,
     "max_unit_source_chars": _as_int,
+    "requests_per_minute": _as_int,
 }
 
 #: Разбор значений секции `[checks]`.
@@ -100,6 +102,11 @@ _STORAGE_FIELDS: Mapping[str, Callable[[object, str], object]] = {
 _SERVER_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "host": _as_str,
     "port": _as_int,
+}
+
+#: Разбор значений секции `[worker]`.
+_WORKER_FIELDS: Mapping[str, Callable[[object, str], object]] = {
+    "concurrency": _as_int,
 }
 
 
@@ -146,6 +153,14 @@ def load_settings(
                 document,
                 name="server",
                 fields=_SERVER_FIELDS,
+                variables=variables,
+            )
+        ),
+        worker=WorkerPoolSettings(
+            **_section(
+                document,
+                name="worker",
+                fields=_WORKER_FIELDS,
                 variables=variables,
             )
         ),

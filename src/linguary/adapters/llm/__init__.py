@@ -17,6 +17,7 @@ from linguary.adapters.llm.json_schema import strict_json_schema
 from linguary.adapters.llm.logging import LoggingLLMClient
 from linguary.adapters.llm.openai_compatible import OpenAICompatibleLLMClient
 from linguary.adapters.llm.payloads import parse_payload, schema_for
+from linguary.adapters.llm.rate_limit import RateLimitedLLMClient
 
 __all__ = [
     "FAKE_MODEL",
@@ -27,6 +28,7 @@ __all__ = [
     "FakeScenarioStep",
     "LoggingLLMClient",
     "OpenAICompatibleLLMClient",
+    "RateLimitedLLMClient",
     "parse_payload",
     "schema_for",
     "strict_json_schema",

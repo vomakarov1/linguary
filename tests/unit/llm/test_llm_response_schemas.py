@@ -214,6 +214,36 @@ def test_strict_json_schema_forbids_additional_properties(model: type) -> None:
     assert all(set(node.get("required", [])) == set(node.get("properties", {})) for node in objects)
 
 
+def test_treatment_plan_item_asks_only_for_block_and_treatment() -> None:
+    """Элемент плана обработки — только блок и режим, без обоснования (QA-13).
+
+    Обоснование режима нигде не сохранялось, а каждый его экземпляр — выходные токены
+    ответа анализа, от объёма которых зависит его длительность.
+    """
+    schema = strict_json_schema(ChapterAnalysisSchema)
+    plan_items = [
+        node
+        for node in _walk(schema)
+        if isinstance(node, dict)
+        and set(node.get("properties", {})) >= {"source_block_id", "treatment"}
+        and "translated_text" not in node.get("properties", {})
+    ]
+
+    assert plan_items
+    assert all(
+        set(node["properties"]) == {"source_block_id", "treatment"} for node in plan_items
+    )
+
+
+def test_treatment_plan_item_with_reason_is_rejected() -> None:
+    """Ответ со старым полем обоснования идёт не по схеме, и схема его отбраковывает."""
+    payload = analysis_payload()
+    payload["treatment_plan"][0]["reason"] = "обычный повествовательный абзац"
+
+    with pytest.raises(ValidationError):
+        ChapterAnalysisSchema.model_validate_json(as_content(payload))
+
+
 def _walk(node: object) -> list[object]:
     """Все узлы схемы, включая вложенные определения."""
     found = [node]

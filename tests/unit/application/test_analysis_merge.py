@@ -138,12 +138,10 @@ def test_fragment_response_is_mapped_to_chapter_block_ids() -> None:
             TreatmentPlanItemResponse(
                 source_block_id="b2",
                 treatment=BlockTreatment.READ_AS_IS,
-                reason="простая фраза",
             ),
             TreatmentPlanItemResponse(
                 source_block_id="b1",
                 treatment=BlockTreatment.TRANSLATE,
-                reason="сюжетный абзац",
             ),
         ),
     )
@@ -167,7 +165,6 @@ def test_fragment_response_with_foreign_block_is_rejected() -> None:
             TreatmentPlanItemResponse(
                 source_block_id="b9",
                 treatment=BlockTreatment.TRANSLATE,
-                reason="сюжетный абзац",
             ),
         ),
     )

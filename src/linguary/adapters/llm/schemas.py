@@ -49,11 +49,14 @@ class GlossaryCandidateSchema(_ResponseModel):
 
 
 class TreatmentPlanItemSchema(_ResponseModel):
-    """Предложенный моделью режим обработки одного блока и его обоснование."""
+    """Предложенный моделью режим обработки одного блока.
+
+    Обоснования режима схема не просит: оно нигде не сохраняется, а объём вывода
+    определяет длительность ответа анализа.
+    """
 
     source_block_id: str = Field(min_length=1)
     treatment: TextualTreatment
-    reason: str
 
 
 class BeforeYouReadEntrySchema(_ResponseModel):

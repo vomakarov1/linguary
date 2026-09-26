@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -167,8 +169,45 @@ def _raise_for_status(response: httpx.Response, *, provider: str) -> None:
             f"провайдер {provider} не принял ключ или доступ к модели: {detail}"
         )
     if status == _RATE_LIMIT_STATUS or status >= 500:
-        raise LLMTransportError(f"провайдер {provider} временно недоступен: {detail}")
+        raise LLMTransportError(
+            f"провайдер {provider} временно недоступен: {detail}",
+            retry_after_seconds=_retry_after(response),
+        )
     raise LLMProviderError(f"провайдер {provider} отверг запрос: {detail}")
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Пауза из заголовка `Retry-After`: число секунд или момент в формате HTTP-даты.
+
+    Нечитаемое или отрицательное значение считается несообщённым: провайдер ничего
+    внятного не сказал, и паузу выбирает политика повторов сама.
+    """
+    raw = response.headers.get("Retry-After", "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = _seconds_until(raw)
+    if seconds is None or seconds != seconds or seconds < 0:
+        return None
+    return seconds
+
+
+def _seconds_until(http_date: str) -> float | None:
+    """Сколько секунд осталось до момента, заданного HTTP-датой."""
+    try:
+        moment = parsedate_to_datetime(http_date)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return max(0.0, (moment - _utc_now()).total_seconds())
+
+
+def _utc_now() -> datetime:
+    """Текущий момент в UTC."""
+    return datetime.now(UTC)
 
 
 def _document(response: httpx.Response) -> dict[str, Any]:

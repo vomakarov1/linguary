@@ -67,7 +67,6 @@ class TreatmentPlanItemResponse:
 
     source_block_id: str
     treatment: BlockTreatment
-    reason: str
 
     def __post_init__(self) -> None:
         if not self.source_block_id.strip():

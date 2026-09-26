@@ -52,7 +52,16 @@ class LLMConfigurationError(LLMError):
 
 
 class LLMTransportError(LLMError):
-    """Временная неудача вызова: таймаут, обрыв связи, ограничение частоты, сбой провайдера."""
+    """Временная неудача вызова: таймаут, обрыв связи, ограничение частоты, сбой провайдера.
+
+    `retry_after_seconds` — сколько провайдер попросил подождать до следующего запроса
+    (заголовок `Retry-After` ответов `429` и `503`), если он это сообщил. Повтор раньше
+    срока получит тот же отказ, поэтому политика повторов не делает паузу короче.
+    """
+
+    def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class LLMProviderError(LLMError):

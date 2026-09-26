@@ -282,6 +282,48 @@ def test_backoff_does_not_grow_beyond_its_limit() -> None:
     assert decision.backoff_seconds == 4.0
 
 
+def test_provider_retry_after_extends_the_backoff() -> None:
+    """Пауза перед повтором не короче той, что попросил провайдер заголовком `Retry-After`.
+
+    Повтор раньше срока снова получит отказ по частоте и сожжёт попытку зря.
+    """
+    retry_policy = policy(max_attempts=5, backoff_seconds=1.0, max_backoff_seconds=30.0)
+
+    decision = retry_policy.decide(
+        LLMTransportError("429", retry_after_seconds=12.0), attempts=1
+    )
+
+    assert decision.action is RetryAction.RETRY_AFTER_BACKOFF
+    assert decision.backoff_seconds == 12.0
+
+
+def test_short_retry_after_does_not_shorten_the_backoff() -> None:
+    """Короткий `Retry-After` не отменяет растущей паузы повторов."""
+    retry_policy = policy(max_attempts=5, backoff_seconds=1.0, max_backoff_seconds=30.0)
+
+    decision = retry_policy.decide(
+        LLMTransportError("503", retry_after_seconds=0.5), attempts=3
+    )
+
+    assert decision.backoff_seconds == 4.0
+
+
+def test_retry_after_is_bounded() -> None:
+    """Непомерный `Retry-After` не превращает одну задачу в часы ожидания."""
+    retry_policy = policy(
+        max_attempts=5,
+        backoff_seconds=1.0,
+        max_backoff_seconds=30.0,
+        max_retry_after_seconds=120.0,
+    )
+
+    decision = retry_policy.decide(
+        LLMTransportError("429", retry_after_seconds=3600.0), attempts=1
+    )
+
+    assert decision.backoff_seconds == 120.0
+
+
 def test_model_output_error_is_retried_with_the_same_request() -> None:
     """Невалидный ответ модели повторяется тем же запросом без уточнений."""
     request = translation_request()

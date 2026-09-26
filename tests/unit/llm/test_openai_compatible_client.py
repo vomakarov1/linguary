@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -14,7 +15,7 @@ import pytest
 from llm_payload_factories import analysis_payload, as_content, translation_payload
 
 from linguary.adapters.config import LLMSettings
-from linguary.adapters.llm import OpenAICompatibleLLMClient
+from linguary.adapters.llm import OpenAICompatibleLLMClient, openai_compatible
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import (
     LLMConfigurationError,
@@ -212,6 +213,44 @@ async def test_provider_status_is_mapped_to_port_error(
         await client.generate(
             LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
         )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "header", "expected"),
+    [
+        pytest.param(429, "7", 7.0, id="rate-limited-seconds"),
+        pytest.param(503, "2.5", 2.5, id="unavailable-fractional-seconds"),
+        pytest.param(
+            429, "Wed, 21 Oct 2015 07:28:10 GMT", 10.0, id="rate-limited-http-date"
+        ),
+        pytest.param(429, "soon", None, id="unreadable"),
+        pytest.param(429, "-3", None, id="negative"),
+        pytest.param(429, None, None, id="absent"),
+    ],
+)
+async def test_retry_after_is_passed_with_transient_error(
+    status_code: int,
+    header: str | None,
+    expected: float | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пауза, которую провайдер просит заголовком `Retry-After`, доходит до политики повторов."""
+    monkeypatch.setattr(
+        openai_compatible, "_utc_now", lambda: datetime(2015, 10, 21, 7, 28, 0, tzinfo=UTC)
+    )
+    headers = {} if header is None else {"Retry-After": header}
+    client = client_over(
+        lambda request: httpx.Response(
+            status_code, json={"error": "slow down"}, headers=headers
+        )
+    )
+
+    with pytest.raises(LLMTransportError) as error:
+        await client.generate(
+            LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
+        )
+
+    assert error.value.retry_after_seconds == expected
 
 
 async def test_provider_error_does_not_expose_api_key() -> None:

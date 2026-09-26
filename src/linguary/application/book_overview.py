@@ -1,9 +1,10 @@
 """Чтение состояния книги для интерфейса: карточка, прогресс, план и предупреждения.
 
 Web UI и CLI показывают одно и то же (PRD § 18, § 21.1, § 21.4): сколько блоков обработано,
-как распределились режимы, какая глава идёт сейчас, какие задачи неуспешны и что импорт
-и обработка успели сказать о книге. Считается это по задачам, сохранённому плану обработки
-и результатам блоков — то есть по хранилищу, а не по ходу выполнения.
+как распределились режимы, какие главы идут сейчас, сколько примерно осталось ждать,
+какие задачи неуспешны и что импорт и обработка успели сказать о книге. Считается это
+по задачам, сохранённому плану обработки, результатам блоков и журналу вызовов модели —
+то есть по хранилищу, а не по ходу выполнения.
 
 Модуль читает через порты и ничего не меняет. Он живёт в прикладном слое, а не в routes:
 подсчёт прогресса — прикладное правило, и повторять его в каждом представлении нельзя.
@@ -11,9 +12,12 @@ Web UI и CLI показывают одно и то же (PRD § 18, § 21.1, §
 
 from __future__ import annotations
 
+import math
+import statistics
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
+from linguary.application.context_builder import textual_blocks
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
@@ -27,6 +31,8 @@ from linguary.domain import (
     DocumentBlock,
     DocumentSection,
     ErrorType,
+    LLMCallLog,
+    LLMCallStage,
     ProcessingTask,
     ResultWarning,
     TaskStatus,
@@ -50,6 +56,19 @@ class ResultBlockNotFoundError(ApplicationError):
 #: задачи уровня книги, отдельной главы у них нет.
 _CHAPTER_TASK_TYPES = (TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT)
 
+#: Этап, время которого оценивается, по состоянию книги, и тип его задач. Повторная
+#: генерация блока — точечная работа, и оценка времени для неё не нужна.
+_ESTIMATED_STAGES: Mapping[BookStatus, tuple[LLMCallStage, TaskType]] = {
+    BookStatus.ANALYZING: (LLMCallStage.CHAPTER_ANALYSIS, TaskType.ANALYZE_CHAPTER),
+    BookStatus.PROCESSING: (
+        LLMCallStage.TRANSLATION_UNIT,
+        TaskType.PROCESS_TRANSLATION_UNIT,
+    ),
+}
+
+#: Секунд в минуте: предел частоты запросов задаётся в запросах в минуту.
+_SECONDS_PER_MINUTE = 60.0
+
 
 @dataclass(frozen=True, slots=True)
 class TaskFailure:
@@ -66,6 +85,31 @@ class TaskFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class RunningChapter:
+    """Глава, задача которой выполняется прямо сейчас."""
+
+    chapter_number: int
+    title: str
+
+
+@dataclass(frozen=True, slots=True)
+class RemainingTime:
+    """Грубая оценка того, сколько ещё идёт текущий этап работы над книгой.
+
+    `seconds` пуст, пока у этапа нет ни одного завершённого вызова модели: мерить
+    ещё нечем, и честнее сказать, что оценка появится позже, чем назвать число.
+    """
+
+    stage: LLMCallStage
+    seconds: int | None = None
+
+    @property
+    def is_known(self) -> bool:
+        """Есть ли уже данные для оценки."""
+        return self.seconds is not None
+
+
+@dataclass(frozen=True, slots=True)
 class BookProgress:
     """Прогресс обработки книги в терминах экрана обработки (PRD § 21.4)."""
 
@@ -74,11 +118,21 @@ class BookProgress:
     planned_blocks: int = 0
     processed_blocks: int = 0
     treatment_counts: Mapping[BlockTreatment, int] = field(default_factory=dict)
-    current_chapter: int | None = None
-    current_chapter_title: str | None = None
+    running_chapters: tuple[RunningChapter, ...] = ()
+    remaining_time: RemainingTime | None = None
     failures: tuple[TaskFailure, ...] = ()
     pending_tasks: int = 0
     running_tasks: int = 0
+
+    @property
+    def current_chapter(self) -> int | None:
+        """Номер первой из выполняющихся глав."""
+        return self.running_chapters[0].chapter_number if self.running_chapters else None
+
+    @property
+    def current_chapter_title(self) -> str | None:
+        """Название первой из выполняющихся глав."""
+        return self.running_chapters[0].title if self.running_chapters else None
 
     @property
     def percent_complete(self) -> int:
@@ -205,8 +259,19 @@ def list_books(
     return tuple(book for book in books if book.status is status)
 
 
-def book_overview(unit_of_work: UnitOfWork, book_id: str) -> BookOverview:
-    """Карточка книги: состояние, прогресс, счётчики режимов и неуспешные задачи."""
+def book_overview(
+    unit_of_work: UnitOfWork,
+    book_id: str,
+    *,
+    concurrency: int = 1,
+    requests_per_minute: int | None = None,
+) -> BookOverview:
+    """Карточка книги: состояние, прогресс, счётчики режимов и неуспешные задачи.
+
+    `concurrency` и `requests_per_minute` — параллелизм воркера и предел частоты
+    запросов к модели: без них оценка оставшегося времени обработки не знает, сколько
+    вызовов идёт одновременно.
+    """
     with unit_of_work.transaction() as transaction:
         book = _book(transaction, book_id)
         document = transaction.documents.get(book_id)
@@ -217,16 +282,66 @@ def book_overview(unit_of_work: UnitOfWork, book_id: str) -> BookOverview:
             transaction.results.count_for_run(run.id) if run is not None else 0
         )
         warning_count = len(transaction.documents.import_warnings(book_id))
+        calls = (
+            transaction.llm_calls.list_for_book(book_id)
+            if book.status in _ESTIMATED_STAGES
+            else ()
+        )
+    progress = _progress(
+        document=document,
+        analyses=analyses,
+        tasks=tasks,
+        processed_blocks=processed_blocks,
+    )
     return BookOverview(
         book=book,
-        progress=_progress(
-            document=document,
-            analyses=analyses,
-            tasks=tasks,
-            processed_blocks=processed_blocks,
+        progress=replace(
+            progress,
+            remaining_time=_remaining_time(
+                status=book.status,
+                progress=progress,
+                document=document,
+                tasks=tasks,
+                calls=calls,
+                concurrency=concurrency,
+                requests_per_minute=requests_per_minute,
+            ),
         ),
         warning_count=warning_count,
     )
+
+
+def estimate_remaining_seconds(
+    *,
+    durations_ms: Sequence[int],
+    completed_blocks: int,
+    remaining_blocks: int,
+    parallelism: int = 1,
+    requests_per_minute: int | None = None,
+) -> int | None:
+    """Грубая оценка оставшегося времени этапа в секундах (QA-13).
+
+    Медианная длительность вызова модели умножается на число оставшихся вызовов и
+    делится на число одновременно идущих вызовов. Оставшиеся вызовы считаются через
+    блоки: сколько вызовов в среднем пришлось на уже сделанный блок, столько же придётся
+    и на оставшиеся — так учитываются и группы блоков обработки, и фрагменты длинных
+    глав анализа. Предел частоты запросов не даёт параллелизму сократить шаг между
+    вызовами ниже `60 / requests_per_minute`. Медиана, а не среднее: один повтор после
+    долгого таймаута не должен растягивать оценку всей книги.
+
+    `None` — мерить ещё нечем: ни одного успешного вызова этапа или ни одного готового блока.
+    """
+    if not durations_ms or completed_blocks <= 0:
+        return None
+    if remaining_blocks <= 0:
+        return 0
+    remaining_calls = remaining_blocks * len(durations_ms) / completed_blocks
+    seconds_per_call = statistics.median(durations_ms) / 1000 / max(1, parallelism)
+    if requests_per_minute is not None:
+        seconds_per_call = max(
+            seconds_per_call, _SECONDS_PER_MINUTE / requests_per_minute
+        )
+    return math.ceil(remaining_calls * seconds_per_call)
 
 
 def processing_plan(unit_of_work: UnitOfWork, book_id: str) -> ProcessingPlanSummary:
@@ -416,16 +531,6 @@ def _progress(
     sections = document.ordered_sections if document is not None else ()
     numbers = _chapter_numbers(document)
     titles = {section.id: section.title for section in sections}
-    running = next(
-        (
-            task
-            for task in tasks
-            if task.status is TaskStatus.RUNNING
-            and task.task_type in _CHAPTER_TASK_TYPES
-        ),
-        None,
-    )
-    current_section = running.scope_id if running is not None else None
     return BookProgress(
         total_sections=len(sections),
         analyzed_sections=len(analyses),
@@ -436,18 +541,98 @@ def _progress(
         treatment_counts=_merge_counts(
             _treatment_counts(analysis) for analysis in analyses
         ),
-        current_chapter=(
-            numbers.get(current_section) if current_section is not None else None
-        ),
-        current_chapter_title=(
-            titles.get(current_section) if current_section is not None else None
-        ),
+        running_chapters=_running_chapters(tasks, numbers=numbers, titles=titles),
         failures=tuple(
             _failure(task) for task in tasks if task.status is TaskStatus.FAILED
         ),
         pending_tasks=sum(1 for task in tasks if task.status is TaskStatus.PENDING),
         running_tasks=sum(1 for task in tasks if task.status is TaskStatus.RUNNING),
     )
+
+
+def _running_chapters(
+    tasks: Sequence[ProcessingTask],
+    *,
+    numbers: Mapping[str, int],
+    titles: Mapping[str, str],
+) -> tuple[RunningChapter, ...]:
+    """Все главы, задачи которых выполняются сейчас, в порядке чтения.
+
+    При параллельной обработке (PRD § 25) одновременно идут несколько глав, и показать
+    одну из них значило бы спрятать остальные.
+    """
+    sections = {
+        task.scope_id
+        for task in tasks
+        if task.status is TaskStatus.RUNNING
+        and task.task_type in _CHAPTER_TASK_TYPES
+        and task.scope_id in numbers
+    }
+    return tuple(
+        RunningChapter(chapter_number=numbers[section_id], title=titles[section_id])
+        for section_id in sorted(sections, key=numbers.__getitem__)
+    )
+
+
+def _remaining_time(
+    *,
+    status: BookStatus,
+    progress: BookProgress,
+    document: CanonicalDocument | None,
+    tasks: Sequence[ProcessingTask],
+    calls: Sequence[LLMCallLog],
+    concurrency: int,
+    requests_per_minute: int | None,
+) -> RemainingTime | None:
+    """Оценка оставшегося времени анализа или обработки, пока этап идёт.
+
+    Этап без задач в очереди и в работе не оценивается: он либо закончен, либо
+    остановлен ошибкой и сам не продвинется. Учитываются только вызовы задач этапа,
+    которые существуют сейчас: возврат к проверке глоссария удаляет задачи отменённого
+    запуска, и его вызовы к оставшейся работе отношения не имеют.
+    """
+    if status not in _ESTIMATED_STAGES:
+        return None
+    stage, task_type = _ESTIMATED_STAGES[status]
+    stage_tasks = [task for task in tasks if task.task_type is task_type]
+    active = sum(
+        1
+        for task in stage_tasks
+        if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+    )
+    if active == 0:
+        return None
+    task_ids = {task.id for task in stage_tasks}
+    durations = [
+        call.duration_ms
+        for call in calls
+        if call.stage is stage and call.success and call.task_id in task_ids
+    ]
+    if stage is LLMCallStage.CHAPTER_ANALYSIS:
+        completed = progress.planned_blocks
+        remaining = _textual_block_count(document) - completed
+        parallelism = 1
+    else:
+        completed = progress.processed_blocks
+        remaining = progress.planned_blocks - completed
+        parallelism = min(concurrency, active)
+    return RemainingTime(
+        stage=stage,
+        seconds=estimate_remaining_seconds(
+            durations_ms=durations,
+            completed_blocks=completed,
+            remaining_blocks=remaining,
+            parallelism=parallelism,
+            requests_per_minute=requests_per_minute,
+        ),
+    )
+
+
+def _textual_block_count(document: CanonicalDocument | None) -> int:
+    """Сколько в книге блоков, которые уходят в модель."""
+    if document is None:
+        return 0
+    return sum(len(textual_blocks(section)) for section in document.ordered_sections)
 
 
 def _failure(task: ProcessingTask) -> TaskFailure:
@@ -563,14 +748,17 @@ __all__ = [
     "PlanBlockSummary",
     "ProcessingPlanSummary",
     "ProcessingPlanUnavailableError",
+    "RemainingTime",
     "ResultBlockNotFoundError",
     "ResultBlockSummary",
     "ResultChapterSummary",
     "ResultWarningEntry",
+    "RunningChapter",
     "TaskFailure",
     "book_overview",
     "book_result",
     "book_warnings",
+    "estimate_remaining_seconds",
     "list_books",
     "processing_plan",
     "result_block",
