@@ -54,6 +54,7 @@ from linguary.domain import (
     CanonicalDocument,
     ChapterAnalysis,
     DocumentSection,
+    GlossaryCandidate,
     LLMCallStage,
     ProcessingRun,
     ProcessingTask,
@@ -108,6 +109,7 @@ class _ChapterWork:
     section: DocumentSection
     analysis: ChapterAnalysis
     run: ProcessingRun
+    book_candidates: tuple[GlossaryCandidate, ...]
     processed_block_ids: frozenset[str]
     used_note_ids: frozenset[str]
     task_id: str | None = None
@@ -192,6 +194,7 @@ class ProcessChapter:
             unit=unit,
             analysis=work.analysis,
             glossary=work.run.glossary_snapshot,
+            book_candidates=work.book_candidates,
         )
         context = replace(
             context,
@@ -238,12 +241,18 @@ class ProcessChapter:
                     f"у книги {command.book_id} нет активного запуска обработки"
                 )
             stored = transaction.results.list_for_run(run.id)
+            book_candidates = tuple(
+                candidate
+                for chapter in transaction.analyses.list_for_book(command.book_id)
+                for candidate in chapter.glossary_candidates
+            )
         section_block_ids = {block.id for block in section.ordered_blocks}
         return _ChapterWork(
             document=document,
             section=section,
             analysis=analysis,
             run=run,
+            book_candidates=book_candidates,
             processed_block_ids=frozenset(
                 result.block_id
                 for result in stored

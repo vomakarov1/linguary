@@ -21,6 +21,7 @@ from processing_scenario import (
     make_process_chapter,
     make_regenerate_block,
     note_reply,
+    store_book_with_rejected_variant,
     store_processing_book,
     translated_reply,
     translation_reply,
@@ -312,3 +313,22 @@ async def test_regeneration_without_an_active_run_is_rejected(
         await regenerate(
             RegenerateBlockCommand(book_id=BOOK_ID, block_id=scenario.block_ids()[0])
         )
+
+
+async def test_rejected_variant_from_other_chapter_does_not_reach_regeneration(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    """Повторная генерация сверяет указания с кандидатами всей книги, как обработка (Д-4)."""
+    scenario = store_book_with_rejected_variant(unit_of_work)
+    client = FakeLLMClient.always(
+        translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)])
+    )
+    regenerate, _ = make_regenerate_block(unit_of_work, client)
+
+    await regenerate(
+        RegenerateBlockCommand(book_id=BOOK_ID, block_id=scenario.block_ids(1)[0])
+    )
+
+    text = client.last_request.input_text
+    assert "Даскмир" not in text
+    assert "(Множественное число, склоняется.)" in text

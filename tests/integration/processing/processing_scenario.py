@@ -41,6 +41,7 @@ from linguary.domain import (
     ChapterAnalysis,
     ConceptType,
     DocumentBlock,
+    GlossaryCandidate,
     DocumentSection,
     LLMSettingsSnapshot,
     ProcessingRun,
@@ -105,12 +106,17 @@ def store_processing_book(
     run_id: str = RUN_ID,
     analysed_sections: Sequence[str] | None = None,
     before_you_read: Sequence[tuple[str, str]] = (),
+    translation_instructions: str = "Сохранять иронию рассказчика.",
+    glossary_candidates: Mapping[str, Sequence[tuple[str, str]]] | None = None,
+    glossary_entries: Sequence[GlossarySnapshotEntry] = (),
 ) -> ProcessingScenario:
     """Кладёт в хранилище книгу, готовую к обработке, вместе с активным запуском.
 
     `analysed_sections` оставляет анализ только у перечисленных глав: обработка главы
     без сохранённого анализа — отдельный запрещённый случай (PRD § 14).
     `before_you_read` — пары «выражение, объяснение» подготовки к чтению каждой главы.
+    `glossary_candidates` — пары «исходный текст, вариант модели» анализа по главам,
+    `glossary_entries` — записи снимка глоссария запуска сверх решения по Mr. Bennet.
     """
     document = build_document(chapters)
     with unit_of_work.transaction() as uow:
@@ -122,11 +128,55 @@ def store_processing_book(
             uow.analyses.save(
                 BOOK_ID,
                 _analysis(
-                    section, treatments=treatments, before_you_read=before_you_read
+                    section,
+                    treatments=treatments,
+                    before_you_read=before_you_read,
+                    translation_instructions=translation_instructions,
+                    candidates=(glossary_candidates or {}).get(section.id, ()),
                 ),
             )
-        uow.runs.add(_run(run_id, locked_terms=locked_terms))
+        uow.runs.add(
+            _run(run_id, locked_terms=locked_terms, extra_entries=glossary_entries)
+        )
     return ProcessingScenario(document=document, run_id=run_id)
+
+
+#: Решения книги из третьего живого прогона: пользователь исправил вариант модели
+#: «Даскмир» на «Даскмер», а указание `the marsh gate` называет прежний вариант.
+REJECTED_VARIANT_GLOSSARY = (
+    GlossarySnapshotEntry(
+        source_text="Duskmere",
+        translation="Даскмер",
+        type=ConceptType.PLACE,
+        status=TermStatus.APPROVED,
+    ),
+    GlossarySnapshotEntry(
+        source_text="the marsh gate",
+        translation="болотные ворота",
+        type=ConceptType.PLACE,
+        status=TermStatus.APPROVED,
+        note="Сторожевой пост при въезде в Даскмир. Множественное число, склоняется.",
+    ),
+)
+
+#: Указания главы 2 того же прогона: отвергнутый вариант назван без кавычек.
+REJECTED_VARIANT_INSTRUCTIONS = (
+    "1. Сохранять иронию рассказчика.\n"
+    "8. Термины из глоссария (болотные огни, Даскмир) использовать единообразно."
+)
+
+
+def store_book_with_rejected_variant(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> ProcessingScenario:
+    """Книга из двух глав: вариант «Даскмир» предложил только анализ главы 1 (Д-4)."""
+    return store_processing_book(
+        unit_of_work,
+        chapters=((SOURCE_TEXT,), (SOURCE_TEXT,)),
+        translation_instructions=REJECTED_VARIANT_INSTRUCTIONS,
+        glossary_candidates={"section-1": (("Duskmere", "Даскмир"),)},
+        glossary_entries=REJECTED_VARIANT_GLOSSARY,
+    )
 
 
 @dataclass(slots=True)
@@ -329,6 +379,8 @@ def _analysis(
     *,
     treatments: Mapping[str, Sequence[BlockTreatment]] | None,
     before_you_read: Sequence[tuple[str, str]] = (),
+    translation_instructions: str = "Сохранять иронию рассказчика.",
+    candidates: Sequence[tuple[str, str]] = (),
 ) -> ChapterAnalysis:
     """Полный анализ главы: план обработки покрывает все её текстовые блоки.
 
@@ -340,16 +392,30 @@ def _analysis(
         tuple((treatments or {}).get(section.id, ()))
         or (BlockTreatment.TRANSLATE,) * len(blocks)
     )
+    analysis_id = f"analysis-{section.id}"
     return ChapterAnalysis.create(
-        id=f"analysis-{section.id}",
+        id=analysis_id,
         section_id=section.id,
         treatment_plan=TreatmentPlan.of_treatments(
             section.id,
             zip((block.id for block in blocks), chosen, strict=True),
         ),
-        translation_instructions="Сохранять иронию рассказчика.",
+        translation_instructions=translation_instructions,
         chapter_summary="Mr. Bennet visits the new neighbour.",
         expected_block_ids=[block.id for block in blocks],
+        glossary_candidates=[
+            GlossaryCandidate.create(
+                id=f"candidate-{section.id}-{source_text}",
+                analysis_id=analysis_id,
+                source_text=source_text,
+                type=ConceptType.PLACE,
+                suggested_translation=translation,
+                confidence=0.9,
+                model_flagged_review=False,
+                confidence_threshold=0.5,
+            )
+            for source_text, translation in candidates
+        ],
         before_you_read=[
             BeforeYouReadEntry(expression=expression, explanation=explanation)
             for expression, explanation in before_you_read
@@ -370,7 +436,12 @@ def _book(status: BookStatus) -> BookRecord:
     )
 
 
-def _run(run_id: str, *, locked_terms: bool) -> ProcessingRun:
+def _run(
+    run_id: str,
+    *,
+    locked_terms: bool,
+    extra_entries: Sequence[GlossarySnapshotEntry] = (),
+) -> ProcessingRun:
     """Активный запуск обработки со снимком глоссария и настроек LLM."""
     entries = [
         GlossarySnapshotEntry(
@@ -378,7 +449,8 @@ def _run(run_id: str, *, locked_terms: bool) -> ProcessingRun:
             translation="мистер Беннет",
             type=ConceptType.PERSON,
             status=TermStatus.LOCKED if locked_terms else TermStatus.SUGGESTED,
-        )
+        ),
+        *extra_entries,
     ]
     return ProcessingRun(
         id=run_id,

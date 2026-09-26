@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 
+from linguary.application.chapter_instructions import note_respecting_glossary
 from linguary.application.errors import ApplicationError
 from linguary.domain import (
     BookStatus,
@@ -255,12 +256,18 @@ def candidates_with_decisions(
     при повторном анализе это кандидаты самой главы и следующих глав. Решение
     пользователя действует на всю книгу, а вариант модели из следующей главы этой
     главе ничего не даёт, поэтому кандидат без решения отсюда не попадает.
+
+    Указание каждого кандидата очищается от фрагментов, называющих вариант модели,
+    который пользователь отверг по другому понятию: «пост при въезде в Даскмир» при
+    решении «Даскмер». Отвергнутые варианты известны из всех переданных кандидатов
+    книги — тем же правилом, что и в контексте обработки (`note_respecting_glossary`).
     """
     decided: dict[str, list[TermConcept]] = {}
     for concept in decisions:
         decided.setdefault(glossary_key(concept.canonical_source_text), []).append(concept)
     with_decision: list[GlossaryCandidate] = []
     without_decision: list[GlossaryCandidate] = []
+    user_decisions: dict[str, GlossarySnapshotEntry] = {}
     marked = [
         *((candidate, False) for candidate in candidates),
         *((candidate, True) for candidate in decided_only),
@@ -275,15 +282,35 @@ def candidates_with_decisions(
             if not needs_decision:
                 without_decision.append(candidate)
             continue
-        with_decision.append(
-            replace(
-                candidate,
-                type=decision.type,
-                suggested_translation=variant.text,
-                note=decision.note,
-            )
+        decided_candidate = replace(
+            candidate,
+            type=decision.type,
+            suggested_translation=variant.text,
+            note=decision.note,
         )
-    return (*with_decision, *without_decision)
+        with_decision.append(decided_candidate)
+        user_decisions.setdefault(
+            glossary_key(candidate.source_text),
+            GlossarySnapshotEntry(
+                source_text=decided_candidate.source_text,
+                translation=variant.text,
+                type=decision.type,
+                status=decision.status,
+                note=decision.note,
+            ),
+        )
+    book_candidates = [candidate for candidate, _ in marked]
+    return tuple(
+        replace(
+            candidate,
+            note=note_respecting_glossary(
+                candidate,
+                decisions=tuple(user_decisions.values()),
+                chapter_candidates=book_candidates,
+            ),
+        )
+        for candidate in (*with_decision, *without_decision)
+    )
 
 
 def _review_item(

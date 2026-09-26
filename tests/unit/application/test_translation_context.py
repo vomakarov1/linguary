@@ -843,3 +843,67 @@ def test_glossary_note_naming_rejected_variant_of_other_concept_is_dropped() -> 
     ) in text
     assert "- boardwalk [term] -> деревянный настил\n" in text
     assert "Рен Колдер (Женский род во всех главах)" in text
+
+
+def test_rejected_variant_is_known_from_other_chapters_of_the_book() -> None:
+    """Отвергнутый вариант берётся из кандидатов всей книги, а не только этой главы (Д-4).
+
+    Третий живой прогон: анализ главы 2 кандидата Duskmere не вернул — понятие уже
+    было в решениях главы 1, — и в запрос главы 2 целиком ушли указание `the marsh
+    gate` с «Даскмир» и пункт указаний главы, называющий «Даскмир» без кавычек.
+    """
+    blocks = make_blocks(1)
+    unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section(blocks, title="Chapter 2", order=1)
+    analysis = replace(
+        make_analysis(unit),
+        translation_instructions=(
+            "1. Сохранять иронию рассказчика.\n"
+            "8. Термины из глоссария (звёздное стекло, болотный кварц, болотные огни, "
+            "Даскмир) использовать единообразно согласно принятым решениям.\n"
+            "9. Путь в Даскмера не сокращать."
+        ),
+    )
+    snapshot = GlossarySnapshot(
+        entries=(
+            *user_decisions_snapshot().entries,
+            GlossarySnapshotEntry(
+                source_text="the marsh gate",
+                translation="болотные ворота",
+                type=ConceptType.PLACE,
+                status=TermStatus.APPROVED,
+                note="Сторожевой пост при въезде в Даскмир. Множественное число, склоняется.",
+            ),
+        )
+    )
+    first_chapter_candidate = GlossaryCandidate.create(
+        id="candidate-chapter-1",
+        analysis_id="analysis-chapter-1",
+        source_text="Duskmere",
+        type=ConceptType.PLACE,
+        suggested_translation="Даскмир",
+        confidence=0.9,
+        model_flagged_review=False,
+        confidence_threshold=0.5,
+    )
+
+    for build in (
+        ContextBuilder().for_translation_unit,
+        ContextBuilder().for_block_regeneration,
+    ):
+        text = build(
+            document=make_document(section),
+            section=section,
+            unit=unit,
+            analysis=analysis,
+            glossary=snapshot,
+            book_candidates=(first_chapter_candidate,),
+        ).request.input_text
+
+        assert "Даскмир" not in text
+        assert (
+            "- the marsh gate [place] -> болотные ворота "
+            "(Множественное число, склоняется.)"
+        ) in text
+        assert "1. Сохранять иронию рассказчика." in text
+        assert "9. Путь в Даскмера не сокращать." in text

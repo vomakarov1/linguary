@@ -326,12 +326,15 @@ class ContextBuilder:
         unit: TranslationUnit,
         analysis: ChapterAnalysis,
         glossary: GlossarySnapshot,
+        book_candidates: Iterable[GlossaryCandidate] = (),
     ) -> TranslationContext:
         """Контекст обработки одной группы блоков (PRD § 10, § 13, § 19.3, ALG-04).
 
         В запрос идут сама группа с режимами из сохранённого плана, снимок глоссария
         запуска, инструкции перевода главы и её сводка. Результатов других групп и текста
-        соседних глав в контексте нет.
+        соседних глав в контексте нет. `book_candidates` — кандидаты анализа всех глав
+        книги: из них известны варианты модели, отвергнутые пользователем, и указания
+        с такими вариантами в запрос не попадают.
         """
         return self._translation_context(
             document=document,
@@ -339,6 +342,7 @@ class ContextBuilder:
             unit=unit,
             analysis=analysis,
             glossary=glossary,
+            book_candidates=book_candidates,
             instructions=translation_unit_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
@@ -354,6 +358,7 @@ class ContextBuilder:
         unit: TranslationUnit,
         analysis: ChapterAnalysis,
         glossary: GlossarySnapshot,
+        book_candidates: Iterable[GlossaryCandidate] = (),
     ) -> TranslationContext:
         """Контекст повторной генерации одного блока (PRD § 13, § 19.3, § 21.5).
 
@@ -373,6 +378,7 @@ class ContextBuilder:
             unit=unit,
             analysis=analysis,
             glossary=glossary,
+            book_candidates=book_candidates,
             instructions=block_regeneration_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
@@ -388,6 +394,7 @@ class ContextBuilder:
         unit: TranslationUnit,
         analysis: ChapterAnalysis,
         glossary: GlossarySnapshot,
+        book_candidates: Iterable[GlossaryCandidate],
         instructions: str,
         neighbours: Sequence[_NeighbourBlocks],
     ) -> TranslationContext:
@@ -412,6 +419,7 @@ class ContextBuilder:
                     unit=unit,
                     analysis=analysis,
                     glossary=glossary,
+                    candidates=(*analysis.glossary_candidates, *book_candidates),
                     neighbours=neighbours,
                 ),
             ),
@@ -434,19 +442,24 @@ class ContextBuilder:
         unit: TranslationUnit,
         analysis: ChapterAnalysis,
         glossary: GlossarySnapshot,
+        candidates: Sequence[GlossaryCandidate],
         neighbours: Sequence[_NeighbourBlocks],
     ) -> str:
-        """Текст запроса обработки: шапка, выжимка анализа главы, глоссарий и блоки."""
+        """Текст запроса обработки: шапка, выжимка анализа главы, глоссарий и блоки.
+
+        `candidates` — кандидаты анализа глав книги: по ним указания главы и элементов
+        глоссария сверяются с отвергнутыми пользователем вариантами модели.
+        """
         parts = [
             _chapter_header(document=document, section=section),
-            _chapter_digest(analysis, glossary),
+            _chapter_digest(analysis, glossary, candidates),
             _mandatory_decisions(
-                _with_agreed_notes(glossary.mandatory_entries, glossary, analysis),
+                _with_agreed_notes(glossary.mandatory_entries, glossary, candidates),
                 target_language=document.target_language,
             ),
             _glossary_suggestions(
                 _with_agreed_notes(
-                    self._suggested_entries(glossary), glossary, analysis
+                    self._suggested_entries(glossary), glossary, candidates
                 ),
                 target_language=document.target_language,
             ),
@@ -822,13 +835,19 @@ note — короткое пояснение, если оно нужно.
 Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
 
 
-def _chapter_digest(analysis: ChapterAnalysis, glossary: GlossarySnapshot) -> str:
+def _chapter_digest(
+    analysis: ChapterAnalysis,
+    glossary: GlossarySnapshot,
+    candidates: Sequence[GlossaryCandidate],
+) -> str:
     """Выжимка анализа главы: её сводка и указания переводчику (PRD § 13).
 
     Кандидаты глоссария сюда не идут: утверждённые решения книги приходят снимком
     запуска, а неутверждённых после старта обработки не существует. Указания написаны
     до проверки глоссария, поэтому пункты, противоречащие решениям пользователя,
     отбрасываются: иначе прежний вариант модели перекрывал бы исправление (PRD § 11).
+    Отвергнутые варианты берутся из кандидатов всей книги: анализ главы не возвращает
+    кандидата понятия, уже решённого в предыдущих главах.
     """
     lines: list[str] = []
     if summary := analysis.chapter_summary.strip():
@@ -836,7 +855,7 @@ def _chapter_digest(analysis: ChapterAnalysis, glossary: GlossarySnapshot) -> st
     instructions = instructions_respecting_glossary(
         analysis.translation_instructions,
         decisions=glossary.mandatory_entries,
-        chapter_candidates=analysis.glossary_candidates,
+        chapter_candidates=candidates,
     )
     if instructions:
         lines.append(f"Указания переводчику этой главы:\n{instructions}")
@@ -846,13 +865,13 @@ def _chapter_digest(analysis: ChapterAnalysis, glossary: GlossarySnapshot) -> st
 def _with_agreed_notes(
     entries: Sequence[GlossarySnapshotEntry],
     glossary: GlossarySnapshot,
-    analysis: ChapterAnalysis,
+    candidates: Sequence[GlossaryCandidate],
 ) -> tuple[GlossarySnapshotEntry, ...]:
     """Записи снимка с указаниями, не спорящими с решениями других понятий (PRD § 11).
 
     Указание элемента, принятого без правки, написала модель на анализе, и оно может
     называть вариант другого понятия, который пользователь отверг. Отвергнутые варианты
-    известны из кандидатов анализа этой главы — теми же, что и для указаний главы.
+    известны из кандидатов анализа глав книги — тех же, что и для указаний главы.
     """
     return tuple(
         replace(
@@ -860,7 +879,7 @@ def _with_agreed_notes(
             note=note_respecting_glossary(
                 entry,
                 decisions=glossary.mandatory_entries,
-                chapter_candidates=analysis.glossary_candidates,
+                chapter_candidates=candidates,
             ),
         )
         for entry in entries

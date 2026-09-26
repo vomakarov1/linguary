@@ -367,6 +367,85 @@ async def test_repeated_analysis_sees_user_decisions_of_whole_book() -> None:
     assert request.index("Селена Роу") < request.index("Mr. Bennet")
 
 
+async def test_glossary_note_in_analysis_context_drops_rejected_variant() -> None:
+    """Указание элемента глоссария в контексте анализа не несёт отвергнутый вариант.
+
+    Третий живой прогон: в контексте анализа главы 2 указание `the marsh gate`
+    называло «Даскмир», хотя решение пользователя по Duskmere — «Даскмер».
+    Решение по другому понятию и его формы при этом остаются.
+    """
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Chapter {number} text.",),
+        )
+        for number in (1, 2)
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    unit_of_work.analyses.save(
+        BOOK_ID,
+        make_chapter_analysis(
+            candidates=(
+                make_analysis_candidate(
+                    source_text="Duskmere",
+                    suggested_translation="Даскмир",
+                    type=ConceptType.PLACE,
+                ),
+                make_analysis_candidate(
+                    source_text="the marsh gate",
+                    suggested_translation="болотные ворота",
+                    type=ConceptType.PLACE,
+                ),
+                make_analysis_candidate(
+                    source_text="boardwalk",
+                    suggested_translation="деревянный настил",
+                    type=ConceptType.TERM,
+                    note="Настил ведёт к Даскмиру. Держать одно слово.",
+                ),
+            ),
+        ),
+    )
+    unit_of_work.glossary.save(
+        _decision("concept-1", "Duskmere", "Даскмер", TermStatus.APPROVED)
+    )
+    unit_of_work.glossary.save(
+        TermConcept(
+            id="concept-2",
+            book_id=BOOK_ID,
+            type=ConceptType.PLACE,
+            canonical_source_text="the marsh gate",
+            status=TermStatus.APPROVED,
+            note=(
+                "Сторожевой пост при въезде в Даскмир. Множественное число, "
+                "склоняется. Стоит у стен Даскмера."
+            ),
+            variants=(
+                TermVariant(
+                    concept_id="concept-2",
+                    language=TARGET_LANGUAGE,
+                    text="болотные ворота",
+                    status=TermStatus.APPROVED,
+                ),
+            ),
+        )
+    )
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    await scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-2"))
+
+    request = client.requests[0].input_text
+    assert "Даскмир" not in request
+    assert (
+        "- the marsh gate [place] -> болотные ворота "
+        "(Множественное число, склоняется. Стоит у стен Даскмера.)"
+    ) in request
+    assert "- boardwalk [term] -> деревянный настил (Держать одно слово.)" in request
+    assert "- Duskmere [person] -> Даскмер" in request
+
+
 async def test_chapter_without_text_is_analysed_without_the_model() -> None:
     """Глава без текстовых блоков не даёт вызова модели, но получает полный анализ."""
     section = make_analysis_section(

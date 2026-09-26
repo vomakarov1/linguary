@@ -244,3 +244,48 @@ def test_note_with_other_gender_of_other_person_is_dropped() -> None:
     )
 
     assert kept_note(entry, entry, WREN) == "Дом стоит на сваях."
+
+
+def test_item_naming_rejected_variant_without_quotes_is_dropped() -> None:
+    """Пункт указаний главы, называющий отвергнутый вариант без кавычек, отсеивается (Д-5).
+
+    Третий живой прогон: пункт «Термины из глоссария (…, Даскмир) использовать
+    единообразно» дошёл до запроса обработки, хотя решение по Duskmere — «Даскмер».
+    """
+    instructions = (
+        "1. Сохранять иронию рассказчика.\n"
+        "8. Термины из глоссария (звёздное стекло, болотный кварц, болотные огни, "
+        "Даскмир) использовать единообразно согласно принятым решениям."
+    )
+
+    result = kept(
+        instructions,
+        WREN,
+        DUSKMERE,
+        candidates=(chapter_candidate("Duskmere", "Даскмир"),),
+    )
+
+    assert result == "1. Сохранять иронию рассказчика."
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        pytest.param("2. Путь в Даскмера не сокращать.", id="decision-form"),
+        pytest.param("2. Даскмер — несклоняемое название.", id="decision"),
+        pytest.param("2. Болотные огни видны издалека.", id="unrelated"),
+    ],
+)
+def test_item_naming_decision_without_quotes_is_kept(item: str) -> None:
+    """Решение пользователя и его грамматические формы без кавычек пункт не отсеивают."""
+    instructions = f"1. Сохранять иронию рассказчика.\n{item}"
+
+    assert (
+        kept(
+            instructions,
+            WREN,
+            DUSKMERE,
+            candidates=(chapter_candidate("Duskmere", "Даскмир"),),
+        )
+        == instructions
+    )

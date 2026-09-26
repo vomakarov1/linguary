@@ -15,6 +15,7 @@ from processing_scenario import (
     block_reply,
     make_process_chapter,
     note_reply,
+    store_book_with_rejected_variant,
     store_processing_book,
     translated_reply,
     translation_reply,
@@ -318,3 +319,24 @@ async def test_unanalysed_chapter_is_not_processed(
         await process(command("section-2"))
 
     assert client.call_count == 0
+
+
+async def test_rejected_variant_from_other_chapter_does_not_reach_the_request(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    """Вариант, отвергнутый пользователем, узнаётся по кандидатам всей книги (Д-4).
+
+    Анализ главы 2 кандидата Duskmere не вернул: вариант «Даскмир» предложил только
+    анализ главы 1. Указание `the marsh gate` и пункт указаний главы с ним всё равно
+    не доходят до запроса обработки главы 2.
+    """
+    store_book_with_rejected_variant(unit_of_work)
+    client = FakeLLMClient.replying([translated_reply(("b1",))])
+    process, _ = make_process_chapter(unit_of_work, client)
+
+    await process(command("section-2"))
+
+    text = client.last_request.input_text
+    assert "Даскмир" not in text
+    assert "(Множественное число, склоняется.)" in text
+    assert "1. Сохранять иронию рассказчика." in text
