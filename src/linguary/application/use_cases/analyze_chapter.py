@@ -45,6 +45,7 @@ from linguary.application.context_builder import (
     textual_blocks,
 )
 from linguary.application.errors import ApplicationError
+from linguary.application.glossary_review import candidates_with_decisions
 from linguary.application.llm_dto import ChapterAnalysisResponse
 from linguary.application.ports.llm import LLMClient, LLMRequest
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
@@ -251,6 +252,9 @@ class AnalyzeChapter:
     ) -> tuple[CanonicalDocument, tuple[GlossaryCandidate, ...]]:
         """Читает книгу и кандидатов глоссария проанализированных предыдущих глав.
 
+        Решение пользователя по кандидату заменяет вариант модели: анализ повторяет
+        накопленные решения дословно и не должен возвращать исправленный вариант.
+
         Берутся только главы, стоящие в порядке чтения раньше текущей: повторный анализ
         главы в середине книги не должен видеть решений следующих глав. Порядок чтения
         сохраняет сам `list_for_book`.
@@ -261,11 +265,15 @@ class AnalyzeChapter:
                 raise AnalyzeChapterError(f"книги {command.book_id} нет в хранилище")
             current_order = _section_of(document, command).order
             orders = {section.id: section.order for section in document.sections}
-            accumulated = tuple(
-                candidate
-                for analysis in transaction.analyses.list_for_book(command.book_id)
-                if orders.get(analysis.section_id, current_order) < current_order
-                for candidate in analysis.glossary_candidates
+            accumulated = candidates_with_decisions(
+                (
+                    candidate
+                    for analysis in transaction.analyses.list_for_book(command.book_id)
+                    if orders.get(analysis.section_id, current_order) < current_order
+                    for candidate in analysis.glossary_candidates
+                ),
+                transaction.glossary.list_for_book(command.book_id),
+                language=document.target_language,
             )
         return document, accumulated
 

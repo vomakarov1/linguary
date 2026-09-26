@@ -15,8 +15,11 @@
 инструкций перевода главы и её сводки — выжимки анализа этой главы. Результаты обработки
 других групп в него не входят: так задачи остаются независимыми, а результат
 воспроизводимым (PRD § 13). Обязательные переводческие указания стоят в контексте
-отдельно от необязательных подсказок: `locked` — решение пользователя, которое модель
-обязана соблюдать, остальное — подсказка (PRD § 11).
+отдельно от необязательных подсказок: принятое, исправленное или зафиксированное
+решение пользователя модель обязана соблюдать, вариант модели без решения и пропущенный
+элемент — подсказка (PRD § 11-12). Решение пользователя сильнее указаний переводчику
+главы: пункт указаний, который ему противоречит, в контекст не попадает
+(`chapter_instructions`), а контекст прямо ставит решения выше указаний.
 
 Контекст повторной генерации отличается от контекста группы двумя вещами: блок в нём
 один и рядом с ним стоят несколько соседних абзацев главы. Соседи нужны, чтобы понять
@@ -35,11 +38,13 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from linguary.application.analysis_merge import ChapterFragment
+from linguary.application.chapter_instructions import instructions_respecting_glossary
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMRequest
@@ -431,7 +436,7 @@ class ContextBuilder:
         """Текст запроса обработки: шапка, выжимка анализа главы, глоссарий и блоки."""
         parts = [
             _chapter_header(document=document, section=section),
-            _chapter_digest(analysis),
+            _chapter_digest(analysis, glossary),
             _mandatory_decisions(
                 glossary.mandatory_entries, target_language=document.target_language
             ),
@@ -778,7 +783,8 @@ note — короткое пояснение, если оно нужно.
 Перевод пиши целиком на языке {target_language} и доводи до конца: оборванная фраза, \
 незакрытая кавычка или скобка отклоняют весь ответ. Абзац переводи как одно целое — \
 не дели его и не склеивай с соседним. Обязательные переводческие решения книги соблюдай \
-дословно; менять допустимо только грамматическую форму.
+дословно; менять допустимо только грамматическую форму. Эти решения принял пользователь: \
+они сильнее указаний переводчику главы, и при расхождении действует решение.
 
 Метка вида [^1] в тексте блока — ссылка на сноску книги. Перенеси каждую такую метку \
 в translated_text без изменений, в то место перевода, к которому она относится. Цифрой \
@@ -810,16 +816,23 @@ note — короткое пояснение, если оно нужно.
 Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
 
 
-def _chapter_digest(analysis: ChapterAnalysis) -> str:
+def _chapter_digest(analysis: ChapterAnalysis, glossary: GlossarySnapshot) -> str:
     """Выжимка анализа главы: её сводка и указания переводчику (PRD § 13).
 
     Кандидаты глоссария сюда не идут: утверждённые решения книги приходят снимком
-    запуска, а неутверждённых после старта обработки не существует.
+    запуска, а неутверждённых после старта обработки не существует. Указания написаны
+    до проверки глоссария, поэтому пункты, противоречащие решениям пользователя,
+    отбрасываются: иначе прежний вариант модели перекрывал бы исправление (PRD § 11).
     """
     lines: list[str] = []
     if summary := analysis.chapter_summary.strip():
         lines.append(f"О чём эта глава:\n{summary}")
-    if instructions := analysis.translation_instructions.strip():
+    instructions = instructions_respecting_glossary(
+        analysis.translation_instructions,
+        decisions=glossary.mandatory_entries,
+        chapter_candidates=analysis.glossary_candidates,
+    )
+    if instructions:
         lines.append(f"Указания переводчику этой главы:\n{instructions}")
     return "\n\n".join(lines)
 
@@ -863,12 +876,14 @@ def _before_you_read_expressions(
 def _mandatory_decisions(
     entries: Sequence[GlossarySnapshotEntry], *, target_language: str
 ) -> str:
-    """Обязательные переводческие указания книги (PRD § 11)."""
+    """Обязательные переводческие указания книги: решения пользователя (PRD § 11-12)."""
     if not entries:
         return "Обязательных переводческих указаний по этой книге нет."
     lines = [
-        f"Обязательные переводческие решения книги ({target_language}). Соблюдай их "
-        f"дословно, меняя только грамматическую форму:"
+        f"Обязательные переводческие решения книги ({target_language}). Их принял "
+        f"пользователь, и они сильнее указаний переводчику главы: если указание называет "
+        f"другой вариант перевода или другой род, следуй решению. Соблюдай их дословно, "
+        f"меняя только грамматическую форму:"
     ]
     lines.extend(_glossary_line(entry) for entry in entries)
     lines.append(_notes_legend(entries))
@@ -933,7 +948,8 @@ def source_text_for_model(block: DocumentBlock, *, footnote_markers: bool = Fals
     восстанавливает её из разметки блока сам. Модель же видит хвост как часть текста
     и переносит его в перевод, где он становится мёртвым символом — вторым значком
     возврата, который никуда не ведёт. Ссылку возврата опознаём по разметке, а не по
-    символам: это ссылка в конце текста сноски, ведущая на якорь того же ресурса.
+    символам: это ссылка в конце текста сноски, ведущая на якорь внутри книги — в том же
+    ресурсе или в другом: у отдельной страницы сносок возврат всегда уходит в главу.
 
     Во-вторых, номер ссылки на сноску посреди абзаца модели как текст не показывается:
     иначе он переходит в перевод голой цифрой. Блоку, который модель обрабатывает,
@@ -964,26 +980,36 @@ def source_text_for_model(block: DocumentBlock, *, footnote_markers: bool = Fals
 def _back_link_start(block: DocumentBlock) -> int:
     """Начало ссылки возврата в конце сноски либо длина текста, если её нет."""
     text = block.text
-    resource_path = block.source_reference.resource_path
     tail = max(
         (
             annotation.start
             for annotation in block.inline_annotations
             if annotation.type is InlineAnnotationType.LINK
             and annotation.end >= len(text.rstrip())
-            and _points_inside(annotation.target, resource_path=resource_path)
+            and text[: annotation.start].strip()
+            and _points_to_book_anchor(annotation.target)
         ),
         default=None,
     )
     return len(text) if tail is None else tail
 
 
-def _points_inside(target: str | None, *, resource_path: str) -> bool:
-    """Ведёт ли ссылка на якорь внутри того же ресурса книги."""
-    if not target:
+#: Схема внешнего адреса: `http:`, `mailto:` и подобные. Импорт оставляет такие ссылки
+#: как есть, а ссылки внутри книги приводит к пути ресурса с якорем.
+_EXTERNAL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _points_to_book_anchor(target: str | None) -> bool:
+    """Ведёт ли ссылка на якорь внутри книги: в том же ресурсе или в другом.
+
+    Возврат из сноски главы ведёт в тот же файл, а возврат со страницы сносок — в файл
+    главы, где стоит ссылка на сноску. Внешний адрес и ссылка на файл без якоря
+    возвратом не бывают: это текст сноски.
+    """
+    if not target or _EXTERNAL_SCHEME.match(target):
         return False
-    path, separator, fragment = target.partition("#")
-    return bool(separator and fragment) and path in ("", resource_path)
+    _, separator, fragment = target.partition("#")
+    return bool(separator and fragment)
 
 
 def _unit_blocks(unit: TranslationUnit) -> str:

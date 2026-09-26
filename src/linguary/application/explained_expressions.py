@@ -13,6 +13,13 @@
 в котором встретилось объяснённое выражение, объясняет уже другое и остаётся. Короткое
 служебное слово частичным совпадением не считается вовсе — иначе подсказка к `to`
 пропала бы из-за объяснённого `heave to`.
+
+Отрывок заметки модель часто берёт целой фразой, и тогда правило половины повтор
+не узнаёт. Что заметка объясняет, выдаёт её собственный текст: объясняя выражение,
+она его называет. Поэтому заметка с длинным отрывком — повтор, если отрывок содержит
+объяснённое выражение, а текст заметки называет это выражение или его значимую часть
+(не меньше половины слов). Заметка к той же фразе про другой оборот объяснённого
+выражения не называет и остаётся.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 
-from linguary.domain import BlockProcessingResult
+from linguary.domain import BlockProcessingResult, LanguageNote
 
 #: Разновидности апострофа, которые в тексте книги и в ответе модели встречаются вперемешку.
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
@@ -61,6 +68,23 @@ class ExplainedExpressions:
             _overlaps(words, expression) for expression in self._expressions
         )
 
+    def repeated_by(self, note: LanguageNote) -> bool:
+        """Повторяет ли языковая заметка выражение `Before You Read`.
+
+        Сначала заметка сравнивается по отрывку, как подсказка. Отрывок длиннее
+        выражения больше чем вдвое по нему повтором не считается, и тогда решает
+        текст заметки: повтор, если отрывок содержит объяснённое выражение, а заметка
+        его называет.
+        """
+        if self.covers(note.original_excerpt):
+            return True
+        excerpt = expression_words(note.original_excerpt)
+        explanation = expression_words(note.note)
+        return any(
+            _contains(excerpt, expression) and _mentions(explanation, expression)
+            for expression in self._expressions
+        )
+
     def without_repeats(self, result: BlockProcessingResult) -> BlockProcessingResult:
         """Результат блока без подсказок и заметок, повторяющих `Before You Read`.
 
@@ -80,7 +104,7 @@ class ExplainedExpressions:
         notes = tuple(
             note
             for note in result.language_notes
-            if not self.covers(note.original_excerpt)
+            if not self.repeated_by(note)
         )
         if hints == result.glossary_hints and notes == result.language_notes:
             return result
@@ -94,11 +118,33 @@ def _overlaps(first: Sequence[str], second: Sequence[str]) -> bool:
     shorter, longer = sorted((first, second), key=len)
     if 2 * len(shorter) < len(longer):
         return False
-    if len(shorter) == 1 and len(shorter[0]) < _MIN_STEM:
+    return _contains(longer, shorter)
+
+
+def _contains(text: Sequence[str], expression: Sequence[str]) -> bool:
+    """Стоит ли значимое выражение в тексте целиком, подряд, с точностью до словоформ."""
+    if not _significant(expression) or len(expression) > len(text):
         return False
     return any(
-        _same_words(shorter, longer[start : start + len(shorter)])
-        for start in range(len(longer) - len(shorter) + 1)
+        _same_words(expression, text[start : start + len(expression)])
+        for start in range(len(text) - len(expression) + 1)
+    )
+
+
+def _mentions(text: Sequence[str], expression: Sequence[str]) -> bool:
+    """Называет ли текст выражение или его непрерывную часть не меньше половины слов."""
+    shortest = (len(expression) + 1) // 2
+    return any(
+        _contains(text, expression[start : start + size])
+        for size in range(len(expression), shortest - 1, -1)
+        for start in range(len(expression) - size + 1)
+    )
+
+
+def _significant(expression: Sequence[str]) -> bool:
+    """Годится ли выражение для частичного совпадения: не одно короткое служебное слово."""
+    return bool(expression) and not (
+        len(expression) == 1 and len(expression[0]) < _MIN_STEM
     )
 
 

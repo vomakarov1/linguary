@@ -33,6 +33,7 @@ from linguary.domain import (
     ConceptType,
     DocumentBlock,
     DocumentSection,
+    GlossaryCandidate,
     GlossarySnapshot,
     GlossarySnapshotEntry,
     InlineAnnotation,
@@ -412,6 +413,97 @@ def test_footnote_backlink_does_not_reach_the_model() -> None:
     assert "↩" not in context.request.input_text
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param("chapter2.xhtml#nref1", id="sibling-file"),
+        pytest.param("../Text/chapter2.xhtml#nref1", id="other-folder"),
+    ],
+)
+def test_backlink_of_notes_page_into_another_file_does_not_reach_the_model(
+    target: str,
+) -> None:
+    """Ссылка возврата со страницы сносок ведёт в другой файл и отсекается так же (Д-2).
+
+    У отдельной страницы сносок возврат всегда уходит в главу, где стоит ссылка на сноску:
+    без этого значок «↩» доходил до модели и оставался мёртвым в переводе.
+    """
+    text = "Duskmere was founded in a single rainy spring. ↩"
+    footnote = DocumentBlock.create(
+        document_id=BOOK_ID,
+        section_id=SECTION_ID,
+        type=BlockType.FOOTNOTE,
+        order=0,
+        text=text,
+        source_reference=SourceReference(
+            resource_path="notes.xhtml", structural_path="/body/aside[1]/p[1]"
+        ),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.LINK,
+                start=text.index("↩"),
+                end=len(text),
+                target=target,
+            ),
+        ),
+    )
+    unit = make_unit((footnote,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((footnote,))
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+    assert "a single rainy spring." in context.request.input_text
+    assert "↩" not in context.request.input_text
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param("https://example.org/duskmere#history", id="external-url"),
+        pytest.param("chapter2.xhtml", id="file-without-anchor"),
+    ],
+)
+def test_footnote_ending_with_an_outside_link_keeps_its_text(target: str) -> None:
+    """Ссылка на внешний адрес или на файл без якоря — текст сноски, а не возврат."""
+    text = "See the town chronicle."
+    footnote = DocumentBlock.create(
+        document_id=BOOK_ID,
+        section_id=SECTION_ID,
+        type=BlockType.FOOTNOTE,
+        order=0,
+        text=text,
+        source_reference=SourceReference(
+            resource_path="notes.xhtml", structural_path="/body/aside[1]/p[1]"
+        ),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.LINK,
+                start=text.index("town chronicle."),
+                end=len(text),
+                target=target,
+            ),
+        ),
+    )
+    unit = make_unit((footnote,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((footnote,))
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+    assert "See the town chronicle." in context.request.input_text
+
+
 def test_link_inside_a_paragraph_survives_for_the_model() -> None:
     """Отсечение хвоста касается только сноски: обычная ссылка абзаца остаётся текстом."""
     text = "Netherfield Park is let at last."
@@ -563,3 +655,150 @@ def test_notes_page_has_no_before_you_read_to_protect() -> None:
 
     assert context.explained_expressions == ()
     assert "уже объяснены до начала чтения" not in context.request.input_text
+
+
+#: Указания главы 2 из живого прогона: модель назначила в них переводы и род вопреки
+#: запрету промпта, а пользователь потом исправил оба решения в глоссарии (Д-1).
+STALE_CHAPTER_INSTRUCTIONS = "\n".join(
+    (
+        "1. Сохранять иронию рассказчика.",
+        "2. Топоним «Duskmere» переводить строго по глоссарию — «Даскмир».",
+        "3. Рен Колдер — сохранять мужской род согласно принятому решению.",
+        "4. Рен Колдер говорит отрывисто, короткими фразами; "
+        "к Селене обращается «госпожа».",
+    )
+)
+
+
+def user_decisions_snapshot(status: TermStatus = TermStatus.APPROVED) -> GlossarySnapshot:
+    """Снимок запуска с решениями пользователя по имени и топониму."""
+    return GlossarySnapshot(
+        entries=(
+            GlossarySnapshotEntry(
+                source_text="Wren Calder",
+                translation="Рен Колдер",
+                type=ConceptType.PERSON,
+                status=status,
+                note="Женский род во всех главах",
+            ),
+            GlossarySnapshotEntry(
+                source_text="Duskmere",
+                translation="Даскмер",
+                type=ConceptType.PLACE,
+                status=status,
+            ),
+        )
+    )
+
+
+def context_with_instructions(
+    instructions: str, snapshot: GlossarySnapshot
+) -> str:
+    """Текст запроса обработки главы с указаниями и кандидатами её анализа."""
+    blocks = make_blocks(1)
+    unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section(blocks)
+    analysis = make_analysis(unit)
+    analysis = replace(
+        analysis,
+        translation_instructions=instructions,
+        glossary_candidates=(
+            GlossaryCandidate.create(
+                id="candidate-1",
+                analysis_id=analysis.id,
+                source_text="Duskmere",
+                type=ConceptType.PLACE,
+                suggested_translation="Даскмир",
+                confidence=0.9,
+                model_flagged_review=False,
+                confidence_threshold=0.5,
+            ),
+        ),
+    )
+    return ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=snapshot,
+    ).request.input_text
+
+
+@pytest.mark.parametrize("status", [TermStatus.APPROVED, TermStatus.LOCKED])
+def test_user_decision_reaches_the_model_as_mandatory(status: TermStatus) -> None:
+    """Принятое, исправленное и зафиксированное решение модель получает обязательным (Д-1)."""
+    text = context_with_instructions(CHAPTER_INSTRUCTIONS, user_decisions_snapshot(status))
+
+    mandatory = text.index("Обязательные переводческие решения книги")
+    assert mandatory < text.index("- Duskmere [place] -> Даскмер")
+    assert mandatory < text.index("- Wren Calder [person] -> Рен Колдер")
+    assert "Необязательные подсказки глоссария" not in text
+    assert "Обязательных переводческих указаний по этой книге нет." not in text
+
+
+def test_chapter_instructions_contradicting_user_decisions_are_dropped() -> None:
+    """Указание главы с другим переводом или другим родом решение глоссария не перекрывает.
+
+    Живой прогон, дефект Д-1: указания главы 2 называли «Даскмир» и мужской род, хотя
+    пользователь исправил топоним на «Даскмер» и указал женский род, — и глава 2 вышла
+    с «Даскмира» и «Рен ответил».
+    """
+    text = context_with_instructions(STALE_CHAPTER_INSTRUCTIONS, user_decisions_snapshot())
+
+    assert "Даскмир" not in text
+    assert "мужской род" not in text
+    assert "1. Сохранять иронию рассказчика." in text
+    assert "говорит отрывисто" in text
+    assert "Рен Колдер (Женский род во всех главах)" in text
+
+
+def test_prompt_puts_glossary_decisions_above_chapter_instructions() -> None:
+    """Контекст прямо говорит, что решение глоссария сильнее указаний главы."""
+    text = context_with_instructions(CHAPTER_INSTRUCTIONS, user_decisions_snapshot())
+
+    assert "сильнее указаний переводчику главы" in text
+
+
+def test_skipped_decisions_leave_chapter_instructions_intact() -> None:
+    """Пропущенный элемент остаётся подсказкой и указаний главы не вытесняет."""
+    text = context_with_instructions(
+        STALE_CHAPTER_INSTRUCTIONS, user_decisions_snapshot(TermStatus.SUGGESTED)
+    )
+
+    assert STALE_CHAPTER_INSTRUCTIONS in text
+    assert "Обязательных переводческих указаний по этой книге нет." in text
+
+
+def test_footnote_that_is_a_link_entirely_keeps_its_text() -> None:
+    """Сноска, целиком ставшая ссылкой в книгу, не теряет текст: возвратом она не бывает."""
+    text = "See chapter two."
+    footnote = DocumentBlock.create(
+        document_id=BOOK_ID,
+        section_id=SECTION_ID,
+        type=BlockType.FOOTNOTE,
+        order=0,
+        text=text,
+        source_reference=SourceReference(
+            resource_path="notes.xhtml", structural_path="/body/aside[1]/p[1]"
+        ),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.LINK,
+                start=0,
+                end=len(text),
+                target="chapter2.xhtml#start",
+            ),
+        ),
+    )
+    unit = make_unit((footnote,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((footnote,))
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+    assert "See chapter two." in context.request.input_text

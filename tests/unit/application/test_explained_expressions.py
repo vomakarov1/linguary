@@ -97,6 +97,58 @@ def test_required_hints_survive_when_all_of_them_repeat() -> None:
     assert filtered.language_notes == ()
 
 
+def test_note_with_whole_sentence_excerpt_explaining_the_expression_is_a_repeat() -> None:
+    """Заметка, чей отрывок — вся фраза, но объясняет она выражение `Before You Read`, уходит.
+
+    Модель часто берёт в отрывок заметки целое предложение. По отрывку такой повтор
+    не узнать — он больше чем вдвое длиннее выражения, — зато его выдаёт сама заметка:
+    она называет объяснённое выражение (живой прогон, дефект Д-3).
+    """
+    explained = ExplainedExpressions(["gatekeeper's edge"])
+    result = _translated(
+        LanguageNote(
+            id="ln-ch02-001",
+            block_id="block-1",
+            original_excerpt="her voice had lost its dry, gatekeeper’s edge entirely",
+            note=(
+                "Gatekeeper's edge — «резкость привратницы»: edge здесь — "
+                "резкость, острота тона."
+            ),
+        ),
+    )
+
+    assert explained.without_repeats(result).language_notes == ()
+
+
+def test_note_on_a_long_sentence_explaining_something_else_survives() -> None:
+    """Заметка к длинной фразе, где выражение лишь встретилось, а объясняется другое, остаётся."""
+    explained = ExplainedExpressions(["heaved and groaned"])
+    note = LanguageNote(
+        id="ln-ch01-003",
+        block_id="block-1",
+        original_excerpt=(
+            "the old house heaved and groaned while she had no business being there"
+        ),
+        note="Have no business + Ving — идиома «не положено, незачем».",
+    )
+    result = _translated(note)
+
+    assert explained.without_repeats(result).language_notes == (note,)
+
+
+def test_short_word_in_note_text_does_not_make_a_repeat() -> None:
+    """Короткое общее слово объяснённого выражения в тексте заметки повтором не делает."""
+    explained = ExplainedExpressions(["heave to"])
+    note = LanguageNote(
+        id="ln-ch01-004",
+        block_id="block-1",
+        original_excerpt="they had to heave to before the storm reached the long pier",
+        note="Reached the pier — «дошёл до», предлог to здесь не нужен.",
+    )
+
+    assert explained.without_repeats(_translated(note)).language_notes == (note,)
+
+
 def test_without_expressions_result_is_unchanged() -> None:
     """Глава без `Before You Read` ничего не отсеивает."""
     result = BlockProcessingResult(
@@ -107,6 +159,16 @@ def test_without_expressions_result_is_unchanged() -> None:
     )
 
     assert ExplainedExpressions([" "]).without_repeats(result) is result
+
+
+def _translated(*notes: LanguageNote) -> BlockProcessingResult:
+    """Результат блока `TRANSLATE` с переданными заметками."""
+    return BlockProcessingResult(
+        block_id="block-1",
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Перевод.",
+        language_notes=notes,
+    )
 
 
 def _note(note_id: str, excerpt: str) -> LanguageNote:

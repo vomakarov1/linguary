@@ -6,6 +6,7 @@ import pytest
 from analysis_fakes import (
     BOOK_ID,
     CONFIDENCE_THRESHOLD,
+    TARGET_LANGUAGE,
     FakeUnitOfWork,
     analysis_reply,
     make_analysis_block,
@@ -27,6 +28,9 @@ from linguary.domain import (
     BlockType,
     ConceptType,
     CoverageStatus,
+    TermConcept,
+    TermStatus,
+    TermVariant,
     TokenUsage,
 )
 
@@ -199,6 +203,86 @@ async def test_repeated_analysis_skips_candidates_of_following_chapters() -> Non
     request = client.requests[0].input_text
     assert "Mr. Bennet" in request
     assert "Mr. Darcy" not in request
+
+
+@pytest.mark.parametrize(
+    ("status", "expected", "absent"),
+    [
+        pytest.param(
+            TermStatus.APPROVED,
+            "- Duskmere [place] -> Даскмер (несклоняемое)",
+            "Даскмир",
+            id="corrected",
+        ),
+        pytest.param(
+            TermStatus.LOCKED,
+            "- Duskmere [place] -> Даскмер (несклоняемое)",
+            "Даскмир",
+            id="locked",
+        ),
+        pytest.param(
+            TermStatus.SUGGESTED,
+            "- Duskmere [place] -> Даскмир",
+            "Даскмер",
+            id="skipped",
+        ),
+    ],
+)
+async def test_user_decision_outranks_model_candidate_in_next_chapter(
+    status: TermStatus, expected: str, absent: str
+) -> None:
+    """Анализ следующей главы видит решение пользователя, а не вариант модели (Д-1).
+
+    Пропущенный элемент решением не считается: главе идёт вариант модели.
+    """
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Chapter {number} text.",),
+        )
+        for number in (1, 2)
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    unit_of_work.analyses.save(
+        BOOK_ID,
+        make_chapter_analysis(
+            candidates=(
+                make_analysis_candidate(
+                    source_text="Duskmere",
+                    suggested_translation="Даскмир",
+                    type=ConceptType.PLACE,
+                ),
+            ),
+        ),
+    )
+    unit_of_work.glossary.save(
+        TermConcept(
+            id="concept-1",
+            book_id=BOOK_ID,
+            type=ConceptType.PLACE,
+            canonical_source_text="DUSKMERE",
+            status=status,
+            note="несклоняемое",
+            variants=(
+                TermVariant(
+                    concept_id="concept-1",
+                    language=TARGET_LANGUAGE,
+                    text="Даскмер",
+                    status=status,
+                ),
+            ),
+        )
+    )
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    await scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-2"))
+
+    request = client.requests[0].input_text
+    assert expected in request
+    assert absent not in request
 
 
 async def test_chapter_without_text_is_analysed_without_the_model() -> None:

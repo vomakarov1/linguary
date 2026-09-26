@@ -53,7 +53,11 @@ def test_two_active_runs_are_rejected() -> None:
 
 
 def test_glossary_snapshot_selects_mandatory_entries() -> None:
-    """Модели как обязательные передаются только зафиксированные решения."""
+    """Модели как обязательные передаются решения пользователя, подсказки модели — нет.
+
+    Принятое и исправленное решение (`approved`) — такое же решение пользователя, как
+    зафиксированное: иначе указание главы с прежним вариантом модели перекрывало его (Д-1).
+    """
     snapshot = GlossarySnapshot(
         entries=(
             GlossarySnapshotEntry(
@@ -68,10 +72,17 @@ def test_glossary_snapshot_selects_mandatory_entries() -> None:
                 type=ConceptType.TERM,
                 status=TermStatus.APPROVED,
             ),
+            GlossarySnapshotEntry(
+                source_text="Newspeak",
+                translation="новояз",
+                type=ConceptType.TERM,
+                status=TermStatus.SUGGESTED,
+            ),
         )
     )
     assert tuple(entry.source_text for entry in snapshot.mandatory_entries) == (
         "Winston Smith",
+        "doublethink",
     )
 
 

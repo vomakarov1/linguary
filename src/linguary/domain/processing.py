@@ -268,8 +268,8 @@ class GlossarySnapshot:
 
     @property
     def mandatory_entries(self) -> tuple[GlossarySnapshotEntry, ...]:
-        """Решения, которые передаются модели как обязательные."""
-        return tuple(entry for entry in self.entries if entry.status.is_mandatory)
+        """Решения пользователя, которые передаются модели как обязательные."""
+        return tuple(entry for entry in self.entries if entry.status.is_user_decision)
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from linguary.application.errors import ApplicationError
 from linguary.domain import (
@@ -221,8 +221,9 @@ def build_glossary_review(
 def glossary_snapshot(review: GlossaryReview, *, language: str) -> GlossarySnapshot:
     """Снимок глоссария, с которым выполняется запуск обработки (PRD § 11, § 13).
 
-    Решение уходит модели своим статусом: `locked` — обязательным переводческим указанием,
-    `approved` и `suggested` — необязательной подсказкой. Элемент без решения попадает
+    Решение уходит модели своим статусом: решение пользователя — `approved` (принято
+    или исправлено) и `locked` — обязательным переводческим указанием, пропущенный
+    элемент (`suggested`) — необязательной подсказкой. Элемент без решения попадает
     в снимок подсказкой с вариантом модели: внимания он не требовал.
     """
     return GlossarySnapshot(
@@ -232,6 +233,46 @@ def glossary_snapshot(review: GlossaryReview, *, language: str) -> GlossarySnaps
             if (entry := _snapshot_entry(item, language=language)) is not None
         )
     )
+
+
+def candidates_with_decisions(
+    candidates: Iterable[GlossaryCandidate],
+    decisions: Iterable[TermConcept],
+    *,
+    language: str,
+) -> tuple[GlossaryCandidate, ...]:
+    """Кандидаты предыдущих глав, в которых решение пользователя заменило вариант модели.
+
+    Анализ следующей главы повторяет накопленные решения книги дословно, поэтому
+    ему нужен вариант пользователя: иначе глава получает и повторяет в своих указаниях
+    вариант модели, который пользователь уже исправил (PRD § 11). Решение сопоставляется
+    с кандидатом ключом `glossary_key` и заменяет вариант перевода, тип и указание;
+    пропущенный элемент решением не считается, и у него остаётся вариант модели.
+    Кандидаты с решением идут первыми: ограничение контекста их не отрезает.
+    """
+    decided: dict[str, list[TermConcept]] = {}
+    for concept in decisions:
+        decided.setdefault(glossary_key(concept.canonical_source_text), []).append(concept)
+    with_decision: list[GlossaryCandidate] = []
+    without_decision: list[GlossaryCandidate] = []
+    for candidate in candidates:
+        decision, _ = _chosen_decision(
+            decided.get(glossary_key(candidate.source_text), ()),
+            shown=candidate.source_text.strip(),
+        )
+        variant = decision.variant_for(language) if decision is not None else None
+        if decision is None or variant is None or not decision.status.is_user_decision:
+            without_decision.append(candidate)
+            continue
+        with_decision.append(
+            replace(
+                candidate,
+                type=decision.type,
+                suggested_translation=variant.text,
+                note=decision.note,
+            )
+        )
+    return (*with_decision, *without_decision)
 
 
 def _review_item(
@@ -393,5 +434,6 @@ __all__ = [
     "GlossaryNotFoundError",
     "GlossaryReviewItem",
     "build_glossary_review",
+    "candidates_with_decisions",
     "glossary_snapshot",
 ]
