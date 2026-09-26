@@ -1,0 +1,39 @@
+[project]
+name = "linguary"
+version = "0.1.0"
+description = "Локальная обработка художественных EPUB через LLM: перевод, словарные подсказки и языковые заметки"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.116",
+    "uvicorn[standard]>=0.35",
+    "jinja2>=3.1",
+    "sqlalchemy>=2.0",
+    "alembic>=1.16",
+    "pydantic>=2.11",
+    "ebooklib>=0.19",
+    "lxml>=5.4",
+    "httpx>=0.28",
+    "python-multipart>=0.0.32",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/linguary"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "pytest-asyncio>=1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+asyncio_mode = "auto"
+markers = [
+    "slow: медленный тест (реальный LLM, большие EPUB); исключается через -m \"not slow\"",
+]

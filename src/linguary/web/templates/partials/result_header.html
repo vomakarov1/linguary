@@ -1,0 +1,27 @@
+<section class="page-head" data-result-header data-result-url="/books/{{ data.book_id }}/result">
+  <div>
+    <h1>Результат</h1>
+    {% if export_task %}
+      <p role="status">Сборка EPUB: {{ export_task.status_label }}.</p>
+    {% elif data.status == "READY_TO_EXPORT" %}
+      <p>EPUB нужно собрать после последних изменений.</p>
+    {% elif data.status == "COMPLETED" %}
+      <p>{{ data.export_validation_status_label or "EPUB собран" }}</p>
+    {% else %}
+      <p>EPUB можно собрать после завершения обработки книги.</p>
+    {% endif %}
+    {% if data.epubcheck_hint %}<p>{{ data.epubcheck_hint }}</p>{% endif %}
+  </div>
+  {% if data.status in ("READY_TO_EXPORT", "COMPLETED") or export_task %}
+    <div class="actions result-actions">
+      {% if data.status == "COMPLETED" and not export_task %}
+        <a class="button-link" href="/books/{{ data.book_id }}/download">Скачать EPUB</a>
+      {% endif %}
+      <form method="post" action="/books/{{ data.book_id }}/export" data-export-form>
+        <button type="submit" {% if export_task and export_task.status in ("pending", "running") %}disabled{% endif %}>
+          {% if export_task and export_task.status in ("pending", "running") %}Собирается{% else %}Собрать EPUB{% endif %}
+        </button>
+      </form>
+    </div>
+  {% endif %}
+</section>

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} - Linguary{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>{{ title }}</h1>
+  </div>
+  <span class="status">Ошибка {{ status_code }}</span>
+</section>
+
+<section class="panel" role="alert">
+  {% for message in messages %}
+    <p>{{ message }}</p>
+  {% endfor %}
+  <p class="actions">
+    <a class="button-link" href="{{ back_url }}">Вернуться назад</a>
+    {% if back_url != "/books" %}<a href="/books">К списку книг</a>{% endif %}
+  </p>
+</section>
+{% endblock %}

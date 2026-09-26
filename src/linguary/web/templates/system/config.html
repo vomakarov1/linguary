@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Конфигурация - Linguary{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Конфигурация</h1>
+    <p>{{ data.server.base_url }}</p>
+  </div>
+  {% if data.llm.is_ready %}<span class="status ok">LLM настроена</span>{% else %}<span class="status">LLM не настроена</span>{% endif %}
+</section>
+
+<section class="metrics">
+  <div><strong>{{ data.llm.provider }}</strong><span>Провайдер</span></div>
+  <div><strong>{{ data.llm.model or "—" }}</strong><span>Модель</span></div>
+  <div><strong>{% if data.epubcheck.available %}Да{% else %}Нет{% endif %}</strong><span>EPUBCheck</span></div>
+  <div><strong>{% if data.server.is_local_only %}Локально{% else %}Сеть{% endif %}</strong><span>Сервер</span></div>
+</section>
+
+<section class="panel">
+  <h2>Внешний провайдер LLM</h2>
+  <p class="notice">{{ data.external_llm_warning }}</p>
+  {% if data.llm.hint %}<p>{{ data.llm.hint }}</p>{% endif %}
+</section>
+
+<section class="panel">
+  <h2>Хранилище</h2>
+  <p>{{ data.storage.data_root }}</p>
+  {% if data.server.warning %}<p>{{ data.server.warning }}</p>{% endif %}
+</section>
+
+{% if not data.epubcheck.available %}
+<section class="panel">
+  <h2>Проверка EPUB</h2>
+  {% if data.epubcheck.reason %}<p>{{ data.epubcheck.reason }}</p>{% endif %}
+  {% if data.epubcheck.hint %}<p>{{ data.epubcheck.hint }}</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

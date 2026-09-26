@@ -1,0 +1,20 @@
+{
+  "translation_instructions": "Сохранять ясный повествовательный тон и переводить имена единообразно.",
+  "chapter_summary": "Wren Calder follows the road to Duskmere and learns that the starglass matters to the town.",
+  "glossary_candidates": [
+    {
+      "source_text": "Wren Calder",
+      "type": "person",
+      "suggested_translation": "Рен Колдер",
+      "confidence": 0.95,
+      "model_flagged_review": false,
+      "note": "женский род"
+    }
+  ],
+  "before_you_read": [
+    {
+      "expression": "had no business being",
+      "explanation": "Оборот «не должно было быть»: говорящий подчёркивает, что происходящее неправильно."
+    }
+  ]
+}

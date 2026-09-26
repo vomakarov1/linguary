@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Результат - Linguary{% endblock %}
+{% block content %}
+{% include "partials/result_header.html" %}
+
+{% set book_id = data.book_id %}
+{% set active_tab = "result" %}
+{% include "partials/book_tabs.html" %}
+
+{% if data.status in ("PROCESSING", "READY_TO_EXPORT", "COMPLETED") %}
+  <section class="panel action-panel">
+    <p>Возврат к проверке глоссария удалит текущие результаты обработки. Готовые переводы,
+      словарные подсказки и Language Notes будут удалены. Разобранная книга и результаты
+      анализа глав сохранятся.</p>
+    <form class="actions" method="post" action="/books/{{ data.book_id }}/reset">
+      <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю удаление результатов</label>
+      <button type="submit">Вернуться к проверке глоссария</button>
+    </form>
+  </section>
+{% endif %}
+
+{% for chapter in data.chapters %}
+  <section class="chapter">
+    <h2>{% if chapter.is_notes %}Сноски - {{ chapter.title }}{% else %}Глава {{ chapter.chapter_number }} - {{ chapter.title }}{% endif %}</h2>
+    {% for block in chapter.blocks %}
+      {% set book_id = data.book_id %}
+      {% include "partials/result_block.html" %}
+    {% endfor %}
+  </section>
+{% endfor %}
+{% endblock %}

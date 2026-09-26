@@ -8,3 +8,12 @@
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.egg-info/

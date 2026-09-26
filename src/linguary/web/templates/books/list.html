@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Книги - Linguary{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Книги</h1>
+    <p>Локальная очередь EPUB и состояние обработки.</p>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Новая книга</h2>
+  <p class="notice">{{ external_llm_warning }}</p>
+  <form class="upload-form" action="/books/upload" method="post" enctype="multipart/form-data">
+    <label>EPUB <input type="file" name="file" accept=".epub" required></label>
+    <label>Исходный язык <input name="source_language" value="en" required></label>
+    <label>Целевой язык <input name="target_language" value="ru" required></label>
+    <button type="submit">Загрузить</button>
+  </form>
+</section>
+
+<section class="list">
+  {% for book in data.books %}
+    <article class="row-card">
+      <div>
+        <h2><a href="/books/{{ book.id }}">{{ book.title }}</a></h2>
+        <p>{{ book.source_language }} -> {{ book.target_language }}</p>
+      </div>
+      <span class="status">{{ book.status_label }}</span>
+    </article>
+  {% else %}
+    <p class="empty">Книг пока нет.</p>
+  {% endfor %}
+</section>
+{% endblock %}
