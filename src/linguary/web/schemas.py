@@ -116,6 +116,7 @@ class GlossaryItemResponse(BaseModel):
     status_label: str | None = None
     confidence: float
     model_flagged_review: bool
+    model_doubts: bool
     has_translation_conflict: bool
     requires_review: bool
     is_decided: bool
@@ -147,6 +148,7 @@ class GlossaryItemResponse(BaseModel):
             ),
             confidence=item.confidence,
             model_flagged_review=item.model_flagged_review,
+            model_doubts=item.model_doubts,
             has_translation_conflict=item.has_translation_conflict,
             requires_review=item.requires_review,
             is_decided=item.is_decided,

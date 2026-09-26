@@ -20,7 +20,10 @@ def test_glossary_review_exposes_pending_items(
 ) -> None:
     """Экран глоссария показывает идентификатор и ожидающее решение первым."""
     candidate = glossary_candidate()
-    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+    scenario = store_book(
+        application, glossary_candidates={0: (candidate,)},
+        chapters=(("Mr. Bennet " * 5,),),
+    )
 
     response = client.get(f"/books/{scenario.book_id}/glossary")
 
@@ -41,6 +44,7 @@ def test_glossary_review_exposes_pending_items(
                 "status_label": None,
                 "confidence": 0.95,
                 "model_flagged_review": False,
+                "model_doubts": False,
                 "has_translation_conflict": False,
                 "requires_review": True,
                 "is_decided": False,
@@ -136,6 +140,7 @@ def test_accept_all_required_glossary_items(
     scenario = store_book(
         application,
         glossary_candidates={0: (first, second)},
+        chapters=(("Mr. Bennet Longbourn " * 5,),),
     )
 
     response = client.post(f"/books/{scenario.book_id}/glossary/accept-all")
@@ -284,7 +289,8 @@ def test_processing_start_is_rejected_while_review_is_incomplete(
     """Необработанный важный термин не даёт открыть запуск обработки."""
     candidate = glossary_candidate()
     scenario = store_book(
-        configured_application, glossary_candidates={0: (candidate,)}
+        configured_application, glossary_candidates={0: (candidate,)},
+        chapters=(("Mr. Bennet " * 5,),),
     )
 
     response = configured_client.post(f"/books/{scenario.book_id}/process")

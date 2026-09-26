@@ -299,13 +299,29 @@ def test_glossary_screen_shows_other_spellings_of_the_item(
     second = glossary_candidate(
         candidate_id="candidate-second", source_text="MR BENNET", confidence=0.9
     )
-    scenario = store_book(application, glossary_candidates={0: (first, second)})
+    scenario = store_book(
+        application, glossary_candidates={0: (first, second)},
+        chapters=(("Mr. Bennet " * 5,),),
+    )
 
     response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
 
     assert "<h2>Mr. Bennet</h2>" in response.text
     assert "Другие написания: MR BENNET." in response.text
     assert "Требуют решения: 1" in response.text
+
+
+def test_glossary_page_marks_model_doubts(
+    client: TestClient, application: Application
+) -> None:
+    candidate = glossary_candidate(model_flagged_review=True)
+    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+
+    response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Модель сомневается." in response.text
+    assert "Требуют решения: 0" in response.text
 
 
 def test_book_detail_screen_starts_processing_after_glossary_is_complete(

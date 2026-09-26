@@ -27,7 +27,7 @@ class ConceptType(StrEnum):
 
     @property
     def always_requires_review(self) -> bool:
-        """Типы, решение по которым пользователь принимает всегда."""
+        """Типы, требующие решения при частом упоминании."""
         return self is not ConceptType.TERM
 
 
@@ -198,20 +198,20 @@ def compute_requires_review(
     model_flagged_review: bool,
     confidence_threshold: float,
     has_translation_conflict: bool = False,
+    is_frequent: bool = True,
 ) -> bool:
     """Требует ли кандидат внимания пользователя (PRD § 12).
 
-    Достаточно одного условия: тип понятия — имя, место, организация или вымышленное
-    понятие; модель пометила кандидата; уверенность ниже настраиваемого порога;
-    при слиянии фрагментов анализа для одного исходного текста получены разные варианты.
+    Частый тип или пометка модели требуют решения; низкая уверенность и конфликт
+    переводов требуют его независимо от частоты. По умолчанию понятие считается
+    частым, чтобы правило отдельных глав осталось прежним.
     """
     if not 0.0 <= confidence_threshold <= 1.0:
         raise GlossaryError(
             f"порог уверенности вне диапазона 0..1: {confidence_threshold}"
         )
     return (
-        type.always_requires_review
-        or model_flagged_review
+        (is_frequent and (type.always_requires_review or model_flagged_review))
         or confidence < confidence_threshold
         or has_translation_conflict
     )

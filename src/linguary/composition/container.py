@@ -138,6 +138,8 @@ class Application:
             glossary_confidence_threshold=(
                 self.settings.checks.glossary_confidence_threshold
             ),
+            glossary_review_min_mentions=self.settings.checks.glossary_review_min_mentions,
+            glossary_review_min_chapters=self.settings.checks.glossary_review_min_chapters,
             llm_settings_snapshot=_llm_snapshot(self.settings),
         )
 
@@ -263,6 +265,8 @@ def build_application(
             glossary_confidence_threshold=(
                 app_settings.checks.glossary_confidence_threshold
             ),
+            glossary_review_min_mentions=app_settings.checks.glossary_review_min_mentions,
+            glossary_review_min_chapters=app_settings.checks.glossary_review_min_chapters,
         ),
         reset_processing=ResetProcessing(unit_of_work=unit_of_work),
         retry_task=RetryTask(unit_of_work=unit_of_work),

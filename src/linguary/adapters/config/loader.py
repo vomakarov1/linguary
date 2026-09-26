@@ -102,6 +102,8 @@ _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
 #: Разбор значений секции `[checks]`.
 _CHECK_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "glossary_confidence_threshold": _as_float,
+    "glossary_review_min_mentions": _as_int,
+    "glossary_review_min_chapters": _as_int,
     "target_language_min_share": _as_float,
     "language_check_min_length": _as_int,
     "repetition_ngram_size": _as_int,

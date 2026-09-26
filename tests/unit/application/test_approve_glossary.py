@@ -9,6 +9,8 @@ from analysis_fakes import (
     FakeUnitOfWork,
     make_analysis_candidate,
     make_chapter_analysis,
+    make_analysis_document,
+    make_analysis_section,
     make_glossary_book,
     sequential_ids,
 )
@@ -26,6 +28,7 @@ from linguary.application.use_cases.approve_glossary import (
     StartProcessing,
     StartProcessingCommand,
 )
+from linguary.adapters.config.settings import CheckSettings, SettingsError
 from linguary.domain import (
     BookStatus,
     BookStatusTransitionError,
@@ -58,9 +61,15 @@ def glossary_book(
     status: BookStatus = BookStatus.GLOSSARY_REVIEW,
 ) -> FakeUnitOfWork:
     """Книга с одной проанализированной главой и её кандидатами глоссария."""
-    return make_glossary_book(
+    unit_of_work = make_glossary_book(
         (make_chapter_analysis(candidates=candidates),), status=status
     )
+    unit_of_work.documents.save(make_analysis_document((
+        make_analysis_section(texts=(" ".join(
+            candidate.source_text for candidate in candidates for _ in range(5)
+        ),)),
+    )))
+    return unit_of_work
 
 
 def approve(unit_of_work: FakeUnitOfWork) -> ApproveGlossary:
@@ -103,6 +112,37 @@ def started_book() -> FakeUnitOfWork:
     approve(unit_of_work)(command(GlossaryDecision.ACCEPT))
     start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
     return unit_of_work
+
+
+def test_start_allowed_when_only_rare_names_undecided() -> None:
+    unit_of_work = glossary_book(make_analysis_candidate())
+    unit_of_work.documents.save(make_analysis_document((
+        make_analysis_section(texts=("Mr. Bennet appeared once.",)),
+    )))
+    assert start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
+
+
+def test_thresholds_from_settings_applied() -> None:
+    settings = CheckSettings(glossary_review_min_mentions=1)
+    unit_of_work = glossary_book(make_analysis_candidate())
+    unit_of_work.documents.save(make_analysis_document((
+        make_analysis_section(texts=("Mr. Bennet appeared once.",)),
+    )))
+    service = ApproveGlossary(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+        glossary_review_min_mentions=settings.glossary_review_min_mentions,
+        glossary_review_min_chapters=settings.glossary_review_min_chapters,
+    )
+    assert service.review(BOOK_ID).items[0].requires_review
+    with pytest.raises(SettingsError):
+        CheckSettings(glossary_review_min_chapters=0)
+
+
+def test_accept_all_touches_only_items_requiring_review() -> None:
+    unit_of_work = glossary_book(make_analysis_candidate(), hint_candidate())
+    concepts = approve(unit_of_work).accept_all_awaiting(BOOK_ID)
+    assert [concept.canonical_source_text for concept in concepts] == ["Mr. Bennet"]
 
 
 def test_accept_stores_approved_decision() -> None:

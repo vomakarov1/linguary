@@ -80,6 +80,50 @@ def review(
     )
 
 
+def test_review_counts_chapters_by_analyses() -> None:
+    first = make_analysis_candidate(source_text="Dracula")
+    second = make_analysis_candidate(source_text="Dracula")
+    book = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(first, second),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 0,
+        min_chapters=2,
+    )
+    assert not book.items[0].is_frequent
+
+
+def test_review_uses_mentions_for_frequency() -> None:
+    candidate = make_analysis_candidate(source_text="Dracula")
+    rare = build_glossary_review(
+        book_id=BOOK_ID, analyses=(chapter_one(candidate),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 4, min_mentions=5,
+    )
+    frequent = build_glossary_review(
+        book_id=BOOK_ID, analyses=(chapter_one(candidate),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 5, min_mentions=5,
+    )
+    assert not rare.items[0].requires_review
+    assert frequent.items[0].requires_review
+
+
+def test_model_doubts_sorted_first_among_suggestions() -> None:
+    book = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(
+            make_analysis_candidate(source_text="Alpha", type=ConceptType.TERM),
+            make_analysis_candidate(source_text="Zeta", type=ConceptType.TERM,
+                                    model_flagged_review=True),
+        ),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+    )
+    assert [item.source_text for item in book.items] == ["Zeta", "Alpha"]
+    assert book.items[0].model_doubts
+
+
 @pytest.mark.parametrize(
     "concept_type",
     [

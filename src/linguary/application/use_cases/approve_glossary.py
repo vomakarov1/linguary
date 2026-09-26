@@ -32,6 +32,7 @@ from linguary.application.glossary_review import (
     build_glossary_review,
     glossary_snapshot,
 )
+from linguary.application.mention_counter import mention_counter
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
     BookEvent,
@@ -128,10 +129,14 @@ class ApproveGlossary:
         *,
         unit_of_work: UnitOfWork,
         glossary_confidence_threshold: float,
+        glossary_review_min_mentions: int = 5,
+        glossary_review_min_chapters: int = 3,
         id_factory: IdFactory | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._glossary_confidence_threshold = glossary_confidence_threshold
+        self._glossary_review_min_mentions = glossary_review_min_mentions
+        self._glossary_review_min_chapters = glossary_review_min_chapters
         self._id_factory = id_factory or _new_id
 
     def review(self, book_id: str) -> GlossaryReview:
@@ -143,6 +148,8 @@ class ApproveGlossary:
                     transaction,
                     book_id,
                     confidence_threshold=self._glossary_confidence_threshold,
+                    min_mentions=self._glossary_review_min_mentions,
+                    min_chapters=self._glossary_review_min_chapters,
                 ),
                 book_status=book.status,
                 is_editable=book.status in EDITABLE_STATUSES,
@@ -157,6 +164,8 @@ class ApproveGlossary:
                 transaction,
                 command.book_id,
                 confidence_threshold=self._glossary_confidence_threshold,
+                min_mentions=self._glossary_review_min_mentions,
+                min_chapters=self._glossary_review_min_chapters,
             )
             item = review.item_for(command.source_text)
             if item is None:
@@ -179,6 +188,8 @@ class ApproveGlossary:
                 transaction,
                 book,
                 confidence_threshold=self._glossary_confidence_threshold,
+                min_mentions=self._glossary_review_min_mentions,
+                min_chapters=self._glossary_review_min_chapters,
             )
         return concept
 
@@ -195,6 +206,8 @@ class ApproveGlossary:
                 transaction,
                 book_id,
                 confidence_threshold=self._glossary_confidence_threshold,
+                min_mentions=self._glossary_review_min_mentions,
+                min_chapters=self._glossary_review_min_chapters,
             )
             concepts = tuple(
                 self._decide(
@@ -215,6 +228,8 @@ class ApproveGlossary:
                 transaction,
                 book,
                 confidence_threshold=self._glossary_confidence_threshold,
+                min_mentions=self._glossary_review_min_mentions,
+                min_chapters=self._glossary_review_min_chapters,
             )
         return concepts
 
@@ -233,6 +248,8 @@ class ApproveGlossary:
                 transaction,
                 command.book_id,
                 confidence_threshold=self._glossary_confidence_threshold,
+                min_mentions=self._glossary_review_min_mentions,
+                min_chapters=self._glossary_review_min_chapters,
             )
             item = review.item_for_concept(command.concept_id)
             if item is None:
@@ -282,6 +299,8 @@ class ApproveGlossary:
                 transaction,
                 book,
                 confidence_threshold=self._glossary_confidence_threshold,
+                min_mentions=self._glossary_review_min_mentions,
+                min_chapters=self._glossary_review_min_chapters,
             )
 
     def _decide(
@@ -328,10 +347,14 @@ class StartProcessing:
         unit_of_work: UnitOfWork,
         glossary_confidence_threshold: float,
         llm_settings_snapshot: LLMSettingsSnapshot,
+        glossary_review_min_mentions: int = 5,
+        glossary_review_min_chapters: int = 3,
         id_factory: IdFactory | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._glossary_confidence_threshold = glossary_confidence_threshold
+        self._glossary_review_min_mentions = glossary_review_min_mentions
+        self._glossary_review_min_chapters = glossary_review_min_chapters
         self._llm_settings_snapshot = llm_settings_snapshot
         self._id_factory = id_factory or _new_id
 
@@ -350,6 +373,8 @@ class StartProcessing:
                 transaction,
                 book.id,
                 confidence_threshold=self._glossary_confidence_threshold,
+                min_mentions=self._glossary_review_min_mentions,
+                min_chapters=self._glossary_review_min_chapters,
             )
             review.ensure_complete()
             started = _status_after_start(book.status)
@@ -368,7 +393,8 @@ class StartProcessing:
 
 
 def _load_review(
-    transaction: UnitOfWork, book_id: str, *, confidence_threshold: float
+    transaction: UnitOfWork, book_id: str, *, confidence_threshold: float,
+    min_mentions: int = 5, min_chapters: int = 3,
 ) -> GlossaryReview:
     """Глоссарий книги, собранный в открытой транзакции."""
     return build_glossary_review(
@@ -376,6 +402,9 @@ def _load_review(
         analyses=transaction.analyses.list_for_book(book_id),
         confidence_threshold=confidence_threshold,
         decisions=transaction.glossary.list_for_book(book_id),
+        count_mentions=mention_counter(document) if (document := transaction.documents.get(book_id)) else None,
+        min_mentions=min_mentions,
+        min_chapters=min_chapters,
     )
 
 
@@ -392,6 +421,8 @@ def _complete_review_if_ready(
     book: BookRecord,
     *,
     confidence_threshold: float,
+    min_mentions: int = 5,
+    min_chapters: int = 3,
 ) -> None:
     """Переводит книгу к запуску обработки после закрытия всех обязательных решений."""
     if book.status is not BookStatus.GLOSSARY_REVIEW:
@@ -400,6 +431,8 @@ def _complete_review_if_ready(
         transaction,
         book.id,
         confidence_threshold=confidence_threshold,
+        min_mentions=min_mentions,
+        min_chapters=min_chapters,
     )
     if review.is_complete:
         transaction.books.save(

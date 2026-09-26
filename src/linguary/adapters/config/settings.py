@@ -173,6 +173,8 @@ class CheckSettings:
     """
 
     glossary_confidence_threshold: float = 0.8
+    glossary_review_min_mentions: int = 5
+    glossary_review_min_chapters: int = 3
     target_language_min_share: float = 0.6
     language_check_min_length: int = 80
     repetition_ngram_size: int = 6
@@ -184,6 +186,9 @@ class CheckSettings:
             value: float = getattr(self, name)
             if not 0.0 <= value <= 1.0:
                 raise SettingsError(f"порог {name} вне диапазона 0..1: {value}")
+        for name in ("glossary_review_min_mentions", "glossary_review_min_chapters"):
+            if getattr(self, name) < 1:
+                raise SettingsError(f"порог {name} должен быть положительным")
         if self.language_check_min_length < 0:
             raise SettingsError("минимальная длина проверки языка не может быть отрицательной")
         if self.repetition_ngram_size < 1:

@@ -24,7 +24,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 
 from linguary.application.chapter_instructions import note_respecting_glossary
@@ -92,10 +92,16 @@ class GlossaryReviewItem:
     model_flagged_review: bool
     has_translation_conflict: bool
     requires_review: bool
+    is_frequent: bool = True
     decision: TermConcept | None = None
     suggested_note: str = ""
     spellings: tuple[str, ...] = ()
     superseded_decisions: tuple[TermConcept, ...] = ()
+
+    @property
+    def model_doubts(self) -> bool:
+        """Модель просила проверить необязательную подсказку."""
+        return self.model_flagged_review and not self.requires_review
 
     @property
     def other_spellings(self) -> tuple[str, ...]:
@@ -195,6 +201,9 @@ def build_glossary_review(
     analyses: Iterable[ChapterAnalysis],
     confidence_threshold: float,
     decisions: Iterable[TermConcept] = (),
+    count_mentions: Callable[[Sequence[str]], int] | None = None,
+    min_mentions: int = 5,
+    min_chapters: int = 3,
 ) -> GlossaryReview:
     """Собирает глоссарий книги из кандидатов всех проанализированных глав (PRD § 11-12).
 
@@ -213,6 +222,9 @@ def build_glossary_review(
             group,
             decisions=decided.get(key, ()),
             confidence_threshold=confidence_threshold,
+            count_mentions=count_mentions,
+            min_mentions=min_mentions,
+            min_chapters=min_chapters,
         )
         for key, group in grouped.items()
     )
@@ -318,18 +330,24 @@ def _review_item(
     *,
     decisions: Sequence[TermConcept],
     confidence_threshold: float,
+    count_mentions: Callable[[Sequence[str]], int] | None,
+    min_mentions: int,
+    min_chapters: int,
 ) -> GlossaryReviewItem:
     """Элемент проверки из упоминаний одного исходного текста в разных главах.
 
     Вариант перевода берётся у самой уверенной главы, а сигналы проверки объединяются:
-    пометка модели хотя бы от одной главы, тип, требующий решения всегда, и расхождение
-    вариантов перевода делают элемент требующим внимания. Правило повторяет слияние
-    фрагментов одной главы, но работает на другом уровне: там объединяются ответы модели
-    об одной главе, здесь — сохранённые кандидаты разных глав.
+    пометка модели хотя бы от одной главы, тип и расхождение вариантов перевода
+    учитываются вместе с частотой упоминаний. Здесь объединяются сохранённые
+    кандидаты разных глав.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
     spellings = spellings_by_preference(
         (candidate.source_text, candidate.confidence) for candidate in group
+    )
+    is_frequent = count_mentions is None or (
+        count_mentions(spellings) >= min_mentions
+        or len({candidate.analysis_id for candidate in group}) >= min_chapters
     )
     decision, superseded = _chosen_decision(decisions, shown=spellings[0])
     concept_type = next(
@@ -362,12 +380,14 @@ def _review_item(
         confidence=leading.confidence,
         model_flagged_review=model_flagged,
         has_translation_conflict=conflict,
+        is_frequent=is_frequent,
         requires_review=compute_requires_review(
             type=concept_type,
             confidence=leading.confidence,
             model_flagged_review=model_flagged,
             confidence_threshold=confidence_threshold,
             has_translation_conflict=conflict,
+            is_frequent=is_frequent,
         ),
         decision=decision,
         suggested_note=suggested_note,
@@ -426,7 +446,7 @@ def _decision_signature(concept: TermConcept) -> tuple[object, ...]:
     )
 
 
-def _display_order(item: GlossaryReviewItem) -> tuple[bool, bool, int, str]:
+def _display_order(item: GlossaryReviewItem) -> tuple[bool, bool, bool, int, str]:
     """Порядок показа проверки (PRD § 12).
 
     Сначала то, что ждёт решения, затем остальные требующие внимания элементы, затем
@@ -435,6 +455,7 @@ def _display_order(item: GlossaryReviewItem) -> tuple[bool, bool, int, str]:
     return (
         not item.awaits_decision,
         not item.requires_review,
+        not item.model_doubts,
         REVIEW_TYPE_ORDER.index(item.concept_type),
         item.source_text.casefold(),
     )

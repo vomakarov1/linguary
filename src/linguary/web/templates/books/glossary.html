@@ -58,6 +58,7 @@
         <p>{{ item.suggested_translation }}{% if item.translation %} -> {{ item.translation }}{% endif %}</p>
         <p class="task-state">Тип: {% for value, label in concept_types %}{% if value == item.type %}{{ label }}{% endif %}{% endfor %}.</p>
         <p class="task-state">Уверенность модели: {{ (item.confidence * 100) | round | int }}%{% if item.model_flagged_review %}; модель просит проверить вариант{% endif %}.</p>
+        {% if item.model_doubts %}<p class="task-state">Модель сомневается.</p>{% endif %}
         {% if item.is_decided %}
           <p class="task-state">Решение: {{ item.status_label }}.</p>
         {% elif not item.requires_review %}

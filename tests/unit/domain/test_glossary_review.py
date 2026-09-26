@@ -48,6 +48,27 @@ def test_confident_term_does_not_require_review() -> None:
 
 
 @pytest.mark.parametrize(
+    ("concept_type", "flagged", "confidence", "conflict", "frequent", "expected"),
+    [
+        (ConceptType.PERSON, False, 0.9, False, False, False),
+        (ConceptType.PERSON, False, 0.9, False, True, True),
+        (ConceptType.TERM, False, 0.6, False, False, True),
+        (ConceptType.TERM, False, 0.9, True, False, True),
+        (ConceptType.TERM, True, 0.9, False, False, False),
+    ],
+)
+def test_frequency_review_rule(
+    concept_type: ConceptType, flagged: bool, confidence: float,
+    conflict: bool, frequent: bool, expected: bool,
+) -> None:
+    assert compute_requires_review(
+        type=concept_type, confidence=confidence,
+        model_flagged_review=flagged, confidence_threshold=THRESHOLD,
+        has_translation_conflict=conflict, is_frequent=frequent,
+    ) is expected
+
+
+@pytest.mark.parametrize(
     ("confidence", "model_flagged_review", "conflict", "expected"),
     [
         pytest.param(0.69, False, False, True, id="confidence-below-threshold"),
