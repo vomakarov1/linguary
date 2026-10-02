@@ -79,17 +79,27 @@ class OpenAICompatibleLLMClient(LLMClient):
     ) -> LLMResponse[PayloadT]:
         """Выполняет запрос и возвращает разобранный структурированный ответ."""
         document = await self._post(_body(request, settings=self._settings))
-        choice = _choice(document)
-        truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
-        content = _content(choice)
-        payload = parse_payload(request.kind, content, truncated=truncated)
+        usage = _usage(document)
+        cost = _cost(document)
+        model = _model(document, fallback=self._settings.model)
+        try:
+            choice = _choice(document)
+            truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
+            content = _content(choice)
+            payload = parse_payload(request.kind, content, truncated=truncated)
+        except LLMResponseFormatError as error:
+            error.usage = usage
+            error.cost = cost
+            error.provider = self._settings.provider
+            error.model = model
+            raise
         return LLMResponse(
             payload=payload,  # type: ignore[arg-type]  # схему выбирает request.kind
             provider=self._settings.provider,
-            model=_model(document, fallback=self._settings.model),
+            model=model,
             truncated=truncated,
-            usage=_usage(document),
-            cost=_cost(document),
+            usage=usage,
+            cost=cost,
             raw_content=content,
         )
 

@@ -51,6 +51,19 @@ class LoggingLLMClient(LLMClient):
         started_at = self._now()
         try:
             response = await self.inner.generate(request)
+        except LLMResponseFormatError as error:
+            self._log(
+                request=request,
+                started_at=started_at,
+                provider=error.provider if error.provider is not None else self.provider,
+                model=error.model if error.model is not None else self.model,
+                success=False,
+                error=error,
+                usage=error.usage,
+                cost=self._cost_of(error.usage, provider_cost=error.cost),
+                response_text=error.raw_content if self.debug_payloads else None,
+            )
+            raise
         except Exception as error:
             self._log(
                 request=request,
@@ -59,11 +72,6 @@ class LoggingLLMClient(LLMClient):
                 model=self.model,
                 success=False,
                 error=error,
-                response_text=(
-                    error.raw_content
-                    if self.debug_payloads and isinstance(error, LLMResponseFormatError)
-                    else None
-                ),
             )
             raise
         call_id = self._new_id()
@@ -74,11 +82,7 @@ class LoggingLLMClient(LLMClient):
             model=response.model,
             success=True,
             usage=response.usage,
-            cost=(
-                response.cost
-                if response.cost is not None
-                else self.pricing.cost_of(response.usage) if self.pricing is not None else None
-            ),
+            cost=self._cost_of(response.usage, provider_cost=response.cost),
             call_id=call_id,
             response_text=response.raw_content if self.debug_payloads else None,
         )
@@ -87,6 +91,14 @@ class LoggingLLMClient(LLMClient):
             call_id=call_id,
             raw_content=response.raw_content if self.debug_payloads else None,
         )
+
+    def _cost_of(
+        self, usage: TokenUsage | None, *, provider_cost: Decimal | None
+    ) -> Decimal | None:
+        """Сохраняет цену провайдера либо вычисляет стоимость известных токенов."""
+        if provider_cost is not None:
+            return provider_cost
+        return self.pricing.cost_of(usage) if self.pricing is not None else None
 
     def _log(
         self,

@@ -78,11 +78,23 @@ class LLMResponseFormatError(LLMError):
     """
 
     def __init__(
-        self, message: str, *, truncated: bool = False, raw_content: str | None = None
+        self,
+        message: str,
+        *,
+        truncated: bool = False,
+        raw_content: str | None = None,
+        usage: TokenUsage | None = None,
+        cost: Decimal | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> None:
         super().__init__(message)
         self.truncated = truncated
         self.raw_content = raw_content
+        self.usage = usage
+        self.cost = cost
+        self.provider = provider
+        self.model = model
 
 
 class LLMResponseKind(StrEnum):

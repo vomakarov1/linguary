@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from linguary.adapters.config import AppSettings, CheckSettings, LLMSettings, StorageSettings
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeLLMClient, FakeReply, OpenAICompatibleLLMClient
 from linguary.adapters.llm.logging import LoggingLLMClient
 from linguary.application.ports.llm import LLMRequest, LLMResponse, LLMResponseFormatError
 from linguary.composition import Application, build_application, drain_tasks
 from linguary.domain.llm_log import TokenPricing
-from linguary.domain import ErrorType, LLMCallStage, TaskError, TaskIdentity, TaskType, TokenUsage
+from linguary.domain import (
+    ErrorType, LLMCallLog, LLMCallStage, TaskError, TaskIdentity, TaskType, TokenUsage,
+)
 from processing_scenario import BOOK_ID, store_processing_book, translated_reply
 
 
@@ -271,3 +276,199 @@ async def test_reference_pricing_fills_cost_without_provider_cost(tmp_path: Path
         assert entry.cost == Decimal("0.018")
     finally:
         built.dispose()
+
+
+def _schema_error_document() -> dict[str, Any]:
+    """Повторный b1 с пустым переводом не проходит действующую схему."""
+    return {
+        "model": "gateway/actual-model",
+        "choices": [{"message": {"content": json.dumps({
+            "blocks": [
+                {
+                    "source_block_id": "b1", "treatment": "TRANSLATE",
+                    "translated_text": "secret book translation", "glossary_hints": [],
+                },
+                {
+                    "source_block_id": "b1", "treatment": "TRANSLATE",
+                    "translated_text": "", "glossary_hints": [],
+                },
+            ],
+            "language_notes": [],
+        })}}],
+        "usage": {"prompt_tokens": 24480, "completion_tokens": 1122, "cost": 0.09027},
+    }
+
+
+async def _logged_format_error(
+    application: Application,
+    document: dict[str, Any] | None = None,
+    *,
+    debug: bool = False,
+    pricing: TokenPricing | None = None,
+    unreadable: bool = False,
+) -> tuple[LLMResponseFormatError, LLMCallLog, str | None]:
+    """Проводит один локальный HTTP-вызов через настоящий журнал и SQLite."""
+    store_processing_book(application.unit_of_work)
+    document = _schema_error_document() if document is None else document
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if unreadable:
+            return httpx.Response(200, text="secret HTTP document")
+        return httpx.Response(200, json=document)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        inner = OpenAICompatibleLLMClient(
+            settings=LLMSettings(
+                provider="http-provider", model="configured-model", api_key="secret-api-key"
+            ),
+            http_client=http,
+        )
+        original_generate = inner.generate
+        original_errors: list[LLMResponseFormatError] = []
+
+        async def record_error(request: LLMRequest[Any]) -> LLMResponse[Any]:
+            try:
+                return await original_generate(request)
+            except LLMResponseFormatError as error:
+                original_errors.append(error)
+                raise
+
+        logger = LoggingLLMClient(
+            inner=inner, unit_of_work=application.unit_of_work,
+            provider="decorator-provider", model="decorator-model",
+            debug_payloads=debug, pricing=pricing,
+        )
+        request = LLMRequest.for_translation(
+            instructions="Переведи", input_text="secret request text"
+        ).with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(inner, "generate", record_error)
+            with pytest.raises(LLMResponseFormatError) as caught:
+                await logger.generate(request)
+
+    assert len(calls) == 1
+    assert original_errors == [caught.value]
+    with application.unit_of_work.transaction() as transaction:
+        (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
+        stored = transaction.llm_calls.response_text_for(entry.id)
+    assert entry.success is False
+    assert entry.error is not None
+    assert entry.error.type is ErrorType.MODEL_OUTPUT
+    assert entry.error.message == str(caught.value)
+    for message in (str(caught.value), entry.error.message, entry.error.detail or ""):
+        for private in (
+            "secret book translation", "secret book text", "secret request text",
+            "secret-api-key", "secret HTTP document", "TRANSLATE", "b1",
+        ):
+            assert private not in message
+        if caught.value.raw_content is not None:
+            assert caught.value.raw_content not in message
+    return caught.value, entry, stored
+
+
+async def test_schema_error_log_keeps_usage_and_provider_cost(application: Application) -> None:
+    error, entry, stored = await _logged_format_error(application)
+
+    assert entry.usage == error.usage == TokenUsage(24480, 1122)
+    assert entry.cost == error.cost == Decimal("0.09027")
+    assert entry.provider == error.provider == "http-provider"
+    assert entry.model == error.model == "gateway/actual-model"
+    assert "value_error" in str(error)
+    assert stored is None
+
+
+async def test_invalid_json_error_log_keeps_usage_and_cost(application: Application) -> None:
+    document = _schema_error_document()
+    document["choices"][0]["message"]["content"] = '{"private": "secret book text"'
+    error, entry, stored = await _logged_format_error(application, document)
+
+    assert entry.usage == error.usage == TokenUsage(24480, 1122)
+    assert entry.cost == error.cost == Decimal("0.09027")
+    assert "json_invalid" in str(error)
+    assert stored is None
+
+
+@pytest.mark.parametrize("provider_cost", [0.001, 0])
+async def test_format_error_log_prefers_provider_cost_over_pricing(
+    application: Application, provider_cost: float
+) -> None:
+    document = _schema_error_document()
+    document["usage"]["cost"] = provider_cost
+    error, entry, _ = await _logged_format_error(
+        application, document, pricing=TokenPricing(Decimal("7"), Decimal("9")),
+    )
+
+    assert entry.cost == error.cost == Decimal(str(provider_cost))
+    assert entry.usage == TokenUsage(24480, 1122)
+
+
+async def test_format_error_log_computes_cost_from_pricing(application: Application) -> None:
+    document = _schema_error_document()
+    document["usage"].pop("cost")
+    error, entry, _ = await _logged_format_error(
+        application, document, pricing=TokenPricing(Decimal("3"), Decimal("15")),
+    )
+
+    assert error.cost is None
+    assert entry.usage == TokenUsage(24480, 1122)
+    assert entry.cost == Decimal("0.09027")
+
+
+async def test_format_error_log_preserves_provider_cost_without_token_counts(
+    application: Application,
+) -> None:
+    document = _schema_error_document()
+    document["usage"] = {"cost": 0.09027}
+    error, entry, _ = await _logged_format_error(
+        application, document, pricing=TokenPricing(Decimal("3"), Decimal("15")),
+    )
+
+    assert entry.usage is error.usage is None
+    assert entry.cost == error.cost == Decimal("0.09027")
+
+
+@pytest.mark.parametrize("with_tokens", [False, True])
+async def test_format_error_log_cost_none_without_data(
+    application: Application, with_tokens: bool
+) -> None:
+    document = _schema_error_document()
+    document["usage"].pop("cost")
+    if not with_tokens:
+        document.pop("usage")
+    error, entry, _ = await _logged_format_error(
+        application, document,
+        pricing=None if with_tokens else TokenPricing(Decimal("3"), Decimal("15")),
+    )
+
+    assert entry.usage == error.usage == (TokenUsage(24480, 1122) if with_tokens else None)
+    assert entry.cost is error.cost is None
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("invalid_json", [False, True])
+async def test_format_error_log_payload_and_message_obey_debug_setting(
+    application: Application, debug: bool, invalid_json: bool
+) -> None:
+    document = _schema_error_document()
+    if invalid_json:
+        document["choices"][0]["message"]["content"] = '{"private": "secret book text"'
+    raw = document["choices"][0]["message"]["content"]
+    error, entry, stored = await _logged_format_error(application, document, debug=debug)
+
+    assert entry.usage == TokenUsage(24480, 1122)
+    assert entry.cost == Decimal("0.09027")
+    assert error.raw_content == raw
+    assert stored == (raw if debug else None)
+
+
+async def test_format_error_log_uses_configured_metadata_for_unreadable_http_document(
+    application: Application,
+) -> None:
+    error, entry, stored = await _logged_format_error(application, unreadable=True)
+
+    assert error.provider is error.model is None
+    assert entry.provider == "decorator-provider"
+    assert entry.model == "decorator-model"
+    assert entry.usage is entry.cost is stored is None

@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 from llm_payload_factories import analysis_payload, as_content, translation_payload
+from pydantic import ValidationError
 
 from linguary.adapters.config import LLMSettings
 from linguary.adapters.llm import OpenAICompatibleLLMClient, openai_compatible
@@ -25,6 +26,7 @@ from linguary.application.ports.llm import (
     LLMResponseFormatError,
     LLMTransportError,
 )
+from linguary.domain import TokenUsage
 
 API_KEY = "test-key-must-not-leak"
 
@@ -62,6 +64,120 @@ def client_over(handler: Any, **settings_overrides: Any) -> OpenAICompatibleLLMC
 def responding(document: dict[str, Any], *, status_code: int = 200) -> Any:
     """Транспорт, отвечающий одним и тем же документом."""
     return lambda request: httpx.Response(status_code, json=document)
+
+
+def schema_error_content() -> str:
+    """Минимальный ответ с пустым переводом TRANSLATE из воспроизведения дефекта."""
+    return as_content({
+        "blocks": [{
+            "source_block_id": "b1", "treatment": "TRANSLATE",
+            "translated_text": "", "glossary_hints": [],
+        }],
+        "language_notes": [],
+    })
+
+
+async def format_error_from(document: dict[str, Any]) -> LLMResponseFormatError:
+    """Получает ошибку через настоящий HTTP-клиент без обращения к сети."""
+    client = client_over(responding(document))
+    with pytest.raises(LLMResponseFormatError) as caught:
+        await client.generate(
+            LLMRequest.for_translation(instructions="Переводи", input_text="b1: text")
+        )
+    return caught.value
+
+
+@pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4.6", None])
+async def test_schema_error_preserves_usage_and_provider_cost(model: str | None) -> None:
+    content = schema_error_content()
+    error = await format_error_from(completion(
+        content, model=model,
+        usage={"prompt_tokens": 24480, "completion_tokens": 1122, "cost": 0.09027},
+    ))
+
+    assert error.usage == TokenUsage(24480, 1122)
+    assert error.cost == Decimal("0.09027")
+    assert error.provider == settings().provider
+    assert error.model == (model or settings().model)
+    assert error.truncated is False
+    assert error.raw_content == content
+    assert isinstance(error.__cause__, ValidationError)
+    assert error.__cause__.errors(include_input=False)[0]["type"] == "value_error"
+    assert "не соответствует схеме" in str(error)
+    for private in (content, "b1", "TRANSLATE", API_KEY):
+        assert private not in str(error)
+
+
+async def test_invalid_json_error_preserves_usage_and_provider_cost() -> None:
+    content = '{"private": "secret book text"'
+    error = await format_error_from(completion(
+        content, usage={"prompt_tokens": 24480, "completion_tokens": 1122, "cost": 0.09027},
+    ))
+
+    assert error.usage == TokenUsage(24480, 1122)
+    assert error.cost == Decimal("0.09027")
+    assert error.raw_content == content
+    assert isinstance(error.__cause__, ValidationError)
+    assert error.__cause__.errors(include_input=False)[0]["type"] == "json_invalid"
+    assert "secret book text" not in str(error)
+
+
+async def test_truncated_format_error_preserves_usage_cost_and_flag() -> None:
+    content = '{"private": "secret book text"'
+    error = await format_error_from(completion(
+        content,
+        choices=[{"message": {"content": content}, "finish_reason": "length"}],
+        usage={"prompt_tokens": 24480, "completion_tokens": 1122, "cost": 0.09027},
+    ))
+
+    assert error.usage == TokenUsage(24480, 1122)
+    assert error.cost == Decimal("0.09027")
+    assert error.truncated is True
+    assert error.raw_content == content
+    assert isinstance(error.__cause__, ValidationError)
+    assert "обрыв ответа по лимиту токенов" in str(error)
+    assert "secret book text" not in str(error)
+
+
+@pytest.mark.parametrize("choices", [[], ["secret envelope text"], [{"message": {}}]])
+async def test_generation_envelope_error_preserves_usage_and_cost(choices: list[Any]) -> None:
+    error = await format_error_from({
+        "model": "gateway/other-model", "choices": choices,
+        "usage": {"prompt_tokens": 24480, "completion_tokens": 1122, "cost": 0.09027},
+    })
+
+    assert error.usage == TokenUsage(24480, 1122)
+    assert error.cost == Decimal("0.09027")
+    assert error.provider == settings().provider
+    assert error.model == "gateway/other-model"
+    assert error.raw_content is None
+    assert error.__cause__ is None
+    assert "secret envelope text" not in str(error)
+
+
+async def test_format_error_without_usage_keeps_usage_and_cost_none() -> None:
+    document = completion(schema_error_content())
+    document.pop("usage")
+    error = await format_error_from(document)
+
+    assert error.usage is None
+    assert error.cost is None
+    assert error.provider == settings().provider
+    assert error.model == settings().model
+
+
+async def test_unreadable_http_document_keeps_metadata_none() -> None:
+    client = client_over(lambda request: httpx.Response(200, text="private HTTP text"))
+    with pytest.raises(LLMResponseFormatError) as caught:
+        await client.generate(
+            LLMRequest.for_translation(instructions="Переводи", input_text="b1: text")
+        )
+
+    assert caught.value.usage is None
+    assert caught.value.cost is None
+    assert caught.value.provider is None
+    assert caught.value.model is None
+    assert "private HTTP text" not in str(caught.value)
 
 
 async def test_successful_call_returns_parsed_payload() -> None:
