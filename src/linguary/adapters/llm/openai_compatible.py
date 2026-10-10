@@ -81,13 +81,20 @@ class OpenAICompatibleLLMClient(LLMClient):
         document = await self._post(_body(request, settings=self._settings))
         usage = _usage(document)
         cost = _cost(document)
-        model = _model(document, fallback=self._settings.model)
+        model = safe_detail(
+            _model(document, fallback=self._settings.model), api_key=self._settings.api_key
+        )
         try:
             choice = _choice(document)
             truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
             content = _content(choice)
             payload = parse_payload(request.kind, content, truncated=truncated)
         except LLMResponseFormatError as error:
+            error.args = (safe_detail(str(error), api_key=self._settings.api_key),)
+            if error.raw_content is not None:
+                error.raw_content = safe_detail(
+                    error.raw_content, api_key=self._settings.api_key
+                )
             error.usage = usage
             error.cost = cost
             error.provider = self._settings.provider
@@ -100,7 +107,7 @@ class OpenAICompatibleLLMClient(LLMClient):
             truncated=truncated,
             usage=usage,
             cost=cost,
-            raw_content=content,
+            raw_content=safe_detail(content, api_key=self._settings.api_key),
         )
 
     async def aclose(self) -> None:
@@ -130,10 +137,15 @@ class OpenAICompatibleLLMClient(LLMClient):
             ) from error
         except httpx.HTTPError as error:
             raise LLMTransportError(
-                f"вызов провайдера {self._settings.provider} не удался: {error}"
+                safe_detail(
+                    f"вызов провайдера {self._settings.provider} не удался: {error}",
+                    api_key=self._settings.api_key,
+                )
             ) from error
-        _raise_for_status(response, provider=self._settings.provider)
-        return _document(response)
+        _raise_for_status(
+            response, provider=self._settings.provider, api_key=self._settings.api_key
+        )
+        return _document(response, api_key=self._settings.api_key)
 
 
 def _endpoint(base_url: str) -> str:
@@ -173,12 +185,14 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
     return body
 
 
-def _raise_for_status(response: httpx.Response, *, provider: str) -> None:
+def _raise_for_status(
+    response: httpx.Response, *, provider: str, api_key: str | None
+) -> None:
     """Приводит неуспешный ответ провайдера к типу ошибки порта (PRD § 16)."""
     status = response.status_code
     if status < 400:
         return
-    detail = f"{status}{_detail(response)}"
+    detail = f"{status}{_detail(response, api_key=api_key)}"
     if status in _AUTHORIZATION_STATUSES:
         raise LLMConfigurationError(
             f"провайдер {provider} не принял ключ или доступ к модели: {detail}"
@@ -229,17 +243,19 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _document(response: httpx.Response) -> dict[str, Any]:
+def _document(response: httpx.Response, *, api_key: str | None) -> dict[str, Any]:
     """Тело успешного ответа провайдера."""
     try:
         document = response.json()
     except ValueError as error:
         raise LLMResponseFormatError(
-            "ответ провайдера не является JSON", raw_content=response.text
+            "ответ провайдера не является JSON",
+            raw_content=safe_detail(response.text, api_key=api_key),
         ) from error
     if not isinstance(document, dict):
         raise LLMResponseFormatError(
-            "ответ провайдера не похож на ответ генерации", raw_content=response.text
+            "ответ провайдера не похож на ответ генерации",
+            raw_content=safe_detail(response.text, api_key=api_key),
         )
     return document
 
@@ -307,10 +323,15 @@ def _cost(document: dict[str, Any]) -> Decimal | None:
     return cost if cost.is_finite() and cost >= 0 else None
 
 
-def _detail(response: httpx.Response) -> str:
+def safe_detail(text: str, *, api_key: str | None) -> str:
+    """Убирает ключ этого клиента до усечения технических деталей."""
+    return text.replace(api_key, "[REDACTED]") if api_key else text
+
+
+def _detail(response: httpx.Response, *, api_key: str | None) -> str:
     """Хвост ответа провайдера для технической детали ошибки."""
     try:
-        text = response.text.strip()
+        text = safe_detail(response.text, api_key=api_key).strip()
     except (UnicodeDecodeError, httpx.ResponseNotRead):
         return ""
     return f": {text[:_DETAIL_LIMIT]}" if text else ""

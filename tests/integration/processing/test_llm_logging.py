@@ -17,6 +17,7 @@ from linguary.adapters.llm import FakeLLMClient, FakeReply, OpenAICompatibleLLMC
 from linguary.adapters.llm.logging import LoggingLLMClient
 from linguary.application.ports.llm import LLMRequest, LLMResponse, LLMResponseFormatError
 from linguary.composition import Application, build_application, drain_tasks
+from linguary.web import create_app
 from linguary.domain.llm_log import TokenPricing
 from linguary.domain import (
     ErrorType, LLMCallLog, LLMCallStage, TaskError, TaskIdentity, TaskType, TokenUsage,
@@ -472,3 +473,66 @@ async def test_format_error_log_uses_configured_metadata_for_unreadable_http_doc
     assert entry.provider == "decorator-provider"
     assert entry.model == "decorator-model"
     assert entry.usage is entry.cost is stored is None
+
+
+@pytest.mark.parametrize("failure", ["auth", "format", "document", "transport"])
+async def test_task_and_llm_log_errors_do_not_contain_key(
+    tmp_path: Path, failure: str,
+) -> None:
+    secret = "generation-specific-test-secret"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure == "transport":
+            raise httpx.ConnectError(f"connection rejected {secret}")
+        if failure == "auth":
+            return httpx.Response(401, text=f"invalid key {secret}")
+        if failure == "document":
+            return httpx.Response(200, text=f"invalid document {secret}")
+        document = _schema_error_document()
+        document["choices"][0]["message"]["content"] = f'{{"secret":"{secret}"'
+        return httpx.Response(200, json=document)
+
+    settings = LLMSettings(
+        model="configured-model", api_key=secret, max_attempts=1,
+        debug_llm_payloads=True,
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        built = build_application(
+            settings=AppSettings(
+                llm=settings, storage=StorageSettings(data_root=str(tmp_path / "data")),
+            ),
+            llm_client=OpenAICompatibleLLMClient(settings=settings, http_client=http),
+        )
+        try:
+            scenario = store_processing_book(built.unit_of_work)
+            await built.task_queue.enqueue(TaskIdentity(
+                book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+                scope_id=scenario.section().id,
+            ))
+            finished = await drain_tasks(built)
+            assert len(finished) == 1
+            error = finished[0].last_error
+            assert error is not None
+            assert (secret not in repr(error)) is True
+            with built.unit_of_work.transaction() as transaction:
+                (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
+                stored = transaction.llm_calls.response_text_for(entry.id)
+            assert entry.error is not None
+            assert (secret not in repr(entry)) is True
+            assert (secret not in (stored or "")) is True
+            expected = {
+                "auth": ErrorType.CONFIGURATION, "transport": ErrorType.TRANSIENT,
+                "format": ErrorType.MODEL_OUTPUT, "document": ErrorType.MODEL_OUTPUT,
+            }
+            assert error.type is entry.error.type is expected[failure]
+            app = create_app(application=built, run_background_worker=False)
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000",
+                ) as web:
+                    for accept in ("application/json", "text/html"):
+                        response = await web.get(f"/books/{BOOK_ID}", headers={"Accept": accept})
+                        assert response.status_code == 200
+                        assert (secret not in response.text) is True
+        finally:
+            await built.aclose()
