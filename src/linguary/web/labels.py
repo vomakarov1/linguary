@@ -282,3 +282,19 @@ __all__ = [
     "task_type_label",
     "treatment_label",
 ]
+
+
+# Подготовленные сообщения изменения настроек; исходный ввод в них не подставляется.
+SETTINGS_SAVED = "Настройки сохранены"
+SETTINGS_RESET = "Настройки сброшены"
+SETTINGS_INVALID = "Проверьте настройки"
+SETTINGS_CONFLICT = "Настройки изменены. Загрузите актуальные настройки"
+SETTINGS_NOT_APPLIED = "Изменения не применены"
+SETTINGS_CLOSING = "Приложение завершает работу. Запрос не принят"
+SETTINGS_UNSUPPORTED_MEDIA_TYPE = "Отправьте настройки в формате JSON или формы"
+SETTINGS_UNKNOWN_FIELDS = "Запрос содержит неизвестные или повторяющиеся поля"
+SETTINGS_REQUIRED_FIELD = "Заполните поле"
+SETTINGS_STRING_FIELD = "Ожидается строка"
+SETTINGS_INTEGER_FIELD = "Ожидается целое число"
+SETTINGS_REVISION_FIELD = "Ожидается целая редакция не меньше нуля"
+SETTINGS_SAFE_FIELD = "Укажите значение без ключа и учётных данных"
