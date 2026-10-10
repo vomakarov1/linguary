@@ -41,11 +41,28 @@ class TaskWorkerPool:
         self._runner = runner
         self._settings = settings or WorkerSettings()
         self._stop = asyncio.Event()
+        self._concurrency = self._settings.concurrency
+        self._changed = asyncio.Event()
+        self._workers: dict[int, asyncio.Task[None]] = {}
+        self._worker_wakes: dict[int, asyncio.Event] = {}
+        self._running = False
+        self._busy_slots: set[int] = set()
+        self._capacity_waiters: set[int] = set()
 
     @property
     def concurrency(self) -> int:
         """Сколько задач воркер выполняет одновременно."""
-        return self._settings.concurrency
+        return self._concurrency
+
+    def set_concurrency(self, value: int) -> None:
+        """Меняет целевое число исполнителей без отмены занятой работы."""
+        if type(value) is not int or value < 1:
+            raise ValueError("параллелизм воркера должен быть положительным целым числом")
+        self._concurrency = value
+        if self._running and not self._stop.is_set():
+            self._changed.set()
+            for wake in self._worker_wakes.values():
+                wake.set()
 
     async def drain(self) -> tuple[ProcessingTask, ...]:
         """Выполняет задачи, пока очередь не опустеет, и возвращает завершённые.
@@ -54,38 +71,86 @@ class TaskWorkerPool:
         """
         finished: list[ProcessingTask] = []
         await asyncio.gather(
-            *(self._drain_worker(finished) for _ in range(self._settings.concurrency))
+            *(self._drain_worker(finished) for _ in range(self._concurrency))
         )
         return tuple(finished)
 
     async def run_forever(self) -> None:
-        """Выполняет задачи, пока не запрошена остановка."""
+        """Управляет исполнителями до остановки, затем собирает их завершение."""
+        if self._running:
+            raise RuntimeError("пул воркеров уже запущен")
+        self._running = True
         self._stop.clear()
-        await asyncio.gather(
-            *(self._polling_worker() for _ in range(self._settings.concurrency))
-        )
+        try:
+            while True:
+                self._changed.clear()
+                for slot, worker in tuple(self._workers.items()):
+                    if worker.done():
+                        del self._workers[slot]
+                        del self._worker_wakes[slot]
+                        worker.result()
+                if not self._stop.is_set():
+                    for slot in range(self._concurrency):
+                        if slot not in self._workers:
+                            wake = self._worker_wakes[slot] = asyncio.Event()
+                            worker = asyncio.create_task(self._polling_worker(slot, wake))
+                            self._workers[slot] = worker
+                            worker.add_done_callback(self._worker_finished)
+                elif not self._workers:
+                    return
+                await self._changed.wait()
+        finally:
+            self._running = False
+            workers = tuple(self._workers.values())
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            self._workers.clear()
+            self._worker_wakes.clear()
+            self._busy_slots.clear()
+            self._capacity_waiters.clear()
+
+    def _worker_finished(self, worker: asyncio.Task[None]) -> None:
+        self._changed.set()
 
     def request_stop(self) -> None:
-        """Просит воркеры завершиться: текущие задачи доигрываются до конца."""
+        """Запрещает новые захваты; начатые задачи завершаются без отмены."""
         self._stop.set()
+        self._changed.set()
+        for wake in self._worker_wakes.values():
+            wake.set()
 
     async def _drain_worker(self, finished: list[ProcessingTask]) -> None:
         """Воркер разовой прогонки: работает, пока в очереди есть задачи."""
         while (task := await self._runner.run_next()) is not None:
             finished.append(task)
 
-    async def _polling_worker(self) -> None:
-        """Воркер постоянной работы: пустую очередь опрашивает с паузой."""
-        while not self._stop.is_set():
-            if await self._runner.run_next() is None:
-                await self._wait_for_work()
+    async def _polling_worker(self, slot: int, wake: asyncio.Event) -> None:
+        """Номер слота сохраняется до завершения уже начатого захвата."""
+        while not self._stop.is_set() and slot < self._concurrency:
+            if len(self._busy_slots) >= self._concurrency:
+                wake.clear()
+                self._capacity_waiters.add(slot)
+                try:
+                    await wake.wait()
+                finally:
+                    self._capacity_waiters.discard(slot)
+                continue
+            self._busy_slots.add(slot)
+            try:
+                task = await self._runner.run_next()
+            finally:
+                self._busy_slots.remove(slot)
+                for waiting_slot in self._capacity_waiters:
+                    self._worker_wakes[waiting_slot].set()
+            if task is None:
+                await self._wait_for_work(wake)
 
-    async def _wait_for_work(self) -> None:
-        """Пауза перед следующим опросом очереди, прерываемая остановкой."""
+    async def _wait_for_work(self, wake: asyncio.Event) -> None:
+        """Опрос очереди прерывается остановкой или изменением размера пула."""
         with suppress(TimeoutError):
-            await asyncio.wait_for(
-                self._stop.wait(), timeout=self._settings.idle_delay_seconds
-            )
+            await asyncio.wait_for(wake.wait(), timeout=self._settings.idle_delay_seconds)
+        wake.clear()
 
 
 def to_async_handler(handler: Callable[[ProcessingTask], None]) -> TaskHandler:

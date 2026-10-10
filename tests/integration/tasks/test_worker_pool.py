@@ -151,3 +151,169 @@ def test_worker_settings_reject_meaningless_values(settings: dict[str, float]) -
     """Настройка воркера не принимает значений, при которых он не работает."""
     with pytest.raises(ValueError):
         WorkerSettings(**settings)
+
+
+class ControlledRunner:
+    """Каждый начатый захват остаётся занят до разрешения теста."""
+
+    def __init__(self):
+        self.started = asyncio.Queue()
+        self.finished = asyncio.Queue()
+        self.releases = {}
+        self.claims = 0
+        self.active = 0
+        self.peak = 0
+
+    async def run_next(self):
+        number = self.claims
+        self.claims += 1
+        release = self.releases[number] = asyncio.Event()
+        self.active += 1
+        self.peak = max(self.active, self.peak)
+        self.started.put_nowait(number)
+        try:
+            await release.wait()
+            self.finished.put_nowait(number)
+            return number
+        finally:
+            self.active -= 1
+
+
+async def next_started(runner):
+    return await asyncio.wait_for(runner.started.get(), TIMEOUT_SECONDS)
+
+
+async def finish_claim(runner, number):
+    runner.releases[number].set()
+    assert await asyncio.wait_for(runner.finished.get(), TIMEOUT_SECONDS) == number
+
+
+async def stop_controlled_pool(pool, running, runner):
+    pool.request_stop()
+    for release in runner.releases.values():
+        release.set()
+    await asyncio.wait_for(running, TIMEOUT_SECONDS)
+    assert runner.active == 0
+
+
+async def test_resize_up_starts_pending_tasks():
+    runner = ControlledRunner()
+    pool = TaskWorkerPool(runner)
+    running = asyncio.create_task(pool.run_forever())
+    try:
+        assert await next_started(runner) == 0
+        pool.set_concurrency(3)
+        assert await next_started(runner) == 1
+        assert await next_started(runner) == 2
+        assert runner.active == 3 and pool.concurrency == 3
+    finally:
+        await stop_controlled_pool(pool, running, runner)
+
+
+async def test_resize_down_does_not_cancel_inflight_tasks():
+    runner = ControlledRunner()
+    pool = TaskWorkerPool(runner, WorkerSettings(concurrency=3))
+    running = asyncio.create_task(pool.run_forever())
+    try:
+        for number in range(3):
+            assert await next_started(runner) == number
+        pool.set_concurrency(1)
+        assert runner.active == 3
+        await finish_claim(runner, 1)
+        await finish_claim(runner, 2)
+        assert runner.claims == 3 and runner.active == 1
+        await finish_claim(runner, 0)
+        assert await next_started(runner) == 3
+        assert runner.active == 1 and pool.concurrency == 1
+    finally:
+        await stop_controlled_pool(pool, running, runner)
+
+
+async def test_resize_up_during_retirement_has_no_duplicate_workers():
+    runner = ControlledRunner()
+    pool = TaskWorkerPool(runner, WorkerSettings(concurrency=3))
+    running = asyncio.create_task(pool.run_forever())
+    try:
+        for number in range(3):
+            assert await next_started(runner) == number
+        pool.set_concurrency(1)
+        pool.set_concurrency(3)
+        for number in range(3):
+            await finish_claim(runner, number)
+            assert await next_started(runner) == number + 3
+        assert runner.active == 3 and runner.peak == 3 and runner.claims == 6
+    finally:
+        await stop_controlled_pool(pool, running, runner)
+
+
+async def test_resize_after_stop_does_not_restart_workers():
+    runner = ControlledRunner()
+    pool = TaskWorkerPool(runner)
+    running = asyncio.create_task(pool.run_forever())
+    assert await next_started(runner) == 0
+    pool.request_stop()
+    pool.set_concurrency(5)
+    await finish_claim(runner, 0)
+    await asyncio.wait_for(running, TIMEOUT_SECONDS)
+    assert pool.concurrency == 5 and runner.claims == 1
+    pool.set_concurrency(7)
+    assert runner.claims == 1
+
+
+async def test_resize_while_idle_wakes_pool():
+    class IdleRunner:
+        def __init__(self):
+            self.calls = asyncio.Queue()
+        async def run_next(self):
+            self.calls.put_nowait(None)
+            return None
+    runner = IdleRunner()
+    pool = TaskWorkerPool(runner, WorkerSettings(idle_delay_seconds=3600))
+    running = asyncio.create_task(pool.run_forever())
+    try:
+        await asyncio.wait_for(runner.calls.get(), TIMEOUT_SECONDS)
+        pool.set_concurrency(2)
+        await asyncio.wait_for(runner.calls.get(), TIMEOUT_SECONDS)
+        await asyncio.wait_for(runner.calls.get(), TIMEOUT_SECONDS)
+    finally:
+        pool.request_stop()
+        await asyncio.wait_for(running, TIMEOUT_SECONDS)
+
+
+async def test_cancelling_pool_collects_all_worker_tasks():
+    runner = ControlledRunner()
+    pool = TaskWorkerPool(runner, WorkerSettings(concurrency=3))
+    running = asyncio.create_task(pool.run_forever())
+    for number in range(3):
+        assert await next_started(runner) == number
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert runner.active == 0
+
+
+@pytest.mark.parametrize('value', [True, 0, -1, 1.5, '2'])
+def test_set_concurrency_rejects_invalid_values(value):
+    pool = TaskWorkerPool(ControlledRunner())
+    with pytest.raises(ValueError):
+        pool.set_concurrency(value)
+    assert pool.concurrency == 1
+
+
+async def test_resize_down_prevents_extra_claims_while_old_slots_are_busy():
+    runner = ControlledRunner()
+    pool = TaskWorkerPool(runner, WorkerSettings(concurrency=3))
+    running = asyncio.create_task(pool.run_forever())
+    try:
+        for number in range(3):
+            assert await next_started(runner) == number
+        pool.set_concurrency(1)
+        await finish_claim(runner, 0)
+        assert runner.claims == 3
+        await finish_claim(runner, 1)
+        assert runner.claims == 3
+        await finish_claim(runner, 2)
+        assert await next_started(runner) == 3
+        assert runner.active == 1
+    finally:
+        await stop_controlled_pool(pool, running, runner)
