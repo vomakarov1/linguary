@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -412,3 +413,18 @@ __all__ = [
     "TreatmentPlanItemRow",
     "UtcDateTime",
 ]
+
+
+class SystemSettingsRow(Base):
+    """Единственная запись переопределений настроек приложения."""
+
+    __tablename__ = "system_settings"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="singleton"),
+        CheckConstraint("revision > 0", name="revision_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    revision: Mapped[int]
+    overrides_json: Mapped[dict[str, object] | None] = mapped_column(JSON(none_as_null=True))
+    api_key: Mapped[str | None] = mapped_column(Text)
