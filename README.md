@@ -79,7 +79,7 @@ Web UI будет доступен по адресу `http://localhost:8000`. К
 ```sh
 docker build -t linguary .
 docker run -d \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
   -e LINGUARY_LLM_API_KEY="ваш_api_ключ" \
   -e LINGUARY_LLM_MODEL="gpt-4o-mini" \
   -v linguary_data:/data \
