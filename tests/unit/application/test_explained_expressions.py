@@ -261,3 +261,35 @@ def test_required_glossary_hint_retained() -> None:
 def test_note_without_available_explanation_kept() -> None:
     note = _note("ln-1", "heaved and groaned")
     assert ExplainedExpressions(["heaved and groaned"]).without_repeats(_translated(note)).language_notes == (note,)
+
+
+@pytest.mark.parametrize("separator", [", ", ": ", " — "])
+@pytest.mark.parametrize("source", ["before-you-read", "block-hint"])
+def test_grab_note_with_new_rhetorical_fact_in_same_sentence_kept(
+    separator: str, source: str,
+) -> None:
+    """Риторический факт остаётся рядом с определением в одном предложении."""
+    expression = "make a grab at"
+    explanation = "попытка схватить"
+    note = LanguageNote(
+        id="ln-1", block_id="block-1", original_excerpt="made a grab at my throat",
+        note="Make a grab at — резко схватить" + separator
+        + "выразительный контраст с церемонностью.",
+    )
+    if source == "before-you-read":
+        explained = ExplainedExpressions(
+            [expression], explanations=[(expression, explanation)],
+        )
+        result = _translated(note)
+    else:
+        explained = ExplainedExpressions([])
+        result = BlockProcessingResult(
+            block_id="block-1", treatment=BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint(original=expression, translation=explanation),),
+            language_notes=(note,),
+        )
+
+    filtered = explained.without_repeats(result)
+
+    assert filtered.language_notes == (note,)
+    assert filtered.glossary_hints == result.glossary_hints
