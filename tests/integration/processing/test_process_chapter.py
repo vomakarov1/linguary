@@ -148,8 +148,8 @@ async def test_hints_and_notes_repeating_before_you_read_are_not_saved(
                     block_reply("b2"),
                 ],
                 notes=(
-                    note_reply("b1", original_excerpt="heaved and groaned"),
-                    note_reply("b2", original_excerpt="the house heaved and groaned"),
+                    note_reply("b1", original_excerpt="heaved and groaned") | {"note": "вздымался и стонал"},
+                    note_reply("b2", original_excerpt="the house heaved and groaned") | {"note": "вздымался и стонал"},
                     note_reply("b2"),
                 ),
             )
@@ -165,6 +165,28 @@ async def test_hints_and_notes_repeating_before_you_read_are_not_saved(
     assert [note.original_excerpt for note in translated.language_notes] == [
         "a truth universally acknowledged"
     ]
+
+
+async def test_new_fact_on_before_you_read_excerpt_is_saved(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    scenario = store_processing_book(
+        unit_of_work,
+        treatments={"section-1": (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE)},
+        before_you_read=(("heaved and groaned", "вздымался и стонал"),),
+    )
+    client = FakeLLMClient.replying([
+        translation_reply(
+            [block_reply("b1"), block_reply("b2")],
+            notes=(note_reply("b1", original_excerpt="heaved and groaned"),),
+        )
+    ])
+    process, _ = make_process_chapter(unit_of_work, client)
+    await process(command())
+    first, _ = stored_results(unit_of_work, scenario.run_id)
+    assert len(first.language_notes) == 1
+    assert first.language_notes[0].note == "Ироническая формула зачина романа."
+    assert first.language_notes[0].original_excerpt == "heaved and groaned"
 
 
 async def test_glossary_only_block_keeps_its_only_hint_even_if_explained(

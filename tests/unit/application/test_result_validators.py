@@ -116,6 +116,38 @@ def test_translation_with_extra_paragraphs_rejected() -> None:
     assert "не включай соседние" in str(error)
 
 
+@pytest.mark.parametrize("source", ["First.", "First.\n\nSecond."])
+def test_extra_lines_retry_message_requires_full_own_text(source: str) -> None:
+    block = make_block(order=0, text=source)
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text="Первый.\nВторой.\nТретий."),)
+    )
+
+    message = str(rejection(payload, unit=unit))
+    source_count = sum(bool(line.strip()) for line in source.splitlines())
+    assert f"содержит 3 абзацев, а оригинал — {source_count}" in message
+    assert f"сохрани исходное число непустых строк ({source_count})" in message
+    assert "весь текст своего блока" in message
+    assert "не включай соседние" in message
+    assert "объедини собственную реплику или авторское окончание" in message
+    assert "не удаляй их" in message
+
+
+def test_real_neighbour_heading_remains_rejected() -> None:
+    """Искусственный 31d97195: чужой заголовок нельзя принять или склеить."""
+    block = make_block(order=0, text='"We shall return."')
+    unit = make_unit((block,))
+    own_translation = "«Мы вернёмся»."
+    payload = make_response(
+        (make_block_result(block, translated_text=own_translation + "\nГлава следующая."),)
+    )
+
+    assert "содержит 2 абзацев, а оригинал — 1" in str(rejection(payload, unit=unit))
+    corrected = make_response((make_block_result(block, translated_text=own_translation),))
+    assert validate(corrected, unit=unit)[0].translated_text == own_translation
+
+
 def test_translation_with_equal_paragraphs_accepted() -> None:
     block = make_block(order=0)
     unit = make_unit((block,))
@@ -674,3 +706,17 @@ def test_latin_words_in_russian_text_are_allowed(translated_text: str) -> None:
     results = validate(payload, unit=unit)
 
     assert results[0].translated_text is not None
+
+
+def test_retry_joins_own_authorial_tail_without_dropping_it() -> None:
+    """Искусственный dcfb5251: собственное окончание остаётся после объединения."""
+    block = make_block(order=0, text='"We shall return." He left.')
+    unit = make_unit((block,))
+    speech = "«Мы вернёмся»."
+    tail = "Он ушёл."
+    split = make_response((make_block_result(block, translated_text=f"{speech}\n{tail}"),))
+
+    assert "не удаляй их" in str(rejection(split, unit=unit))
+    joined = f"{speech} {tail}"
+    corrected = make_response((make_block_result(block, translated_text=joined),))
+    assert validate(corrected, unit=unit)[0].translated_text == joined

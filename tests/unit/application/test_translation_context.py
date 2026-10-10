@@ -15,7 +15,11 @@ from processing_fakes import (
     make_unit,
 )
 
-from linguary.application.context_builder import ContextBuilder, ContextBuildError, notes_budget
+from linguary.application.context_builder import (
+    ContextBuilder,
+    ContextBuildError,
+    notes_budget,
+)
 from linguary.application.llm_dto import (
     BlockResultResponse,
     LanguageNoteResponse,
@@ -967,3 +971,86 @@ def test_rejected_variant_is_known_from_other_chapters_of_the_book() -> None:
         ) in text
         assert "1. Сохранять иронию рассказчика." in text
         assert "9. Путь в Даскмера не сокращать." in text
+
+
+@pytest.mark.parametrize("method", ["for_translation_unit", "for_block_regeneration"])
+def test_unit_and_regeneration_include_full_byr_explanations(method: str) -> None:
+    blocks = make_blocks(1)
+    unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section(blocks)
+    analysis = replace(make_analysis(unit), before_you_read=(
+        BeforeYouReadEntry(expression=" made a grab at ", explanation=" попытался схватить "),
+        BeforeYouReadEntry(expression="sheath/armour", explanation="ножны скрывают, броня защищает"),
+    ))
+    context = getattr(ContextBuilder(), method)(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+    assert context.explained_entries == (
+        ("made a grab at", "попытался схватить"),
+        ("sheath/armour", "ножны скрывают, броня защищает"),
+    )
+    assert context.explained_expressions == ("made a grab at", "sheath/armour")
+    for expression, explanation in context.explained_entries:
+        assert f"- {expression}: {explanation}" in context.request.input_text
+
+
+def test_notes_only_context_has_no_byr_entries() -> None:
+    block = make_block(order=0, type=BlockType.FOOTNOTE, text="A plain face.")
+    unit = make_unit((block,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((block,))
+    analysis = replace(make_analysis(unit), before_you_read=(BeforeYouReadEntry(expression="plain", explanation="простой"),))
+    for method in ("for_translation_unit", "for_block_regeneration"):
+        context = getattr(ContextBuilder(), method)(
+            document=make_document(section),
+            section=section,
+            unit=unit,
+            analysis=analysis,
+            glossary=make_snapshot(),
+        )
+        assert context.explained_entries == ()
+        assert "- plain: простой" not in context.request.input_text
+
+
+def test_note_with_new_language_fact_is_allowed() -> None:
+    instructions = build_context()[0].request.instructions
+    assert "новый языковой или культурный факт того же отрывка допустим" in instructions
+    assert "made/make a grab at" in instructions
+    assert "sheath/armour" in instructions
+
+
+def test_mixed_cultural_note_cannot_retell_plot() -> None:
+    assert "культурная справка не оправдывает пересказ сюжета" in build_context()[0].request.instructions
+
+
+def test_saved_speech_instruction_is_subordinate_to_natural_rendering() -> None:
+    saved = "Имитировать ломаную речь Ван Хелсинга во всех репликах."
+    text = context_with_instructions(saved, make_snapshot())
+    assert saved in text
+    assert "сохранённые указания главы подчинены этому принципу" in text
+    instructions = build_context()[0].request.instructions
+    assert "без искусственной имитации" in instructions
+    assert "не переноси приёмы одного персонажа на остальных" in instructions
+
+
+@pytest.mark.parametrize("method", ["for_translation_unit", "for_block_regeneration"])
+def test_regeneration_preserves_own_authorial_tail_and_line_count(method: str) -> None:
+    target = make_block(order=1, text='“I go,” he said.\nAnd with that he left.')
+    neighbour = make_block(order=0, text="The room was silent.")
+    section = make_section((neighbour, target))
+    unit = make_unit((target,), treatments=(BlockTreatment.TRANSLATE,))
+    context = getattr(ContextBuilder(), method)(document=make_document(section), section=section,
+        unit=unit, analysis=make_analysis(unit), glossary=make_snapshot())
+    assert target.text in context.request.input_text
+    for requirement in ("ровно исходное число непустых строк", "весь собственный текст блока", "авторское окончание", "не удаляй окончание ради числа строк"):
+        assert requirement in context.request.instructions
+
+
+def test_note_claim_requires_observable_translation_feature() -> None:
+    instructions = build_context()[0].request.instructions
+    assert "наблюдаемое основание в самом переводе" in instructions
+    assert "может описывать особенность оригинала" in instructions
+    assert "Гладкий перевод без этой особенности" in instructions

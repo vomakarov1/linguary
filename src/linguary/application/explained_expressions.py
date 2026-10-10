@@ -14,12 +14,8 @@
 служебное слово частичным совпадением не считается вовсе — иначе подсказка к `to`
 пропала бы из-за объяснённого `heave to`.
 
-Отрывок заметки модель часто берёт целой фразой, и тогда правило половины повтор
-не узнаёт. Что заметка объясняет, выдаёт её собственный текст: объясняя выражение,
-она его называет. Поэтому заметка с длинным отрывком — повтор, если отрывок содержит
-объяснённое выражение, а текст заметки называет это выражение или его значимую часть
-(не меньше половины слов). Заметка к той же фразе про другой оборот объяснённого
-выражения не называет и остаётся.
+Заметки удаляются только при подтверждённом повторе объяснения. Неизвестные
+самостоятельные утверждения сохраняются для содержательной проверки.
 """
 
 from __future__ import annotations
@@ -51,11 +47,19 @@ def expression_words(text: str) -> tuple[str, ...]:
 class ExplainedExpressions:
     """Выражения `Before You Read` одной главы, подготовленные к сравнению."""
 
-    __slots__ = ("_expressions",)
+    __slots__ = ("_expressions", "_explanations")
 
-    def __init__(self, expressions: Iterable[str]) -> None:
+    def __init__(
+        self, expressions: Iterable[str], *,
+        explanations: Iterable[tuple[str, str]] = (),
+    ) -> None:
         self._expressions = tuple(
             words for expression in expressions if (words := expression_words(expression))
+        )
+
+        self._explanations = tuple(
+            (expression_words(expression), explanation)
+            for expression, explanation in explanations if expression_words(expression)
         )
 
     def __bool__(self) -> bool:
@@ -71,18 +75,14 @@ class ExplainedExpressions:
     def repeated_by(self, note: LanguageNote) -> bool:
         """Повторяет ли языковая заметка выражение `Before You Read`.
 
-        Сначала заметка сравнивается по отрывку, как подсказка. Отрывок длиннее
-        выражения больше чем вдвое по нему повтором не считается, и тогда решает
-        текст заметки: повтор, если отрывок содержит объяснённое выражение, а заметка
-        его называет.
+        Отрывок определяет кандидата, включая значимую фразу внутри длинного
+        предложения. Удаление требует покрытия всех утверждений объяснением.
         """
-        if self.covers(note.original_excerpt):
-            return True
         excerpt = expression_words(note.original_excerpt)
-        explanation = expression_words(note.note)
         return any(
-            _contains(excerpt, expression) and _mentions(explanation, expression)
-            for expression in self._expressions
+            (_overlaps(excerpt, expression) or _contains(excerpt, expression))
+            and _same_explanation(expression, explanation, note.note)
+            for expression, explanation in self._explanations
         )
 
     def without_repeats(self, result: BlockProcessingResult) -> BlockProcessingResult:
@@ -113,16 +113,61 @@ class ExplainedExpressions:
 
 
 def _repeats_block_hint(note: LanguageNote, result: BlockProcessingResult) -> bool:
-    """Содержит ли отрывок заметки выражение подсказки того же блока."""
+    """Повторяет ли заметка уже данное объяснение подсказки своего блока."""
     excerpt = expression_words(note.original_excerpt)
     return any(
-        (hint_words := expression_words(hint.original))
-        and any(
-            excerpt[start : start + len(hint_words)] == hint_words
-            for start in range(len(excerpt) - len(hint_words) + 1)
-        )
+        (expression := expression_words(hint.original))
+        and (_overlaps(excerpt, expression) or _contains(excerpt, expression))
+        and _same_explanation(expression, hint.translation, note.note)
         for hint in result.glossary_hints
     )
+
+
+# Конечные словари описывают только два повтора, подтверждённых рецензией.
+# Неизвестное слово в утверждении запрещает удаление даже рядом с известным значением.
+_GRAB_WORDS = "make a grab at my throat разговорн идиом значени резко порывист схват ухват попыт выпад сдела рукой сторон чего либо движение"
+_ARMOUR_WORDS = "sheath armour his and ножн оболоч брон доспех скры защит защищ отраж удар оруж враг граф скептицизм одновременно"
+_CONNECTORS = frozenset("и или это то что здесь как его с со в от на для только но также".split())
+
+
+def _features(expression: Sequence[str], text: str) -> frozenset[str]:
+    words = expression_words(text)
+    if _contains(expression, ("make", "a", "grab", "at")):
+        return frozenset({"grab"}) if any(
+            word.startswith(("схват", "ухват")) for word in words
+        ) else frozenset()
+    if "sheath" in expression and "armour" in expression:
+        features = set()
+        if any(word.startswith(("ножн", "оболоч")) for word in words) and any(
+            word.startswith("скры") for word in words
+        ):
+            features.add("conceal")
+        if any(word.startswith(("брон", "доспех")) for word in words) and any(
+            word.startswith(("защит", "защищ", "отраж")) for word in words
+        ):
+            features.add("protect")
+        return frozenset(features)
+    return frozenset()
+
+
+def _same_explanation(expression: Sequence[str], previous: str, current: str) -> bool:
+    if expression_words(previous) == expression_words(current):
+        return bool(expression_words(current))
+    known = _features(expression, previous)
+    if not known:
+        return False
+    vocabulary = (_GRAB_WORDS if "grab" in known else _ARMOUR_WORDS).split()
+    claims = [claim for claim in re.split(r"[.;!?\n]+", current) if expression_words(claim)]
+    for claim in claims:
+        words = expression_words(claim)
+        if any(word not in _CONNECTORS and not any(
+            word.startswith(root) for root in vocabulary
+        ) for word in words):
+            return False
+        features = _features(expression, claim)
+        if not features or not features <= known:
+            return False
+    return bool(claims)
 
 
 def _overlaps(first: Sequence[str], second: Sequence[str]) -> bool:
@@ -169,6 +214,8 @@ def _same_words(first: Sequence[str], second: Sequence[str]) -> bool:
 
 def _same_word(first: str, second: str) -> bool:
     """Одно ли это слово: совпадение или словоформы с общей основой."""
+    first = {"made": "make"}.get(first, first)
+    second = {"made": "make"}.get(second, second)
     if first == second:
         return True
     stem = next(
