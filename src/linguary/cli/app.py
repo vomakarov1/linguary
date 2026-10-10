@@ -125,7 +125,7 @@ def _doctor(args: argparse.Namespace) -> int:
         print(f"Server: {application.settings.server.base_url}")
         return 0
     finally:
-        application.dispose()
+        asyncio.run(application.aclose())
 
 
 def _import(args: argparse.Namespace) -> int:
@@ -154,7 +154,7 @@ def _import(args: argparse.Namespace) -> int:
         print(f"Task: {task.id}")
         return 0
     finally:
-        application.dispose()
+        asyncio.run(application.aclose())
 
 
 def _analyze(args: argparse.Namespace) -> int:
@@ -167,7 +167,7 @@ def _analyze(args: argparse.Namespace) -> int:
         print(f"Task: {task.id if task is not None else 'none'}")
         return 0
     finally:
-        application.dispose()
+        asyncio.run(application.aclose())
 
 
 def _process(args: argparse.Namespace) -> int:
@@ -181,23 +181,26 @@ def _process(args: argparse.Namespace) -> int:
         print(f"Tasks: {len(tasks)}")
         return 0
     finally:
-        application.dispose()
+        asyncio.run(application.aclose())
 
 
 def _worker(args: argparse.Namespace) -> int:
     """Запускает локальный worker."""
     application = _application(args)
-    try:
-        if args.once:
-            tasks = asyncio.run(drain_tasks(application))
-            failed = [task for task in tasks if task.last_error is not None]
-            print(f"Tasks finished: {len(tasks)}")
-            print(f"Tasks failed: {len(failed)}")
-            return 1 if failed else 0
-        asyncio.run(run_worker(application))
-        return 0
-    finally:
-        application.dispose()
+    async def execute() -> int:
+        try:
+            if args.once:
+                tasks = await drain_tasks(application)
+                failed = [task for task in tasks if task.last_error is not None]
+                print(f"Tasks finished: {len(tasks)}")
+                print(f"Tasks failed: {len(failed)}")
+                return 1 if failed else 0
+            await run_worker(application)
+            return 0
+        finally:
+            await application.aclose()
+
+    return asyncio.run(execute())
 
 
 def _retry(args: argparse.Namespace) -> int:
@@ -209,7 +212,7 @@ def _retry(args: argparse.Namespace) -> int:
         print(f"Status: {task.status.value}")
         return 0
     finally:
-        application.dispose()
+        asyncio.run(application.aclose())
 
 
 def _export(args: argparse.Namespace) -> int:
@@ -231,7 +234,7 @@ def _export(args: argparse.Namespace) -> int:
         )
         return 0
     finally:
-        application.dispose()
+        asyncio.run(application.aclose())
 
 
 def _application(args: argparse.Namespace):
