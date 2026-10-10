@@ -96,7 +96,9 @@ class TranslationCall:
         `Before You Read` главы (PRD § 19.3): повтор не повод отбраковывать ответ.
         """
         request = context.request
-        explained = ExplainedExpressions(context.explained_expressions)
+        explained = ExplainedExpressions(
+            context.explained_expressions, explanations=context.explained_entries
+        )
         attempts = 0
         while True:
             attempts += 1
