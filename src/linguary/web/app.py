@@ -264,13 +264,18 @@ def _lifespan(
         try:
             yield
         finally:
-            if worker is not None:
-                built.worker_pool.request_stop()
-                worker.cancel()
-                with suppress(asyncio.CancelledError):
-                    await worker
-            if owns_application:
-                await built.aclose()
+            built.begin_close()
+            try:
+                if worker is not None:
+                    worker.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await worker
+            finally:
+                try:
+                    await built.system_settings.aclose()
+                finally:
+                    if owns_application:
+                        await built.aclose()
 
     return lifespan
 

@@ -25,8 +25,10 @@ Web UI, CLI и сквозной тест: второго места сборки
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
 from linguary.adapters.config import AppSettings, load_settings
@@ -35,6 +37,7 @@ from linguary.adapters.config.system_settings import overlay_settings
 from linguary.adapters.db.system_settings import SystemSettingsStore
 from linguary.adapters.llm.rate_limit import LLMRateLimiter
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
+from linguary.composition.system_settings import SystemSettingsService
 from linguary.adapters.db.engine import create_database_engine
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.epub import (
@@ -111,6 +114,7 @@ class Application:
     """
 
     runtime_settings: RuntimeSettings
+    system_settings: SystemSettingsService
     settings_store: SystemSettingsStore
     rate_limiter: LLMRateLimiter
     paths: DataPaths
@@ -130,6 +134,7 @@ class Application:
     processing: RuntimeSequence
     regeneration: RuntimeSequence
     _dispose: Callable[[], None]
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def settings(self) -> AppSettings:
@@ -164,12 +169,38 @@ class Application:
         """Ставит задачу сборки итогового EPUB (PRD § 20)."""
         return await self.export_sequence.start(book_id)
 
+    def begin_close(self) -> None:
+        """Запрещает новые изменения настроек и новые захваты задач."""
+        self.system_settings.begin_close()
+        self.worker_pool.request_stop()
+
     async def aclose(self) -> None:
-        """Закрывает соединения приложения: провайдера LLM и базу."""
+        """Дожидается принятых изменений до закрытия поколений и базы."""
+        self.begin_close()
+        if self._close_task is None:
+            task = asyncio.create_task(self._close())
+            object.__setattr__(self, "_close_task", task)
+            task.add_done_callback(self._collect_close)
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
+        errors = []
+        for close in (self.system_settings.aclose, self.runtime_settings.aclose):
+            try:
+                await close()
+            except Exception:
+                errors.append(True)
         try:
-            await self.runtime_settings.aclose()
-        finally:
             self.dispose()
+        except Exception:
+            errors.append(True)
+        if errors:
+            raise SettingsError("Не удалось закрыть все ресурсы приложения") from None
+
+    @staticmethod
+    def _collect_close(task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
 
     def dispose(self) -> None:
         """Закрывает соединения с базой.
@@ -292,19 +323,24 @@ def build_application(
             regeneration=regeneration,
         ),
     )
+    worker_pool = TaskWorkerPool(
+        runner,
+        worker_settings or WorkerSettings(concurrency=app_settings.worker.concurrency),
+    )
+    system_settings = SystemSettingsService(
+        runtime=runtime_settings, store=settings_store,
+        limiter=rate_limiter, worker_pool=worker_pool,
+    )
     return Application(
         runtime_settings=runtime_settings,
+        system_settings=system_settings,
         settings_store=settings_store,
         rate_limiter=rate_limiter,
         paths=paths,
         unit_of_work=unit_of_work,
         task_queue=task_queue,
         runner=runner,
-        worker_pool=TaskWorkerPool(
-            runner,
-            worker_settings
-            or WorkerSettings(concurrency=app_settings.worker.concurrency),
-        ),
+        worker_pool=worker_pool,
         epubcheck=epubcheck,
         register_book=RegisterBook(unit_of_work=unit_of_work),
         import_book=import_book,
