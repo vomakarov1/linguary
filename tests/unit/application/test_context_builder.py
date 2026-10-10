@@ -407,3 +407,29 @@ def test_fragment_outside_the_chapter_is_rejected() -> None:
     """Фрагмент, номер которого выходит за число фрагментов главы, не собирается."""
     with pytest.raises(ContextBuildError):
         build_fragment_context(order=1, fragment_count=1)
+
+
+def test_clear_long_plot_with_local_vocabulary_uses_lighter_help() -> None:
+    instructions = build_context().request.instructions
+    assert "число незнакомых слов само по себе" in instructions
+    assert "длинный сюжетный абзац" in instructions
+    assert "доступный диалог" in instructions
+
+
+def test_short_opaque_dialogue_needs_translation() -> None:
+    assert "короткий диалог с непрозрачной смысловой связью" in build_context().request.instructions
+
+
+def test_plan_self_check_preserves_help_for_difficult_blocks() -> None:
+    instructions = build_context().request.instructions
+    for requirement in ("60% блоков", "70% объёма", "15% блоков", "не переключай самые длинные блоки", "не лишай помощи сложные блоки"):
+        assert requirement in instructions
+    fragment = chapter_fragment_instructions(source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE)
+    assert "70% объёма" in fragment
+
+
+def test_analysis_requires_natural_character_speech() -> None:
+    for instructions in (build_context().request.instructions,
+                         chapter_fragment_instructions(source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE)):
+        assert "естественными понятными средствами" in instructions
+        assert "без искусственной имитации" in instructions
