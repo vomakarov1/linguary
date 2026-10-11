@@ -589,3 +589,45 @@ async def test_success_diagnostic_redacts_key_without_changing_payload() -> None
     ))
     assert response.payload.blocks[0].translated_text == API_KEY
     assert response.raw_content == content.replace(API_KEY, "[REDACTED]")
+
+
+@pytest.mark.parametrize('kind', ['transport', 'provider', 'format', 'success'])
+@pytest.mark.parametrize('mode', ['custom', 'auto'])
+async def test_proxy_diagnostics_redact_encoded_decoded_credentials(monkeypatch, kind, mode):
+    secret = 'http://alice:p%40ss@localhost:8123'
+    text = f'{secret} http://alice:p@ss@localhost:8123 alice:p%40ss alice:p@ss p%40ss p@ss Basic YWxpY2U6cEBzcw=='
+    if mode == 'auto':
+        monkeypatch.setenv('HTTPS_PROXY', secret)
+    def handler(request):
+        if kind == 'transport':
+            raise httpx.ConnectError(text)
+        if kind == 'provider':
+            return httpx.Response(403, text=text)
+        if kind == 'format':
+            return httpx.Response(200, json=completion(text))
+        return httpx.Response(200, json=completion(as_content(translation_payload()), model=text))
+    client = client_over(handler, proxy_mode=mode, proxy_url=secret if mode == 'custom' else None)
+    if mode == 'auto':
+        monkeypatch.setenv('HTTPS_PROXY', 'http://different:next-password@localhost:9')
+    try:
+        if kind == 'success':
+            response = await client.generate(LLMRequest.for_translation(instructions='Переводи', input_text='text'))
+            output = response.model + response.raw_content
+        else:
+            with pytest.raises((LLMTransportError, LLMConfigurationError, LLMResponseFormatError)) as caught:
+                await client.generate(LLMRequest.for_translation(instructions='Переводи', input_text='text'))
+            output = str(caught.value) + (getattr(caught.value, 'raw_content', '') or '')
+            assert caught.value.__cause__ is None
+        for value in (secret, 'alice', 'p%40ss', 'p@ss', 'YWxpY2U6cEBzcw=='):
+            assert value not in output
+    finally:
+        await client._http.aclose()
+
+
+def test_proxy_client_preparation_error_is_safe(monkeypatch):
+    def fail(**kwargs):
+        raise ValueError('http://alice:p%40ss@localhost alice p@ss')
+    monkeypatch.setattr(httpx, 'AsyncClient', fail)
+    with pytest.raises(LLMConfigurationError) as caught:
+        OpenAICompatibleLLMClient(settings=settings(proxy_mode='custom', proxy_url='http://alice:p%40ss@localhost'))
+    assert 'alice' not in str(caught.value) and caught.value.__cause__ is None

@@ -24,6 +24,7 @@ class StoredSystemSettings:
     revision: int
     overrides: dict[str, object] | None = field(repr=False)
     api_key: str | None = field(repr=False)
+    proxy_url: str | None = field(default=None, repr=False)
 
 
 class SystemSettingsStore:
@@ -43,7 +44,7 @@ class SystemSettingsStore:
                 if row is None:
                     return None
                 return StoredSystemSettings(
-                    row['revision'], row['overrides_json'], row['api_key']
+                    row['revision'], row['overrides_json'], row['api_key'], row['proxy_url']
                 )
         except SQLAlchemyError:
             raise SettingsStoreError('Не удалось прочитать настройки') from None
@@ -54,19 +55,21 @@ class SystemSettingsStore:
         api_key: str | None,
         *,
         expected_revision: int,
+        proxy_url: str | None = None,
     ) -> StoredSystemSettings:
         fields = {'provider', 'model', 'base_url', 'requests_per_minute', 'concurrency'}
-        if not isinstance(overrides, dict) or set(overrides) != fields:
+        if not isinstance(overrides, dict) or set(overrides) not in (fields, fields | {'proxy_mode'}):
             raise SettingsStoreError('Недопустимый состав сохраняемых настроек')
-        return self._write(dict(overrides), api_key, expected_revision=expected_revision)
+        return self._write(dict(overrides), api_key, proxy_url, expected_revision=expected_revision)
 
     def reset(self, *, expected_revision: int) -> StoredSystemSettings:
-        return self._write(None, None, expected_revision=expected_revision)
+        return self._write(None, None, None, expected_revision=expected_revision)
 
     def _write(
         self,
         overrides: dict[str, object] | None,
         api_key: str | None,
+        proxy_url: str | None,
         *,
         expected_revision: int,
     ) -> StoredSystemSettings:
@@ -84,6 +87,7 @@ class SystemSettingsStore:
                     revision=expected_revision + 1,
                     overrides_json=overrides,
                     api_key=api_key,
+                    proxy_url=proxy_url,
                 )
                 if revision is None:
                     connection.execute(insert(SystemSettingsRow).values(id=1, **values))
@@ -102,6 +106,7 @@ class SystemSettingsStore:
                 expected_revision + 1,
                 None if overrides is None else dict(overrides),
                 api_key,
+                proxy_url,
             )
         except SQLAlchemyError:
             raise SettingsStoreError('Не удалось записать настройки') from None

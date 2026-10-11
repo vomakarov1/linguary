@@ -19,11 +19,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
+from urllib.request import getproxies
 from typing import Any
 
 import httpx
 
-from linguary.adapters.config.settings import LLMSettings
+from linguary.adapters.config.settings import LLMSettings, proxy_secrets
 from linguary.adapters.llm.json_schema import strict_json_schema
 from linguary.adapters.llm.payloads import parse_payload, schema_for
 from linguary.application.ports.llm import (
@@ -71,7 +72,19 @@ class OpenAICompatibleLLMClient(LLMClient):
         """
         settings.ensure_ready()
         self._settings = settings
-        self._http = http_client or httpx.AsyncClient(timeout=settings.timeout_seconds)
+        urls = ()
+        if settings.proxy_mode == 'custom':
+            urls = (settings.proxy_url,)
+        elif settings.proxy_mode == 'auto':
+            urls = tuple(value for key, value in getproxies().items() if key in ('http', 'https', 'all'))
+        self._proxy_secrets = tuple(secret for url in urls for secret in proxy_secrets(url))
+        try:
+            self._http = http_client if http_client is not None else httpx.AsyncClient(
+                timeout=settings.timeout_seconds, trust_env=settings.proxy_mode == 'auto',
+                **({'proxy': settings.proxy_url} if settings.proxy_mode == 'custom' else {}),
+            )
+        except Exception:
+            raise LLMConfigurationError('Не удалось подготовить соединение с провайдером') from None
         self._owns_http = http_client is None
 
     async def generate[PayloadT: LLMPayload](
@@ -82,7 +95,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         usage = _usage(document)
         cost = _cost(document)
         model = safe_detail(
-            _model(document, fallback=self._settings.model), api_key=self._settings.api_key
+            _model(document, fallback=self._settings.model), api_key=self._settings.api_key, secrets=self._proxy_secrets
         )
         try:
             choice = _choice(document)
@@ -90,15 +103,19 @@ class OpenAICompatibleLLMClient(LLMClient):
             content = _content(choice)
             payload = parse_payload(request.kind, content, truncated=truncated)
         except LLMResponseFormatError as error:
-            error.args = (safe_detail(str(error), api_key=self._settings.api_key),)
+            error.args = (safe_detail(str(error), api_key=self._settings.api_key, secrets=self._proxy_secrets),)
             if error.raw_content is not None:
                 error.raw_content = safe_detail(
-                    error.raw_content, api_key=self._settings.api_key
+                    error.raw_content, api_key=self._settings.api_key, secrets=self._proxy_secrets
                 )
             error.usage = usage
             error.cost = cost
             error.provider = self._settings.provider
             error.model = model
+            if error.__cause__ is not None and self._safe(str(error.__cause__)) != str(error.__cause__):
+                error.__cause__ = None
+                error.__context__ = None
+                error.__suppress_context__ = True
             raise
         return LLMResponse(
             payload=payload,  # type: ignore[arg-type]  # схему выбирает request.kind
@@ -107,8 +124,11 @@ class OpenAICompatibleLLMClient(LLMClient):
             truncated=truncated,
             usage=usage,
             cost=cost,
-            raw_content=safe_detail(content, api_key=self._settings.api_key),
+            raw_content=safe_detail(content, api_key=self._settings.api_key, secrets=self._proxy_secrets),
         )
+
+    def _safe(self, text: str) -> str:
+        return safe_detail(text, api_key=self._settings.api_key, secrets=self._proxy_secrets)
 
     async def aclose(self) -> None:
         """Закрывает HTTP-соединения, если клиент создавал их сам."""
@@ -134,18 +154,18 @@ class OpenAICompatibleLLMClient(LLMClient):
             raise LLMTransportError(
                 f"провайдер {self._settings.provider} не ответил за "
                 f"{self._settings.timeout_seconds:g} с"
-            ) from error
+            ) from None
         except httpx.HTTPError as error:
             raise LLMTransportError(
                 safe_detail(
-                    f"вызов провайдера {self._settings.provider} не удался: {error}",
-                    api_key=self._settings.api_key,
+                    f"вызов провайдера {self._settings.provider} не удался: {self._safe(str(error))}",
+                    api_key=self._settings.api_key, secrets=self._proxy_secrets,
                 )
-            ) from error
+            ) from None
         _raise_for_status(
-            response, provider=self._settings.provider, api_key=self._settings.api_key
+            response, provider=self._settings.provider, api_key=self._settings.api_key, secrets=self._proxy_secrets
         )
-        return _document(response, api_key=self._settings.api_key)
+        return _document(response, api_key=self._settings.api_key, secrets=self._proxy_secrets)
 
 
 def _endpoint(base_url: str) -> str:
@@ -186,13 +206,13 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
 
 
 def _raise_for_status(
-    response: httpx.Response, *, provider: str, api_key: str | None
+    response: httpx.Response, *, provider: str, api_key: str | None, secrets: tuple[str, ...] = ()
 ) -> None:
     """Приводит неуспешный ответ провайдера к типу ошибки порта (PRD § 16)."""
     status = response.status_code
     if status < 400:
         return
-    detail = f"{status}{_detail(response, api_key=api_key)}"
+    detail = f"{status}{_detail(response, api_key=api_key, secrets=secrets)}"
     if status in _AUTHORIZATION_STATUSES:
         raise LLMConfigurationError(
             f"провайдер {provider} не принял ключ или доступ к модели: {detail}"
@@ -243,19 +263,19 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _document(response: httpx.Response, *, api_key: str | None) -> dict[str, Any]:
+def _document(response: httpx.Response, *, api_key: str | None, secrets: tuple[str, ...] = ()) -> dict[str, Any]:
     """Тело успешного ответа провайдера."""
     try:
         document = response.json()
     except ValueError as error:
         raise LLMResponseFormatError(
             "ответ провайдера не является JSON",
-            raw_content=safe_detail(response.text, api_key=api_key),
-        ) from error
+            raw_content=safe_detail(response.text, api_key=api_key, secrets=secrets),
+        ) from None
     if not isinstance(document, dict):
         raise LLMResponseFormatError(
             "ответ провайдера не похож на ответ генерации",
-            raw_content=safe_detail(response.text, api_key=api_key),
+            raw_content=safe_detail(response.text, api_key=api_key, secrets=secrets),
         )
     return document
 
@@ -323,15 +343,17 @@ def _cost(document: dict[str, Any]) -> Decimal | None:
     return cost if cost.is_finite() and cost >= 0 else None
 
 
-def safe_detail(text: str, *, api_key: str | None) -> str:
+def safe_detail(text: str, *, api_key: str | None, secrets: tuple[str, ...] = ()) -> str:
     """Убирает ключ этого клиента до усечения технических деталей."""
-    return text.replace(api_key, "[REDACTED]") if api_key else text
+    for secret in sorted((*secrets, *((api_key,) if api_key else ())), key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    return text
 
 
-def _detail(response: httpx.Response, *, api_key: str | None) -> str:
+def _detail(response: httpx.Response, *, api_key: str | None, secrets: tuple[str, ...] = ()) -> str:
     """Хвост ответа провайдера для технической детали ошибки."""
     try:
-        text = safe_detail(response.text, api_key=api_key).strip()
+        text = safe_detail(response.text, api_key=api_key, secrets=secrets).strip()
     except (UnicodeDecodeError, httpx.ResponseNotRead):
         return ""
     return f": {text[:_DETAIL_LIMIT]}" if text else ""

@@ -10,12 +10,13 @@ from urllib.parse import urlsplit
 from fastapi import Request
 
 from linguary.adapters.config import AppSettings
+from linguary.adapters.config.settings import proxy_secrets
 from linguary.adapters.config.system_settings import SystemSettingsUpdate, SystemSettingsValidationError
 from linguary.web import labels
 from linguary.web.schemas import SafeSettingsFormValues
 
-_SAVE_FIELDS = frozenset({'provider', 'model', 'api_key', 'base_url', 'requests_per_minute', 'concurrency', 'expected_revision'})
-_REQUIRED_FIELDS = _SAVE_FIELDS - {'api_key'}
+_SAVE_FIELDS = frozenset({'provider', 'model', 'api_key', 'base_url', 'requests_per_minute', 'concurrency', 'expected_revision', 'proxy_mode', 'proxy_url'})
+_REQUIRED_FIELDS = _SAVE_FIELDS - {'api_key', 'proxy_mode', 'proxy_url'}
 _INTEGER = re.compile(r'[+-]?[0-9]+\Z')
 _CREDENTIALS = re.compile(r'(?i)(bearer\s+|(?:api[_-]?key|token|password|secret|authorization)\s*[:=]|sk-[a-z0-9_-]{8,}|https?://[^/\s]+@)')
 
@@ -41,13 +42,14 @@ def _integer(value: object, *, form: bool) -> int | None:
     return None
 
 
-def _secrets(current_settings: AppSettings, posted_key: object) -> tuple[str, ...]:
-    values = []
-    pending = [current_settings.llm.api_key, posted_key]
+def _secrets(current_settings: AppSettings, posted_key: object, posted_proxy: object = None) -> tuple[str, ...]:
+    values = list(proxy_secrets(current_settings.llm.proxy_url))
+    pending = [current_settings.llm.api_key, posted_key, posted_proxy]
     while pending:
         value = pending.pop()
         if isinstance(value, str) and value.strip():
             values.append(value.strip())
+            values.extend(proxy_secrets(value))
         elif isinstance(value, dict):
             pending.extend(value)
             pending.extend(value.values())
@@ -84,16 +86,17 @@ def _safe_url(value: str) -> str:
 
 def _projection(values: Mapping[str, object], current_settings: AppSettings, *, form: bool, duplicate_fields: frozenset[str] = frozenset()) -> SafeSettingsFormValues:
     key = values.get('api_key')
-    secrets = _secrets(current_settings, key)
+    secrets = _secrets(current_settings, key, values.get('proxy_url'))
     fields = {name: value for name, value in values.items() if name in _SAVE_FIELDS and name not in duplicate_fields}
     provider = _safe_text(fields.get('provider'), secrets)
     revision = _integer(fields.get('expected_revision'), form=form)
     return SafeSettingsFormValues(
         provider=provider if provider == 'openai_compatible' else '',
-        model='' if 'api_key' in duplicate_fields else _safe_text(fields.get('model'), secrets),
-        base_url='' if 'api_key' in duplicate_fields else _safe_url(_safe_text(fields.get('base_url'), secrets)),
+        model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('model'), secrets),
+        base_url='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_url(_safe_text(fields.get('base_url'), secrets)),
         requests_per_minute=_integer(fields.get('requests_per_minute'), form=form),
         concurrency=_integer(fields.get('concurrency'), form=form),
+        proxy_mode=fields.get('proxy_mode') if fields.get('proxy_mode') in ('auto', 'direct', 'custom') else current_settings.llm.proxy_mode,
         expected_revision=revision if revision is not None and revision >= 0 else None,
     )
 
@@ -103,6 +106,8 @@ def safe_form_values(current_settings: AppSettings, *, update: SystemSettingsUpd
     values = dict(provider=source.provider, model=source.model, base_url=source.base_url,
                   requests_per_minute=source.requests_per_minute,
                   concurrency=current_settings.worker.concurrency if update is None else update.concurrency,
+                  proxy_mode=source.proxy_mode,
+                  proxy_url=None if update is None else update.proxy_url,
                   api_key=None if update is None else update.api_key,
                   expected_revision=expected_revision)
     return _projection(values, current_settings, form=False)
@@ -157,7 +162,7 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
     revision = _revision(values, form=form, errors=errors)
     strings = {}
     posted_key = values.get('api_key')
-    secrets = _secrets(current_settings, posted_key)
+    secrets = _secrets(current_settings, posted_key, values.get('proxy_url'))
     for name in ('provider', 'model', 'base_url'):
         value = values.get(name)
         if not isinstance(value, str):
@@ -168,6 +173,9 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
                 errors[name] = labels.SETTINGS_SAFE_FIELD
     if 'api_key' in values and not isinstance(posted_key, str):
         errors['api_key'] = labels.SETTINGS_STRING_FIELD
+    for name in ('proxy_mode', 'proxy_url'):
+        if name in values and not isinstance(values[name], str):
+            errors[name] = labels.SETTINGS_STRING_FIELD
     concurrency = _integer(values.get('concurrency'), form=form)
     if concurrency is None:
         errors['concurrency'] = labels.SETTINGS_INTEGER_FIELD
@@ -177,7 +185,7 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
         errors['requests_per_minute'] = labels.SETTINGS_INTEGER_FIELD
     if not errors:
         try:
-            update = SystemSettingsUpdate(**strings, requests_per_minute=rate, concurrency=concurrency, api_key=posted_key)
+            update = SystemSettingsUpdate(**strings, requests_per_minute=rate, concurrency=concurrency, api_key=posted_key, proxy_mode=values.get('proxy_mode'), proxy_url=values.get('proxy_url'))
         except SystemSettingsValidationError as error:
             errors[error.field] = error.message
     if errors:

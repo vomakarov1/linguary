@@ -21,6 +21,7 @@ class FormPage(HTMLParser):
         super().__init__()
         self.forms = {}
         self.current = None
+        self.select = None
         self.feed(text)
 
     def handle_starttag(self, tag, attrs):
@@ -35,13 +36,19 @@ class FormPage(HTMLParser):
                 self.current['buttons'].append(attrs)
             elif tag == 'select':
                 self.current['selects'][attrs['name']] = attrs
+                self.select = attrs
+            elif tag == 'option' and self.select is not None:
+                if 'value' not in self.select or 'selected' in attrs:
+                    self.select['value'] = attrs.get('value', '')
 
     def handle_endtag(self, tag):
         if tag == 'form':
             self.current = None
+        elif tag == 'select':
+            self.select = None
 
     def values(self):
-        return {name: attrs.get('value', '') for name, attrs in self.forms['/system/config']['inputs'].items()} | {'provider': 'openai_compatible'}
+        return {name: attrs.get('value', '') for name, attrs in self.forms['/system/config']['inputs'].items()} | {name: attrs.get('value', '') for name, attrs in self.forms['/system/config']['selects'].items()}
 
 
 def page(client):

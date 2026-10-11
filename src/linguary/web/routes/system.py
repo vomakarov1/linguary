@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from linguary.adapters.db.system_settings import SettingsRevisionConflict
+from linguary.adapters.config.system_settings import SystemSettingsValidationError
 from linguary.composition.system_settings import SettingsClosingError
 
 from linguary.web import labels
@@ -129,6 +130,9 @@ async def _change_config(request: Request, application, *, reset: bool):
         code, message, status_code = error.code, error.message, error.status_code
         field_errors = error.field_errors
         form_values = error.form_values
+    except SystemSettingsValidationError as error:
+        code, message, status_code = 'invalid_settings', labels.SETTINGS_INVALID, 422
+        field_errors = {error.field: error.message}
     except SettingsRevisionConflict:
         code, message, status_code = "revision_conflict", labels.SETTINGS_CONFLICT, 409
         field_errors = {}

@@ -5,7 +5,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 
 from linguary.adapters.config.settings import AppSettings, SettingsError
-from linguary.adapters.config.system_settings import SystemSettingsUpdate, candidate_settings
+from linguary.adapters.config.system_settings import SystemSettingsUpdate, SystemSettingsValidationError, candidate_settings
 from linguary.adapters.db.system_settings import SettingsRevisionConflict, SystemSettingsStore
 from linguary.adapters.llm.rate_limit import LLMRateLimiter
 from linguary.adapters.runtime import TaskWorkerPool
@@ -96,6 +96,7 @@ class SystemSettingsService:
                     )
                 else:
                     overrides = dict(
+                        proxy_mode=candidate.llm.proxy_mode,
                         provider=candidate.llm.provider,
                         model=candidate.llm.model,
                         base_url=candidate.llm.base_url,
@@ -105,11 +106,12 @@ class SystemSettingsService:
                     result = await asyncio.to_thread(
                         self._store.save, overrides, candidate.llm.api_key,
                         expected_revision=expected_revision,
+                        proxy_url=candidate.llm.proxy_url,
                     )
             except Exception as error:
                 if generation is not None:
                     await self._discard(generation)
-                if isinstance(error, SettingsRevisionConflict):
+                if isinstance(error, (SettingsRevisionConflict, SystemSettingsValidationError)):
                     raise
                 raise SettingsNotAppliedError('Изменения не применены') from None
             self._runtime.publish(generation, result.revision)

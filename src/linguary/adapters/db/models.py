@@ -428,3 +428,4 @@ class SystemSettingsRow(Base):
     revision: Mapped[int]
     overrides_json: Mapped[dict[str, object] | None] = mapped_column(JSON(none_as_null=True))
     api_key: Mapped[str | None] = mapped_column(Text)
+    proxy_url: Mapped[str | None] = mapped_column(Text)

@@ -149,3 +149,28 @@ def test_downgrade_removes_system_settings(alembic_config, engine):
     tables = inspect(engine).get_table_names()
     assert 'system_settings' not in tables
     assert 'books' in tables
+
+
+def test_upgrade_0004_preserves_settings_and_adds_proxy_column(alembic_config, database_path):
+    import json
+    from sqlalchemy import text
+    command.upgrade(alembic_config, '0004')
+    engine = create_database_engine(database_path)
+    values = dict(provider='openai_compatible', model='old', base_url='http://localhost', requests_per_minute=None, concurrency=1)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text('INSERT INTO system_settings (id, revision, overrides_json, api_key) VALUES (1, 7, :values, :key)'), {'values': json.dumps(values), 'key': 'key'})
+        command.upgrade(alembic_config, 'head')
+        with engine.begin() as connection:
+            row = connection.execute(text('SELECT * FROM system_settings')).mappings().one()
+            assert row['revision'] == 7 and row['api_key'] == 'key'
+            assert row['proxy_url'] is None and json.loads(row['overrides_json']) == values
+            connection.execute(text('UPDATE system_settings SET overrides_json=:values, proxy_url=:url'), {'values': json.dumps({**values, 'proxy_mode': 'custom'}), 'url': 'http://alice:password@localhost'})
+        command.downgrade(alembic_config, '0004')
+        assert 'proxy_url' not in {column['name'] for column in inspect(engine).get_columns('system_settings')}
+        with engine.connect() as connection:
+            row = connection.execute(text('SELECT * FROM system_settings')).mappings().one()
+            assert row['revision'] == 7 and row['api_key'] == 'key'
+            assert json.loads(row['overrides_json']) == values
+    finally:
+        engine.dispose()

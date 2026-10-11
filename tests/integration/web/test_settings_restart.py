@@ -180,3 +180,24 @@ async def test_large_positive_rate_survives_same_database_restart(tmp_path):
         assert restarted.runtime_settings.revision == restarted.settings_store.load().revision == 1
         await restarted.rate_limiter.acquire()
         await restarted.rate_limiter.acquire()
+
+
+async def test_proxy_persists_restart_and_reset_restores_baseline(tmp_path):
+    initial = replace(baseline(tmp_path), llm=replace(baseline(tmp_path).llm, proxy_mode='direct'))
+    secret = 'http://alice:p%40ss@localhost:8123'
+    async with running(initial) as (first, web):
+        saved = await web.post('/system/config', json=payload(proxy_mode='custom', proxy_url=secret))
+        assert saved.status_code == 200
+        assert first.settings_store.load().proxy_url == secret
+    async with running(initial) as (second, web):
+        assert second.settings.llm.proxy_mode == 'custom'
+        assert second.settings.llm.proxy_url == secret
+        blank = await web.post('/system/config', json=payload(proxy_mode='custom', proxy_url=' ', expected_revision=1))
+        assert blank.status_code == 200 and second.settings.llm.proxy_url == secret
+        reset = await web.post('/system/config/reset', json={'expected_revision': 2})
+        assert reset.status_code == 200
+        assert second.settings.llm.proxy_mode == 'direct' and second.settings_store.load().proxy_url is None
+    async with running(initial) as (third, web):
+        assert third.settings.llm.proxy_mode == 'direct'
+        assert third.settings.llm.proxy_url is None
+        assert third.runtime_settings.revision == 3

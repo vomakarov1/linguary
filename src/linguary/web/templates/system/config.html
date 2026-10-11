@@ -43,6 +43,20 @@
       {% if data.llm.has_api_key %}<p>Ключ сохранён: <span>••••••••</span></p>{% else %}<p>Ключ не задан.</p>{% endif %}
       <p>Пустое поле сохраняет текущий ключ. Чтобы заменить ключ, введите его заново.</p>
     </div>
+    <div class="settings-field">
+      <label for="settings-proxy-mode">Соединение с LLM</label>
+      <select id="settings-proxy-mode" name="proxy_mode" {% if 'proxy_mode' in field_errors %}aria-invalid="true" aria-describedby="settings-error-proxy_mode"{% endif %}>
+        {% for mode, title in [('auto', 'Из окружения'), ('direct', 'Напрямую'), ('custom', 'Через прокси')] %}<option value="{{ mode }}" {% if form_values.proxy_mode == mode %}selected{% endif %}>{{ title }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="settings-field">
+      <label for="settings-proxy-url">Адрес прокси</label>
+      <input id="settings-proxy-url" name="proxy_url" type="password" autocomplete="new-password" {% if 'proxy_url' in field_errors %}aria-invalid="true" aria-describedby="settings-error-proxy_url"{% endif %}>
+      {% if data.llm.has_proxy_url %}<p>Адрес сохранён: <span>••••••••</span></p>{% else %}<p>Адрес не задан.</p>{% endif %}
+      <p>Для режима «Через прокси» укажите HTTP(S)-адрес. Логин и пароль можно включить в адрес. Пустое поле сохраняет прежний адрес. Выбор другого режима удаляет сохранённый адрес.</p>
+      <p>Адрес может начинаться с http:// даже для HTTPS API.</p>
+      <p>Если прокси запущен на хосте Docker, используйте host.docker.internal вместо localhost.</p>
+    </div>
     <button type="submit" {% if not can_submit %}disabled{% endif %}>Сохранить настройки</button>
   </form>
   <form class="settings-form settings-reset" action="{{ config_url }}/reset" method="post">

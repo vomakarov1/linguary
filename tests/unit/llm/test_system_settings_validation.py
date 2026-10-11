@@ -70,3 +70,51 @@ def test_invalid_stored_fields_fail_safely():
     with pytest.raises(SystemSettingsValidationError) as caught:
         overlay_settings(AppSettings(), StoredSystemSettings(1, {secret: secret}, secret))
     assert secret not in str(caught.value)
+
+
+@pytest.mark.parametrize('mode', ['auto', 'direct', 'custom'])
+def test_proxy_modes_and_http_https_urls_validate(mode):
+    url = 'https://alice:p%40ss@localhost:8080' if mode == 'custom' else None
+    result = candidate_settings(AppSettings(), update(proxy_mode=mode, proxy_url=url))
+    assert result.llm.proxy_mode == mode
+    assert result.llm.proxy_url == url
+    assert 'p%40ss' not in repr(result)
+
+
+@pytest.mark.parametrize('url', ['socks5://localhost:9', 'http://localhost:bad', 'http://localhost:99999', 'http://localhost/x', 'http://localhost?q=1', 'http://localhost#x', 'http://local\nhost', 'http://localhost /'])
+def test_proxy_url_rejects_socks_invalid_port_controls_path_query_fragment(url):
+    with pytest.raises(SystemSettingsValidationError) as caught:
+        update(proxy_mode='custom', proxy_url=url)
+    assert caught.value.field == 'proxy_url'
+    assert url not in str(caught.value)
+
+
+def test_custom_blank_preserves_previous_url():
+    current = AppSettings(llm=LLMSettings(proxy_mode='custom', proxy_url='http://alice:password@localhost:9'))
+    assert candidate_settings(current, update(proxy_mode='custom', proxy_url='  ')).llm.proxy_url == current.llm.proxy_url
+    assert candidate_settings(current, update()).llm.proxy_url == current.llm.proxy_url
+    for mode in ('auto', 'direct'):
+        assert candidate_settings(current, update(proxy_mode=mode)).llm.proxy_url is None
+
+
+def test_custom_without_url_rejects():
+    with pytest.raises(SystemSettingsValidationError) as caught:
+        candidate_settings(AppSettings(), update(proxy_mode='custom'))
+    assert caught.value.field == 'proxy_url'
+
+
+def test_url_without_mode_rejects():
+    with pytest.raises(SystemSettingsValidationError):
+        update(proxy_url='http://localhost:9')
+
+
+@pytest.mark.parametrize('url', ['\nhttp://localhost', 'http://localhost\n', ' http://localhost '])
+def test_proxy_url_rejects_outer_controls_and_whitespace(url):
+    with pytest.raises(SystemSettingsValidationError) as caught:
+        update(proxy_mode='custom', proxy_url=url)
+    assert caught.value.field == 'proxy_url'
+
+
+def test_proxy_secrets_include_httpx_basic_credentials():
+    from linguary.adapters.config.settings import proxy_secrets
+    assert 'YWxpY2U6cEBzcw==' in proxy_secrets('http://alice:p%40ss@localhost:9')

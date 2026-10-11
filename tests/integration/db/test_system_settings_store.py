@@ -85,3 +85,32 @@ def test_reset_empty_database_creates_revision_without_overrides(engine):
     assert reset.revision == 1
     assert reset.overrides is None and reset.api_key is None
     assert store.load() == reset
+
+
+def test_proxy_url_is_separate_from_overrides_json(engine):
+    from sqlalchemy import text
+    store = SystemSettingsStore(engine)
+    secret = 'http://alice:p%40ss@localhost:9'
+    saved = store.save({**OVERRIDES, 'proxy_mode': 'custom'}, 'key', expected_revision=0, proxy_url=secret)
+    assert store.load() == saved
+    assert secret not in repr(saved)
+    with engine.connect() as connection:
+        row = connection.execute(text('SELECT overrides_json, proxy_url FROM system_settings')).one()
+        assert secret not in row.overrides_json
+        assert row.proxy_url == secret
+    reset = store.reset(expected_revision=1)
+    assert reset.proxy_url is None and reset.revision == 2
+
+
+def test_proxy_failed_commit_preserves_previous_row(engine):
+    store = SystemSettingsStore(engine)
+    previous = store.save({**OVERRIDES, 'proxy_mode': 'custom'}, 'key', expected_revision=0, proxy_url='http://old:password@localhost:9')
+    def fail(connection):
+        raise OperationalError('secret SQL', {}, Exception('new-password'))
+    event.listen(engine, 'commit', fail)
+    try:
+        with pytest.raises(SettingsStoreError):
+            store.save({**OVERRIDES, 'proxy_mode': 'direct'}, 'key', expected_revision=1)
+    finally:
+        event.remove(engine, 'commit', fail)
+    assert store.load() == previous

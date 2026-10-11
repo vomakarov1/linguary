@@ -536,3 +536,34 @@ async def test_task_and_llm_log_errors_do_not_contain_key(
                         assert (secret not in response.text) is True
         finally:
             await built.aclose()
+
+
+@pytest.mark.parametrize('failure', ['provider', 'format'])
+async def test_proxy_secret_not_in_task_llm_logs_or_http_responses(tmp_path, failure):
+    secret = 'http://alice:p%40ss@localhost:8123'
+    detail = f'{secret} alice:p@ss p%40ss p@ss Basic YWxpY2U6cEBzcw=='
+    settings = LLMSettings(model='test', api_key='key', proxy_mode='custom', proxy_url=secret, max_attempts=1, debug_llm_payloads=True)
+    def handler(request):
+        if failure == 'provider':
+            return httpx.Response(403, text=detail)
+        return httpx.Response(200, json={'model': detail, 'choices': [{'message': {'content': detail}, 'finish_reason': 'stop'}]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as transport:
+        llm = OpenAICompatibleLLMClient(settings=settings, http_client=transport)
+        built = build_application(settings=AppSettings(llm=settings, storage=StorageSettings(data_root=str(tmp_path))), llm_client=llm)
+        try:
+            scenario = store_processing_book(built.unit_of_work)
+            await built.task_queue.enqueue(TaskIdentity(book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT, scope_id=scenario.section().id))
+            finished = await drain_tasks(built)
+            with built.unit_of_work.transaction() as transaction:
+                logs = transaction.llm_calls.list_for_book(BOOK_ID)
+                raw = [transaction.llm_calls.response_text_for(entry.id) for entry in logs]
+            assert len(finished) == len(logs) == 1
+            output = repr(finished) + repr(logs) + repr(raw)
+            web = create_app(application=built, run_background_worker=False)
+            async with web.router.lifespan_context(web):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=web), base_url='http://localhost') as http:
+                    output += (await http.get('/system/config')).text
+            for value in (secret, 'alice', 'p%40ss', 'p@ss', 'YWxpY2U6cEBzcw=='):
+                assert value not in output
+        finally:
+            await built.aclose()

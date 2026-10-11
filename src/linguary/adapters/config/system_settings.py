@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from linguary.adapters.config.settings import AppSettings, OPENAI_COMPATIBLE_PROVIDER, SettingsError
+from linguary.adapters.config.settings import AppSettings, OPENAI_COMPATIBLE_PROVIDER, SettingsError, validate_proxy
 
 if TYPE_CHECKING:
     from linguary.adapters.db.system_settings import StoredSystemSettings
@@ -38,7 +38,24 @@ class SystemSettingsUpdate:
     concurrency: int
     api_key: str | None = field(default=None, repr=False)
 
+    proxy_mode: str | None = None
+    proxy_url: str | None = field(default=None, repr=False)
+
     def __post_init__(self) -> None:
+        mode = self.proxy_mode
+        if mode is None and self.proxy_url is not None:
+            raise SystemSettingsValidationError('proxy_url', 'Укажите режим соединения для адреса прокси')
+        if mode is not None and mode not in ('auto', 'direct', 'custom'):
+            raise SystemSettingsValidationError('proxy_mode', 'Недопустимый режим соединения')
+        url = None if self.proxy_url is None else _string(self.proxy_url, 'proxy_url') or None
+        if url is not None:
+            if mode != 'custom':
+                raise SystemSettingsValidationError('proxy_url', 'Укажите режим «Через прокси» для адреса прокси')
+            try:
+                validate_proxy(mode, self.proxy_url)
+            except SettingsError as error:
+                raise SystemSettingsValidationError('proxy_url', str(error)) from None
+        object.__setattr__(self, 'proxy_url', url)
         provider = _string(self.provider, 'provider')
         model = _string(self.model, 'model')
         base_url = _string(self.base_url, 'base_url')
@@ -66,9 +83,18 @@ class SystemSettingsUpdate:
 
 
 def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> AppSettings:
+    mode = current.llm.proxy_mode if update.proxy_mode is None else update.proxy_mode
+    if update.proxy_mode is None:
+        url = current.llm.proxy_url
+    elif mode == 'custom':
+        url = update.proxy_url or current.llm.proxy_url
+    else:
+        url = None
+    if mode == 'custom' and url is None:
+        raise SystemSettingsValidationError('proxy_url', 'Укажите адрес прокси')
     return replace(
         current,
-        llm=replace(current.llm, provider=update.provider, model=update.model,
+        llm=replace(current.llm, proxy_mode=mode, proxy_url=url, provider=update.provider, model=update.model,
                     base_url=update.base_url, requests_per_minute=update.requests_per_minute,
                     api_key=update.api_key if update.api_key is not None else current.llm.api_key),
         worker=replace(current.worker, concurrency=update.concurrency),
@@ -79,7 +105,7 @@ def overlay_settings(initial: AppSettings, stored: StoredSystemSettings | None) 
     if stored is None or stored.overrides is None:
         return initial
     fields = {'provider', 'model', 'base_url', 'requests_per_minute', 'concurrency'}
-    if not isinstance(stored.overrides, dict) or set(stored.overrides) != fields:
+    if not isinstance(stored.overrides, dict) or set(stored.overrides) not in (fields, fields | {'proxy_mode'}):
         raise SystemSettingsValidationError('form', 'Сохранённые настройки имеют неверный формат')
-    update = SystemSettingsUpdate(**stored.overrides, api_key=stored.api_key)
+    update = SystemSettingsUpdate(**(dict(proxy_mode='auto') | stored.overrides), api_key=stored.api_key, proxy_url=stored.proxy_url)
     return candidate_settings(initial, update)
