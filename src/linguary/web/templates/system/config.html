@@ -17,29 +17,35 @@
   <p><a href="{{ config_url }}">{% if is_conflict or not can_submit %}Загрузить актуальные настройки{% else %}Вернуться к конфигурации{% endif %}</a></p>
   {% endif %}
   {% for field, error in field_errors.items() %}<p id="settings-error-{{ field }}" role="alert">{{ error }}</p>{% endfor %}
-  <form class="upload-form" action="{{ config_url }}" method="post">
+  <form class="settings-form" action="{{ config_url }}" method="post">
     {% if form_values.expected_revision is not none %}<input type="hidden" name="expected_revision" value="{{ form_values.expected_revision }}">{% endif %}
-    <label for="settings-provider">Провайдер</label>
-    <select id="settings-provider" name="provider" {% if 'provider' in field_errors %}aria-invalid="true" aria-describedby="settings-error-provider"{% endif %}>
-      <option value="openai_compatible" {% if form_values.provider == 'openai_compatible' %}selected{% endif %}>OpenAI-совместимый</option>
-    </select>
+    <div class="settings-field">
+      <label for="settings-provider">Провайдер</label>
+      <select id="settings-provider" name="provider" {% if 'provider' in field_errors %}aria-invalid="true" aria-describedby="settings-error-provider"{% endif %}>
+        <option value="openai_compatible" {% if form_values.provider == 'openai_compatible' %}selected{% endif %}>OpenAI-совместимый</option>
+      </select>
+    </div>
     {% for field, title, kind, value in [
       ('model', 'Модель', 'text', form_values.model),
       ('base_url', 'Адрес API', 'url', form_values.base_url),
       ('requests_per_minute', 'Запросов в минуту', 'number', form_values.requests_per_minute),
       ('concurrency', 'Одновременных задач', 'number', form_values.concurrency)
     ] %}
-    <label for="settings-{{ field }}">{{ title }}</label>
-    <input id="settings-{{ field }}" name="{{ field }}" type="{{ kind }}" value="{{ value if value is not none else '' }}" {% if kind == 'number' %}min="1" step="1"{% endif %} {% if field in field_errors %}aria-invalid="true" aria-describedby="settings-error-{{ field }}"{% endif %}>
+    <div class="settings-field">
+      <label for="settings-{{ field }}">{{ title }}</label>
+      <input id="settings-{{ field }}" name="{{ field }}" type="{{ kind }}" value="{{ value if value is not none else '' }}" {% if kind == 'number' %}min="1" step="1"{% endif %} {% if field in field_errors %}aria-invalid="true" aria-describedby="settings-error-{{ field }}"{% endif %}>
+      {% if field == 'requests_per_minute' %}<p>Оставьте число запросов в минуту пустым, чтобы снять ограничение.</p>{% endif %}
+    </div>
     {% endfor %}
-    <p>Оставьте число запросов в минуту пустым, чтобы снять ограничение.</p>
-    <label for="settings-api-key">Ключ API</label>
-    <input id="settings-api-key" name="api_key" type="password" autocomplete="new-password" {% if 'api_key' in field_errors %}aria-invalid="true" aria-describedby="settings-error-api_key"{% endif %}>
-    {% if data.llm.has_api_key %}<p>Ключ сохранён: <span>••••••••</span></p>{% else %}<p>Ключ не задан.</p>{% endif %}
-    <p>Пустое поле сохраняет текущий ключ. Чтобы заменить ключ, введите его заново.</p>
+    <div class="settings-field">
+      <label for="settings-api-key">Ключ API</label>
+      <input id="settings-api-key" name="api_key" type="password" autocomplete="new-password" {% if 'api_key' in field_errors %}aria-invalid="true" aria-describedby="settings-error-api_key"{% endif %}>
+      {% if data.llm.has_api_key %}<p>Ключ сохранён: <span>••••••••</span></p>{% else %}<p>Ключ не задан.</p>{% endif %}
+      <p>Пустое поле сохраняет текущий ключ. Чтобы заменить ключ, введите его заново.</p>
+    </div>
     <button type="submit" {% if not can_submit %}disabled{% endif %}>Сохранить настройки</button>
   </form>
-  <form action="{{ config_url }}/reset" method="post">
+  <form class="settings-form settings-reset" action="{{ config_url }}/reset" method="post">
     {% if form_values.expected_revision is not none %}<input type="hidden" name="expected_revision" value="{{ form_values.expected_revision }}">{% endif %}
     <p>Сброс вернёт исходные настройки приложения, включая исходный ключ.</p>
     <button type="submit" {% if not can_submit %}disabled{% endif %}>Сбросить настройки</button>
