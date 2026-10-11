@@ -219,3 +219,236 @@ async def test_chapter_and_group_refs_with_two_chapters_and_retries(tmp_path):
     for branch in result.variants:
         assert len({item.chapter_id for item in branch.observations}) == 2
         assert len({item.group_id for item in branch.observations}) > 2
+
+
+def live_protocol():
+    from linguary.comparison.protocol import ComparisonProtocol
+    from linguary.adapters.config import CheckSettings
+    from dataclasses import asdict
+    value = protocol()
+    return ComparisonProtocol.model_validate(value.model_dump() | {
+        'temperature_policy': 'set', 'rubric': {k: 3 for k in value.rubric}, 'scale_max': 5, 'sufficient_gain': 1, 'comparability_margin': .2,
+        'minimum_first_responses': {'analysis': 1, 'processing': 1}, 'schedule': tuple(v.id for v in value.variants),
+        'critical_places': [{'chapter_id': 'control', 'location': 'wordplay', 'expected_explanation': 'Explain the semantic relation'}],
+        'checks': asdict(CheckSettings()), 'requests_per_minute': 1000, 'concurrency': 1, 'budget': 10, 'max_call_cost': 1,
+        'stop_conditions': ['budget'], 'reference_book': 'synthetic reference', 'projection_method': 'fixed source character ratio',
+        'max_book_cost': 10, 'max_book_seconds': 3600, 'routes': {v.analysis_model: 'mock-route' for v in value.variants},
+        'context_cache_policy': 'record', 'retain_rejected': False, 'diagnostic_retention_seconds': 0, 'diagnostic_access': 'local',
+        'code_version': 'test', 'instruction_version': 'test', 'schema_version': 'test', 'checks_version': 'test',
+    })
+
+
+def four_chapter_protocol(tmp_path):
+    value = live_protocol()
+    import zipfile
+    corpus = tmp_path / 'four-chapters.epub'
+    with zipfile.ZipFile(SYNTHETIC_EPUB) as original, zipfile.ZipFile(corpus, 'w') as target:
+        fourth = original.read('OEBPS/chapter1.xhtml').replace(b'chapter1', b'chapter4').replace(b'Duskmere', b'Moonwater')
+        for member in original.infolist():
+            data = original.read(member)
+            if member.filename == 'OEBPS/content.opf':
+                data = data.replace(b'</manifest>', b'<item id="chapter4" href="chapter4.xhtml" media-type="application/xhtml+xml"/></manifest>').replace(b'</spine>', b'<itemref idref="chapter4"/></spine>')
+            target.writestr(member, data)
+        target.writestr('OEBPS/chapter4.xhtml', fourth)
+    value = value.model_copy(update={'chapters': tuple(c.model_copy(update={'source': str(corpus), 'chapter_id': str(index + 1)}) for index, c in enumerate(value.chapters))})
+    return value
+
+
+def cli_args(tmp_path, value, mode, approval=None):
+    from linguary.comparison.__main__ import parser
+    protocol_path = tmp_path / 'protocol.json'
+    protocol_path.write_text(value.model_dump_json())
+    command = [mode, '--protocol', str(protocol_path), '--root', str(tmp_path / 'comparison'), '--protected-root', str(tmp_path / 'production')]
+    if approval:
+        command += ['--approval', str(approval)]
+    return parser().parse_args(command)
+
+
+async def test_prepare_without_api_key_or_network(tmp_path, monkeypatch):
+    from linguary.comparison.__main__ import execute
+    monkeypatch.delenv('COMPARISON_API_KEY', raising=False)
+    calls = []
+    assert await execute(cli_args(tmp_path, protocol(), '--prepare'), http_factory=lambda **kwargs: calls.append(kwargs)) == 0
+    assert not calls and (tmp_path / 'comparison' / 'manifest.json').exists()
+
+
+async def test_live_without_approval_makes_zero_requests(tmp_path):
+    from linguary.comparison.__main__ import execute
+    from linguary.comparison.protocol import ProtocolError
+    calls = []
+    with pytest.raises(ProtocolError):
+        await execute(cli_args(tmp_path, live_protocol(), '--live'), http_factory=lambda **kwargs: calls.append(kwargs))
+    assert not calls
+
+
+async def test_changed_manifest_blocks_live(tmp_path, monkeypatch):
+    from linguary.comparison.__main__ import execute
+    from linguary.comparison.protocol import ProtocolApproval, ProtocolError
+    value = four_chapter_protocol(tmp_path)
+    await execute(cli_args(tmp_path, value, '--prepare'))
+    manifest = tmp_path / 'comparison' / 'manifest.json'
+    data = json.loads(manifest.read_text())
+    data['code_version'] = 'changed'
+    manifest.write_text(json.dumps(data))
+    approval = tmp_path / 'approval.json'
+    approval.write_text(ProtocolApproval(protocol_hash=value.content_hash, accepted=True, accepted_by='TEST ONLY', accepted_at='2026-10-11').model_dump_json())
+    calls = []
+    monkeypatch.setenv('COMPARISON_API_KEY', 'synthetic-key')
+    with pytest.raises(ProtocolError):
+        await execute(cli_args(tmp_path, value, '--live', approval), http_factory=lambda **kwargs: calls.append(kwargs))
+    assert not calls
+
+
+async def test_negative_run_keeps_production_data_root_unchanged(tmp_path):
+    from linguary.comparison.__main__ import execute, parser
+    from linguary.comparison.workspace import WorkspaceError
+    protected = tmp_path / 'production'
+    protected.mkdir()
+    database = protected / 'database.sqlite'
+    database.write_bytes(b'protected')
+    before = file_hash(database)
+    args = cli_args(tmp_path, protocol(), '--prepare')
+    args.root = str(protected / 'comparison')
+    with pytest.raises(WorkspaceError):
+        await execute(args)
+    assert file_hash(database) == before and list(protected.iterdir()) == [database]
+
+
+async def test_complete_fake_comparison_to_report(tmp_path):
+    from linguary.comparison.__main__ import prepare, save_result, local_report
+    value = protocol()
+    workspace = prepare(tmp_path / 'comparison', [tmp_path / 'production'], value)
+    result = await run_comparison(value, workspace, Factory())
+    from linguary.comparison.report import build_report
+    direct = build_report(json.loads((workspace.root / 'manifest.json').read_text()), result.observations, result, {}, {})
+    assert direct.total['unique_calls'] == 6
+    assert all(details['analysis']['first_received'] == 1 for details in direct.variants.values())
+    save_result(result, value, workspace.root, 10)
+    report = local_report(workspace.root, workspace.protected_roots, value)
+    assert report.simulated and report.decision.status == 'insufficient_data'
+    assert report.total['unique_calls'] == 6
+    assert (workspace.root / 'report.json').exists() and (workspace.root / 'report.md').exists()
+    assert len(report.variants) == 4
+    assert len(result.stage_wall_seconds) == 6
+    # End-to-end wall duration includes local work; fake receipts have unknown duration.
+    assert report.total['wall_seconds'] == 10 and report.total['request_seconds'] is None
+
+
+async def test_anonymous_epubs_exclude_model_labels(tmp_path):
+    import zipfile
+    from linguary.comparison.report import anonymize_epubs
+    source = tmp_path / 'named.epub'
+    with zipfile.ZipFile(source, 'w') as archive:
+        archive.writestr('mimetype', 'application/epub+zip')
+        archive.writestr('content.opf', '<metadata>openai/gpt-6-luna anthropic/claude-sonnet-4.6 luna sonnet</metadata>')
+    outcomes = {'variants': [{'variant_id': 'luna/sonnet', 'repeat': 1, 'epubs': {'book': str(source)}}]}
+    mapping = anonymize_epubs(outcomes, tmp_path)
+    assert len(mapping) == 1
+    for path in (tmp_path / 'review-materials').glob('*.epub'):
+        with zipfile.ZipFile(path) as archive:
+            contents = b''.join(archive.read(name) for name in archive.namelist())
+            assert b'luna' not in contents and b'sonnet' not in contents
+    assert 'luna/sonnet' not in (tmp_path / 'review-materials' / 'review-sheet.json').read_text()
+
+
+@pytest.mark.parametrize("temperature_policy", ["set", "omit"])
+async def test_live_admission_and_run_with_mock_transport(tmp_path, monkeypatch, temperature_policy):
+    import httpx
+    from linguary.comparison.__main__ import execute
+    from linguary.comparison.protocol import ProtocolApproval
+    value = live_protocol()
+    value = four_chapter_protocol(tmp_path)
+    value = value.model_copy(update={'temperature_policy': temperature_policy, 'generation': dict(value.generation, temperature=None if temperature_policy == 'omit' else .5)})
+    protected = tmp_path / 'production'
+    protected.mkdir()
+    protected_file = protected / 'database'
+    protected_file.write_bytes(b'never change')
+    before = file_hash(protected_file)
+    await execute(cli_args(tmp_path, value, '--prepare'))
+    approval = tmp_path / 'approval.json'
+    approval.write_text(ProtocolApproval(protocol_hash=value.content_hash, accepted=True, accepted_by='TEST ONLY', accepted_at='2026-10-11').model_dump_json())
+    document = EbookLibEpubReader().read(EpubReadRequest(book_id='fixture', source_path=str(SYNTHETIC_EPUB), source_language='en', target_language='ru')).document
+    document = replace(document, sections=document.ordered_sections[:1])
+    replies = llm_replies(document)
+    processing = json.loads(replies[1].content)
+    for block in processing['blocks']:
+        block['translated_text'] += ' Рен Колдер.'
+    calls = []
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        assert ('temperature' in body) is (temperature_policy == 'set')
+        assert body['max_tokens'] == value.generation['max_output_tokens']
+        assert body['provider'] == {'order': ['mock-route'], 'allow_fallbacks': False, 'require_parameters': True}
+        kind = body['response_format']['json_schema']['name']
+        import re
+        from pipeline_support import read_fixture
+        aliases = tuple(dict.fromkeys(re.findall(r'\[(b\d+)\]', body['messages'][-1]['content'])))
+        if 'analysis' in kind.lower():
+            payload = read_fixture('analysis-template.json')
+            payload['treatment_plan'] = [{'source_block_id': alias, 'treatment': 'TRANSLATE'} for alias in aliases]
+        else:
+            payload = {'blocks': [{'source_block_id': alias, 'treatment': 'TRANSLATE', 'translated_text': f'Русский перевод учебного блока сохраняет смысл и события главы. Рен Колдер. {alias}.', 'glossary_hints': []} for alias in aliases], 'language_notes': []}
+        content = json.dumps(payload, ensure_ascii=False)
+        return httpx.Response(200, json={'id': f'gen-{len(calls)}', 'model': body['model'], 'provider': 'mock-route', 'full_response_cache': False, 'context_cache': False,
+                                      'usage': {'cost': .01, 'prompt_tokens': 100, 'completion_tokens': 100}, 'choices': [{'finish_reason': 'stop', 'message': {'content': content}}]})
+    monkeypatch.setenv('COMPARISON_API_KEY', 'synthetic-key')
+    assert await execute(cli_args(tmp_path, value, '--live', approval), http_factory=lambda **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)) == 0
+    root = tmp_path / 'comparison'
+    result = json.loads((root / 'result.json').read_text())
+    assert len(calls) == 24 and len(result['variants']) == 4
+    assert all(branch['completed'] for branch in result['variants']), result
+    assert result['simulated'] is False
+    assert all(manifest['temperature_policy'] == temperature_policy for manifest in result['manifests'].values())
+    if temperature_policy == 'omit':
+        assert all(manifest['effective_settings']['llm']['temperature'] is None for manifest in result['manifests'].values())
+    assert file_hash(protected_file) == before
+    # A separate report invocation reconstructs every receipt and outcome from disk.
+    assert await execute(cli_args(tmp_path, value, '--report'), http_factory=lambda **kwargs: pytest.fail('no report HTTP')) == 0
+    report = json.loads((root / 'report.json').read_text())
+    assert report['total']['unique_calls'] == 24 and report['decision']['status'] == 'insufficient_data'
+    assert 'synthetic-key' not in (root / 'report.json').read_text()
+
+
+async def test_stop_keeps_receipts_and_partial_report(tmp_path):
+    from linguary.adapters.llm import FakeReply
+    from linguary.comparison.__main__ import prepare, save_result, local_report
+    class Failure(Factory):
+        def __call__(self, *, model, stage, **kwargs):
+            client = super().__call__(model=model, stage=stage, **kwargs)
+            if stage == 'processing':
+                client.replies = (FakeReply(content='{'),)
+            return client
+    value = protocol()
+    workspace = prepare(tmp_path / 'comparison', [tmp_path / 'production'], value)
+    result = await run_comparison(value, workspace, Failure())
+    save_result(result, value, workspace.root, 5)
+    report = local_report(workspace.root, workspace.protected_roots, value)
+    assert report.total['unique_calls'] == 6
+    assert all(not repeat['completed'] and repeat['failures'] for details in report.variants.values() for repeat in details['repeats'])
+    assert report.decision.status != 'candidate'
+
+
+async def test_local_cleanup_removes_rejected_diagnostics_before_publication(tmp_path):
+    from linguary.comparison.__main__ import prepare, cleanup_diagnostics, local_report
+    value = protocol()
+    workspace = prepare(tmp_path / 'comparison', [tmp_path / 'production'], value)
+    diagnostics = workspace.root / 'analysis' / 'diagnostics'
+    diagnostics.mkdir(parents=True)
+    (diagnostics / 'receipt.json').write_text(json.dumps({'call_uid': 'receipt', 'expires_at': 999999999999, 'response': 'REJECTED PRIVATE RESPONSE'}))
+    local_report(workspace.root, workspace.protected_roots, value)
+    assert not list(diagnostics.iterdir())
+    assert 'REJECTED PRIVATE RESPONSE' not in (workspace.root / 'report.json').read_text()
+
+
+async def test_duplicate_physical_chapters_block_cli_before_http(tmp_path):
+    from linguary.comparison.__main__ import execute
+    from linguary.comparison.protocol import ProtocolApproval, ProtocolError
+    value = live_protocol()
+    await execute(cli_args(tmp_path, value, '--prepare'))
+    approval = tmp_path / 'approval.json'
+    approval.write_text(ProtocolApproval(protocol_hash=value.content_hash, accepted=True, accepted_by='TEST ONLY', accepted_at='2026-10-11').model_dump_json())
+    calls = []
+    with pytest.raises(ProtocolError):
+        await execute(cli_args(tmp_path, value, '--live', approval), http_factory=lambda **kwargs: calls.append(kwargs))
+    assert not calls

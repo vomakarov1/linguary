@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -54,6 +55,7 @@ class ComparisonResult:
     observations: list[CallObservation] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     manifests: dict[str, ComparisonManifest] = field(default_factory=dict)
+    stage_wall_seconds: dict[str, float] = field(default_factory=dict)
 
 
 class _Documents:
@@ -143,11 +145,17 @@ class _SimulatedClient:
         return response
 
 
-def _stage_client(client, ledger, model, route, simulated, settings):
+def _stage_client(client, ledger, model, route, simulated, settings, budget, max_call_cost, temperature_policy="set"):
     if simulated:
         return _SimulatedClient(client, ledger, model, route)
     if not isinstance(client, ObservedLLMClient) or client.ledger is not ledger or client.model != model or client.route != route:
         raise ComparisonStopped("Клиент не обеспечивает принятый маршрут и квитанции")
+    if client.temperature_policy != temperature_policy:
+        ledger.stop("temperature_policy_mismatch")
+        raise ComparisonStopped("Клиент изменяет политику temperature")
+    if client.budget is not budget or client.maximum != Decimal(str(max_call_cost)):
+        ledger.stop("budget_binding_mismatch")
+        raise ComparisonStopped("Клиент изменяет общий бюджет или резерв вызова")
     if client.generation_settings != (settings.temperature, settings.max_output_tokens):
         ledger.stop("generation_parameters_mismatch")
         raise ComparisonStopped("Клиент изменяет согласованные параметры генерации")
@@ -277,7 +285,11 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
         repeat = repeats[variant_id]
         key = repeat, variant.analysis_model
         if key not in analyses:
-            analyses[key] = await _run_analysis(protocol, workspace, client_factory, result, budget, simulated, sources, repeat, variant.analysis_model)
+            started = time.monotonic()
+            try:
+                analyses[key] = await _run_analysis(protocol, workspace, client_factory, result, budget, simulated, sources, repeat, variant.analysis_model)
+            finally:
+                result.stage_wall_seconds[f"analysis:{repeat}:{variant.analysis_model}"] = time.monotonic() - started
         if result.violations and any(not violation.startswith('analysis_failed:') for violation in result.violations):
             break
         prepared = analyses[key]
@@ -285,7 +297,11 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
             result.variants.append(VariantResult(variant.id, repeat, '', None, failures=['analysis_failed']))
             continue
         artifact, selection = prepared
-        await _run_processing(protocol, client_factory, result, budget, simulated, sources, repeat, variant, artifact, selection)
+        started = time.monotonic()
+        try:
+            await _run_processing(protocol, client_factory, result, budget, simulated, sources, repeat, variant, artifact, selection)
+        finally:
+            result.stage_wall_seconds[f"processing:{repeat}:{variant.id}"] = time.monotonic() - started
         if any(not violation.startswith('analysis_failed:') for violation in result.violations):
             break
     return result
@@ -299,7 +315,7 @@ async def _run_analysis(protocol, workspace, client_factory, result, budget, sim
     client = application = None
     try:
         client = client_factory(model=analysis_model, stage='analysis', settings=analysis_ws.settings.llm, ledger=ledger, budget=budget)
-        inner = _stage_client(client, ledger, analysis_model, route, simulated, analysis_ws.settings.llm)
+        inner = _stage_client(client, ledger, analysis_model, route, simulated, analysis_ws.settings.llm, budget, protocol.max_call_cost, protocol.temperature_policy or "set")
         application = analysis_ws.build_application(llm_client=inner, on_logged=ledger.on_logged)
         for source_key, book_id in sources.items():
             local_inputs = json.loads((analysis_ws.root / 'inputs.json').read_text())
@@ -364,7 +380,7 @@ async def _run_processing(protocol, client_factory, result, budget, simulated, s
     client = application = None
     try:
         client = client_factory(model=variant.processing_model, stage='processing', settings=processing_ws.settings.llm, ledger=ledger, budget=budget)
-        inner = _stage_client(client, ledger, variant.processing_model, route, simulated, processing_ws.settings.llm)
+        inner = _stage_client(client, ledger, variant.processing_model, route, simulated, processing_ws.settings.llm, budget, protocol.max_call_cost, protocol.temperature_policy or "set")
         application = processing_ws.build_application(llm_client=inner, on_logged=ledger.on_logged)
         _, fixed = _selection(application, protocol, sources)
         _manifest(processing_ws, result, f"{repeat}:{variant.id}", selection, fixed, artifact.content_hash)

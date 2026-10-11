@@ -13,6 +13,7 @@ from uuid import uuid4
 import httpx
 
 from linguary.adapters.config import LLMSettings
+from linguary.adapters.config.settings import proxy_secrets
 from linguary.adapters.llm.openai_compatible import OpenAICompatibleLLMClient, safe_detail
 from linguary.application.ports.llm import LLMClient, LLMConfigurationError, LLMRequest, LLMResponse, LLMResponseFormatError, LLMResponseKind
 from linguary.domain import TokenUsage
@@ -246,7 +247,10 @@ _current: ContextVar[CallObservation | None] = ContextVar('comparison_call', def
 
 class ReceiptHTTPClient:
     """Получает техническую квитанцию до настоящего разбора ответа адаптером."""
-    def __init__(self, http, *, ledger, model, route, pricing=None):
+    def __init__(self, http, *, ledger, model, route, pricing=None, temperature_policy="set"):
+        if temperature_policy not in ("set", "omit"):
+            raise ComparisonStopped("Не согласована политика temperature")
+        self.temperature_policy = temperature_policy
         self.http, self.ledger = http, ledger
         self.model, self.route, self.pricing = model, route, pricing
 
@@ -258,6 +262,8 @@ class ReceiptHTTPClient:
         if body.get('model') != self.model or body.get('response_format', {}).get('json_schema', {}).get('strict') is not True:
             self.ledger.stop('request_contract_mismatch')
             raise ComparisonStopped('Параметры запроса отличаются от согласованных')
+        if self.temperature_policy == 'omit':
+            body.pop('temperature', None)
         body['provider'] = {'order': [self.route], 'allow_fallbacks': False, 'require_parameters': True}
         response = await self.http.post(url, **kwargs)
         if response.status_code >= 400:
@@ -272,9 +278,10 @@ class ReceiptHTTPClient:
             document = {}
         if not isinstance(document, dict):
             document = {}
-        item.actual_model = document.get('model') if isinstance(document.get('model'), str) else None
-        item.actual_provider = document.get('provider') if isinstance(document.get('provider'), str) else None
-        item.generation_id = document.get('id') if isinstance(document.get('id'), str) else None
+        actual_model, actual_provider = document.get('model'), document.get('provider')
+        for attribute, key in (('actual_model', 'model'), ('actual_provider', 'provider'), ('generation_id', 'id')):
+            value = document.get(key)
+            setattr(item, attribute, safe_detail(value, api_key=None, secrets=self.ledger.secrets) if isinstance(value, str) else None)
         usage = document.get('usage') or {}
         if not isinstance(usage, dict):
             usage = {}
@@ -290,7 +297,7 @@ class ReceiptHTTPClient:
         item.full_response_cache = cache if isinstance(cache, bool) else None
         context = document.get('context_cache')
         item.context_cache = context if isinstance(context, bool) else None
-        if item.actual_model != self.model or item.actual_provider != self.route:
+        if actual_model != self.model or actual_provider != self.route:
             self.ledger.stop('unknown_or_changed_route')
         if item.cost is None:
             self.ledger.stop('unknown_price')
@@ -302,13 +309,14 @@ class ReceiptHTTPClient:
 
 class ObservedLLMClient:
     """Клиент одного принятого маршрута; HTTP-клиент всегда внедряется явно."""
-    def __init__(self, *, settings: LLMSettings, route: str, http_client, ledger: ObservationLedger, budget: BudgetGuard, max_call_cost: Decimal, pricing: TokenPricing | None = None):
+    def __init__(self, *, settings: LLMSettings, route: str, http_client, ledger: ObservationLedger, budget: BudgetGuard, max_call_cost: Decimal, pricing: TokenPricing | None = None, temperature_policy="set"):
+        self.temperature_policy = temperature_policy
         self.ledger, self.budget, self.maximum = ledger, budget, max_call_cost
         self.generation_settings = (settings.temperature, settings.max_output_tokens)
         self.model, self.route = settings.model, route
-        ledger.secrets = tuple(dict.fromkeys((*ledger.secrets, *((settings.api_key,) if settings.api_key else ()))))
+        ledger.secrets = tuple(dict.fromkeys((*ledger.secrets, *((settings.api_key,) if settings.api_key else ()), *proxy_secrets(settings.proxy_url))))
         self._http = http_client
-        self.inner = OpenAICompatibleLLMClient(settings=settings, http_client=ReceiptHTTPClient(http_client, ledger=ledger, model=self.model, route=route, pricing=pricing))
+        self.inner = OpenAICompatibleLLMClient(settings=settings, http_client=ReceiptHTTPClient(http_client, ledger=ledger, model=self.model, route=route, pricing=pricing, temperature_policy=temperature_policy))
 
     async def generate(self, request):
         self.ledger.ensure_open()

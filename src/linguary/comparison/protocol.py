@@ -56,6 +56,7 @@ class ComparisonProtocol(Contract):
     repeats: int | None = Field(default=None, gt=0)
     minimum_first_responses: dict[str, int | None] = Field(default_factory=lambda: {'analysis': None, 'processing': None})
     schedule: tuple[str, ...] = ()
+    temperature_policy: Literal['set', 'omit'] | None = None
     generation: dict[str, float | int | None] = Field(default_factory=lambda: {'temperature': None, 'max_output_tokens': None, 'max_attempts': None})
     splitting: dict[str, int | None] = Field(default_factory=lambda: {'max_fragment_blocks': None, 'max_unit_source_chars': None})
     checks: dict[str, float | int | None] = Field(default_factory=dict)
@@ -125,6 +126,7 @@ class ComparisonManifest(Contract):
     artifact_hashes: dict[str, str] = Field(default_factory=dict)
     grouping: dict[str, object] = Field(default_factory=dict)
     effective_settings: dict[str, object]
+    temperature_policy: Literal['set', 'omit'] | None = None
     paths: dict[str, str] = Field(default_factory=dict)
 
 
@@ -159,6 +161,10 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
             return any(missing(v) for v in value)
         return False
     data = protocol.model_dump(mode='json')
+    if protocol.temperature_policy == 'omit':
+        if protocol.generation.get('temperature') is not None:
+            raise ProtocolError('Политика omit требует явно пустой temperature')
+        data['generation'].pop('temperature', None)
     if missing(data) or any(data[k] == 'unrecorded' for k in ('code_version', 'instruction_version', 'schema_version', 'checks_version')):
         raise ProtocolError('Протокол содержит несогласованные условия')
     criteria = {'accuracy', 'naturalness', 'author_voice', 'difficulty_detection', 'helpfulness'}
@@ -177,6 +183,21 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
         raise ProtocolError('Пределы генерации должны быть положительными')
     if any(v < 0 or v > protocol.scale_max for v in protocol.rubric.values()):
         raise ProtocolError('Минимумы качества вне принятой шкалы')
+    # Разные пути или обозначения главы не создают независимые наблюдения.
+    from linguary.adapters.epub import EbookLibEpubReader
+    from linguary.application.ports.epub import EpubReadRequest
+    physical = set()
+    try:
+        for chapter in protocol.chapters:
+            path = Path(chapter.source).expanduser().resolve(strict=True)
+            digest = file_hash(path)
+            document = EbookLibEpubReader().read(EpubReadRequest(book_id='admission', source_path=str(path), source_language='en', target_language='ru')).document
+            matches = [section for index, section in enumerate(document.ordered_sections, 1) if chapter.chapter_id in (section.id, section.source_resource_path, str(index))]
+            if len(matches) != 1 or (digest, matches[0].id) in physical:
+                raise ProtocolError('Нужны четыре разные физические главы')
+            physical.add((digest, matches[0].id))
+    except Exception:
+        raise ProtocolError('Не удалось подтвердить независимые главы источников') from None
     chapter_ids = {c.id for c in protocol.chapters}
     if not protocol.critical_places or any(p.chapter_id not in chapter_ids or not p.location.strip() or not p.expected_explanation.strip() for p in protocol.critical_places):
         raise ProtocolError('Не согласованы критические места')
@@ -203,7 +224,7 @@ def build_manifest(protocol, inputs, effective_settings) -> ComparisonManifest:
         code_version=protocol.code_version, instruction_version=protocol.instruction_version,
         schema_version=protocol.schema_version, checks_version=protocol.checks_version,
         input_hashes={key: file_hash(Path(path)) for key, path in inputs.items()},
-        effective_settings=settings_projection(effective_settings),
+        effective_settings=settings_projection(effective_settings), temperature_policy=protocol.temperature_policy,
     )
 
 

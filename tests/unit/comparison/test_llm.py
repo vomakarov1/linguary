@@ -160,7 +160,7 @@ async def test_changed_generation_parameters_block_before_network():
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request))) as http:
         client = ObservedLLMClient(settings=replace(settings, temperature=.9), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
         with pytest.raises(ComparisonStopped):
-            _stage_client(client, ledger, 'model', 'route', False, settings)
+            _stage_client(client, ledger, 'model', 'route', False, settings, client.budget, Decimal('.5'))
     assert not calls and 'generation_parameters_mismatch' in ledger.violations
 
 
@@ -195,3 +195,62 @@ def test_observation_write_failure_clears_raw_on_finalization(tmp_path):
     assert not (tmp_path / 'diagnostics').exists()
     with pytest.raises(ComparisonStopped):
         ledger.begin(LLMRequest.for_translation(instructions='translate', input_text='next'), model='model', route='route')
+
+
+@pytest.mark.parametrize('field', ['model', 'provider', 'id'])
+async def test_external_receipt_metadata_redacts_secrets(tmp_path, field):
+    import json
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+    secret = 'synthetic-api-secret'
+    document = {'model': 'model', 'provider': 'route', 'id': 'normal-id', 'full_response_cache': False, 'usage': {'cost': .2}, 'choices': [{'message': {'content': '{'}}]}
+    document[field] = 'echo-' + secret
+    ledger = ObservationLedger(receipt_root=tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=document))) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', api_key=secret), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
+    item, = ledger.observations
+    assert item.received_response
+    assert secret not in json.dumps(item.public())
+    assert secret not in next(tmp_path.glob('*.json')).read_text()
+    if field != 'id':
+        assert item.generation_id == 'normal-id'
+        assert 'unknown_or_changed_route' in ledger.violations
+
+
+@pytest.mark.parametrize('change', ['guard', 'maximum'])
+async def test_stage_client_enforces_shared_budget_before_http(change):
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+    from linguary.comparison.runner import _stage_client
+    ledger = ObservationLedger()
+    guard = BudgetGuard(Decimal('1'))
+    calls = []
+    settings = LLMSettings(model='model', api_key='synthetic-key')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request))) as http:
+        client = ObservedLLMClient(settings=settings, route='route', http_client=http, ledger=ledger, budget=guard if change == 'maximum' else BudgetGuard(Decimal('1')), max_call_cost=Decimal('.9') if change == 'maximum' else Decimal('.5'))
+        with pytest.raises(ComparisonStopped):
+            _stage_client(client, ledger, 'model', 'route', False, settings, guard, Decimal('.5'))
+    assert not calls and 'budget_binding_mismatch' in ledger.violations
+
+
+@pytest.mark.parametrize('policy,present', [('set', True), ('omit', False)])
+async def test_explicit_temperature_policy_is_applied_before_http(policy, present):
+    import json
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={'model': 'model', 'provider': 'route', 'id': 'generation', 'full_response_cache': False, 'usage': {'cost': .2}, 'choices': [{'message': {'content': '{'}}]})
+    ledger = ObservationLedger()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', api_key='test-only', temperature=.5, max_output_tokens=1234), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'), temperature_policy=policy)
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
+    assert len(requests) == 1 and ('temperature' in requests[0]) is present
+    assert requests[0]['max_tokens'] == 1234
