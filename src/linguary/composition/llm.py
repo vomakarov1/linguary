@@ -5,7 +5,8 @@
 Но `OpenAICompatibleLLMClient` без модели и ключа не создаётся вовсе, а сценарии анализа
 и обработки требуют клиент в конструкторе.
 
-Поэтому клиент создаётся при первом обращении к модели. Ненастроенная LLM даёт
+Поэтому клиент допускает явную подготовку без сети, сохраняя возможность собрать
+ненастроенное поколение. Ненастроенная LLM при обращении даёт
 `LLMConfigurationError` — ошибка настройки: задача останавливается с диагностическим
 сообщением и автоматически не повторяется, а после исправления настроек пользователь
 повторяет её сам.
@@ -24,11 +25,16 @@ from linguary.application.ports.llm import (
 
 
 class ConfiguredLLMClient(LLMClient):
-    """Клиент провайдера, создаваемый при первом вызове модели."""
+    """Клиент провайдера с подготовкой без сети и безопасным первым запуском."""
 
     def __init__(self, settings: LLMSettings) -> None:
         self._settings = settings
         self._client: OpenAICompatibleLLMClient | None = None
+
+    def prepare(self) -> None:
+        """Создаёт собственный HTTP-клиент без сети; неполные настройки допустимы."""
+        if self._settings.is_ready:
+            self._connected()
 
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]

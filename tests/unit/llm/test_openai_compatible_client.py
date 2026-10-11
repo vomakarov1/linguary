@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -492,3 +493,141 @@ async def test_gateway_model_name_is_taken_from_response() -> None:
 def _json(request: httpx.Request) -> dict[str, Any]:
     """Тело отправленного запроса."""
     return json.loads(request.content.decode("utf-8"))
+
+
+@pytest.mark.parametrize("status,error_type", [
+    (401, LLMConfigurationError), (403, LLMConfigurationError),
+    (402, LLMProviderError), (400, LLMProviderError),
+    (429, LLMTransportError), (503, LLMTransportError),
+])
+async def test_provider_auth_error_redacts_echoed_key(status: int, error_type: type) -> None:
+    client = client_over(lambda request: httpx.Response(
+        status, text=f"rejected {API_KEY}", headers={"Retry-After": "17"},
+    ))
+    with pytest.raises(error_type) as caught:
+        await client.generate(LLMRequest.for_translation(instructions="Переводи", input_text="text"))
+    assert (API_KEY not in str(caught.value)) is True
+    assert "[REDACTED]" in str(caught.value)
+    if isinstance(caught.value, LLMTransportError):
+        assert caught.value.retry_after_seconds == 17
+
+
+async def test_redaction_happens_before_detail_truncation() -> None:
+    client = client_over(lambda request: httpx.Response(401, text="x" * 290 + API_KEY))
+    with pytest.raises(LLMConfigurationError) as caught:
+        await client.generate(LLMRequest.for_translation(instructions="Переводи", input_text="text"))
+    assert "[REDACTED]" in str(caught.value)
+    assert (API_KEY[:10] not in str(caught.value)) is True
+
+
+async def test_transport_error_redacts_key() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"failed with {API_KEY}")
+    client = client_over(handler)
+    with pytest.raises(LLMTransportError) as caught:
+        await client.generate(LLMRequest.for_translation(instructions="Переводи", input_text="text"))
+    assert (API_KEY not in str(caught.value)) is True
+    assert "[REDACTED]" in str(caught.value)
+
+
+@pytest.mark.parametrize("outer", [False, True])
+async def test_format_error_diagnostic_redacts_key(outer: bool) -> None:
+    content = f'{{"secret": "{API_KEY}"'
+    client = client_over(lambda request: httpx.Response(
+        200, text=content,
+    )) if outer else client_over(responding(completion(
+        content, model=f"gateway/{API_KEY}",
+        usage={"prompt_tokens": 12, "completion_tokens": 3, "cost": 0.007},
+    )))
+    with pytest.raises(LLMResponseFormatError) as caught:
+        await client.generate(LLMRequest.for_translation(instructions="Переводи", input_text="text"))
+    error = caught.value
+    assert (API_KEY not in str(error)) is True
+    assert error.raw_content == content.replace(API_KEY, "[REDACTED]")
+    if not outer:
+        assert error.model == "gateway/[REDACTED]"
+        assert error.usage == TokenUsage(12, 3)
+        assert error.cost == Decimal("0.007")
+
+
+async def test_overlapping_clients_redact_their_own_generation_key() -> None:
+    entered = 0
+    both_entered = asyncio.Event()
+
+    async def generate(key: str) -> str:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await both_entered.wait()
+            return httpx.Response(401, text=f"rejected {key}")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = OpenAICompatibleLLMClient(settings=settings(api_key=key), http_client=http)
+            with pytest.raises(LLMConfigurationError) as caught:
+                await client.generate(LLMRequest.for_translation(
+                    instructions="Переводи", input_text="text",
+                ))
+        assert (key not in str(caught.value)) is True
+        return str(caught.value)
+
+    messages = await asyncio.wait_for(asyncio.gather(
+        generate("old-generation-key"), generate("new-generation-key"),
+    ), timeout=2)
+    assert messages[0] == messages[1]
+    assert "[REDACTED]" in messages[0]
+
+
+async def test_success_diagnostic_redacts_key_without_changing_payload() -> None:
+    payload = translation_payload()
+    payload["blocks"][0]["translated_text"] = API_KEY
+    content = as_content(payload)
+    client = client_over(responding(completion(content)))
+    response = await client.generate(LLMRequest.for_translation(
+        instructions="Переводи", input_text="text",
+    ))
+    assert response.payload.blocks[0].translated_text == API_KEY
+    assert response.raw_content == content.replace(API_KEY, "[REDACTED]")
+
+
+@pytest.mark.parametrize('kind', ['transport', 'provider', 'format', 'success'])
+@pytest.mark.parametrize('mode', ['custom', 'auto'])
+async def test_proxy_diagnostics_redact_encoded_decoded_credentials(monkeypatch, kind, mode):
+    secret = 'http://alice:p%40ss@localhost:8123'
+    text = f'{secret} http://alice:p@ss@localhost:8123 alice:p%40ss alice:p@ss p%40ss p@ss Basic YWxpY2U6cEBzcw=='
+    if mode == 'auto':
+        monkeypatch.setenv('HTTPS_PROXY', secret)
+    def handler(request):
+        if kind == 'transport':
+            raise httpx.ConnectError(text)
+        if kind == 'provider':
+            return httpx.Response(403, text=text)
+        if kind == 'format':
+            return httpx.Response(200, json=completion(text))
+        return httpx.Response(200, json=completion(as_content(translation_payload()), model=text))
+    client = client_over(handler, proxy_mode=mode, proxy_url=secret if mode == 'custom' else None)
+    if mode == 'auto':
+        monkeypatch.setenv('HTTPS_PROXY', 'http://different:next-password@localhost:9')
+    try:
+        if kind == 'success':
+            response = await client.generate(LLMRequest.for_translation(instructions='Переводи', input_text='text'))
+            output = response.model + response.raw_content
+        else:
+            with pytest.raises((LLMTransportError, LLMConfigurationError, LLMResponseFormatError)) as caught:
+                await client.generate(LLMRequest.for_translation(instructions='Переводи', input_text='text'))
+            output = str(caught.value) + (getattr(caught.value, 'raw_content', '') or '')
+            assert caught.value.__cause__ is None
+        for value in (secret, 'alice', 'p%40ss', 'p@ss', 'YWxpY2U6cEBzcw=='):
+            assert value not in output
+    finally:
+        await client._http.aclose()
+
+
+def test_proxy_client_preparation_error_is_safe(monkeypatch):
+    def fail(**kwargs):
+        raise ValueError('http://alice:p%40ss@localhost alice p@ss')
+    monkeypatch.setattr(httpx, 'AsyncClient', fail)
+    with pytest.raises(LLMConfigurationError) as caught:
+        OpenAICompatibleLLMClient(settings=settings(proxy_mode='custom', proxy_url='http://alice:p%40ss@localhost'))
+    assert 'alice' not in str(caught.value) and caught.value.__cause__ is None

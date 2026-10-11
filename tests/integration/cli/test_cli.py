@@ -160,3 +160,65 @@ def _config(
     path = tmp_path / "config.toml"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+@pytest.mark.parametrize('fails', [False, True])
+def test_doctor_closes_owned_http_client(tmp_path, monkeypatch, capsys, fails):
+    import httpx
+    from linguary.cli import app as cli
+
+    clients = []
+    original = httpx.AsyncClient
+    def create_client(**options):
+        client = original(**options, transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+        clients.append(client)
+        return client
+    monkeypatch.setattr(httpx, 'AsyncClient', create_client)
+    if fails:
+        def fail(settings):
+            raise OSError('diagnostic unavailable')
+        monkeypatch.setattr(cli.LLMConfigResponse, 'of_settings', fail)
+    config = _config(tmp_path, llm_model='model', api_key='private-test-key')
+    assert main(['--config', str(config), 'doctor']) == (1 if fails else 0)
+    assert len(clients) == 1 and all(client.is_closed for client in clients)
+    captured = capsys.readouterr()
+    assert 'private-test-key' not in captured.out + captured.err
+
+
+@pytest.mark.parametrize('fails', [False, True])
+@pytest.mark.parametrize('once', [False, True])
+def test_worker_closes_owned_http_client_in_work_loop(tmp_path, monkeypatch, capsys, fails, once):
+    import asyncio
+    import httpx
+    from linguary.application.errors import ApplicationError
+    from linguary.cli import app as cli
+
+    events = []
+    clients = []
+    original = httpx.AsyncClient
+    class TrackedClient(original):
+        async def aclose(self):
+            events.append(('close', asyncio.get_running_loop()))
+            await super().aclose()
+    def respond(request):
+        events.append(('request', asyncio.get_running_loop()))
+        return httpx.Response(200)
+    def create_client(**options):
+        client = TrackedClient(**options, transport=httpx.MockTransport(respond))
+        clients.append(client)
+        return client
+    async def work(application):
+        await clients[-1].get('https://mock.invalid/check')
+        if fails:
+            raise ApplicationError('task failed')
+        return []
+    monkeypatch.setattr(httpx, 'AsyncClient', create_client)
+    monkeypatch.setattr(cli, 'drain_tasks' if once else 'run_worker', work)
+    config = _config(tmp_path, llm_model='model', api_key='private-test-key')
+    args = ['--config', str(config), 'worker'] + (['--once'] if once else [])
+    assert main(args) == (1 if fails else 0)
+    assert len(clients) == 1 and all(client.is_closed for client in clients)
+    assert [event for event, loop in events] == ['request', 'close']
+    assert events[0][1] is events[1][1]
+    captured = capsys.readouterr()
+    assert 'private-test-key' not in captured.out + captured.err

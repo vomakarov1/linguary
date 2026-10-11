@@ -6,13 +6,16 @@
 внешней проверки), позже переезжают сюда тем же способом.
 
 Ключ провайдера — секрет: он не попадает ни в `repr`, ни в текст ошибок, ни в журнал
-вызовов, и хранится только там, откуда прочитан, — в окружении или локальном файле
-настроек вне репозитория (PRD § 23).
+вызовов. Исходный ключ читается из окружения или локального файла настроек вне
+репозитория; переопределение через веб-интерфейс хранится в SQLite каталога данных.
 """
 
 from __future__ import annotations
 
+from base64 import b64encode
 from dataclasses import dataclass, field
+from typing import Literal
+from urllib.parse import quote, unquote, urlsplit
 
 from linguary.application.analysis_merge import fragment_blocks_for
 from linguary.application.errors import ApplicationError
@@ -67,6 +70,48 @@ class SettingsError(ApplicationError):
     """Локальная конфигурация непригодна: неразбираемый файл или недопустимое значение."""
 
 
+def validate_proxy(mode: object, url: object) -> None:
+    """Проверяет адрес без включения секретного ввода в исключение."""
+    if mode not in ('auto', 'direct', 'custom'):
+        raise SettingsError('Недопустимый режим соединения')
+    if mode != 'custom':
+        if url is not None:
+            raise SettingsError('Адрес прокси допустим только для режима «Через прокси»')
+        return
+    try:
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        valid = (parsed is not None and parsed.scheme in ('http', 'https')
+                 and bool(parsed.hostname) and parsed.path in ('', '/')
+                 and '?' not in url and '#' not in url
+                 and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url))
+        if parsed is not None:
+            parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise SettingsError('Ожидается HTTP(S)-адрес прокси без пути, параметров и фрагмента')
+
+
+def proxy_secrets(url: object) -> tuple[str, ...]:
+    """Полный адрес и формы учётных данных для безопасной диагностики."""
+    if not isinstance(url, str) or not url.strip():
+        return ()
+    values = {url, unquote(url)}
+    try:
+        parsed = urlsplit(url)
+        if '@' in parsed.netloc:
+            values.add(parsed.netloc.rsplit('@', 1)[0])
+        values.update(value for value in (parsed.username, parsed.password) if value)
+        if parsed.username is not None or parsed.password is not None:
+            credentials = f"{unquote(parsed.username or '')}:{unquote(parsed.password or '')}"
+            values.add(b64encode(credentials.encode('utf-8')).decode('ascii'))
+    except ValueError:
+        pass
+    values.update(unquote(value) for value in tuple(values))
+    values.update(quote(value, safe='') for value in tuple(values))
+    return tuple(sorted((value for value in values if value), key=len, reverse=True))
+
+
 @dataclass(frozen=True, slots=True)
 class LLMSettings:
     """Настройка провайдера LLM (PRD § 23).
@@ -96,6 +141,8 @@ class LLMSettings:
     base_url: str = DEFAULT_BASE_URL
     model: str = ""
     api_key: str | None = field(default=None, repr=False)
+    proxy_mode: Literal["auto", "direct", "custom"] = "auto"
+    proxy_url: str | None = field(default=None, repr=False)
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_output_tokens: int | None = None
     temperature: float | None = None
@@ -108,6 +155,7 @@ class LLMSettings:
     output_price_per_mtok: float | None = None
 
     def __post_init__(self) -> None:
+        validate_proxy(self.proxy_mode, self.proxy_url)
         if not self.provider.strip():
             raise SettingsError("провайдер LLM не задан")
         if not self.base_url.strip():

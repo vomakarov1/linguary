@@ -185,6 +185,57 @@ p {
   gap: 0.6rem;
 }
 
+.settings-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  max-width: 36rem;
+  margin-top: 1rem;
+}
+
+.settings-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.settings-field input,
+.settings-field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem;
+  background-color: var(--panel);
+  color: var(--ink);
+  font: inherit;
+}
+
+.settings-field select {
+  appearance: none;
+  padding-right: 2.25rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%236f6760' stroke-width='1.5'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1rem;
+}
+
+.settings-field p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.settings-form > button {
+  justify-self: start;
+}
+
+.settings-reset {
+  margin-top: 1.5rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+}
+
 .tabs {
   display: flex;
   flex-wrap: wrap;

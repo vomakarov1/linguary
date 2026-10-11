@@ -37,62 +37,103 @@ type Clock = Callable[[], float]
 type Sleep = Callable[[float], Awaitable[None]]
 
 #: Секунд в минуте: предел задаётся в запросах в минуту, как его публикуют провайдеры.
-_SECONDS_PER_MINUTE = 60.0
+_SECONDS_PER_MINUTE = 60
+
+
+class LLMRateLimiter:
+    """Общие резервации запросов и независимая пауза провайдера."""
+
+    def __init__(
+        self,
+        requests_per_minute: int | None,
+        *,
+        clock: Clock | None = None,
+        sleep: Sleep | None = None,
+    ) -> None:
+        self._clock = clock or time.monotonic
+        self._sleep = sleep or asyncio.sleep
+        self._lock = threading.Lock()
+        self._last_numeric_slot: float | None = None
+        self._last_unlimited_call: float | None = None
+        self._provider_blocked_until = 0.0
+        self.set_limit(requests_per_minute)
+
+    @property
+    def requests_per_minute(self) -> int | None:
+        with self._lock:
+            return self._requests_per_minute
+
+    def set_limit(self, value: int | None) -> None:
+        if value is not None and (type(value) is not int or value < 1):
+            raise ValueError("предел частоты запросов должен быть положительным целым числом")
+        # Деление целых не преобразует огромный предел в float до расчёта отношения.
+        interval = None if value is None else _SECONDS_PER_MINUTE / value
+        with self._lock:
+            self._requests_per_minute = value
+            self._interval = interval
+
+    async def acquire(self) -> None:
+        with self._lock:
+            slot = None
+            if self._interval is not None:
+                times = [self._clock()]
+                for previous in (self._last_numeric_slot, self._last_unlimited_call):
+                    if previous is not None:
+                        times.append(previous + self._interval)
+                slot = max(times)
+                self._last_numeric_slot = slot
+        while True:
+            with self._lock:
+                now = self._clock()
+                deadline = self._provider_blocked_until
+                if slot is not None:
+                    deadline = max(deadline, slot)
+                delay = deadline - now
+                if delay <= 0:
+                    if slot is None:
+                        self._last_unlimited_call = now
+                    return
+            await self._sleep(delay)
+
+    def hold(self, seconds: float) -> None:
+        """Продлевает общий запрет провайдера, не меняя числовые слоты."""
+        with self._lock:
+            self._provider_blocked_until = max(
+                self._provider_blocked_until, self._clock() + seconds
+            )
 
 
 class RateLimitedLLMClient(LLMClient):
-    """Декоратор `LLMClient`, выдерживающий предел запросов в минуту."""
+    """Декоратор над клиентом с собственным или общим ограничителем."""
 
     def __init__(
         self,
         *,
         inner: LLMClient,
-        requests_per_minute: int,
+        requests_per_minute: int | None = None,
+        limiter: LLMRateLimiter | None = None,
         clock: Clock | None = None,
         sleep: Sleep | None = None,
     ) -> None:
-        if requests_per_minute < 1:
-            raise ValueError("предел частоты запросов к модели должен быть положительным")
         self._inner = inner
-        self._interval = _SECONDS_PER_MINUTE / requests_per_minute
-        self._clock = clock or time.monotonic
-        self._sleep = sleep or asyncio.sleep
-        self._lock = threading.Lock()
-        self._next_free: float | None = None
+        self._limiter = limiter if limiter is not None else LLMRateLimiter(
+            requests_per_minute, clock=clock, sleep=sleep
+        )
 
     @property
-    def requests_per_minute(self) -> float:
-        """Предел частоты, который выдерживает ограничитель."""
-        return _SECONDS_PER_MINUTE / self._interval
+    def requests_per_minute(self) -> int | None:
+        return self._limiter.requests_per_minute
 
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
-        """Дожидается своего момента и выполняет запрос."""
-        delay = self._reserve()
-        if delay > 0:
-            await self._sleep(delay)
+        await self._limiter.acquire()
         try:
             return await self._inner.generate(request)
         except LLMTransportError as error:
             if error.retry_after_seconds is not None:
-                self._hold(error.retry_after_seconds)
+                self._limiter.hold(error.retry_after_seconds)
             raise
 
-    def _reserve(self) -> float:
-        """Занимает ближайший свободный момент и возвращает, сколько до него ждать."""
-        with self._lock:
-            now = self._clock()
-            slot = now if self._next_free is None else max(now, self._next_free)
-            self._next_free = slot + self._interval
-            return slot - now
 
-    def _hold(self, seconds: float) -> None:
-        """Не выпускает запросы раньше, чем провайдер обещал их принять."""
-        with self._lock:
-            resume_at = self._clock() + seconds
-            if self._next_free is None or self._next_free < resume_at:
-                self._next_free = resume_at
-
-
-__all__ = ["RateLimitedLLMClient"]
+__all__ = ["LLMRateLimiter", "RateLimitedLLMClient"]

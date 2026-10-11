@@ -12,11 +12,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Self
+from typing import Literal, Self
+from dataclasses import dataclass, field
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from linguary.adapters.config import AppSettings
+from linguary.adapters.config.settings import proxy_secrets
 from linguary.adapters.validation import EpubCheckAvailability
 from linguary.application.book_overview import (
     BookOverview,
@@ -766,22 +768,31 @@ class LLMConfigResponse(BaseModel):
     is_ready: bool
     provider: str
     model: str | None = None
+    proxy_mode: Literal["auto", "direct", "custom"] = "auto"
+    has_proxy_url: bool = False
     has_api_key: bool
     base_url: str
     max_attempts: int
+    requests_per_minute: int | None = None
     hint: str | None = None
 
     @classmethod
     def of_settings(cls, settings: AppSettings) -> LLMConfigResponse:
         """Собирает состояние LLM по локальной конфигурации."""
         llm = settings.llm
+        def public_text(value: str) -> str:
+            key = (llm.api_key or "").strip()
+            return "" if (key and key in value) or any(secret in value for secret in proxy_secrets(llm.proxy_url)) else value
         return cls(
             is_ready=llm.is_ready,
-            provider=llm.provider,
-            model=llm.model or None,
+            provider=public_text(llm.provider),
+            model=public_text(llm.model) or None,
+            proxy_mode=llm.proxy_mode,
+            has_proxy_url=bool(llm.proxy_url),
             has_api_key=bool(llm.api_key and llm.api_key.strip()),
-            base_url=llm.base_url,
+            base_url=public_text(llm.base_url),
             max_attempts=llm.max_attempts,
+            requests_per_minute=llm.requests_per_minute,
             hint=None if llm.is_ready else labels.LLM_NOT_CONFIGURED_HINT,
         )
 
@@ -827,6 +838,10 @@ class ServerConfigResponse(BaseModel):
     warning: str | None = None
 
 
+class WorkerConfigResponse(BaseModel):
+    concurrency: int
+
+
 class SystemConfigResponse(BaseModel):
     """Экран конфигурации и окружения целиком (API-01, PRD § 21.6)."""
 
@@ -834,7 +849,38 @@ class SystemConfigResponse(BaseModel):
     epubcheck: EpubCheckConfigResponse
     storage: StorageConfigResponse
     server: ServerConfigResponse
+    worker: WorkerConfigResponse
+    revision: int
     external_llm_warning: str = Field(default=labels.EXTERNAL_LLM_WARNING)
+
+
+type SettingsField = Literal[
+    "provider", "model", "api_key", "base_url", "requests_per_minute",
+    "concurrency", "expected_revision", "form", "proxy_mode", "proxy_url",
+]
+
+
+class SettingsErrorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: Literal[
+        "invalid_settings", "revision_conflict", "settings_not_applied",
+        "settings_closing", "unsupported_media_type",
+    ]
+    message: str
+    field_errors: dict[SettingsField, str] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SafeSettingsFormValues:
+    """Отдельная проекция формы; поле ключа отсутствует намеренно."""
+
+    provider: str = field(repr=False)
+    model: str = field(repr=False)
+    base_url: str = field(repr=False)
+    requests_per_minute: int | None
+    concurrency: int | None
+    expected_revision: int | None
+    proxy_mode: str = "auto"
 
 
 class ErrorResponse(BaseModel):
@@ -872,6 +918,9 @@ __all__ = [
     "ServerConfigResponse",
     "StorageConfigResponse",
     "SystemConfigResponse",
+    "WorkerConfigResponse",
+    "SettingsErrorResponse",
+    "SafeSettingsFormValues",
     "TaskFailureResponse",
     "TaskResponse",
     "TreatmentCount",

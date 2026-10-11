@@ -25,11 +25,19 @@ Web UI, CLI и сквозной тест: второго места сборки
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 
 from linguary.adapters.config import AppSettings, load_settings
+from linguary.adapters.config.settings import SettingsError
+from linguary.adapters.config.system_settings import overlay_settings
+from linguary.adapters.db.system_settings import SystemSettingsStore
+from linguary.adapters.llm.rate_limit import LLMRateLimiter
+from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
+from linguary.composition.system_settings import SystemSettingsService
 from linguary.adapters.db.engine import create_database_engine
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.epub import (
@@ -105,7 +113,10 @@ class Application:
     и ничего не конструируют сами.
     """
 
-    settings: AppSettings
+    runtime_settings: RuntimeSettings
+    system_settings: SystemSettingsService
+    settings_store: SystemSettingsStore
+    rate_limiter: LLMRateLimiter
     paths: DataPaths
     unit_of_work: SqlAlchemyUnitOfWork
     task_queue: SqliteTaskQueue
@@ -119,11 +130,15 @@ class Application:
     approve_glossary: ApproveGlossary
     reset_processing: ResetProcessing
     retry_task: RetryTask
-    analysis: ChapterAnalysisSequence
-    processing: ChapterProcessingSequence
-    regeneration: BlockRegenerationSequence
-    _llm_client: ConfiguredLLMClient
+    analysis: RuntimeSequence
+    processing: RuntimeSequence
+    regeneration: RuntimeSequence
     _dispose: Callable[[], None]
+    _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
+
+    @property
+    def settings(self) -> AppSettings:
+        return self.runtime_settings.current.settings
 
     def start_processing(self) -> StartProcessing:
         """Сценарий запуска обработки книги.
@@ -132,15 +147,16 @@ class Application:
         настроек модели, а ненастроенная LLM снимка не даёт. Отказ приходит тем же
         `LLMConfigurationError`, что и попытка обратиться к модели (PRD § 23).
         """
-        self.settings.llm.ensure_ready()
+        settings = self.settings
+        settings.llm.ensure_ready()
         return StartProcessing(
             unit_of_work=self.unit_of_work,
             glossary_confidence_threshold=(
-                self.settings.checks.glossary_confidence_threshold
+                settings.checks.glossary_confidence_threshold
             ),
-            glossary_review_min_mentions=self.settings.checks.glossary_review_min_mentions,
-            glossary_review_min_chapters=self.settings.checks.glossary_review_min_chapters,
-            llm_settings_snapshot=_llm_snapshot(self.settings),
+            glossary_review_min_mentions=settings.checks.glossary_review_min_mentions,
+            glossary_review_min_chapters=settings.checks.glossary_review_min_chapters,
+            llm_settings_snapshot=_llm_snapshot(settings),
         )
 
     async def start_import(self, book_id: str) -> ProcessingTask:
@@ -153,17 +169,44 @@ class Application:
         """Ставит задачу сборки итогового EPUB (PRD § 20)."""
         return await self.export_sequence.start(book_id)
 
+    def begin_close(self) -> None:
+        """Запрещает новые изменения настроек и новые захваты задач."""
+        self.system_settings.begin_close()
+        self.worker_pool.request_stop()
+
     async def aclose(self) -> None:
-        """Закрывает соединения приложения: провайдера LLM и базу."""
-        await self._llm_client.aclose()
-        self.dispose()
+        """Дожидается принятых изменений до закрытия поколений и базы."""
+        self.begin_close()
+        if self._close_task is None:
+            task = asyncio.create_task(self._close())
+            object.__setattr__(self, "_close_task", task)
+            task.add_done_callback(self._collect_close)
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
+        errors = []
+        for close in (self.system_settings.aclose, self.runtime_settings.aclose):
+            try:
+                await close()
+            except Exception:
+                errors.append(True)
+        try:
+            self.dispose()
+        except Exception:
+            errors.append(True)
+        if errors:
+            raise SettingsError("Не удалось закрыть все ресурсы приложения") from None
+
+    @staticmethod
+    def _collect_close(task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            task.exception()
 
     def dispose(self) -> None:
         """Закрывает соединения с базой.
 
-        Отдельно от `aclose`, потому что синхронному коду — тесту и завершению CLI —
-        закрывать нечего, кроме базы: HTTP-клиент провайдера создаётся только при
-        обращении к модели.
+        Этот метод закрывает только базу. Собственные HTTP-клиенты поколений
+        освобождаются асинхронным `aclose`.
         """
         self._dispose()
 
@@ -180,11 +223,20 @@ def build_application(
     """Собирает приложение по локальной конфигурации.
 
     `llm_client` подменяется в тестах и в сквозном сценарии (`FakeLLMClient`); без него
-    берётся клиент провайдера, который создаётся при первом обращении к модели.
+    берётся собственный клиент провайдера, подготовленный без сетевого обращения.
     `worker_settings` перекрывает параллелизм фоновых задач, заданный секцией `[worker]`
     (PRD § 25). `migrate` отключает применение схемы там, где базу готовит вызывающий код.
     """
-    app_settings = settings or load_settings()
+    try:
+        initial_settings = settings if settings is not None else load_settings()
+    except SettingsError:
+        raise SettingsError("Исходная конфигурация приложения недопустима") from None
+    if worker_settings is not None:
+        initial_settings = replace(
+            initial_settings,
+            worker=replace(initial_settings.worker, concurrency=worker_settings.concurrency),
+        )
+    app_settings = initial_settings
     paths = DataPaths.of_settings(app_settings.storage)
     paths.prepare()
     if migrate:
@@ -192,11 +244,57 @@ def build_application(
     engine = create_database_engine(paths.database_path)
     unit_of_work = SqlAlchemyUnitOfWork.for_engine(engine)
     task_queue = SqliteTaskQueue.for_engine(engine, id_factory=task_id_factory)
-    configured_client = ConfiguredLLMClient(app_settings.llm)
-    model = _model_client(
-        app_settings,
-        inner=llm_client or configured_client,
-        unit_of_work=unit_of_work,
+    settings_store = SystemSettingsStore(engine)
+    try:
+        stored = settings_store.load()
+        app_settings = overlay_settings(initial_settings, stored)
+    except Exception:
+        engine.dispose()
+        raise SettingsError("Сохранённые настройки приложения недопустимы") from None
+    if worker_settings is not None:
+        app_settings = replace(
+            app_settings,
+            worker=replace(app_settings.worker, concurrency=worker_settings.concurrency),
+        )
+    rate_limiter = LLMRateLimiter(app_settings.llm.requests_per_minute)
+
+    def generation_factory(candidate: AppSettings) -> RuntimeGeneration:
+        configured_client = ConfiguredLLMClient(candidate.llm)
+        model = _model_client(
+            candidate,
+            inner=llm_client if llm_client is not None else configured_client,
+            unit_of_work=unit_of_work,
+            limiter=rate_limiter,
+        )
+        generation = RuntimeGeneration(
+            settings=candidate,
+            configured_client=configured_client,
+            analysis=_analysis_sequence(
+                settings=candidate, unit_of_work=unit_of_work,
+                task_queue=task_queue, model=model,
+            ),
+            processing=_processing_sequence(
+                settings=candidate, unit_of_work=unit_of_work,
+                task_queue=task_queue, model=model,
+            ),
+            regeneration=_regeneration_sequence(
+                settings=candidate, unit_of_work=unit_of_work,
+                task_queue=task_queue, model=model,
+            ),
+        )
+        if llm_client is None:
+            configured_client.prepare()
+        return generation
+
+    try:
+        generation = generation_factory(app_settings)
+    except Exception:
+        engine.dispose()
+        raise SettingsError("Не удалось подготовить настройки приложения") from None
+    runtime_settings = RuntimeSettings(
+        initial_settings, generation,
+        revision=0 if stored is None else stored.revision,
+        generation_factory=generation_factory,
     )
     epubcheck = epubcheck or EpubCheckValidator(settings=EpubCheckSettings())
 
@@ -210,24 +308,9 @@ def build_application(
         writer=EpubExportWriter(),
         validator=epubcheck,
     )
-    analysis = _analysis_sequence(
-        settings=app_settings,
-        unit_of_work=unit_of_work,
-        task_queue=task_queue,
-        model=model,
-    )
-    processing = _processing_sequence(
-        settings=app_settings,
-        unit_of_work=unit_of_work,
-        task_queue=task_queue,
-        model=model,
-    )
-    regeneration = _regeneration_sequence(
-        settings=app_settings,
-        unit_of_work=unit_of_work,
-        task_queue=task_queue,
-        model=model,
-    )
+    analysis = RuntimeSequence(runtime_settings, "analysis")
+    processing = RuntimeSequence(runtime_settings, "processing")
+    regeneration = RuntimeSequence(runtime_settings, "regeneration")
     runner = TaskRunner(
         queue=task_queue,
         handlers=_handlers(
@@ -240,17 +323,24 @@ def build_application(
             regeneration=regeneration,
         ),
     )
+    worker_pool = TaskWorkerPool(
+        runner,
+        worker_settings or WorkerSettings(concurrency=app_settings.worker.concurrency),
+    )
+    system_settings = SystemSettingsService(
+        runtime=runtime_settings, store=settings_store,
+        limiter=rate_limiter, worker_pool=worker_pool,
+    )
     return Application(
-        settings=app_settings,
+        runtime_settings=runtime_settings,
+        system_settings=system_settings,
+        settings_store=settings_store,
+        rate_limiter=rate_limiter,
         paths=paths,
         unit_of_work=unit_of_work,
         task_queue=task_queue,
         runner=runner,
-        worker_pool=TaskWorkerPool(
-            runner,
-            worker_settings
-            or WorkerSettings(concurrency=app_settings.worker.concurrency),
-        ),
+        worker_pool=worker_pool,
         epubcheck=epubcheck,
         register_book=RegisterBook(unit_of_work=unit_of_work),
         import_book=import_book,
@@ -273,13 +363,13 @@ def build_application(
         analysis=analysis,
         processing=processing,
         regeneration=regeneration,
-        _llm_client=configured_client,
         _dispose=engine.dispose,
     )
 
 
 def _model_client(
-    settings: AppSettings, *, inner: LLMClient, unit_of_work: SqlAlchemyUnitOfWork
+    settings: AppSettings, *, inner: LLMClient, unit_of_work: SqlAlchemyUnitOfWork,
+    limiter: LLMRateLimiter,
 ) -> LLMClient:
     """Клиент модели, которым пользуются все LLM-сценарии.
 
@@ -304,11 +394,7 @@ def _model_client(
             else None
         ),
     )
-    if settings.llm.requests_per_minute is None:
-        return model
-    return RateLimitedLLMClient(
-        inner=model, requests_per_minute=settings.llm.requests_per_minute
-    )
+    return RateLimitedLLMClient(inner=model, limiter=limiter)
 
 
 def _analysis_sequence(
