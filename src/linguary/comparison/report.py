@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import statistics
 import zipfile
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -258,6 +259,28 @@ def write_report(report, root):
     (root / 'report.md').write_text(report.to_markdown(), encoding='utf-8')
 
 
+def _anonymous_metadata(data):
+    """Удалить явно добавленное происхождение, не сериализуя текст книги заново."""
+    from html import unescape
+
+    fields = {'model', 'analysis_model', 'processing_model', 'provenance'}
+    fields |= {'linguary:' + key for key in fields}
+
+    def remove_field(match):
+        element = match.group()
+        attributes = re.findall(rb'\b(name|property)\s*=\s*([\"\'])(.*?)\2', element.split(b'>', 1)[0], re.DOTALL)
+        if any(unescape(value.decode('utf-8')) in fields for _, _, value in attributes):
+            return b''
+        return element
+
+    def metadata(match):
+        return re.sub(rb'<(?:[\w.-]+:)?meta\b[^>]*?(?:/>|>.*?</(?:[\w.-]+:)?meta\s*>)',
+                      remove_field, match.group(), flags=re.DOTALL)
+
+    return re.sub(rb'<(?:[\w.-]+:)?(?:metadata|head)\b[^>]*>.*?</(?:[\w.-]+:)?(?:metadata|head)\s*>',
+                  metadata, data, flags=re.DOTALL)
+
+
 def anonymize_epubs(outcomes, root, model_labels=(LUNA, SONNET, 'luna', 'sonnet'), protocol=None):
     """Материалы рецензента имеют случайные метки; соответствие хранится отдельно."""
     from uuid import uuid4
@@ -273,10 +296,7 @@ def anonymize_epubs(outcomes, root, model_labels=(LUNA, SONNET, 'luna', 'sonnet'
                 for member in original.infolist():
                     data = original.read(member)
                     if member.filename.endswith(('.opf', '.xhtml', '.html', '.xml', '.ncx')):
-                        text = data.decode('utf-8')
-                        for name in sorted(set(model_labels), key=len, reverse=True):
-                            text = text.replace(name, 'anonymous')
-                        data = text.encode('utf-8')
+                        data = _anonymous_metadata(data)
                     anonymous.writestr(member, data)
             mapping[label] = {'variant_id': branch['variant_id'], 'repeat': branch['repeat'], 'book_id': book}
     (root / 'review-mapping.json').write_text(json.dumps(mapping, indent=2))

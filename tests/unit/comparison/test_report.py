@@ -138,3 +138,49 @@ def test_blind_reviews_are_mapped_only_after_reviewer_fills_materials():
     incomplete = aggregate_blind_reviews(mapping, {'anonymous-a': review}, protocol)
     assert incomplete[vid]['criteria']['accuracy'] is None
     assert incomplete[vid]['no_gross_errors'] is None
+
+
+def test_anonymous_epubs_preserve_book_text_and_original_metadata(tmp_path):
+    import zipfile
+    from linguary.comparison.protocol import LUNA, SONNET, file_hash
+    from linguary.comparison.report import anonymize_epubs
+
+    chapters = {
+        'source.xhtml': '<html><head><title>A sonnet for luna</title></head><body><p>The <em>sonnet</em> describes a lunar landscape. luna.</p></body></html>',
+        'translation.xhtml': '<html><head><title>Сонет о luna</title></head><body><p>Русский <em>перевод</em>: sonnet, lunar, luna — лунный пейзаж.</p></body></html>',
+    }
+    metadata = ('<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata>'
+                '<dc:title>The sonnet of luna</dc:title><dc:creator>Luna Sonnet</dc:creator>'
+                f'<meta name="linguary:analysis_model" content="{LUNA}"/>'
+                f'<meta property="linguary:processing_model">{SONNET}</meta>'
+                '<meta name="linguary:provenance">luna/sonnet</meta>'
+                '<meta name="description" content="A lunar sonnet"/>'
+                '<meta property="dcterms:modified">2026-10-11</meta>'
+                '</metadata></package>')
+    source = tmp_path / 'source.epub'
+    with zipfile.ZipFile(source, 'w') as archive:
+        archive.writestr('content.opf', metadata)
+        for name, text in chapters.items():
+            archive.writestr(name, text.encode())
+    before = file_hash(source)
+    mapping = anonymize_epubs({'variants': [{'variant_id': 'luna/sonnet', 'repeat': 1, 'epubs': {'book': source}}]}, tmp_path)
+    assert file_hash(source) == before
+    label, = mapping
+    with zipfile.ZipFile(tmp_path / 'review-materials' / f'{label}.epub') as archive:
+        for name, text in chapters.items():
+            assert archive.read(name) == text.encode()
+        anonymous_metadata = archive.read('content.opf').decode()
+        assert LUNA not in anonymous_metadata and SONNET not in anonymous_metadata
+        assert 'linguary:provenance' not in anonymous_metadata
+        assert '<dc:title>The sonnet of luna</dc:title>' in anonymous_metadata
+        assert '<dc:creator>Luna Sonnet</dc:creator>' in anonymous_metadata
+        assert '<meta name="description" content="A lunar sonnet"/>' in anonymous_metadata
+        assert '<meta property="dcterms:modified">2026-10-11</meta>' in anonymous_metadata
+    assert mapping[label] == {'variant_id': 'luna/sonnet', 'repeat': 1, 'book_id': 'book'}
+
+
+def test_anonymous_metadata_changes_only_explicit_provenance_in_head():
+    from linguary.comparison.report import _anonymous_metadata
+    head = b'<head><meta name="linguary:model" content="openai/gpt-6-luna"/><title>luna sonnet</title></head>'
+    body = '<body><p>Луна: lunar sonnet.</p><meta name="model" content="luna"/></body>'.encode()
+    assert _anonymous_metadata(head + body) == b'<head><title>luna sonnet</title></head>' + body

@@ -332,6 +332,17 @@ async def test_complete_fake_comparison_to_report(tmp_path):
     assert len(result.stage_wall_seconds) == 6
     # End-to-end wall duration includes local work; fake receipts have unknown duration.
     assert report.total['wall_seconds'] == 10 and report.total['request_seconds'] is None
+    from linguary.comparison.__main__ import execute
+    import zipfile
+    assert await execute(cli_args(tmp_path, value, '--report'), http_factory=lambda **kwargs: pytest.fail('no report HTTP')) == 0
+    mapping = json.loads((workspace.root / 'review-mapping.json').read_text())
+    assert len(mapping) == 4
+    for label, origin in mapping.items():
+        branch = next(branch for branch in result.variants if branch.variant_id == origin['variant_id'])
+        with zipfile.ZipFile(branch.epubs[origin['book_id']]) as original, zipfile.ZipFile(workspace.root / 'review-materials' / f'{label}.epub') as anonymous:
+            assert original.namelist() == anonymous.namelist()
+            assert all(original.read(name) == anonymous.read(name) for name in original.namelist())
+    assert set(json.loads((workspace.root / 'review-materials' / 'review-sheet.json').read_text())) == set(mapping)
 
 
 async def test_anonymous_epubs_exclude_model_labels(tmp_path):
@@ -340,7 +351,7 @@ async def test_anonymous_epubs_exclude_model_labels(tmp_path):
     source = tmp_path / 'named.epub'
     with zipfile.ZipFile(source, 'w') as archive:
         archive.writestr('mimetype', 'application/epub+zip')
-        archive.writestr('content.opf', '<metadata>openai/gpt-6-luna anthropic/claude-sonnet-4.6 luna sonnet</metadata>')
+        archive.writestr('content.opf', '<metadata><meta name="model">openai/gpt-6-luna anthropic/claude-sonnet-4.6 luna sonnet</meta></metadata>')
     outcomes = {'variants': [{'variant_id': 'luna/sonnet', 'repeat': 1, 'epubs': {'book': str(source)}}]}
     mapping = anonymize_epubs(outcomes, tmp_path)
     assert len(mapping) == 1
