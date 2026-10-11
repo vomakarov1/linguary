@@ -8,13 +8,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 from linguary.application.ports.llm import (
     LLMClient,
+    LLMConfigurationError,
     LLMPayload,
     LLMRequest,
     LLMResponse,
@@ -27,6 +28,7 @@ from linguary.domain.llm_log import TokenPricing
 
 type Clock = Callable[[], datetime]
 type IdFactory = Callable[[], str]
+type LoggedObserver = Callable[[LLMCallLog, LLMRequest, LLMResponse | Exception], None]
 
 
 @dataclass(slots=True)
@@ -41,11 +43,15 @@ class LoggingLLMClient(LLMClient):
     clock: Clock | None = None
     debug_payloads: bool = False
     pricing: TokenPricing | None = None
+    on_logged: LoggedObserver | None = None
+    _observation_failed: bool = field(default=False, init=False, repr=False)
 
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
         """Выполняет вызов модели и фиксирует его итог, если запрос привязан к книге."""
+        if self._observation_failed:
+            raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены")
         if request.book_id is None or request.stage is None:
             return await self.inner.generate(request)
         started_at = self._now()
@@ -62,6 +68,7 @@ class LoggingLLMClient(LLMClient):
                 usage=error.usage,
                 cost=self._cost_of(error.usage, provider_cost=error.cost),
                 response_text=error.raw_content if self.debug_payloads else None,
+                outcome=error,
             )
             raise
         except Exception as error:
@@ -72,6 +79,7 @@ class LoggingLLMClient(LLMClient):
                 model=self.model,
                 success=False,
                 error=error,
+                outcome=error,
             )
             raise
         call_id = self._new_id()
@@ -85,6 +93,7 @@ class LoggingLLMClient(LLMClient):
             cost=self._cost_of(response.usage, provider_cost=response.cost),
             call_id=call_id,
             response_text=response.raw_content if self.debug_payloads else None,
+            outcome=response,
         )
         return replace(
             response,
@@ -113,29 +122,40 @@ class LoggingLLMClient(LLMClient):
         cost: Decimal | None = None,
         call_id: str | None = None,
         response_text: str | None = None,
+        outcome: LLMResponse | Exception | None = None,
     ) -> None:
         """Записывает одну строку журнала в короткой транзакции."""
         if request.book_id is None or request.stage is None:
             return
-        with self.unit_of_work.transaction() as transaction:
-            transaction.llm_calls.add(
-                LLMCallLog(
-                    id=call_id or self._new_id(),
-                    book_id=request.book_id,
-                    task_id=request.task_id,
-                    stage=request.stage,
-                    provider=provider,
-                    model=model,
-                    started_at=started_at,
-                    duration_ms=self._duration_ms(started_at),
-                    attempt=request.attempt,
-                    success=success,
-                    error=None if error is None else classify_error(error),
-                    usage=usage,
-                    cost=cost,
-                ),
-                response_text=response_text,
-            )
+        entry = LLMCallLog(
+            id=call_id or self._new_id(),
+            book_id=request.book_id,
+            task_id=request.task_id,
+            stage=request.stage,
+            provider=provider,
+            model=model,
+            started_at=started_at,
+            duration_ms=self._duration_ms(started_at),
+            attempt=request.attempt,
+            success=success,
+            error=None if error is None else classify_error(error),
+            usage=usage,
+            cost=cost,
+        )
+        try:
+            with self.unit_of_work.transaction() as transaction:
+                transaction.llm_calls.add(entry, response_text=response_text)
+        except Exception:
+            if self.on_logged is None:
+                raise
+            self._observation_failed = True
+            raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены") from None
+        if self.on_logged is not None and outcome is not None:
+            try:
+                self.on_logged(entry, request, outcome)
+            except Exception:
+                self._observation_failed = True
+                raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены") from None
 
     def _duration_ms(self, started_at: datetime) -> int:
         """Длительность вызова в миллисекундах."""

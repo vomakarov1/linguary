@@ -46,6 +46,7 @@ from linguary.adapters.epub import (
     FilesystemEpubResourceStore,
 )
 from linguary.adapters.llm import LoggingLLMClient, RateLimitedLLMClient
+from linguary.adapters.llm.logging import LoggedObserver
 from linguary.domain.llm_log import TokenPricing
 from linguary.adapters.runtime import (
     ExecutorLock,
@@ -219,6 +220,7 @@ def build_application(
     task_id_factory: Callable[[], str] | None = None,
     epubcheck: EpubCheckValidator | None = None,
     migrate: bool = True,
+    on_logged: LoggedObserver | None = None,
 ) -> Application:
     """Собирает приложение по локальной конфигурации.
 
@@ -265,6 +267,7 @@ def build_application(
             inner=llm_client if llm_client is not None else configured_client,
             unit_of_work=unit_of_work,
             limiter=rate_limiter,
+            on_logged=on_logged,
         )
         generation = RuntimeGeneration(
             settings=candidate,
@@ -370,6 +373,7 @@ def build_application(
 def _model_client(
     settings: AppSettings, *, inner: LLMClient, unit_of_work: SqlAlchemyUnitOfWork,
     limiter: LLMRateLimiter,
+    on_logged: LoggedObserver | None = None,
 ) -> LLMClient:
     """Клиент модели, которым пользуются все LLM-сценарии.
 
@@ -384,6 +388,7 @@ def _model_client(
         provider=settings.llm.provider,
         model=settings.llm.model or "not_configured",
         debug_payloads=settings.llm.debug_llm_payloads,
+        on_logged=on_logged,
         pricing=(
             TokenPricing(
                 input_per_mtok=Decimal(str(settings.llm.input_price_per_mtok)),

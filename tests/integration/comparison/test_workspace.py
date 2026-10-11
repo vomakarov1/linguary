@@ -118,3 +118,17 @@ def test_changed_storage_settings_block_application_before_protected_writes(tmp_
     with pytest.raises(WorkspaceError):
         workspace.build_application()
     assert sorted(p.name for p in protected.iterdir()) == ['keep']
+
+
+def test_two_processing_forks_after_gc_keep_frozen_hash(tmp_path):
+    import gc
+    workspace = prepared(tmp_path)
+    artifact = freeze_analysis(workspace)
+    digest = file_hash(artifact.root / 'data' / 'linguary.db')
+    left = fork_processing(artifact, 'left')
+    app = left.build_application()
+    app.dispose()
+    gc.collect()
+    assert file_hash(artifact.root / 'data' / 'linguary.db') == digest
+    right = fork_processing(artifact, 'right')
+    assert right.analysis_hash == left.analysis_hash

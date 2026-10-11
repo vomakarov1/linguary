@@ -1,6 +1,8 @@
 """Изолированные каталоги и закрытые согласованные снимки анализа."""
 from __future__ import annotations
 
+from contextlib import closing
+
 import fcntl
 import json
 import re
@@ -187,9 +189,9 @@ def freeze_analysis(workspace) -> AnalysisArtifact:
         try:
             data = destination / 'data'
             data.mkdir()
-            with sqlite3.connect(f'file:{workspace.database_path}?mode=ro', uri=True) as source:
+            with closing(sqlite3.connect(f'file:{workspace.database_path}?mode=ro', uri=True)) as source:
                 _validate_analysis(source)
-                with sqlite3.connect(data / 'linguary.db') as target:
+                with closing(sqlite3.connect(data / 'linguary.db')) as target:
                     source.backup(target)
             books = workspace.root / 'data' / 'books'
             if books.exists():
@@ -201,7 +203,7 @@ def freeze_analysis(workspace) -> AnalysisArtifact:
             for name in ('inputs.json', 'context.json', 'settings.json'):
                 shutil.copy2(workspace.root / name, destination / name)
             # Абсолютные пути EPUB должны ссылаться на файлы конкретной копии.
-            with sqlite3.connect(data / 'linguary.db') as db:
+            with closing(sqlite3.connect(data / 'linguary.db')) as db, db:
                 _relocate_sources(db, workspace.root, destination)
                 receipts = [r[0] for r in db.execute('SELECT id FROM llm_call_logs ORDER BY id')]
             hashes = _hashes(destination)
@@ -253,7 +255,7 @@ def fork_processing(artifact, variant_id) -> ComparisonWorkspace:
         shutil.copytree(artifact.root / 'inputs', destination / 'inputs')
         for name in ('context.json', 'inputs.json', 'settings.json', 'artifact.json'):
             shutil.copy2(artifact.root / name, destination / name)
-        with sqlite3.connect(destination / 'data' / 'linguary.db') as db:
+        with closing(sqlite3.connect(destination / 'data' / 'linguary.db')) as db, db:
             _relocate_sources(db, artifact.root, destination)
         settings = replace(artifact.settings, storage=StorageSettings(data_root=str(destination / 'data')))
         return ComparisonWorkspace(destination, protected, artifact.protocol, settings, token, artifact.content_hash)
