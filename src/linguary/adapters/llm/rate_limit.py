@@ -37,7 +37,7 @@ type Clock = Callable[[], float]
 type Sleep = Callable[[float], Awaitable[None]]
 
 #: Секунд в минуте: предел задаётся в запросах в минуту, как его публикуют провайдеры.
-_SECONDS_PER_MINUTE = 60.0
+_SECONDS_PER_MINUTE = 60
 
 
 class LLMRateLimiter:
@@ -66,9 +66,11 @@ class LLMRateLimiter:
     def set_limit(self, value: int | None) -> None:
         if value is not None and (type(value) is not int or value < 1):
             raise ValueError("предел частоты запросов должен быть положительным целым числом")
+        # Деление целых не преобразует огромный предел в float до расчёта отношения.
+        interval = None if value is None else _SECONDS_PER_MINUTE / value
         with self._lock:
             self._requests_per_minute = value
-            self._interval = None if value is None else _SECONDS_PER_MINUTE / value
+            self._interval = interval
 
     async def acquire(self) -> None:
         with self._lock:

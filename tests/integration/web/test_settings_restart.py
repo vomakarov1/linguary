@@ -160,3 +160,23 @@ async def test_unconfigured_llm_can_be_configured_without_restart(tmp_path, monk
             (entry,) = uow.llm_calls.list_for_book(BOOK_ID)
         assert entry.success and entry.model == "fake-model"
         assert app.settings.llm.model == "saved-model"
+
+
+async def test_large_positive_rate_survives_same_database_restart(tmp_path):
+    rate = 10**400
+    async with running(baseline(tmp_path)) as (first, web):
+        response = await web.post("/system/config", json=payload(requests_per_minute=rate))
+        assert response.status_code == 200
+        persisted = response.json()
+        database_path = first.paths.database_path
+    async with running(baseline(tmp_path, rpm=7)) as (restarted, web):
+        response = await web.get("/system/config")
+        assert response.status_code == 200
+        assert response.json() == persisted
+        assert restarted.paths.database_path == database_path
+        assert restarted.settings.llm.requests_per_minute == rate
+        assert restarted.rate_limiter.requests_per_minute == rate
+        assert restarted.settings_store.load().overrides["requests_per_minute"] == rate
+        assert restarted.runtime_settings.revision == restarted.settings_store.load().revision == 1
+        await restarted.rate_limiter.acquire()
+        await restarted.rate_limiter.acquire()

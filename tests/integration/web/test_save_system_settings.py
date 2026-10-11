@@ -210,3 +210,16 @@ def test_cleanup_error_after_publication_does_not_return_false_failure(configure
     response = configured_client.post('/system/config', json=payload())
     assert response.status_code == 200 and response.json()['revision'] == 1
     assert 'private-test-key' not in response.text
+
+
+def test_large_positive_rate_json_save_matches_database_and_runtime(configured_client, configured_application):
+    rate = 10**400
+    response = configured_client.post('/system/config', json=payload(requests_per_minute=rate))
+    assert response.status_code == 200
+    data = response.json()
+    stored = configured_application.settings_store.load()
+    assert data['revision'] == stored.revision == configured_application.runtime_settings.revision == 1
+    assert data['llm']['requests_per_minute'] == stored.overrides['requests_per_minute'] == rate
+    assert configured_application.settings.llm.requests_per_minute == rate
+    assert configured_application.rate_limiter.requests_per_minute == rate
+    assert configured_client.get('/system/config').json() == data

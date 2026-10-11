@@ -253,3 +253,35 @@ def test_changed_limit_rejects_invalid_values(value):
     with pytest.raises(ValueError):
         limiter.set_limit(value)
     assert limiter.requests_per_minute == 60
+
+
+@pytest.mark.parametrize("rate", [10**309, 10**400])
+@pytest.mark.parametrize("change_limit", [False, True])
+async def test_large_positive_integer_limit_is_applied(rate, change_limit):
+    from linguary.adapters.llm.rate_limit import LLMRateLimiter
+
+    clock = ManualClock()
+    limiter = LLMRateLimiter(60 if change_limit else rate, clock=clock, sleep=clock.sleep)
+    if change_limit:
+        limiter.set_limit(rate)
+    assert limiter.requests_per_minute == rate
+    await limiter.acquire()
+    await limiter.acquire()
+    assert clock.now == 60 / rate
+    assert clock.sleeps == ([] if rate == 10**400 else [60 / rate])
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5, "60"])
+async def test_invalid_limit_preserves_state(invalid):
+    from linguary.adapters.llm.rate_limit import LLMRateLimiter
+
+    clock = ManualClock()
+    limiter = LLMRateLimiter(30, clock=clock, sleep=clock.sleep)
+    await limiter.acquire()
+    limiter.hold(3)
+    with pytest.raises(ValueError):
+        limiter.set_limit(invalid)
+    assert limiter.requests_per_minute == 30
+    await limiter.acquire()
+    await limiter.acquire()
+    assert clock.sleeps == [3, 1]
