@@ -176,7 +176,7 @@ def test_anonymous_epubs_preserve_book_text_and_original_metadata(tmp_path):
         assert '<dc:creator>Luna Sonnet</dc:creator>' in anonymous_metadata
         assert '<meta name="description" content="A lunar sonnet"/>' in anonymous_metadata
         assert '<meta property="dcterms:modified">2026-10-11</meta>' in anonymous_metadata
-    assert mapping[label] == {'variant_id': 'luna/sonnet', 'repeat': 1, 'book_id': 'book'}
+    assert mapping[label] == {'variant_id': 'luna/sonnet', 'repeat': 1, 'book_id': 'book', 'chapter_ids': []}
 
 
 def test_anonymous_metadata_changes_only_explicit_provenance_in_head():
@@ -184,3 +184,18 @@ def test_anonymous_metadata_changes_only_explicit_provenance_in_head():
     head = b'<head><meta name="linguary:model" content="openai/gpt-6-luna"/><title>luna sonnet</title></head>'
     body = '<body><p>Луна: lunar sonnet.</p><meta name="model" content="luna"/></body>'.encode()
     assert _anonymous_metadata(head + body) == b'<head><title>luna sonnet</title></head>' + body
+
+
+def test_critical_review_is_scoped_to_its_chapter():
+    from linguary.comparison.protocol import CriticalPlace
+    from linguary.comparison.report import aggregate_blind_reviews
+    protocol = draft_protocol().model_copy(update={'critical_places': (
+        CriticalPlace(chapter_id='control', location='pun', expected_explanation='meaning'),
+        CriticalPlace(chapter_id='wordplay', location='idiom', expected_explanation='idiom'),)})
+    mapping = {'a': {'variant_id': protocol.variants[0].id, 'repeat': 1, 'chapter_ids': ['control']},
+               'b': {'variant_id': protocol.variants[0].id, 'repeat': 1, 'chapter_ids': ['wordplay']}}
+    sheet = {'a': {'critical_places': {'control:pun': True}}, 'b': {'critical_places': {'wordplay:idiom': True}}}
+    result = aggregate_blind_reviews(mapping, sheet, protocol)
+    assert result[protocol.variants[0].id]['critical_places'] == {'control:pun': True, 'wordplay:idiom': True}
+    sheet['b']['critical_places']['wordplay:idiom'] = None
+    assert aggregate_blind_reviews(mapping, sheet, protocol)[protocol.variants[0].id]['critical_places']['wordplay:idiom'] is None

@@ -228,9 +228,9 @@ def live_protocol():
     value = protocol()
     return ComparisonProtocol.model_validate(value.model_dump() | {
         'temperature_policy': 'set', 'rubric': {k: 3 for k in value.rubric}, 'scale_max': 5, 'sufficient_gain': 1, 'comparability_margin': .2,
-        'minimum_first_responses': {'analysis': 1, 'processing': 1}, 'schedule': tuple(v.id for v in value.variants),
+        'minimum_first_responses': {'analysis': 20, 'processing': 20}, 'schedule': tuple(v.id for v in value.variants),
         'critical_places': [{'chapter_id': 'control', 'location': 'wordplay', 'expected_explanation': 'Explain the semantic relation'}],
-        'checks': asdict(CheckSettings()), 'requests_per_minute': 1000, 'concurrency': 1, 'budget': 10, 'max_call_cost': 1,
+        'max_total_attempts': 88, 'checks': asdict(CheckSettings()), 'requests_per_minute': 1000, 'concurrency': 1, 'budget': 10, 'max_call_cost': 1,
         'stop_conditions': ['budget'], 'reference_book': 'synthetic reference', 'projection_method': 'fixed source character ratio',
         'max_book_cost': 10, 'max_book_seconds': 3600, 'routes': {v.analysis_model: 'mock-route' for v in value.variants},
         'context_cache_policy': 'record', 'retain_rejected': False, 'diagnostic_retention_seconds': 0, 'diagnostic_access': 'local',
@@ -251,7 +251,10 @@ def four_chapter_protocol(tmp_path):
             target.writestr(member, data)
         target.writestr('OEBPS/chapter4.xhtml', fourth)
     value = value.model_copy(update={'chapters': tuple(c.model_copy(update={'source': str(corpus), 'chapter_id': str(index + 1)}) for index, c in enumerate(value.chapters))})
-    return value
+    from linguary.comparison.protocol import CostBounds, RouteMetadata
+    return value.model_copy(update={'version_hashes': {key: {str(Path(__file__).resolve()): file_hash(Path(__file__))} for key in ('code_version', 'instruction_version', 'schema_version', 'checks_version')}, 'source_hashes': {c.id: file_hash(Path(c.source)) for c in value.chapters},
+        'route_metadata': {m: RouteMetadata(provider_names=(r,), model_versions=(m,)) for m, r in value.routes.items()},
+        'cost_bounds': CostBounds(max_request_bytes=1000000, max_input_tokens=100000, input_price_per_mtok=1, output_price_per_mtok=1, output_includes_reasoning=True, input_bound_method='synthetic', evidence='MockTransport only')})
 
 
 def cli_args(tmp_path, value, mode, approval=None):
@@ -369,7 +372,7 @@ async def test_live_admission_and_run_with_mock_transport(tmp_path, monkeypatch,
     from linguary.comparison.protocol import ProtocolApproval
     value = live_protocol()
     value = four_chapter_protocol(tmp_path)
-    value = value.model_copy(update={'temperature_policy': temperature_policy, 'generation': dict(value.generation, temperature=None if temperature_policy == 'omit' else .5)})
+    value = value.model_copy(update={'temperature_policy': temperature_policy, 'generation': dict(value.generation, max_output_tokens=8000, temperature=None if temperature_policy == 'omit' else .5)})
     protected = tmp_path / 'production'
     protected.mkdir()
     protected_file = protected / 'database'
@@ -390,7 +393,8 @@ async def test_live_admission_and_run_with_mock_transport(tmp_path, monkeypatch,
         calls.append(body)
         assert ('temperature' in body) is (temperature_policy == 'set')
         assert body['max_tokens'] == value.generation['max_output_tokens']
-        assert body['provider'] == {'order': ['mock-route'], 'allow_fallbacks': False, 'require_parameters': True}
+        assert body['provider'] == {'order': ['mock-route'], 'allow_fallbacks': False, 'require_parameters': True, 'max_price': {'prompt': 1, 'completion': 1}}
+        assert request.headers['X-OpenRouter-Cache'] == 'false'
         kind = body['response_format']['json_schema']['name']
         import re
         from pipeline_support import read_fixture
@@ -402,7 +406,7 @@ async def test_live_admission_and_run_with_mock_transport(tmp_path, monkeypatch,
             payload = {'blocks': [{'source_block_id': alias, 'treatment': 'TRANSLATE', 'translated_text': f'Русский перевод учебного блока сохраняет смысл и события главы. Рен Колдер. {alias}.', 'glossary_hints': []} for alias in aliases], 'language_notes': []}
         content = json.dumps(payload, ensure_ascii=False)
         return httpx.Response(200, json={'id': f'gen-{len(calls)}', 'model': body['model'], 'provider': 'mock-route', 'full_response_cache': False, 'context_cache': False,
-                                      'usage': {'cost': .01, 'prompt_tokens': 100, 'completion_tokens': 100}, 'choices': [{'finish_reason': 'stop', 'message': {'content': content}}]})
+                                      'usage': {'cost': .01, 'prompt_tokens': 100, 'completion_tokens': 100, 'prompt_tokens_details': {'cached_tokens': 0}}, 'choices': [{'finish_reason': 'stop', 'message': {'content': content}}]})
     monkeypatch.setenv('COMPARISON_API_KEY', 'synthetic-key')
     assert await execute(cli_args(tmp_path, value, '--live', approval), http_factory=lambda **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)) == 0
     root = tmp_path / 'comparison'
@@ -463,3 +467,11 @@ async def test_duplicate_physical_chapters_block_cli_before_http(tmp_path):
     with pytest.raises(ProtocolError):
         await execute(cli_args(tmp_path, value, '--live', approval), http_factory=lambda **kwargs: calls.append(kwargs))
     assert not calls
+
+
+async def test_absent_fixed_concept_is_not_invented(tmp_path):
+    value = protocol()
+    value = value.model_copy(update={'fixed_glossary': dict(value.fixed_glossary, **{'Absent synthetic concept': {'decision': 'correct', 'translation': 'Отсутствующее понятие'}})})
+    workspace = prepare_workspace(tmp_path / 'comparison', [tmp_path / 'production'], value)
+    result = await run_comparison(value, workspace, Factory())
+    assert all(branch.completed for branch in result.variants)

@@ -42,8 +42,34 @@ class CriticalPlace(Contract):
     expected_explanation: str
 
 
+class RouteMetadata(Contract):
+    provider_names: tuple[str, ...]
+    model_versions: tuple[str, ...]
+
+
+class EndpointSnapshot(Contract):
+    path: str
+    sha256: str
+
+
+class CostBounds(Contract):
+    max_request_bytes: int = Field(gt=0)
+    max_input_tokens: int = Field(gt=0)
+    input_price_per_mtok: float = Field(ge=0, allow_inf_nan=False)
+    output_price_per_mtok: float = Field(ge=0, allow_inf_nan=False)
+    output_includes_reasoning: bool
+    input_bound_method: Literal['unverified', 'synthetic', 'provider_context_limit']
+    endpoint_snapshots: dict[str, EndpointSnapshot] = Field(default_factory=dict)
+    input_price_multiplier: float = Field(default=1, ge=1, allow_inf_nan=False)
+    evidence: str
+
+
 class ComparisonProtocol(Contract):
     version: Literal[1] = 1
+    version_hashes: dict[str, dict[str, str]] = Field(default_factory=dict)
+    source_hashes: dict[str, str] = Field(default_factory=dict)
+    route_metadata: dict[str, RouteMetadata] = Field(default_factory=dict)
+    cost_bounds: CostBounds | None = None
     chapters: tuple[ChapterInput, ...]
     variants: tuple[Variant, ...]
     fixed_glossary: dict[str, object] = Field(default_factory=dict)
@@ -62,6 +88,7 @@ class ComparisonProtocol(Contract):
     checks: dict[str, float | int | None] = Field(default_factory=dict)
     requests_per_minute: int | None = Field(default=None, gt=0)
     concurrency: int | None = Field(default=None, gt=0)
+    max_total_attempts: int | None = Field(default=None, gt=0)
     budget: float | None = Field(default=None, gt=0)
     max_call_cost: float | None = Field(default=None, gt=0)
     stop_conditions: tuple[str, ...] = ()
@@ -160,6 +187,7 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
         if isinstance(value, (tuple, list)):
             return any(missing(v) for v in value)
         return False
+    validate_input_bindings(protocol, required=True)
     data = protocol.model_dump(mode='json')
     if protocol.temperature_policy == 'omit':
         if protocol.generation.get('temperature') is not None:
@@ -201,9 +229,81 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
     chapter_ids = {c.id for c in protocol.chapters}
     if not protocol.critical_places or any(p.chapter_id not in chapter_ids or not p.location.strip() or not p.expected_explanation.strip() for p in protocol.critical_places):
         raise ProtocolError('Не согласованы критические места')
+    if set(protocol.route_metadata) != set(protocol.routes) or any(not m.provider_names or not m.model_versions or any(not value.strip() for value in (*m.provider_names, *m.model_versions)) for m in protocol.route_metadata.values()):
+        raise ProtocolError('Не приняты имена провайдеров и точные версии моделей')
+    bounds = protocol.cost_bounds
+    if bounds is None or not bounds.output_includes_reasoning or not bounds.evidence.strip() or bounds.input_bound_method == 'unverified':
+        raise ProtocolError('Не доказана граница оплачиваемого входа и вывода')
+    if bounds.input_bound_method == "provider_context_limit":
+        validate_context_envelope(bounds, protocol.routes, protocol.route_metadata, protocol.generation["max_output_tokens"])
+    from decimal import Decimal
+    maximum = (Decimal(bounds.max_input_tokens) * Decimal(str(bounds.input_price_per_mtok)) + Decimal(protocol.generation['max_output_tokens']) * Decimal(str(bounds.output_price_per_mtok))) / Decimal(1000000)
+    if maximum > Decimal(str(protocol.max_call_cost)):
+        raise ProtocolError('Тарифные пределы превышают резерв вызова')
     if protocol.max_call_cost > protocol.budget:
         raise ProtocolError('Резерв вызова превышает бюджет')
     return ValidatedProtocol(protocol=protocol, approval=approval, protocol_hash=protocol.content_hash)
+
+
+def validate_context_envelope(bounds, routes, metadata, output_tokens):
+    """Консервативный предел по квоте точки, без оценки токенов по байтам."""
+    from decimal import Decimal
+    if bounds.input_price_multiplier < 2 or not set(routes) <= bounds.endpoint_snapshots.keys():
+        raise ProtocolError('Не закреплены квоты точек и максимальный множитель записи кеша')
+    for model, route in routes.items():
+        snapshot = bounds.endpoint_snapshots[model]
+        try:
+            path = Path(snapshot.path).expanduser()
+            if file_hash(path) != snapshot.sha256:
+                raise ProtocolError('Снимок точки изменился')
+            data = json.loads(path.read_text())['data']
+            endpoints = [endpoint for endpoint in data['endpoints'] if endpoint['tag'] == route]
+            if data['id'] != model or len(endpoints) != 1:
+                raise ProtocolError('Неоднозначная точка в принятом снимке')
+            endpoint = endpoints[0]
+            limit = endpoint.get('max_prompt_tokens') or endpoint['context_length']
+            if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > bounds.max_input_tokens:
+                raise ProtocolError('Квота точки превышает принятый предел входа')
+            if endpoint['provider_name'] not in metadata[model].provider_names or endpoint.get('status') != 0 or endpoint['max_completion_tokens'] < output_tokens:
+                raise ProtocolError('Точка не соответствует принятому провайдеру или выводу')
+            pricing = endpoint['pricing']
+            for tariff in (pricing, *pricing.get('overrides', [])):
+                prompt = Decimal(tariff.get('prompt', pricing['prompt'])) * 1000000
+                completion = Decimal(tariff.get('completion', pricing['completion'])) * 1000000
+                effective = prompt * Decimal(str(bounds.input_price_multiplier))
+                if effective > Decimal(str(bounds.input_price_per_mtok)) or completion > Decimal(str(bounds.output_price_per_mtok)):
+                    raise ProtocolError('Тариф точки превышает принятый предел')
+                for key in ('input_cache_read', 'input_cache_write', 'input_cache_write_1h'):
+                    if key in tariff and Decimal(tariff[key]) * 1000000 > Decimal(str(bounds.input_price_per_mtok)):
+                        raise ProtocolError('Тариф кеша превышает принятый предел')
+                if Decimal(tariff.get('request', '0')) != 0:
+                    raise ProtocolError('Не согласована отдельная плата за запрос')
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError):
+            raise ProtocolError('Не удалось подтвердить квоты и тарифы принятой точки') from None
+
+
+def validate_input_bindings(protocol, *, required=False):
+    version_keys = {'code_version', 'instruction_version', 'schema_version', 'checks_version'}
+    if required and (set(protocol.version_hashes) != version_keys or any(not hashes for hashes in protocol.version_hashes.values())):
+        raise ProtocolError('Не приняты хеши файлов всех четырёх версий')
+    try:
+        for hashes in protocol.version_hashes.values():
+            for path, digest in hashes.items():
+                if len(digest) != 64 or file_hash(Path(path).expanduser()) != digest:
+                    raise ProtocolError('Файл версии не соответствует принятому хешу')
+    except OSError:
+        raise ProtocolError('Не удалось проверить принятую версию') from None
+    if not protocol.source_hashes and not required:
+        return
+    if set(protocol.source_hashes) != {c.id for c in protocol.chapters}:
+        raise ProtocolError('Не приняты хеши всех источников')
+    try:
+        for chapter in protocol.chapters:
+            digest = protocol.source_hashes[chapter.id]
+            if len(digest) != 64 or file_hash(Path(chapter.source).expanduser()) != digest:
+                raise ProtocolError('Источник не соответствует принятому хешу')
+    except OSError:
+        raise ProtocolError('Не удалось проверить принятый источник') from None
 
 
 SAFE_SETTINGS = {

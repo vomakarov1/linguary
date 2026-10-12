@@ -4,6 +4,10 @@ import pytest
 
 from linguary.comparison.llm import BudgetGuard, ComparisonStopped, ObservationLedger
 from linguary.application.ports.llm import LLMRequest, LLMResponseFormatError
+from linguary.comparison.protocol import CostBounds, RouteMetadata
+
+BOUNDS = CostBounds(max_request_bytes=100000, max_input_tokens=100000, input_price_per_mtok=1, output_price_per_mtok=1, output_includes_reasoning=True, input_bound_method="synthetic", evidence="MockTransport only")
+METADATA = RouteMetadata(provider_names=("route",), model_versions=("model",))
 
 
 def test_budget_reserves_inflight_calls():
@@ -46,8 +50,8 @@ async def test_receipt_survives_payload_parse_failure():
     from linguary.adapters.config import LLMSettings
     from linguary.comparison.llm import ObservedLLMClient
     ledger = ObservationLedger()
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={'model': 'model', 'provider': 'route', 'id': 'generation', 'full_response_cache': False, 'usage': {'cost': .2}, 'choices': [{'message': {'content': '{'}, 'finish_reason': 'length'}]}))) as http:
-        client = ObservedLLMClient(settings=LLMSettings(model='model', api_key='SECRET'), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={'model': 'model', 'provider': 'route', 'id': 'generation', 'full_response_cache': False, 'usage': {'cost': .2, 'prompt_tokens_details': {'cached_tokens': 0}}, 'choices': [{'message': {'content': '{'}, 'finish_reason': 'length'}]}))) as http:
+        client = ObservedLLMClient(cost_bounds=BOUNDS, route_metadata=METADATA, settings=LLMSettings(max_output_tokens=8000, model='model', api_key='SECRET'), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
         with pytest.raises(LLMResponseFormatError):
             await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
     item, = ledger.observations
@@ -55,20 +59,20 @@ async def test_receipt_survives_payload_parse_failure():
     assert item.first_response and item.truncated and item.call_id is None
 
 
-@pytest.mark.parametrize('changes,reason', [({'usage': {}}, 'unknown_price'), ({'full_response_cache': True}, 'unknown_or_full_response_cache'), ({'provider': 'fallback'}, 'unknown_or_changed_route')])
+@pytest.mark.parametrize('changes,reason', [({'usage': {}}, 'unknown_price'), ({'cache_hit': True}, 'unknown_or_full_response_cache'), ({'provider': 'fallback'}, 'unknown_or_changed_route')])
 async def test_unknown_price_and_cache_hit_stop(changes, reason):
     import httpx
     from linguary.adapters.config import LLMSettings
     from linguary.comparison.llm import ObservedLLMClient
     calls = []
-    document = {'model': 'model', 'provider': 'route', 'id': 'generation', 'full_response_cache': False, 'usage': {'cost': .2}, 'choices': [{'message': {'content': '{'}}]}
+    document = {'model': 'model', 'provider': 'route', 'id': 'generation', 'full_response_cache': False, 'usage': {'cost': .2, 'prompt_tokens_details': {'cached_tokens': 0}}, 'choices': [{'message': {'content': '{'}}]}
     document.update(changes)
     def handler(request):
         calls.append(request)
-        return httpx.Response(200, json=document)
+        return httpx.Response(200, json=document, headers={'X-OpenRouter-Cache-Status': 'HIT' if changes.get('cache_hit') else 'MISS'})
     ledger = ObservationLedger()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        client = ObservedLLMClient(settings=LLMSettings(model='model', api_key='SECRET'), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
+        client = ObservedLLMClient(cost_bounds=BOUNDS, route_metadata=METADATA, settings=LLMSettings(max_output_tokens=8000, model='model', api_key='SECRET'), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
         request = LLMRequest.for_translation(instructions='translate', input_text='private')
         with pytest.raises(LLMResponseFormatError):
             await client.generate(request)
@@ -125,9 +129,9 @@ async def test_receipt_survives_log_repository_failure(tmp_path):
     calls = []
     def handler(request):
         calls.append(request)
-        return httpx.Response(200, json={'model': 'model', 'provider': 'route', 'id': 'paid-call', 'full_response_cache': False, 'usage': {'cost': .2}, 'choices': [{'message': {'content': '{'}}]})
+        return httpx.Response(200, json={'model': 'model', 'provider': 'route', 'id': 'paid-call', 'full_response_cache': False, 'usage': {'cost': .2, 'prompt_tokens_details': {'cached_tokens': 0}}, 'choices': [{'message': {'content': '{'}}]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        client = ObservedLLMClient(settings=LLMSettings(model='model', api_key='SECRET'), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
+        client = ObservedLLMClient(cost_bounds=BOUNDS, route_metadata=METADATA, settings=LLMSettings(max_output_tokens=8000, model='model', api_key='SECRET'), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
         logger = LoggingLLMClient(inner=client, unit_of_work=BrokenUow(), provider='route', model='model', on_logged=ledger.on_logged)
         request = LLMRequest.for_translation(instructions='secret prompt', input_text='secret input').with_logging(book_id='book', stage=LLMCallStage.TRANSLATION_UNIT)
         for _ in range(2):
@@ -158,7 +162,7 @@ async def test_changed_generation_parameters_block_before_network():
     settings = LLMSettings(model='model', api_key='SECRET', temperature=.5, max_output_tokens=1000)
     ledger = ObservationLedger()
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request))) as http:
-        client = ObservedLLMClient(settings=replace(settings, temperature=.9), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
+        client = ObservedLLMClient(cost_bounds=BOUNDS, route_metadata=METADATA, settings=replace(settings, temperature=.9), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
         with pytest.raises(ComparisonStopped):
             _stage_client(client, ledger, 'model', 'route', False, settings, client.budget, Decimal('.5'))
     assert not calls and 'generation_parameters_mismatch' in ledger.violations
@@ -204,11 +208,11 @@ async def test_external_receipt_metadata_redacts_secrets(tmp_path, field):
     from linguary.adapters.config import LLMSettings
     from linguary.comparison.llm import ObservedLLMClient
     secret = 'synthetic-api-secret'
-    document = {'model': 'model', 'provider': 'route', 'id': 'normal-id', 'full_response_cache': False, 'usage': {'cost': .2}, 'choices': [{'message': {'content': '{'}}]}
+    document = {'model': 'model', 'provider': 'route', 'id': 'normal-id', 'full_response_cache': False, 'usage': {'cost': .2, 'prompt_tokens_details': {'cached_tokens': 0}}, 'choices': [{'message': {'content': '{'}}]}
     document[field] = 'echo-' + secret
     ledger = ObservationLedger(receipt_root=tmp_path)
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=document))) as http:
-        client = ObservedLLMClient(settings=LLMSettings(model='model', api_key=secret), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
+        client = ObservedLLMClient(cost_bounds=BOUNDS, route_metadata=METADATA, settings=LLMSettings(max_output_tokens=8000, model='model', api_key=secret), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'))
         with pytest.raises(LLMResponseFormatError):
             await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
     item, = ledger.observations
@@ -229,9 +233,9 @@ async def test_stage_client_enforces_shared_budget_before_http(change):
     ledger = ObservationLedger()
     guard = BudgetGuard(Decimal('1'))
     calls = []
-    settings = LLMSettings(model='model', api_key='synthetic-key')
+    settings = LLMSettings(max_output_tokens=8000, model='model', api_key='synthetic-key')
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request))) as http:
-        client = ObservedLLMClient(settings=settings, route='route', http_client=http, ledger=ledger, budget=guard if change == 'maximum' else BudgetGuard(Decimal('1')), max_call_cost=Decimal('.9') if change == 'maximum' else Decimal('.5'))
+        client = ObservedLLMClient(cost_bounds=BOUNDS, route_metadata=METADATA, settings=settings, route='route', http_client=http, ledger=ledger, budget=guard if change == 'maximum' else BudgetGuard(Decimal('1')), max_call_cost=Decimal('.9') if change == 'maximum' else Decimal('.5'))
         with pytest.raises(ComparisonStopped):
             _stage_client(client, ledger, 'model', 'route', False, settings, guard, Decimal('.5'))
     assert not calls and 'budget_binding_mismatch' in ledger.violations
@@ -246,11 +250,132 @@ async def test_explicit_temperature_policy_is_applied_before_http(policy, presen
     requests = []
     def handler(request):
         requests.append(json.loads(request.content))
-        return httpx.Response(200, json={'model': 'model', 'provider': 'route', 'id': 'generation', 'full_response_cache': False, 'usage': {'cost': .2}, 'choices': [{'message': {'content': '{'}}]})
+        return httpx.Response(200, json={'model': 'model', 'provider': 'route', 'id': 'generation', 'full_response_cache': False, 'usage': {'cost': .2, 'prompt_tokens_details': {'cached_tokens': 0}}, 'choices': [{'message': {'content': '{'}}]})
     ledger = ObservationLedger()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        client = ObservedLLMClient(settings=LLMSettings(model='model', api_key='test-only', temperature=.5, max_output_tokens=1234), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'), temperature_policy=policy)
+        client = ObservedLLMClient(cost_bounds=BOUNDS, route_metadata=METADATA, settings=LLMSettings(model='model', api_key='test-only', temperature=.5, max_output_tokens=1234), route='route', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'), temperature_policy=policy)
         with pytest.raises(LLMResponseFormatError):
             await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
     assert len(requests) == 1 and ('temperature' in requests[0]) is present
     assert requests[0]['max_tokens'] == 1234
+
+
+@pytest.mark.parametrize('change', ['bytes', 'tariff', 'unverified', 'missing'])
+async def test_unproven_or_excessive_cost_bounds_send_zero_requests(change):
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+    bounds = {'bytes': BOUNDS.model_copy(update={'max_request_bytes': 1}),
+              'tariff': BOUNDS.model_copy(update={'input_price_per_mtok': 100}),
+              'unverified': BOUNDS.model_copy(update={'input_bound_method': 'unverified'}),
+              'missing': None}[change]
+    calls = []
+    guard = BudgetGuard(Decimal('1'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: calls.append(request))) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', max_output_tokens=8000, api_key='synthetic'), route='route', http_client=http, ledger=ObservationLedger(), budget=guard, max_call_cost=Decimal('.5'), cost_bounds=bounds, route_metadata=METADATA)
+        with pytest.raises(ComparisonStopped):
+            await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
+    assert not calls and not guard.uncertain and guard.spent == 0
+
+
+async def test_documented_receipt_provider_display_version_and_cache():
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert request.headers['X-OpenRouter-Cache'] == 'false'
+        return httpx.Response(200, headers={'X-OpenRouter-Cache-Status': 'MISS'}, json={
+            'provider': 'Display Provider', 'model': 'model-2026-10', 'id': 'gen',
+            'usage': {'cost': .2, 'prompt_tokens': 100, 'completion_tokens': 10, 'prompt_tokens_details': {'cached_tokens': 20}},
+            'choices': [{'message': {'content': '{'}}]})
+    ledger = ObservationLedger()
+    metadata = RouteMetadata(provider_names=('Display Provider',), model_versions=('model-2026-10',))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', max_output_tokens=8000, api_key='synthetic'), route='slug', http_client=http, ledger=ledger, budget=BudgetGuard(Decimal('1')), max_call_cost=Decimal('.5'), cost_bounds=BOUNDS, route_metadata=metadata)
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
+    item, = ledger.observations
+    assert not ledger.violations and item.context_cache is True and item.full_response_cache is False
+    assert item.actual_model == 'model-2026-10' and item.actual_provider == 'Display Provider'
+
+
+def test_uncertain_attempt_reservation_is_not_reused():
+    guard = BudgetGuard(Decimal('1'))
+    reservation = guard.reserve(Decimal('.6'))
+    guard.settle(reservation, None)
+    assert guard.uncertain[reservation] == Decimal('.6')
+    with pytest.raises(ComparisonStopped):
+        guard.reserve(Decimal('.5'))
+
+
+def test_global_attempt_limit_includes_failed_attempts():
+    guard = BudgetGuard(Decimal('10'), max_total_attempts=2)
+    guard.settle(guard.reserve(Decimal('.5')), None)
+    guard.settle(guard.reserve(Decimal('.5')), Decimal('.1'))
+    with pytest.raises(ComparisonStopped, match='попыток'):
+        guard.reserve(Decimal('.5'))
+    assert guard.attempts == 2 and guard.spent == Decimal('.1') and sum(guard.uncertain.values()) == Decimal('.5')
+
+
+async def test_context_envelope_price_ceiling_is_sent_before_mock_generation(tmp_path):
+    import json
+    import httpx
+    from linguary.comparison.protocol import CostBounds, EndpointSnapshot, file_hash
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+    path = tmp_path / 'endpoints.json'
+    path.write_text(json.dumps({'data': {'id': 'model', 'endpoints': [{
+        'tag': 'slug', 'provider_name': 'Display Provider', 'status': 0, 'context_length': 1000000,
+        'max_prompt_tokens': None, 'max_completion_tokens': 128000,
+        'pricing': {'prompt': '.000003', 'completion': '.000015', 'input_cache_write_1h': '.000006'}}]}}))
+    bounds = CostBounds(max_request_bytes=1048576, max_input_tokens=1000000, input_price_per_mtok=6, output_price_per_mtok=15,
+                        output_includes_reasoning=True, input_bound_method='provider_context_limit', input_price_multiplier=2,
+                        endpoint_snapshots={'model': EndpointSnapshot(path=str(path), sha256=file_hash(path))}, evidence='Synthetic quota proof')
+    metadata = RouteMetadata(provider_names=('Display Provider',), model_versions=('model-version',))
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert json.loads(request.content)['provider']['max_price'] == {'prompt': 3, 'completion': 15, 'request': 0}
+        return httpx.Response(200, json={'model': 'model-version', 'provider': 'Display Provider', 'id': 'gen',
+            'usage': {'cost': .01, 'prompt_tokens_details': {'cached_tokens': 0}}, 'choices': [{'message': {'content': '{'}}]})
+    guard = BudgetGuard(Decimal('20'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', max_output_tokens=8000, api_key='synthetic'), route='slug',
+            http_client=http, ledger=ObservationLedger(), budget=guard, max_call_cost=Decimal('6.12'), cost_bounds=bounds, route_metadata=metadata)
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
+    assert len(calls) == 1 and guard.spent == Decimal('.01')
+
+
+@pytest.mark.parametrize('details', [None, {}, {'cached_tokens': None}, {'cached_tokens': '0'}, {'cached_tokens': False}, {'cached_tokens': -1}, []])
+async def test_unknown_context_cache_stops_followup_and_preserves_paid_receipt(tmp_path, details):
+    import json
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+    calls = []
+    def handler(request):
+        calls.append(request)
+        usage = {'cost': .2, 'prompt_tokens': 100, 'completion_tokens': 10}
+        if details is not None:
+            usage['prompt_tokens_details'] = details
+        return httpx.Response(200, headers={'X-OpenRouter-Cache-Status': 'MISS'}, json={
+            'model': 'model', 'provider': 'route', 'id': 'paid-generation', 'usage': usage,
+            'choices': [{'message': {'content': '{'}}]})
+    ledger = ObservationLedger(receipt_root=tmp_path)
+    guard = BudgetGuard(Decimal('1'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', max_output_tokens=8000, api_key='synthetic'), route='route',
+            http_client=http, ledger=ledger, budget=guard, max_call_cost=Decimal('.5'), cost_bounds=BOUNDS, route_metadata=METADATA)
+        request = LLMRequest.for_translation(instructions='translate', input_text='private')
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(request)
+        with pytest.raises(ComparisonStopped):
+            await client.generate(request)
+    assert len(calls) == 1 and ledger.violations == ['unknown_context_cache']
+    item, = ledger.observations
+    assert item.context_cache is None and item.cost == guard.spent == Decimal('.2')
+    stored = json.loads(next(tmp_path.glob('*.json')).read_text())
+    assert stored['cost'] == '0.2' and stored['context_cache'] is None and stored['generation_id'] == 'paid-generation'

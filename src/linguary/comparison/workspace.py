@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from linguary.adapters.config import AppSettings, CheckSettings, LLMSettings, StorageSettings, WorkerPoolSettings
-from linguary.comparison.protocol import ComparisonProtocol, file_hash, settings_projection, stable_hash
+from linguary.comparison.protocol import ComparisonProtocol, file_hash, settings_projection, stable_hash, validate_input_bindings
 
 
 class WorkspaceError(ValueError):
@@ -117,6 +117,7 @@ def _cleanup(root, token):
 
 
 def prepare_workspace(root, protected_roots, protocol) -> ComparisonWorkspace:
+    validate_input_bindings(protocol)
     root, protected = _check_root(Path(root), protected_roots)
     token = uuid4().hex
     root.mkdir(parents=True, exist_ok=True)

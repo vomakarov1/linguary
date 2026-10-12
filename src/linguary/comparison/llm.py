@@ -18,6 +18,7 @@ from linguary.adapters.llm.openai_compatible import OpenAICompatibleLLMClient, s
 from linguary.application.ports.llm import LLMClient, LLMConfigurationError, LLMRequest, LLMResponse, LLMResponseFormatError, LLMResponseKind
 from linguary.domain import TokenUsage
 from linguary.domain.llm_log import TokenPricing
+from linguary.comparison.protocol import CostBounds, RouteMetadata, ProtocolError, validate_context_envelope
 
 
 class ComparisonStopped(LLMConfigurationError):
@@ -37,6 +38,7 @@ class CallObservation:
     chapter_id: str | None = None
     group_id: str | None = None
     call_id: str | None = None
+    submitted: bool = False
     received_response: bool = False
     first_response: bool = False
     truncated: bool = False
@@ -63,21 +65,26 @@ class CallObservation:
 
 class BudgetGuard:
     """Общий резерв учитывает уже потраченные и ещё выполняемые запросы."""
-    def __init__(self, budget: Decimal):
+    def __init__(self, budget: Decimal, max_total_attempts: int | None = None):
         self.budget = Decimal(budget)
         if not self.budget.is_finite() or self.budget <= 0:
             raise ValueError('Бюджет должен быть положительным')
+        self.max_total_attempts = max_total_attempts
+        self.attempts = 0
         self.spent = Decimal(0)
         self.reservations: dict[str, Decimal] = {}
         self.uncertain: dict[str, Decimal] = {}
         self.stopped = False
 
     def reserve(self, max_cost: Decimal) -> str:
+        if self.max_total_attempts is not None and self.attempts >= self.max_total_attempts:
+            raise ComparisonStopped("Исчерпан согласованный предел всех попыток")
         maximum = Decimal(max_cost)
         if self.stopped or not maximum.is_finite() or maximum <= 0 or self.spent + sum(self.reservations.values()) + sum(self.uncertain.values()) + maximum > self.budget:
             raise ComparisonStopped('Недостаточно согласованного резерва бюджета')
         token = uuid4().hex
         self.reservations[token] = maximum
+        self.attempts += 1
         return token
 
     def settle(self, reservation: str, receipt: Decimal | None):
@@ -247,12 +254,14 @@ _current: ContextVar[CallObservation | None] = ContextVar('comparison_call', def
 
 class ReceiptHTTPClient:
     """Получает техническую квитанцию до настоящего разбора ответа адаптером."""
-    def __init__(self, http, *, ledger, model, route, pricing=None, temperature_policy="set"):
+    def __init__(self, http, *, ledger, model, route, pricing=None, temperature_policy="set", cost_bounds=None, route_metadata=None):
         if temperature_policy not in ("set", "omit"):
             raise ComparisonStopped("Не согласована политика temperature")
         self.temperature_policy = temperature_policy
         self.http, self.ledger = http, ledger
         self.model, self.route, self.pricing = model, route, pricing
+        self.cost_bounds, self.route_metadata = cost_bounds, route_metadata
+        self.max_output_tokens = None
 
     async def post(self, url, **kwargs):
         item = _current.get()
@@ -264,7 +273,31 @@ class ReceiptHTTPClient:
             raise ComparisonStopped('Параметры запроса отличаются от согласованных')
         if self.temperature_policy == 'omit':
             body.pop('temperature', None)
-        body['provider'] = {'order': [self.route], 'allow_fallbacks': False, 'require_parameters': True}
+        bounds = self.cost_bounds
+        if bounds is None or bounds.input_bound_method == 'unverified' or (bounds.input_bound_method == 'synthetic' and not isinstance(getattr(self.http, '_transport', None), httpx.MockTransport)):
+            self.ledger.stop('unproven_billable_input_bound')
+            raise ComparisonStopped('Не доказана граница оплачиваемого входа; synthetic требует MockTransport')
+        if self.route_metadata is None or not self.route_metadata.model_versions or not self.route_metadata.provider_names:
+            raise ComparisonStopped('Не приняты точные обозначения квитанции')
+        if not bounds.output_includes_reasoning or body.get('max_tokens') != self.max_output_tokens:
+            raise ComparisonStopped('Не доказана граница оплачиваемого вывода')
+        if bounds.input_bound_method == 'provider_context_limit':
+            try:
+                validate_context_envelope(bounds, {self.model: self.route}, {self.model: self.route_metadata}, self.max_output_tokens)
+            except ProtocolError:
+                self.ledger.stop('endpoint_envelope_mismatch')
+                raise ComparisonStopped('Принятая квота или тариф точки изменились') from None
+        if set(body) - {'model', 'messages', 'response_format', 'temperature', 'max_tokens'}:
+            raise ComparisonStopped('Дополнительные оплачиваемые возможности запрещены')
+        body['provider'] = {'order': [self.route], 'allow_fallbacks': False, 'require_parameters': True,
+                            'max_price': {'prompt': bounds.input_price_per_mtok / bounds.input_price_multiplier, 'completion': bounds.output_price_per_mtok}}
+        if bounds.input_bound_method == 'provider_context_limit':
+            body['provider']['max_price']['request'] = 0
+        kwargs['headers'] = dict(kwargs.get('headers', {}), **{'X-OpenRouter-Cache': 'false'})
+        if len(json.dumps(body, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()) > bounds.max_request_bytes:
+            self.ledger.stop('request_byte_limit')
+            raise ComparisonStopped('Тело запроса превышает согласованную границу')
+        item.submitted = True
         response = await self.http.post(url, **kwargs)
         if response.status_code >= 400:
             if response.status_code < 500 and response.status_code != 429:
@@ -291,14 +324,15 @@ class ReceiptHTTPClient:
         cost = usage.get('cost')
         if isinstance(cost, (int, float)) and not isinstance(cost, bool) and Decimal(str(cost)).is_finite() and cost >= 0:
             item.cost, item.cost_source = Decimal(str(cost)), 'provider_receipt'
-        elif self.pricing is not None and item.usage is not None:
-            item.cost, item.cost_source = self.pricing.cost_of(item.usage), 'fixed_route_tariff'
-        cache = document.get('full_response_cache')
-        item.full_response_cache = cache if isinstance(cache, bool) else None
-        context = document.get('context_cache')
-        item.context_cache = context if isinstance(context, bool) else None
-        if actual_model != self.model or actual_provider != self.route:
+        cache = response.headers.get('X-OpenRouter-Cache-Status')
+        item.full_response_cache = {'HIT': True, 'MISS': False, None: False}.get(cache)
+        details = usage.get('prompt_tokens_details')
+        cached = details.get('cached_tokens') if isinstance(details, dict) else None
+        item.context_cache = cached > 0 if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0 else None
+        if actual_model not in self.route_metadata.model_versions or actual_provider not in self.route_metadata.provider_names:
             self.ledger.stop('unknown_or_changed_route')
+        if item.context_cache is None:
+            self.ledger.stop('unknown_context_cache')
         if item.cost is None:
             self.ledger.stop('unknown_price')
         if item.full_response_cache is not False:
@@ -309,17 +343,27 @@ class ReceiptHTTPClient:
 
 class ObservedLLMClient:
     """Клиент одного принятого маршрута; HTTP-клиент всегда внедряется явно."""
-    def __init__(self, *, settings: LLMSettings, route: str, http_client, ledger: ObservationLedger, budget: BudgetGuard, max_call_cost: Decimal, pricing: TokenPricing | None = None, temperature_policy="set"):
+    def __init__(self, *, settings: LLMSettings, route: str, http_client, ledger: ObservationLedger, budget: BudgetGuard, max_call_cost: Decimal, pricing: TokenPricing | None = None, temperature_policy="set", cost_bounds: CostBounds | None = None, route_metadata: RouteMetadata | None = None):
         self.temperature_policy = temperature_policy
+        self.cost_bounds = cost_bounds
         self.ledger, self.budget, self.maximum = ledger, budget, max_call_cost
         self.generation_settings = (settings.temperature, settings.max_output_tokens)
         self.model, self.route = settings.model, route
         ledger.secrets = tuple(dict.fromkeys((*ledger.secrets, *((settings.api_key,) if settings.api_key else ()), *proxy_secrets(settings.proxy_url))))
         self._http = http_client
-        self.inner = OpenAICompatibleLLMClient(settings=settings, http_client=ReceiptHTTPClient(http_client, ledger=ledger, model=self.model, route=route, pricing=pricing, temperature_policy=temperature_policy))
+        receipt_http = ReceiptHTTPClient(http_client, ledger=ledger, model=self.model, route=route, pricing=pricing, temperature_policy=temperature_policy, cost_bounds=cost_bounds, route_metadata=route_metadata)
+        receipt_http.max_output_tokens = settings.max_output_tokens
+        self.inner = OpenAICompatibleLLMClient(settings=settings, http_client=receipt_http)
 
     async def generate(self, request):
         self.ledger.ensure_open()
+        if self.generation_settings[1] is None:
+            raise ComparisonStopped("Не принят предел вывода")
+        if self.cost_bounds is not None:
+            maximum = (Decimal(self.cost_bounds.max_input_tokens) * Decimal(str(self.cost_bounds.input_price_per_mtok)) + Decimal(self.generation_settings[1]) * Decimal(str(self.cost_bounds.output_price_per_mtok))) / Decimal(1000000)
+            if maximum > self.maximum:
+                self.ledger.stop('tariff_exceeds_reservation')
+                raise ComparisonStopped('Тарифный предел превышает резерв вызова')
         try:
             reservation = self.budget.reserve(self.maximum)
         except ComparisonStopped:
@@ -338,11 +382,15 @@ class ObservedLLMClient:
         finally:
             item.duration_ms = int((time.monotonic() - started) * 1000)
             _current.reset(token)
+            if not item.submitted:
+                item.cost, item.cost_source = Decimal(0), "not_sent"
             try:
-                self.budget.settle(reservation, item.cost)
+                self.budget.settle(reservation, item.cost if item.submitted else Decimal(0))
             except ComparisonStopped:
                 self.ledger.stop('budget_exceeded')
                 raise
+            finally:
+                self.ledger.persist(item)
 
     async def aclose(self):
         await self._http.aclose()

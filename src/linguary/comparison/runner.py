@@ -39,6 +39,7 @@ class VariantResult:
     analysis_hash: str
     workspace: object
     epubs: dict[str, Path] = field(default_factory=dict)
+    epub_chapters: dict[str, list[str]] = field(default_factory=dict)
     completed: bool = False
     failures: list[str] = field(default_factory=list)
     completed_chapters: list[str] = field(default_factory=list)
@@ -230,9 +231,9 @@ def _apply_glossary(application, protocol, book_id):
     review = application.approve_glossary.review(book_id)
     decisions = protocol.fixed_glossary
     items = {item.source_text: item for item in review.items}
-    if any(source not in items for source in decisions):
-        raise ComparisonStopped('Фиксированное решение отсутствует в анализе')
     for source, decision in decisions.items():
+        if source not in items:
+            continue
         if not isinstance(decision, dict) or not set(decision) <= {'decision', 'translation', 'note'}:
             raise ComparisonStopped('Формат фиксированного решения непредставим')
         item = items[source]
@@ -268,7 +269,7 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
     if protocol.content_hash != workspace.protocol.content_hash or not protocol.repeats:
         raise ComparisonStopped('Каталог или число повторов не соответствует протоколу')
     result = ComparisonResult(protocol.content_hash, simulated)
-    budget = BudgetGuard(Decimal(str(protocol.budget))) if protocol.budget else None
+    budget = BudgetGuard(Decimal(str(protocol.budget)), protocol.max_total_attempts) if protocol.budget else None
     # Копии одинакового EPUB группируются по содержимому, не по имени файла.
     inputs = json.loads((workspace.root / 'inputs.json').read_text())
     source_paths = {value['sha256']: workspace.root / value['path'] for value in inputs.values()}
@@ -405,6 +406,7 @@ async def _run_processing(protocol, client_factory, result, budget, simulated, s
             target.parent.mkdir(parents=True, exist_ok=True)
             export(ExportBookCommand(book_id, str(target)))
             branch.epubs[book_id] = target
+            branch.epub_chapters[book_id] = [chapter.id for chapter in protocol.chapters if sources.get(file_hash(Path(chapter.source))) == book_id]
         branch.completed = True
     except Exception:
         branch.failures.append('branch_incomplete')

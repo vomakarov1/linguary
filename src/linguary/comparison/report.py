@@ -298,12 +298,12 @@ def anonymize_epubs(outcomes, root, model_labels=(LUNA, SONNET, 'luna', 'sonnet'
                     if member.filename.endswith(('.opf', '.xhtml', '.html', '.xml', '.ncx')):
                         data = _anonymous_metadata(data)
                     anonymous.writestr(member, data)
-            mapping[label] = {'variant_id': branch['variant_id'], 'repeat': branch['repeat'], 'book_id': book}
+            mapping[label] = {'variant_id': branch['variant_id'], 'repeat': branch['repeat'], 'book_id': book, 'chapter_ids': branch.get('epub_chapters', {}).get(book, [])}
     (root / 'review-mapping.json').write_text(json.dumps(mapping, indent=2))
     (root / 'review-mapping.json').chmod(0o600)
     fields = ('no_gross_errors', 'simple_help_density_appropriate', 'help_without_duplication', 'analysis_reviewed', 'execution_after_dedup_reviewed', 'independent_chapters_confirmed')
     sheet = {label: {'criteria': {key: None for key in protocol.rubric} if protocol else {},
-                     'critical_places': {f'{p.chapter_id}:{p.location}': None for p in protocol.critical_places} if protocol else {},
+                     'critical_places': {f'{p.chapter_id}:{p.location}': None for p in protocol.critical_places if p.chapter_id in mapping[label]['chapter_ids']} if protocol else {},
                      **{key: None for key in fields}} for label in mapping}
     (materials / 'review-sheet.json').write_text(json.dumps(sheet, indent=2))
     return mapping
@@ -323,7 +323,7 @@ def aggregate_blind_reviews(mapping, sheet, protocol):
         for criterion in protocol.rubric:
             scores = [entry.get('criteria', {}).get(criterion) for _, entry in entries]
             criteria[criterion] = statistics.mean(scores) if scores and all(isinstance(score, (int, float)) and not isinstance(score, bool) for score in scores) else None
-        review = {'criteria': criteria, 'critical_places': {f'{place.chapter_id}:{place.location}': agreement([entry.get('critical_places', {}).get(f'{place.chapter_id}:{place.location}') for _, entry in entries]) for place in protocol.critical_places},
+        review = {'criteria': criteria, 'critical_places': {f'{place.chapter_id}:{place.location}': agreement([entry.get('critical_places', {}).get(f'{place.chapter_id}:{place.location}') for origin, entry in entries if place.chapter_id in origin.get('chapter_ids', [])]) for place in protocol.critical_places},
                   **{key: agreement([entry.get(key) for _, entry in entries]) for key in fields}, 'repeat_scores': []}
         for repeat in sorted({origin['repeat'] for origin, _ in entries}):
             scores = [entry.get('criteria', {}).get(key) for origin, entry in entries if origin['repeat'] == repeat for key in protocol.rubric]

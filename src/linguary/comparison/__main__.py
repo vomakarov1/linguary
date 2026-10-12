@@ -89,7 +89,7 @@ def result_document(result, protocol, root):
             'stage_wall_seconds': result.stage_wall_seconds, 'manifests': {key: value.model_dump(mode='json') for key, value in result.manifests.items()},
             'analyses': [{'content_hash': a.content_hash, 'provenance': a.provenance, 'path': relative(a.root)} for a in result.analyses],
             'variants': [{'variant_id': v.variant_id, 'repeat': v.repeat, 'analysis_hash': v.analysis_hash, 'completed': v.completed,
-                          'failures': v.failures, 'completed_chapters': v.completed_chapters,
+                          'failures': v.failures, 'completed_chapters': v.completed_chapters, 'epub_chapters': v.epub_chapters,
                           'epubs': {k: relative(p) for k, p in v.epubs.items()}} for v in result.variants]}
 
 
@@ -148,6 +148,8 @@ def local_report(root, protected, protocol):
 class LiveClientFactory:
     simulated = False
     def __init__(self, protocol, api_key, http_factory=httpx.AsyncClient):
+        if protocol.cost_bounds is None or (protocol.cost_bounds.input_bound_method != "provider_context_limit" and http_factory is httpx.AsyncClient):
+            raise ProtocolError("Реальный запуск закрыт: не доказана граница оплачиваемого входа")
         self.protocol, self.api_key, self.http_factory = protocol, api_key, http_factory
 
     def __call__(self, *, model, settings, ledger, budget, **kwargs):
@@ -155,8 +157,10 @@ class LiveClientFactory:
             raise ProtocolError('Не задан ключ COMPARISON_API_KEY')
         settings = replace(settings, api_key=self.api_key, base_url='https://openrouter.ai/api/v1', proxy_mode='direct')
         settings.ensure_ready()
+        if self.protocol.cost_bounds is None or self.protocol.cost_bounds.input_bound_method == "unverified":
+            raise ProtocolError("Не доказана граница оплачиваемого входа")
         return ObservedLLMClient(settings=settings, route=self.protocol.routes[model], http_client=self.http_factory(timeout=settings.timeout_seconds, trust_env=False),
-                                 ledger=ledger, budget=budget, max_call_cost=Decimal(str(self.protocol.max_call_cost)), temperature_policy=self.protocol.temperature_policy)
+                                 ledger=ledger, budget=budget, max_call_cost=Decimal(str(self.protocol.max_call_cost)), temperature_policy=self.protocol.temperature_policy, cost_bounds=self.protocol.cost_bounds, route_metadata=self.protocol.route_metadata[model])
 
 
 async def execute(args, *, http_factory=httpx.AsyncClient):
