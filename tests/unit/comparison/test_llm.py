@@ -10,6 +10,102 @@ BOUNDS = CostBounds(max_request_bytes=100000, max_input_tokens=100000, input_pri
 METADATA = RouteMetadata(provider_names=("route",), model_versions=("model",))
 
 
+@pytest.mark.parametrize('case', ['match', 'no_native_counts', 'invalid_native_counts', 'wrong_id', 'wrong_model', 'wrong_provider', 'wrong_cost', 'nonfinite_cost', 'boolean_cost',
+    'missing_data', 'missing_id', 'missing_cost', 'malformed', '401', '404', 'timeout',
+    'redirect', 'other_alias', 'other_provider', 'missing_chat_id', 'exact'])
+async def test_alias_requires_generation_identity_before_next_post(tmp_path, case):
+    import json
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+    from linguary.domain import TokenUsage
+
+    native = 'model-version'
+    metadata = {'id': 'generation', 'model': native, 'provider_name': 'route', 'total_cost': .2,
+                'native_tokens_prompt': 120, 'native_tokens_completion': 12}
+    chat = {'id': 'generation', 'model': 'model', 'provider': 'route',
+            'usage': {'cost': .2, 'prompt_tokens': 100, 'completion_tokens': 10,
+                      'prompt_tokens_details': {'cached_tokens': 0}},
+            'choices': [{'message': {'content': '{'}}]}
+    changes = {'wrong_id': ('id', 'other'), 'wrong_model': ('model', 'other'),
+               'wrong_provider': ('provider_name', 'other'), 'wrong_cost': ('total_cost', .3)}
+    if case in changes:
+        key, value = changes[case]
+        metadata[key] = value
+    if case == 'missing_id':
+        metadata.pop('id')
+    if case == 'missing_cost':
+        metadata.pop('total_cost')
+    if case == 'nonfinite_cost':
+        metadata['total_cost'] = float('inf')
+    if case == 'boolean_cost':
+        metadata['total_cost'] = True
+    if case == 'no_native_counts':
+        metadata.pop('native_tokens_prompt')
+        metadata.pop('native_tokens_completion')
+    if case == 'invalid_native_counts':
+        metadata['native_tokens_completion'] = True
+    if case == 'missing_chat_id':
+        chat.pop('id')
+    if case == 'other_alias':
+        chat['model'] = 'other'
+    if case == 'other_provider':
+        chat['provider'] = 'other'
+    if case == 'exact':
+        chat['model'] = native
+    calls = []
+    def handler(request):
+        calls.append(request.method)
+        assert request.headers['Authorization'] == 'Bearer SECRET'
+        assert request.url.host == 'api.invalid'
+        if request.method == 'POST':
+            assert request.url.path == '/api/v1/chat/completions'
+            return httpx.Response(200, json=chat)
+        assert request.method == 'GET' and request.url.path == '/api/v1/generation'
+        assert dict(request.url.params) == {'id': 'generation'}
+        if case == 'timeout':
+            raise httpx.ReadTimeout('PRIVATE SECRET', request=request)
+        if case in ('401', '404'):
+            return httpx.Response(int(case), text='PRIVATE SECRET')
+        if case == 'malformed':
+            return httpx.Response(200, text='PRIVATE SECRET')
+        if case == 'redirect':
+            return httpx.Response(302, headers={'Location': 'https://other.invalid/generation'})
+        if case == 'nonfinite_cost':
+            return httpx.Response(200, text=json.dumps({'data': metadata}))
+        return httpx.Response(200, json={} if case == 'missing_data' else {'data': metadata})
+
+    ledger = ObservationLedger(receipt_root=tmp_path)
+    guard = BudgetGuard(Decimal('1'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', base_url='https://api.invalid/api/v1',
+            max_output_tokens=8000, api_key='SECRET'), route='route', http_client=http, ledger=ledger,
+            budget=guard, max_call_cost=Decimal('.5'), cost_bounds=BOUNDS,
+            route_metadata=RouteMetadata(provider_names=('route',), model_versions=(native,)))
+        request = LLMRequest.for_translation(instructions='translate', input_text='private')
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(request)
+        item = ledger.observations[0]
+        assert item.cost == guard.spent == Decimal('.2') and guard.attempts == 1
+        assert item.usage == TokenUsage(100, 10)
+        if case in ('match', 'no_native_counts', 'exact'):
+            assert ledger.violations == [] and item.actual_model == native
+            assert item.reported_model == chat['model']
+            assert item.model_identity_source == ('chat' if case == 'exact' else 'generation_metadata')
+            with pytest.raises(LLMResponseFormatError):
+                await client.generate(request)
+            assert guard.attempts == 2 and calls.count('POST') == 2
+        else:
+            assert 'unknown_or_changed_route' in ledger.violations
+            with pytest.raises(ComparisonStopped):
+                await client.generate(request)
+            assert calls.count('POST') == guard.attempts == 1
+    expected_gets = 0 if case in ('exact', 'other_alias', 'other_provider', 'missing_chat_id') else calls.count('POST')
+    assert calls.count('GET') == expected_gets
+    stored = json.loads((tmp_path / f'{item.call_uid}.json').read_text())
+    assert stored['cost'] == '0.2' and 'PRIVATE' not in json.dumps(stored) and 'SECRET' not in json.dumps(stored)
+
+
 @pytest.mark.parametrize('status,compressed', [(400, True), (403, True), (400, False), (429, True)])
 async def test_safe_http_error_preserves_status_and_stops_contract_rejection(tmp_path, status, compressed):
     import gzip

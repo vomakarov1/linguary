@@ -44,6 +44,8 @@ class CallObservation:
     truncated: bool = False
     accepted: bool | None = None
     actual_model: str | None = None
+    reported_model: str | None = None
+    model_identity_source: str | None = None
     actual_provider: str | None = None
     generation_id: str | None = None
     full_response_cache: bool | None = None
@@ -263,6 +265,34 @@ class ReceiptHTTPClient:
         self.cost_bounds, self.route_metadata = cost_bounds, route_metadata
         self.max_output_tokens = None
 
+    async def _generation_model(self, url, headers, timeout, item, provider):
+        endpoint = httpx.URL(url)
+        if not item.generation_id or not endpoint.path.endswith('/chat/completions'):
+            return None
+        endpoint = endpoint.copy_with(path=endpoint.path[:-len('/chat/completions')] + '/generation', query=None, fragment=None)
+        try:
+            response = await self.http.get(endpoint, params={'id': item.generation_id}, headers=headers,
+                                           timeout=timeout, follow_redirects=False)
+            if response.status_code != 200:
+                return None
+            document = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        data = document.get('data') if isinstance(document, dict) else None
+        if not isinstance(data, dict) or data.get('id') != item.generation_id or data.get('provider_name') != provider:
+            return None
+        model = data.get('model')
+        cost = data.get('total_cost')
+        if model not in self.route_metadata.model_versions or not isinstance(cost, (int, float)) or isinstance(cost, bool):
+            return None
+        total = Decimal(str(cost))
+        if not total.is_finite() or total < 0 or item.cost is None or total != item.cost:
+            return None
+        for key in ('native_tokens_prompt', 'native_tokens_completion'):
+            if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool) or data[key] < 0):
+                return None
+        return model
+
     async def post(self, url, **kwargs):
         item = _current.get()
         if item is None:
@@ -314,7 +344,7 @@ class ReceiptHTTPClient:
         if not isinstance(document, dict):
             document = {}
         actual_model, actual_provider = document.get('model'), document.get('provider')
-        for attribute, key in (('actual_model', 'model'), ('actual_provider', 'provider'), ('generation_id', 'id')):
+        for attribute, key in (('reported_model', 'model'), ('actual_provider', 'provider'), ('generation_id', 'id')):
             value = document.get(key)
             setattr(item, attribute, safe_detail(value, api_key=None, secrets=self.ledger.secrets) if isinstance(value, str) else None)
         usage = document.get('usage') or {}
@@ -331,8 +361,15 @@ class ReceiptHTTPClient:
         details = usage.get('prompt_tokens_details')
         cached = details.get('cached_tokens') if isinstance(details, dict) else None
         item.context_cache = cached > 0 if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0 else None
+        if actual_model not in self.route_metadata.model_versions and actual_model == self.model and actual_provider in self.route_metadata.provider_names:
+            actual_model = await self._generation_model(url, kwargs['headers'], kwargs.get('timeout'), item, actual_provider)
+            if actual_model is not None:
+                item.model_identity_source = 'generation_metadata'
         if actual_model not in self.route_metadata.model_versions or actual_provider not in self.route_metadata.provider_names:
             self.ledger.stop('unknown_or_changed_route')
+        else:
+            item.actual_model = actual_model
+            item.model_identity_source = item.model_identity_source or 'chat'
         if item.context_cache is None:
             self.ledger.stop('unknown_context_cache')
         if item.cost is None:
