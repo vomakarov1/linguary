@@ -10,6 +10,54 @@ BOUNDS = CostBounds(max_request_bytes=100000, max_input_tokens=100000, input_pri
 METADATA = RouteMetadata(provider_names=("route",), model_versions=("model",))
 
 
+@pytest.mark.parametrize('status,compressed', [(400, True), (403, True), (400, False), (429, True)])
+async def test_safe_http_error_preserves_status_and_stops_contract_rejection(tmp_path, status, compressed):
+    import gzip
+    import json
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.application.ports.llm import LLMConfigurationError, LLMProviderError, LLMTransportError
+    from linguary.comparison.llm import ObservedLLMClient
+
+    calls = []
+    private_body = b'PRIVATE provider error SECRET'
+    content = gzip.compress(private_body) if compressed else private_body
+    headers = {'Content-Length': str(len(content)), 'Retry-After': '7'}
+    if compressed:
+        headers['Content-Encoding'] = 'gzip'
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, content=content, headers=headers)
+
+    ledger = ObservationLedger(receipt_root=tmp_path)
+    guard = BudgetGuard(Decimal('1'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', max_output_tokens=8000, api_key='SECRET'),
+            route='route', http_client=http, ledger=ledger, budget=guard, max_call_cost=Decimal('.5'),
+            cost_bounds=BOUNDS, route_metadata=METADATA)
+        request = LLMRequest.for_translation(instructions='translate', input_text='private')
+        error_type = {400: LLMProviderError, 403: LLMConfigurationError, 429: LLMTransportError}[status]
+        with pytest.raises(error_type, match=str(status)) as caught:
+            await client.generate(request)
+        assert 'PRIVATE' not in str(caught.value) and 'SECRET' not in str(caught.value)
+        assert 'provider request failed' in str(caught.value)
+        if status == 429:
+            assert caught.value.retry_after_seconds == 7
+            assert ledger.violations == []
+        else:
+            assert ledger.violations == ['provider_rejected_contract']
+            with pytest.raises(ComparisonStopped):
+                await client.generate(request)
+
+    assert len(calls) == guard.attempts == 1
+    assert guard.spent == 0 and sum(guard.uncertain.values()) == Decimal('.5')
+    stored = json.loads(next(tmp_path.glob('*.json')).read_text())
+    assert stored['submitted'] is True and stored['received_response'] is False
+    assert stored['failure_category'] == 'no_response' and stored['cost'] is None
+    assert 'PRIVATE' not in json.dumps(stored) and 'SECRET' not in json.dumps(stored)
+
+
 def test_budget_reserves_inflight_calls():
     guard = BudgetGuard(Decimal('1'))
     reservation = guard.reserve(Decimal('.6'))

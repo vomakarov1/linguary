@@ -303,7 +303,9 @@ class ReceiptHTTPClient:
             if response.status_code < 500 and response.status_code != 429:
                 self.ledger.stop("provider_rejected_contract")
             # Не раскрываем тело HTTP-ошибки через стандартные detail исключений.
-            return httpx.Response(response.status_code, json={'error': 'provider request failed'}, headers=response.headers, request=response.request)
+            headers = {key: value for key, value in response.headers.items()
+                       if key.lower() not in {'content-encoding', 'content-length', 'transfer-encoding'}}
+            return httpx.Response(response.status_code, json={'error': 'provider request failed'}, headers=headers, request=response.request)
         self.ledger.received(item)
         try:
             document = response.json()
