@@ -73,6 +73,8 @@ def _restore(root, protected, protocol):
             raise ProtocolError('Подготовленные условия изменены')
     data = _read(root / 'settings.json')
     settings = AppSettings(llm=LLMSettings(**data['llm']), checks=CheckSettings(**data['checks']), worker=WorkerPoolSettings(**data['worker']), storage=StorageSettings(data_root=str(root / 'data')))
+    if settings.llm.proxy_mode != protocol.proxy_mode:
+        raise ProtocolError('Подготовленный режим прокси не соответствует протоколу')
     if settings_projection(settings) != manifest.effective_settings:
         raise ProtocolError('Эффективные настройки изменились')
     return ComparisonWorkspace(root, protected, protocol, settings, (root / '.comparison-owner').read_text()), manifest
@@ -155,11 +157,13 @@ class LiveClientFactory:
     def __call__(self, *, model, settings, ledger, budget, **kwargs):
         if not self.api_key:
             raise ProtocolError('Не задан ключ COMPARISON_API_KEY')
-        settings = replace(settings, api_key=self.api_key, base_url='https://openrouter.ai/api/v1', proxy_mode='direct')
+        if settings.proxy_mode != self.protocol.proxy_mode:
+            raise ProtocolError('Режим прокси клиента не соответствует протоколу')
+        settings = replace(settings, api_key=self.api_key, base_url='https://openrouter.ai/api/v1')
         settings.ensure_ready()
         if self.protocol.cost_bounds is None or self.protocol.cost_bounds.input_bound_method == "unverified":
             raise ProtocolError("Не доказана граница оплачиваемого входа")
-        return ObservedLLMClient(settings=settings, route=self.protocol.routes[model], http_client=self.http_factory(timeout=settings.timeout_seconds, trust_env=False),
+        return ObservedLLMClient(settings=settings, route=self.protocol.routes[model], http_client=self.http_factory(timeout=settings.timeout_seconds, trust_env=settings.proxy_mode == 'auto'),
                                  ledger=ledger, budget=budget, max_call_cost=Decimal(str(self.protocol.max_call_cost)), temperature_policy=self.protocol.temperature_policy, cost_bounds=self.protocol.cost_bounds, route_metadata=self.protocol.route_metadata[model])
 
 

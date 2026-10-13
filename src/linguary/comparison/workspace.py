@@ -141,7 +141,7 @@ def prepare_workspace(root, protected_roots, protocol) -> ComparisonWorkspace:
             hashes[chapter.id] = {'path': str(target.relative_to(root)), 'sha256': before}
         generation = {k: v for k, v in protocol.generation.items() if v is not None}
         splitting = {k: v for k, v in protocol.splitting.items() if v is not None}
-        llm = LLMSettings(**generation, **splitting, requests_per_minute=protocol.requests_per_minute, debug_llm_payloads=False)
+        llm = LLMSettings(**generation, **splitting, proxy_mode=protocol.proxy_mode, requests_per_minute=protocol.requests_per_minute, debug_llm_payloads=False)
         settings = AppSettings(llm=llm, checks=CheckSettings(**{k: v for k, v in protocol.checks.items() if v is not None}), storage=StorageSettings(data_root=str(root / 'data')), worker=WorkerPoolSettings(concurrency=protocol.concurrency or 1))
         workspace = ComparisonWorkspace(root, protected, protocol, settings, token)
         (root / 'inputs.json').write_text(json.dumps(hashes, sort_keys=True))

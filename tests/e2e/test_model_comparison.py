@@ -275,6 +275,67 @@ async def test_prepare_without_api_key_or_network(tmp_path, monkeypatch):
     assert not calls and (tmp_path / 'comparison' / 'manifest.json').exists()
 
 
+@pytest.mark.parametrize('proxy_mode', ['auto', 'direct'])
+async def test_cli_factory_uses_prepared_proxy_mode_without_persisting_credentials(tmp_path, monkeypatch, proxy_mode):
+    import httpx
+    from decimal import Decimal
+    from linguary.comparison.__main__ import LiveClientFactory, _restore, prepare
+    from linguary.comparison.protocol import ProtocolError
+    from linguary.comparison.llm import BudgetGuard, ObservationLedger
+
+    for key in ('HTTP_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'):
+        monkeypatch.delenv(key, raising=False)
+    proxy_url = 'http://synthetic-user:synthetic-password@proxy.invalid:8080'
+    monkeypatch.setenv('HTTPS_PROXY', proxy_url)
+    value = four_chapter_protocol(tmp_path).model_copy(update={'proxy_mode': proxy_mode})
+    workspace = prepare(tmp_path / 'comparison', [tmp_path / 'production'], value)
+    restored, manifest = _restore(workspace.root, workspace.protected_roots, value)
+    assert restored.settings.llm.proxy_mode == manifest.effective_settings['llm']['proxy_mode'] == proxy_mode
+    for name in ('settings.json', 'manifest.json'):
+        persisted = (workspace.root / name).read_text()
+        assert proxy_url not in persisted and 'synthetic-password' not in persisted
+        assert 'proxy_url' not in persisted
+
+    clients = []
+    def http_factory(**kwargs):
+        assert kwargs['trust_env'] is (proxy_mode == 'auto')
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: pytest.fail('no HTTP expected')), **kwargs)
+        clients.append(client)
+        return client
+
+    model = value.variants[0].analysis_model
+    factory = LiveClientFactory(value, 'synthetic-key', http_factory)
+    client = factory(model=model, settings=replace(restored.settings.llm, model=model),
+        ledger=ObservationLedger(), budget=BudgetGuard(Decimal('10')))
+    assert client.inner._settings.proxy_mode == proxy_mode
+    assert len(clients) == 1
+    await client.aclose()
+    other_mode = 'direct' if proxy_mode == 'auto' else 'auto'
+    assert value.content_hash != value.model_copy(update={'proxy_mode': other_mode}).content_hash
+    with pytest.raises(ProtocolError, match='прокси'):
+        factory(model=model, settings=replace(restored.settings.llm, model=model, proxy_mode=other_mode),
+            ledger=ObservationLedger(), budget=BudgetGuard(Decimal('10')))
+    assert len(clients) == 1
+
+
+def test_restore_rejects_proxy_mode_not_bound_to_protocol(tmp_path):
+    from linguary.comparison.__main__ import _restore, prepare
+    from linguary.comparison.protocol import ProtocolError, stable_hash
+
+    value = four_chapter_protocol(tmp_path)
+    workspace = prepare(tmp_path / 'comparison', [tmp_path / 'production'], value)
+    data = json.loads((workspace.root / 'settings.json').read_text())
+    data['llm']['proxy_mode'] = 'direct'
+    (workspace.root / 'settings.json').write_text(json.dumps(data))
+    manifest = json.loads((workspace.root / 'manifest.json').read_text())
+    manifest['effective_settings']['llm']['proxy_mode'] = 'direct'
+    manifest['artifact_hashes']['settings.json'] = file_hash(workspace.root / 'settings.json')
+    (workspace.root / 'manifest.json').write_text(json.dumps(manifest))
+    (workspace.root / 'prepared.json').write_text(json.dumps({'manifest_hash': stable_hash(manifest), 'protocol_hash': value.content_hash}))
+    with pytest.raises(ProtocolError, match='прокси'):
+        _restore(workspace.root, workspace.protected_roots, value)
+
+
 async def test_live_without_approval_makes_zero_requests(tmp_path):
     from linguary.comparison.__main__ import execute
     from linguary.comparison.protocol import ProtocolError

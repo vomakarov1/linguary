@@ -83,6 +83,7 @@ class ComparisonProtocol(Contract):
     minimum_first_responses: dict[str, int | None] = Field(default_factory=lambda: {'analysis': None, 'processing': None})
     schedule: tuple[str, ...] = ()
     temperature_policy: Literal['set', 'omit'] | None = None
+    proxy_mode: Literal['auto', 'direct'] = 'auto'
     generation: dict[str, float | int | None] = Field(default_factory=lambda: {'temperature': None, 'max_output_tokens': None, 'max_attempts': None})
     splitting: dict[str, int | None] = Field(default_factory=lambda: {'max_fragment_blocks': None, 'max_unit_source_chars': None})
     checks: dict[str, float | int | None] = Field(default_factory=dict)
@@ -307,7 +308,7 @@ def validate_input_bindings(protocol, *, required=False):
 
 
 SAFE_SETTINGS = {
-    'llm': {'provider', 'model', 'temperature', 'max_output_tokens', 'timeout_seconds', 'max_attempts', 'max_fragment_blocks', 'max_unit_source_chars', 'requests_per_minute', 'debug_llm_payloads', 'input_price_per_mtok', 'output_price_per_mtok'},
+    'llm': {'provider', 'model', 'proxy_mode', 'temperature', 'max_output_tokens', 'timeout_seconds', 'max_attempts', 'max_fragment_blocks', 'max_unit_source_chars', 'requests_per_minute', 'debug_llm_payloads', 'input_price_per_mtok', 'output_price_per_mtok'},
     'checks': {'glossary_confidence_threshold', 'glossary_review_min_mentions', 'glossary_review_min_chapters', 'target_language_min_share', 'language_check_min_length', 'repetition_ngram_size', 'repetition_min_repeats', 'language_notes_per_chapter'},
     'worker': {'concurrency'},
 }
