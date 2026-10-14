@@ -1,6 +1,7 @@
 """Наблюдения на границе провайдера и ограничения локального сравнения."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -19,6 +20,9 @@ from linguary.application.ports.llm import LLMClient, LLMConfigurationError, LLM
 from linguary.domain import TokenUsage
 from linguary.domain.llm_log import TokenPricing
 from linguary.comparison.protocol import CostBounds, RouteMetadata, ProtocolError, validate_context_envelope
+
+_METADATA_TIMEOUT_SECONDS = 10
+_METADATA_RETRY_DELAYS = (.5, 1, 2, 4)
 
 
 class ComparisonStopped(LLMConfigurationError):
@@ -46,6 +50,9 @@ class CallObservation:
     actual_model: str | None = None
     reported_model: str | None = None
     model_identity_source: str | None = None
+    metadata_status_code: int | None = None
+    metadata_check_reason: str | None = None
+    metadata_get_count: int = 0
     actual_provider: str | None = None
     generation_id: str | None = None
     full_response_cache: bool | None = None
@@ -268,30 +275,74 @@ class ReceiptHTTPClient:
     async def _generation_model(self, url, headers, timeout, item, provider):
         endpoint = httpx.URL(url)
         if not item.generation_id or not endpoint.path.endswith('/chat/completions'):
+            item.metadata_check_reason = 'invalid_lookup'
             return None
         endpoint = endpoint.copy_with(path=endpoint.path[:-len('/chat/completions')] + '/generation', query=None, fragment=None)
         try:
-            response = await self.http.get(endpoint, params={'id': item.generation_id}, headers=headers,
-                                           timeout=timeout, follow_redirects=False)
-            if response.status_code != 200:
-                return None
-            document = response.json()
-        except (httpx.HTTPError, ValueError):
-            return None
-        data = document.get('data') if isinstance(document, dict) else None
-        if not isinstance(data, dict) or data.get('id') != item.generation_id or data.get('provider_name') != provider:
-            return None
-        model = data.get('model')
+            async with asyncio.timeout(_METADATA_TIMEOUT_SECONDS):
+                for attempt in range(len(_METADATA_RETRY_DELAYS) + 1):
+                    if attempt:
+                        await asyncio.sleep(_METADATA_RETRY_DELAYS[attempt - 1])
+                    item.metadata_get_count += 1
+                    item.metadata_status_code = None
+                    try:
+                        response = await self.http.get(endpoint, params={'id': item.generation_id}, headers=headers,
+                                                       timeout=timeout, follow_redirects=False)
+                    except httpx.DecodingError:
+                        item.metadata_check_reason = 'malformed_response'
+                        return None
+                    except httpx.TransportError:
+                        item.metadata_check_reason = 'transport_error'
+                        continue
+                    item.metadata_status_code = response.status_code
+                    if response.status_code == 404 or response.status_code == 429 or response.status_code >= 500:
+                        item.metadata_check_reason = 'transient_http_error'
+                        continue
+                    if response.status_code != 200:
+                        item.metadata_check_reason = 'http_error'
+                        return None
+                    try:
+                        document = response.json()
+                    except ValueError:
+                        item.metadata_check_reason = 'malformed_response'
+                        return None
+                    data = document.get('data') if isinstance(document, dict) else None
+                    model, reason, retry = self._generation_identity(data, item, provider)
+                    item.metadata_check_reason = reason
+                    if not retry:
+                        return model
+                item.metadata_check_reason = 'attempts_exhausted'
+        except TimeoutError:
+            item.metadata_check_reason = 'deadline_exceeded'
+        return None
+
+    def _generation_identity(self, data, item, provider):
+        if not isinstance(data, dict):
+            return None, 'malformed_response', False
+        if data.get('id') is not None and data['id'] != item.generation_id:
+            return None, 'id_mismatch', False
+        if data.get('model') is not None and data['model'] not in self.route_metadata.model_versions:
+            return None, 'model_mismatch', False
+        if data.get('provider_name') is not None and data['provider_name'] != provider:
+            return None, 'provider_mismatch', False
         cost = data.get('total_cost')
-        if model not in self.route_metadata.model_versions or not isinstance(cost, (int, float)) or isinstance(cost, bool):
-            return None
-        total = Decimal(str(cost))
-        if not total.is_finite() or total < 0 or item.cost is None or total != item.cost:
-            return None
+        if cost is not None:
+            if not isinstance(cost, (int, float)) or isinstance(cost, bool):
+                return None, 'invalid_cost', False
+            total = Decimal(str(cost))
+            if not total.is_finite() or total < 0:
+                return None, 'invalid_cost', False
+            if item.cost is not None and total != item.cost:
+                return None, 'price_conflict', False
+        if item.cost is None:
+            return None, 'unknown_price', False
         for key in ('native_tokens_prompt', 'native_tokens_completion'):
-            if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool) or data[key] < 0):
-                return None
-        return model
+            value = data.get(key)
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                return None, 'invalid_native_usage', False
+        if any(data.get(key) is None for key in ('id', 'model', 'provider_name', 'total_cost')):
+            return None, 'pending', True
+        return data['model'], 'verified', False
 
     async def post(self, url, **kwargs):
         item = _current.get()

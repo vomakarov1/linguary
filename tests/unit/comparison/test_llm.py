@@ -12,13 +12,14 @@ METADATA = RouteMetadata(provider_names=("route",), model_versions=("model",))
 
 @pytest.mark.parametrize('case', ['match', 'no_native_counts', 'invalid_native_counts', 'wrong_id', 'wrong_model', 'wrong_provider', 'wrong_cost', 'nonfinite_cost', 'boolean_cost',
     'missing_data', 'missing_id', 'missing_cost', 'malformed', '401', '404', 'timeout',
-    'redirect', 'other_alias', 'other_provider', 'missing_chat_id', 'exact'])
-async def test_alias_requires_generation_identity_before_next_post(tmp_path, case):
+    'null_native_counts', 'redirect', 'other_alias', 'other_provider', 'missing_chat_id', 'exact'])
+async def test_alias_requires_generation_identity_before_next_post(tmp_path, monkeypatch, case):
     import json
     import httpx
     from linguary.adapters.config import LLMSettings
     from linguary.comparison.llm import ObservedLLMClient
     from linguary.domain import TokenUsage
+    monkeypatch.setattr('linguary.comparison.llm._METADATA_RETRY_DELAYS', (0, 0, 0, 0), raising=False)
 
     native = 'model-version'
     metadata = {'id': 'generation', 'model': native, 'provider_name': 'route', 'total_cost': .2,
@@ -45,6 +46,8 @@ async def test_alias_requires_generation_identity_before_next_post(tmp_path, cas
         metadata.pop('native_tokens_completion')
     if case == 'invalid_native_counts':
         metadata['native_tokens_completion'] = True
+    if case == 'null_native_counts':
+        metadata['native_tokens_prompt'] = metadata['native_tokens_completion'] = None
     if case == 'missing_chat_id':
         chat.pop('id')
     if case == 'other_alias':
@@ -88,7 +91,7 @@ async def test_alias_requires_generation_identity_before_next_post(tmp_path, cas
         item = ledger.observations[0]
         assert item.cost == guard.spent == Decimal('.2') and guard.attempts == 1
         assert item.usage == TokenUsage(100, 10)
-        if case in ('match', 'no_native_counts', 'exact'):
+        if case in ('match', 'no_native_counts', 'null_native_counts', 'exact'):
             assert ledger.violations == [] and item.actual_model == native
             assert item.reported_model == chat['model']
             assert item.model_identity_source == ('chat' if case == 'exact' else 'generation_metadata')
@@ -100,10 +103,97 @@ async def test_alias_requires_generation_identity_before_next_post(tmp_path, cas
             with pytest.raises(ComparisonStopped):
                 await client.generate(request)
             assert calls.count('POST') == guard.attempts == 1
-    expected_gets = 0 if case in ('exact', 'other_alias', 'other_provider', 'missing_chat_id') else calls.count('POST')
+    expected_gets = 0 if case in ('exact', 'other_alias', 'other_provider', 'missing_chat_id') else (5 if case in ('missing_id', 'missing_cost', '404', 'timeout') else calls.count('POST'))
     assert calls.count('GET') == expected_gets
     stored = json.loads((tmp_path / f'{item.call_uid}.json').read_text())
     assert stored['cost'] == '0.2' and 'PRIVATE' not in json.dumps(stored) and 'SECRET' not in json.dumps(stored)
+
+
+@pytest.mark.parametrize('case', ['404_then_ready', '429_then_ready', '503_then_ready', 'transport_then_ready',
+    'null_fields_then_ready', 'wrong_id', 'wrong_model', 'wrong_provider', 'wrong_cost', 'zero_cost', 'conflict_with_pending_fields', '401', '403',
+    '404_exhausted', 'blocked_get_deadline', 'backoff_deadline', 'invalid_encoding'])
+async def test_metadata_retries_are_bounded_and_never_resubmit_paid_post(tmp_path, monkeypatch, case):
+    import asyncio
+    import json
+    import httpx
+    from linguary.adapters.config import LLMSettings
+    from linguary.comparison.llm import ObservedLLMClient
+
+    monkeypatch.setattr('linguary.comparison.llm._METADATA_RETRY_DELAYS', (0, 0, 0, 0), raising=False)
+    if case in ('blocked_get_deadline', 'backoff_deadline'):
+        monkeypatch.setattr('linguary.comparison.llm._METADATA_TIMEOUT_SECONDS', .01, raising=False)
+    if case == 'backoff_deadline':
+        monkeypatch.setattr('linguary.comparison.llm._METADATA_RETRY_DELAYS', (.5, 1, 2, 4))
+    chat = {'id': 'generation', 'model': 'model', 'provider': 'route',
+            'usage': {'cost': .2, 'prompt_tokens_details': {'cached_tokens': 0}},
+            'choices': [{'message': {'content': '{'}}]}
+    metadata = {'id': 'generation', 'model': 'model-version', 'provider_name': 'route', 'total_cost': .2}
+    changes = {'wrong_id': ('id', 'other'), 'wrong_model': ('model', 'other'),
+               'wrong_provider': ('provider_name', 'other'), 'wrong_cost': ('total_cost', .3)}
+    if case in changes:
+        key, value = changes[case]
+        metadata[key] = value
+    if case == 'zero_cost':
+        metadata['total_cost'] = 0
+    if case == 'conflict_with_pending_fields':
+        metadata.update(model=None, total_cost=.3)
+    calls = []
+    async def handler(request):
+        calls.append(request.method)
+        assert request.headers['Authorization'] == 'Bearer SECRET'
+        if request.method == 'POST':
+            return httpx.Response(200, json=chat)
+        if case == 'blocked_get_deadline':
+            await asyncio.Event().wait()
+        if case in ('401', '403'):
+            return httpx.Response(int(case), text='PRIVATE SECRET')
+        if case in ('404_exhausted', 'backoff_deadline'):
+            return httpx.Response(404, text='PRIVATE SECRET')
+        if case == 'invalid_encoding':
+            return httpx.Response(200, content=b'PRIVATE SECRET', headers={'Content-Encoding': 'gzip'})
+        if calls.count('GET') < 3 and case.endswith('_then_ready'):
+            if case == 'transport_then_ready':
+                raise httpx.ReadTimeout('PRIVATE SECRET', request=request)
+            if case == 'null_fields_then_ready':
+                return httpx.Response(200, json={'data': dict(metadata, model=None, total_cost=None)})
+            return httpx.Response(int(case[:3]), text='PRIVATE SECRET')
+        return httpx.Response(200, json={'data': metadata})
+
+    ledger = ObservationLedger(receipt_root=tmp_path)
+    guard = BudgetGuard(Decimal('1'))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ObservedLLMClient(settings=LLMSettings(model='model', max_output_tokens=8000, api_key='SECRET'),
+            route='route', http_client=http, ledger=ledger, budget=guard, max_call_cost=Decimal('.5'),
+            cost_bounds=BOUNDS, route_metadata=RouteMetadata(provider_names=('route',), model_versions=('model-version',)))
+        request = LLMRequest.for_translation(instructions='translate', input_text='private')
+        with pytest.raises(LLMResponseFormatError):
+            await asyncio.wait_for(client.generate(request), .5)
+        item, = ledger.observations
+        assert guard.attempts == calls.count('POST') == ledger.first_responses == 1
+        assert item.cost == guard.spent == Decimal('.2') and not guard.reservations
+        expected_gets = 3 if case.endswith('_then_ready') else (5 if case == '404_exhausted' else 1)
+        assert item.metadata_get_count == calls.count('GET') == expected_gets
+        if case.endswith('_then_ready'):
+            assert not ledger.violations and item.actual_model == 'model-version'
+            assert item.metadata_status_code == 200 and item.metadata_check_reason == 'verified'
+        else:
+            assert ledger.violations == ['unknown_or_changed_route']
+            with pytest.raises(ComparisonStopped):
+                await client.generate(request)
+            assert calls.count('POST') == 1
+            if case == 'blocked_get_deadline':
+                assert item.metadata_check_reason == 'deadline_exceeded' and item.metadata_status_code is None
+            if case == 'backoff_deadline':
+                assert item.metadata_check_reason == 'deadline_exceeded' and item.metadata_status_code == 404
+            if case == '404_exhausted':
+                assert item.metadata_check_reason == 'attempts_exhausted' and item.metadata_status_code == 404
+            if case in ('wrong_cost', 'zero_cost', 'conflict_with_pending_fields'):
+                assert item.metadata_check_reason == 'price_conflict'
+            if case == 'invalid_encoding':
+                assert item.metadata_check_reason == 'malformed_response'
+        persisted = json.loads((tmp_path / f'{item.call_uid}.json').read_text())
+        assert persisted['cost'] == '0.2' and persisted['metadata_get_count'] == expected_gets
+        assert 'PRIVATE' not in json.dumps(persisted) and 'SECRET' not in json.dumps(persisted)
 
 
 @pytest.mark.parametrize('status,compressed', [(400, True), (403, True), (400, False), (429, True)])
