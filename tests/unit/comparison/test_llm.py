@@ -103,15 +103,15 @@ async def test_alias_requires_generation_identity_before_next_post(tmp_path, mon
             with pytest.raises(ComparisonStopped):
                 await client.generate(request)
             assert calls.count('POST') == guard.attempts == 1
-    expected_gets = 0 if case in ('exact', 'other_alias', 'other_provider', 'missing_chat_id') else (5 if case in ('missing_id', 'missing_cost', '404', 'timeout') else calls.count('POST'))
+    expected_gets = 0 if case in ('exact', 'other_alias', 'other_provider', 'missing_chat_id') else (25 if case in ('missing_id', 'missing_cost', '404', 'timeout') else calls.count('POST'))
     assert calls.count('GET') == expected_gets
     stored = json.loads((tmp_path / f'{item.call_uid}.json').read_text())
     assert stored['cost'] == '0.2' and 'PRIVATE' not in json.dumps(stored) and 'SECRET' not in json.dumps(stored)
 
 
-@pytest.mark.parametrize('case', ['404_then_ready', '429_then_ready', '503_then_ready', 'transport_then_ready',
+@pytest.mark.parametrize('case', ['404_then_ready', 'late_ready', '429_then_ready', '503_then_ready', 'transport_then_ready',
     'null_fields_then_ready', 'wrong_id', 'wrong_model', 'wrong_provider', 'wrong_cost', 'zero_cost', 'conflict_with_pending_fields', '401', '403',
-    '404_exhausted', 'blocked_get_deadline', 'backoff_deadline', 'invalid_encoding'])
+    '404_exhausted', 'blocked_get_deadline', 'backoff_deadline', 'invalid_encoding', 'per_get_timeout_then_ready'])
 async def test_metadata_retries_are_bounded_and_never_resubmit_paid_post(tmp_path, monkeypatch, case):
     import asyncio
     import json
@@ -124,6 +124,8 @@ async def test_metadata_retries_are_bounded_and_never_resubmit_paid_post(tmp_pat
         monkeypatch.setattr('linguary.comparison.llm._METADATA_TIMEOUT_SECONDS', .01, raising=False)
     if case == 'backoff_deadline':
         monkeypatch.setattr('linguary.comparison.llm._METADATA_RETRY_DELAYS', (.5, 1, 2, 4))
+    if case == 'per_get_timeout_then_ready':
+        monkeypatch.setattr('linguary.comparison.llm._METADATA_REQUEST_TIMEOUT_SECONDS', .01, raising=False)
     chat = {'id': 'generation', 'model': 'model', 'provider': 'route',
             'usage': {'cost': .2, 'prompt_tokens_details': {'cached_tokens': 0}},
             'choices': [{'message': {'content': '{'}}]}
@@ -143,6 +145,7 @@ async def test_metadata_retries_are_bounded_and_never_resubmit_paid_post(tmp_pat
         assert request.headers['Authorization'] == 'Bearer SECRET'
         if request.method == 'POST':
             return httpx.Response(200, json=chat)
+        assert request.extensions['timeout']['read'] <= 10
         if case == 'blocked_get_deadline':
             await asyncio.Event().wait()
         if case in ('401', '403'):
@@ -151,6 +154,10 @@ async def test_metadata_retries_are_bounded_and_never_resubmit_paid_post(tmp_pat
             return httpx.Response(404, text='PRIVATE SECRET')
         if case == 'invalid_encoding':
             return httpx.Response(200, content=b'PRIVATE SECRET', headers={'Content-Encoding': 'gzip'})
+        if case == 'late_ready' and calls.count('GET') < 7:
+            return httpx.Response(404, text='PRIVATE SECRET')
+        if case == 'per_get_timeout_then_ready' and calls.count('GET') < 3:
+            await asyncio.Event().wait()
         if calls.count('GET') < 3 and case.endswith('_then_ready'):
             if case == 'transport_then_ready':
                 raise httpx.ReadTimeout('PRIVATE SECRET', request=request)
@@ -166,14 +173,15 @@ async def test_metadata_retries_are_bounded_and_never_resubmit_paid_post(tmp_pat
             route='route', http_client=http, ledger=ledger, budget=guard, max_call_cost=Decimal('.5'),
             cost_bounds=BOUNDS, route_metadata=RouteMetadata(provider_names=('route',), model_versions=('model-version',)))
         request = LLMRequest.for_translation(instructions='translate', input_text='private')
-        with pytest.raises(LLMResponseFormatError):
+        with pytest.raises(LLMResponseFormatError) as caught:
             await asyncio.wait_for(client.generate(request), .5)
+        assert caught.value.raw_content == '{'
         item, = ledger.observations
         assert guard.attempts == calls.count('POST') == ledger.first_responses == 1
         assert item.cost == guard.spent == Decimal('.2') and not guard.reservations
-        expected_gets = 3 if case.endswith('_then_ready') else (5 if case == '404_exhausted' else 1)
+        expected_gets = 7 if case == 'late_ready' else (3 if case.endswith('_then_ready') else (25 if case == '404_exhausted' else 1))
         assert item.metadata_get_count == calls.count('GET') == expected_gets
-        if case.endswith('_then_ready'):
+        if case.endswith('_then_ready') or case == 'late_ready':
             assert not ledger.violations and item.actual_model == 'model-version'
             assert item.metadata_status_code == 200 and item.metadata_check_reason == 'verified'
         else:

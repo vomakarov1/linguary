@@ -21,8 +21,10 @@ from linguary.domain import TokenUsage
 from linguary.domain.llm_log import TokenPricing
 from linguary.comparison.protocol import CostBounds, RouteMetadata, ProtocolError, validate_context_envelope
 
-_METADATA_TIMEOUT_SECONDS = 10
-_METADATA_RETRY_DELAYS = (.5, 1, 2, 4)
+_METADATA_TIMEOUT_SECONDS = 300
+_METADATA_MAX_ATTEMPTS = 25
+_METADATA_REQUEST_TIMEOUT_SECONDS = 10
+_METADATA_RETRY_DELAYS = (.5, 1, 2, 4, 8, 15)
 
 
 class ComparisonStopped(LLMConfigurationError):
@@ -278,20 +280,29 @@ class ReceiptHTTPClient:
             item.metadata_check_reason = 'invalid_lookup'
             return None
         endpoint = endpoint.copy_with(path=endpoint.path[:-len('/chat/completions')] + '/generation', query=None, fragment=None)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _METADATA_TIMEOUT_SECONDS
         try:
-            async with asyncio.timeout(_METADATA_TIMEOUT_SECONDS):
-                for attempt in range(len(_METADATA_RETRY_DELAYS) + 1):
+            async with asyncio.timeout_at(deadline):
+                for attempt in range(_METADATA_MAX_ATTEMPTS):
                     if attempt:
-                        await asyncio.sleep(_METADATA_RETRY_DELAYS[attempt - 1])
+                        await asyncio.sleep(_METADATA_RETRY_DELAYS[min(attempt - 1, len(_METADATA_RETRY_DELAYS) - 1)])
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        item.metadata_check_reason = 'deadline_exceeded'
+                        return None
+                    request_timeout = min(_METADATA_REQUEST_TIMEOUT_SECONDS, remaining)
                     item.metadata_get_count += 1
                     item.metadata_status_code = None
                     try:
-                        response = await self.http.get(endpoint, params={'id': item.generation_id}, headers=headers,
-                                                       timeout=timeout, follow_redirects=False)
+                        async with asyncio.timeout(request_timeout):
+                            response = await self.http.get(endpoint, params={'id': item.generation_id}, headers=headers,
+                                                           timeout=min(timeout, request_timeout) if timeout is not None else request_timeout,
+                                                           follow_redirects=False)
                     except httpx.DecodingError:
                         item.metadata_check_reason = 'malformed_response'
                         return None
-                    except httpx.TransportError:
+                    except (httpx.TransportError, TimeoutError):
                         item.metadata_check_reason = 'transport_error'
                         continue
                     item.metadata_status_code = response.status_code
