@@ -88,6 +88,7 @@ class AnalysisArtifact:
     settings: AppSettings
     provenance: dict[str, object]
     source_root: Path | None = None
+    sidecar_hashes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,11 @@ def load_continuation(workspace, *, materialize=False):
         branch_root = _bound_child(source_root, recipe['variant_path'])
         artifact_data = json.loads((original / 'artifact.json').read_text())
         digest = stable_hash({'files': artifact_data['files'], 'provenance': artifact_data['provenance']})
-        if (_hashes(original) != artifact_data['files'] or digest != artifact_data['content_hash']
+        sidecar_hashes = {name: recipe['file_hashes'][str((original / name).relative_to(source_root))]
+                          for name in ('data/linguary.db-wal', 'data/linguary.db-shm')
+                          if name not in artifact_data['files'] and (original / name).is_file()}
+        _validate_artifact_files(original, artifact_data['files'], sidecar_hashes)
+        if (digest != artifact_data['content_hash']
                 or digest != result['analyses'][0]['content_hash'] or digest != variant['analysis_hash']
                 or artifact_data['provenance']['protocol_hash'] != previous.content_hash):
             raise WorkspaceError('Замороженный анализ изменился')
@@ -273,11 +278,12 @@ def load_continuation(workspace, *, materialize=False):
         if materialize:
             shutil.copytree(original, target)
             shutil.copyfile(path, workspace.root / 'continuation.json')
-        if _hashes(target) != artifact_data['files'] or json.loads((target / 'artifact.json').read_text()) != artifact_data:
+        _validate_artifact_files(target, artifact_data['files'], sidecar_hashes)
+        if json.loads((target / 'artifact.json').read_text()) != artifact_data:
             raise WorkspaceError('Подготовленная копия анализа изменилась')
         settings = replace(workspace.settings, llm=replace(workspace.settings.llm, model=expected.analysis_model, provider=previous.routes[expected.analysis_model]))
         artifact = AnalysisArtifact(target, digest, artifact_data['files'], workspace.protocol, workspace.protected_roots,
-                                    settings, artifact_data['provenance'], original)
+                                    settings, artifact_data['provenance'], original, sidecar_hashes)
         provenance = {'binding_sha256': binding.sha256, 'origin_protocol_hash': previous.content_hash,
                       'origin_code_version': previous.code_version, 'analysis_hash': digest,
                       'imported_call_uids': [item.call_uid for item in observations], 'verdict_repairs': repairs,
@@ -375,6 +381,21 @@ def _hashes(root):
     return {str(p.relative_to(root)): file_hash(p) for p in sorted(root.rglob('*')) if p.is_file() and p.name != 'artifact.json'}
 
 
+def _validate_artifact_files(root, expected, sidecar_hashes=None):
+    if any(path.is_symlink() for path in (root, *root.parents)) or any(path.is_symlink() for path in root.rglob('*')):
+        raise WorkspaceError('Ссылки в замороженном анализе запрещены')
+    actual = {str(path.relative_to(root)): file_hash(path) for path in root.rglob('*')
+              if path.is_file() and path != root / 'artifact.json'}
+    bound = sidecar_hashes or {}
+    extras = set(actual) - set(expected)
+    if (any(actual.get(name) != digest for name, digest in expected.items())
+            or extras - {'data/linguary.db-wal', 'data/linguary.db-shm'}
+            or extras != set(bound) or any(actual[name] != bound[name] for name in extras)):
+        raise WorkspaceError('Файлы замороженного анализа изменились')
+    if 'data/linguary.db-wal' in extras and (root / 'data' / 'linguary.db-wal').stat().st_size != 0:
+        raise WorkspaceError('Необъявленный WAL содержит состояние вне замороженного анализа')
+
+
 def freeze_analysis(workspace) -> AnalysisArtifact:
     _verify_owned(workspace)
     if workspace._application is None or not workspace._closed or workspace._frozen or not workspace.database_path.is_file():
@@ -446,7 +467,8 @@ def _relocate_sources(db, old_root, new_root):
 def fork_processing(artifact, variant_id, *, destination_root=None) -> ComparisonWorkspace:
     if not re.fullmatch(r'[A-Za-z0-9_-]+', variant_id):
         raise WorkspaceError('Идентификатор копии недопустим')
-    if any(p.is_symlink() for p in artifact.root.rglob('*')) or _hashes(artifact.root) != artifact.file_hashes or stable_hash({'files': artifact.file_hashes, 'provenance': artifact.provenance}) != artifact.content_hash:
+    _validate_artifact_files(artifact.root, artifact.file_hashes, artifact.sidecar_hashes)
+    if stable_hash({'files': artifact.file_hashes, 'provenance': artifact.provenance}) != artifact.content_hash:
         raise WorkspaceError('Снимок анализа изменён')
     if destination_root is not None and not (Path(destination_root) / '.comparison-owner').is_file():
         raise WorkspaceError('Нет принадлежащего сравнению нового корня')

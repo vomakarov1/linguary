@@ -333,6 +333,11 @@ async def continuation_origin(tmp_path, monkeypatch):
     result = json.loads((root / 'result.json').read_text())
     assert len(result['analyses']) == len(result['variants']) == 1
     assert result['variants'][0]['completed'] is False and 'unknown_final_status' in result['violations']
+    frozen = root / result['analyses'][0]['path']
+    manifest_files = json.loads((frozen / 'artifact.json').read_text())['files']
+    assert 'data/linguary.db-wal' not in manifest_files and 'data/linguary.db-shm' not in manifest_files
+    (frozen / 'data' / 'linguary.db-wal').write_bytes(b'')
+    (frozen / 'data' / 'linguary.db-shm').write_bytes(bytes(32768))
     recipe = {'source_root': str(root), 'source_protocol': value.model_dump(mode='json'),
         'file_hashes': _continuation_inventory(root), 'analysis_path': result['analyses'][0]['path'],
         'variant_path': str(next(root.glob('processing/*')).relative_to(root))}
@@ -372,6 +377,7 @@ async def test_continuation_keeps_failed_control_and_runs_only_remaining_variant
     assert result.variants[0].completed is False and result.variants[0].failures == original['variants'][0]['failures']
     assert all(branch.completed for branch in result.variants[1:]), result.violations
     assert result.variants[0].analysis_hash == result.variants[1].analysis_hash == original['analyses'][0]['content_hash']
+    assert result.analyses[0].sidecar_hashes.keys() == {'data/linguary.db-wal', 'data/linguary.db-shm'}
     assert len({item.call_uid for item in result.observations}) == len(result.observations)
     old_receipts = [json.loads(path.read_text()) for path in (old_root / 'receipts').glob('*.json')]
     assert sum(item.cost for item in result.observations) == sum(Decimal(item['cost']) for item in old_receipts) + Decimal('.01') * (len(requests) - prior_requests)
@@ -386,7 +392,8 @@ async def test_continuation_keeps_failed_control_and_runs_only_remaining_variant
 
 
 @pytest.mark.parametrize('change', ['inventory', 'unknown_cost', 'unknown_route', 'cache_hit', 'unknown_context_cache', 'missing_log', 'committed_wal_missing_log',
-    'symlink', 'escape', 'copied_artifact', 'budget_extension', 'attempt_extension'])
+    'symlink', 'escape', 'copied_artifact', 'budget_extension', 'attempt_extension',
+    'nonempty_frozen_wal', 'unbound_frozen_sidecar', 'foreign_frozen_extra', 'missing_frozen_file', 'modified_frozen_file'])
 async def test_continuation_admission_rejects_unproven_origin_before_http(tmp_path, continuation_origin, change):
     import sqlite3
     from contextlib import closing
@@ -439,7 +446,18 @@ async def test_continuation_admission_rejects_unproven_origin_before_http(tmp_pa
                     db.execute('DELETE FROM llm_call_logs WHERE id = ?', (processing['call_id'],))
         if change == 'escape':
             recipe['analysis_path'] = '../outside'
+        frozen = origin / json.loads(binding_path.read_text())['analysis_path']
+        if change == 'nonempty_frozen_wal':
+            (frozen / 'data' / 'linguary.db-wal').write_bytes(b'committed state outside the frozen digest')
+        if change == 'foreign_frozen_extra':
+            (frozen / 'data' / 'unexpected.bin').write_bytes(b'extra')
+        if change == 'missing_frozen_file':
+            next((frozen / 'inputs').glob('*.epub')).unlink()
+        if change == 'modified_frozen_file':
+            next((frozen / 'inputs').glob('*.epub')).write_bytes(b'changed')
         recipe['file_hashes'] = _continuation_inventory(origin)
+        if change == 'unbound_frozen_sidecar':
+            recipe['file_hashes'].pop(str((frozen / 'data' / 'linguary.db-wal').relative_to(origin)))
         binding_path.write_text(json.dumps(recipe))
         updates = {'continuation': value.continuation.model_copy(update={'sha256': file_hash(binding_path)})}
         if change == 'budget_extension':
