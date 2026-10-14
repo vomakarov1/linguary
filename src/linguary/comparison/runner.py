@@ -26,7 +26,7 @@ from linguary.application.use_cases.process_chapter import ChapterProcessingSequ
 from linguary.application.use_cases.register_book import RegisterBookCommand
 from linguary.comparison.llm import BudgetGuard, CallObservation, ComparisonStopped, ObservationLedger, ObservedLLMClient
 from linguary.comparison.protocol import ComparisonManifest, ComparisonProtocol, ValidatedProtocol, build_manifest, file_hash, settings_projection, stable_hash, validate_for_live
-from linguary.comparison.workspace import AnalysisArtifact, fork_processing, freeze_analysis, prepare_workspace
+from linguary.comparison.workspace import AnalysisArtifact, fork_processing, freeze_analysis, prepare_workspace, load_continuation
 from linguary.composition import drain_tasks
 from linguary.composition.container import _llm_snapshot, _validator
 from linguary.domain import BookEvent, TaskIdentity, TaskType, apply_book_event
@@ -57,6 +57,7 @@ class ComparisonResult:
     violations: list[str] = field(default_factory=list)
     manifests: dict[str, ComparisonManifest] = field(default_factory=dict)
     stage_wall_seconds: dict[str, float] = field(default_factory=dict)
+    continuation_provenance: dict[str, object] = field(default_factory=dict)
 
 
 class _Documents:
@@ -180,10 +181,8 @@ def _finalize(application, ledger, book_ids):
     statuses = {}
     with application.unit_of_work.transaction() as transaction:
         for book_id in book_ids:
-            tasks = {task.id: task for task in transaction.tasks.list_for_book(book_id)}
             for item in transaction.llm_calls.list_for_book(book_id):
-                task = tasks.get(item.task_id)
-                statuses[item.id] = item.success if not item.success or (task is not None and task.status.value == 'succeeded') else None
+                statuses[item.id] = item.success
     for operation in {item.operation_id for item in ledger.observations}:
         try:
             ledger.finalize_operation(operation, accepted=None, call_statuses=statuses)
@@ -268,6 +267,7 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
     protocol = ComparisonProtocol.model_validate(protocol.model_dump())
     if protocol.content_hash != workspace.protocol.content_hash or not protocol.repeats:
         raise ComparisonStopped('Каталог или число повторов не соответствует протоколу')
+    continuation = load_continuation(workspace)
     result = ComparisonResult(protocol.content_hash, simulated)
     budget = BudgetGuard(Decimal(str(protocol.budget)), protocol.max_total_attempts) if protocol.budget else None
     # Копии одинакового EPUB группируются по содержимому, не по имени файла.
@@ -280,10 +280,27 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
         raise ComparisonStopped('Расписание не соответствует матрице и числу повторов')
     repeats = {v.id: 0 for v in protocol.variants}
     analyses = {}
+    terminal = set()
+    if continuation is not None:
+        artifact = continuation.artifact
+        result.analyses.append(artifact)
+        result.observations.extend(continuation.observations)
+        result.continuation_provenance = continuation.provenance
+        result.stage_wall_seconds.update(continuation.stage_wall_seconds)
+        stored = continuation.variant
+        prior = VariantResult(stored['variant_id'], stored['repeat'], stored['analysis_hash'], None,
+                              failures=list(stored['failures']), completed_chapters=list(stored['completed_chapters']),
+                              epub_chapters=dict(stored['epub_chapters']),
+                              observations=[item for item in continuation.observations if item.variant_id == stored['variant_id']])
+        result.variants.append(prior)
+        terminal.add((prior.repeat, prior.variant_id))
+        analyses[(1, variants[prior.variant_id].analysis_model)] = artifact, continuation.selection
     for variant_id in scheduled:
         variant = variants[variant_id]
         repeats[variant_id] += 1
         repeat = repeats[variant_id]
+        if (repeat, variant_id) in terminal:
+            continue
         key = repeat, variant.analysis_model
         if key not in analyses:
             started = time.monotonic()
@@ -300,7 +317,7 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
         artifact, selection = prepared
         started = time.monotonic()
         try:
-            await _run_processing(protocol, client_factory, result, budget, simulated, sources, repeat, variant, artifact, selection)
+            await _run_processing(protocol, client_factory, result, budget, simulated, sources, repeat, variant, artifact, selection, workspace.root)
         finally:
             result.stage_wall_seconds[f"processing:{repeat}:{variant.id}"] = time.monotonic() - started
         if any(not violation.startswith('analysis_failed:') for violation in result.violations):
@@ -371,8 +388,8 @@ async def _run_analysis(protocol, workspace, client_factory, result, budget, sim
             await _close(client)
 
 
-async def _run_processing(protocol, client_factory, result, budget, simulated, sources, repeat, variant, artifact, selection):
-    processing_ws = fork_processing(artifact, _safe_id(f'{repeat}-{variant.id}'))
+async def _run_processing(protocol, client_factory, result, budget, simulated, sources, repeat, variant, artifact, selection, destination_root=None):
+    processing_ws = fork_processing(artifact, _safe_id(f'{repeat}-{variant.id}'), destination_root=destination_root)
     route = protocol.routes.get(variant.processing_model, 'fake')
     _settings(processing_ws, variant.processing_model, route)
     branch = VariantResult(variant.id, repeat, artifact.content_hash, processing_ws)

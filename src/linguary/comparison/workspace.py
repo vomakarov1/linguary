@@ -8,12 +8,16 @@ import json
 import re
 import shutil
 import sqlite3
+import tempfile
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
 from linguary.adapters.config import AppSettings, CheckSettings, LLMSettings, StorageSettings, WorkerPoolSettings
-from linguary.comparison.protocol import ComparisonProtocol, file_hash, settings_projection, stable_hash, validate_input_bindings
+from linguary.comparison.protocol import ComparisonProtocol, LUNA, file_hash, settings_projection, stable_hash, validate_input_bindings
+from linguary.comparison.llm import CallObservation
+from linguary.domain import TokenUsage
 
 
 class WorkspaceError(ValueError):
@@ -83,6 +87,204 @@ class AnalysisArtifact:
     protected_roots: tuple[Path, ...]
     settings: AppSettings
     provenance: dict[str, object]
+    source_root: Path | None = None
+
+
+@dataclass(frozen=True)
+class ContinuationState:
+    artifact: AnalysisArtifact
+    variant: dict[str, object]
+    observations: list[CallObservation]
+    selection: dict[str, set[str]]
+    provenance: dict[str, object]
+    stage_wall_seconds: dict[str, float]
+
+
+def _bound_child(root, relative):
+    if not isinstance(relative, str) or Path(relative).is_absolute() or '..' in Path(relative).parts:
+        raise WorkspaceError('Путь происхождения выходит за исходный корень')
+    path = root / relative
+    if any(part.is_symlink() for part in (path, *path.parents)) or not path.resolve().is_relative_to(root):
+        raise WorkspaceError('Ссылки и выход за исходный корень запрещены')
+    return path
+
+
+def _continuation_inventory(root):
+    if any(part.is_symlink() for part in (root, *root.parents)) or any(path.is_symlink() for path in root.rglob('*')):
+        raise WorkspaceError('Ссылки в происхождении запрещены')
+    return {str(path.relative_to(root)): file_hash(path) for path in root.rglob('*') if path.is_file()}
+
+
+def _continuation_protocol_matches(previous, current):
+    allowed = {'code_version', 'version_hashes', 'budget', 'max_total_attempts', 'continuation', 'cost_bounds'}
+    old, new = previous.model_dump(mode='json'), current.model_dump(mode='json')
+    if {k: v for k, v in old.items() if k not in allowed} != {k: v for k, v in new.items() if k not in allowed}:
+        raise WorkspaceError('Научные условия продолжения изменены')
+    if previous.repeats != 1 or previous.continuation is not None:
+        raise WorkspaceError('Допускается только продолжение первого исходного повтора')
+    for group in ('instruction_version', 'schema_version', 'checks_version'):
+        if previous.version_hashes.get(group) != current.version_hashes.get(group):
+            raise WorkspaceError('Инструкции, схемы или проверки изменились')
+    changed = {str(Path(__file__).parent / name) for name in ('runner.py', 'workspace.py', 'protocol.py', '__main__.py')}
+    before, after = previous.version_hashes.get('code_version', {}), current.version_hashes.get('code_version', {})
+    if set(before) != set(after) or any(before[path] != after[path] for path in before if str(Path(path).resolve()) not in changed):
+        raise WorkspaceError('Изменение кода выходит за сценарий продолжения')
+    if previous.cost_bounds is None or current.cost_bounds is None:
+        raise WorkspaceError('Нет проверенных тарифных границ')
+    exclude = {'endpoint_snapshots', 'evidence'}
+    if previous.cost_bounds.model_dump(exclude=exclude) != current.cost_bounds.model_dump(exclude=exclude):
+        raise WorkspaceError('Тарифные границы продолжения изменились')
+
+
+def load_continuation(workspace, *, materialize=False):
+    binding = workspace.protocol.continuation
+    if binding is None:
+        return None
+    try:
+        path = Path(binding.path).expanduser()
+        if any(part.is_symlink() for part in (path, *path.parents)) or file_hash(path) != binding.sha256:
+            raise WorkspaceError('Привязка происхождения изменена')
+        recipe = json.loads(path.read_text())
+        if set(recipe) != {'source_root', 'source_protocol', 'file_hashes', 'analysis_path', 'variant_path'}:
+            raise WorkspaceError('Неполное происхождение продолжения')
+        source_root = Path(recipe['source_root']).expanduser()
+        if not source_root.is_absolute():
+            raise WorkspaceError('Исходный корень должен быть абсолютным')
+        if any(part.is_symlink() for part in (source_root, *source_root.parents)):
+            raise WorkspaceError('Ссылки в исходном корне запрещены')
+        source_root = source_root.resolve()
+        if not (source_root / '.comparison-owner').is_file() or any(source_root == p or source_root.is_relative_to(p) or p.is_relative_to(source_root) for p in workspace.protected_roots):
+            raise WorkspaceError('Исторический корень не принадлежит сравнению')
+        if source_root == workspace.root or source_root.is_relative_to(workspace.root) or workspace.root.is_relative_to(source_root):
+            raise WorkspaceError('Новый корень пересекается с историческим')
+        if _continuation_inventory(source_root) != recipe['file_hashes']:
+            raise WorkspaceError('Исторические материалы изменились')
+        previous = ComparisonProtocol.model_validate(recipe['source_protocol'])
+        _continuation_protocol_matches(previous, workspace.protocol)
+        manifest = json.loads(_bound_child(source_root, 'manifest.json').read_text())
+        result = json.loads(_bound_child(source_root, 'result.json').read_text())
+        prepared = json.loads(_bound_child(source_root, 'prepared.json').read_text())
+        if (manifest['protocol_hash'] != previous.content_hash or result['protocol_hash'] != previous.content_hash
+                or prepared != {'manifest_hash': stable_hash(manifest), 'protocol_hash': previous.content_hash}
+                or result['simulated'] is not False or set(result['violations']) - {'unknown_final_status'}):
+            raise WorkspaceError('Исторический результат не подходит для продолжения')
+        if len(result['variants']) != 1 or len(result['analyses']) != 1:
+            raise WorkspaceError('Ожидались один анализ и одна конечная ветвь')
+        variant = result['variants'][0]
+        expected = previous.variants[0]
+        if (variant['variant_id'] != previous.schedule[0] or variant['variant_id'] != expected.id
+                or expected.analysis_model != LUNA or expected.processing_model != LUNA or variant['repeat'] != 1
+                or variant['completed'] is not False or not variant['failures'] or variant['epubs']):
+            raise WorkspaceError('Первое сочетание не является конечной неуспешной ветвью')
+        original = _bound_child(source_root, recipe['analysis_path'])
+        branch_root = _bound_child(source_root, recipe['variant_path'])
+        artifact_data = json.loads((original / 'artifact.json').read_text())
+        digest = stable_hash({'files': artifact_data['files'], 'provenance': artifact_data['provenance']})
+        if (_hashes(original) != artifact_data['files'] or digest != artifact_data['content_hash']
+                or digest != result['analyses'][0]['content_hash'] or digest != variant['analysis_hash']
+                or artifact_data['provenance']['protocol_hash'] != previous.content_hash):
+            raise WorkspaceError('Замороженный анализ изменился')
+        inputs = json.loads((original / 'inputs.json').read_text())
+        if {key: item['sha256'] for key, item in inputs.items()} != previous.source_hashes:
+            raise WorkspaceError('Источники анализа отличаются')
+        for key, item in inputs.items():
+            if file_hash(_bound_child(original, item['path'])) != item['sha256'] or file_hash(Path(next(c.source for c in previous.chapters if c.id == key))) != item['sha256']:
+                raise WorkspaceError('Исходный EPUB изменился')
+        logs, selection = {}, {}
+        with tempfile.TemporaryDirectory(prefix='.verify-origin-', dir=workspace.root) as inspection:
+            for index, database in enumerate((original / 'data' / 'linguary.db', branch_root / 'data' / 'linguary.db')):
+                copied = Path(inspection) / str(index) / database.name
+                copied.parent.mkdir()
+                for suffix in ('', '-wal', '-shm', '-journal'):
+                    source = database.with_name(database.name + suffix)
+                    if source.is_file():
+                        shutil.copyfile(source, copied.with_name(copied.name + suffix))
+                with closing(sqlite3.connect(copied.as_uri() + '?mode=ro', uri=True)) as db:
+                    if database.is_relative_to(original):
+                        _validate_analysis(db)
+                        for book_id, section_id in db.execute('SELECT book_id, section_id FROM chapter_analyses'):
+                            selection.setdefault(book_id, set()).add(section_id)
+                    for entry in db.execute('SELECT id, success, provider, model, cost FROM llm_call_logs'):
+                        if entry[0] in logs and logs[entry[0]] != entry:
+                            raise WorkspaceError('Журналы происхождения противоречат друг другу')
+                        logs[entry[0]] = entry
+        if _continuation_inventory(source_root) != recipe['file_hashes']:
+            raise WorkspaceError('Происхождение изменилось во время проверки')
+        observations, repairs, call_ids = [], [], set()
+        receipt_documents = {}
+        for receipt in sorted((source_root / 'receipts').glob('*.json')):
+            data = json.loads(receipt.read_text())
+            if '_raw' in data:
+                raise WorkspaceError('Сырые ответы не входят в происхождение')
+            receipt_documents[data['call_uid']] = dict(data)
+            call_id = data.get('call_id')
+            if call_id not in logs or call_id in call_ids or receipt.stem != data['call_uid']:
+                raise WorkspaceError('Квитанция не связана с единственной записью журнала')
+            call_ids.add(call_id)
+            entry = logs[call_id]
+            route = previous.route_metadata[data['assigned_model']]
+            cost = Decimal(data['cost'])
+            if (not cost.is_finite() or cost < 0 or Decimal(str(entry[4])) != cost or data['repeat'] != 1
+                    or data['assigned_model'] != expected.analysis_model
+                    or data['submitted'] is not True or data['received_response'] is not True
+                    or data['actual_model'] not in route.model_versions or data['actual_provider'] not in route.provider_names
+                    or entry[2] != data['actual_provider'] or entry[3] not in (data.get('reported_model'), data['actual_model'])
+                    or data['assigned_route'] != previous.routes[data['assigned_model']]
+                    or data['full_response_cache'] is not False or not isinstance(data['context_cache'], bool)
+                    or data['cost_source'] != 'provider_receipt' or not isinstance(data.get('generation_id'), str) or not data['generation_id']
+                    or data['model_identity_source'] not in ('chat', 'generation_metadata')):
+                raise WorkspaceError('Маршрут, цена или кеш квитанции не подтверждены')
+            if data['model_identity_source'] == 'chat' and data.get('reported_model') != data['actual_model']:
+                raise WorkspaceError('Точная версия не наблюдалась в ответе')
+            if data['model_identity_source'] == 'generation_metadata' and (
+                    data.get('reported_model') != data['assigned_model'] or data['metadata_status_code'] != 200
+                    or data['metadata_check_reason'] != 'verified' or data['metadata_get_count'] < 1):
+                raise WorkspaceError('Точная версия не подтверждена метаданными')
+            verdict = bool(entry[1])
+            if data['accepted'] is None and verdict:
+                repairs.append({'call_uid': data['call_uid'], 'call_id': call_id, 'reason': 'persisted_log_verdict', 'accepted': True})
+            elif data['accepted'] is not verdict:
+                raise WorkspaceError('Вердикт квитанции противоречит журналу')
+            data['accepted'], data['cost'] = verdict, cost
+            if data.get('usage') is not None:
+                data['usage'] = TokenUsage(**data['usage'])
+            observations.append(CallObservation(**data))
+        for copy in source_root.rglob('receipts/*.json'):
+            duplicate = json.loads(copy.read_text())
+            if receipt_documents.get(duplicate['call_uid']) != duplicate:
+                raise WorkspaceError('Копии квитанции противоречат друг другу')
+        if call_ids != set(logs) or not observations or len({item.call_uid for item in observations}) != len(observations):
+            raise WorkspaceError('Неполный набор уникальных квитанций')
+        if (previous.budget is None or workspace.protocol.budget is None or previous.max_total_attempts is None
+                or workspace.protocol.max_total_attempts is None
+                or Decimal(str(workspace.protocol.budget)) > Decimal(str(previous.budget)) - sum(item.cost for item in observations)
+                or workspace.protocol.max_total_attempts > previous.max_total_attempts - len(observations)):
+            raise WorkspaceError('Продолжение превышает оставшийся бюджет или предел отправок')
+        analysis_ids = set(artifact_data['provenance']['analysis_call_ids'])
+        if {item.call_id for item in observations if item.stage == 'chapter_analysis'} != analysis_ids:
+            raise WorkspaceError('Происхождение анализа не подтверждено')
+        for item in observations:
+            if item.stage == 'chapter_analysis':
+                if item.variant_id != f'analysis-{expected.analysis_model}':
+                    raise WorkspaceError('Квитанция относится к другому анализу')
+            elif item.variant_id != expected.id or item.stage != 'translation_result':
+                raise WorkspaceError('Квитанция относится к другому сочетанию')
+        target = workspace.root / 'imported-analysis'
+        if materialize:
+            shutil.copytree(original, target)
+            shutil.copyfile(path, workspace.root / 'continuation.json')
+        if _hashes(target) != artifact_data['files'] or json.loads((target / 'artifact.json').read_text()) != artifact_data:
+            raise WorkspaceError('Подготовленная копия анализа изменилась')
+        settings = replace(workspace.settings, llm=replace(workspace.settings.llm, model=expected.analysis_model, provider=previous.routes[expected.analysis_model]))
+        artifact = AnalysisArtifact(target, digest, artifact_data['files'], workspace.protocol, workspace.protected_roots,
+                                    settings, artifact_data['provenance'], original)
+        provenance = {'binding_sha256': binding.sha256, 'origin_protocol_hash': previous.content_hash,
+                      'origin_code_version': previous.code_version, 'analysis_hash': digest,
+                      'imported_call_uids': [item.call_uid for item in observations], 'verdict_repairs': repairs,
+                      'origin_violations': result['violations']}
+        return ContinuationState(artifact, variant, observations, selection, provenance, result.get('stage_wall_seconds', {}))
+    except (OSError, ValueError, TypeError, KeyError, ArithmeticError, sqlite3.Error):
+        raise WorkspaceError('Не удалось подтвердить неизменное происхождение продолжения') from None
 
 
 def _check_root(root: Path, protected_roots) -> tuple[Path, tuple[Path, ...]]:
@@ -241,12 +443,14 @@ def _relocate_sources(db, old_root, new_root):
         db.execute('UPDATE books SET source_epub_path=? WHERE id=?', (str(target), book_id))
 
 
-def fork_processing(artifact, variant_id) -> ComparisonWorkspace:
+def fork_processing(artifact, variant_id, *, destination_root=None) -> ComparisonWorkspace:
     if not re.fullmatch(r'[A-Za-z0-9_-]+', variant_id):
         raise WorkspaceError('Идентификатор копии недопустим')
     if any(p.is_symlink() for p in artifact.root.rglob('*')) or _hashes(artifact.root) != artifact.file_hashes or stable_hash({'files': artifact.file_hashes, 'provenance': artifact.provenance}) != artifact.content_hash:
         raise WorkspaceError('Снимок анализа изменён')
-    destination, protected = _check_root(artifact.root.parent / 'processing' / variant_id, artifact.protected_roots)
+    if destination_root is not None and not (Path(destination_root) / '.comparison-owner').is_file():
+        raise WorkspaceError('Нет принадлежащего сравнению нового корня')
+    destination, protected = _check_root((Path(destination_root) if destination_root is not None else artifact.root.parent) / 'processing' / variant_id, artifact.protected_roots)
     token = uuid4().hex
     destination.mkdir(parents=True, exist_ok=True)
     (destination / '.comparison-owner').write_text(token)
@@ -257,7 +461,7 @@ def fork_processing(artifact, variant_id) -> ComparisonWorkspace:
         for name in ('context.json', 'inputs.json', 'settings.json', 'artifact.json'):
             shutil.copy2(artifact.root / name, destination / name)
         with closing(sqlite3.connect(destination / 'data' / 'linguary.db')) as db, db:
-            _relocate_sources(db, artifact.root, destination)
+            _relocate_sources(db, artifact.source_root or artifact.root, destination)
         settings = replace(artifact.settings, storage=StorageSettings(data_root=str(destination / 'data')))
         return ComparisonWorkspace(destination, protected, artifact.protocol, settings, token, artifact.content_hash)
     except Exception:

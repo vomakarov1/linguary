@@ -275,6 +275,209 @@ async def test_prepare_without_api_key_or_network(tmp_path, monkeypatch):
     assert not calls and (tmp_path / 'comparison' / 'manifest.json').exists()
 
 
+@pytest.fixture
+async def continuation_origin(tmp_path, monkeypatch):
+    import httpx
+    import re
+    from linguary.comparison import runner
+    from linguary.comparison.__main__ import execute
+    from linguary.comparison.protocol import ProtocolApproval, ContinuationBinding
+    from linguary.comparison.workspace import _continuation_inventory
+    from pipeline_support import read_fixture
+
+    value = four_chapter_protocol(tmp_path)
+    value = value.model_copy(update={'generation': dict(value.generation, max_output_tokens=8000),
+        'splitting': dict(value.splitting, max_unit_source_chars=700), 'max_call_cost': .2})
+    processing_calls, requests = 0, []
+    def handler(request):
+        nonlocal processing_calls
+        assert request.method == 'POST'
+        body = json.loads(request.content)
+        requests.append(body)
+        aliases = tuple(dict.fromkeys(re.findall(r'\[(b\d+)\]', body['messages'][-1]['content'])))
+        if 'analysis' in body['response_format']['json_schema']['name'].lower():
+            payload = read_fixture('analysis-template.json')
+            payload['treatment_plan'] = [{'source_block_id': alias, 'treatment': 'TRANSLATE'} for alias in aliases]
+        else:
+            processing_calls += 1
+            payload = {'blocks': [{'source_block_id': alias, 'treatment': 'TRANSLATE',
+                'translated_text': f'Русский перевод учебного блока сохраняет смысл и события главы. Рен Колдер. {alias}.',
+                'glossary_hints': []} for alias in aliases], 'language_notes': []}
+            if processing_calls == 2:
+                payload = {'invalid': 'schema'}
+        return httpx.Response(200, headers={'X-OpenRouter-Cache-Status': 'MISS'}, json={
+            'id': f'gen-{len(requests)}', 'model': body['model'], 'provider': 'mock-route',
+            'usage': {'cost': .01, 'prompt_tokens': 100, 'completion_tokens': 10,
+                      'prompt_tokens_details': {'cached_tokens': 32}},
+            'choices': [{'message': {'content': json.dumps(payload, ensure_ascii=False)}, 'finish_reason': 'stop'}]})
+    http_factory = lambda **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
+    await execute(cli_args(tmp_path, value, '--prepare'))
+    approval = tmp_path / 'approval.json'
+    approval.write_text(ProtocolApproval(protocol_hash=value.content_hash, accepted=True, accepted_by='TEST ONLY', accepted_at='2026-10-14').model_dump_json())
+    monkeypatch.setenv('COMPARISON_API_KEY', 'synthetic-key')
+    original_finalize = runner._finalize
+    def legacy_finalize(application, ledger, book_ids):
+        statuses = {}
+        with application.unit_of_work.transaction() as transaction:
+            for book_id in book_ids:
+                tasks = {task.id: task for task in transaction.tasks.list_for_book(book_id)}
+                for item in transaction.llm_calls.list_for_book(book_id):
+                    task = tasks.get(item.task_id)
+                    statuses[item.id] = item.success if not item.success or (task is not None and task.status.value == 'succeeded') else None
+        for operation in {item.operation_id for item in ledger.observations}:
+            ledger.finalize_operation(operation, accepted=None, call_statuses=statuses)
+    monkeypatch.setattr(runner, '_finalize', legacy_finalize)
+    await execute(cli_args(tmp_path, value, '--live', approval), http_factory=http_factory)
+    monkeypatch.setattr(runner, '_finalize', original_finalize)
+    root = tmp_path / 'comparison'
+    result = json.loads((root / 'result.json').read_text())
+    assert len(result['analyses']) == len(result['variants']) == 1
+    assert result['variants'][0]['completed'] is False and 'unknown_final_status' in result['violations']
+    recipe = {'source_root': str(root), 'source_protocol': value.model_dump(mode='json'),
+        'file_hashes': _continuation_inventory(root), 'analysis_path': result['analyses'][0]['path'],
+        'variant_path': str(next(root.glob('processing/*')).relative_to(root))}
+    binding_path = tmp_path / 'continuation.json'
+    binding_path.write_text(json.dumps(recipe))
+    following = value.model_copy(update={'budget': 9.8, 'max_total_attempts': 68,
+        'continuation': ContinuationBinding(path=str(binding_path), sha256=file_hash(binding_path))})
+    return following, root, binding_path, result, http_factory, requests
+
+
+async def test_continuation_keeps_failed_control_and_runs_only_remaining_variants(tmp_path, continuation_origin):
+    from decimal import Decimal
+    from linguary.comparison.__main__ import execute, _restore, result_document, LiveClientFactory
+    from linguary.comparison.runner import run_comparison
+    from linguary.comparison.protocol import ProtocolApproval, validate_for_live
+    from linguary.comparison.workspace import _continuation_inventory
+
+    value, old_root, _, original, http_factory, requests = continuation_origin
+    before, prior_requests = _continuation_inventory(old_root), len(requests)
+    args = cli_args(tmp_path, value, '--prepare')
+    args.root = str(tmp_path / 'continued')
+    await execute(args)
+    workspace, _ = _restore(args.root, args.protected_root, value)
+    clients = []
+    class RecordingFactory(LiveClientFactory):
+        def __call__(self, **kwargs):
+            if not clients:
+                assert kwargs['budget'].spent == 0 and kwargs['budget'].attempts == 0
+            clients.append((kwargs['stage'], kwargs['model']))
+            return super().__call__(**kwargs)
+    approval = ProtocolApproval(protocol_hash=value.content_hash, accepted=True, accepted_by='TEST ONLY', accepted_at='2026-10-14')
+    factory = RecordingFactory(value, 'synthetic-key', http_factory)
+    result = await run_comparison(validate_for_live(value, approval), workspace, factory)
+    luna, sonnet = value.variants[0].analysis_model, value.variants[-1].analysis_model
+    assert clients == [('processing', sonnet), ('analysis', sonnet), ('processing', luna), ('processing', sonnet)]
+    assert [branch.variant_id for branch in result.variants] == list(value.schedule)
+    assert result.variants[0].completed is False and result.variants[0].failures == original['variants'][0]['failures']
+    assert all(branch.completed for branch in result.variants[1:]), result.violations
+    assert result.variants[0].analysis_hash == result.variants[1].analysis_hash == original['analyses'][0]['content_hash']
+    assert len({item.call_uid for item in result.observations}) == len(result.observations)
+    old_receipts = [json.loads(path.read_text()) for path in (old_root / 'receipts').glob('*.json')]
+    assert sum(item.cost for item in result.observations) == sum(Decimal(item['cost']) for item in old_receipts) + Decimal('.01') * (len(requests) - prior_requests)
+    imported = {item.call_uid: item for item in result.observations if item.call_uid in {r['call_uid'] for r in old_receipts}}
+    assert all(imported[item['call_uid']].first_response == item['first_response'] for item in old_receipts)
+    assert all(imported[item['call_uid']].accepted is False for item in old_receipts if item['accepted'] is False)
+    assert result.continuation_provenance['verdict_repairs']
+    assert all(item.context_cache is True for item in imported.values())
+    assert all(branch.workspace.root.is_relative_to(workspace.root) for branch in result.variants[1:])
+    assert _continuation_inventory(old_root) == before
+    assert result_document(result, value, workspace.root)['continuation_provenance']['origin_protocol_hash'] == original['protocol_hash']
+
+
+@pytest.mark.parametrize('change', ['inventory', 'unknown_cost', 'unknown_route', 'cache_hit', 'unknown_context_cache', 'missing_log', 'committed_wal_missing_log',
+    'symlink', 'escape', 'copied_artifact', 'budget_extension', 'attempt_extension'])
+async def test_continuation_admission_rejects_unproven_origin_before_http(tmp_path, continuation_origin, change):
+    import sqlite3
+    from contextlib import closing
+    from linguary.comparison.__main__ import execute
+    from linguary.comparison.protocol import ProtocolApproval, stable_hash
+    from linguary.comparison.workspace import _continuation_inventory, WorkspaceError
+
+    value, origin, binding_path, _, _, _ = continuation_origin
+    args = cli_args(tmp_path, value, '--prepare')
+    args.root = str(tmp_path / 'continued')
+    await execute(args)
+    fresh = Path(args.root)
+    wal_writer = None
+    recipe = json.loads(binding_path.read_text())
+    if change == 'inventory':
+        (origin / 'result.json').write_text('{}')
+    elif change == 'copied_artifact':
+        source = next((fresh / 'imported-analysis' / 'inputs').glob('*.epub'))
+        source.write_bytes(b'changed')
+    elif change == 'symlink':
+        target = tmp_path / 'recipe-copy.json'
+        target.write_bytes(binding_path.read_bytes())
+        binding_path.unlink()
+        binding_path.symlink_to(target)
+    else:
+        receipt = next((origin / 'receipts').glob('*.json'))
+        data = json.loads(receipt.read_text())
+        if change == 'unknown_cost':
+            data['cost'] = None
+        if change == 'unknown_route':
+            data['actual_model'] = 'unapproved'
+        if change == 'cache_hit':
+            data['full_response_cache'] = True
+        if change == 'unknown_context_cache':
+            data['context_cache'] = None
+        if change in ('unknown_cost', 'unknown_route', 'cache_hit', 'unknown_context_cache'):
+            receipt.write_text(json.dumps(data))
+        if change in ('missing_log', 'committed_wal_missing_log'):
+            branch_db = origin / recipe['variant_path'] / 'data' / 'linguary.db'
+            processing = next(json.loads(p.read_text()) for p in (origin / 'receipts').glob('*.json')
+                              if json.loads(p.read_text())['stage'] == 'translation_result')
+            if change == 'committed_wal_missing_log':
+                wal_writer = sqlite3.connect(branch_db)
+                wal_writer.execute('PRAGMA journal_mode=WAL')
+                wal_writer.execute('DELETE FROM llm_call_logs WHERE id = ?', (processing['call_id'],))
+                wal_writer.commit()
+                assert branch_db.with_name(branch_db.name + '-wal').is_file()
+            else:
+                with closing(sqlite3.connect(branch_db)) as db, db:
+                    db.execute('DELETE FROM llm_call_logs WHERE id = ?', (processing['call_id'],))
+        if change == 'escape':
+            recipe['analysis_path'] = '../outside'
+        recipe['file_hashes'] = _continuation_inventory(origin)
+        binding_path.write_text(json.dumps(recipe))
+        updates = {'continuation': value.continuation.model_copy(update={'sha256': file_hash(binding_path)})}
+        if change == 'budget_extension':
+            updates['budget'] = 10
+        if change == 'attempt_extension':
+            updates['max_total_attempts'] = 88
+        value = value.model_copy(update=updates)
+        (fresh / 'continuation.json').write_bytes(binding_path.read_bytes())
+        manifest = json.loads((fresh / 'manifest.json').read_text())
+        manifest['protocol_hash'] = value.content_hash
+        manifest['artifact_hashes']['continuation.json'] = file_hash(fresh / 'continuation.json')
+        (fresh / 'manifest.json').write_text(json.dumps(manifest))
+        (fresh / 'prepared.json').write_text(json.dumps({'protocol_hash': value.content_hash, 'manifest_hash': stable_hash(manifest)}))
+    approval_path = tmp_path / 'next-approval.json'
+    approval_path.write_text(ProtocolApproval(protocol_hash=value.content_hash, accepted=True, accepted_by='TEST ONLY', accepted_at='2026-10-14').model_dump_json())
+    args = cli_args(tmp_path, value, '--live', approval_path)
+    args.root = str(fresh)
+    clients = []
+    try:
+        with pytest.raises((WorkspaceError, ValueError)):
+            await execute(args, http_factory=lambda **kwargs: clients.append(kwargs))
+    finally:
+        if wal_writer is not None:
+            wal_writer.close()
+    assert not clients
+
+
+def test_legacy_admission_hash_is_preserved_without_continuation(tmp_path):
+    from linguary.comparison.protocol import ComparisonProtocol, ProtocolApproval, stable_hash, validate_for_live
+    document = four_chapter_protocol(tmp_path).model_dump(mode='json')
+    document.pop('continuation')
+    old_hash = stable_hash(document)
+    restored = ComparisonProtocol.model_validate(document)
+    assert restored.content_hash == old_hash
+    approval = ProtocolApproval(protocol_hash=old_hash, accepted=True, accepted_by='TEST ONLY', accepted_at='2026-10-14')
+    assert validate_for_live(restored, approval).protocol_hash == old_hash
+
+
 @pytest.mark.parametrize('proxy_mode', ['auto', 'direct'])
 async def test_cli_factory_uses_prepared_proxy_mode_without_persisting_credentials(tmp_path, monkeypatch, proxy_mode):
     import httpx

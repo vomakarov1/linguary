@@ -64,6 +64,11 @@ class CostBounds(Contract):
     evidence: str
 
 
+class ContinuationBinding(Contract):
+    path: str = Field(min_length=1)
+    sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
 class ComparisonProtocol(Contract):
     version: Literal[1] = 1
     version_hashes: dict[str, dict[str, str]] = Field(default_factory=dict)
@@ -84,6 +89,7 @@ class ComparisonProtocol(Contract):
     schedule: tuple[str, ...] = ()
     temperature_policy: Literal['set', 'omit'] | None = None
     proxy_mode: Literal['auto', 'direct'] = 'auto'
+    continuation: ContinuationBinding | None = None
     generation: dict[str, float | int | None] = Field(default_factory=lambda: {'temperature': None, 'max_output_tokens': None, 'max_attempts': None})
     splitting: dict[str, int | None] = Field(default_factory=lambda: {'max_fragment_blocks': None, 'max_unit_source_chars': None})
     checks: dict[str, float | int | None] = Field(default_factory=dict)
@@ -126,7 +132,10 @@ class ComparisonProtocol(Contract):
 
     @property
     def content_hash(self) -> str:
-        return stable_hash(self.model_dump(mode='json'))
+        data = self.model_dump(mode='json')
+        if self.continuation is None:
+            data.pop('continuation')
+        return stable_hash(data)
 
 
 class ProtocolApproval(Contract):
@@ -190,6 +199,8 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
         return False
     validate_input_bindings(protocol, required=True)
     data = protocol.model_dump(mode='json')
+    if protocol.continuation is None:
+        data.pop('continuation')
     if protocol.temperature_policy == 'omit':
         if protocol.generation.get('temperature') is not None:
             raise ProtocolError('Политика omit требует явно пустой temperature')

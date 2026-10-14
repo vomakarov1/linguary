@@ -17,7 +17,7 @@ from linguary.comparison.llm import ObservedLLMClient
 from linguary.comparison.protocol import ComparisonManifest, ProtocolApproval, ProtocolError, build_manifest, file_hash, load_protocol, settings_projection, stable_hash, validate_for_live
 from linguary.comparison.report import aggregate_blind_reviews, anonymize_epubs, build_report, evaluate_candidate, write_report
 from linguary.comparison.runner import run_comparison
-from linguary.comparison.workspace import ComparisonWorkspace, WorkspaceError, prepare_workspace
+from linguary.comparison.workspace import ComparisonWorkspace, WorkspaceError, prepare_workspace, load_continuation
 
 
 def _read(path):
@@ -47,8 +47,11 @@ def _inputs(root):
 
 def prepare(root, protected, protocol):
     workspace = prepare_workspace(root, protected, protocol)
+    load_continuation(workspace, materialize=True)
     manifest = build_manifest(protocol, _inputs(workspace.root), workspace.settings)
     manifest = manifest.model_copy(update={'artifact_hashes': {name: file_hash(workspace.root / name) for name in ('inputs.json', 'context.json', 'settings.json')}, 'paths': {'result': 'result.json', 'receipts': 'receipts', 'review_materials': 'review-materials', 'review_mapping': 'review-mapping.json'}})
+    if protocol.continuation is not None:
+        manifest.artifact_hashes['continuation.json'] = file_hash(workspace.root / 'continuation.json')
     (workspace.root / 'manifest.json').write_text(manifest.model_dump_json(indent=2))
     # Хеш допуска принадлежит стадии подготовки; замена манифеста отменяет допуск.
     (workspace.root / 'prepared.json').write_text(json.dumps({'manifest_hash': stable_hash(manifest.model_dump(mode='json')), 'protocol_hash': protocol.content_hash}))
@@ -77,7 +80,9 @@ def _restore(root, protected, protocol):
         raise ProtocolError('Подготовленный режим прокси не соответствует протоколу')
     if settings_projection(settings) != manifest.effective_settings:
         raise ProtocolError('Эффективные настройки изменились')
-    return ComparisonWorkspace(root, protected, protocol, settings, (root / '.comparison-owner').read_text()), manifest
+    workspace = ComparisonWorkspace(root, protected, protocol, settings, (root / '.comparison-owner').read_text())
+    load_continuation(workspace)
+    return workspace, manifest
 
 
 def result_document(result, protocol, root):
@@ -87,6 +92,7 @@ def result_document(result, protocol, root):
             raise WorkspaceError('Материал результата выходит за каталог сравнения')
         return str(path.relative_to(root))
     return {'protocol_hash': result.protocol_hash, 'simulated': result.simulated, 'violations': result.violations,
+            'continuation_provenance': result.continuation_provenance,
             'variant_models': {v.id: {'analysis_model': v.analysis_model, 'processing_model': v.processing_model} for v in protocol.variants},
             'stage_wall_seconds': result.stage_wall_seconds, 'manifests': {key: value.model_dump(mode='json') for key, value in result.manifests.items()},
             'analyses': [{'content_hash': a.content_hash, 'provenance': a.provenance, 'path': relative(a.root)} for a in result.analyses],
