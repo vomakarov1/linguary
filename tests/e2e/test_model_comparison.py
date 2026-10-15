@@ -276,7 +276,7 @@ async def test_prepare_without_api_key_or_network(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-async def continuation_origin(tmp_path, monkeypatch):
+async def continuation_origin(tmp_path, monkeypatch, request):
     import httpx
     import re
     from linguary.comparison import runner
@@ -286,6 +286,9 @@ async def continuation_origin(tmp_path, monkeypatch):
     from pipeline_support import read_fixture
 
     value = four_chapter_protocol(tmp_path)
+    native_provider = getattr(request, 'param', 'OpenAI')
+    value = value.model_copy(update={'routes': {model: 'openai' for model in value.routes},
+        'route_metadata': {model: route.model_copy(update={'provider_names': (native_provider,)}) for model, route in value.route_metadata.items()}})
     value = value.model_copy(update={'generation': dict(value.generation, max_output_tokens=8000),
         'splitting': dict(value.splitting, max_unit_source_chars=700), 'max_call_cost': .2})
     processing_calls, requests = 0, []
@@ -306,7 +309,7 @@ async def continuation_origin(tmp_path, monkeypatch):
             if processing_calls == 2:
                 payload = {'invalid': 'schema'}
         return httpx.Response(200, headers={'X-OpenRouter-Cache-Status': 'MISS'}, json={
-            'id': f'gen-{len(requests)}', 'model': body['model'], 'provider': 'mock-route',
+            'id': f'gen-{len(requests)}', 'model': body['model'], 'provider': native_provider,
             'usage': {'cost': .01, 'prompt_tokens': 100, 'completion_tokens': 10,
                       'prompt_tokens_details': {'cached_tokens': 32}},
             'choices': [{'message': {'content': json.dumps(payload, ensure_ascii=False)}, 'finish_reason': 'stop'}]})
@@ -348,6 +351,7 @@ async def continuation_origin(tmp_path, monkeypatch):
     return following, root, binding_path, result, http_factory, requests
 
 
+@pytest.mark.parametrize('continuation_origin', ['OpenAI', 'Anthropic'], indirect=True)
 async def test_continuation_keeps_failed_control_and_runs_only_remaining_variants(tmp_path, continuation_origin):
     from decimal import Decimal
     from linguary.comparison.__main__ import execute, _restore, result_document, LiveClientFactory
@@ -391,7 +395,7 @@ async def test_continuation_keeps_failed_control_and_runs_only_remaining_variant
     assert result_document(result, value, workspace.root)['continuation_provenance']['origin_protocol_hash'] == original['protocol_hash']
 
 
-@pytest.mark.parametrize('change', ['inventory', 'unknown_cost', 'unknown_route', 'cache_hit', 'unknown_context_cache', 'missing_log', 'committed_wal_missing_log',
+@pytest.mark.parametrize('change', ['inventory', 'unknown_cost', 'unknown_route', 'wrong_logged_adapter', 'wrong_native_provider', 'cache_hit', 'unknown_context_cache', 'missing_log', 'committed_wal_missing_log',
     'symlink', 'escape', 'copied_artifact', 'budget_extension', 'attempt_extension',
     'nonempty_frozen_wal', 'unbound_frozen_sidecar', 'foreign_frozen_extra', 'missing_frozen_file', 'modified_frozen_file'])
 async def test_continuation_admission_rejects_unproven_origin_before_http(tmp_path, continuation_origin, change):
@@ -425,11 +429,18 @@ async def test_continuation_admission_rejects_unproven_origin_before_http(tmp_pa
             data['cost'] = None
         if change == 'unknown_route':
             data['actual_model'] = 'unapproved'
+        if change == 'wrong_native_provider':
+            data['actual_provider'] = 'openai'
+        if change == 'wrong_logged_adapter':
+            processing = next(json.loads(p.read_text()) for p in (origin / 'receipts').glob('*.json')
+                              if json.loads(p.read_text())['stage'] == 'translation_result')
+            with closing(sqlite3.connect(origin / recipe['variant_path'] / 'data' / 'linguary.db')) as db, db:
+                db.execute('UPDATE llm_call_logs SET provider = ? WHERE id = ?', ('OpenAI', processing['call_id']))
         if change == 'cache_hit':
             data['full_response_cache'] = True
         if change == 'unknown_context_cache':
             data['context_cache'] = None
-        if change in ('unknown_cost', 'unknown_route', 'cache_hit', 'unknown_context_cache'):
+        if change in ('unknown_cost', 'unknown_route', 'wrong_native_provider', 'cache_hit', 'unknown_context_cache'):
             receipt.write_text(json.dumps(data))
         if change in ('missing_log', 'committed_wal_missing_log'):
             branch_db = origin / recipe['variant_path'] / 'data' / 'linguary.db'

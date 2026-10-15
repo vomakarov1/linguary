@@ -233,7 +233,7 @@ def load_continuation(workspace, *, materialize=False):
                     or data['assigned_model'] != expected.analysis_model
                     or data['submitted'] is not True or data['received_response'] is not True
                     or data['actual_model'] not in route.model_versions or data['actual_provider'] not in route.provider_names
-                    or entry[2] != data['actual_provider'] or entry[3] not in (data.get('reported_model'), data['actual_model'])
+                    or entry[2] != previous.routes[data['assigned_model']] or entry[3] not in (data.get('reported_model'), data['actual_model'])
                     or data['assigned_route'] != previous.routes[data['assigned_model']]
                     or data['full_response_cache'] is not False or not isinstance(data['context_cache'], bool)
                     or data['cost_source'] != 'provider_receipt' or not isinstance(data.get('generation_id'), str) or not data['generation_id']
