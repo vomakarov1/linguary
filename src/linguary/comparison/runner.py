@@ -5,18 +5,19 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 
 from linguary.adapters.epub import EpubExportWriter
 from linguary.adapters.llm import FakeLLMClient, LoggingLLMClient, RateLimitedLLMClient
 from linguary.adapters.runtime import TaskWorkerPool, WorkerSettings
-from linguary.application.context_builder import ContextBuilder
+from linguary.application.context_builder import ContextBuilder, textual_blocks
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.task_runner import TaskRunner
 from linguary.application.use_cases.analyze_chapter import AnalyzeChapter, AnalyzeChapterCommand
@@ -26,7 +27,7 @@ from linguary.application.use_cases.process_chapter import ChapterProcessingSequ
 from linguary.application.use_cases.register_book import RegisterBookCommand
 from linguary.comparison.llm import BudgetGuard, CallObservation, ComparisonStopped, ObservationLedger, ObservedLLMClient
 from linguary.comparison.protocol import ComparisonManifest, ComparisonProtocol, ValidatedProtocol, build_manifest, file_hash, settings_projection, stable_hash, validate_for_live
-from linguary.comparison.workspace import AnalysisArtifact, fork_processing, freeze_analysis, prepare_workspace, load_continuation
+from linguary.comparison.workspace import AnalysisArtifact, PartialAnalysisSeed, fork_processing, freeze_analysis, prepare_workspace, load_continuation
 from linguary.composition import drain_tasks
 from linguary.composition.container import _llm_snapshot, _validator
 from linguary.domain import BookEvent, TaskIdentity, TaskType, apply_book_event
@@ -57,6 +58,7 @@ class ComparisonResult:
     violations: list[str] = field(default_factory=list)
     manifests: dict[str, ComparisonManifest] = field(default_factory=dict)
     stage_wall_seconds: dict[str, float] = field(default_factory=dict)
+    stage_wall_segments: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     continuation_provenance: dict[str, object] = field(default_factory=dict)
 
 
@@ -303,11 +305,17 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
             continue
         key = repeat, variant.analysis_model
         if key not in analyses:
+            seed = continuation.partial_seed if continuation is not None and repeat == 1 and continuation.partial_seed is not None and variant.analysis_model == continuation.partial_seed.observation.assigned_model else None
+            stage = f"analysis:{repeat}:{variant.analysis_model}"
+            historical = result.stage_wall_seconds.get(stage, 0)
             started = time.monotonic()
             try:
-                analyses[key] = await _run_analysis(protocol, workspace, client_factory, result, budget, simulated, sources, repeat, variant.analysis_model)
+                analyses[key] = await _run_analysis(protocol, workspace, client_factory, result, budget, simulated, sources, repeat, variant.analysis_model, seed=seed)
             finally:
-                result.stage_wall_seconds[f"analysis:{repeat}:{variant.analysis_model}"] = time.monotonic() - started
+                elapsed = time.monotonic() - started
+                result.stage_wall_seconds[stage] = historical + elapsed
+                if seed is not None:
+                    result.stage_wall_segments[stage] = [{'origin': 'imported', 'seconds': historical}, {'origin': 'current', 'seconds': elapsed}]
         if result.violations and any(not violation.startswith('analysis_failed:') for violation in result.violations):
             break
         prepared = analyses[key]
@@ -325,7 +333,46 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
     return result
 
 
-async def _run_analysis(protocol, workspace, client_factory, result, budget, simulated, sources, repeat, analysis_model):
+def _import_analysis_seed(seed, application, selection, fixed, ledger, analysis_model, repeat):
+    try:
+        if not isinstance(seed, PartialAnalysisSeed):
+            raise ValueError('Нужен проверенный типизированный анализ')
+        fragment, analysis, log, observation = seed.fragment, seed.analysis, seed.log, seed.observation
+        book_id, section_id = fragment['book_id'], fragment['section_id']
+        if (section_id not in selection.get(book_id, set()) or analysis.section_id != section_id
+                or analysis.id != fragment['analysis_id'] or log.book_id != book_id or not log.success
+                or observation.assigned_model != analysis_model or observation.repeat != repeat
+                or observation.stage != 'chapter_analysis' or log.stage.value != observation.stage or observation.accepted is not True
+                or observation.chapter_id != section_id or observation.call_id != log.id
+                or log.id != fragment['call_id'] or observation.call_uid != fragment['call_uid']
+                or observation.generation_id != fragment['generation_id']
+                or observation.operation_id != fragment['operation_id']
+                or stable_hash(asdict(analysis)) != fragment['typed_analysis_sha256']):
+            raise ValueError('Сохранённый анализ не соответствует доказательству')
+        analysis.ensure_ready_for_processing()
+        with application.unit_of_work.transaction() as transaction:
+            document = transaction.documents.get(book_id)
+        section = next(section for section in document.sections if section.id == section_id)
+        block_ids = [block.id for block in textual_blocks(section)]
+        context_ledger = ObservationLedger(variant_id=ledger.variant_id, repeat=repeat)
+        context = _FixedContext(fixed, context_ledger).for_chapter_analysis(document=document, section=section, accumulated_candidates=())
+        group = hashlib.sha256(json.dumps([book_id, observation.stage, section_id, block_ids], separators=(',', ':')).encode()).hexdigest()
+        operation = hashlib.sha256('\0'.join((ledger.variant_id, str(repeat), book_id, observation.stage, group)).encode()).hexdigest()
+        if (block_ids != fragment['block_ids'] or list(analysis.treatment_plan.block_ids) != block_ids
+                or hashlib.sha256(context.request.input_text.encode()).hexdigest() != fragment['request_input_sha256']
+                or hashlib.sha256(context.request.instructions.encode()).hexdigest() != fragment['request_instructions_sha256']
+                or operation != observation.operation_id or group != observation.group_id):
+            raise ValueError('Источник или фиксированный контекст изменился')
+        with application.unit_of_work.transaction() as transaction:
+            transaction.analyses.save(book_id, analysis)
+            transaction.llm_calls.add(log)
+        return book_id, section_id
+    except Exception:
+        ledger.stop('partial_seed_mismatch')
+        raise
+
+
+async def _run_analysis(protocol, workspace, client_factory, result, budget, simulated, sources, repeat, analysis_model, seed=None):
     analysis_ws = prepare_workspace(workspace.root / f'analysis-{repeat}-{_safe_id(analysis_model)}', workspace.protected_roots, protocol)
     route = protocol.routes.get(analysis_model, 'fake')
     _settings(analysis_ws, analysis_model, route)
@@ -344,6 +391,7 @@ async def _run_analysis(protocol, workspace, client_factory, result, budget, sim
         if any(task.last_error is not None for task in imported):
             raise ComparisonStopped('Импорт источника не завершён')
         selection, fixed = _selection(application, protocol, sources)
+        seeded_section = _import_analysis_seed(seed, application, selection, fixed, ledger, analysis_model, repeat) if seed is not None else None
         _manifest(analysis_ws, result, f"analysis:{repeat}:{analysis_model}", selection, fixed)
         selected_uow = _SelectedUnitOfWork(application.unit_of_work, selection)
         analyze = AnalyzeChapter(unit_of_work=selected_uow, llm_client=_model(application, inner, ledger), retry_policy=RetryPolicy(max_attempts=application.settings.llm.max_attempts), glossary_confidence_threshold=application.settings.checks.glossary_confidence_threshold, max_fragment_blocks=application.settings.llm.effective_max_fragment_blocks, context_builder=_FixedContext(fixed, ledger))
@@ -354,6 +402,8 @@ async def _run_analysis(protocol, workspace, client_factory, result, budget, sim
             with selected_uow.transaction() as transaction:
                 document = transaction.documents.get(book_id)
             for section in document.ordered_sections:
+                if (book_id, section.id) == seeded_section:
+                    continue
                 task = await application.task_queue.enqueue(TaskIdentity(book_id, TaskType.ANALYZE_CHAPTER, section.id))
                 ledger.task_scopes[task.id] = section.id
         tasks = await TaskWorkerPool(TaskRunner(queue=application.task_queue, handlers={TaskType.ANALYZE_CHAPTER: analyze_task}), WorkerSettings(concurrency=1)).drain()

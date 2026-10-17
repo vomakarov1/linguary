@@ -46,12 +46,35 @@ def _inputs(root):
 
 
 def prepare(root, protected, protocol):
+    # Проверка прямых источников предшествует созданию любых файлов назначения.
+    if protocol.continuation is not None:
+        binding = Path(protocol.continuation.path)
+        if any(path.is_symlink() for path in (binding, *binding.parents)) or file_hash(binding) != protocol.continuation.sha256:
+            raise WorkspaceError('Привязка происхождения изменена')
+        recipe = _read(binding)
+        if recipe.get('kind') == 'late_sonnet_resume_v1':
+            destination = Path(root).expanduser().absolute()
+            if any(path.is_symlink() for path in (destination, *destination.parents)):
+                raise WorkspaceError('Ссылки в назначении запрещены')
+            destination = destination.resolve()
+            for spec in recipe['sources'].values():
+                source = Path(spec['source_root']).resolve()
+                if destination.is_relative_to(source) or source.is_relative_to(destination):
+                    raise WorkspaceError('Назначение пересекается с прямым источником')
     workspace = prepare_workspace(root, protected, protocol)
-    load_continuation(workspace, materialize=True)
+    continuation = load_continuation(workspace, materialize=True)
     manifest = build_manifest(protocol, _inputs(workspace.root), workspace.settings)
     manifest = manifest.model_copy(update={'artifact_hashes': {name: file_hash(workspace.root / name) for name in ('inputs.json', 'context.json', 'settings.json')}, 'paths': {'result': 'result.json', 'receipts': 'receipts', 'review_materials': 'review-materials', 'review_mapping': 'review-mapping.json'}})
     if protocol.continuation is not None:
         manifest.artifact_hashes['continuation.json'] = file_hash(workspace.root / 'continuation.json')
+    if continuation is not None and continuation.partial_seed is not None:
+        manifest.artifact_hashes['partial-seed.json'] = file_hash(workspace.root / 'partial-seed.json')
+        for item in continuation.observations:
+            name = f'receipts/{item.call_uid}.json'
+            manifest.artifact_hashes[name] = file_hash(workspace.root / name)
+        manifest = manifest.model_copy(update={'grouping': dict(manifest.grouping,
+            continuation_provenance=continuation.provenance, historical_variants=[continuation.variant],
+            historical_stage_wall_seconds=continuation.stage_wall_seconds)})
     (workspace.root / 'manifest.json').write_text(manifest.model_dump_json(indent=2))
     # Хеш допуска принадлежит стадии подготовки; замена манифеста отменяет допуск.
     (workspace.root / 'prepared.json').write_text(json.dumps({'manifest_hash': stable_hash(manifest.model_dump(mode='json')), 'protocol_hash': protocol.content_hash}))
@@ -93,6 +116,7 @@ def result_document(result, protocol, root):
         return str(path.relative_to(root))
     return {'protocol_hash': result.protocol_hash, 'simulated': result.simulated, 'violations': result.violations,
             'continuation_provenance': result.continuation_provenance,
+            'stage_wall_segments': getattr(result, 'stage_wall_segments', {}),
             'variant_models': {v.id: {'analysis_model': v.analysis_model, 'processing_model': v.processing_model} for v in protocol.variants},
             'stage_wall_seconds': result.stage_wall_seconds, 'manifests': {key: value.model_dump(mode='json') for key, value in result.manifests.items()},
             'analyses': [{'content_hash': a.content_hash, 'provenance': a.provenance, 'path': relative(a.root)} for a in result.analyses],
@@ -130,10 +154,29 @@ def local_report(root, protected, protocol):
     root, protected = _safe_root(root, protected)
     cleanup_diagnostics(root, protected, all_rejected=True)
     manifest = ComparisonManifest.model_validate(_read(root / 'manifest.json'))
+    provenance = manifest.grouping.get('continuation_provenance', {})
+    if provenance.get('kind') == 'late_sonnet_resume_v1':
+        prepared = _read(root / 'prepared.json')
+        if (manifest.protocol_hash != protocol.content_hash
+                or prepared != {'manifest_hash': stable_hash(manifest.model_dump(mode='json')), 'protocol_hash': protocol.content_hash}):
+            raise ProtocolError('Происхождение отчёта изменилось')
+        for name, digest in manifest.artifact_hashes.items():
+            path = (root / name).resolve()
+            if not path.is_relative_to(root) or file_hash(path) != digest:
+                raise ProtocolError('Артефакт отчёта изменился')
     if (root / 'result.json').is_file():
         outcomes = _read(root / 'result.json')
+        if provenance.get('kind') == 'late_sonnet_resume_v1' and outcomes.get('continuation_provenance') != provenance:
+            raise ProtocolError('История результата расходится с подготовкой')
     else:
         outcomes = {'protocol_hash': protocol.content_hash, 'simulated': False, 'variants': [], 'violations': ['run_incomplete']}
+        provenance = manifest.grouping.get('continuation_provenance', {})
+        if provenance.get('kind') == 'late_sonnet_resume_v1':
+            historical_time = manifest.grouping['historical_stage_wall_seconds']
+            outcomes.update(continuation_provenance=provenance, variants=manifest.grouping['historical_variants'],
+                stage_wall_seconds=historical_time,
+                stage_wall_segments={stage: [{'origin': 'imported', 'seconds': seconds}] for stage, seconds in historical_time.items()},
+                variant_models={v.id: {'analysis_model': v.analysis_model, 'processing_model': v.processing_model} for v in protocol.variants})
     observations = [_read(path) for path in sorted(root.rglob('receipts/*.json'))]
     # Пути результатов ограничены принадлежащими сравнению материалами.
     for branch in outcomes['variants']:
@@ -146,7 +189,11 @@ def local_report(root, protected, protocol):
         anonymize_epubs(outcomes, root, protocol=protocol)
     reviews = _read(root / 'reviews.json') if (root / 'reviews.json').is_file() else aggregate_blind_reviews(_read(root / 'review-mapping.json'), _read(root / 'review-materials' / 'review-sheet.json'), protocol)
     projection = _read(root / 'projection.json') if (root / 'projection.json').is_file() else {}
-    projection = dict(projection, wall_seconds=outcomes.get('wall_seconds'), stage_wall_seconds=outcomes.get('stage_wall_seconds', {}))
+    projection = dict(projection, wall_seconds=outcomes.get('wall_seconds'), stage_wall_seconds=outcomes.get('stage_wall_seconds', {}),
+                      stage_wall_segments=outcomes.get('stage_wall_segments', {}))
+    provenance = outcomes.get('continuation_provenance', {})
+    if provenance.get('kind') == 'late_sonnet_resume_v1':
+        manifest = manifest.model_copy(update={'grouping': dict(manifest.grouping, continuation_provenance=provenance)})
     report = build_report(manifest, observations, outcomes, reviews, projection)
     report.decision = evaluate_candidate(report, protocol)
     write_report(report, root)

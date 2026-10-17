@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -5,7 +8,7 @@ import pytest
 
 from linguary.application.ports.llm import LLMRequest
 from linguary.comparison.llm import ObservationLedger
-from linguary.comparison.protocol import draft_protocol, stable_hash
+from linguary.comparison.protocol import draft_protocol, file_hash, stable_hash
 from linguary.comparison.runner import _finalize
 
 from test_late_metadata import late_case, verify
@@ -340,3 +343,313 @@ def test_partial_proof_rejects_normalized_overlap_before_copy(partial_case,tmp_p
     with pytest.raises(WorkspaceError,match='непересекающийся'):
         inspect_partial_analysis(source_root=root,source_inventory=before,supplement=verify(partial_case),destination_root=destination)
     assert _continuation_inventory(root)==before
+
+
+@pytest.fixture
+def fixed_recipe_case(partial_case,tmp_path,request):
+    import json
+    import shutil
+    import sqlite3
+    from pathlib import Path
+    from linguary.comparison import workspace
+    from linguary.comparison.late_metadata import verify_late_metadata
+    from linguary.comparison.protocol import ContinuationBinding, CostBounds, LUNA, SONNET, RouteMetadata, file_hash
+
+    root, protocol, receipt, evidence = partial_case
+    source = Path(__file__).resolve().parents[2] / 'fixtures/epub/synthetic_story.epub'
+    code = {str(Path(workspace.__file__).resolve()):file_hash(Path(workspace.__file__))}
+    for name in ('runner.py','llm.py','__main__.py'):
+        path=Path(workspace.__file__).parent/name
+        code[str(path)]=file_hash(path)
+    protocol=protocol.model_copy(update={'version_hashes':dict(protocol.version_hashes,code_version=code),
+        'cost_bounds':CostBounds(max_request_bytes=100000,max_input_tokens=10000,input_price_per_mtok=1,output_price_per_mtok=1,output_includes_reasoning=True,input_bound_method='synthetic',evidence='Local fixture'),
+        'chapters':tuple(chapter.model_copy(update={'source':str(source)}) for chapter in protocol.chapters),
+        'routes':{**protocol.routes,LUNA:'anthropic'},'route_metadata':{**protocol.route_metadata,LUNA:RouteMetadata(provider_names=('Anthropic',),model_versions=('native-luna',))}})
+    first=protocol.model_copy(update={'budget':10,'max_total_attempts':88,'continuation':None,'repeats':1,'schedule':tuple(v.id for v in protocol.variants)})
+    initial=tmp_path/'wait'
+    initial.mkdir()
+    (initial/'.comparison-owner').write_text('initial')
+    artifact=initial/'artifact'
+    shutil.copytree(root/'partial',artifact,ignore=shutil.ignore_patterns('receipts'))
+    with sqlite3.connect(artifact/'data/linguary.db') as db:
+        db.execute("DELETE FROM llm_call_logs WHERE id='blocked'")
+        db.execute("UPDATE llm_call_logs SET id='initial-call',model='native-luna',cost='0.01'")
+        db.execute("DELETE FROM processing_tasks WHERE id='blocked-task'")
+    files=workspace._hashes(artifact)
+    origin={'protocol_hash':first.content_hash,'analysis_call_ids':['initial-call'],'input_hashes':json.loads((artifact/'inputs.json').read_text())}
+    digest=stable_hash({'files':files,'provenance':origin})
+    (artifact/'artifact.json').write_text(json.dumps({'files':files,'provenance':origin,'content_hash':digest}))
+    shutil.copytree(artifact,initial/'branch')
+    if getattr(request,'param',None)=='wal':
+        branch_database=initial/'branch/data/linguary.db'
+        with sqlite3.connect(branch_database) as branch:
+            branch.execute("UPDATE llm_call_logs SET model='wrong-base-model'")
+        writer=sqlite3.connect(branch_database)
+        writer.execute('PRAGMA journal_mode=WAL')
+        writer.execute('PRAGMA wal_autocheckpoint=0')
+        writer.execute("UPDATE llm_call_logs SET model='native-luna'")
+        writer.commit()
+        request.addfinalizer(writer.close)
+    old_receipt=dict(receipt,call_uid='initial-uid',call_id='initial-call',operation_id='initial-operation',generation_id='initial-generation',assigned_model=LUNA,reported_model=LUNA,actual_model='native-luna',variant_id=f'analysis-{LUNA}',model_identity_source='chat',cost='0.01',accepted=None)
+    old_receipt['reported_model']='native-luna'
+    (initial/'receipts').mkdir()
+    (initial/'receipts/initial-uid.json').write_text(json.dumps(old_receipt))
+    manifest={'protocol_hash':first.content_hash}
+    (initial/'manifest.json').write_text(json.dumps(manifest))
+    (initial/'prepared.json').write_text(json.dumps({'protocol_hash':first.content_hash,'manifest_hash':stable_hash(manifest)}))
+    variant={'variant_id':first.variants[0].id,'repeat':1,'completed':False,'failures':['branch_incomplete'],'completed_chapters':[],
+             'analysis_hash':digest,'epubs':{},'epub_chapters':{}}
+    (initial/'result.json').write_text(json.dumps({'protocol_hash':first.content_hash,'simulated':False,'violations':['unknown_final_status'],
+        'analyses':[{'content_hash':digest}],'variants':[variant],'stage_wall_seconds':{}}))
+    (initial/'report.json').write_text('{}')
+    legacy={'source_root':str(initial),'source_protocol':first.model_dump(mode='json'),'file_hashes':workspace._continuation_inventory(initial),
+            'analysis_path':'artifact','variant_path':'branch'}
+    legacy_path=tmp_path/'initial-origin.json'
+    legacy_path.write_text(json.dumps(legacy))
+    protocol=protocol.model_copy(update={'continuation':ContinuationBinding(path=str(legacy_path),sha256=file_hash(legacy_path)),
+                                       'repeats':1,'schedule':first.schedule,'budget':9.99,'max_total_attempts':87})
+    (root/'continuation.json').write_bytes(legacy_path.read_bytes())
+    partial_manifest=json.loads((root/'partial/manifest.json').read_text())
+    partial_manifest['protocol_hash']=protocol.content_hash
+    (root/'partial/manifest.json').write_text(json.dumps(partial_manifest))
+    (root/'manifest.json').write_text(json.dumps({'protocol_hash':protocol.content_hash}))
+    (root/'prepared.json').write_text(json.dumps({'protocol_hash':protocol.content_hash,'manifest_hash':stable_hash({'protocol_hash':protocol.content_hash})}))
+    imported=dict(old_receipt,accepted=True)
+    (root/'receipts/initial-uid.json').write_text(json.dumps(imported))
+    result={'protocol_hash':protocol.content_hash,'simulated':False,'violations':['unknown_or_changed_route','unlinked_log'],
+            'manifests':{'analysis':partial_manifest},'variants':[variant],
+            'continuation_provenance':{'imported_call_uids':['initial-uid']},
+            'stage_wall_seconds':{f'analysis:1:{LUNA}':2,f'processing:1:{first.variants[0].id}':3,f'analysis:1:{SONNET}':4}}
+    (root/'result.json').write_text(json.dumps(result))
+    (root/'report.json').write_text(json.dumps({'manifest':{'protocol_hash':protocol.content_hash},'violations':result['violations'],
+        'observations':[receipt,imported],'total':{'unique_calls':2,'cost':'0.074236'}}))
+    data=json.loads(evidence.read_text());data['series_3']['protected_files_sha256']={name:file_hash(root/name) for name in data['series_3']['protected_files_sha256']};evidence.write_text(json.dumps(data))
+    inventory=workspace._continuation_inventory(root)
+    supplement=verify_late_metadata(evidence_path=evidence,evidence_sha256=file_hash(evidence),source_root=root,source_inventory=inventory,protocol=protocol)
+    copied=tmp_path/'proof-copy'
+    shutil.copytree(root,copied)
+    proof={'confirmed_fragments':[],'missing_fragments':[],'reasons':[]}
+    workspace._inspect_partial_copy(copied,supplement.document,protocol,proof)
+    proof.update(source_root=str(root),source_inventory_before=inventory,source_inventory_after=inventory,copy_inventory_before_read=inventory,
+        verdict='reusable',live_permission=False,complete_artifact=False,supplement_sha256=supplement.content_hash,
+        implementation_file_hashes={'src/linguary/comparison/workspace.py':'6d534d3975374d96cd1e6bffc2833427c7ed1dd97f70989410d13cd54942e490'},
+        historical={'violations':result['violations']})
+    def save_binding(name,data):
+        path=tmp_path/name
+        path.write_text(json.dumps(data))
+        return {'path':str(path),'sha256':file_hash(path),'content_hash':stable_hash(data)}
+    after=dict(code)
+    late=Path(workspace.__file__).parent/'late_metadata.py'
+    after[str(late)]=file_hash(late)
+    recipe={'kind':'late_sonnet_resume_v1','sources':{'luna':legacy,'sonnet':{'source_root':str(root),'source_protocol':protocol.model_dump(mode='json'),'file_hashes':inventory}},
+        'supplement':save_binding('supplement.json',supplement.document),'proof':save_binding('proof.json',proof),
+        'seed':proof['confirmed_fragments'][0],'code_transition':{'before':code,'after':after}}
+    path=tmp_path/'fixed-recipe.json'
+    path.write_text(json.dumps(recipe))
+    following=protocol.model_copy(update={'version_hashes':dict(protocol.version_hashes,code_version=after),
+        'budget':float(proof['accounting']['remaining_cost']),'max_total_attempts':proof['accounting']['remaining_posts'],
+        'continuation':ContinuationBinding(path=str(path),sha256=file_hash(path))})
+    return following,path,recipe
+
+
+def test_fixed_recipe_accepts_wait_and_verified_v3_seed(fixed_recipe_case,tmp_path):
+    from linguary.comparison.workspace import load_continuation,prepare_workspace
+    protocol,_,_=fixed_recipe_case
+    root=prepare_workspace(tmp_path/'new',[tmp_path/'protected'],protocol)
+    state=load_continuation(root,materialize=True)
+    restored=load_continuation(root)
+    assert state.partial_seed.public()==restored.partial_seed.public()
+    assert len(state.observations)==2
+    assert state.partial_seed.observation.actual_model=='native-sonnet'
+    assert state.partial_seed.observation.call_uid=='uid'
+    assert state.variant['completed'] is False
+
+
+@pytest.mark.parametrize('change',['third_source','chain','extra_seed','inventory','supplement','proof','typed','context','no_transition','extra_code','wrong_late','changed_validation'])
+def test_reject_changed_inventory_supplement_proof_typed_context(fixed_recipe_case,tmp_path,change):
+    import json
+    from linguary.comparison.protocol import ProtocolError, file_hash
+    from linguary.comparison.workspace import load_continuation,prepare_workspace,WorkspaceError
+    protocol,path,recipe=fixed_recipe_case
+    if change=='third_source':recipe['sources']['third']=recipe['sources']['luna']
+    if change=='chain':recipe['sources']['luna']['extra_continuation']={}
+    if change=='extra_seed':recipe['seed']=[recipe['seed'],recipe['seed']]
+    if change=='inventory':recipe['sources']['sonnet']['file_hashes']['new']='0'*64
+    if change=='supplement':recipe['supplement']['content_hash']='0'*64
+    if change=='proof':recipe['proof']['sha256']='0'*64
+    if change=='typed':recipe['seed']['typed_analysis_sha256']='0'*64
+    if change=='context':recipe['seed']['request_input_sha256']='0'*64
+    if change=='no_transition':recipe['code_transition']={}
+    if change=='extra_code':recipe['code_transition']['after'][str(tmp_path/'extra.py')]='0'*64
+    if change=='wrong_late':
+        key=next(key for key in recipe['code_transition']['after'] if key.endswith('late_metadata.py'))
+        recipe['code_transition']['after'][key]='0'*64
+    if change=='changed_validation':
+        proof_path=__import__('pathlib').Path(recipe['proof']['path'])
+        proof=json.loads(proof_path.read_text());proof['validation_source_hashes']['outside']='0'*64
+        proof_path.write_text(json.dumps(proof));recipe['proof']['sha256']=file_hash(proof_path);recipe['proof']['content_hash']=stable_hash(proof)
+    path.write_text(json.dumps(recipe))
+    protocol=protocol.model_copy(update={'continuation':protocol.continuation.model_copy(update={'sha256':file_hash(path)})})
+    with pytest.raises((WorkspaceError,ProtocolError)):
+        workspace=prepare_workspace(tmp_path/'new',[tmp_path/'protected'],protocol)
+        load_continuation(workspace,materialize=True)
+
+
+@pytest.mark.parametrize('fixed_recipe_case',['wal'],indirect=True)
+def test_source_sqlite_is_never_opened_and_wal_is_copied(fixed_recipe_case,tmp_path,monkeypatch):
+    import sqlite3
+    from pathlib import Path
+    from linguary.comparison.workspace import load_continuation,prepare_workspace,_continuation_inventory
+    protocol,_,recipe=fixed_recipe_case
+    before={name:_continuation_inventory(Path(spec['source_root'])) for name,spec in recipe['sources'].items()}
+    assert 'branch/data/linguary.db-wal' in before['luna']
+    root=prepare_workspace(tmp_path/'new',[tmp_path/'protected'],protocol)
+    connect=sqlite3.connect
+    connections=[]
+    def only_copy(path,*args,**kwargs):
+        assert str(root.root) in str(path)
+        connections.append(str(path))
+        return connect(path,*args,**kwargs)
+    monkeypatch.setattr(sqlite3,'connect',only_copy)
+    state=load_continuation(root,materialize=True)
+    assert state.partial_seed.analysis.id=='analysis'
+    assert len(connections)==4
+    assert before=={name:_continuation_inventory(Path(spec['source_root'])) for name,spec in recipe['sources'].items()}
+
+def test_prepare_restore_bind_both_sources_seed_and_late_proof(fixed_recipe_case,tmp_path,monkeypatch):
+    from linguary.comparison.__main__ import prepare,_restore
+    from linguary.comparison.workspace import load_continuation
+    value,_,recipe=fixed_recipe_case
+    workspace=prepare(tmp_path/'fixed-prepared',[tmp_path/'production'],value)
+    restored,manifest=_restore(workspace.root,workspace.protected_roots,value)
+    state=load_continuation(restored)
+    assert manifest.artifact_hashes['partial-seed.json']==file_hash(workspace.root/'partial-seed.json')
+    assert state.partial_seed.fragment==recipe['seed']
+    assert state.provenance['source_inventories']=={name:spec['file_hashes'] for name,spec in recipe['sources'].items()}
+    assert state.provenance['supplement']==recipe['supplement']
+    assert state.provenance['proof']==recipe['proof']
+
+
+def test_report_contains_one_effective_sonnet_receipt(fixed_recipe_case,tmp_path):
+    from linguary.comparison.__main__ import prepare,save_result,local_report
+    from linguary.comparison.runner import ComparisonResult,VariantResult
+    from linguary.comparison.workspace import load_continuation
+    value,_,_=fixed_recipe_case
+    workspace=prepare(tmp_path/'fixed-prepared',[tmp_path/'production'],value)
+    state=load_continuation(workspace)
+    stored=state.variant
+    result=ComparisonResult(value.content_hash,True,analyses=[state.artifact],observations=state.observations,
+        variants=[VariantResult(stored['variant_id'],1,stored['analysis_hash'],None,failures=stored['failures'])],
+        continuation_provenance=state.provenance,stage_wall_seconds=state.stage_wall_seconds,
+        stage_wall_segments={'analysis:1:sonnet':[{'origin':'imported','seconds':4},{'origin':'current','seconds':0}]})
+    save_result(result,value,workspace.root,0)
+    report=local_report(workspace.root,workspace.protected_roots,value)
+    assert report.total['unique_calls']==2
+    sonnet=[item for item in report.observations if item['call_uid']=='uid']
+    assert len(sonnet)==1 and sonnet[0]['actual_model']=='native-sonnet'
+    assert report.manifest['grouping']['continuation_provenance']['historical_violations']['sonnet']==['unknown_or_changed_route','unlinked_log']
+    assert report.projection['stage_wall_segments']==result.stage_wall_segments
+    assert json.loads((workspace.root/'result.json').read_text())['stage_wall_segments']==result.stage_wall_segments
+
+
+@pytest.mark.parametrize('change',['seed','receipt','duplicate_generation'])
+def test_seed_receipt_conflict_or_duplicate_generation_blocks_before_client(fixed_recipe_case,tmp_path,monkeypatch,change):
+    from linguary.comparison import __main__ as cli
+    from linguary.comparison.protocol import ProtocolError
+    from linguary.comparison.workspace import WorkspaceError
+    value,_,_=fixed_recipe_case
+    workspace=cli.prepare(tmp_path/'fixed-prepared',[tmp_path/'production'],value)
+    if change=='seed':
+        path=workspace.root/'partial-seed.json'
+        data=json.loads(path.read_text());data['fragment']['request_input_sha256']='0'*64;path.write_text(json.dumps(data))
+    else:
+        path=workspace.root/'receipts/uid.json'
+        data=json.loads(path.read_text())
+        if change=='receipt':data['actual_model']='other'
+        else:
+            path=path.with_name('other.json');data['call_uid']='other';data['call_id']='other-call'
+        path.write_text(json.dumps(data))
+    monkeypatch.setattr(cli,'LiveClientFactory',lambda *a,**k:pytest.fail('client must not be constructed'))
+    with pytest.raises((WorkspaceError,ProtocolError)):
+        cli._restore(workspace.root,workspace.protected_roots,value)
+
+
+@pytest.mark.parametrize('approval',['missing','stale','changed_seed'])
+async def test_missing_stale_approval_or_changed_prepared_seed_has_zero_client_and_key_reads(fixed_recipe_case,tmp_path,monkeypatch,approval):
+    from linguary.comparison import __main__ as cli
+    from linguary.comparison.protocol import ProtocolApproval,ProtocolError
+    value,_,_=fixed_recipe_case
+    workspace=cli.prepare(tmp_path/'fixed-prepared',[tmp_path/'production'],value)
+    protocol_path=tmp_path/'new-protocol.json'
+    protocol_path.write_text(value.model_dump_json())
+    args=cli.parser().parse_args(['--live','--root',str(workspace.root),'--protected-root',str(tmp_path/'production'),'--protocol',str(protocol_path)])
+    if approval!='missing':
+        path=tmp_path/'approval.json'
+        path.write_text(ProtocolApproval(protocol_hash='0'*64 if approval=='stale' else value.content_hash,accepted=True,accepted_by='TEST ONLY',accepted_at='2026-10-17').model_dump_json())
+        args.approval=str(path)
+    if approval=='changed_seed':
+        (workspace.root/'partial-seed.json').write_text('{}')
+        monkeypatch.setattr(cli,'validate_for_live',lambda *args: value)
+    original_get=cli.os.environ.get
+    def no_key(key,*args):
+        if key=='COMPARISON_API_KEY':pytest.fail('key must not be read')
+        return original_get(key,*args)
+    monkeypatch.setattr(cli.os.environ,'get',no_key)
+    with pytest.raises(ProtocolError):
+        await cli.execute(args,http_factory=lambda **kwargs:pytest.fail('HTTP client must not be constructed'))
+
+
+@pytest.mark.parametrize('destination',['used_v3','inside_source','normalized_overlap'])
+def test_used_v3_and_overlapping_destination_are_rejected(fixed_recipe_case,tmp_path,destination):
+    from linguary.comparison.__main__ import prepare
+    from linguary.comparison.workspace import WorkspaceError,_continuation_inventory
+    value,_,recipe=fixed_recipe_case
+    source=Path(recipe['sources']['sonnet']['source_root'])
+    before=_continuation_inventory(source)
+    root=source if destination=='used_v3' else source/'new-copy'
+    if destination=='normalized_overlap':
+        outside=tmp_path/'outside';outside.mkdir()
+        root=outside/'..'/source.name/'new-copy'
+    with pytest.raises(WorkspaceError):prepare(root,[tmp_path/'production'],value)
+    assert _continuation_inventory(source)==before
+
+
+def test_report_without_result_preserves_bound_import_history(fixed_recipe_case,tmp_path):
+    from linguary.comparison.__main__ import prepare,local_report
+    from linguary.comparison.workspace import load_continuation
+    value,_,_=fixed_recipe_case
+    workspace=prepare(tmp_path/'fixed-prepared',[tmp_path/'production'],value)
+    state=load_continuation(workspace)
+    report=local_report(workspace.root,workspace.protected_roots,value)
+    assert report.total['unique_calls']==2
+    assert report.violations==['run_incomplete']
+    assert report.manifest['grouping']['continuation_provenance']==state.provenance
+    assert report.projection['stage_wall_seconds']==state.stage_wall_seconds
+    assert report.variants[state.variant['variant_id']]['repeats'][0]['completed'] is False
+    assert report.variants[state.variant['variant_id']]['repeats'][0]['failures']==state.variant['failures']
+
+
+async def test_execute_exception_before_result_preserves_import_history(fixed_recipe_case,tmp_path,monkeypatch):
+    from linguary.comparison import __main__ as cli
+    from linguary.comparison.protocol import ProtocolError
+    value,_,_=fixed_recipe_case
+    root=tmp_path/'fixed-prepared'
+    cli.prepare(root,[tmp_path/'production'],value)
+    protocol_path=tmp_path/'new-protocol.json'
+    protocol_path.write_text(value.model_dump_json())
+    args=cli.parser().parse_args(['--live','--root',str(root),'--protected-root',str(tmp_path/'production'),'--protocol',str(protocol_path)])
+    monkeypatch.setattr(cli,'validate_for_live',lambda *args:value)
+    monkeypatch.setattr(cli,'LiveClientFactory',lambda *args:SimpleNamespace(api_key='synthetic-key'))
+    monkeypatch.setattr(cli,'os',SimpleNamespace(environ={'COMPARISON_API_KEY':'synthetic-key'}))
+    async def abort(*args):
+        raise RuntimeError('Local interruption before result persistence')
+    monkeypatch.setattr(cli,'run_comparison',abort)
+    with pytest.raises(ProtocolError,match='Запуск остановлен'):
+        await cli.execute(args,http_factory=lambda **kwargs:pytest.fail('No HTTP expected'))
+    assert not (root/'result.json').exists()
+    report=json.loads((root/'report.json').read_text())
+    provenance=report['manifest']['grouping']['continuation_provenance']
+    assert provenance['historical_violations']['sonnet']==['unknown_or_changed_route','unlinked_log']
+    assert provenance['accounting']['posts']==6
+    assert report['projection']['stage_wall_seconds']
+    assert report['total']['unique_calls']==2

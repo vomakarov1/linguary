@@ -16,9 +16,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from linguary.adapters.config import AppSettings, CheckSettings, LLMSettings, StorageSettings, WorkerPoolSettings
-from linguary.comparison.protocol import ComparisonProtocol, LUNA, file_hash, settings_projection, stable_hash, validate_input_bindings
+from linguary.comparison.protocol import ComparisonProtocol, ContinuationBinding, LUNA, SONNET, file_hash, settings_projection, stable_hash, validate_input_bindings
 from linguary.comparison.llm import CallObservation
-from linguary.domain import TokenUsage
+from linguary.domain import ChapterAnalysis, LLMCallLog, TokenUsage
 
 
 class WorkspaceError(ValueError):
@@ -100,6 +100,27 @@ class ContinuationState:
     selection: dict[str, set[str]]
     provenance: dict[str, object]
     stage_wall_seconds: dict[str, float]
+    partial_seed: PartialAnalysisSeed | None = None
+
+
+@dataclass(frozen=True)
+class PartialAnalysisSeed:
+    analysis: ChapterAnalysis
+    log: LLMCallLog
+    observation: CallObservation
+    fragment: dict[str, object]
+    provenance: dict[str, object]
+
+    def public(self):
+        return {'analysis': asdict(self.analysis), 'log': _seed_log_projection(self.log),
+                'observation': self.observation.public(), 'fragment': self.fragment, 'provenance': self.provenance}
+
+
+def _seed_log_projection(log):
+    data = asdict(log)
+    data['started_at'] = log.started_at.isoformat()
+    data['cost'] = str(log.cost)
+    return data
 
 
 def _bound_child(root, relative):
@@ -142,6 +163,21 @@ def load_continuation(workspace, *, materialize=False):
     binding = workspace.protocol.continuation
     if binding is None:
         return None
+    path = Path(binding.path)
+    if any(p.is_symlink() for p in (path, *path.parents)) or file_hash(path) != binding.sha256:
+        raise WorkspaceError('Привязка происхождения изменена')
+    recipe = json.loads(path.read_text())
+    if not isinstance(recipe, dict):
+        raise WorkspaceError('Ожидался объект происхождения')
+    if recipe.get('kind') == 'late_sonnet_resume_v1':
+        return _load_late_sonnet_continuation(workspace, recipe, materialize=materialize)
+    return _load_legacy_continuation(workspace, materialize=materialize)
+
+
+def _load_legacy_continuation(workspace, *, materialize=False, verified_copy=None):
+    binding = workspace.protocol.continuation
+    if binding is None:
+        return None
     try:
         path = Path(binding.path).expanduser()
         if any(part.is_symlink() for part in (path, *path.parents)) or file_hash(path) != binding.sha256:
@@ -157,7 +193,9 @@ def load_continuation(workspace, *, materialize=False):
         source_root = source_root.resolve()
         if not (source_root / '.comparison-owner').is_file() or any(source_root == p or source_root.is_relative_to(p) or p.is_relative_to(source_root) for p in workspace.protected_roots):
             raise WorkspaceError('Исторический корень не принадлежит сравнению')
-        if source_root == workspace.root or source_root.is_relative_to(workspace.root) or workspace.root.is_relative_to(source_root):
+        internal_copy = (verified_copy is not None and source_root == verified_copy
+                         and source_root.parent.parent == workspace.root)
+        if not internal_copy and (source_root == workspace.root or source_root.is_relative_to(workspace.root) or workspace.root.is_relative_to(source_root)):
             raise WorkspaceError('Новый корень пересекается с историческим')
         if _continuation_inventory(source_root) != recipe['file_hashes']:
             raise WorkspaceError('Исторические материалы изменились')
@@ -294,6 +332,181 @@ def load_continuation(workspace, *, materialize=False):
         raise WorkspaceError('Не удалось подтвердить неизменное происхождение продолжения') from None
 
 
+def _late_code_transition(recipe, previous, current, proof):
+    directory = Path(__file__).resolve().parent
+    mutable = {str(directory / name) for name in ('workspace.py', 'runner.py', '__main__.py')}
+    late = str(directory / 'late_metadata.py')
+    provenance_paths = {str(directory / name) for name in ('llm.py', 'runner.py')}
+    provenance_paths.add(str(directory.parent / 'adapters/llm/logging.py'))
+    transition = recipe['code_transition']
+    before, after = transition['before'], transition['after']
+    if (set(transition) != {'before', 'after'} or before != previous.version_hashes['code_version']
+            or after != current.version_hashes['code_version'] or set(after) != set(before) | {late}
+            or after[late] != '2e3cae8dc439acf9dbcd320550eb087a73e5f63c836bb940d397d0540227ce6f'
+            or set(proof['provenance_source_hashes']) != provenance_paths
+            or proof['implementation_file_hashes'][str(Path('src/linguary/comparison/workspace.py'))] != '6d534d3975374d96cd1e6bffc2833427c7ed1dd97f70989410d13cd54942e490'
+            or any(after[path] != before[path] for path in before if path not in mutable)):
+        raise WorkspaceError('Нет точного разрешённого перехода кода P14 → P15')
+    for path, digest in after.items():
+        candidate = Path(path)
+        if (not candidate.is_absolute() or any(p.is_symlink() for p in (candidate, *candidate.parents))
+                or file_hash(candidate) != digest):
+            raise WorkspaceError('Исполняемый код отличается от перехода')
+    for path, digest in proof['validation_source_hashes'].items():
+        if after.get(path, digest) != digest or file_hash(Path(path)) != digest:
+            raise WorkspaceError('Проверки типизированного анализа изменились')
+    for path, digest in proof['provenance_source_hashes'].items():
+        if (path in before and before[path] != digest) or (path != str(directory / 'runner.py') and file_hash(Path(path)) != digest):
+            raise WorkspaceError('Исторический код объяснения журнала изменился')
+    compatible = current.model_copy(update={'version_hashes': dict(current.version_hashes, code_version={path: after[path] for path in before})})
+    _continuation_protocol_matches(previous.model_copy(update={'continuation': None}), compatible)
+    return compatible
+
+
+def _late_document(binding):
+    if set(binding) != {'path', 'sha256', 'content_hash'}:
+        raise WorkspaceError('Неполная привязка доказательства')
+    path = Path(binding['path'])
+    if (not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents))
+            or file_hash(path) != binding['sha256']):
+        raise WorkspaceError('Доказательство изменилось')
+    data = json.loads(path.read_text())
+    if stable_hash(data) != binding['content_hash']:
+        raise WorkspaceError('Содержимое доказательства изменилось')
+    return data
+
+
+def _load_late_sonnet_continuation(workspace, recipe, *, materialize):
+    """Конкретный импорт wait Luna/LL + одного проверенного анализа Sonnet."""
+    from linguary.comparison.late_metadata import verify_late_metadata
+    from linguary.domain.errors import DomainError
+    from sqlalchemy.exc import SQLAlchemyError
+    try:
+        _verify_owned(workspace)
+        if (set(recipe) != {'kind', 'sources', 'supplement', 'proof', 'seed', 'code_transition'}
+                or set(recipe['sources']) != {'luna', 'sonnet'} or workspace.protocol.repeats != 1):
+            raise WorkspaceError('Нужны ровно два прямых источника и один исходный повтор')
+        initial, sonnet = recipe['sources']['luna'], recipe['sources']['sonnet']
+        if (set(initial) != {'source_root', 'source_protocol', 'file_hashes', 'analysis_path', 'variant_path'}
+                or set(sonnet) != {'source_root', 'source_protocol', 'file_hashes'}):
+            raise WorkspaceError('Произвольная цепочка источников запрещена')
+        previous = ComparisonProtocol.model_validate(sonnet['source_protocol'])
+        original = ComparisonProtocol.model_validate(initial['source_protocol'])
+        if original.continuation is not None or previous.continuation is None:
+            raise WorkspaceError('Исходники не являются первоначальным wait и его v3')
+        supplement, proof = _late_document(recipe['supplement']), _late_document(recipe['proof'])
+        compatible = _late_code_transition(recipe, previous, workspace.protocol, proof)
+        if (proof['verdict'] != 'reusable' or proof['reasons'] or proof['live_permission'] is not False
+                or proof['complete_artifact'] is not False or len(proof['confirmed_fragments']) != 1
+                or recipe['seed'] != proof['confirmed_fragments'][0]
+                or proof['supplement_sha256'] != stable_hash(supplement)):
+            raise WorkspaceError('Нет единственного проверенного типизированного начала анализа')
+        sources = {}
+        for name, spec in recipe['sources'].items():
+            root = Path(spec['source_root'])
+            if (not root.is_absolute() or any(p.is_symlink() for p in (root, *root.parents))
+                    or not (root / '.comparison-owner').is_file() or root != root.resolve()
+                    or any(root.is_relative_to(p) or p.is_relative_to(root) for p in (workspace.root, *workspace.protected_roots))
+                    or _continuation_inventory(root) != spec['file_hashes']):
+                raise WorkspaceError('Исходный inventory или изоляция изменились')
+            sources[name] = root
+        if sources['luna'].is_relative_to(sources['sonnet']) or sources['sonnet'].is_relative_to(sources['luna']):
+            raise WorkspaceError('Источники пересекаются')
+        if (proof['source_root'] != str(sources['sonnet']) or supplement['source_root'] != str(sources['sonnet'])
+                or proof['source_inventory_before'] != sonnet['file_hashes'] or proof['source_inventory_after'] != sonnet['file_hashes']
+                or proof['copy_inventory_before_read'] != sonnet['file_hashes']):
+            raise WorkspaceError('P14 относится к другому исходному состоянию')
+        checked = verify_late_metadata(evidence_path=supplement['diagnosis']['path'], evidence_sha256=supplement['diagnosis']['sha256'],
+            source_root=sources['sonnet'], source_inventory=sonnet['file_hashes'], protocol=previous)
+        if checked.content_hash != stable_hash(supplement):
+            raise WorkspaceError('Поздние метаданные не воспроизводятся')
+        origin = json.loads(_bound_child(sources['sonnet'], 'continuation.json').read_text())
+        if (origin != initial or file_hash(sources['sonnet'] / 'continuation.json') != previous.continuation.sha256):
+            raise WorkspaceError('V3 не связан с единственным прямым источником Luna/LL')
+        with tempfile.TemporaryDirectory(prefix='.verify-fixed-', dir=workspace.root) as temporary:
+            copies = {}
+            for name, root in sources.items():
+                copies[name] = Path(temporary) / name
+                shutil.copytree(root, copies[name])
+                if _continuation_inventory(copies[name]) != recipe['sources'][name]['file_hashes']:
+                    raise WorkspaceError('Полная копия источника изменилась')
+            computed = {'confirmed_fragments': [], 'missing_fragments': [], 'reasons': []}
+            analysis, log = _inspect_partial_data(copies['sonnet'], supplement, previous, computed)
+            comparable = ('confirmed_fragments', 'missing_fragments', 'logs_sha256', 'logs', 'log_explanations',
+                          'validation_source_hashes', 'accounting', 'historical_variants')
+            if computed['reasons'] or any(computed[key] != proof[key] for key in comparable):
+                raise WorkspaceError('Типизированное содержимое, контекст или объяснение P14 не воспроизводятся')
+            remaining = proof['accounting']
+            if (Decimal(str(workspace.protocol.budget)) > Decimal(remaining['remaining_cost'])
+                    or workspace.protocol.max_total_attempts > remaining['remaining_posts']):
+                raise WorkspaceError('Превышен остаток общего бюджета')
+            legacy = dict(initial, source_root=str(copies['luna']))
+            legacy_path = Path(temporary) / 'legacy.json'
+            legacy_path.write_text(json.dumps(legacy))
+            legacy_protocol = compatible.model_copy(update={'continuation': ContinuationBinding(path=str(legacy_path), sha256=file_hash(legacy_path))})
+            initial_state = _load_legacy_continuation(replace(workspace, protocol=legacy_protocol), materialize=materialize,
+                                                       verified_copy=copies['luna'])
+            initial_state = replace(initial_state, provenance=dict(initial_state.provenance,
+                binding_sha256=previous.continuation.sha256))
+            effective = dict(supplement['receipt'], actual_model=supplement['verified']['model'],
+                model_identity_source='generation_metadata', metadata_status_code=200, metadata_check_reason='verified',
+                metadata_get_count=supplement['receipt']['metadata_get_count'] + 1)
+            effective['cost'], effective['usage'] = Decimal(effective['cost']), TokenUsage(**effective['usage'])
+            observation = CallObservation(**effective)
+            observations = [*initial_state.observations, observation]
+            imported_receipts = {}
+            for receipt_path in (copies['sonnet'] / 'receipts').glob('*.json'):
+                document = json.loads(receipt_path.read_text())
+                imported_receipts[document['call_uid']] = document
+            if (set(imported_receipts) != {item.call_uid for item in observations}
+                    or any(imported_receipts[item.call_uid] != item.public() for item in initial_state.observations)
+                    or computed['historical_variants'] != [initial_state.variant]):
+                raise WorkspaceError('Импортированные Luna/LL в v3 расходятся с прямым источником')
+            for field in ('call_uid', 'call_id', 'generation_id'):
+                if len({getattr(item, field) for item in observations}) != len(observations):
+                    raise WorkspaceError('Импортированные наблюдения повторены')
+            provenance = {'kind': recipe['kind'], 'binding_sha256': workspace.protocol.continuation.sha256,
+                'source_inventories': {name: spec['file_hashes'] for name, spec in recipe['sources'].items()},
+                'supplement': recipe['supplement'], 'proof': recipe['proof'], 'code_transition': recipe['code_transition'],
+                'historical_violations': {'luna': initial_state.provenance['origin_violations'], 'sonnet': proof['historical']['violations']},
+                'excluded_local_logs': proof['log_explanations'], 'accounting': remaining,
+                'original_receipt_sha256': supplement['source_hashes'], 'luna': initial_state.provenance}
+            seed = PartialAnalysisSeed(analysis, log, observation, recipe['seed'], provenance)
+            seed_path = workspace.root / 'partial-seed.json'
+            if materialize:
+                seed_path.write_text(json.dumps(seed.public(), ensure_ascii=False, sort_keys=True))
+                shutil.copyfile(Path(workspace.protocol.continuation.path), workspace.root / 'continuation.json')
+                for item in observations:
+                    directory = workspace.root / 'receipts'
+                    directory.mkdir(exist_ok=True)
+                    (directory / f'{item.call_uid}.json').write_text(json.dumps(item.public(), ensure_ascii=False))
+            if json.loads(seed_path.read_text()) != json.loads(json.dumps(seed.public())):
+                raise WorkspaceError('Подготовленное типизированное начало изменилось')
+            for item in observations:
+                if json.loads((workspace.root / 'receipts' / f'{item.call_uid}.json').read_text()) != item.public():
+                    raise WorkspaceError('Эффективная квитанция изменилась')
+            expected_receipts = {item.call_uid: item.public() for item in observations}
+            for receipt_path in workspace.root.rglob('receipts/*.json'):
+                if receipt_path.is_relative_to(Path(temporary)):
+                    continue
+                document = json.loads(receipt_path.read_text())
+                if expected_receipts.get(document['call_uid']) != document:
+                    raise WorkspaceError('В подготовке появилась посторонняя или противоречивая квитанция')
+            artifact = replace(initial_state.artifact, protocol=workspace.protocol,
+                source_root=sources['luna'] / initial['analysis_path'])
+            return ContinuationState(artifact, initial_state.variant, observations, initial_state.selection, provenance,
+                                     json.loads((sources['sonnet'] / 'result.json').read_text())['stage_wall_seconds'], seed)
+    except WorkspaceError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, ArithmeticError, sqlite3.Error, SQLAlchemyError, DomainError):
+        raise WorkspaceError('Не удалось подтвердить фиксированное продолжение Sonnet') from None
+    finally:
+        if 'sources' in locals():
+            for name, root in sources.items():
+                if _continuation_inventory(root) != recipe['sources'][name]['file_hashes']:
+                    raise WorkspaceError('Источник изменился во время проверки фиксированного продолжения')
+
+
 def _check_root(root: Path, protected_roots) -> tuple[Path, tuple[Path, ...]]:
     resolved = root.expanduser().resolve()
     protected = tuple(Path(p).expanduser().resolve() for p in protected_roots)
@@ -366,6 +579,17 @@ def inspect_partial_analysis(*, source_root, source_inventory, supplement, desti
 
 
 def _inspect_partial_copy(root, supplement, protocol, proof):
+    from linguary.adapters.llm import logging as logging_module
+    from linguary.comparison import llm as comparison_llm, runner
+    provenance_sources = [Path(module.__file__).resolve() for module in (logging_module, comparison_llm, runner)]
+    proof['provenance_source_hashes'] = {str(path): file_hash(path) for path in provenance_sources}
+    historical_code = protocol.version_hashes.get('code_version', {})
+    if any(str(path) in historical_code and historical_code[str(path)] != proof['provenance_source_hashes'][str(path)] for path in provenance_sources):
+        raise WorkspaceError('Код объяснения происхождения изменился относительно серии')
+    return _inspect_partial_data(root, supplement, protocol, proof)
+
+
+def _inspect_partial_data(root, supplement, protocol, proof):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
     from linguary.adapters.db.repositories import SqlAlchemyChapterAnalysisRepository, SqlAlchemyDocumentRepository
@@ -378,13 +602,6 @@ def _inspect_partial_copy(root, supplement, protocol, proof):
     from linguary.domain import CoverageStatus
 
     receipt = supplement['receipt']
-    from linguary.adapters.llm import logging as logging_module
-    from linguary.comparison import llm as comparison_llm, runner
-    provenance_sources = [Path(module.__file__).resolve() for module in (logging_module, comparison_llm, runner)]
-    proof['provenance_source_hashes'] = {str(path): file_hash(path) for path in provenance_sources}
-    historical_code = protocol.version_hashes.get('code_version', {})
-    if any(str(path) in historical_code and historical_code[str(path)] != proof['provenance_source_hashes'][str(path)] for path in provenance_sources):
-        raise WorkspaceError('Код объяснения происхождения изменился относительно серии')
     nested = [name for name in supplement['receipt_paths'] if not name.startswith('receipts/')]
     if len(nested) != 1:
         raise WorkspaceError('Нет единственного частичного корня')
@@ -478,6 +695,7 @@ def _inspect_partial_copy(root, supplement, protocol, proof):
                 or analysis_task['error_message'] != 'Запись наблюдения недоступна; новые вызовы остановлены'
                 or analysis_task['error_detail'] != 'linguary.application.ports.llm.LLMConfigurationError'):
             proof['reasons'].append('unexplained_analysis_task:' + analysis_task['id'])
+    saved_analysis = saved_log = None
     engine = create_engine('sqlite://', creator=lambda: sqlite3.connect(database.as_uri() + '?mode=ro', uri=True))
     try:
         with Session(engine) as session:
@@ -522,9 +740,13 @@ def _inspect_partial_copy(root, supplement, protocol, proof):
                         'request_input_sha256': hashlib.sha256(context.request.input_text.encode()).hexdigest(),
                         'request_instructions_sha256': hashlib.sha256(context.request.instructions.encode()).hexdigest(),
                         'link_basis': 'unique_successful_call_and_task_book_scope_not_direct_analysis_call_id', 'raw_response_required': False})
+                    from linguary.adapters.db.models import LLMCallLogRow
+                    from linguary.adapters.db.mapping import to_llm_call
+                    saved_analysis, saved_log = analysis, to_llm_call(session.get(LLMCallLogRow, paid['id']))
     finally:
         engine.dispose()
     _partial_accounting(root, report, result, protocol, receipt, proof)
+    return saved_analysis, saved_log
 
 
 def _partial_accounting(root, report, result, protocol, receipt, proof):

@@ -131,6 +131,233 @@ async def test_analysis_receipts_not_duplicated_by_forks(tmp_path):
     assert all(item.accepted is True for item in result.observations)
 
 
+class RemainingMatrixFactory:
+    simulated = True
+
+    def __init__(self, stop_after=None):
+        self.clients = []
+        self.stop_after = stop_after
+
+    def __call__(self, *, model, stage, ledger, budget, **kwargs):
+        import re
+        from linguary.adapters.llm import FakeReply
+        from pipeline_support import read_fixture
+
+        owner = self
+
+        class DynamicFake(FakeLLMClient):
+            async def generate(self, request):
+                if stage == 'analysis' and owner.stop_after is not None and len(self.requests) == owner.stop_after:
+                    ledger.stop('unknown_or_changed_route')
+                    ledger.ensure_open()
+                aliases = tuple(dict.fromkeys(re.findall(r'\[(b\d+)\]', request.input_text)))
+                if stage == 'analysis':
+                    payload = read_fixture('analysis-template.json')
+                    payload['treatment_plan'] = [{'source_block_id': alias, 'treatment': 'TRANSLATE'} for alias in aliases]
+                else:
+                    payload = {'blocks': [{'source_block_id': alias, 'treatment': 'TRANSLATE',
+                        'translated_text': f'Русский перевод учебного блока сохраняет смысл и события главы. Рен Колдер. {alias}.',
+                        'glossary_hints': []} for alias in aliases], 'language_notes': []}
+                self.default = replace(FakeReply.of_payload(payload), model=model)
+                return await super().generate(request)
+
+        client = DynamicFake()
+        self.clients.append((stage, model, client, ledger, budget))
+        return client
+
+
+@pytest.fixture
+async def partial_analysis_continuation(tmp_path, monkeypatch):
+    import hashlib
+    import zipfile
+    from dataclasses import asdict
+    from decimal import Decimal
+    from linguary.comparison import runner
+    from linguary.comparison.protocol import stable_hash
+    from linguary.comparison.workspace import ContinuationState, PartialAnalysisSeed, fork_processing
+
+    corpus = tmp_path / 'six-chapters.epub'
+    with zipfile.ZipFile(SYNTHETIC_EPUB) as original, zipfile.ZipFile(corpus, 'w') as target:
+        first = original.read('OEBPS/chapter1.xhtml')
+        third = original.read('OEBPS/chapter3.xhtml')
+        for member in original.infolist():
+            data = original.read(member)
+            if member.filename == 'OEBPS/content.opf':
+                additions = b''.join(f'<item id="chapter{i}" href="chapter{i}.xhtml" media-type="application/xhtml+xml"/>'.encode() for i in range(4, 7))
+                spine = b''.join(f'<itemref idref="chapter{i}"/>'.encode() for i in range(4, 7))
+                data = data.replace(b'</manifest>', additions + b'</manifest>').replace(b'</spine>', spine + b'</spine>')
+            if member.filename == 'OEBPS/chapter2.xhtml':
+                data = first.replace(b'chapter1', b'chapter2')
+            target.writestr(member, data)
+        for index in range(4, 7):
+            target.writestr(f'OEBPS/chapter{index}.xhtml', third.replace(b'chapter3', f'chapter{index}'.encode()))
+    draft = protocol()
+    value = draft.model_copy(update={'chapters': tuple(draft.chapters[min(i - 1, 3)].model_copy(update={'id': f'ch-{i}', 'source': str(corpus), 'chapter_id': str(i)}) for i in range(1, 7)),
+        'previous_context': {f'ch-{i}': f'FIXED CONTEXT {i}' for i in range(1, 7)},
+        'splitting': dict(draft.splitting, max_unit_source_chars=1250), 'budget': 9.888884480, 'max_total_attempts': 67})
+    origin = prepare_workspace(tmp_path / 'historical', [tmp_path / 'production'], value)
+    sources = {file_hash(corpus): 'book-' + file_hash(corpus)[:16]}
+    baseline = runner.ComparisonResult(value.content_hash, True)
+    factory = RemainingMatrixFactory()
+    luna, sonnet = value.variants[0].analysis_model, value.variants[-1].analysis_model
+    luna_artifact, selection = await runner._run_analysis(value, origin, factory, baseline, None, True, sources, 1, luna)
+    sonnet_artifact, _ = await runner._run_analysis(value, origin, factory, baseline, None, True, sources, 1, sonnet)
+    inspection = fork_processing(sonnet_artifact, 'seed-inspection')
+    application = inspection.build_application(llm_client=FakeLLMClient.replying(()))
+    book_id, = sources.values()
+    with application.unit_of_work.transaction() as transaction:
+        document = transaction.documents.get(book_id)
+        section = document.ordered_sections[0]
+        analysis = transaction.analyses.get_for_section(book_id, section.id)
+        observation = next(item for item in baseline.observations if item.assigned_model == sonnet and item.chapter_id == section.id)
+        log = next(item for item in transaction.llm_calls.list_for_book(book_id) if item.id == observation.call_id)
+    await application.aclose()
+    observation = replace(observation, cost=Decimal('.064236'), duration_ms=355243, generation_id='historical-sonnet-generation',
+        model_identity_source='generation_metadata', metadata_status_code=200, metadata_check_reason='verified')
+    log = replace(log, cost=observation.cost, duration_ms=observation.duration_ms)
+    context = runner._FixedContext({section.id: 'FIXED CONTEXT 1'}, runner.ObservationLedger()).for_chapter_analysis(document=document, section=section, accumulated_candidates=())
+    fragment = {'analysis_id': analysis.id, 'book_id': book_id, 'section_id': section.id, 'call_uid': observation.call_uid,
+        'call_id': log.id, 'operation_id': observation.operation_id, 'generation_id': observation.generation_id,
+        'block_ids': list(analysis.treatment_plan.block_ids), 'typed_analysis_sha256': stable_hash(asdict(analysis)),
+        'request_input_sha256': hashlib.sha256(context.request.input_text.encode()).hexdigest(),
+        'request_instructions_sha256': hashlib.sha256(context.request.instructions.encode()).hexdigest()}
+    imported = [replace(item, cost=Decimal('.002'), generation_id=f'historical-luna-{i}') for i, item in enumerate(baseline.observations[:6])]
+    imported.extend(replace(imported[0], call_uid=f'old-ll-{i}', call_id=f'old-log-{i}', generation_id=f'old-generation-{i}',
+        operation_id=f'old-operation-{i}', stage='translation_result', variant_id=value.variants[0].id,
+        accepted=False if i == 9 else True, sequence=i + 1) for i in range(10))
+    imported[-1] = replace(imported[-1], cost=Decimal('.008675320'))
+    provenance = {'kind': 'late_sonnet_canterville', 'historical_violations': {'sonnet': ['unknown_or_changed_route', 'unlinked_log']},
+        'excluded_local_logs': [{'call_id': 'forbidden-local-log', 'new_post': False}],
+        'accounting': {'spent_posts': 21, 'spent_cost': '.111115520', 'remaining_posts': 67, 'remaining_cost': '9.888884480'}}
+    seed = PartialAnalysisSeed(analysis, log, observation, fragment, provenance)
+    stored = {'variant_id': value.variants[0].id, 'repeat': 1, 'analysis_hash': luna_artifact.content_hash,
+        'failures': ['chapter_failed:historical', 'branch_incomplete'], 'completed_chapters': [], 'epub_chapters': {}}
+    stage = f'analysis:1:{sonnet}'
+    state = ContinuationState(luna_artifact, stored, [*imported, observation], selection, provenance, {stage: 359.376}, seed)
+    monkeypatch.setattr(runner, 'load_continuation', lambda workspace: state)
+    return value, state
+
+
+async def test_remaining_matrix_has_29_logical_operations(tmp_path, partial_analysis_continuation):
+    from decimal import Decimal
+    value, state = partial_analysis_continuation
+    workspace = prepare_workspace(tmp_path / 'remaining', [tmp_path / 'production'], value)
+    factory = RemainingMatrixFactory()
+    result = await run_comparison(value, workspace, factory)
+    assert all(branch.completed for branch in result.variants[1:]), result.violations
+    assert result.variants[0].failures == state.variant['failures'] and not result.variants[0].completed
+    luna, sonnet = value.variants[0].analysis_model, value.variants[-1].analysis_model
+    assert [(stage, model) for stage, model, *_ in factory.clients] == [('processing', sonnet), ('analysis', sonnet), ('processing', luna), ('processing', sonnet)]
+    analysis_calls = [request for stage, _, client, *_ in factory.clients if stage == 'analysis' for request in client.requests]
+    assert len(analysis_calls) == 5
+    assert all('FIXED CONTEXT 1\n' not in request.input_text for request in analysis_calls)
+    assert sum(len(client.requests) for _, _, client, *_ in factory.clients) == 29
+    assert len(result.analyses) == 2
+    assert result.variants[2].analysis_hash == result.variants[3].analysis_hash == result.analyses[1].content_hash
+    assert len(result.observations) == 46
+    for field in ('call_uid', 'call_id'):
+        assert len({getattr(item, field) for item in result.observations}) == 46
+    assert len({item.operation_id for item in result.observations if item.first_response}) == 46
+    assert sum(item.cost for item in result.observations) == Decimal('.102911320')
+    assert result.observations[:17] == state.observations
+    assert all(budget.spent == 0 and budget.attempts == 0 and budget.max_total_attempts == 67 for *_, budget in factory.clients)
+    seed = state.partial_seed
+    resumed = result.variants[2].workspace.build_application(llm_client=FakeLLMClient.replying(()))
+    try:
+        with resumed.unit_of_work.transaction() as transaction:
+            assert transaction.analyses.get_for_section(seed.log.book_id, seed.analysis.section_id) == seed.analysis
+            logs = transaction.llm_calls.list_for_book(seed.log.book_id)
+            assert next(log for log in logs if log.id == seed.log.id) == seed.log
+            assert not any(log.id == 'forbidden-local-log' for log in logs)
+            assert not any(task.id == seed.log.task_id for task in transaction.tasks.list_for_book(seed.log.book_id))
+    finally:
+        await resumed.aclose()
+    stage = f'analysis:1:{sonnet}'
+    segments = result.stage_wall_segments[stage]
+    assert segments[0] == {'origin': 'imported', 'seconds': 359.376}
+    assert segments[1]['origin'] == 'current' and segments[1]['seconds'] > 0
+    assert result.stage_wall_seconds[stage] == sum(segment['seconds'] for segment in segments)
+    assert seed.observation.duration_ms == 355243
+
+
+@pytest.mark.parametrize('changed', ['typed', 'context', 'instructions', 'blocks'])
+async def test_seed_data_or_context_change_stops_before_analysis_call(tmp_path, partial_analysis_continuation, changed):
+    value, state = partial_analysis_continuation
+    fragment = state.partial_seed.fragment
+    key = {'typed': 'typed_analysis_sha256', 'context': 'request_input_sha256', 'instructions': 'request_instructions_sha256', 'blocks': 'block_ids'}[changed]
+    fragment[key] = [] if changed == 'blocks' else 'changed'
+    workspace = prepare_workspace(tmp_path / 'remaining', [tmp_path / 'production'], value)
+    factory = RemainingMatrixFactory()
+    result = await run_comparison(value, workspace, factory)
+    assert not any(client.requests for stage, _, client, *_ in factory.clients if stage == 'analysis')
+    assert len(result.analyses) == 1
+    assert 'partial_seed_mismatch' in result.violations
+
+
+async def test_remaining_analysis_stops_on_future_metadata_failure(tmp_path, partial_analysis_continuation):
+    value, _ = partial_analysis_continuation
+    workspace = prepare_workspace(tmp_path / 'remaining', [tmp_path / 'production'], value)
+    factory = RemainingMatrixFactory(stop_after=1)
+    result = await run_comparison(value, workspace, factory)
+    assert len(factory.clients) == 2
+    assert len(factory.clients[1][2].requests) == 1
+    assert len(result.analyses) == 1
+    assert len(result.variants) == 2
+    assert 'unknown_or_changed_route' in result.violations
+
+
+async def test_future_missing_metadata_stops_followup_post(tmp_path, partial_analysis_continuation, monkeypatch):
+    import re
+    import httpx
+    from decimal import Decimal
+    from linguary.comparison import llm, runner
+    from linguary.comparison.protocol import CostBounds, RouteMetadata
+    from pipeline_support import read_fixture
+
+    value, state = partial_analysis_continuation
+    seed = state.partial_seed
+    model = seed.observation.assigned_model
+    value = value.model_copy(update={'routes': {model: 'mock-route'}, 'max_call_cost': .2})
+    workspace = prepare_workspace(tmp_path / 'remaining', [tmp_path / 'production'], value)
+    monkeypatch.setattr(llm, '_METADATA_MAX_ATTEMPTS', 2)
+    monkeypatch.setattr(llm, '_METADATA_RETRY_DELAYS', (0,))
+    methods = []
+
+    def handler(request):
+        methods.append(request.method)
+        if request.method == 'GET':
+            return httpx.Response(404, json={'error': 'metadata unavailable'})
+        body = json.loads(request.content)
+        aliases = tuple(dict.fromkeys(re.findall(r'\[(b\d+)\]', body['messages'][-1]['content'])))
+        payload = read_fixture('analysis-template.json')
+        payload['treatment_plan'] = [{'source_block_id': alias, 'treatment': 'TRANSLATE'} for alias in aliases]
+        return httpx.Response(200, json={'id': 'new-generation', 'model': model, 'provider': 'mock-route',
+            'usage': {'cost': .01, 'prompt_tokens': 100, 'completion_tokens': 100, 'prompt_tokens_details': {'cached_tokens': 0}},
+            'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(payload, ensure_ascii=False)}}]})
+
+    budget = llm.BudgetGuard(Decimal('9.888884480'), 67)
+
+    def factory(*, settings, ledger, budget, **kwargs):
+        assert budget.attempts == 0 and budget.spent == 0
+        return llm.ObservedLLMClient(settings=replace(settings, api_key='synthetic-test-only'), route='mock-route',
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), ledger=ledger, budget=budget, max_call_cost=Decimal('.2'),
+            cost_bounds=CostBounds(max_request_bytes=1000000, max_input_tokens=100000, input_price_per_mtok=1, output_price_per_mtok=1,
+                output_includes_reasoning=True, input_bound_method='synthetic', evidence='MockTransport only'),
+            route_metadata=RouteMetadata(provider_names=('mock-route',), model_versions=(model + '-snapshot',)))
+
+    result = runner.ComparisonResult(value.content_hash, False, observations=list(state.observations))
+    source = Path(value.chapters[0].source)
+    prepared = await runner._run_analysis(value, workspace, factory, result, budget, False,
+        {file_hash(source): seed.log.book_id}, 1, model, seed=seed)
+    assert prepared is None and result.analyses == []
+    assert methods == ['POST', 'GET', 'GET']
+    assert 'unknown_or_changed_route' in result.violations
+    assert budget.attempts == 1 and budget.spent == Decimal('.01')
+    assert len(result.observations) == 18 and result.observations[-1].actual_model is None
+    assert result.observations[-1].metadata_check_reason == 'attempts_exhausted'
+    assert seed.observation.duration_ms == 355243
+
+
 async def test_stage_client_and_snapshot_match(tmp_path):
     workspace = prepare_workspace(tmp_path / 'comparison', [tmp_path / 'production'], protocol())
     result = await run_comparison(protocol(), workspace, Factory())
