@@ -4,12 +4,13 @@ from __future__ import annotations
 from contextlib import closing
 
 import fcntl
+import hashlib
 import json
 import re
 import shutil
 import sqlite3
 import tempfile
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -303,6 +304,271 @@ def _check_root(root: Path, protected_roots) -> tuple[Path, tuple[Path, ...]]:
     if root.is_symlink() or (resolved.exists() and (not resolved.is_dir() or any(resolved.iterdir()))):
         raise WorkspaceError('Назначение должно быть новым или пустым каталогом')
     return resolved, protected
+
+
+@dataclass(frozen=True)
+class PartialAnalysisProof:
+    document: dict[str, object]
+
+    @property
+    def content_hash(self):
+        return stable_hash(self.document)
+
+
+def inspect_partial_analysis(*, source_root, source_inventory, supplement, destination_root):
+    """Исследует полную свежую копию; не открывает исходную SQLite и не разрешает live."""
+    from linguary.comparison.late_metadata import verify_late_metadata
+    from linguary.domain.errors import DomainError
+    from sqlalchemy.exc import SQLAlchemyError
+    source, destination = Path(source_root), Path(destination_root)
+    if (not source.is_absolute() or not destination.is_absolute()
+            or any(p.is_symlink() for p in (source, *source.parents, destination, *destination.parents))):
+        raise WorkspaceError('Проверке нужен новый непересекающийся каталог без ссылок')
+    source, destination = source.resolve(), destination.resolve()
+    if destination.exists() or destination.is_relative_to(source) or source.is_relative_to(destination):
+        raise WorkspaceError('Проверке нужен новый непересекающийся каталог без ссылок')
+    document = supplement.document
+    protocol = ComparisonProtocol.model_validate(document['protocol'])
+    verified = verify_late_metadata(evidence_path=document['diagnosis']['path'], evidence_sha256=document['diagnosis']['sha256'],
+                                    source_root=source, source_inventory=source_inventory, protocol=protocol)
+    if verified.content_hash != supplement.content_hash or document['source_root'] != str(source):
+        raise WorkspaceError('Производное подтверждение изменилось или относится к другому корню')
+    proof = {'version': 1, 'source_root': str(source), 'destination_root': str(destination),
+             'supplement_sha256': supplement.content_hash, 'source_inventory_before': dict(source_inventory),
+             'source_hashes': document['source_hashes'], 'confirmed_fragments': [], 'missing_fragments': [],
+             'reasons': [], 'historical': document['historical'], 'complete_artifact': False, 'live_permission': False,
+             'accounting_delta': {'posts': 0, 'cost': '0', 'first_responses': 0}}
+    try:
+        shutil.copytree(source, destination)
+        copied = _continuation_inventory(destination)
+        if copied != source_inventory or _continuation_inventory(source) != source_inventory:
+            raise WorkspaceError('Полная копия не совпадает с неизменным источником')
+        proof['copy_inventory_before_read'] = copied
+        token = uuid4().hex
+        (destination / '.partial-proof-owner').write_text(token)
+        proof['ownership'] = token
+        try:
+            _inspect_partial_copy(destination, document, protocol, proof)
+        except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, ArithmeticError, StopIteration, sqlite3.Error, SQLAlchemyError, DomainError) as error:
+            if isinstance(error, DomainError):
+                proof['reasons'].append('domain_validation_failed:' + type(error).__name__)
+            else:
+                proof['reasons'].append(str(error) if isinstance(error, WorkspaceError) else 'invalid_saved_evidence:' + type(error).__name__)
+        proof['copy_inventory_after_read'] = _continuation_inventory(destination)
+    finally:
+        if _continuation_inventory(source) != source_inventory:
+            raise WorkspaceError('Источник изменился во время проверки частичного анализа')
+    proof['source_inventory_after'] = _continuation_inventory(source)
+    if not proof['confirmed_fragments']:
+        proof['reasons'].append('no_confirmed_saved_fragment')
+    proof['verdict'] = 'insufficient_evidence' if proof['reasons'] or not proof['confirmed_fragments'] else 'reusable'
+    return PartialAnalysisProof(proof)
+
+
+def _inspect_partial_copy(root, supplement, protocol, proof):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from linguary.adapters.db.repositories import SqlAlchemyChapterAnalysisRepository, SqlAlchemyDocumentRepository
+    from linguary.adapters.epub import EbookLibEpubReader
+    from linguary.application.context_builder import textual_blocks
+    from linguary.application.ports.epub import EpubReadRequest
+    from linguary.comparison.late_metadata import _decimal, _read_json
+    from linguary.comparison.llm import ObservationLedger
+    from linguary.comparison.runner import _FixedContext
+    from linguary.domain import CoverageStatus
+
+    receipt = supplement['receipt']
+    from linguary.adapters.llm import logging as logging_module
+    from linguary.comparison import llm as comparison_llm, runner
+    provenance_sources = [Path(module.__file__).resolve() for module in (logging_module, comparison_llm, runner)]
+    proof['provenance_source_hashes'] = {str(path): file_hash(path) for path in provenance_sources}
+    historical_code = protocol.version_hashes.get('code_version', {})
+    if any(str(path) in historical_code and historical_code[str(path)] != proof['provenance_source_hashes'][str(path)] for path in provenance_sources):
+        raise WorkspaceError('Код объяснения происхождения изменился относительно серии')
+    nested = [name for name in supplement['receipt_paths'] if not name.startswith('receipts/')]
+    if len(nested) != 1:
+        raise WorkspaceError('Нет единственного частичного корня')
+    partial = _bound_child(root, str(Path(nested[0]).parents[1]))
+    if not (partial / '.comparison-owner').is_file():
+        raise WorkspaceError('Частичный корень не принадлежит сравнению')
+    manifest = _read_json(partial / 'manifest.json')
+    result, report = _read_json(root / 'result.json'), _read_json(root / 'report.json')
+    explained_violations = {'unknown_or_changed_route', 'unlinked_log', f"analysis_failed:{receipt['repeat']}:{receipt['assigned_model']}"}
+    if set(result['violations']) - explained_violations:
+        raise WorkspaceError('Есть необъяснённое историческое нарушение')
+    if manifest['protocol_hash'] != protocol.content_hash or manifest not in result['manifests'].values():
+        raise WorkspaceError('Манифест частичного анализа не связан с результатом')
+    version_hashes = {}
+    for group in ('instruction_version', 'schema_version', 'checks_version'):
+        hashes = protocol.version_hashes[group]
+        if not hashes or manifest[group] != getattr(protocol, group):
+            raise WorkspaceError('Версии инструкций, схем или проверок не согласованы')
+        for path, digest in hashes.items():
+            path = Path(path)
+            if (not path.is_relative_to(Path(__file__).resolve().parents[1]) or path.suffix != '.py'
+                    or any(p.is_symlink() for p in (path, *path.parents)) or file_hash(path) != digest):
+                raise WorkspaceError('Код чтения или проверки анализа изменился')
+            version_hashes[str(path)] = digest
+    proof['validation_source_hashes'] = version_hashes
+    inputs = _read_json(partial / 'inputs.json')
+    context = _read_json(partial / 'context.json')
+    if (context != {'glossary': protocol.fixed_glossary, 'previous_context': protocol.previous_context}
+            or {key: item['sha256'] for key, item in inputs.items()} != protocol.source_hashes):
+        raise WorkspaceError('Исходники или фиксированный контекст изменились')
+    for item in inputs.values():
+        if file_hash(_bound_child(partial, item['path'])) != item['sha256']:
+            raise WorkspaceError('Копия исходного EPUB изменилась')
+    database = _bound_child(partial, 'data/linguary.db')
+    if not database.is_file():
+        raise WorkspaceError('Нет сохранённой SQLite')
+    with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        logs = [dict(row) for row in db.execute('SELECT * FROM llm_call_logs ORDER BY started_at, id')]
+        tasks = {row['id']: dict(row) for row in db.execute('SELECT * FROM processing_tasks')}
+        if any(row['response_text'] is not None for row in logs):
+            raise WorkspaceError('Сырые ответы не входят в доказательство')
+    paid = [entry for entry in logs if entry['id'] == receipt['call_id']]
+    if len(paid) != 1:
+        raise WorkspaceError('Квитанция не связана с единственным журналом')
+    paid = paid[0]
+    task = tasks[paid['task_id']]
+    if (paid['success'] != 1 or paid['stage'] != receipt['stage'] or paid['provider'] != receipt['assigned_route']
+            or paid['model'] != receipt['reported_model'] or _decimal(paid['cost']) != _decimal(receipt['cost'])
+            or paid['prompt_tokens'] != receipt['usage']['prompt_tokens'] or paid['completion_tokens'] != receipt['usage']['completion_tokens']
+            or paid['book_id'] != task['book_id'] or task['scope_id'] != receipt['chapter_id']
+            or task['task_type'] != 'analyze_chapter' or task['status'] != 'succeeded'
+            or paid['attempt'] != 1 or task['attempts'] != 1):
+        raise WorkspaceError('Успешный журнал, задача и квитанция противоречат друг другу')
+    selected = manifest['grouping']['selected_sections']
+    if receipt['chapter_id'] not in selected[paid['book_id']]:
+        raise WorkspaceError('Оплаченная глава отсутствует в выбранном корпусе')
+    extras = [entry for entry in logs if entry['id'] != receipt['call_id']]
+    explained = []
+    if len(extras) > 1:
+        proof['reasons'].append('multiple_unlinked_logs_after_observer_failure')
+    for entry in extras:
+        blocked_task = tasks[entry['task_id']]
+        if (len(extras) == 1 and entry['task_id'] != paid['task_id']
+                and entry['success'] == 0 and entry['duration_ms'] == 0 and entry['attempt'] == 1
+                and all(entry[key] is None for key in ('prompt_tokens', 'completion_tokens', 'cost', 'response_text'))
+                and entry['error_type'] == 'ConfigurationError' and entry['error_detail'] == 'linguary.comparison.llm.ComparisonStopped'
+                and entry['error_message'] == 'Нарушены условия сравнения; новые вызовы остановлены'
+                and entry['provider'] == receipt['assigned_route'] and entry['model'] == receipt['reported_model']
+                and entry['stage'] == 'chapter_analysis' and entry['started_at'] >= paid['started_at']
+                and blocked_task['book_id'] == entry['book_id'] and blocked_task['status'] == 'failed'
+                and blocked_task['attempts'] == 1 and blocked_task['error_type'] == 'ConfigurationError'
+                and blocked_task['error_message'] == 'Запись наблюдения недоступна; новые вызовы остановлены'
+                and blocked_task['error_detail'] == 'linguary.application.ports.llm.LLMConfigurationError'
+                and blocked_task['task_type'] == 'analyze_chapter' and blocked_task['scope_id'] in selected[entry['book_id']]):
+            explained.append({'call_id': entry['id'], 'reason': 'ensure_open_before_begin_then_logged_observer_without_observation',
+                              'code': ['comparison/llm.py:ObservedLLMClient.generate', 'adapters/llm/logging.py:LoggingLLMClient.generate',
+                                       'comparison/llm.py:ObservationLedger.on_logged'], 'new_post': False})
+        else:
+            proof['reasons'].append('unexplained_log:' + entry['id'])
+    if 'unlinked_log' in result['violations'] and not explained:
+        proof['reasons'].append('unexplained_unlinked_log_or_repeated_notification')
+    proof['logs_sha256'] = stable_hash(logs)
+    proof['logs'] = logs
+    proof['log_explanations'] = explained
+    for analysis_task in (item for item in tasks.values() if item['task_type'] == 'analyze_chapter'):
+        if analysis_task['id'] == paid['task_id']:
+            continue
+        if (analysis_task['status'] != 'failed' or analysis_task['attempts'] != 1
+                or analysis_task['error_type'] != 'ConfigurationError'
+                or analysis_task['error_message'] != 'Запись наблюдения недоступна; новые вызовы остановлены'
+                or analysis_task['error_detail'] != 'linguary.application.ports.llm.LLMConfigurationError'):
+            proof['reasons'].append('unexplained_analysis_task:' + analysis_task['id'])
+    engine = create_engine('sqlite://', creator=lambda: sqlite3.connect(database.as_uri() + '?mode=ro', uri=True))
+    try:
+        with Session(engine) as session:
+            documents = SqlAlchemyDocumentRepository(session)
+            analyses = SqlAlchemyChapterAnalysisRepository(session)
+            for book_id, section_ids in selected.items():
+                document = documents.get(book_id)
+                for section_id in section_ids:
+                    analysis = analyses.get_for_section(book_id, section_id)
+                    if analysis is None:
+                        proof['missing_fragments'].append({'book_id': book_id, 'section_id': section_id})
+                        continue
+                    if book_id != paid['book_id'] or section_id != receipt['chapter_id']:
+                        raise WorkspaceError('Сохранённый анализ не связан с оплаченной операцией')
+                    section = next(section for section in document.sections if section.id == section_id)
+                    blocks = textual_blocks(section)
+                    expected = tuple(block.id for block in blocks)
+                    analysis.ensure_ready_for_processing()
+                    if (analysis.treatment_plan.coverage_for(expected) != CoverageStatus.COMPLETE
+                            or analysis.treatment_plan.block_ids != expected
+                            or not analysis.translation_instructions.strip() or not analysis.chapter_summary.strip()):
+                        raise WorkspaceError('Типизированный анализ неполон или нарушает порядок блоков')
+                    section_order = next(index for index, item in enumerate(document.ordered_sections, 1) if item.id == section_id)
+                    chapter = next(chapter for chapter in protocol.chapters if chapter.id in inputs
+                                   and chapter.chapter_id in (section.id, section.source_resource_path, str(section_order))
+                                   and book_id == 'book-' + inputs[chapter.id]['sha256'][:16])
+                    original = EbookLibEpubReader().read(EpubReadRequest(book_id=book_id, source_path=str(_bound_child(partial, inputs[chapter.id]['path'])),
+                                                       source_language=document.source_language, target_language=document.target_language)).document
+                    original_section = next(item for item in original.sections if item.id == section_id)
+                    if [(b.id, b.text) for b in textual_blocks(original_section)] != [(b.id, b.text) for b in blocks]:
+                        raise WorkspaceError('Блоки анализа не совпадают с исходным EPUB')
+                    group = hashlib.sha256(json.dumps([book_id, receipt['stage'], section_id, list(expected)], separators=(',', ':')).encode()).hexdigest()
+                    operation = hashlib.sha256('\0'.join((receipt['variant_id'], str(receipt['repeat']), book_id, receipt['stage'], group)).encode()).hexdigest()
+                    if group != receipt['group_id'] or operation != receipt['operation_id']:
+                        raise WorkspaceError('Группа и оплаченная операция не совпадают с покрытыми блоками')
+                    ledger = ObservationLedger()
+                    context = _FixedContext({section_id: protocol.previous_context.get(chapter.id, '')}, ledger).for_chapter_analysis(
+                        document=document, section=section, accumulated_candidates=())
+                    proof['confirmed_fragments'].append({'analysis_id': analysis.id, 'book_id': book_id, 'section_id': section_id,
+                        'call_uid': receipt['call_uid'], 'call_id': receipt['call_id'], 'operation_id': operation, 'generation_id': receipt['generation_id'],
+                        'block_ids': list(expected), 'coverage': 'complete', 'typed_analysis_sha256': stable_hash(asdict(analysis)),
+                        'request_input_sha256': hashlib.sha256(context.request.input_text.encode()).hexdigest(),
+                        'request_instructions_sha256': hashlib.sha256(context.request.instructions.encode()).hexdigest(),
+                        'link_basis': 'unique_successful_call_and_task_book_scope_not_direct_analysis_call_id', 'raw_response_required': False})
+    finally:
+        engine.dispose()
+    _partial_accounting(root, report, result, protocol, receipt, proof)
+
+
+def _partial_accounting(root, report, result, protocol, receipt, proof):
+    from linguary.comparison.late_metadata import _decimal, _integer, _read_json
+    receipts = [_read_json(path) for path in sorted((root / 'receipts').glob('*.json'))]
+    by_uid = {item['call_uid']: item for item in receipts}
+    if len(by_uid) != len(receipts) or by_uid.get(receipt['call_uid']) != receipt:
+        raise WorkspaceError('Уникальность оплаченных вызовов не подтверждена')
+    for path in root.rglob('receipts/*.json'):
+        copy = _read_json(path)
+        if by_uid.get(copy['call_uid']) != copy:
+            raise WorkspaceError('Копии импортированных квитанций расходятся')
+    if {item['call_uid']: item for item in report['observations']} != by_uid or len(report['observations']) != len(receipts):
+        raise WorkspaceError('Отчёт не совпадает с уникальными квитанциями')
+    generations, first, call_ids = set(), set(), set()
+    for item in receipts:
+        if (item['submitted'] is not True or not isinstance(item['generation_id'], str) or not item['generation_id']
+                or type(item['first_response']) is not bool or item['generation_id'] in generations
+                or not isinstance(item['call_id'], str) or not item['call_id'] or item['call_id'] in call_ids
+                or not isinstance(item['operation_id'], str) or not item['operation_id']):
+            raise WorkspaceError('Генерации расхода повторены или неизвестны')
+        generations.add(item['generation_id'])
+        call_ids.add(item['call_id'])
+        if item['first_response']:
+            if item['operation_id'] in first:
+                raise WorkspaceError('Первый ответ операции учтён повторно')
+            first.add(item['operation_id'])
+    imported = result['continuation_provenance']['imported_call_uids']
+    if len(imported) != len(set(imported)) or set(imported) != set(by_uid) - {receipt['call_uid']}:
+        raise WorkspaceError('Импортированные Luna/LL учтены неоднозначно')
+    subtotal = sum((_decimal(item['cost']) for item in receipts), Decimal(0))
+    if _decimal(report['total']['cost']) != subtotal or _integer(report['total']['unique_calls']) != len(receipts):
+        raise WorkspaceError('Расход отчёта не совпадает с квитанциями')
+    accounting = json.loads(protocol.projection_method)
+    posts = _integer(accounting['prior_attempts_total']) + len(receipts)
+    cost = _decimal(accounting['known_prior_cost']) + subtotal
+    cap, attempts_cap = _decimal(accounting['global_budget']), _integer(accounting['global_attempt_limit'])
+    if cost > cap or posts > attempts_cap:
+        raise WorkspaceError('Исторический расход превышает общий предел')
+    proof['accounting'] = {'unique_call_uids': sorted(by_uid), 'operation_ids': sorted({item['operation_id'] for item in receipts}),
+        'generation_ids': sorted(generations), 'imported_call_uids': imported, 'posts': posts, 'known_cost': str(cost),
+        'remaining_cost': str(cap - cost), 'remaining_posts': attempts_cap - posts,
+        'prior_technical_posts': accounting['prior_attempts_total'], 'prior_technical_known_cost': accounting['known_prior_cost']}
+    proof['historical_variants'] = result['variants']
 
 
 def _verify_owned(workspace):

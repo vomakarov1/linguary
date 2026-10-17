@@ -42,6 +42,43 @@ class Factory:
         return client
 
 
+async def test_blocked_next_analysis_explains_unlinked_log_without_post(tmp_path):
+    import sqlite3
+    from decimal import Decimal
+    from linguary.adapters.config import LLMSettings
+    from linguary.adapters.llm.logging import LoggingLLMClient
+    from linguary.application.ports.llm import LLMConfigurationError, LLMRequest
+    from linguary.application.use_cases.import_book import ImportBookCommand
+    from linguary.comparison.llm import BudgetGuard, ObservationLedger, ObservedLLMClient
+    from linguary.domain import LLMCallStage
+
+    workspace = prepare_workspace(tmp_path / 'comparison', [tmp_path / 'production'], protocol())
+    application = workspace.build_application(llm_client=FakeLLMClient.replying(()))
+    imported = application.import_book(ImportBookCommand(book_id='book',source_epub_path=str(SYNTHETIC_EPUB),source_language='en',target_language='ru'))
+    ledger = ObservationLedger()
+    ledger.stop('unknown_or_changed_route')
+    budget = BudgetGuard(Decimal('10'))
+    class NoHTTP:
+        async def post(self,*args,**kwargs):
+            pytest.fail('the blocked attempt must never reach HTTP')
+    inner = ObservedLLMClient(settings=LLMSettings(model='assigned',max_output_tokens=8000,api_key='synthetic-test-only'),route='assigned-route',http_client=NoHTTP(),
+                              ledger=ledger,budget=budget,max_call_cost=Decimal('.1'))
+    logger = LoggingLLMClient(inner=inner,unit_of_work=application.unit_of_work,provider='assigned-route',model='assigned',on_logged=ledger.on_logged)
+    request = LLMRequest.for_chapter_analysis(instructions='Analyze',input_text='chapter').with_logging(book_id=imported.book.id,stage=LLMCallStage.CHAPTER_ANALYSIS,task_id='blocked-task')
+    try:
+        with pytest.raises(LLMConfigurationError,match='Запись наблюдения недоступна'):
+            await logger.generate(request)
+        with pytest.raises(LLMConfigurationError,match='Запись наблюдения недоступна'):
+            await logger.generate(request)
+        with sqlite3.connect(workspace.database_path) as db:
+            logs=db.execute('SELECT success,provider,model,error_type,error_message,error_detail,prompt_tokens,completion_tokens,cost,response_text FROM llm_call_logs').fetchall()
+        assert logs==[(0,'assigned-route','assigned','ConfigurationError','Нарушены условия сравнения; новые вызовы остановлены','linguary.comparison.llm.ComparisonStopped',None,None,None,None)]
+        assert ledger.violations==['unknown_or_changed_route','unlinked_log']
+        assert ledger.observations==[] and budget.attempts==0 and budget.spent==0
+    finally:
+        application.dispose()
+
+
 def protocol():
     draft = draft_protocol()
     return draft.model_copy(update={'chapters': tuple(c.model_copy(update={'source': str(SYNTHETIC_EPUB), 'chapter_id': '1'}) for c in draft.chapters), 'repeats': 1, 'generation': {'temperature': .5, 'max_output_tokens': 2000, 'max_attempts': 1}, 'splitting': {'max_fragment_blocks': 1000, 'max_unit_source_chars': 100000}, 'previous_context': {c.id: 'FIXED PREVIOUS CONTEXT' for c in draft.chapters}, 'fixed_glossary': {'Wren Calder': {'decision': 'accept', 'translation': 'Рен Колдер', 'note': 'женский род'}}})
