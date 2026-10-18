@@ -9,7 +9,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import Engine, inspect
+from sqlalchemy import Engine, JSON, inspect
 
 from linguary.adapters.db.engine import create_database_engine
 from linguary.adapters.db.models import Base
@@ -174,3 +174,140 @@ def test_upgrade_0004_preserves_settings_and_adds_proxy_column(alembic_config, d
             assert json.loads(row['overrides_json']) == values
     finally:
         engine.dispose()
+
+
+@pytest.fixture
+def content_rows(unit_of_work):
+    from persistence_factories import (
+        make_analysis, make_book, make_concept, make_document, make_run,
+        make_translated_result,
+    )
+    with unit_of_work.transaction() as uow:
+        uow.books.add(make_book())
+        uow.documents.save(make_document())
+        uow.glossary.save(make_concept())
+        uow.analyses.save('book-1', make_analysis())
+        uow.runs.add(make_run())
+        uow.results.replace_results('run-1', [make_translated_result()])
+
+
+CONTENT_COLUMNS = (
+    ('chapter_analyses', 'content_plan_json'),
+    ('block_results', 'content_evidence_json'),
+)
+
+
+def test_content_upgrade_preserves_legacy_rows(alembic_config, engine, content_rows):
+    from sqlalchemy import text
+    from linguary.adapters.db.system_settings import SystemSettingsStore
+    store = SystemSettingsStore(engine)
+    settings = store.save(dict(provider='openai_compatible', model='test', base_url='http://localhost:8080/v1', requests_per_minute=None, concurrency=2), None, expected_revision=0)
+    command.downgrade(alembic_config, '0005')
+    with engine.connect() as connection:
+        before = {
+            name: connection.execute(text(f'SELECT * FROM {name}')).all()
+            for name in ('chapter_analyses', 'block_results', 'treatment_plan_items', 'glossary_candidates', 'term_concepts', 'system_settings')
+        }
+    command.upgrade(alembic_config, '0006')
+    with engine.connect() as connection:
+        for name, rows in before.items():
+            columns = list(rows[0]._mapping)
+            after = connection.execute(text(f"SELECT {', '.join(columns)} FROM {name}")).all()
+            assert after == rows
+        for table, column in CONTENT_COLUMNS:
+            assert connection.execute(text(
+                f'SELECT {column} IS NULL, typeof({column}) FROM {table}'
+            )).one() == (1, 'null')
+    assert store.load() == settings
+
+
+@pytest.mark.parametrize('table,column', CONTENT_COLUMNS)
+@pytest.mark.parametrize('payload', ['null', '[]', '"private-book-text"', '0', 'true', '{broken-private-book-text'])
+def test_content_json_rejects_nonobjects_on_read(engine, content_rows, table, column, payload):
+    from sqlalchemy import select, text
+    from linguary.application.ports.persistence import PersistenceError
+    model = Base.metadata.tables[table]
+    with engine.begin() as connection:
+        connection.execute(text(f'UPDATE {table} SET {column} = :payload'), {'payload': payload})
+    with engine.connect() as connection:
+        with pytest.raises(PersistenceError) as caught:
+            connection.execute(select(model.c[column])).all()
+    assert 'private-book-text' not in str(caught.value)
+    assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize('table,column', CONTENT_COLUMNS)
+def test_content_json_writes_none_as_sql_null(engine, content_rows, table, column):
+    from sqlalchemy import select, text, update
+    model = Base.metadata.tables[table]
+    with engine.begin() as connection:
+        connection.execute(update(model).values({column: {'version': 2}}))
+        assert connection.execute(select(model.c[column])).scalar_one() == {'version': 2}
+        connection.execute(update(model).values({column: None}))
+        assert connection.execute(text(f'SELECT {column} IS NULL FROM {table}')).scalar_one() == 1
+        assert connection.execute(select(model.c[column])).scalar_one() is None
+
+
+@pytest.mark.parametrize('table,column', CONTENT_COLUMNS)
+@pytest.mark.parametrize('payload', [[], 'private-book-text', 0, True, JSON.NULL])
+def test_content_json_rejects_nonobjects_on_write(engine, content_rows, table, column, payload):
+    from sqlalchemy import update
+    from linguary.application.ports.persistence import PersistenceError
+    with pytest.raises(PersistenceError) as caught, engine.begin() as connection:
+        connection.execute(update(Base.metadata.tables[table]).values({column: payload}))
+    assert 'private-book-text' not in str(caught.value)
+
+
+@pytest.mark.parametrize('table,column', CONTENT_COLUMNS)
+@pytest.mark.parametrize('payload', ['{}', 'null', '{"version": 999}', '{broken'])
+def test_content_downgrade_refuses_all_nonnull_before_ddl(
+    alembic_config, engine, content_rows, table, column, payload,
+):
+    from sqlalchemy import text
+    with engine.begin() as connection:
+        connection.execute(text(f'UPDATE {table} SET {column} = :payload'), {'payload': payload})
+    from sqlalchemy import event
+    ddl = []
+
+    def track_ddl(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith(('ALTER ', 'DROP ', 'CREATE ')):
+            ddl.append(statement)
+
+    event.listen(Engine, 'before_cursor_execute', track_ddl)
+    try:
+        with pytest.raises(RuntimeError, match='содержательного'):
+            command.downgrade(alembic_config, '0005')
+    finally:
+        event.remove(Engine, 'before_cursor_execute', track_ddl)
+    assert ddl == []
+    with engine.connect() as connection:
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0006'
+        assert connection.execute(text(f'SELECT {column} FROM {table}')).scalar_one() == payload
+        for target, name in CONTENT_COLUMNS:
+            assert name in {item['name'] for item in inspect(connection).get_columns(target)}
+
+
+def test_content_null_downgrade_keeps_analysis_children(alembic_config, engine, content_rows, unit_of_work):
+    from persistence_factories import make_analysis
+    command.downgrade(alembic_config, '0005')
+    command.upgrade(alembic_config, '0006')
+    with unit_of_work.transaction() as uow:
+        assert uow.analyses.get_for_section('book-1', 'section-1') == make_analysis()
+
+
+def test_content_downgrade_old_sqlite_fails_before_ddl(engine, content_rows, monkeypatch):
+    import importlib.util
+    path = Path(__file__).resolve().parents[3] / 'alembic/versions/0006_content_plan.py'
+    spec = importlib.util.spec_from_file_location('content_plan_migration', path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    with engine.connect() as connection:
+        monkeypatch.setattr(connection.dialect, 'server_version_info', (3, 34, 0))
+        monkeypatch.setattr(migration.op, 'get_bind', lambda: connection)
+        dropped = []
+        monkeypatch.setattr(migration.op, 'drop_column', lambda *args: dropped.append(args))
+        with pytest.raises(RuntimeError, match='SQLite 3.35'):
+            migration.downgrade()
+        assert dropped == []
+        for target, name in CONTENT_COLUMNS:
+            assert name in {item['name'] for item in inspect(connection).get_columns(target)}
