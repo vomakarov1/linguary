@@ -332,3 +332,81 @@ async def test_quote_only_byr_retries_whole_and_fragment_analysis(max_blocks, qu
     assert result.analysis.content_plan is not None
     assert result.analysis.before_you_read[0].explanation != quoted
     assert unit_of_work.analyses.get_for_section(BOOK_ID, "section-1") == result.analysis
+
+
+@pytest.mark.parametrize('max_blocks', [2, 4])
+async def test_candidate_note_budget_retries_before_save(max_blocks):
+    import json
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
+    from linguary.application.retry_policy import RetryPolicy
+    from analysis_fakes import CONFIDENCE_THRESHOLD, sequential_ids
+    data = json.loads(analysis_reply(aliases=tuple(f'b{i}' for i in range(1, max_blocks + 1))).content)
+    data['before_you_read'] = []
+    data['treatment_plan'] = [dict(source_block_id=f'b{i}', treatment='READ_AS_IS') for i in range(1, max_blocks + 1)]
+    difficulty = dict(id='d', anchors=[dict(block_id='b1', start=0, end=9, quote='Paragraph')], owner_block_id='b1', kind='grammar', priority='critical', help_kind='explanation', required_points=[dict(id='p', description='Explain the construction')])
+    data['content_plan'] = dict(version=2, profile='content-plan-v2', difficulties=[difficulty], before_you_read_evidence=[])
+    bad = FakeReply.of_payload(data)
+    data['content_plan']['difficulties'] = []
+    good = FakeReply.of_payload(data)
+    client = FakeLLMClient.replying([bad, good, good] if max_blocks == 2 else [bad, good])
+    work = four_block_book()
+    async def sleep(_):
+        pass
+    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=max_blocks, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2', language_notes_per_chapter=0))
+    result = await scenario(command())
+    assert result.analysis.content_plan.difficulties == ()
+    assert result.attempts == (3 if max_blocks == 2 else 2)
+    assert all(r.contract_version == 2 for r in client.requests)
+    assert [r.attempt for r in client.requests[:2]] == [1, 2]
+    assert work.analyses.get_for_section(BOOK_ID, 'section-1') == result.analysis
+
+
+async def test_fragment_byr_budgets_preserve_all_bound_evidence():
+    import json
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
+    from linguary.application.retry_policy import RetryPolicy
+    from analysis_fakes import CONFIDENCE_THRESHOLD, sequential_ids
+    def reply(label, count):
+        data = json.loads(analysis_reply(aliases=('b1', 'b2')).content)
+        data['before_you_read'] = [dict(expression=f'{label} expression {i}', explanation=f'{label} explanation for aspect {i}.') for i in range(count)]
+        points = [dict(id=f'p{i}', description=f'Explain aspect {i}') for i in range(count)]
+        data['content_plan'] = dict(version=2, profile='content-plan-v2', difficulties=[dict(id='d', anchors=[dict(block_id='b1', start=0, end=9, quote='Paragraph')], owner_block_id='b1', kind='semantic_relation', priority='critical', help_kind='explanation', required_points=points)], before_you_read_evidence=[dict(difficulty_id='d', point_id=f'p{i}', artifact_kind='before_you_read.explanation', source_block_id='b1', artifact_index=i, body_excerpt=f'{label} explanation for aspect {i}.') for i in range(count)])
+        return FakeReply.of_payload(data)
+    client = FakeLLMClient.replying([reply('First', 6), reply('First', 5), reply('Second', 5)])
+    work = four_block_book()
+    async def sleep(_):
+        pass
+    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=2, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2', language_notes_per_chapter=0))
+    result = await scenario(command())
+    assert result.attempts == 3
+    assert len(result.analysis.before_you_read) == 10
+    assert len(result.analysis.content_plan.before_you_read_evidence) == 10
+    assert len(result.analysis.content_plan.difficulties) == 2
+    assert work.analyses.get_for_section(BOOK_ID, 'section-1') == result.analysis
+
+
+async def test_real_group_note_budget_retries_before_save():
+    import json
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
+    from linguary.application.retry_policy import RetryPolicy
+    from analysis_fakes import CONFIDENCE_THRESHOLD, sequential_ids
+    section = make_analysis_section(texts=('Echo', 'Echo', 'Echo', 'Long text. ' * 1000))
+    work = FakeUnitOfWork(document=make_analysis_document((section,)))
+    data = json.loads(analysis_reply(aliases=('b1', 'b2', 'b3', 'b4')).content)
+    data['before_you_read'] = []
+    data['treatment_plan'] = [dict(source_block_id=f'b{i}', treatment='READ_AS_IS') for i in range(1, 5)]
+    data['content_plan'] = dict(version=2, profile='content-plan-v2', difficulties=[dict(id=f'd{i}', anchors=[dict(block_id=f'b{i}', start=0, end=4, quote='Echo')], owner_block_id=f'b{i}', kind='wordplay', priority='critical', help_kind='explanation', required_points=[dict(id='p', description='Explain the relationship')]) for i in range(1, 4)], before_you_read_evidence=[])
+    bad = FakeReply.of_payload(data)
+    data['content_plan']['difficulties'] = data['content_plan']['difficulties'][:1]
+    client = FakeLLMClient.replying([bad, FakeReply.of_payload(data)])
+    async def sleep(_):
+        pass
+    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=4, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2'))
+    result = await scenario(command())
+    assert result.attempts == 2
+    assert len(result.analysis.content_plan.difficulties) == 1
+    assert work.analyses.get_for_section(BOOK_ID, 'section-1') == result.analysis
+    assert 'реальную группу' in client.requests[1].instructions

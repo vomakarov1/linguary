@@ -607,3 +607,19 @@ def test_byr_quote_with_additional_explanation_is_not_rejected_as_quote():
         )),
     )
     validate_content_plan(payload, {"b1": "stable"}, {"stable": "Echo"})
+
+
+def test_analysis_plan_respects_configured_note_budget():
+    from dataclasses import replace
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import ContentPlanResponse, HelpEvidenceResponse
+    from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+    d = Difficulty('d', (SourceAnchor('b1', 0, 4, 'Echo'),), 'b1', 'wordplay', 'critical', 'explanation', (RequiredPoint('p', 'Explain'),))
+    payload = ChapterAnalysisResponse('i', 's', treatment_plan=(TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),), content_plan=ContentPlanResponse((d,)))
+    with pytest.raises(AnalysisMergeError):
+        validate_content_plan(payload, {'b1': 'stable'}, {'stable': 'Echo'}, language_notes_per_chapter=0, note_limits_by_block={'stable': 0})
+    e = HelpEvidenceResponse('d', 'p', 'before_you_read.explanation', 'b1', 0, 'Two meanings')
+    covered = replace(payload, before_you_read=(BeforeYouReadEntryResponse('Echo', 'Two meanings are contrasted.'),), content_plan=ContentPlanResponse((d,), (e,)))
+    validate_content_plan(covered, {'b1': 'stable'}, {'stable': 'Echo'}, language_notes_per_chapter=0, note_limits_by_block={'stable': 0})
+    with pytest.raises(AnalysisMergeError):
+        validate_content_plan(covered, {'b1': 'stable'}, {'stable': 'Echo'}, before_you_read_limit=0)

@@ -433,3 +433,36 @@ def test_analysis_requires_natural_character_speech() -> None:
                          chapter_fragment_instructions(source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE)):
         assert "естественными понятными средствами" in instructions
         assert "без искусственной имитации" in instructions
+
+
+def test_candidate_profile_and_fragment_byr_budgets():
+    section = make_analysis_section(section_id='section-1', title='Chapter', order=0, texts=FRAGMENTED_TEXTS)
+    document = make_analysis_document((section,))
+    builder = ContextBuilder(content_plan_profile='content-plan-v2', language_notes_per_chapter=3)
+    fragments = plan_fragments(textual_blocks(section), max_blocks=1)
+    contexts = [builder.for_chapter_fragment(document=document, section=section, fragment=f, fragment_count=len(fragments)) for f in fragments]
+    assert sum(c.before_you_read_limit for c in contexts) == 10
+    assert [c.before_you_read_limit for c in contexts] == [3, 3, 2, 2]
+    assert all(c.request.contract_version == 2 for c in contexts)
+    assert sum(c.language_notes_per_chapter for c in contexts) == 3
+    assert 'игру слов' in contexts[0].request.instructions
+    assert build_context().request.contract_version == 1
+
+
+def test_unknown_content_profile_rejected():
+    with pytest.raises(ContextBuildError):
+        ContextBuilder(content_plan_profile='unknown')
+
+
+def test_analysis_checks_real_processing_group_notes_budget():
+    from linguary.application.analysis_merge import validate_content_plan, AnalysisMergeError
+    from linguary.application.llm_dto import ChapterAnalysisResponse, ContentPlanResponse, TreatmentPlanItemResponse
+    from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+    section = make_analysis_section(section_id='s', title='Chapter', order=0, texts=('Echo', 'Echo', 'Echo', 'Long text. ' * 1000))
+    document = make_analysis_document((section,))
+    context = ContextBuilder(content_plan_profile='content-plan-v2').for_chapter_analysis(document=document, section=section)
+    difficulties = tuple(Difficulty(f'd{i}', (SourceAnchor(f'b{i}', 0, 4, 'Echo'),), f'b{i}', 'wordplay', 'critical', 'explanation', (RequiredPoint('p', 'Explain'),)) for i in range(1, 4))
+    payload = ChapterAnalysisResponse('i', 's', treatment_plan=tuple(TreatmentPlanItemResponse(f'b{i}', BlockTreatment.READ_AS_IS) for i in range(1, 5)), content_plan=ContentPlanResponse(difficulties))
+    assert context.note_group_limits[0][1] == 1
+    with pytest.raises(AnalysisMergeError, match='реальную группу'):
+        validate_content_plan(payload, context.block_ids_by_alias, {b.id: b.text for b in section.blocks}, language_notes_per_chapter=context.language_notes_per_chapter, note_limits_by_block=context.note_limits_by_block, note_group_limits=context.note_group_limits)

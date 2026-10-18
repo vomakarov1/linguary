@@ -221,6 +221,7 @@ def build_application(
     epubcheck: EpubCheckValidator | None = None,
     migrate: bool = True,
     on_logged: LoggedObserver | None = None,
+    content_plan_profile: str = "legacy-v1",
 ) -> Application:
     """Собирает приложение по локальной конфигурации.
 
@@ -229,6 +230,7 @@ def build_application(
     `worker_settings` перекрывает параллелизм фоновых задач, заданный секцией `[worker]`
     (PRD § 25). `migrate` отключает применение схемы там, где базу готовит вызывающий код.
     """
+    ContextBuilder(content_plan_profile=content_plan_profile)
     try:
         initial_settings = settings if settings is not None else load_settings()
     except SettingsError:
@@ -274,15 +276,15 @@ def build_application(
             configured_client=configured_client,
             analysis=_analysis_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=model,
+                task_queue=task_queue, model=model, content_plan_profile=content_plan_profile,
             ),
             processing=_processing_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=model,
+                task_queue=task_queue, model=model, content_plan_profile=content_plan_profile,
             ),
             regeneration=_regeneration_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=model,
+                task_queue=task_queue, model=model, content_plan_profile=content_plan_profile,
             ),
         )
         if llm_client is None:
@@ -408,6 +410,7 @@ def _analysis_sequence(
     unit_of_work: SqlAlchemyUnitOfWork,
     task_queue: SqliteTaskQueue,
     model: LLMClient,
+    content_plan_profile: str = "legacy-v1",
 ) -> ChapterAnalysisSequence:
     """Анализ глав с порогом глоссария и пределом фрагмента из настроек (PRD § 12, § 14)."""
     return ChapterAnalysisSequence(
@@ -419,7 +422,7 @@ def _analysis_sequence(
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             glossary_confidence_threshold=settings.checks.glossary_confidence_threshold,
             max_fragment_blocks=settings.llm.effective_max_fragment_blocks,
-            context_builder=_context_builder(settings),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile),
         ),
     )
 
@@ -430,6 +433,7 @@ def _processing_sequence(
     unit_of_work: SqlAlchemyUnitOfWork,
     task_queue: SqliteTaskQueue,
     model: LLMClient,
+    content_plan_profile: str = "legacy-v1",
 ) -> ChapterProcessingSequence:
     """Обработка глав с пределом группы блоков из настроек (PRD § 10)."""
     return ChapterProcessingSequence(
@@ -441,7 +445,7 @@ def _processing_sequence(
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
             max_unit_source_chars=settings.llm.max_unit_source_chars,
-            context_builder=_context_builder(settings),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile),
         ),
     )
 
@@ -452,6 +456,7 @@ def _regeneration_sequence(
     unit_of_work: SqlAlchemyUnitOfWork,
     task_queue: SqliteTaskQueue,
     model: LLMClient,
+    content_plan_profile: str = "legacy-v1",
 ) -> BlockRegenerationSequence:
     """Повторная генерация блока с соседним контекстом (PRD § 13, § 21.5)."""
     return BlockRegenerationSequence(
@@ -462,7 +467,7 @@ def _regeneration_sequence(
             llm_client=model,
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
-            context_builder=_context_builder(settings),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile),
         ),
     )
 
@@ -482,9 +487,11 @@ def _llm_snapshot(settings: AppSettings) -> LLMSettingsSnapshot:
     )
 
 
-def _context_builder(settings: AppSettings) -> ContextBuilder:
+def _context_builder(settings: AppSettings, *, content_plan_profile: str = "legacy-v1") -> ContextBuilder:
     """Политика контекста запросов к модели (PRD § 13)."""
     return ContextBuilder(
+        content_plan_profile=content_plan_profile,
+        max_unit_source_chars=settings.llm.max_unit_source_chars,
         regeneration_context_blocks=DEFAULT_REGENERATION_CONTEXT_BLOCKS,
         language_notes_per_chapter=settings.checks.language_notes_per_chapter,
     )

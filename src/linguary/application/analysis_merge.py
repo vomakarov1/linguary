@@ -507,22 +507,40 @@ def validate_content_plan(
     payload: ChapterAnalysisResponse,
     aliases: Mapping[str, str],
     texts: Mapping[str, str],
+    *,
+    before_you_read_limit: int = 10,
+    language_notes_per_chapter: int = 8,
+    note_limits_by_block: Mapping[str, int] | None = None,
+    note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
 ) -> None:
     """Проверяет исходные привязки и допустимость каналов до принятия ответа."""
     plan = content_plan_from_response(payload, aliases)
     if plan is None:
         return
+    if len(payload.before_you_read) > before_you_read_limit:
+        raise AnalysisMergeError("BYR превышает согласованный бюджет фрагмента")
     treatments = {aliases[i.source_block_id]: i.treatment for i in payload.treatment_plan}
+    note_owners = set()
     for difficulty in plan.difficulties:
         for anchor in difficulty.anchors:
             anchor.validate(texts)
         covered = {e.point_id for e in plan.before_you_read_evidence if e.difficulty_id == difficulty.id}
         if difficulty.help_kind == "lexical_hint" and treatments.get(difficulty.owner_block_id) is not BlockTreatment.GLOSSARY_ONLY and covered != {p.id for p in difficulty.required_points}:
             raise AnalysisMergeError("лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR")
+        if (difficulty.help_kind == "explanation"
+                and covered != {p.id for p in difficulty.required_points}
+                and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS):
+            note_owners.add(difficulty.owner_block_id)
         for item in plan.before_you_read_evidence:
             if item.difficulty_id == difficulty.id and any(_quotation_key(item.body_excerpt) == _quotation_key(a.quote) for a in difficulty.anchors):
                 raise AnalysisMergeError("цитата оригинала не является объяснением")
-
+    if any(len(note_owners.intersection(ids)) > limit for ids, limit in note_group_limits):
+        raise AnalysisMergeError("обязательные заметки не помещаются в реальную группу обработки")
+    if len(note_owners) > language_notes_per_chapter or any(
+        note_limits_by_block is not None and note_limits_by_block.get(owner, 0) < 1
+        for owner in note_owners
+    ):
+        raise AnalysisMergeError("содержательный план не помещается в бюджет языковых заметок")
 
 
 def _quotation_key(text: str) -> str:

@@ -254,3 +254,22 @@ def _walk(node: object) -> list[object]:
         for item in node:
             found.extend(_walk(item))
     return found
+
+
+def test_v1_schema_unchanged():
+    import hashlib
+    import json
+    from linguary.adapters.llm.payloads import schema_for
+    from linguary.application.ports.llm import LLMResponseKind
+    expected = {'chapter_analysis': '9c354997070f86d64b9ec7fb9ef3d741b76f7f2a08c84bf6bb8eccf9c9622b88', 'translation_result': '85cdddc508275c54c92f92cc5e39b7f9a5cbb0a0388051c093d7ad5329ba25f9'}
+    for kind in LLMResponseKind:
+        wire = strict_json_schema(schema_for(kind))
+        assert hashlib.sha256(json.dumps(wire, sort_keys=True, separators=(',', ':')).encode()).hexdigest() == expected[kind.value]
+
+
+def test_v2_preserves_exact_source_substrings():
+    from linguary.adapters.llm.schemas import SourceAnchorSchema, HelpEvidenceSchema
+    anchor = SourceAnchorSchema(block_id='b1', start=0, end=5, quote='Echo ')
+    assert anchor.quote == 'Echo '
+    evidence = HelpEvidenceSchema(difficulty_id='d', point_id='p', source_block_id='b1', artifact_kind='language_note.note', artifact_index=0, body_excerpt=' two meanings ')
+    assert evidence.body_excerpt == ' two meanings '

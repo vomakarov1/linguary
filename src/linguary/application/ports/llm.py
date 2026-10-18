@@ -120,6 +120,7 @@ class LLMRequest[PayloadT: LLMPayload]:
     stage: LLMCallStage | None = None
     task_id: str | None = None
     attempt: int = 1
+    contract_version: int = 1
 
     def __post_init__(self) -> None:
         if not self.instructions.strip():
@@ -149,24 +150,26 @@ class LLMRequest[PayloadT: LLMPayload]:
 
     @classmethod
     def for_chapter_analysis(
-        cls, *, instructions: str, input_text: str
+        cls, *, instructions: str, input_text: str, contract_version: int = 1
     ) -> LLMRequest[ChapterAnalysisResponse]:
         """Запрос анализа главы или её фрагмента (PRD § 11, § 14)."""
         return LLMRequest[ChapterAnalysisResponse](
             kind=LLMResponseKind.CHAPTER_ANALYSIS,
             instructions=instructions,
             input_text=input_text,
+            contract_version=contract_version,
         )
 
     @classmethod
     def for_translation(
-        cls, *, instructions: str, input_text: str
+        cls, *, instructions: str, input_text: str, contract_version: int = 1
     ) -> LLMRequest[TranslationResultResponse]:
         """Запрос обработки группы блоков или одного блока (PRD § 10, § 14)."""
         return LLMRequest[TranslationResultResponse](
             kind=LLMResponseKind.TRANSLATION_RESULT,
             instructions=instructions,
             input_text=input_text,
+            contract_version=contract_version,
         )
 
 

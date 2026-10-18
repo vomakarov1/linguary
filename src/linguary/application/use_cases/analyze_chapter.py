@@ -335,7 +335,13 @@ class AnalyzeChapter:
                 _ensure_plan_covers_chapter(response.payload, context)
                 _ensure_candidates_single_script(response.payload, context)
                 try:
-                    validate_content_plan(response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks})
+                    validate_content_plan(
+                        response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
+                        before_you_read_limit=context.before_you_read_limit,
+                        language_notes_per_chapter=context.language_notes_per_chapter,
+                        note_limits_by_block=context.note_limits_by_block,
+                        note_group_limits=context.note_group_limits,
+                    )
                 except (ApplicationError, DomainError) as error:
                     raise ResultValidationError(str(error), expectation=context.expectation) from error
             except Exception as error:

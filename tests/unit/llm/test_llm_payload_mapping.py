@@ -105,3 +105,24 @@ def test_response_of_wrong_kind_is_rejected() -> None:
         parse_payload(
             LLMResponseKind.TRANSLATION_RESULT, as_content(analysis_payload())
         )
+
+
+def test_v2_round_trip_plan_and_evidence():
+    data = analysis_payload()
+    data['content_plan'] = {'version': 2, 'profile': 'content-plan-v2', 'difficulties': [], 'before_you_read_evidence': []}
+    result = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, as_content(data), contract_version=2)
+    assert result.content_plan.version == 2
+    data = translation_payload()
+    data['content_evidence'] = []
+    assert parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), contract_version=2).content_evidence == ()
+
+
+@pytest.mark.parametrize('kind,data', [(LLMResponseKind.CHAPTER_ANALYSIS, analysis_payload()), (LLMResponseKind.TRANSLATION_RESULT, translation_payload())])
+def test_v2_missing_fields_rejected(kind, data):
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(kind, as_content(data), contract_version=2)
+
+
+def test_unknown_contract_version_rejected():
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, '{}', contract_version=3)
