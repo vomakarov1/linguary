@@ -248,3 +248,87 @@ async def test_failed_fragment_leaves_the_chapter_unanalysed() -> None:
 
     assert client.call_count == 3
     assert unit_of_work.analyses.get_for_section(BOOK_ID, "section-1") is None
+
+
+@pytest.mark.parametrize("max_blocks", [2, 4])
+@pytest.mark.parametrize("bad_anchor", ["unknown", "mismatch"])
+async def test_unknown_or_mismatched_anchor_retries_analysis(max_blocks, bad_anchor):
+    from dataclasses import replace
+    from linguary.application.llm_dto import ContentPlanResponse
+    from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+
+    class CandidateClient:
+        def __init__(self):
+            self.base = FakeLLMClient.always(analysis_reply(aliases=tuple(f"b{i}" for i in range(1, max_blocks + 1))))
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            response = await self.base.generate(request)
+            alias = "invisible" if self.calls == 1 and bad_anchor == "unknown" else "b1"
+            quote = "Invented!" if self.calls == 1 and bad_anchor == "mismatch" else "Paragraph"
+            d = Difficulty("model-id", (SourceAnchor(alias, 0, len(quote), quote),), alias, "grammar", "useful", "explanation", (RequiredPoint("p", "Explain the construction"),))
+            return replace(response, payload=replace(response.payload, content_plan=ContentPlanResponse((d,))))
+
+    client = CandidateClient()
+    scenario, _ = make_analyze_chapter(four_block_book(), client, max_fragment_blocks=max_blocks)
+    result = await scenario(command())
+    assert result.attempts == (3 if max_blocks == 2 else 2)
+    assert len(result.analysis.content_plan.difficulties) == (2 if max_blocks == 2 else 1)
+    assert all(d.owner_block_id != "b1" for d in result.analysis.content_plan.difficulties)
+
+
+async def test_legacy_analysis_has_no_content_validation():
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1", "b2", "b3", "b4")))
+    scenario, _ = make_analyze_chapter(four_block_book(), client, max_fragment_blocks=4)
+    assert (await scenario(command())).analysis.content_plan is None
+
+
+@pytest.mark.parametrize("max_blocks", [2, 4])
+@pytest.mark.parametrize("quoted", ['«Paragraph»', '"Paragraph"'])
+async def test_quote_only_byr_retries_whole_and_fragment_analysis(max_blocks, quoted):
+    from dataclasses import replace
+    from linguary.application.llm_dto import (
+        BeforeYouReadEntryResponse, ContentPlanResponse, HelpEvidenceResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain import BlockTreatment
+    from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+
+    class CandidateClient:
+        def __init__(self):
+            self.base = FakeLLMClient.always(analysis_reply(
+                aliases=tuple(f"b{i}" for i in range(1, max_blocks + 1)),
+            ))
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            response = await self.base.generate(request)
+            body = quoted if self.calls == 1 else '«Paragraph» means a section of written text.'
+            difficulty = Difficulty(
+                "d", (SourceAnchor("b1", 0, 9, "Paragraph"),), "b1",
+                "vocabulary", "useful", "lexical_hint",
+                (RequiredPoint("p", "Explain the word"),),
+            )
+            payload = replace(
+                response.payload,
+                treatment_plan=tuple(
+                    TreatmentPlanItemResponse(f"b{i}", BlockTreatment.READ_AS_IS)
+                    for i in range(1, max_blocks + 1)
+                ),
+                before_you_read=(BeforeYouReadEntryResponse("Paragraph", body),),
+                content_plan=ContentPlanResponse((difficulty,), (
+                    HelpEvidenceResponse("d", "p", "before_you_read.explanation", "b1", 0, body),
+                )),
+            )
+            return replace(response, payload=payload)
+
+    client = CandidateClient()
+    unit_of_work = four_block_book()
+    scenario, _ = make_analyze_chapter(unit_of_work, client, max_fragment_blocks=max_blocks)
+    result = await scenario(command())
+    assert result.attempts == (3 if max_blocks == 2 else 2)
+    assert result.analysis.content_plan is not None
+    assert result.analysis.before_you_read[0].explanation != quoted
+    assert unit_of_work.analyses.get_for_section(BOOK_ID, "section-1") == result.analysis

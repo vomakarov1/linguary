@@ -503,3 +503,107 @@ def test_fragments_with_repeated_order_are_rejected() -> None:
             make_fragment(0, blocks=expected[1:]),
             expected=expected,
         )
+
+
+def test_fragment_aliases_do_not_collide():
+    from linguary.application.llm_dto import ContentPlanResponse
+    from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+    difficulty = Difficulty("d1", (SourceAnchor("b1", 0, 4, "Echo"),), "b1", "wordplay", "critical", "explanation", (RequiredPoint("p1", "Explain the two meanings"),))
+    payload = ChapterAnalysisResponse("Keep voice", "A voice echoes", content_plan=ContentPlanResponse((difficulty,)))
+    first = FragmentAnalysis.of_response(payload, order=0, block_ids_by_alias={"b1": "stable1"})
+    second = FragmentAnalysis.of_response(payload, order=1, block_ids_by_alias={"b1": "stable2"})
+    assert first.content_plan.difficulties[0].id != second.content_plan.difficulties[0].id
+    assert first.content_plan.difficulties[0].owner_block_id == "stable1"
+
+
+def test_conflicting_duplicate_difficulty_rejected():
+    from linguary.domain.content_plan import ContentPlan, Difficulty, SourceAnchor, RequiredPoint
+    from dataclasses import replace
+    d = Difficulty("x", (SourceAnchor("stable", 0, 4, "Echo"),), "stable", "wordplay", "critical", "explanation", (RequiredPoint("p", "Explain"),))
+    fragments = [FragmentAnalysis(0, "i", "s", content_plan=ContentPlan(difficulties=(d,))), FragmentAnalysis(1, "i", "s", content_plan=ContentPlan(difficulties=(replace(d, priority="useful"),)))]
+    with pytest.raises(AnalysisMergeError):
+        merge_chapter_analysis(fragments, id="a", section_id="s", expected_block_ids=(), glossary_confidence_threshold=.8, id_factory=lambda: "id")
+
+
+def test_merge_preserves_all_required_points():
+    from linguary.domain.content_plan import ContentPlan, Difficulty, SourceAnchor, RequiredPoint
+    points = (RequiredPoint("p1", "First meaning"), RequiredPoint("p2", "Second meaning"))
+    d = Difficulty("stable", (SourceAnchor("block-1", 0, 4, "Echo"),), "block-1", "wordplay", "critical", "explanation", points)
+    analysis = merge_chapter_analysis([FragmentAnalysis(0, "i", "s", treatments=(TreatmentPlanItem("block-1", BlockTreatment.READ_AS_IS),), content_plan=ContentPlan(difficulties=(d,)))], id="a", section_id="s", expected_block_ids=("block-1", "block-2"), glossary_confidence_threshold=.8, id_factory=lambda: "id")
+    assert analysis.content_plan.difficulties[0].required_points == points
+    assert not analysis.is_complete
+
+
+def test_anchor_and_byr_validation_uses_visible_real_bodies():
+    from dataclasses import replace
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import ContentPlanResponse, HelpEvidenceResponse
+    from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+    from linguary.domain.errors import DomainError
+    d = Difficulty("d", (SourceAnchor("b1", 0, 4, "Echo"),), "b1", "wordplay", "critical", "explanation", (RequiredPoint("p", "Explain both meanings"),))
+    e = HelpEvidenceResponse("d", "p", "before_you_read.explanation", "b1", 0, "two meanings")
+    payload = ChapterAnalysisResponse("i", "s", treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),), before_you_read=(BeforeYouReadEntryResponse("Echo", "This has two meanings."),), content_plan=ContentPlanResponse((d,), (e,)))
+    validate_content_plan(payload, {"b1": "stable"}, {"stable": "Echo"})
+    with pytest.raises(DomainError):
+        validate_content_plan(payload, {"b1": "stable"}, {"stable": "Other"})
+    with pytest.raises(AnalysisMergeError):
+        validate_content_plan(payload, {"different": "stable"}, {"stable": "Echo"})
+    for invalid in (replace(e, artifact_index=9), replace(e, body_excerpt="invented"), replace(e, point_id="other")):
+        with pytest.raises((AnalysisMergeError, DomainError)):
+            validate_content_plan(replace(payload, content_plan=ContentPlanResponse((d,), (invalid,))), {"b1": "stable"}, {"stable": "Echo"})
+
+
+def test_duplicate_anchor_merges_all_aspects():
+    from dataclasses import replace
+    from linguary.domain.content_plan import ContentPlan, Difficulty, SourceAnchor, RequiredPoint
+    d = Difficulty("first", (SourceAnchor("block-1", 0, 4, "Echo"),), "block-1", "wordplay", "critical", "explanation", (RequiredPoint("p1", "First meaning"),))
+    other = replace(d, id="second", required_points=(RequiredPoint("p2", "Second meaning"),))
+    fragments = [FragmentAnalysis(i, "i", "s", content_plan=ContentPlan(difficulties=(item,))) for i, item in enumerate((d, other))]
+    analysis = merge_chapter_analysis(fragments, id="a", section_id="s", expected_block_ids=(), glossary_confidence_threshold=.8, id_factory=lambda: "id")
+    assert len(analysis.content_plan.difficulties) == 1
+    merged = analysis.content_plan.difficulties[0]
+    assert {p.id for p in merged.required_points} == {"p1", "p2"}
+    assert merged.id == merged.canonical_id
+
+
+@pytest.mark.parametrize("quoted", ['«Echo»', '“Echo”', '„Echo“', '「Echo」', '"Echo"', "'Echo'", ' \u00a0« Echo »!\n'])
+@pytest.mark.parametrize("expression", ["Echo", "A different expression"])
+def test_quoted_byr_cannot_cover_lexical_help(quoted, expression):
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import ContentPlanResponse, HelpEvidenceResponse
+    from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+
+    difficulty = Difficulty(
+        "d", (SourceAnchor("b1", 0, 4, "Echo"),), "b1",
+        "vocabulary", "useful", "lexical_hint", (RequiredPoint("p", "Explain the word"),),
+    )
+    evidence = HelpEvidenceResponse("d", "p", "before_you_read.explanation", "b1", 0, quoted)
+    payload = ChapterAnalysisResponse(
+        "instructions", "summary",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
+        before_you_read=(BeforeYouReadEntryResponse(expression, quoted),),
+        content_plan=ContentPlanResponse((difficulty,), (evidence,)),
+    )
+    with pytest.raises(AnalysisMergeError):
+        validate_content_plan(payload, {"b1": "stable"}, {"stable": "Echo"})
+
+
+def test_byr_quote_with_additional_explanation_is_not_rejected_as_quote():
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import ContentPlanResponse, HelpEvidenceResponse
+    from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+
+    body = '«Echo» refers to a reflected sound.'
+    difficulty = Difficulty(
+        "d", (SourceAnchor("b1", 0, 4, "Echo"),), "b1",
+        "vocabulary", "useful", "lexical_hint", (RequiredPoint("p", "Explain the word"),),
+    )
+    payload = ChapterAnalysisResponse(
+        "instructions", "summary",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
+        before_you_read=(BeforeYouReadEntryResponse("Echo", body),),
+        content_plan=ContentPlanResponse((difficulty,), (
+            HelpEvidenceResponse("d", "p", "before_you_read.explanation", "b1", 0, body),
+        )),
+    )
+    validate_content_plan(payload, {"b1": "stable"}, {"stable": "Echo"})

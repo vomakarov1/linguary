@@ -37,6 +37,8 @@ from linguary.application.analysis_merge import (
     ChapterFragment,
     FragmentAnalysis,
     before_you_read_entries,
+    content_plan_from_response,
+    validate_content_plan,
     merge_chapter_analysis,
     plan_fragments,
 )
@@ -56,6 +58,7 @@ from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators.mixed_script import mixed_script_word
 from linguary.application.task_runner import TaskQueue
+from linguary.domain.errors import DomainError
 from linguary.domain import (
     BeforeYouReadEntry,
     BookEvent,
@@ -190,7 +193,7 @@ class AnalyzeChapter:
                 task_id=command.task_id,
             ),
         )
-        payload, attempts, usage = await self._request_analysis(context)
+        payload, attempts, usage = await self._request_analysis(context, blocks=blocks)
         analysis = self._to_analysis(
             payload, context=context, section=section, blocks=blocks
         )
@@ -255,7 +258,7 @@ class AnalyzeChapter:
                     task_id=command.task_id,
                 ),
             )
-            payload, fragment_attempts, usage = await self._request_analysis(context)
+            payload, fragment_attempts, usage = await self._request_analysis(context, blocks=fragment.blocks)
             attempts += fragment_attempts
             usages.append(usage)
             analysed.append(
@@ -315,7 +318,7 @@ class AnalyzeChapter:
         return document, accumulated
 
     async def _request_analysis(
-        self, context: ChapterAnalysisContext
+        self, context: ChapterAnalysisContext, *, blocks: Sequence[DocumentBlock]
     ) -> tuple[ChapterAnalysisResponse, int, TokenUsage | None]:
         """Выполняет вызов модели с повторами по политике (ALG-05).
 
@@ -331,6 +334,10 @@ class AnalyzeChapter:
                 response = await self._llm_client.generate(request)
                 _ensure_plan_covers_chapter(response.payload, context)
                 _ensure_candidates_single_script(response.payload, context)
+                try:
+                    validate_content_plan(response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks})
+                except (ApplicationError, DomainError) as error:
+                    raise ResultValidationError(str(error), expectation=context.expectation) from error
             except Exception as error:
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
@@ -376,6 +383,7 @@ class AnalyzeChapter:
             expected_block_ids=[block.id for block in blocks],
             glossary_candidates=self._candidates(payload, analysis_id=analysis_id),
             before_you_read=_before_you_read(payload),
+            content_plan=content_plan_from_response(payload, context.block_ids_by_alias),
         )
 
     def _candidates(

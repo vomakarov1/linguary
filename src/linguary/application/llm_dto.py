@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from linguary.application.errors import ApplicationError
 from linguary.domain import BlockTreatment, ConceptType
+from linguary.domain.content_plan import Difficulty
 
 
 class LLMPayloadError(ApplicationError):
@@ -105,6 +106,8 @@ class ChapterAnalysisResponse:
     glossary_candidates: tuple[GlossaryCandidateResponse, ...] = ()
     treatment_plan: tuple[TreatmentPlanItemResponse, ...] = ()
     before_you_read: tuple[BeforeYouReadEntryResponse, ...] = ()
+
+    content_plan: ContentPlanResponse | None = None
 
     def __post_init__(self) -> None:
         if not self.translation_instructions.strip():
@@ -209,6 +212,7 @@ class TranslationResultResponse:
 
     blocks: tuple[BlockResultResponse, ...] = ()
     language_notes: tuple[LanguageNoteResponse, ...] = ()
+    content_evidence: tuple[HelpEvidenceResponse, ...] = ()
 
     @property
     def block_ids(self) -> tuple[str, ...]:
@@ -221,6 +225,8 @@ class TranslationResultResponse:
 
 
 __all__ = [
+    "ContentPlanResponse",
+    "HelpEvidenceResponse",
     "BeforeYouReadEntryResponse",
     "BlockResultResponse",
     "ChapterAnalysisResponse",
@@ -231,3 +237,36 @@ __all__ = [
     "TranslationResultResponse",
     "TreatmentPlanItemResponse",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class HelpEvidenceResponse:
+    difficulty_id: str
+    point_id: str
+    artifact_kind: str
+    source_block_id: str
+    artifact_index: int
+    body_excerpt: str
+
+    def __post_init__(self) -> None:
+        if not all(v.strip() for v in (self.difficulty_id, self.point_id, self.source_block_id, self.body_excerpt)) or self.artifact_index < 0:
+            raise LLMPayloadError("свидетельство требует аспект, индекс и непустое тело")
+        if self.artifact_kind not in {"before_you_read.explanation", "language_note.note", "glossary_hint.note", "glossary_hint.translation"}:
+            raise LLMPayloadError("неизвестный канал помощи")
+
+
+@dataclass(frozen=True, slots=True)
+class ContentPlanResponse:
+    difficulties: tuple[Difficulty, ...] = ()
+    before_you_read_evidence: tuple[HelpEvidenceResponse, ...] = ()
+    version: int = 2
+    profile: str = "content-plan-v2"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "difficulties", tuple(self.difficulties))
+        object.__setattr__(self, "before_you_read_evidence", tuple(self.before_you_read_evidence))
+        if self.version != 2 or self.profile != "content-plan-v2":
+            raise LLMPayloadError("неизвестная версия содержательного плана")
+        ids = [d.id for d in self.difficulties]
+        if len(ids) != len(set(ids)):
+            raise LLMPayloadError("повторяющийся идентификатор трудности")
