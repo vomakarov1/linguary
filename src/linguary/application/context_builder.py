@@ -54,7 +54,8 @@ from linguary.application.chapter_instructions import (
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMRequest
-from linguary.domain.content_plan import artifact_key
+from linguary.domain.content_plan import ContentPlan, artifact_key
+from linguary.domain import BeforeYouReadEntry
 from linguary.application.retry_policy import (
     ExpectedBlock,
     ResultExpectation,
@@ -243,6 +244,8 @@ class TranslationContext(AliasedBlocksContext):
     expectation: ResultExpectation
     explained_expressions: tuple[str, ...] = ()
     explained_entries: tuple[tuple[str, str], ...] = ()
+    content_plan: ContentPlan | None = None
+    before_you_read: tuple[BeforeYouReadEntry, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -526,6 +529,8 @@ class ContextBuilder:
             ),
             explained_expressions=_before_you_read_expressions(analysis, section),
             explained_entries=_before_you_read_entries(analysis, section),
+            content_plan=analysis.content_plan,
+            before_you_read=() if section.is_notes_only else analysis.before_you_read,
         )
 
     def _translation_input(

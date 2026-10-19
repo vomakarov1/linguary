@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+from linguary.application.validators.content_plan import validate_content_coverage
+from linguary.application.retry_policy import ResultValidationError
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -237,12 +240,14 @@ class ExportBook:
                     f"собирать не из чего"
                 )
             results = transaction.results.list_for_run(run.id)
+            analyses = transaction.analyses.list_for_book(command.book_id)
+            _validate_content_plans(document, analyses, results)
             return replace(
                 plan,
                 block_results={result.block_id: result for result in results},
                 learning_materials=_learning_materials(
                     document=document,
-                    analyses=transaction.analyses.list_for_book(command.book_id),
+                    analyses=analyses,
                     results=results,
                 ),
             )
@@ -435,3 +440,28 @@ __all__ = [
     "ExportMode",
     "ExportValidationRejectedError",
 ]
+
+
+def _validate_content_plans(document, analyses, results):
+    """Перепроверяет сохранённые тела текущего запуска до сборки книги."""
+    sections = {s.id: s for s in document.sections}
+    blocks = tuple(document.blocks())
+    for analysis in analyses:
+        plan = analysis.content_plan
+        if plan is None:
+            continue
+        owners = {b.id for b in blocks if b.section_id == analysis.section_id}
+        actual = tuple(r for r in results if r.block_id in owners)
+        expected = {item.block_id: item.treatment for item in analysis.treatment_plan.items if item.treatment.is_textual}
+        required_owners = {d.owner_block_id for d in plan.difficulties}
+        if not (required_owners | expected.keys()) <= {r.block_id for r in actual}:
+            raise ResultValidationError('отсутствует результат владельца содержательного плана')
+        byr = () if sections[analysis.section_id].is_notes_only else analysis.before_you_read
+        if not actual:
+            raise ResultValidationError('отсутствуют свидетельства содержательного плана')
+        for result in actual:
+            if result.block_id not in expected or result.treatment != expected[result.block_id]:
+                raise ResultValidationError('режим результата не соответствует плану обработки')
+            if result.content_evidence is None:
+                raise ResultValidationError('отсутствуют свидетельства содержательного плана')
+            validate_content_coverage(plan, (result,), byr, result.content_evidence, owner_block_ids=(result.block_id,))

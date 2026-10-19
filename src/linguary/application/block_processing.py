@@ -24,6 +24,8 @@ from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators import TranslationResultValidator
+from linguary.application.validators.content_plan import resolve_response_evidence, validate_content_coverage
+from linguary.domain.content_plan import ContentEvidence
 from linguary.domain import (
     BlockProcessingResult,
     BookEvent,
@@ -105,14 +107,23 @@ class TranslationCall:
             response = None
             try:
                 response = await self._llm_client.generate(request)
+                mapped = context.to_block_ids(response.payload)
                 results = self._validator.validate(
-                    context.to_block_ids(response.payload),
+                    mapped,
                     unit=unit,
                     target_language=target_language,
                     note_id_factory=note_ids,
                     truncated=response.truncated,
                     expectation=context.expectation,
                 )
+                if context.content_plan is not None:
+                    owners = tuple(r.block_id for r in results)
+                    evidence = resolve_response_evidence(context.content_plan, mapped, results, context.before_you_read, owner_block_ids=owners)
+                    results = tuple(explained.without_repeats_v2(r) for r in results)
+                    checked = validate_content_coverage(context.content_plan, results, context.before_you_read, evidence, owner_block_ids=owners)
+                    results = tuple(replace(r, content_evidence=ContentEvidence(context.content_plan.sha256, tuple(e for e in checked if e.block_id == r.block_id))) for r in results)
+                else:
+                    results = tuple(explained.without_repeats(r) for r in results)
             except Exception as error:
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
@@ -126,7 +137,7 @@ class TranslationCall:
                 request = decision.next_request(request)
                 continue
             return TranslationCallResult(
-                results=tuple(explained.without_repeats(result) for result in results),
+                results=results,
                 attempts=attempts,
                 usage=response.usage,
             )
