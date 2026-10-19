@@ -193,11 +193,22 @@ def evaluate_candidate(report, protocol) -> ComparisonDecision:
     reasons = list(report.missing_data)
     if report.violations or report.manifest.get('protocol_hash') != protocol.content_hash:
         return ComparisonDecision('invalid_conditions', reasons=report.violations or ['protocol_hash_mismatch'])
+    variants = {variant.id: variant for variant in protocol.variants}
     for item in ([] if report.simulated else report.observations):
         if item.get('received_response') and (item.get('actual_model') is None or item.get('actual_provider') is None or item.get('full_response_cache') is not False):
             return ComparisonDecision('invalid_conditions', reasons=['unknown_route_or_cache'])
-        if item.get('received_response') and (item['actual_model'] != item['assigned_model'] or item['actual_provider'] != item['assigned_route']):
-            return ComparisonDecision('invalid_conditions', reasons=['changed_route'])
+        if item.get('received_response'):
+            model = item.get('assigned_model')
+            if _stage(item.get('stage')) == 'processing':
+                variant = variants.get(item.get('variant_id'))
+                if variant is None or model != variant.processing_model:
+                    return ComparisonDecision('invalid_conditions', reasons=['changed_route'])
+            metadata = protocol.route_metadata.get(model)
+            if (metadata is None or model not in protocol.routes
+                    or item.get('assigned_route') != protocol.routes[model]
+                    or item['actual_model'] not in metadata.model_versions
+                    or item['actual_provider'] not in metadata.provider_names):
+                return ComparisonDecision('invalid_conditions', reasons=['changed_route'])
     if report.simulated:
         reasons.append('simulated_results')
     if any(v is None for v in (protocol.sufficient_gain, protocol.comparability_margin, protocol.scale_max, protocol.max_book_cost, protocol.max_book_seconds)):

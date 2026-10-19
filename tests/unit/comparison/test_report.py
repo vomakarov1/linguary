@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 
 from linguary.comparison.llm import CallObservation
-from linguary.comparison.protocol import draft_protocol
+from linguary.comparison.protocol import RouteMetadata, draft_protocol
 from linguary.comparison.report import build_report, evaluate_candidate
 
 
@@ -46,7 +46,16 @@ def test_unknown_cost_never_becomes_zero():
 
 
 def test_missing_reviews_or_minimum_samples_prevent_selection():
-    assert evaluate_candidate(report([receipt('1')]), draft_protocol()).status == 'insufficient_data'
+    protocol = draft_protocol()
+    variant = protocol.variants[0]
+    model = variant.processing_model
+    protocol = protocol.model_copy(update={
+        'routes': {model: 'r'},
+        'route_metadata': {model: RouteMetadata(model_versions=(model,), provider_names=('r',))},
+    })
+    value = report([receipt('1', variant_id=variant.id, assigned_model=model, actual_model=model)])
+    value.manifest['protocol_hash'] = protocol.content_hash
+    assert evaluate_candidate(value, protocol).status == 'insufficient_data'
 
 
 def test_failed_chapters_and_invalid_conditions_remain_visible():
@@ -62,21 +71,79 @@ def candidate_fixture():
         'critical_places': ({'unused': True},)})
     from linguary.comparison.protocol import CriticalPlace
     protocol = protocol.model_copy(update={'critical_places': (CriticalPlace(chapter_id='control', location='pun', expected_explanation='Explain meaning'),)})
+    models = {v.analysis_model for v in protocol.variants}
+    protocol = protocol.model_copy(update={
+        'routes': {model: 'route-' + model for model in models},
+        'route_metadata': {model: RouteMetadata(model_versions=(model,), provider_names=('route-' + model,)) for model in models},
+    })
     items, outcomes, reviews, books = [], {'variants': [], 'variant_models': {}, 'simulated': False}, {}, {}
     for variant in protocol.variants:
         outcomes['variant_models'][variant.id] = {'analysis_model': variant.analysis_model}
         for repeat in (1, 2):
             outcomes['variants'].append({'variant_id': variant.id, 'repeat': repeat, 'completed': True, 'failures': []})
-            items.append(receipt(f'p-{variant.id}-{repeat}', operation=f'p-{variant.id}-{repeat}', variant_id=variant.id, repeat=repeat))
+            items.append(receipt(f'p-{variant.id}-{repeat}', operation=f'p-{variant.id}-{repeat}', variant_id=variant.id, repeat=repeat, assigned_model=variant.processing_model, actual_model=variant.processing_model, assigned_route=protocol.routes[variant.processing_model], actual_provider=protocol.routes[variant.processing_model]))
         score = 3 if variant.id == 'luna/luna' else 4
         reviews[variant.id] = {'repeat_scores': [score, score], 'criteria': {key: score for key in protocol.rubric}, 'critical_places': {'control:pun': True},
             **{key: True for key in ('no_gross_errors', 'simple_help_density_appropriate', 'help_without_duplication', 'analysis_reviewed', 'execution_after_dedup_reviewed', 'independent_chapters_confirmed')}}
         books[variant.id] = {'cost': '1', 'wall_seconds': 10, 'analysis_included': True, 'assumptions': ['fixed synthetic corpus']}
     for model in {v.analysis_model for v in protocol.variants}:
         for repeat in (1, 2):
-            items.append(receipt(f'a-{model}-{repeat}', operation=f'a-{model}-{repeat}', variant_id=f'analysis-{model}', repeat=repeat, stage='chapter_analysis', assigned_model=model, actual_model=model))
+            items.append(receipt(f'a-{model}-{repeat}', operation=f'a-{model}-{repeat}', variant_id=f'analysis-{model}', repeat=repeat, stage='chapter_analysis', assigned_model=model, actual_model=model, assigned_route=protocol.routes[model], actual_provider=protocol.routes[model]))
     value = build_report({'protocol_hash': protocol.content_hash}, items, outcomes, reviews, {'books': books, 'wall_seconds': 10, 'assumptions': ['fixed synthetic corpus']})
     return protocol, value
+
+
+@pytest.mark.parametrize('mismatch', [None, 'actual_model', 'actual_provider', 'assigned_model', 'assigned_route', 'missing_metadata'])
+def test_candidate_checks_receipts_against_agreed_route_metadata(mismatch):
+    protocol, value = candidate_fixture()
+    metadata = {model: RouteMetadata(model_versions=(model + '-2026-10',), provider_names=('Display ' + model,))
+                for model in protocol.routes}
+    if mismatch == 'missing_metadata':
+        metadata.pop(value.observations[0]['assigned_model'])
+    protocol = protocol.model_copy(update={'route_metadata': metadata})
+    value.manifest['protocol_hash'] = protocol.content_hash
+    for item in value.observations:
+        item['actual_model'] = item['assigned_model'] + '-2026-10'
+        item['actual_provider'] = 'Display ' + item['assigned_model']
+    if mismatch and mismatch != 'missing_metadata':
+        value.observations[0][mismatch] = 'foreign-value'
+    decision = evaluate_candidate(value, protocol)
+    if mismatch is None:
+        assert decision.status == 'candidate'
+        assert decision.variant_id == 'sonnet/sonnet'
+    else:
+        assert decision.status == 'invalid_conditions'
+        assert decision.reasons == ['changed_route']
+
+
+@pytest.mark.parametrize('assignment', ['model', 'route'])
+def test_matching_receipt_cannot_override_protocol_assignment(assignment):
+    protocol, value = candidate_fixture()
+    item = value.observations[0]
+    if assignment == 'model':
+        item['assigned_model'] = item['actual_model'] = 'foreign-model'
+    else:
+        item['assigned_route'] = item['actual_provider'] = 'foreign-provider'
+    decision = evaluate_candidate(value, protocol)
+    assert decision.status == 'invalid_conditions'
+    assert decision.reasons == ['changed_route']
+
+
+@pytest.mark.parametrize('stage', ['translation_result', 'processing'])
+@pytest.mark.parametrize('mismatch', ['other_allowed_model', 'unknown_variant'])
+def test_processing_receipt_must_match_protocol_variant(stage, mismatch):
+    protocol, value = candidate_fixture()
+    item = value.observations[0]
+    item['stage'] = stage
+    if mismatch == 'other_allowed_model':
+        other = next(model for model in protocol.routes if model != item['assigned_model'])
+        item.update(assigned_model=other, actual_model=protocol.route_metadata[other].model_versions[0],
+                    assigned_route=protocol.routes[other], actual_provider=protocol.route_metadata[other].provider_names[0])
+    else:
+        item['variant_id'] = 'unknown-variant'
+    decision = evaluate_candidate(value, protocol)
+    assert decision.status == 'invalid_conditions'
+    assert decision.reasons == ['changed_route']
 
 
 def test_quality_tie_prefers_simpler_eligible_variant():
