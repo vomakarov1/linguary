@@ -97,5 +97,14 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
             excerpt = excerpt.strip()
         if not excerpt:
             raise ResultValidationError('пустое свидетельство помощи')
+        if a.body and excerpt not in a.body:
+            from linguary.application.analysis_merge import _quotation_key, find_quote_span
+            span = find_quote_span(a.body, excerpt)
+            if span is not None:
+                excerpt = span[2]
+            else:
+                stripped = _quotation_key(excerpt)
+                if stripped and stripped in a.body:
+                    excerpt = stripped
         evidence.append(HelpEvidence(item.difficulty_id, item.point_id, kind, owner, a.key, excerpt))
     return ContentEvidence(plan.sha256, tuple(evidence))

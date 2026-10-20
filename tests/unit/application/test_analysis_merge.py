@@ -623,3 +623,76 @@ def test_analysis_plan_respects_configured_note_budget():
     validate_content_plan(covered, {'b1': 'stable'}, {'stable': 'Echo'}, language_notes_per_chapter=0, note_limits_by_block={'stable': 0})
     with pytest.raises(AnalysisMergeError):
         validate_content_plan(covered, {'b1': 'stable'}, {'stable': 'Echo'}, before_you_read_limit=0)
+
+
+def test_find_quote_span_and_anchor_alignment_with_typography():
+    from linguary.application.analysis_merge import content_plan_from_response, find_quote_span, validate_content_plan
+    from linguary.application.llm_dto import ContentPlanResponse
+    from linguary.domain.content_plan import Difficulty, RequiredPoint, SourceAnchor
+
+    text = "One dollar. Pennies saved until one’s cheeks burned with imputation of parsimony."
+    # 1. Direct span resolution
+    res = find_quote_span(text, "one's cheeks burned", estimated_start=15)
+    assert res is not None
+    start, end, actual = res
+    assert actual == "one’s cheeks burned"
+    assert text[start:end] == actual
+
+    # 2. Inexact bounds from model are resolved when texts are provided
+    d = Difficulty(
+        "d1",
+        (SourceAnchor("b1", 99, 118, "one's cheeks burned"),),
+        "b1",
+        "vocabulary",
+        "critical",
+        "explanation",
+        (RequiredPoint("p1", "Explain"),),
+    )
+    payload = ChapterAnalysisResponse(
+        "i",
+        "s",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),),
+        content_plan=ContentPlanResponse((d,)),
+    )
+    plan = content_plan_from_response(payload, {"b1": "stable"}, {"stable": text})
+    assert plan is not None
+    resolved_anchor = plan.difficulties[0].anchors[0]
+    assert resolved_anchor.start == start
+    assert resolved_anchor.end == end
+    assert resolved_anchor.quote == "one’s cheeks burned"
+    # Validation passes without error
+    validate_content_plan(payload, {"b1": "stable"}, {"stable": text})
+
+
+def test_byr_body_excerpt_with_outer_quotes_aligned_to_explanation():
+    from linguary.application.analysis_merge import content_plan_from_response, validate_content_plan
+    from linguary.application.llm_dto import ContentPlanResponse, HelpEvidenceResponse
+    from linguary.domain.content_plan import Difficulty, RequiredPoint, SourceAnchor
+
+    text = "She got it on the sly."
+    d = Difficulty(
+        "d1",
+        (SourceAnchor("b1", 14, 21, "the sly"),),
+        "b1",
+        "vocabulary",
+        "useful",
+        "explanation",
+        (RequiredPoint("p1", "Explain"),),
+    )
+    # The explanation does not have outer quotes, but the LLM wrapped body_excerpt in «...»
+    payload = ChapterAnalysisResponse(
+        "i",
+        "s",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),),
+        before_you_read=(BeforeYouReadEntryResponse("on the sly", "тайком, украдкой, стараясь не привлекать внимания"),),
+        content_plan=ContentPlanResponse(
+            (d,),
+            (HelpEvidenceResponse("d1", "p1", "before_you_read.explanation", "b1", 0, "«тайком, украдкой, стараясь не привлекать внимания»"),),
+        ),
+    )
+    plan = content_plan_from_response(payload, {"b1": "stable"}, {"stable": text})
+    assert plan is not None
+    assert plan.before_you_read_evidence[0].body_excerpt == "тайком, украдкой, стараясь не привлекать внимания"
+    validate_content_plan(payload, {"b1": "stable"}, {"stable": text})
+
+

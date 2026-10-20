@@ -230,6 +230,9 @@ def build_application(
     `worker_settings` перекрывает параллелизм фоновых задач, заданный секцией `[worker]`
     (PRD § 25). `migrate` отключает применение схемы там, где базу готовит вызывающий код.
     """
+    if content_plan_profile == "legacy-v1":
+        import os
+        content_plan_profile = os.environ.get("LINGUARY_CONTENT_PLAN_PROFILE", "legacy-v1")
     ContextBuilder(content_plan_profile=content_plan_profile)
     try:
         initial_settings = settings if settings is not None else load_settings()

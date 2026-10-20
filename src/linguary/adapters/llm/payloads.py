@@ -88,7 +88,7 @@ def parse_payload(
     except (LLMPayloadError, DomainError) as error:
         raise LLMResponseFormatError(
             f"ответ модели ({kind.value}) не соответствует внутреннему контракту: "
-            f"{type(error).__name__}",
+            f"{type(error).__name__}: {error}",
             truncated=truncated,
             raw_content=content,
         ) from error
@@ -202,13 +202,27 @@ __all__ = ["SCHEMAS", "parse_payload", "schema_for"]
 
 
 def _content_plan(schema) -> ContentPlanResponse:
+    difficulties = []
+    for d in schema.difficulties:
+        anchors = []
+        for a in d.anchors:
+            start = a.start
+            end = a.end if a.end - a.start == len(a.quote) else a.start + len(a.quote)
+            anchors.append(SourceAnchor(block_id=a.block_id, start=start, end=end, quote=a.quote))
+        difficulties.append(
+            Difficulty(
+                id=d.id,
+                owner_block_id=d.owner_block_id,
+                kind=d.kind,
+                priority=d.priority,
+                help_kind=d.help_kind,
+                anchors=tuple(anchors),
+                required_points=tuple(RequiredPoint(**p.model_dump()) for p in d.required_points),
+            )
+        )
     return ContentPlanResponse(
-        version=schema.version, profile=schema.profile,
-        difficulties=tuple(Difficulty(
-            id=d.id, owner_block_id=d.owner_block_id, kind=d.kind,
-            priority=d.priority, help_kind=d.help_kind,
-            anchors=tuple(SourceAnchor(**a.model_dump()) for a in d.anchors),
-            required_points=tuple(RequiredPoint(**p.model_dump()) for p in d.required_points),
-        ) for d in schema.difficulties),
+        version=schema.version,
+        profile=schema.profile,
+        difficulties=tuple(difficulties),
         before_you_read_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.before_you_read_evidence),
     )

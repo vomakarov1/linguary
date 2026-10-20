@@ -266,6 +266,7 @@ class AnalyzeChapter:
                     payload,
                     order=fragment.order,
                     block_ids_by_alias=context.block_ids_by_alias,
+                    texts={b.id: b.text for b in fragment.blocks},
                 )
             )
         analysis = merge_chapter_analysis(
@@ -389,7 +390,9 @@ class AnalyzeChapter:
             expected_block_ids=[block.id for block in blocks],
             glossary_candidates=self._candidates(payload, analysis_id=analysis_id),
             before_you_read=_before_you_read(payload),
-            content_plan=content_plan_from_response(payload, context.block_ids_by_alias),
+            content_plan=content_plan_from_response(
+                payload, context.block_ids_by_alias, {b.id: b.text for b in blocks}
+            ),
         )
 
     def _candidates(
