@@ -105,14 +105,18 @@ before_you_read_evidence (пустые списки обязательны, ес
 Каждая трудность: id, anchors [{block_id, start, end, quote}], owner_block_id,
 kind, priority, help_kind, required_points [{id, description}]. Смещения — Unicode
 кодовые точки точного исходного текста, end исключён; quote=text[start:end].
+Копируй quote ДОСЛОВНО из текста блока, не раскрывай и не меняй сокращения (например, she’s нельзя заменять на she is).
 Владелец один, из anchors. Ссылайся только на видимые блоки по b1..bN.
 Все включённые аспекты обязательны; не навязывай перевод вопреки глоссарию.
-lexical_hint требует GLOSSARY_ONLY или уже предоставленный BYR; explanation
-требует объясняющего BYR, языковой заметки либо содержательного glossary_hint.note.
+lexical_hint допустим ТОЛЬКО для блоков GLOSSARY_ONLY или при полном покрытии в BYR.
+Для блоков TRANSLATE и READ_AS_IS используй help_kind=explanation.
+explanation требует объясняющего BYR, языковой заметки либо содержательного glossary_hint.note.
 Перевод, цитата и пересказ не заменяют объяснение. Не повышай квоты.
 Если BYR уже покрывает аспект, не требуй лишней заметки. Для каждого такого аспекта
 верни свидетельство: difficulty_id, point_id, artifact_kind=before_you_read.explanation,
-source_block_id владельца, artifact_index (с нуля), body_excerpt из тела объяснения.
+source_block_id владельца, artifact_index, body_excerpt.
+artifact_index — строго порядковый номер (начиная с 0) той записи в before_you_read, в чьём explanation находится body_excerpt.
+body_excerpt обязан быть точной подстрокой из русского текста explanation соответствующего элемента before_you_read[artifact_index], не цитатой оригинала.
 Не выдумывай связи с невидимыми частями. Пустой план допустим.
 """
 _CONTENT_PLAN_PROCESSING = """
