@@ -301,3 +301,62 @@ def test_invalid_worker_and_rate_settings_are_reported(tmp_path: Path, content: 
     """Бессмысленный параллелизм или предел частоты — ошибка конфигурации."""
     with pytest.raises(SettingsError):
         load_settings(environ={}, config_path=write_config(tmp_path, content))
+
+
+def test_analysis_and_processing_models_default_to_empty() -> None:
+    """По умолчанию раздельные модели не заданы."""
+    settings = LLMSettings()
+    assert settings.analysis_model == ""
+    assert settings.processing_model == ""
+
+
+def test_effective_models_fallback_to_general_model() -> None:
+    """При отсутствии явных настроек эффективные модели совпадают с общей model."""
+    settings = LLMSettings(model="base/model")
+    assert settings.effective_analysis_model == "base/model"
+    assert settings.effective_processing_model == "base/model"
+
+
+def test_effective_models_use_explicit_values() -> None:
+    """Явные настройки перекрывают общую model для анализа и обработки."""
+    settings = LLMSettings(
+        model="base/model",
+        analysis_model="deep/analysis",
+        processing_model="fast/translation",
+    )
+    assert settings.effective_analysis_model == "deep/analysis"
+    assert settings.effective_processing_model == "fast/translation"
+
+
+def test_analysis_and_processing_models_are_read_from_toml(tmp_path: Path) -> None:
+    """Раздельные модели считываются из секции [llm] TOML-конфигурации."""
+    content = """
+    [llm]
+    model = "default-model"
+    analysis_model = "analysis-model"
+    processing_model = "processing-model"
+    """
+    settings = load_settings(environ={}, config_path=write_config(tmp_path, content))
+    assert settings.llm.model == "default-model"
+    assert settings.llm.analysis_model == "analysis-model"
+    assert settings.llm.processing_model == "processing-model"
+    assert settings.llm.effective_analysis_model == "analysis-model"
+    assert settings.llm.effective_processing_model == "processing-model"
+
+
+def test_analysis_and_processing_models_are_read_from_environment(tmp_path: Path) -> None:
+    """Раздельные модели читаются из переменных окружения."""
+    settings = load_settings(
+        environ={
+            "LINGUARY_LLM_MODEL": "default-model",
+            "LINGUARY_LLM_ANALYSIS_MODEL": "env-analysis-model",
+            "LINGUARY_LLM_PROCESSING_MODEL": "env-processing-model",
+        },
+        config_path=write_config(tmp_path, ""),
+    )
+    assert settings.llm.model == "default-model"
+    assert settings.llm.analysis_model == "env-analysis-model"
+    assert settings.llm.processing_model == "env-processing-model"
+    assert settings.llm.effective_analysis_model == "env-analysis-model"
+    assert settings.llm.effective_processing_model == "env-processing-model"
+
