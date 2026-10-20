@@ -101,7 +101,7 @@ class OpenAICompatibleLLMClient(LLMClient):
             choice = _choice(document)
             truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
             content = _content(choice)
-            payload = parse_payload(request.kind, content, truncated=truncated)
+            payload = parse_payload(request.kind, content, contract_version=request.contract_version, truncated=truncated)
         except LLMResponseFormatError as error:
             error.args = (safe_detail(str(error), api_key=self._settings.api_key, secrets=self._proxy_secrets),)
             if error.raw_content is not None:
@@ -194,7 +194,7 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
             "json_schema": {
                 "name": request.kind.value,
                 "strict": True,
-                "schema": strict_json_schema(schema_for(request.kind)),
+                "schema": strict_json_schema(schema_for(request.kind, contract_version=request.contract_version)),
             },
         },
     }

@@ -11,6 +11,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from linguary.domain.content_plan import ContentEvidence
 from linguary.domain.document import DocumentBlock
 from linguary.domain.errors import (
     ActiveRunConflictError,
@@ -77,6 +78,7 @@ class BlockProcessingResult:
     glossary_hints: tuple[GlossaryHint, ...] = ()
     language_notes: tuple[LanguageNote, ...] = ()
     warnings: tuple[ResultWarning, ...] = ()
+    content_evidence: ContentEvidence | tuple[()] = ()
 
     def __post_init__(self) -> None:
         if not self.block_id.strip():

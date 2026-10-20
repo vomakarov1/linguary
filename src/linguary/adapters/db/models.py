@@ -27,6 +27,9 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Dialect
+from sqlalchemy.exc import DontWrapMixin
+
+from linguary.application.ports.persistence import PersistenceError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -42,6 +45,41 @@ NAMING_CONVENTION = {
 
 #: Условие частичного уникального индекса «один активный запуск обработки на книгу».
 ACTIVE_RUN_CONDITION = "status = 'active'"
+
+
+class ContentJSONError(PersistenceError, DontWrapMixin):
+    """Ошибка новых JSON-полей без включения параметров SQL в сообщение."""
+
+
+class ContentObjectJSON(TypeDecorator[dict[str, Any]]):
+    """SQL NULL для legacy; ненулевой JSON обязан быть объектом."""
+
+    impl = JSON
+    cache_ok = True
+
+    def __init__(self) -> None:
+        super().__init__(none_as_null=True)
+
+    def process_bind_param(self, value, dialect):
+        if value is not None and type(value) is not dict:
+            raise ContentJSONError("некорректный объект содержательного плана или свидетельств")
+        return value
+
+    def result_processor(self, dialect, coltype):
+        processor = super().result_processor(dialect, coltype)
+
+        def process(raw):
+            if raw is None:
+                return None
+            try:
+                value = processor(raw)
+            except (ValueError, TypeError):
+                raise ContentJSONError("повреждённый JSON содержательного плана или свидетельств") from None
+            if type(value) is not dict:
+                raise ContentJSONError("некорректный объект содержательного плана или свидетельств")
+            return value
+
+        return process
 
 
 class UtcDateTime(TypeDecorator[datetime]):
@@ -224,6 +262,7 @@ class ChapterAnalysisRow(Base):
     translation_instructions: Mapped[str] = mapped_column(Text)
     chapter_summary: Mapped[str] = mapped_column(Text)
     before_you_read_json: Mapped[list[dict[str, str]]] = mapped_column(JSON)
+    content_plan_json: Mapped[dict[str, Any] | None] = mapped_column(ContentObjectJSON(), nullable=True)
 
 
 class TreatmentPlanItemRow(Base):
@@ -296,6 +335,7 @@ class BlockResultRow(Base):
     treatment: Mapped[str] = mapped_column(String)
     translated_text: Mapped[str | None] = mapped_column(Text)
     glossary_hints_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    content_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(ContentObjectJSON(), nullable=True)
 
 
 class LanguageNoteRow(Base):

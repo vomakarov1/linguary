@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from datetime import datetime
+from dataclasses import asdict
+from typing import Any
 
 from linguary.adapters.db.models import (
     BlockResultRow,
@@ -31,7 +33,11 @@ from linguary.adapters.db.models import (
     TermVariantRow,
     TreatmentPlanItemRow,
 )
-from linguary.application.ports.persistence import BookRecord, ExportValidationStatus
+from linguary.application.ports.persistence import BookRecord, ExportValidationStatus, PersistenceError
+from linguary.domain.content_plan import (
+    ContentPlan, ContentEvidence, Difficulty, SourceAnchor, RequiredPoint, HelpEvidence,
+)
+from linguary.domain.errors import DomainError
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockProcessingResult,
@@ -330,6 +336,7 @@ def to_analysis_row(book_id: str, analysis: ChapterAnalysis) -> ChapterAnalysisR
         coverage_status=analysis.coverage_status.value,
         translation_instructions=analysis.translation_instructions,
         chapter_summary=analysis.chapter_summary,
+        content_plan_json=_encode_content_plan(analysis.content_plan),
         before_you_read_json=[
             {"expression": entry.expression, "explanation": entry.explanation}
             for entry in analysis.before_you_read
@@ -400,6 +407,7 @@ def to_analysis(
             )
             for candidate in candidates
         ),
+        content_plan=_decode_content_plan(row.content_plan_json),
         before_you_read=tuple(
             BeforeYouReadEntry(
                 expression=entry["expression"], explanation=entry["explanation"]
@@ -468,6 +476,7 @@ def to_result_row(run_id: str, result: BlockProcessingResult) -> BlockResultRow:
         block_id=result.block_id,
         treatment=result.treatment.value,
         translated_text=result.translated_text,
+        content_evidence_json=_encode_content_evidence(result.content_evidence),
         glossary_hints_json=[
             {"original": hint.original, "translation": hint.translation, "note": hint.note}
             for hint in result.glossary_hints
@@ -515,6 +524,7 @@ def to_block_result(
         block_id=row.block_id,
         treatment=BlockTreatment(row.treatment),
         translated_text=row.translated_text,
+        content_evidence=_decode_content_evidence(row.content_evidence_json),
         glossary_hints=tuple(
             GlossaryHint(
                 original=hint["original"],
@@ -633,3 +643,113 @@ def _to_task_error(
     if error_type is None or message is None:
         return None
     return TaskError(type=ErrorType(error_type), message=message, detail=detail)
+
+
+# --- содержательный план: отдельный строгий формат хранения версии 2 -----------------
+
+
+def _object(value: object, fields: set[str]) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("неверные поля объекта")
+    return value
+
+
+def _string(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("ожидалась строка")
+    return value
+
+
+def _integer(value: object) -> int:
+    if type(value) is not int:
+        raise ValueError("ожидалось целое число")
+    return value
+
+
+def _array(value: object) -> list[Any]:
+    if type(value) is not list:
+        raise ValueError("ожидался список")
+    return value
+
+
+def _help_evidence(value: object) -> HelpEvidence:
+    fields = {"difficulty_id", "point_id", "artifact_kind", "block_id", "artifact_key", "body_excerpt"}
+    data = _object(value, fields)
+    return HelpEvidence(**{name: _string(data[name]) for name in fields})
+
+
+def _difficulty(value: object) -> Difficulty:
+    fields = {"id", "anchors", "owner_block_id", "kind", "priority", "help_kind", "required_points"}
+    data = _object(value, fields)
+    anchors = []
+    for item in _array(data["anchors"]):
+        anchor = _object(item, {"block_id", "start", "end", "quote"})
+        anchors.append(SourceAnchor(
+            block_id=_string(anchor["block_id"]), start=_integer(anchor["start"]),
+            end=_integer(anchor["end"]), quote=_string(anchor["quote"]),
+        ))
+    points = []
+    for item in _array(data["required_points"]):
+        point = _object(item, {"id", "description"})
+        points.append(RequiredPoint(_string(point["id"]), _string(point["description"])))
+    return Difficulty(
+        **{name: _string(data[name]) for name in ("id", "owner_block_id", "kind", "priority", "help_kind")},
+        anchors=tuple(anchors), required_points=tuple(points),
+    )
+
+
+def _decode_content_plan(value: object) -> ContentPlan | None:
+    if value is None:
+        return None
+    try:
+        data = _object(value, {"version", "profile", "difficulties", "before_you_read_evidence"})
+        return ContentPlan(
+            version=_integer(data["version"]), profile=_string(data["profile"]),
+            difficulties=tuple(_difficulty(item) for item in _array(data["difficulties"])),
+            before_you_read_evidence=tuple(_help_evidence(item) for item in _array(data["before_you_read_evidence"])),
+        )
+    except (ValueError, TypeError, DomainError):
+        raise PersistenceError("повреждённый сохранённый содержательный план") from None
+
+
+def _decode_content_evidence(value: object) -> ContentEvidence | tuple[()]:
+    if value is None:
+        return ()
+    try:
+        data = _object(value, {"version", "plan_sha256", "evidence", "structural_coverage", "semantic_correctness"})
+        return ContentEvidence(
+            version=_integer(data["version"]), plan_sha256=_string(data["plan_sha256"]),
+            evidence=tuple(_help_evidence(item) for item in _array(data["evidence"])),
+            structural_coverage=_string(data["structural_coverage"]),
+            semantic_correctness=_string(data["semantic_correctness"]),
+        )
+    except (ValueError, TypeError, DomainError):
+        raise PersistenceError("повреждённые сохранённые свидетельства помощи") from None
+
+
+def _json_collections(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_collections(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_collections(item) for item in value]
+    return value
+
+
+def _encode_content_plan(value: ContentPlan | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if type(value) is not ContentPlan:
+        raise PersistenceError("некорректный содержательный план для сохранения")
+    data = _json_collections(asdict(value))
+    _decode_content_plan(data)
+    return data
+
+
+def _encode_content_evidence(value: ContentEvidence | tuple[()]) -> dict[str, Any] | None:
+    if type(value) is tuple and value == ():
+        return None
+    if type(value) is not ContentEvidence:
+        raise PersistenceError("некорректные свидетельства помощи для сохранения")
+    data = _json_collections(asdict(value))
+    _decode_content_evidence(data)
+    return data

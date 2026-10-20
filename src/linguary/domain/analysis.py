@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from linguary.domain.content_plan import ContentPlan
 from linguary.domain.errors import AnalysisIncompleteError, DomainError
 from linguary.domain.glossary import GlossaryCandidate
 from linguary.domain.learning import BeforeYouReadEntry
@@ -28,6 +29,8 @@ class ChapterAnalysis:
     chapter_summary: str
     glossary_candidates: tuple[GlossaryCandidate, ...] = ()
     before_you_read: tuple[BeforeYouReadEntry, ...] = ()
+
+    content_plan: ContentPlan | None = None
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -57,6 +60,7 @@ class ChapterAnalysis:
         expected_block_ids: Iterable[str],
         glossary_candidates: Iterable[GlossaryCandidate] = (),
         before_you_read: Iterable[BeforeYouReadEntry] = (),
+        content_plan: ContentPlan | None = None,
     ) -> ChapterAnalysis:
         """Создаёт анализ, вычислив полноту покрытия блоков главы планом."""
         return cls(
@@ -68,6 +72,7 @@ class ChapterAnalysis:
             chapter_summary=chapter_summary,
             glossary_candidates=tuple(glossary_candidates),
             before_you_read=tuple(before_you_read),
+            content_plan=content_plan,
         )
 
     @property

@@ -15,9 +15,9 @@ LLM. Провайдер получает их как JSON Schema строгог�
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from linguary.domain import BlockTreatment, ConceptType
 
@@ -147,3 +147,49 @@ __all__ = [
     "TranslationResultSchema",
     "TreatmentPlanItemSchema",
 ]
+
+
+class SourceAnchorSchema(_ResponseModel):
+    block_id: str = Field(min_length=1)
+    start: int = Field(ge=0, strict=True)
+    end: int = Field(gt=0, strict=True)
+    quote: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
+
+
+class RequiredPointSchema(_ResponseModel):
+    id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+class DifficultySchema(_ResponseModel):
+    id: str = Field(min_length=1)
+    anchors: list[SourceAnchorSchema] = Field(min_length=1)
+    owner_block_id: str = Field(min_length=1)
+    kind: Literal['wordplay', 'semantic_relation', 'grammar', 'cultural_reference', 'idiom', 'vocabulary']
+    priority: Literal['critical', 'useful']
+    help_kind: Literal['explanation', 'lexical_hint']
+    required_points: list[RequiredPointSchema] = Field(min_length=1)
+
+
+class HelpEvidenceSchema(_ResponseModel):
+    difficulty_id: str = Field(min_length=1)
+    point_id: str = Field(min_length=1)
+    artifact_kind: Literal['before_you_read.explanation', 'language_note.note', 'glossary_hint.note', 'glossary_hint.translation']
+    source_block_id: str = Field(min_length=1)
+    artifact_index: int = Field(ge=0, strict=True)
+    body_excerpt: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
+
+
+class ContentPlanSchema(_ResponseModel):
+    version: Literal[2]
+    profile: Literal['content-plan-v2']
+    difficulties: list[DifficultySchema]
+    before_you_read_evidence: list[HelpEvidenceSchema]
+
+
+class ChapterAnalysisV2Schema(ChapterAnalysisSchema):
+    content_plan: ContentPlanSchema
+
+
+class TranslationResultV2Schema(TranslationResultSchema):
+    content_evidence: list[HelpEvidenceSchema]

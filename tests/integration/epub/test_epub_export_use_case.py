@@ -327,3 +327,23 @@ def test_export_of_an_unknown_book_is_rejected(
     """Экспортировать книгу, которой нет в хранилище, нельзя."""
     with pytest.raises(ExportBookError, match="нет в хранилище"):
         export(unit_of_work)(command(tmp_path))
+
+
+def test_export_rejects_missing_or_stale_v2_evidence():
+    from types import SimpleNamespace
+    from linguary.application.use_cases.export_book import _validate_content_plans
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.domain import BlockProcessingResult, BlockTreatment
+    from linguary.domain.content_plan import ContentPlan, ContentEvidence
+    p = ContentPlan()
+    document = SimpleNamespace(blocks=lambda: (SimpleNamespace(id='b', section_id='s'),), sections=(SimpleNamespace(id='s', is_notes_only=False),))
+    analysis = SimpleNamespace(section_id='s', content_plan=p, before_you_read=(), treatment_plan=SimpleNamespace(items=(SimpleNamespace(block_id='b', treatment=BlockTreatment.READ_AS_IS), SimpleNamespace(block_id='missing', treatment=BlockTreatment.READ_AS_IS))))
+    result = BlockProcessingResult('b', BlockTreatment.READ_AS_IS)
+    for value in (None, ContentEvidence('0' * 64)):
+        with pytest.raises(ResultValidationError):
+            _validate_content_plans(document, (analysis,), (replace(result, content_evidence=value),))
+    valid = replace(result, content_evidence=ContentEvidence(p.sha256))
+    with pytest.raises(ResultValidationError):
+        _validate_content_plans(document, (analysis,), (valid,))
+    analysis.treatment_plan = SimpleNamespace(items=analysis.treatment_plan.items[:1])
+    _validate_content_plans(document, (analysis,), (valid,))

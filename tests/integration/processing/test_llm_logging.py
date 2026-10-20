@@ -567,3 +567,70 @@ async def test_proxy_secret_not_in_task_llm_logs_or_http_responses(tmp_path, fai
                 assert value not in output
         finally:
             await built.aclose()
+
+
+async def test_observer_links_success_and_format_error_call_ids(application):
+    store_processing_book(application.unit_of_work)
+    events = []
+    logger = LoggingLLMClient(inner=FakeLLMClient.replying([FakeReply(content='{'), translated_reply()]), unit_of_work=application.unit_of_work, provider='fake', model='fake', on_logged=lambda *event: events.append(event))
+    request = LLMRequest.for_translation(instructions='translate', input_text='text').with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT)
+    with pytest.raises(LLMResponseFormatError):
+        await logger.generate(request)
+    response = await logger.generate(request)
+    with application.unit_of_work.transaction() as transaction:
+        logs = transaction.llm_calls.list_for_book(BOOK_ID)
+        assert all(transaction.llm_calls.response_text_for(entry.id) is None for entry in logs)
+    assert [event[0].id for event in events] == [entry.id for entry in logs]
+    assert events[1][0].id == response.call_id
+    assert isinstance(events[0][2], LLMResponseFormatError)
+
+
+async def test_observer_receives_transport_failure_id(application):
+    from linguary.application.ports.llm import LLMTransportError
+    store_processing_book(application.unit_of_work)
+    events = []
+    logger = LoggingLLMClient(inner=FakeLLMClient.replying([LLMTransportError('offline')]), unit_of_work=application.unit_of_work, provider='fake', model='fake', on_logged=lambda *event: events.append(event))
+    request = LLMRequest.for_translation(instructions='translate', input_text='text').with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT)
+    with pytest.raises(LLMTransportError):
+        await logger.generate(request)
+    with application.unit_of_work.transaction() as transaction:
+        (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
+    assert events[0][0].id == entry.id
+
+
+async def test_observer_failure_stops_followup_calls(application):
+    from linguary.application.ports.llm import LLMConfigurationError
+    store_processing_book(application.unit_of_work)
+    inner = AsyncMock()
+    inner.generate.return_value = LLMResponse(payload=object(), provider='fake', model='fake')
+    def fail(*args):
+        raise RuntimeError('secret observer detail')
+    logger = LoggingLLMClient(inner=inner, unit_of_work=application.unit_of_work, provider='fake', model='fake', on_logged=fail)
+    request = LLMRequest.for_translation(instructions='translate', input_text='text').with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT)
+    for _ in range(2):
+        with pytest.raises(LLMConfigurationError, match='наблюдения'):
+            await logger.generate(request)
+    assert inner.generate.await_count == 1
+
+
+async def test_optional_observer_is_inactive_by_default(application):
+    assert LoggingLLMClient(inner=FakeLLMClient(), unit_of_work=application.unit_of_work, provider='fake', model='fake').on_logged is None
+
+
+async def test_debug_false_never_persists_success_raw(tmp_path):
+    events = []
+    inner = AsyncMock()
+    inner.generate.return_value = LLMResponse(payload=object(), provider='fake', model='fake', raw_content='private accepted answer')
+    built = build_application(settings=AppSettings(llm=LLMSettings(model='fake'), storage=StorageSettings(data_root=str(tmp_path / 'data'))), llm_client=inner, on_logged=lambda *event: events.append(event))
+    try:
+        store_processing_book(built.unit_of_work)
+        request = LLMRequest.for_translation(instructions='translate', input_text='text').with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT)
+        # The application stage is accessed through the real processing pipeline.
+        logger = LoggingLLMClient(inner=inner, unit_of_work=built.unit_of_work, provider='fake', model='fake', on_logged=lambda *event: events.append(event))
+        response = await logger.generate(request)
+        assert events[0][2].raw_content == 'private accepted answer'
+        assert response.raw_content is None
+        with built.unit_of_work.transaction() as transaction:
+            assert transaction.llm_calls.response_text_for(response.call_id) is None
+    finally:
+        await built.aclose()

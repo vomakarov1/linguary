@@ -189,3 +189,19 @@ async def test_owned_client_is_prepared_without_network_and_closed(tmp_path):
     assert not http.is_closed
     await app.aclose()
     assert http.is_closed
+
+
+async def test_runtime_rebuild_preserves_content_plan_profile(tmp_path):
+    from linguary.application.context_builder import CONTENT_PLAN_PROMPT_VERSION
+    from linguary.domain import BookMetadata, CanonicalDocument, DocumentSection, DocumentBlock, BlockType, SupportStatus, SourceReference
+    app = build_application(settings=settings(tmp_path), llm_client=FakeLLMClient(), content_plan_profile='content-plan-v2')
+    try:
+        block = DocumentBlock.create(document_id='book', section_id='s', order=0, type=BlockType.PARAGRAPH, text='Echo calls.', support_status=SupportStatus.SUPPORTED, source_reference=SourceReference(resource_path='s.xhtml', structural_path='/p'))
+        section = DocumentSection(id='s', document_id='book', title='Chapter', order=0, source_resource_path='s.xhtml', blocks=(block,))
+        document = CanonicalDocument(id='book', metadata=BookMetadata(title='Story', authors=()), source_language='en', target_language='ru', sections=(section,))
+        app.runtime_settings.publish(app.runtime_settings.prepare(candidate_settings(app.settings, SystemSettingsUpdate(**overrides()))), 1)
+        context = app.runtime_settings.current.analysis._analyze_chapter._context_builder.for_chapter_analysis(document=document, section=section)
+        assert context.request.contract_version == 2
+        assert CONTENT_PLAN_PROMPT_VERSION in context.request.instructions
+    finally:
+        await app.aclose()

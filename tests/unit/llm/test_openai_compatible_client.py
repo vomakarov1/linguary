@@ -631,3 +631,31 @@ def test_proxy_client_preparation_error_is_safe(monkeypatch):
     with pytest.raises(LLMConfigurationError) as caught:
         OpenAICompatibleLLMClient(settings=settings(proxy_mode='custom', proxy_url='http://alice:p%40ss@localhost'))
     assert 'alice' not in str(caught.value) and caught.value.__cause__ is None
+
+
+async def test_candidate_version_selects_schema_and_parser():
+    seen = []
+    data = analysis_payload()
+    data['content_plan'] = {'version': 2, 'profile': 'content-plan-v2', 'difficulties': [], 'before_you_read_evidence': []}
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=completion(as_content(data)))
+    client = client_over(handler)
+    try:
+        result = await client.generate(LLMRequest.for_chapter_analysis(instructions='Анализ', input_text='Текст', contract_version=2))
+        assert result.payload.content_plan.version == 2
+        schema = seen[0]['response_format']['json_schema']['schema']
+        assert 'content_plan' in schema['required']
+    finally:
+        await client.aclose()
+
+
+async def test_unknown_version_makes_zero_http_calls():
+    calls = []
+    client = client_over(lambda r: calls.append(r))
+    try:
+        with pytest.raises(LLMResponseFormatError):
+            await client.generate(LLMRequest.for_translation(instructions='Перевод', input_text='Текст', contract_version=9))
+        assert calls == []
+    finally:
+        await client.aclose()

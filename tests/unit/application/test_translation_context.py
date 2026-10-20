@@ -1054,3 +1054,38 @@ def test_note_claim_requires_observable_translation_feature() -> None:
     assert "наблюдаемое основание в самом переводе" in instructions
     assert "может описывать особенность оригинала" in instructions
     assert "Гладкий перевод без этой особенности" in instructions
+
+
+def test_v2_plan_requires_explicit_profile_and_owned_anchors():
+    from linguary.domain.content_plan import ContentPlan, Difficulty, SourceAnchor, RequiredPoint
+    blocks = (make_block(order=0, text='Echo calls.'), make_block(order=1, text='The answer echoes.'))
+    section = make_section(blocks)
+    unit = make_unit((blocks[0],))
+    d = Difficulty('difficulty', (SourceAnchor(blocks[0].id, 0, 4, 'Echo'), SourceAnchor(blocks[1].id, 4, 10, 'answer')), blocks[0].id, 'semantic_relation', 'critical', 'explanation', (RequiredPoint('p', 'Explain the link'),))
+    analysis = replace(make_analysis(unit), content_plan=ContentPlan(difficulties=(d,)))
+    args = dict(document=make_document(section), section=section, unit=unit, analysis=analysis, glossary=make_snapshot())
+    with pytest.raises(ContextBuildError):
+        ContextBuilder().for_translation_unit(**args)
+    builder = ContextBuilder(content_plan_profile='content-plan-v2')
+    for context in (builder.for_translation_unit(**args), builder.for_block_regeneration(**args)):
+        assert context.request.contract_version == 2
+        text = context.request.input_text
+        assert 'answer' in text and 'Explain the link' in text
+        assert blocks[1].id not in text
+        assert 'related-source' in text
+        assert 'Решения глоссария' in context.request.instructions
+    legacy = builder.for_translation_unit(**{**args, 'analysis': make_analysis(unit)})
+    assert legacy.request.contract_version == 1
+
+
+def test_translation_aliases_preserve_content_evidence():
+    from linguary.application.llm_dto import HelpEvidenceResponse
+    blocks = make_blocks(1, text='Echo calls.')
+    section = make_section(blocks)
+    unit = make_unit(blocks)
+    context = ContextBuilder().for_translation_unit(document=make_document(section), section=section, unit=unit, analysis=make_analysis(unit), glossary=make_snapshot())
+    e = HelpEvidenceResponse('d', 'p', 'language_note.note', 'b1', 0, 'Explanation')
+    payload = TranslationResultResponse(content_evidence=(e,))
+    assert context.to_block_ids(payload).content_evidence[0].source_block_id == blocks[0].id
+    with pytest.raises(ResultValidationError):
+        context.to_block_ids(replace(payload, content_evidence=(replace(e, source_block_id='b2'),)))

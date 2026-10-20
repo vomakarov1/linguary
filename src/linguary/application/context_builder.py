@@ -39,6 +39,8 @@
 from __future__ import annotations
 
 import re
+import json
+from dataclasses import asdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -52,6 +54,8 @@ from linguary.application.chapter_instructions import (
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMRequest
+from linguary.domain.content_plan import ContentPlan, artifact_key
+from linguary.domain import BeforeYouReadEntry
 from linguary.application.retry_policy import (
     ExpectedBlock,
     ResultExpectation,
@@ -69,6 +73,7 @@ from linguary.domain import (
     InlineAnnotationType,
     SupportStatus,
     TranslationUnit,
+    TreatmentPlan,
     footnote_marker,
     footnote_references,
     glossary_key,
@@ -88,6 +93,42 @@ DEFAULT_REGENERATION_CONTEXT_BLOCKS = 2
 #: Типы блоков, которые не являются текстом для чтения даже при полной поддержке импортёром.
 #: Изображение поддержано целиком, но читателю оно даёт не текст, а картинку.
 _NON_TEXTUAL_BLOCK_TYPES = frozenset({BlockType.IMAGE, BlockType.PAGE_BREAK})
+
+
+CONTENT_PLAN_PROMPT_VERSION = "content-plan-v2.1"
+_CONTENT_PLAN_ANALYSIS = """
+Профиль content-plan-v2, инструкция content-plan-v2.1.
+Сначала ищи игру слов, смысловые и логические связи, непрозрачную грамматику;
+обычная лексика не должна вытеснять эти трудности. Выбирай минимальную помощь.
+Верни content_plan с version=2, profile=content-plan-v2, difficulties и
+before_you_read_evidence (пустые списки обязательны, если трудностей нет).
+Каждая трудность: id, anchors [{block_id, start, end, quote}], owner_block_id,
+kind, priority, help_kind, required_points [{id, description}]. Смещения — Unicode
+кодовые точки точного исходного текста, end исключён; quote=text[start:end].
+Владелец один, из anchors. Ссылайся только на видимые блоки по b1..bN.
+Все включённые аспекты обязательны; не навязывай перевод вопреки глоссарию.
+lexical_hint требует GLOSSARY_ONLY или уже предоставленный BYR; explanation
+требует объясняющего BYR, языковой заметки либо содержательного glossary_hint.note.
+Перевод, цитата и пересказ не заменяют объяснение. Не повышай квоты.
+Если BYR уже покрывает аспект, не требуй лишней заметки. Для каждого такого аспекта
+верни свидетельство: difficulty_id, point_id, artifact_kind=before_you_read.explanation,
+source_block_id владельца, artifact_index (с нуля), body_excerpt из тела объяснения.
+Не выдумывай связи с невидимыми частями. Пустой план допустим.
+"""
+_CONTENT_PLAN_PROCESSING = """
+Профиль content-plan-v2, инструкция content-plan-v2.1.
+Выполни все required_points назначенных владельцам трудностей минимальной помощью
+в пределах прежних режимов и бюджета. Решения глоссария выше формулировок помощи;
+объясни смысл, сохраняя согласованный перевод. Не повторяй уже покрытый BYR аспект.
+Верни content_evidence (включая пустой список): difficulty_id, point_id,
+artifact_kind (before_you_read.explanation, language_note.note, glossary_hint.note;
+для lexical_hint также glossary_hint.translation), source_block_id владельца,
+artifact_index с нуля в соответствующем списке (подсказки внутри блока), body_excerpt.
+Отрывок должен дословно входить в реальное тело помощи, а не только цитировать
+оригинал. Перевод и пересказ не считаются объяснением. Соседние anchors служат
+контекстом, не требуют результата. Свидетельства показывают только структуру,
+смысловая правильность отдельно не проверена.
+"""
 
 
 class ContextBuildError(ApplicationError):
@@ -168,11 +209,17 @@ class ChapterAnalysisContext(AliasedBlocksContext):
     request: LLMRequest[ChapterAnalysisResponse]
     block_ids_by_alias: Mapping[str, str]
     expectation: ResultExpectation
+    before_you_read_limit: int = 10
+    language_notes_per_chapter: int = 8
+    note_limits_by_block: Mapping[str, int] | None = None
+    note_group_limits: tuple[tuple[tuple[str, ...], int], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "block_ids_by_alias", MappingProxyType(dict(self.block_ids_by_alias))
         )
+        if self.note_limits_by_block is not None:
+            object.__setattr__(self, "note_limits_by_block", MappingProxyType(dict(self.note_limits_by_block)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +244,8 @@ class TranslationContext(AliasedBlocksContext):
     expectation: ResultExpectation
     explained_expressions: tuple[str, ...] = ()
     explained_entries: tuple[tuple[str, str], ...] = ()
+    content_plan: ContentPlan | None = None
+    before_you_read: tuple[BeforeYouReadEntry, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -229,7 +278,7 @@ class TranslationContext(AliasedBlocksContext):
                 alias
                 for alias in (*payload.block_ids, *(
                     note.source_block_id for note in payload.language_notes
-                ))
+                ), *(e.source_block_id for e in payload.content_evidence))
                 if alias not in self.block_ids_by_alias
             }
         )
@@ -239,6 +288,7 @@ class TranslationContext(AliasedBlocksContext):
                 expectation=self.expectation,
             )
         return TranslationResultResponse(
+            content_evidence=tuple(replace(e, source_block_id=self.block_id_for(e.source_block_id)) for e in payload.content_evidence),
             blocks=tuple(
                 replace(block, source_block_id=self.block_id_for(block.source_block_id))
                 for block in payload.blocks
@@ -267,7 +317,15 @@ class ContextBuilder:
         max_accumulated_candidates: int = DEFAULT_MAX_ACCUMULATED_CANDIDATES,
         regeneration_context_blocks: int = DEFAULT_REGENERATION_CONTEXT_BLOCKS,
         language_notes_per_chapter: int = 8,
+        content_plan_profile: str = "legacy-v1",
+        max_unit_source_chars: int = 8000,
     ) -> None:
+        if content_plan_profile not in {"legacy-v1", "content-plan-v2"}:
+            raise ContextBuildError("неизвестный профиль содержательного плана")
+        if max_unit_source_chars < 1:
+            raise ContextBuildError("предел размера группы должен быть положительным")
+        self._max_unit_source_chars = max_unit_source_chars
+        self._content_plan_profile = content_plan_profile
         if max_accumulated_candidates < 0:
             raise ContextBuildError(
                 "ограничение числа накопленных кандидатов не может быть отрицательным"
@@ -344,6 +402,8 @@ class ContextBuilder:
                 source_language=document.source_language,
                 target_language=document.target_language,
             ),
+            before_you_read_limit=10 // fragment_count + (fragment.order < 10 % fragment_count),
+            language_notes_limit=self._language_notes_per_chapter // fragment_count + (fragment.order < self._language_notes_per_chapter % fragment_count),
             fragment_label=_fragment_label(fragment.order, fragment_count),
             findings=findings if fragment.order > 0 else None,
         )
@@ -429,6 +489,11 @@ class ContextBuilder:
         neighbours: Sequence[_NeighbourBlocks],
     ) -> TranslationContext:
         """Готовый запрос обработки переданных блоков вместе с разбором ответа."""
+        if analysis.content_plan is not None and self._content_plan_profile != "content-plan-v2":
+            raise ContextBuildError("сохранённый v2-план требует явный профиль content-plan-v2")
+        version = 2 if analysis.content_plan is not None else 1
+        if version == 2:
+            instructions += "\n" + _CONTENT_PLAN_PROCESSING
         if unit.section_id != section.id:
             raise ContextBuildError(
                 f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
@@ -442,6 +507,7 @@ class ContextBuilder:
             section_id=section.id,
             unit_id=unit.id,
             request=LLMRequest.for_translation(
+                contract_version=version,
                 instructions=instructions,
                 input_text=self._translation_input(
                     document=document,
@@ -463,6 +529,8 @@ class ContextBuilder:
             ),
             explained_expressions=_before_you_read_expressions(analysis, section),
             explained_entries=_before_you_read_entries(analysis, section),
+            content_plan=analysis.content_plan,
+            before_you_read=() if section.is_notes_only else analysis.before_you_read,
         )
 
     def _translation_input(
@@ -486,6 +554,8 @@ class ContextBuilder:
             chapter_chars=sum(len(block.text) for block in textual_blocks(section)),
             per_chapter=self._language_notes_per_chapter,
         )
+        if analysis.content_plan is not None and self._language_notes_per_chapter == 0:
+            budget = 0
         parts = [
             _chapter_header(document=document, section=section),
             f"В этом запросе — не больше {budget} языковых заметок.",
@@ -503,6 +573,7 @@ class ContextBuilder:
             _explained_expressions(analysis, section),
             _neighbour_context(neighbours),
             _unit_blocks(unit),
+            _owned_content_plan(analysis, unit),
         ]
         return "\n\n".join(part for part in parts if part)
 
@@ -556,12 +627,30 @@ class ContextBuilder:
         instructions: str,
         fragment_label: str | None,
         findings: FragmentFindings | None = None,
+        before_you_read_limit: int = 10,
+        language_notes_limit: int | None = None,
     ) -> ChapterAnalysisContext:
         """Готовый запрос по переданным блокам главы вместе с разбором ответа."""
         aliases = {_alias(index): block.id for index, block in enumerate(blocks, start=1)}
+        candidate = self._content_plan_profile == "content-plan-v2"
+        note_limit = self._language_notes_per_chapter if language_notes_limit is None else language_notes_limit
+        note_groups = self._analysis_note_groups(section, blocks) if candidate else ()
+        if candidate and section.is_notes_only:
+            before_you_read_limit = 0
+        if candidate:
+            instructions += "\n" + _CONTENT_PLAN_ANALYSIS
+            instructions += f"\nВ этом ответе не больше {before_you_read_limit} BYR."
+            instructions += f"\nБюджет обязательных заметок этого анализа: {note_limit}."
+            instructions += "\nПределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False)
+            instructions += "\nСначала используй существующий BYR или допустимый hint.note; READ_AS_IS требует отдельной заметки, если BYR не покрывает все аспекты."
         return ChapterAnalysisContext(
+            before_you_read_limit=before_you_read_limit,
+            note_group_limits=note_groups,
+            language_notes_per_chapter=note_limit,
+            note_limits_by_block={b.id: notes_budget(unit_chars=len(b.text), chapter_chars=sum(len(t.text) for t in textual_blocks(section)), per_chapter=self._language_notes_per_chapter) if self._language_notes_per_chapter else 0 for b in blocks},
             section_id=section.id,
             request=LLMRequest.for_chapter_analysis(
+                contract_version=2 if candidate else 1,
                 instructions=instructions,
                 input_text=self._chapter_input(
                     document=document,
@@ -578,6 +667,43 @@ class ContextBuilder:
                 blocks=tuple(ExpectedBlock(block_id=alias) for alias in aliases),
             ),
         )
+
+    def _analysis_note_groups(
+        self, section: DocumentSection, blocks: Sequence[DocumentBlock],
+    ) -> tuple[tuple[tuple[str, ...], int], ...]:
+        # Группировка зависит от исходных блоков, а не от текстового режима.
+        from linguary.application.translation_units import plan_translation_units
+        from linguary.domain import BlockTreatment
+
+        chapter = textual_blocks(section)
+        plan = TreatmentPlan.of_treatments(
+            section.id, ((b.id, BlockTreatment.READ_AS_IS) for b in chapter),
+        )
+        units = plan_translation_units(
+            chapter, plan, id_factory=lambda: "budget",
+            max_source_chars=self._max_unit_source_chars,
+        )
+        visible = {b.id for b in blocks}
+        chapter_chars = sum(len(b.text) for b in chapter)
+        result = []
+        for unit in units:
+            size = sum(len(item.block.text) for item in unit.items)
+            capacity = notes_budget(unit_chars=size, chapter_chars=chapter_chars,
+                                    per_chapter=self._language_notes_per_chapter)
+            if self._language_notes_per_chapter == 0:
+                capacity = 0
+            cursor = 0
+            share = 0
+            owners = []
+            for item in unit.items:
+                end = cursor + len(item.block.text)
+                if item.block.id in visible:
+                    owners.append(item.block.id)
+                    share += capacity * end // size - capacity * cursor // size
+                cursor = end
+            if owners:
+                result.append((tuple(owners), share))
+        return tuple(result)
 
     def _chapter_input(
         self,
@@ -1294,3 +1420,36 @@ __all__ = [
     "textual_blocks",
     "translation_unit_instructions",
 ]
+
+
+def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str:
+    if analysis.content_plan is None:
+        return ""
+    aliases = {item.block.id: _alias(i) for i, item in enumerate(unit.items, 1)}
+    difficulties = []
+    related = {}
+    for difficulty in analysis.content_plan.difficulties:
+        if difficulty.owner_block_id not in aliases:
+            continue
+        value = asdict(difficulty)
+        value["owner_block_id"] = aliases[difficulty.owner_block_id]
+        for anchor in value["anchors"]:
+            source_id = anchor["block_id"]
+            if source_id not in aliases:
+                related.setdefault(source_id, f"related-source-{len(related) + 1}")
+            anchor["block_id"] = aliases.get(source_id, related.get(source_id))
+        difficulties.append(value)
+    evidence = []
+    for item in analysis.content_plan.before_you_read_evidence:
+        if item.block_id in aliases:
+            value = asdict(item)
+            value["block_id"] = aliases[item.block_id]
+            for index, entry in enumerate(analysis.before_you_read):
+                if artifact_key(item.artifact_kind, item.block_id, {"expression": entry.expression, "explanation": entry.explanation}) == item.artifact_key:
+                    value["artifact_index"] = index
+                    break
+            evidence.append(value)
+    return "Обязательные аспекты и точные связанные привязки:\n" + json.dumps({
+        "version": 2, "difficulties": difficulties, "before_you_read_evidence": evidence,
+        "before_you_read": [dict(artifact_index=i, expression=e.expression, explanation=e.explanation) for i, e in enumerate(analysis.before_you_read)],
+    }, ensure_ascii=False)

@@ -85,6 +85,16 @@ class ExplainedExpressions:
             for expression, explanation in self._explanations
         )
 
+    def without_repeats_v2(self, result: BlockProcessingResult) -> BlockProcessingResult:
+        """Удаляет лишь точные повторы объясняющего текста; новые аспекты остаются."""
+        bodies = {text.strip() for _, text in self._explanations if text.strip()}
+        hints = tuple(h for h in result.glossary_hints if not h.note or h.note.strip() not in bodies)
+        if not hints and result.treatment.requires_glossary_hints:
+            hints = result.glossary_hints
+        bodies.update(h.note.strip() for h in hints if h.note and h.note.strip())
+        notes = tuple(n for n in result.language_notes if n.note.strip() not in bodies)
+        return replace(result, glossary_hints=hints, language_notes=notes)
+
     def without_repeats(self, result: BlockProcessingResult) -> BlockProcessingResult:
         """Результат без повторов подготовки к чтению и подсказок того же блока.
 

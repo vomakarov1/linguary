@@ -293,3 +293,10 @@ def test_grab_note_with_new_rhetorical_fact_in_same_sentence_kept(
 
     assert filtered.language_notes == (note,)
     assert filtered.glossary_hints == result.glossary_hints
+
+
+def test_new_aspect_is_retained_without_phrase_rules():
+    from linguary.domain import BlockProcessingResult, BlockTreatment, LanguageNote
+    explained = ExplainedExpressions(('Echo',), explanations=(('Echo', 'Первое самостоятельное объяснение.'),))
+    result = BlockProcessingResult('b', BlockTreatment.READ_AS_IS, language_notes=(LanguageNote('n', 'b', 'Echo', 'Первое самостоятельное объяснение. Дополнительный аспект.'),))
+    assert explained.without_repeats_v2(result).language_notes == result.language_notes

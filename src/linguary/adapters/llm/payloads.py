@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from pydantic import BaseModel, ValidationError
 
 from linguary.adapters.llm.schemas import (
+    ChapterAnalysisV2Schema,
+    TranslationResultV2Schema,
     BeforeYouReadEntrySchema,
     BlockResultSchema,
     ChapterAnalysisSchema,
@@ -27,6 +29,8 @@ from linguary.adapters.llm.schemas import (
     TreatmentPlanItemSchema,
 )
 from linguary.application.llm_dto import (
+    ContentPlanResponse,
+    HelpEvidenceResponse,
     BeforeYouReadEntryResponse,
     BlockResultResponse,
     ChapterAnalysisResponse,
@@ -43,6 +47,8 @@ from linguary.application.ports.llm import (
     LLMResponseKind,
 )
 from linguary.domain import BlockTreatment
+from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+from linguary.domain.errors import DomainError
 
 #: Схема ответа для каждого вида запроса.
 SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
@@ -50,20 +56,25 @@ SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
     LLMResponseKind.TRANSLATION_RESULT: TranslationResultSchema,
 }
 
-def schema_for(kind: LLMResponseKind) -> type[BaseModel]:
+def schema_for(kind: LLMResponseKind, *, contract_version: int = 1) -> type[BaseModel]:
     """Схема структурированного ответа для вида запроса."""
+    if type(contract_version) is not int or contract_version not in (1, 2):
+        raise LLMResponseFormatError("неизвестная версия контракта ответа")
+    if contract_version == 2:
+        return {LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisV2Schema,
+                LLMResponseKind.TRANSLATION_RESULT: TranslationResultV2Schema}[kind]
     return SCHEMAS[kind]
 
 
 def parse_payload(
-    kind: LLMResponseKind, content: str, *, truncated: bool = False
+    kind: LLMResponseKind, content: str, *, contract_version: int = 1, truncated: bool = False
 ) -> LLMPayload:
     """Разбирает текст ответа модели и отдаёт внутренний DTO.
 
     `truncated` — сообщение провайдера об обрыве по лимиту токенов; оно попадает
     в ошибку разбора, когда оборванный ответ не удаётся разобрать.
     """
-    schema = schema_for(kind)
+    schema = schema_for(kind, contract_version=contract_version)
     try:
         validated = schema.model_validate_json(content)
     except ValidationError as error:
@@ -74,10 +85,10 @@ def parse_payload(
         ) from error
     try:
         return _to_dto(validated)
-    except LLMPayloadError as error:
+    except (LLMPayloadError, DomainError) as error:
         raise LLMResponseFormatError(
             f"ответ модели ({kind.value}) не соответствует внутреннему контракту: "
-            f"{type(error).__name__}",
+            f"{type(error).__name__}: {error}",
             truncated=truncated,
             raw_content=content,
         ) from error
@@ -95,6 +106,7 @@ def _to_dto(validated: BaseModel) -> LLMPayload:
 def _chapter_analysis(schema: ChapterAnalysisSchema) -> ChapterAnalysisResponse:
     """DTO анализа главы."""
     return ChapterAnalysisResponse(
+        content_plan=_content_plan(schema.content_plan) if isinstance(schema, ChapterAnalysisV2Schema) else None,
         translation_instructions=schema.translation_instructions,
         chapter_summary=schema.chapter_summary,
         glossary_candidates=tuple(
@@ -135,6 +147,7 @@ def _before_you_read(schema: BeforeYouReadEntrySchema) -> BeforeYouReadEntryResp
 def _translation_result(schema: TranslationResultSchema) -> TranslationResultResponse:
     """DTO результата обработки группы блоков."""
     return TranslationResultResponse(
+        content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.content_evidence) if isinstance(schema, TranslationResultV2Schema) else (),
         blocks=tuple(_block_result(item) for item in schema.blocks),
         language_notes=tuple(_language_note(item) for item in schema.language_notes),
     )
@@ -186,3 +199,30 @@ def _format_error(
 
 
 __all__ = ["SCHEMAS", "parse_payload", "schema_for"]
+
+
+def _content_plan(schema) -> ContentPlanResponse:
+    difficulties = []
+    for d in schema.difficulties:
+        anchors = []
+        for a in d.anchors:
+            start = a.start
+            end = a.end if a.end - a.start == len(a.quote) else a.start + len(a.quote)
+            anchors.append(SourceAnchor(block_id=a.block_id, start=start, end=end, quote=a.quote))
+        difficulties.append(
+            Difficulty(
+                id=d.id,
+                owner_block_id=d.owner_block_id,
+                kind=d.kind,
+                priority=d.priority,
+                help_kind=d.help_kind,
+                anchors=tuple(anchors),
+                required_points=tuple(RequiredPoint(**p.model_dump()) for p in d.required_points),
+            )
+        )
+    return ContentPlanResponse(
+        version=schema.version,
+        profile=schema.profile,
+        difficulties=tuple(difficulties),
+        before_you_read_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.before_you_read_evidence),
+    )

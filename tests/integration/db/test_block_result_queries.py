@@ -104,3 +104,35 @@ def test_count_for_run_without_results_is_zero(
 
     with unit_of_work.transaction() as uow:
         assert uow.results.count_for_run(RUN_ID) == 0
+
+
+def test_block_replacement_keeps_evidence_atomic(unit_of_work, stored_results):
+    from dataclasses import replace
+    from linguary.domain.content_plan import ContentEvidence, HelpEvidence
+    evidence = ContentEvidence('a' * 64, (HelpEvidence(
+        'difficulty-1', 'meaning', 'language_note.note', SECOND_BLOCK_ID,
+        'key-1', stored_results[1].language_notes[0].note,
+    ),))
+    changed = replace(stored_results[1], translated_text='Новый перевод.', content_evidence=evidence)
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, [changed])
+    with unit_of_work.transaction() as uow:
+        assert uow.results.list_for_run(RUN_ID) == (stored_results[0], changed)
+        assert uow.results.get(RUN_ID, SECOND_BLOCK_ID) == changed
+    with pytest.raises(RuntimeError), unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, [replace(changed, content_evidence=())])
+        raise RuntimeError('отмена замены')
+    with unit_of_work.transaction() as uow:
+        assert uow.results.list_for_run(RUN_ID) == (stored_results[0], changed)
+
+
+def test_group_serialization_failure_rolls_back_all_rows(unit_of_work, stored_results):
+    from dataclasses import replace
+    from linguary.application.ports.persistence import PersistenceError
+    from linguary.domain.content_plan import ContentEvidence
+    changed = replace(stored_results[0], translated_text='Новый перевод.', content_evidence=ContentEvidence('a' * 64))
+    invalid = replace(stored_results[1], content_evidence={'private-book-text': 'invalid'})
+    with pytest.raises(PersistenceError), unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, [changed, invalid])
+    with unit_of_work.transaction() as uow:
+        assert uow.results.list_for_run(RUN_ID) == stored_results

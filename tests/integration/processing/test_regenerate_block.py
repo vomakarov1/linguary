@@ -332,3 +332,38 @@ async def test_rejected_variant_from_other_chapter_does_not_reach_regeneration(
     text = client.last_request.input_text
     assert "Даскмир" not in text
     assert "(Множественное число, склоняется.)" in text
+
+
+@pytest.mark.parametrize('accept', [True, False])
+async def test_regeneration_atomically_replaces_evidence(unit_of_work, accept):
+    import json
+    from dataclasses import replace
+    from linguary.adapters.llm import FakeReply
+    from linguary.domain.content_plan import ContentPlan, ContentEvidence, Difficulty, SourceAnchor, RequiredPoint
+    scenario = store_processing_book(unit_of_work)
+    await process_chapter(unit_of_work, aliases=('b1', 'b2'))
+    owner = scenario.block_ids()[0]
+    plan = ContentPlan(difficulties=(Difficulty('d', (SourceAnchor(owner, 0, 4, SOURCE_TEXT[:4]),), owner, 'wordplay', 'critical', 'explanation', (RequiredPoint('p', 'Explain the relation'),)),))
+    with unit_of_work.transaction() as uow:
+        analysis = uow.analyses.get_for_section(BOOK_ID, 'section-1')
+        uow.analyses.save(BOOK_ID, replace(analysis, content_plan=plan))
+        previous = uow.results.list_for_run(RUN_ID)
+        uow.results.replace_results(RUN_ID, (replace(previous[0], content_evidence=ContentEvidence(plan.sha256)),))
+    previous = stored_results(unit_of_work)
+    body = 'Новое объяснение иронического отношения рассказчика.'
+    payload = json.loads(translation_reply([block_reply('b1', translated_text=REGENERATED_TEXT)], notes=(note_reply('b1', note=body),)).content)
+    payload['content_evidence'] = [dict(difficulty_id='d', point_id='p', artifact_kind='language_note.note', source_block_id='b1', artifact_index=0, body_excerpt=body)] if accept else []
+    client = FakeLLMClient.always(FakeReply.of_payload(payload))
+    regenerate, _ = make_regenerate_block(unit_of_work, client, max_attempts=2, context_builder=ContextBuilder(content_plan_profile="content-plan-v2"))
+    command = RegenerateBlockCommand(book_id=BOOK_ID, block_id=owner)
+    if accept:
+        await regenerate(command)
+        current = stored_results(unit_of_work)
+        assert current[0].translated_text == REGENERATED_TEXT
+        assert current[0].content_evidence.evidence[0].body_excerpt == body
+        assert current[1] == previous[1]
+    else:
+        with pytest.raises(ResultValidationError):
+            await regenerate(command)
+        assert len(client.requests) == 2
+        assert stored_results(unit_of_work) == previous

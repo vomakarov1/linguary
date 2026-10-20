@@ -22,8 +22,11 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from linguary.domain.content_plan import ContentPlan, HelpEvidence, SourceAnchor, artifact_key
 
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
@@ -99,6 +102,7 @@ class FragmentAnalysis:
     treatments: tuple[TreatmentPlanItem, ...] = ()
     glossary_candidates: tuple[GlossaryCandidateResponse, ...] = ()
     before_you_read: tuple[BeforeYouReadEntryResponse, ...] = ()
+    content_plan: ContentPlan | None = None
 
     def __post_init__(self) -> None:
         if self.order < 0:
@@ -111,6 +115,7 @@ class FragmentAnalysis:
         *,
         order: int,
         block_ids_by_alias: Mapping[str, str],
+        texts: Mapping[str, str] | None = None,
     ) -> FragmentAnalysis:
         """Ответ фрагмента с планом, переведённым в идентификаторы блоков главы.
 
@@ -137,6 +142,7 @@ class FragmentAnalysis:
             ),
             glossary_candidates=payload.glossary_candidates,
             before_you_read=payload.before_you_read,
+            content_plan=content_plan_from_response(payload, block_ids_by_alias, texts=texts),
         )
 
 
@@ -201,6 +207,7 @@ def merge_chapter_analysis(
             id_factory=id_factory,
         ),
         before_you_read=_merged_before_you_read(ordered),
+        content_plan=_merged_content_plan(ordered),
     )
 
 
@@ -409,6 +416,9 @@ __all__ = [
     "MAX_BEFORE_YOU_READ",
     "TOKENS_PER_ANALYSED_BLOCK",
     "before_you_read_entries",
+    "content_plan_from_response",
+    "find_quote_span",
+    "validate_content_plan",
     "fragment_blocks_for",
     "AnalysisMergeError",
     "ChapterFragment",
@@ -416,3 +426,212 @@ __all__ = [
     "merge_chapter_analysis",
     "plan_fragments",
 ]
+
+
+def find_quote_span(
+    text: str, quote: str, *, estimated_start: int = 0
+) -> tuple[int, int, str] | None:
+    """Находит вхождение цитаты в текст с учётом типографики и пробелов."""
+    if not text or not quote:
+        return None
+
+    # Поиск точных совпадений
+    exact_matches: list[tuple[int, int, str]] = []
+    idx = 0
+    quote_len = len(quote)
+    while True:
+        pos = text.find(quote, idx)
+        if pos == -1:
+            break
+        exact_matches.append((pos, pos + quote_len, text[pos : pos + quote_len]))
+        idx = pos + 1
+
+    if exact_matches:
+        return min(exact_matches, key=lambda m: abs(m[0] - estimated_start))
+
+    # Нестрогий поиск с учётом вариантов кавычек, апострофов и тире
+    pattern_parts: list[str] = []
+    for ch in quote:
+        if ch in ("'", "’", "‘", "`"):
+            pattern_parts.append(r"['’‘`]")
+        elif ch in ('"', "“", "”", "«", "»"):
+            pattern_parts.append(r'["“”«»]')
+        elif ch in ("-", "—", "–"):
+            pattern_parts.append(r"[-—–]")
+        elif ch.isspace():
+            pattern_parts.append(r"\s+")
+        else:
+            pattern_parts.append(re.escape(ch))
+    pattern = "".join(pattern_parts)
+    try:
+        regex_matches = [
+            (m.start(), m.end(), text[m.start() : m.end()])
+            for m in re.finditer(pattern, text)
+        ]
+        if regex_matches:
+            return min(regex_matches, key=lambda m: abs(m[0] - estimated_start))
+    except re.error:
+        pass
+
+    # Поиск без обрамляющей пунктуации
+    stripped = quote.strip(" \t\r\n.,;:!?\"'«»()[]")
+    if stripped and stripped != quote:
+        return find_quote_span(text, stripped, estimated_start=estimated_start)
+
+    return None
+
+
+def content_plan_from_response(
+    payload: ChapterAnalysisResponse,
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str] | None = None,
+) -> ContentPlan | None:
+    """Заменяет локальные псевдонимы и вычисляет стабильные ссылки приложения."""
+    if payload.content_plan is None:
+        return None
+    difficulties = []
+    ids = {}
+    for difficulty in payload.content_plan.difficulties:
+        try:
+            mapped_anchors = []
+            for a in difficulty.anchors:
+                real_block_id = aliases[a.block_id]
+                if texts is not None and real_block_id in texts:
+                    span = find_quote_span(texts[real_block_id], a.quote, estimated_start=a.start)
+                    if span is not None:
+                        start, end, actual_quote = span
+                        mapped_anchors.append(
+                            SourceAnchor(block_id=real_block_id, start=start, end=end, quote=actual_quote)
+                        )
+                    else:
+                        mapped_anchors.append(replace(a, block_id=real_block_id))
+                else:
+                    mapped_anchors.append(replace(a, block_id=real_block_id))
+            mapped = replace(
+                difficulty,
+                anchors=tuple(mapped_anchors),
+                owner_block_id=aliases[difficulty.owner_block_id],
+            )
+        except KeyError as error:
+            raise AnalysisMergeError("привязка к невидимому блоку") from error
+        mapped = replace(mapped, id=mapped.canonical_id)
+        ids[difficulty.id] = mapped.id
+        difficulties.append(mapped)
+    evidence = []
+    selected = before_you_read_entries(payload.before_you_read)
+    for item in payload.content_plan.before_you_read_evidence:
+        if item.artifact_kind != "before_you_read.explanation" or item.artifact_index >= len(payload.before_you_read):
+            raise AnalysisMergeError("свидетельство анализа не ссылается на существующий BYR")
+        entry = payload.before_you_read[item.artifact_index]
+        if not any(e.expression == entry.expression and e.explanation == entry.explanation for e in selected):
+            raise AnalysisMergeError("BYR удалён нормализацией или превышает бюджет")
+        body_excerpt = item.body_excerpt
+        if body_excerpt not in entry.explanation:
+            span = find_quote_span(entry.explanation, body_excerpt)
+            if span is not None:
+                body_excerpt = span[2]
+            else:
+                stripped = _quotation_key(body_excerpt)
+                if stripped and stripped in entry.explanation:
+                    body_excerpt = stripped
+        if body_excerpt not in entry.explanation or _quotation_key(body_excerpt) == _quotation_key(entry.expression):
+            raise AnalysisMergeError("отрывок не принадлежит телу объяснения BYR")
+        try:
+            evidence.append(HelpEvidence(ids[item.difficulty_id], item.point_id, item.artifact_kind, aliases[item.source_block_id], artifact_key(item.artifact_kind, aliases[item.source_block_id], {"expression": entry.expression, "explanation": entry.explanation}), body_excerpt))
+        except KeyError as error:
+            raise AnalysisMergeError("неизвестная трудность или владелец свидетельства") from error
+    return ContentPlan(difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence))
+
+
+def _merged_content_plan(fragments: Sequence[FragmentAnalysis]) -> ContentPlan | None:
+    plans = [f.content_plan for f in fragments if f.content_plan is not None]
+    if not plans:
+        return None
+    if len(plans) != len(fragments):
+        raise AnalysisMergeError("нельзя смешивать версии анализа")
+    groups = {}
+    for plan in plans:
+        for difficulty in plan.difficulties:
+            key = (difficulty.anchors, difficulty.kind)
+            groups.setdefault(key, []).append(difficulty)
+    difficulties = []
+    ids = {}
+    for group in groups.values():
+        first = group[0]
+        points = {}
+        for difficulty in group:
+            if (difficulty.owner_block_id, difficulty.priority, difficulty.help_kind) != (first.owner_block_id, first.priority, first.help_kind):
+                raise AnalysisMergeError("конфликт повторяющейся трудности")
+            for point in difficulty.required_points:
+                if point.id in points and points[point.id] != point:
+                    raise AnalysisMergeError("конфликт описаний смыслового аспекта")
+                points[point.id] = point
+        merged = replace(first, required_points=tuple(points.values()))
+        merged = replace(merged, id=merged.canonical_id)
+        difficulties.append(merged)
+        for difficulty in group:
+            previous = ids.setdefault(difficulty.id, merged.id)
+            if previous != merged.id:
+                raise AnalysisMergeError("идентификатор обозначает разные трудности")
+    evidence = []
+    for plan in plans:
+        for item in plan.before_you_read_evidence:
+            mapped = replace(item, difficulty_id=ids[item.difficulty_id])
+            if mapped not in evidence:
+                evidence.append(mapped)
+    result = ContentPlan(difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence))
+    selected = _merged_before_you_read(fragments)
+    for item in evidence:
+        if not any(artifact_key(item.artifact_kind, item.block_id, {"expression": e.expression, "explanation": e.explanation}) == item.artifact_key for e in selected):
+            raise AnalysisMergeError("слияние удалило BYR со свидетельством")
+    return result
+
+
+def validate_content_plan(
+    payload: ChapterAnalysisResponse,
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str],
+    *,
+    before_you_read_limit: int = 10,
+    language_notes_per_chapter: int = 8,
+    note_limits_by_block: Mapping[str, int] | None = None,
+    note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
+) -> None:
+    """Проверяет исходные привязки и допустимость каналов до принятия ответа."""
+    plan = content_plan_from_response(payload, aliases, texts=texts)
+    if plan is None:
+        return
+    if len(payload.before_you_read) > before_you_read_limit:
+        raise AnalysisMergeError("BYR превышает согласованный бюджет фрагмента")
+    treatments = {aliases[i.source_block_id]: i.treatment for i in payload.treatment_plan}
+    note_owners = set()
+    for difficulty in plan.difficulties:
+        for anchor in difficulty.anchors:
+            anchor.validate(texts)
+        covered = {e.point_id for e in plan.before_you_read_evidence if e.difficulty_id == difficulty.id}
+        if difficulty.help_kind == "lexical_hint" and treatments.get(difficulty.owner_block_id) is not BlockTreatment.GLOSSARY_ONLY and covered != {p.id for p in difficulty.required_points}:
+            raise AnalysisMergeError("лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR")
+        if (difficulty.help_kind == "explanation"
+                and covered != {p.id for p in difficulty.required_points}
+                and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS):
+            note_owners.add(difficulty.owner_block_id)
+        for item in plan.before_you_read_evidence:
+            if item.difficulty_id == difficulty.id and any(_quotation_key(item.body_excerpt) == _quotation_key(a.quote) for a in difficulty.anchors):
+                raise AnalysisMergeError("цитата оригинала не является объяснением")
+    if any(len(note_owners.intersection(ids)) > limit for ids, limit in note_group_limits):
+        raise AnalysisMergeError("обязательные заметки не помещаются в реальную группу обработки")
+    if len(note_owners) > language_notes_per_chapter or any(
+        note_limits_by_block is not None and note_limits_by_block.get(owner, 0) < 1
+        for owner in note_owners
+    ):
+        raise AnalysisMergeError("содержательный план не помещается в бюджет языковых заметок")
+
+
+def _quotation_key(text: str) -> str:
+    """Убирает только внешнее оформление цитаты, не оценивая смысл текста."""
+    start, end = 0, len(text)
+    while start < end and (text[start].isspace() or unicodedata.category(text[start]).startswith("P")):
+        start += 1
+    while end > start and (text[end - 1].isspace() or unicodedata.category(text[end - 1]).startswith("P")):
+        end -= 1
+    return text[start:end]

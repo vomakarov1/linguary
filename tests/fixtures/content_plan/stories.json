@@ -1,0 +1,30 @@
+{
+  "ledger": {
+    "blocks": ["The clerk balanced the books before lunch.", "After lunch he balanced on the books to reach a shelf."],
+    "treatments": ["TRANSLATE", "TRANSLATE"],
+    "translations": ["Клерк свёл счета до обеда.", "После обеда он встал на книги, удерживая равновесие, чтобы достать до полки."],
+    "byr": [{"expression": "balanced the books", "explanation": "В первой сцене клерк сводит бухгалтерские счета, а не двигает книги."}],
+    "difficulties": [{"owner": 1, "kind": "wordplay", "anchors": [{"block": 0, "quote": "balanced"}, {"block": 1, "quote": "balanced"}], "points": [{"id": "accounts", "description": "Бухгалтерское значение первой сцены", "channel": "byr", "body": "В первой сцене клерк сводит бухгалтерские счета, а не двигает книги."}, {"id": "link", "description": "Буквальное равновесие во второй сцене меняет значение повтора", "body": "Во второй сцене клерк буквально держит равновесие на книгах: повтор balanced соединяет счета с физическим действием."}]}],
+    "regenerated": "Повтор balanced меняет смысл: сначала клерк сводит счета, затем удерживает равновесие, стоя на книгах."
+  },
+  "lantern": {
+    "blocks": ["On Lantern Eve the village left every gate open for returning travellers.", "Not until the lantern went out did Sera notice the open gate."],
+    "treatments": ["TRANSLATE", "TRANSLATE"],
+    "translations": ["В канун фонарей деревня оставляла ворота открытыми для возвращавшихся путников.", "Лишь когда фонарь погас, Сэра заметила открытые ворота."],
+    "byr": [],
+    "glossary": {"source": "Sera", "suggested": "Сира", "corrected": "Сэра", "note": "Имя героини, женский род."},
+    "difficulties": [{"owner": 1, "kind": "grammar", "anchors": [{"block": 1, "quote": "Not until the lantern went out did Sera notice"}], "points": [{"id": "inversion", "description": "Отрицательный оборот вызывает инверсию и задаёт момент обнаружения", "body": "Начальное Not until вызывает инверсию did Sera notice: героиня замечает ворота лишь после того, как погас фонарь."}]}, {"owner": 0, "kind": "cultural_reference", "anchors": [{"block": 0, "quote": "Lantern Eve"}], "points": [{"id": "custom", "description": "Местный обычай определён самим рассказом", "body": "Lantern Eve — вымышленный праздник этого рассказа; открытые ворота обозначают гостеприимство к возвращающимся путникам."}]}]
+  },
+  "window": {
+    "blocks": ["A child opened the window.", "The dog slept beside the chair."],
+    "treatments": ["READ_AS_IS", "READ_AS_IS"],
+    "translations": [null, null], "byr": [], "difficulties": []
+  },
+  "echo": {
+    "blocks": ["Mira called the stone light; the second light meant pale rather than heavy.", "The porter carried the stone indoors.", "The painter called the cloth light because its colour was pale.", "The porter hung the cloth by the door."],
+    "treatments": ["TRANSLATE", "READ_AS_IS", "TRANSLATE", "READ_AS_IS"],
+    "translations": ["Мира назвала камень светлым; во второй раз речь шла о цвете, а не о весе.", null, "Художник назвал ткань светлой из-за её бледного цвета.", null],
+    "fragment_blocks": 2, "byr": [],
+    "difficulties": [{"owner": 0, "kind": "semantic_relation", "anchors": [{"block": 0, "quote": "light", "occurrence": 1}], "points": [{"id": "stone", "description": "Второе вхождение относится к цвету", "body": "Второе light описывает бледный цвет камня; первое допускает прочтение о небольшом весе."}]}, {"owner": 2, "kind": "semantic_relation", "anchors": [{"block": 2, "quote": "light"}], "points": [{"id": "cloth", "description": "Та же цитата в другом блоке имеет отдельную привязку", "body": "В реплике художника light относится к цвету ткани, а не к её весу или освещению."}]}]
+  }
+}
