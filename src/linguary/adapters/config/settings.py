@@ -140,6 +140,8 @@ class LLMSettings:
     provider: str = OPENAI_COMPATIBLE_PROVIDER
     base_url: str = DEFAULT_BASE_URL
     model: str = ""
+    analysis_model: str = ""
+    processing_model: str = ""
     api_key: str | None = field(default=None, repr=False)
     proxy_mode: Literal["auto", "direct", "custom"] = "auto"
     proxy_url: str | None = field(default=None, repr=False)
@@ -184,6 +186,16 @@ class LLMSettings:
     def effective_max_fragment_blocks(self) -> int:
         """Явный предел или размер, рассчитанный по доступному выводу."""
         return self.max_fragment_blocks or fragment_blocks_for(self.max_output_tokens)
+
+    @property
+    def effective_analysis_model(self) -> str:
+        """Модель для анализа: явная analysis_model или общая model."""
+        return self.analysis_model.strip() or self.model
+
+    @property
+    def effective_processing_model(self) -> str:
+        """Модель для обработки и перегенерации: явная processing_model или общая model."""
+        return self.processing_model.strip() or self.model
 
     @property
     def is_ready(self) -> bool:

@@ -638,6 +638,12 @@ def test_find_quote_span_and_anchor_alignment_with_typography():
     assert actual == "one’s cheeks burned"
     assert text[start:end] == actual
 
+    # Contractions resolution (e.g. she is -> she's)
+    text_contractions = "She said she’s such a capital one for catching mice."
+    res_contractions = find_quote_span(text_contractions, "she is such a capital one for catching mice")
+    assert res_contractions is not None
+    assert res_contractions[2] == "she’s such a capital one for catching mice"
+
     # 2. Inexact bounds from model are resolved when texts are provided
     d = Difficulty(
         "d1",

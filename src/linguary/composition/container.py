@@ -267,27 +267,50 @@ def build_application(
 
     def generation_factory(candidate: AppSettings) -> RuntimeGeneration:
         configured_client = ConfiguredLLMClient(candidate.llm)
-        model = _model_client(
+        analysis_model = candidate.llm.effective_analysis_model
+        processing_model = candidate.llm.effective_processing_model
+
+        analysis_inner = (
+            llm_client
+            if llm_client is not None
+            else configured_client.client_for(analysis_model)
+        )
+        processing_inner = (
+            llm_client
+            if llm_client is not None
+            else configured_client.client_for(processing_model)
+        )
+
+        analysis_client = _model_client(
             candidate,
-            inner=llm_client if llm_client is not None else configured_client,
+            inner=analysis_inner,
             unit_of_work=unit_of_work,
             limiter=rate_limiter,
             on_logged=on_logged,
+            model_name=analysis_model or "not_configured",
+        )
+        processing_client = _model_client(
+            candidate,
+            inner=processing_inner,
+            unit_of_work=unit_of_work,
+            limiter=rate_limiter,
+            on_logged=on_logged,
+            model_name=processing_model or "not_configured",
         )
         generation = RuntimeGeneration(
             settings=candidate,
             configured_client=configured_client,
             analysis=_analysis_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=model, content_plan_profile=content_plan_profile,
+                task_queue=task_queue, model=analysis_client, content_plan_profile=content_plan_profile,
             ),
             processing=_processing_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=model, content_plan_profile=content_plan_profile,
+                task_queue=task_queue, model=processing_client, content_plan_profile=content_plan_profile,
             ),
             regeneration=_regeneration_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=model, content_plan_profile=content_plan_profile,
+                task_queue=task_queue, model=processing_client, content_plan_profile=content_plan_profile,
             ),
         )
         if llm_client is None:
@@ -379,6 +402,7 @@ def _model_client(
     settings: AppSettings, *, inner: LLMClient, unit_of_work: SqlAlchemyUnitOfWork,
     limiter: LLMRateLimiter,
     on_logged: LoggedObserver | None = None,
+    model_name: str | None = None,
 ) -> LLMClient:
     """Клиент модели, которым пользуются все LLM-сценарии.
 
@@ -391,7 +415,7 @@ def _model_client(
         inner=inner,
         unit_of_work=unit_of_work,
         provider=settings.llm.provider,
-        model=settings.llm.model or "not_configured",
+        model=model_name or settings.llm.model or "not_configured",
         debug_payloads=settings.llm.debug_llm_payloads,
         on_logged=on_logged,
         pricing=(
@@ -484,7 +508,7 @@ def _llm_snapshot(settings: AppSettings) -> LLMSettingsSnapshot:
     """
     return LLMSettingsSnapshot(
         provider=settings.llm.provider,
-        model=settings.llm.model,
+        model=settings.llm.effective_processing_model,
         temperature=settings.llm.temperature,
         max_output_tokens=settings.llm.max_output_tokens,
     )

@@ -463,6 +463,12 @@ def find_quote_span(
         else:
             pattern_parts.append(re.escape(ch))
     pattern = "".join(pattern_parts)
+    pattern = re.sub(r"\b(she|he|it|that|there|what|who)(?:\\s\+is|\['’‘`\]s)\b", r"\1(?:\\s+is|['’‘`]s)", pattern, flags=re.I)
+    pattern = re.sub(r"\b(I)(?:\\s\+am|\['’‘`\]m)\b", r"\1(?:\\s+am|['’‘`]m)", pattern, flags=re.I)
+    pattern = re.sub(r"\b(you|we|they)(?:\\s\+are|\['’‘`\]re)\b", r"\1(?:\\s+are|['’‘`]re)", pattern, flags=re.I)
+    pattern = re.sub(r"\b(do|does|did|is|are|was|were|have|has|had|could|would|should|must)(?:\\s\+not|n\['’‘`\]t)\b", r"\1(?:\\s+not|n['’‘`]t)", pattern, flags=re.I)
+    pattern = re.sub(r"\b(?:will\\s\+not|won\['’‘`\]t)\b", r"(?:will\\s+not|won['’‘`]t)", pattern, flags=re.I)
+    pattern = re.sub(r"\b(?:can\\s\+not|cannot|can\['’‘`\]t)\b", r"(?:can\\s+not|cannot|can['’‘`]t)", pattern, flags=re.I)
     try:
         regex_matches = [
             (m.start(), m.end(), text[m.start() : m.end()])
