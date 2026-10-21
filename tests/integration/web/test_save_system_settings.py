@@ -26,6 +26,33 @@ def test_save_updates_get_and_persists(configured_client, configured_application
     assert configured_application.settings_store.load().overrides['model'] == 'new-model'
 
 
+def test_save_system_settings_updates_split_models_and_temperature(configured_client, configured_application):
+    values = payload(
+        analysis_model='analysis-v1',
+        processing_model='processing-v1',
+        temperature=0.8,
+        timeout_seconds=120.0,
+    )
+    response = configured_client.post('/system/config', json=values)
+    assert response.status_code == 200
+    data = response.json()
+    assert data['llm']['analysis_model'] == 'analysis-v1'
+    assert data['llm']['processing_model'] == 'processing-v1'
+    assert data['llm']['temperature'] == 0.8
+    assert data['llm']['timeout_seconds'] == 120.0
+
+    get_data = configured_client.get('/system/config').json()
+    assert get_data['llm']['analysis_model'] == 'analysis-v1'
+    assert get_data['llm']['processing_model'] == 'processing-v1'
+    assert get_data['llm']['temperature'] == 0.8
+    assert get_data['llm']['timeout_seconds'] == 120.0
+    assert configured_application.settings.llm.analysis_model == 'analysis-v1'
+    assert configured_application.settings.llm.processing_model == 'processing-v1'
+    assert configured_application.settings.llm.temperature == 0.8
+    assert configured_application.settings.llm.timeout_seconds == 120.0
+
+
+
 @pytest.mark.parametrize('key', [None, '', '   '])
 def test_empty_key_keeps_current_key(configured_client, configured_application, key):
     values = payload()

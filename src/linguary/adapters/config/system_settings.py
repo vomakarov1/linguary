@@ -29,6 +29,11 @@ def _positive_integer(value: object, name: str) -> None:
         raise SystemSettingsValidationError(name, 'Ожидается положительное целое число')
 
 
+BASE_OVERRIDE_FIELDS = frozenset({'provider', 'model', 'base_url', 'requests_per_minute', 'concurrency'})
+OPTIONAL_OVERRIDE_FIELDS = frozenset({'proxy_mode', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds'})
+ALLOWED_OVERRIDE_FIELDS = BASE_OVERRIDE_FIELDS | OPTIONAL_OVERRIDE_FIELDS
+
+
 @dataclass(frozen=True, slots=True)
 class SystemSettingsUpdate:
     provider: str = field(repr=False)
@@ -40,6 +45,11 @@ class SystemSettingsUpdate:
 
     proxy_mode: str | None = None
     proxy_url: str | None = field(default=None, repr=False)
+
+    analysis_model: str | None = None
+    processing_model: str | None = None
+    temperature: float | None = None
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         mode = self.proxy_mode
@@ -82,6 +92,25 @@ class SystemSettingsUpdate:
         for name, value in (('provider', provider), ('model', model), ('base_url', base_url), ('api_key', key)):
             object.__setattr__(self, name, value)
 
+        analysis_model = None if self.analysis_model is None else _string(self.analysis_model, 'analysis_model')
+        processing_model = None if self.processing_model is None else _string(self.processing_model, 'processing_model')
+        if self.temperature is not None:
+            if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
+                raise SystemSettingsValidationError('temperature', 'Ожидается число')
+            if not (0.0 <= float(self.temperature) <= 2.0):
+                raise SystemSettingsValidationError('temperature', 'Значение должно быть от 0.0 до 2.0')
+            object.__setattr__(self, 'temperature', float(self.temperature))
+        if self.timeout_seconds is not None:
+            if isinstance(self.timeout_seconds, bool) or not isinstance(self.timeout_seconds, (int, float)):
+                raise SystemSettingsValidationError('timeout_seconds', 'Ожидается число')
+            if float(self.timeout_seconds) <= 0:
+                raise SystemSettingsValidationError('timeout_seconds', 'Ожидается положительное число')
+            object.__setattr__(self, 'timeout_seconds', float(self.timeout_seconds))
+        if analysis_model is not None:
+            object.__setattr__(self, 'analysis_model', analysis_model)
+        if processing_model is not None:
+            object.__setattr__(self, 'processing_model', processing_model)
+
 
 def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> AppSettings:
     mode = current.llm.proxy_mode if update.proxy_mode is None else update.proxy_mode
@@ -93,11 +122,40 @@ def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> Ap
         url = None
     if mode == 'custom' and url is None:
         raise SystemSettingsValidationError('proxy_url', 'Укажите адрес прокси')
+
+    analysis_model = (
+        current.llm.analysis_model if update.analysis_model is None
+        else update.analysis_model
+    )
+    processing_model = (
+        current.llm.processing_model if update.processing_model is None
+        else update.processing_model
+    )
+    temperature = (
+        current.llm.temperature if update.temperature is None
+        else update.temperature
+    )
+    timeout_seconds = (
+        current.llm.timeout_seconds if update.timeout_seconds is None
+        else update.timeout_seconds
+    )
+
     return replace(
         current,
-        llm=replace(current.llm, proxy_mode=mode, proxy_url=url, provider=update.provider, model=update.model,
-                    base_url=update.base_url, requests_per_minute=update.requests_per_minute,
-                    api_key=update.api_key if update.api_key is not None else current.llm.api_key),
+        llm=replace(
+            current.llm,
+            proxy_mode=mode,
+            proxy_url=url,
+            provider=update.provider,
+            model=update.model,
+            analysis_model=analysis_model,
+            processing_model=processing_model,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+            base_url=update.base_url,
+            requests_per_minute=update.requests_per_minute,
+            api_key=update.api_key if update.api_key is not None else current.llm.api_key,
+        ),
         worker=replace(current.worker, concurrency=update.concurrency),
     )
 
@@ -105,8 +163,8 @@ def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> Ap
 def overlay_settings(initial: AppSettings, stored: StoredSystemSettings | None) -> AppSettings:
     if stored is None or stored.overrides is None:
         return initial
-    fields = {'provider', 'model', 'base_url', 'requests_per_minute', 'concurrency'}
-    if not isinstance(stored.overrides, dict) or set(stored.overrides) not in (fields, fields | {'proxy_mode'}):
+    if not isinstance(stored.overrides, dict) or not (BASE_OVERRIDE_FIELDS <= set(stored.overrides) <= ALLOWED_OVERRIDE_FIELDS):
         raise SystemSettingsValidationError('form', 'Сохранённые настройки имеют неверный формат')
     update = SystemSettingsUpdate(**(dict(proxy_mode='auto') | stored.overrides), api_key=stored.api_key, proxy_url=stored.proxy_url)
     return candidate_settings(initial, update)
+

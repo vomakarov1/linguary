@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from linguary.adapters.config import AppSettings
-from linguary.adapters.config.settings import proxy_secrets
+from linguary.adapters.config.settings import DEFAULT_TIMEOUT_SECONDS, proxy_secrets
 from linguary.adapters.validation import EpubCheckAvailability
 from linguary.application.book_overview import (
     BookOverview,
@@ -768,6 +768,10 @@ class LLMConfigResponse(BaseModel):
     is_ready: bool
     provider: str
     model: str | None = None
+    analysis_model: str | None = None
+    processing_model: str | None = None
+    temperature: float | None = None
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     proxy_mode: Literal["auto", "direct", "custom"] = "auto"
     has_proxy_url: bool = False
     has_api_key: bool
@@ -787,6 +791,10 @@ class LLMConfigResponse(BaseModel):
             is_ready=llm.is_ready,
             provider=public_text(llm.provider),
             model=public_text(llm.model) or None,
+            analysis_model=public_text(llm.analysis_model) or None,
+            processing_model=public_text(llm.processing_model) or None,
+            temperature=llm.temperature,
+            timeout_seconds=llm.timeout_seconds,
             proxy_mode=llm.proxy_mode,
             has_proxy_url=bool(llm.proxy_url),
             has_api_key=bool(llm.api_key and llm.api_key.strip()),
@@ -857,6 +865,7 @@ class SystemConfigResponse(BaseModel):
 type SettingsField = Literal[
     "provider", "model", "api_key", "base_url", "requests_per_minute",
     "concurrency", "expected_revision", "form", "proxy_mode", "proxy_url",
+    "analysis_model", "processing_model", "temperature", "timeout_seconds",
 ]
 
 
@@ -881,6 +890,10 @@ class SafeSettingsFormValues:
     concurrency: int | None
     expected_revision: int | None
     proxy_mode: str = "auto"
+    analysis_model: str = field(default="", repr=False)
+    processing_model: str = field(default="", repr=False)
+    temperature: float | None = None
+    timeout_seconds: float | None = None
 
 
 class ErrorResponse(BaseModel):

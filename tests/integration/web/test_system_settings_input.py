@@ -173,3 +173,60 @@ def test_public_config_fields_never_contain_the_effective_key():
     settings = AppSettings(llm=LLMSettings(model=SECRET, api_key=SECRET, base_url='https://example.com/' + SECRET))
     response = LLMConfigResponse.of_settings(settings)
     assert SECRET not in response.model_dump_json()
+
+
+async def test_system_settings_input_parses_split_models_and_inference():
+    values = payload(
+        analysis_model="analysis-model",
+        processing_model="proc-model",
+        temperature=0.7,
+        timeout_seconds=90.0,
+    )
+    json_update, json_revision = await read_settings_update(request(values), current_settings=CURRENT)
+    assert json_update.analysis_model == "analysis-model"
+    assert json_update.processing_model == "proc-model"
+    assert json_update.temperature == 0.7
+    assert json_update.timeout_seconds == 90.0
+
+    form_values = payload(
+        analysis_model="analysis-model",
+        processing_model="proc-model",
+        temperature="0.7",
+        timeout_seconds="90.0",
+        requests_per_minute="",
+    )
+    form_update, form_revision = await read_settings_update(
+        request(form_values, 'application/x-www-form-urlencoded'),
+        current_settings=CURRENT,
+    )
+    assert form_update.analysis_model == "analysis-model"
+    assert form_update.processing_model == "proc-model"
+    assert form_update.temperature == 0.7
+    assert form_update.timeout_seconds == 90.0
+
+
+def test_safe_form_values_includes_split_models_without_secrets():
+    from linguary.web.system_settings_input import safe_form_values
+    from linguary.adapters.config.system_settings import SystemSettingsUpdate
+
+    update = SystemSettingsUpdate(
+        provider='openai_compatible',
+        model='base-model',
+        base_url='http://localhost:8080/v1',
+        requests_per_minute=None,
+        concurrency=2,
+        analysis_model='analysis-secret-key',
+        processing_model='clean-proc',
+        temperature=0.4,
+        timeout_seconds=45.0,
+        api_key=SECRET,
+    )
+    settings_with_secret = AppSettings(llm=LLMSettings(api_key='analysis-secret-key'))
+    values = safe_form_values(settings_with_secret, update=update, expected_revision=3)
+    assert values.analysis_model == ''
+    assert values.processing_model == 'clean-proc'
+    assert values.temperature == 0.4
+    assert values.timeout_seconds == 45.0
+    assert values.expected_revision == 3
+    assert 'analysis-secret-key' not in str(asdict(values))
+

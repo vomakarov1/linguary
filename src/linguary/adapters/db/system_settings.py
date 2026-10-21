@@ -8,6 +8,7 @@ from sqlalchemy import Engine, insert, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from linguary.adapters.config.settings import SettingsError
+from linguary.adapters.config.system_settings import ALLOWED_OVERRIDE_FIELDS, BASE_OVERRIDE_FIELDS
 from linguary.adapters.db.models import SystemSettingsRow
 
 
@@ -57,8 +58,7 @@ class SystemSettingsStore:
         expected_revision: int,
         proxy_url: str | None = None,
     ) -> StoredSystemSettings:
-        fields = {'provider', 'model', 'base_url', 'requests_per_minute', 'concurrency'}
-        if not isinstance(overrides, dict) or set(overrides) not in (fields, fields | {'proxy_mode'}):
+        if not isinstance(overrides, dict) or not (BASE_OVERRIDE_FIELDS <= set(overrides) <= ALLOWED_OVERRIDE_FIELDS):
             raise SettingsStoreError('Недопустимый состав сохраняемых настроек')
         return self._write(dict(overrides), api_key, proxy_url, expected_revision=expected_revision)
 
