@@ -1688,6 +1688,7 @@ def _in_xhtml_namespace(element: etree._Element) -> etree._Element:
     for node in element.iter():
         if isinstance(node.tag, str) and not node.tag.startswith("{"):
             node.tag = f"{{{_XHTML_NAMESPACE}}}{node.tag}"
+        node.attrib.pop("summary", None)
     return element
 
 
