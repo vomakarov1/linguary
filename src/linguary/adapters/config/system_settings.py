@@ -47,14 +47,15 @@ class SystemSettingsUpdate:
             raise SystemSettingsValidationError('proxy_url', 'Укажите режим соединения для адреса прокси')
         if mode is not None and mode not in ('auto', 'direct', 'custom'):
             raise SystemSettingsValidationError('proxy_mode', 'Недопустимый режим соединения')
-        url = None if self.proxy_url is None else _string(self.proxy_url, 'proxy_url') or None
-        if url is not None:
-            if mode != 'custom':
-                raise SystemSettingsValidationError('proxy_url', 'Укажите режим «Через прокси» для адреса прокси')
-            try:
-                validate_proxy(mode, self.proxy_url)
-            except SettingsError as error:
-                raise SystemSettingsValidationError('proxy_url', str(error)) from None
+        if mode != 'custom':
+            url = None
+        else:
+            url = None if self.proxy_url is None else _string(self.proxy_url, 'proxy_url') or None
+            if url is not None:
+                try:
+                    validate_proxy(mode, self.proxy_url)
+                except SettingsError as error:
+                    raise SystemSettingsValidationError('proxy_url', str(error)) from None
         object.__setattr__(self, 'proxy_url', url)
         provider = _string(self.provider, 'provider')
         model = _string(self.model, 'model')

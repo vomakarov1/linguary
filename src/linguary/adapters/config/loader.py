@@ -89,6 +89,8 @@ _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "analysis_model": _as_str,
     "processing_model": _as_str,
     "api_key": _as_str,
+    "proxy_mode": _as_str,
+    "proxy_url": _as_str,
     "timeout_seconds": _as_float,
     "max_output_tokens": _as_int,
     "temperature": _as_float,
