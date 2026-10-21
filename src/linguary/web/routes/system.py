@@ -11,8 +11,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from linguary.adapters.config import LLMSettings
+from linguary.adapters.config.settings import proxy_secrets
 from linguary.adapters.db.system_settings import SettingsRevisionConflict
 from linguary.adapters.config.system_settings import SystemSettingsValidationError
+from linguary.adapters.llm.connection_check import test_llm_connection
+from linguary.adapters.llm.openai_compatible import safe_detail
 from linguary.composition.system_settings import SettingsClosingError
 
 from linguary.web import labels
@@ -20,6 +24,7 @@ from linguary.web.dependencies import CurrentApplication
 from linguary.web.schemas import (
     EpubCheckConfigResponse,
     LLMConfigResponse,
+    LLMTestConnectionResponse,
     ServerConfigResponse,
     StorageConfigResponse,
     SystemConfigResponse,
@@ -112,6 +117,80 @@ async def save_system_config(request: Request, application: CurrentApplication):
 @router.post("/system/config/reset", response_model=SystemConfigResponse)
 async def reset_system_config(request: Request, application: CurrentApplication):
     return await _change_config(request, application, reset=True)
+
+
+@router.post("/system/config/test", response_model=LLMTestConnectionResponse)
+async def test_system_config(
+    request: Request,
+    application: CurrentApplication,
+) -> LLMTestConnectionResponse:
+    current = application.settings.llm
+    data: dict[str, object] = {}
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type == "application/json":
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                data = body
+        except Exception:
+            data = {}
+    elif content_type in ("application/x-www-form-urlencoded", "multipart/form-data"):
+        try:
+            form = await request.form()
+            data = dict(form)
+        except Exception:
+            data = {}
+
+    provider = str(data["provider"]).strip() if data.get("provider") else current.provider
+    base_url = str(data["base_url"]).strip() if data.get("base_url") else current.base_url
+
+    model = str(data["model"]).strip() if "model" in data else current.model
+    analysis_model = str(data["analysis_model"]).strip() if "analysis_model" in data else current.analysis_model
+    processing_model = str(data["processing_model"]).strip() if "processing_model" in data else current.processing_model
+
+    posted_key = data.get("api_key")
+    api_key = str(posted_key).strip() if (posted_key and str(posted_key).strip()) else current.api_key
+
+    proxy_mode = data.get("proxy_mode") if data.get("proxy_mode") in ("auto", "direct", "custom") else current.proxy_mode
+    posted_proxy_url = data.get("proxy_url")
+    proxy_url = str(posted_proxy_url).strip() if (posted_proxy_url and str(posted_proxy_url).strip()) else current.proxy_url
+    if proxy_mode != "custom":
+        proxy_url = None
+
+    secrets = proxy_secrets(proxy_url)
+
+    try:
+        test_settings = LLMSettings(
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            analysis_model=analysis_model,
+            processing_model=processing_model,
+            api_key=api_key,
+            proxy_mode=proxy_mode,
+            proxy_url=proxy_url,
+        )
+    except Exception as error:
+        cleaned_error = safe_detail(str(error), api_key=api_key, secrets=secrets)
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Ошибка конфигурации подключения",
+            error=cleaned_error,
+        )
+
+    ok, message = await test_llm_connection(test_settings)
+    if ok:
+        return LLMTestConnectionResponse(
+            ok=True,
+            message=message,
+            error=None,
+        )
+    return LLMTestConnectionResponse(
+        ok=False,
+        message="Не удалось подключиться к модели",
+        error=message,
+    )
+
 
 
 async def _change_config(request: Request, application, *, reset: bool):

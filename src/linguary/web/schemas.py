@@ -902,6 +902,23 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class LLMTestConnectionRequest(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+    analysis_model: str | None = None
+    processing_model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    proxy_mode: Literal["auto", "direct", "custom"] | None = None
+    proxy_url: str | None = None
+
+
+class LLMTestConnectionResponse(BaseModel):
+    ok: bool
+    message: str
+    error: str | None = None
+
+
 __all__ = [
     "BookDetailResponse",
     "BookListResponse",
@@ -919,6 +936,8 @@ __all__ = [
     "GlossaryReviewResponse",
     "ImportWarningResponse",
     "LLMConfigResponse",
+    "LLMTestConnectionRequest",
+    "LLMTestConnectionResponse",
     "LanguageNoteResponse",
     "PlanBlockResponse",
     "ProcessingPlanResponse",
