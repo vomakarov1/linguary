@@ -27,7 +27,7 @@ class FormPage(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         if tag == 'form':
-            self.current = {'inputs': {}, 'buttons': [], 'selects': {}}
+            self.current = {'attrs': attrs, 'inputs': {}, 'buttons': [], 'selects': {}}
             self.forms[attrs['action']] = self.current
         elif self.current is not None:
             if tag == 'input':
@@ -203,3 +203,62 @@ def test_html_500_retry_after_external_change_conflicts(configured_client, confi
     response = configured_client.post('/system/config', data=values, headers=HTML)
     assert response.status_code == 409
     assert FormPage(response.text).values()['expected_revision'] == '0'
+
+
+def test_config_html_renders_logical_groups_and_inline_errors(configured_client):
+    res = page(configured_client)
+    assert res.status_code == 200
+    assert '<fieldset' in res.text
+    assert '<legend>' in res.text
+    assert 'Провайдер и модели' in res.text
+    assert 'Параметры инференса' in res.text
+    assert 'Сетевое подключение и прокси' in res.text
+    assert 'Очередь и фоновая работа' in res.text
+
+    err_res = post(configured_client, concurrency=0)
+    assert err_res.status_code == 422
+    assert '<span id="settings-error-concurrency"' in err_res.text
+    assert 'role="alert"' in err_res.text
+    assert 'aria-describedby="settings-error-concurrency"' in err_res.text
+
+
+def test_config_html_has_reset_confirmation_attribute(configured_client):
+    res = page(configured_client)
+    form = FormPage(res.text).forms['/system/config/reset']
+    assert 'data-confirm' in form['attrs']
+    assert form['attrs']['data-confirm'] == 'Сбросить все настройки к исходным значениям? Это действие отменит все пользовательские изменения.'
+
+
+def test_config_html_renders_test_connection_button(configured_client):
+    res = page(configured_client)
+    form = FormPage(res.text).forms['/system/config']
+    test_btn = next((b for b in form['buttons'] if b.get('id') == 'settings-test-connection'), None)
+    assert test_btn is not None
+    assert test_btn.get('type') == 'button'
+    assert 'Проверить подключение' in res.text
+    assert 'id="settings-test-status"' in res.text
+
+
+def test_config_html_includes_new_fields(configured_client):
+    res = page(configured_client)
+    inputs = FormPage(res.text).forms['/system/config']['inputs']
+    assert 'analysis_model' in inputs
+    assert 'processing_model' in inputs
+    assert 'temperature' in inputs
+    assert 'timeout_seconds' in inputs
+    assert inputs['timeout_seconds']['value'] == '600.0'
+
+    post(
+        configured_client,
+        analysis_model='claude-3-haiku',
+        processing_model='claude-3-sonnet',
+        temperature='0.7',
+        timeout_seconds='45.0',
+    )
+    after = page(configured_client)
+    after_inputs = FormPage(after.text).forms['/system/config']['inputs']
+    assert after_inputs['analysis_model']['value'] == 'claude-3-haiku'
+    assert after_inputs['processing_model']['value'] == 'claude-3-sonnet'
+    assert after_inputs['temperature']['value'] == '0.7'
+    assert after_inputs['timeout_seconds']['value'] == '45.0'
+
