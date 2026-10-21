@@ -401,12 +401,15 @@ def _render_chapters(
 
     Вводные служебные разделы (титул, оглавление) и страница сносок пересказа не имеют,
     и сюжетная глава после них вспоминает последнюю сюжетную главу до них.
+    Номер сюжетной главы не сдвигается из-за вводных разделов.
     """
     renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings)
     chapters: list[_Chapter] = []
     previous: DocumentSection | None = None
-    for number, section in enumerate(request.document.ordered_sections, start=1):
+    story_chapter_number = 1
+    for section in request.document.ordered_sections:
         is_front = _is_front_matter(section, request.document)
+        number = 0 if is_front else story_chapter_number
         chapters.append(
             renderer.render(
                 section,
@@ -417,6 +420,7 @@ def _render_chapters(
         )
         if not section.is_notes_only and not is_front:
             previous = section
+            story_chapter_number += 1
     return tuple(chapters)
 
 

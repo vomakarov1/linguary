@@ -494,6 +494,7 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
             ),
         )
 
+    ch1_para = next(b for b in ch1_sec.blocks if b.type is BlockType.PARAGRAPH)
     for block in ch1_sec.blocks:
         if block.type is BlockType.PARAGRAPH:
             results[block.id] = BlockProcessingResult(
@@ -502,6 +503,14 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
                 translated_text="Алиса начала очень уставать.",
                 glossary_hints=(
                     GlossaryHint(original="tired", translation="уставать"),
+                ),
+                language_notes=(
+                    LanguageNote(
+                        id="note-1",
+                        block_id=block.id,
+                        original_excerpt="tired",
+                        note="Разговорная заметка.",
+                    ),
                 ),
             )
 
@@ -529,7 +538,7 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
                 ),
             ),
             chapter_summary="Alice follows the White Rabbit down the rabbit-hole.",
-            language_notes=(),
+            language_notes=results[ch1_para.id].language_notes,
         ),
         ch2_sec.id: LearningMaterial.for_chapter(
             section_id=ch2_sec.id,
@@ -567,6 +576,8 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
     # Санитайзер Before You Read очистил мета-инструкцию в карточке
     assert "Необычный, странный." in ch1_text
     assert "Передавай как" not in ch1_text
+    # Заметки главы 1 имеют префикс ln-ch01 (не сдвинуты из-за титула)
+    assert [el.get("id") for el in elements(ch1_doc, "aside")] == ["ln-ch01-001"]
 
     # 3. Проверяем вторую главу (Chapter 2) — содержит previously из главы 1
     ch2_doc = chapters["OEBPS/chapter2.xhtml"]
