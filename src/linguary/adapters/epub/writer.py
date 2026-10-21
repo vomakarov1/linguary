@@ -36,6 +36,7 @@ from lxml import etree
 
 from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.resources import package_path
+from linguary.application.analysis_merge import sanitize_before_you_read_explanation
 from linguary.application.ports.epub import (
     EpubExportFatalError,
     EpubImportFatalError,
@@ -295,21 +296,131 @@ def _resource_media_types(request: EpubWriteRequest) -> Mapping[str, str]:
     }
 
 
+_FRONT_MATTER_FILENAMES = frozenset(
+    {
+        "cover",
+        "title",
+        "titlepage",
+        "title_page",
+        "halftitle",
+        "half_title",
+        "copyright",
+        "colophon",
+        "imprint",
+        "contents",
+        "toc",
+        "nav",
+    }
+)
+
+_FRONT_MATTER_TITLES = frozenset(
+    {
+        "cover",
+        "contents",
+        "table of contents",
+        "toc",
+        "оглавление",
+        "содержание",
+        "title",
+        "title page",
+        "titlepage",
+        "half title",
+        "half-title",
+        "титул",
+        "титульный лист",
+        "copyright",
+        "colophon",
+    }
+)
+
+
+def _is_front_matter(
+    section: DocumentSection, document: CanonicalDocument | None = None
+) -> bool:
+    """Определяет вводный служебный раздел (титульный лист, оглавление, front matter).
+
+    Такие разделы не являются сюжетными главами: они не получают сносок и переводов,
+    не открывают книгу блоком пересказа и сами не служат источником для «Previously in...».
+    """
+    if section.is_notes_only:
+        return False
+
+    title_norm = section.title.strip().casefold().strip("\"'«»")
+    headings = [
+        b.text.strip().casefold()
+        for b in section.blocks
+        if b.type is BlockType.HEADING and b.text.strip()
+    ]
+
+    has_chapter = (
+        any("chapter" in h or "глава" in h or "часть" in h for h in headings)
+        or "chapter" in title_norm
+        or "глава" in title_norm
+        or "часть" in title_norm
+    )
+    if has_chapter:
+        return False
+
+    stem = Path(section.source_resource_path).stem.casefold()
+    if stem.startswith("wrap") or stem in _FRONT_MATTER_FILENAMES:
+        return True
+
+    if title_norm in _FRONT_MATTER_TITLES:
+        return True
+
+    if any(h in _FRONT_MATTER_TITLES for h in headings):
+        return True
+
+    text_blocks = [
+        b
+        for b in section.blocks
+        if b.type
+        in (
+            BlockType.PARAGRAPH,
+            BlockType.POEM,
+            BlockType.QUOTE,
+            BlockType.LIST_ITEM,
+        )
+        and b.text.strip()
+    ]
+    if not text_blocks:
+        return True
+
+    if document is not None and document.metadata.title:
+        book_title = document.metadata.title.strip().casefold()
+        if (title_norm == book_title or (headings and headings[0] == book_title)) and len(text_blocks) <= 2:
+            return True
+
+    return False
+
+
 def _render_chapters(
     request: EpubWriteRequest, *, opaque: _OpaqueSource, warnings: _ExportWarnings
 ) -> tuple[_Chapter, ...]:
     """Документы глав в порядке чтения.
 
-    Предыдущая глава — последний раздел перед этим, который сам является главой:
-    страница сносок пересказа не имеет, и глава после неё вспоминает главу до неё.
+    Вводные служебные разделы (титул, оглавление) и страница сносок пересказа не имеют,
+    и сюжетная глава после них вспоминает последнюю сюжетную главу до них.
+    Номер сюжетной главы не сдвигается из-за вводных разделов.
     """
     renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings)
     chapters: list[_Chapter] = []
     previous: DocumentSection | None = None
-    for number, section in enumerate(request.document.ordered_sections, start=1):
-        chapters.append(renderer.render(section, number=number, previous=previous))
-        if not section.is_notes_only:
+    story_chapter_number = 1
+    for section in request.document.ordered_sections:
+        is_front = _is_front_matter(section, request.document)
+        number = 0 if is_front else story_chapter_number
+        chapters.append(
+            renderer.render(
+                section,
+                number=number,
+                previous=None if is_front else previous,
+                is_front_matter=is_front,
+            )
+        )
+        if not section.is_notes_only and not is_front:
             previous = section
+            story_chapter_number += 1
     return tuple(chapters)
 
 
@@ -329,12 +440,19 @@ class _ChapterRenderer:
         self._document = request.document
 
     def render(
-        self, section: DocumentSection, *, number: int, previous: DocumentSection | None
+        self,
+        section: DocumentSection,
+        *,
+        number: int,
+        previous: DocumentSection | None,
+        is_front_matter: bool = False,
     ) -> _Chapter:
         """Собирает главу целиком: учебные разделы, блоки и слои помощи.
 
         Страница сносок собирается без разметки главы и без учебных разделов перед
         текстом: её сноски переводятся, но главой она не является.
+        Вводные служебные разделы (титул, оглавление) собираются без учебных материалов,
+        сносок и перевода.
         """
         href = _contained_name(section.source_resource_path)
         root = _xhtml_document(
@@ -344,12 +462,23 @@ class _ChapterRenderer:
         )
         body = root.find(f"{{{_XHTML_NAMESPACE}}}body")
         if section.is_notes_only:
-            self._append_blocks(body, section, href=href, number=number)
+            self._append_blocks(
+                body, section, href=href, number=number, is_front_matter=False
+            )
+        elif is_front_matter:
+            container = _sub(
+                body, "section", {f"{{{_EPUB_NAMESPACE}}}type": "frontmatter"}
+            )
+            self._append_blocks(
+                container, section, href=href, number=number, is_front_matter=True
+            )
         else:
             container = _sub(body, "section", {f"{{{_EPUB_NAMESPACE}}}type": "chapter"})
             self._append_previously(container, previous)
             self._append_before_you_read(container, section)
-            self._append_blocks(container, section, href=href, number=number)
+            self._append_blocks(
+                container, section, href=href, number=number, is_front_matter=False
+            )
         return _Chapter(
             section_id=section.id, href=href, title=section.title, root=root
         )
@@ -381,7 +510,9 @@ class _ChapterRenderer:
         definitions = _sub(block, "dl")
         for entry in material.before_you_read:
             _sub(definitions, "dt").text = entry.expression
-            _sub(definitions, "dd").text = entry.explanation
+            _sub(definitions, "dd").text = sanitize_before_you_read_explanation(
+                entry.explanation
+            )
 
     def _append_blocks(
         self,
@@ -390,6 +521,7 @@ class _ChapterRenderer:
         *,
         href: str,
         number: int,
+        is_front_matter: bool = False,
     ) -> None:
         """Блоки главы вместе со слоями помощи, в порядке исходного документа."""
         blocks = section.ordered_blocks
@@ -399,7 +531,13 @@ class _ChapterRenderer:
                 children.setdefault(block.parent_id, []).append(block)
         state = _SectionState(section=section, href=href, number=number)
         roots = tuple(block for block in blocks if block.parent_id is None)
-        self._append_siblings(container, roots, children=children, state=state)
+        self._append_siblings(
+            container,
+            roots,
+            children=children,
+            state=state,
+            is_front_matter=is_front_matter,
+        )
 
     def _append_siblings(
         self,
@@ -409,6 +547,7 @@ class _ChapterRenderer:
         children: Mapping[str, list[DocumentBlock]],
         state: _SectionState,
         parent_type: BlockType | None = None,
+        is_front_matter: bool = False,
     ) -> None:
         """Соседние блоки одного уровня; подряд идущие пункты и цитаты — под обёрткой."""
         group: etree._Element | None = None
@@ -425,6 +564,7 @@ class _ChapterRenderer:
                 children=children,
                 state=state,
                 parent_type=parent_type,
+                is_front_matter=is_front_matter,
             )
 
     def _append_block(
@@ -435,6 +575,7 @@ class _ChapterRenderer:
         children: Mapping[str, list[DocumentBlock]],
         state: _SectionState,
         parent_type: BlockType | None,
+        is_front_matter: bool = False,
     ) -> None:
         """Один блок: оригинал, вложенные блоки и слой помощи под ним."""
         nested = children.get(block.id, ())
@@ -448,13 +589,15 @@ class _ChapterRenderer:
                 children=children,
                 state=state,
                 parent_type=block.type,
+                is_front_matter=is_front_matter,
             )
         help_parent = (
             element
             if block.type is BlockType.LIST_ITEM and element is not None
             else parent
         )
-        self._append_help(help_parent, block, state=state)
+        if not is_front_matter:
+            self._append_help(help_parent, block, state=state)
 
     def _append_original(
         self,

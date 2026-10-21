@@ -86,6 +86,8 @@ def test_export_structure_only_writes_epub(tmp_path: Path, capsys) -> None:
             "book-export",
             "--output",
             str(output_path),
+            "--mode",
+            "structure_only",
         ]
     )
 
@@ -93,6 +95,56 @@ def test_export_structure_only_writes_epub(tmp_path: Path, capsys) -> None:
     assert exit_code == 0
     assert output_path.is_file()
     assert "Export:" in output
+
+
+def test_export_defaults_to_full_mode(tmp_path: Path, capsys) -> None:
+    """CLI export по умолчанию и с --mode full использует полный экспорт."""
+    config = _config(tmp_path)
+    output_path = tmp_path / "smoke.epub"
+    main(
+        [
+            "--config",
+            str(config),
+            "import",
+            str(SYNTHETIC_EPUB),
+            "--book-id",
+            "book-export-full",
+        ]
+    )
+    main(["--config", str(config), "worker", "--once"])
+
+    # По умолчанию --mode full на не готовой книге завершается с ошибкой
+    exit_code_default = main(
+        [
+            "--config",
+            str(config),
+            "export",
+            "book-export-full",
+            "--output",
+            str(output_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code_default == 1
+    assert "экспортировать целиком нельзя" in captured.err
+
+    # Явный --mode full ведёт себя аналогично
+    exit_code_full = main(
+        [
+            "--config",
+            str(config),
+            "export",
+            "book-export-full",
+            "--output",
+            str(output_path),
+            "--mode",
+            "full",
+        ]
+    )
+    captured_full = capsys.readouterr()
+    assert exit_code_full == 1
+    assert "экспортировать целиком нельзя" in captured_full.err
+
 
 
 def test_analyze_without_llm_configuration_fails_before_queueing(

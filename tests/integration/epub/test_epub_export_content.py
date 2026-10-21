@@ -448,3 +448,142 @@ def test_notes_page_is_translated_but_not_dressed_as_a_chapter(
     assert "Summary of Chapter One." in following
     assert "Summary of Notes." not in following
     assert "idiom of Chapter Two" in following
+
+
+def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
+    """Титул и оглавление не получают помощи, а первая сюжетная глава не получает previously."""
+    epub_path = build_epub(
+        tmp_path / "book_with_front_matter.epub",
+        documents={
+            "title.xhtml": xhtml_document(
+                "<h1>Alice’s Adventures in Wonderland</h1>"
+                "<h2>by Lewis Carroll</h2>"
+                "<h2>Contents</h2>"
+                "<table><tr><td>Chapter One</td></tr><tr><td>Chapter Two</td></tr></table>"
+            ),
+            "chapter1.xhtml": xhtml_document(
+                "<h1>Chapter One</h1>"
+                "<p>Alice was beginning to get very tired.</p>"
+            ),
+            "chapter2.xhtml": xhtml_document(
+                "<h1>Chapter Two</h1>"
+                "<p>Curiouser and curiouser cried Alice.</p>"
+            ),
+        },
+        toc=[
+            ("title.xhtml", "Contents"),
+            ("chapter1.xhtml", "Chapter One"),
+            ("chapter2.xhtml", "Chapter Two"),
+        ],
+        title="Alice’s Adventures in Wonderland",
+    )
+
+    dry = run_export(epub_path, tmp_path=tmp_path / "dry", book_id="book-front-matter")
+    document = dry.imported.document
+
+    title_sec, ch1_sec, ch2_sec = document.ordered_sections
+
+    results = {}
+    for block in title_sec.blocks:
+        results[block.id] = BlockProcessingResult(
+            block_id=block.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Перевод титула.",
+            glossary_hints=(
+                GlossaryHint(original="Alice", translation="Алиса"),
+            ),
+        )
+
+    ch1_para = next(b for b in ch1_sec.blocks if b.type is BlockType.PARAGRAPH)
+    for block in ch1_sec.blocks:
+        if block.type is BlockType.PARAGRAPH:
+            results[block.id] = BlockProcessingResult(
+                block_id=block.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Алиса начала очень уставать.",
+                glossary_hints=(
+                    GlossaryHint(original="tired", translation="уставать"),
+                ),
+                language_notes=(
+                    LanguageNote(
+                        id="note-1",
+                        block_id=block.id,
+                        original_excerpt="tired",
+                        note="Разговорная заметка.",
+                    ),
+                ),
+            )
+
+    for block in ch2_sec.blocks:
+        if block.type is BlockType.PARAGRAPH:
+            results[block.id] = BlockProcessingResult(
+                block_id=block.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Все чудесатее и чудесатее вскричала Алиса.",
+            )
+
+    materials = {
+        title_sec.id: LearningMaterial.for_chapter(
+            section_id=title_sec.id,
+            before_you_read=(),
+            chapter_summary="This opening section contains only the title page.",
+            language_notes=(),
+        ),
+        ch1_sec.id: LearningMaterial.for_chapter(
+            section_id=ch1_sec.id,
+            before_you_read=(
+                BeforeYouReadEntry(
+                    expression="out of the way",
+                    explanation="Необычный, странный. Передавай как забавное искажение.",
+                ),
+            ),
+            chapter_summary="Alice follows the White Rabbit down the rabbit-hole.",
+            language_notes=results[ch1_para.id].language_notes,
+        ),
+        ch2_sec.id: LearningMaterial.for_chapter(
+            section_id=ch2_sec.id,
+            before_you_read=(),
+            chapter_summary="Alice grows very large in the hall.",
+            language_notes=(),
+        ),
+    }
+
+    run = run_export(
+        epub_path,
+        tmp_path=tmp_path / "full",
+        book_id="book-front-matter",
+        block_results=results,
+        learning_materials=materials,
+    )
+
+    chapters = documents_of(run.path)
+
+    # 1. Проверяем вводный раздел (титул / оглавление)
+    title_doc = chapters["OEBPS/title.xhtml"]
+    title_text = "".join(title_doc.itertext())
+    assert "linguary-glossary" not in [c for _, c in [((el.tag, el.get("class")) if el is not None else ("", "")) for el in elements(title_doc, "*")]]
+    assert "linguary-translation" not in [c for _, c in [((el.tag, el.get("class")) if el is not None else ("", "")) for el in elements(title_doc, "*")]]
+    assert "Перевод титула." not in title_text
+    assert "Алиса" not in title_text
+
+    # 2. Проверяем первую сюжетную главу (Chapter 1)
+    ch1_doc = chapters["OEBPS/chapter1.xhtml"]
+    ch1_text = "".join(ch1_doc.itertext())
+    ch1_classes = [el.get("class") for el in elements(ch1_doc, "section") if el.get("class")]
+    assert "linguary-previously" not in ch1_classes
+    assert "Previously" not in ch1_text
+    assert "title page" not in ch1_text
+    # Санитайзер Before You Read очистил мета-инструкцию в карточке
+    assert "Необычный, странный." in ch1_text
+    assert "Передавай как" not in ch1_text
+    # Заметки главы 1 имеют префикс ln-ch01 (не сдвинуты из-за титула)
+    assert [el.get("id") for el in elements(ch1_doc, "aside")] == ["ln-ch01-001"]
+
+    # 3. Проверяем вторую главу (Chapter 2) — содержит previously из главы 1
+    ch2_doc = chapters["OEBPS/chapter2.xhtml"]
+    ch2_text = "".join(ch2_doc.itertext())
+    ch2_classes = [el.get("class") for el in elements(ch2_doc, "section") if el.get("class")]
+    assert "linguary-previously" in ch2_classes
+    assert "Previously in Chapter One" in ch2_text
+    assert "Alice follows the White Rabbit" in ch2_text
+

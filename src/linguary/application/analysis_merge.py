@@ -391,10 +391,78 @@ def _merged_before_you_read(
     )
 
 
+_BYR_DIRECTIVE_PREFIX = re.compile(
+    r"^(?:(?:(?:в|при)\s+переводе|для\s+перевода|(?:указание|инструкция)\s+переводчику|переводчику)\s*[:—–,-]?\s*)?"
+    r"(?:(?:лучше|следует|рекомендуется|можно|нужно|необходимо|желательно|стоит)\s+)?"
+    r"(?:передавай(?:те)?|передавать|передать|переводи(?:те)?|переводить|перевести|сохраняй(?:те)?|сохранять|сохранить|используй(?:те)?|использовать)"
+    r"(?:\s+как|\s+в\s+значении|\s+через|\s+буквально|\b)\s*",
+    re.IGNORECASE,
+)
+
+_BYR_META_PREFIX = re.compile(
+    r"^(?:(?:указание|инструкция)\s+переводчику|переводчику)\s*[:—–,-]\s*",
+    re.IGNORECASE,
+)
+
+
+def sanitize_before_you_read_explanation(text: str) -> str:
+    """Очищает пояснение Before You Read от инструкций переводчику."""
+    if not text:
+        return ""
+    s = text.strip()
+    s = re.sub(
+        r"\s*\((?:(?:в|при)\s+переводе|передавай|переводи|переводить|передавать)[^)]*\)",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+
+    sentences = [p.strip() for p in re.split(r"(?<=[.!?])\s+", s) if p.strip()]
+    cleaned_sentences = []
+
+    for sent in sentences:
+        if ";" in sent:
+            clauses = [c.strip() for c in sent.split(";") if c.strip()]
+            kept_clauses = []
+            for c in clauses:
+                clean_c = c.rstrip(".!?")
+                if _BYR_DIRECTIVE_PREFIX.match(clean_c) or _BYR_META_PREFIX.match(clean_c):
+                    continue
+                kept_clauses.append(c)
+            if kept_clauses:
+                reconstructed = "; ".join(kept_clauses)
+                if not reconstructed.endswith((".", "!", "?")):
+                    reconstructed += "."
+                cleaned_sentences.append(reconstructed)
+            continue
+
+        clean_sent = sent.rstrip(".!?")
+        if _BYR_DIRECTIVE_PREFIX.match(clean_sent) or _BYR_META_PREFIX.match(clean_sent):
+            continue
+        cleaned_sentences.append(sent)
+
+    if not cleaned_sentences:
+        first = sentences[0]
+        match = _BYR_DIRECTIVE_PREFIX.match(first) or _BYR_META_PREFIX.match(first)
+        if match:
+            rest = first[match.end() :].strip()
+            if rest:
+                rest = rest[0].upper() + rest[1:]
+                if not rest.endswith((".", "!", "?")):
+                    rest += "."
+                return rest
+        return text.strip()
+
+    result = " ".join(cleaned_sentences).strip()
+    result = re.sub(r"\s+([,;:?.!])", r"\1", result)
+    result = re.sub(r"\s+", " ", result)
+    return result
+
+
 def before_you_read_entries(
     entries: Iterable[BeforeYouReadEntryResponse],
 ) -> tuple[BeforeYouReadEntry, ...]:
-    """Оставляет первые десять различных выражений главы."""
+    """Оставляет первые десять различных выражений главы с очищенными пояснениями."""
     selected: dict[str, BeforeYouReadEntry] = {}
     for entry in entries:
         key = (
@@ -404,7 +472,8 @@ def before_you_read_entries(
         )
         if key and key not in selected:
             selected[key] = BeforeYouReadEntry(
-                expression=entry.expression, explanation=entry.explanation
+                expression=entry.expression,
+                explanation=sanitize_before_you_read_explanation(entry.explanation),
             )
         if len(selected) >= MAX_BEFORE_YOU_READ:
             break
@@ -418,6 +487,7 @@ __all__ = [
     "before_you_read_entries",
     "content_plan_from_response",
     "find_quote_span",
+    "sanitize_before_you_read_explanation",
     "validate_content_plan",
     "fragment_blocks_for",
     "AnalysisMergeError",
