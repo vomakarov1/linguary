@@ -12,6 +12,7 @@ from linguary.application.analysis_merge import (
     plan_fragments,
     fragment_blocks_for,
     before_you_read_entries,
+    sanitize_before_you_read_explanation,
 )
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
@@ -700,5 +701,56 @@ def test_byr_body_excerpt_with_outer_quotes_aligned_to_explanation():
     assert plan is not None
     assert plan.before_you_read_evidence[0].body_excerpt == "тайком, украдкой, стараясь не привлекать внимания"
     validate_content_plan(payload, {"b1": "stable"}, {"stable": text})
+
+
+def test_sanitize_before_you_read_explanation():
+    """Санитайзер вырезает мета-инструкции переводчику из карточек Before You Read."""
+    # 1. Инструкция в конце предложения («Передавай как...»)
+    text1 = (
+        "Намеренно неправильная сравнительная степень (вместо more and more curious): "
+        "Алиса так удивлена, что забыла грамматику. Передавай как забавное искажение."
+    )
+    assert sanitize_before_you_read_explanation(text1) == (
+        "Намеренно неправильная сравнительная степень (вместо more and more curious): "
+        "Алиса так удивлена, что забыла грамматику."
+    )
+
+    # 2. Инструкция после точки с запятой
+    text2 = "Устойчивое выражение; переводи как «не в духе»."
+    assert sanitize_before_you_read_explanation(text2) == "Устойчивое выражение."
+
+    # 3. Инструкция в отдельном предложении с «В переводе...»
+    text3 = "Разговорный оборот. В переводе передавай как «чудом спасся»."
+    assert sanitize_before_you_read_explanation(text3) == "Разговорный оборот."
+
+    # 4. Префикс «Указание переводчику:»
+    text4 = "Идиома. Указание переводчику: сохраняй иронию оригинала."
+    assert sanitize_before_you_read_explanation(text4) == "Идиома."
+
+    # 5. Вся фраза состоит из инструкции «Передавай как...»
+    text5 = "Передавай как «из ряда вон выходящее»."
+    assert sanitize_before_you_read_explanation(text5) == "«из ряда вон выходящее»."
+
+    # 6. Инструкция в скобках
+    text6 = "Сленговое выражение (в переводе передавай разговорно). Встречается у подростков."
+    assert sanitize_before_you_read_explanation(text6) == "Сленговое выражение. Встречается у подростков."
+
+    # 7. Обычный пояснительный текст без инструкций остаётся неизменным
+    text7 = "Необычный, странный; в тексте out-of-the-way things — «из ряда вон выходящие вещи»."
+    assert sanitize_before_you_read_explanation(text7) == text7
+
+
+def test_before_you_read_entries_sanitizes_explanation():
+    """Функция before_you_read_entries автоматически очищает пояснения."""
+    entries = (
+        BeforeYouReadEntryResponse(
+            expression="Curiouser and curiouser",
+            explanation="Искажение грамматики. Передавай как забавную ошибку.",
+        ),
+    )
+    result = before_you_read_entries(entries)
+    assert len(result) == 1
+    assert result[0].explanation == "Искажение грамматики."
+
 
 

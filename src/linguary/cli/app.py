@@ -75,9 +75,15 @@ def _parser() -> argparse.ArgumentParser:
     retry.add_argument("task_id")
     retry.set_defaults(handler=_retry)
 
-    export = subparsers.add_parser("export", help="собрать EPUB без LLM-результатов")
+    export = subparsers.add_parser("export", help="собрать EPUB книги")
     export.add_argument("book_id")
     export.add_argument("--output", required=True, help="куда записать EPUB")
+    export.add_argument(
+        "--mode",
+        choices=[mode.value for mode in ExportMode],
+        default=ExportMode.FULL.value,
+        help="режим сборки EPUB: full (по умолчанию) или structure_only",
+    )
     export.set_defaults(handler=_export)
     return parser
 
@@ -216,14 +222,14 @@ def _retry(args: argparse.Namespace) -> int:
 
 
 def _export(args: argparse.Namespace) -> int:
-    """Собирает EPUB в режиме `structure_only` для технической проверки."""
+    """Собирает EPUB в выбранном режиме (по умолчанию full)."""
     application = _application(args)
     try:
         result = application.export_book(
             ExportBookCommand(
                 book_id=args.book_id,
                 target_path=args.output,
-                mode=ExportMode.STRUCTURE_ONLY,
+                mode=ExportMode(args.mode),
             )
         )
         print(f"Book: {result.book_id}")
