@@ -127,3 +127,106 @@ def test_config_test_never_leaks_secrets(configured_client):
         assert response.status_code == 200
         assert secret_key not in response.text
         assert secret_proxy_pass not in response.text
+
+
+def test_config_test_does_not_leak_current_key_to_new_base_url(configured_client):
+    received_requests = []
+
+    class TrackingHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received_requests.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    http = ThreadingHTTPServer(("127.0.0.1", 0), TrackingHandler)
+    thread = Thread(target=http.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{http.server_port}"
+        response = configured_client.post(
+            "/system/config/test",
+            json={
+                "base_url": f"{base_url}/v1",
+                "model": "test-model",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "ключ" in data["message"].lower() or "ключ" in (data["error"] or "").lower()
+        assert len(received_requests) == 0
+    finally:
+        http.shutdown()
+        http.server_close()
+        thread.join()
+
+
+def test_config_test_does_not_leak_current_key_to_new_proxy(configured_client):
+    response = configured_client.post(
+        "/system/config/test",
+        json={
+            "proxy_mode": "custom",
+            "proxy_url": "http://127.0.0.1:59998",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert "ключ" in data["message"].lower() or "ключ" in (data["error"] or "").lower()
+
+
+def test_config_test_rejects_form_data(configured_client):
+    response = configured_client.post(
+        "/system/config/test",
+        data={"model": "test-model"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "ftp://example.com/v1",
+        "http://user:pass@example.com/v1",
+        "http://example.com/v1?token=123",
+        "http://example.com/v1#section",
+        "http://169.254.169.254/v1",
+        "http://metadata.google.internal/computeMetadata/v1",
+    ],
+)
+def test_config_test_rejects_invalid_or_metadata_url(configured_client, bad_url):
+    response = configured_client.post(
+        "/system/config/test",
+        json={
+            "base_url": bad_url,
+            "model": "test-model",
+            "api_key": "test-key",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["error"] is not None
+
+
+def test_config_test_does_not_reveal_response_body_on_error(configured_client):
+    with mock_server(
+        status=403,
+        response_body=b'{"secret_internal_detail": "internal-db-password-12345"}',
+    ) as base_url:
+        response = configured_client.post(
+            "/system/config/test",
+            json={
+                "base_url": f"{base_url}/v1",
+                "model": "test-model",
+                "api_key": "test-key",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "secret_internal_detail" not in response.text
+        assert "internal-db-password-12345" not in response.text

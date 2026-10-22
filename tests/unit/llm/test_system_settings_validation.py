@@ -118,3 +118,15 @@ def test_proxy_url_rejects_outer_controls_and_whitespace(url):
 def test_proxy_secrets_include_httpx_basic_credentials():
     from linguary.adapters.config.settings import proxy_secrets
     assert 'YWxpY2U6cEBzcw==' in proxy_secrets('http://alice:p%40ss@localhost:9')
+
+
+@pytest.mark.parametrize('timeout', [0, -1, -0.5, 600.1, 1000])
+def test_timeout_seconds_rejects_nonpositive_and_above_limit(timeout):
+    with pytest.raises(SystemSettingsValidationError) as caught:
+        update(timeout_seconds=timeout)
+    assert caught.value.field == 'timeout_seconds'
+
+
+@pytest.mark.parametrize('timeout', [0.1, 1, 60, 600, 600.0])
+def test_timeout_seconds_accepts_valid_range(timeout):
+    assert update(timeout_seconds=timeout).timeout_seconds == float(timeout)

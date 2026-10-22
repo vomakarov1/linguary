@@ -105,6 +105,8 @@ class SystemSettingsUpdate:
                 raise SystemSettingsValidationError('timeout_seconds', 'Ожидается число')
             if float(self.timeout_seconds) <= 0:
                 raise SystemSettingsValidationError('timeout_seconds', 'Ожидается положительное число')
+            if float(self.timeout_seconds) > 600.0:
+                raise SystemSettingsValidationError('timeout_seconds', 'Значение не должно превышать 600 секунд')
             object.__setattr__(self, 'timeout_seconds', float(self.timeout_seconds))
         if analysis_model is not None:
             object.__setattr__(self, 'analysis_model', analysis_model)

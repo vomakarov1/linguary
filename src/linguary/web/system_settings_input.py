@@ -238,6 +238,8 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
             errors['timeout_seconds'] = 'Ожидается число'
         elif timeout <= 0:
             errors['timeout_seconds'] = 'Ожидается положительное число'
+        elif timeout > 600.0:
+            errors['timeout_seconds'] = 'Значение не должно превышать 600 секунд'
     if not errors:
         try:
             update = SystemSettingsUpdate(

@@ -69,22 +69,10 @@ async def test_llm_connection(
             if 200 <= response.status_code < 300:
                 return True, "Подключение успешно установлено"
             if response.status_code in (401, 403):
-                detail = _clean(response.text[:200])
-                msg = f"Ошибка авторизации ({response.status_code}): неверный API-ключ или нет доступа к модели"
-                if detail:
-                    msg = f"{msg}: {detail}"
-                return False, msg
+                return False, f"Ошибка авторизации ({response.status_code}): неверный API-ключ или нет доступа к модели"
             if response.status_code == 404:
-                detail = _clean(response.text[:200])
-                msg = "Модель или эндпоинт не найдены (404)"
-                if detail:
-                    msg = f"{msg}: {detail}"
-                return False, msg
-            detail = _clean(response.text[:200])
-            msg = f"Провайдер вернул ошибку ({response.status_code})"
-            if detail:
-                msg = f"{msg}: {detail}"
-            return False, msg
+                return False, "Модель или эндпоинт не найдены (404)"
+            return False, f"Провайдер вернул ошибку ({response.status_code})"
     except httpx.TimeoutException:
         return False, f"Превышено время ожидания ответа ({timeout_seconds:g} с)"
     except (httpx.ConnectError, httpx.ConnectTimeout) as error:

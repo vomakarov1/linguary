@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import ipaddress
+from urllib.parse import urlsplit
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
@@ -24,6 +27,7 @@ from linguary.web.dependencies import CurrentApplication
 from linguary.web.schemas import (
     EpubCheckConfigResponse,
     LLMConfigResponse,
+    LLMTestConnectionRequest,
     LLMTestConnectionResponse,
     ServerConfigResponse,
     StorageConfigResponse,
@@ -35,6 +39,7 @@ from linguary.web.schemas import (
 from linguary.web.views import render, wants_html
 from linguary.web.system_settings_input import (
     SettingsInputError, read_settings_update, read_settings_reset, safe_form_values, sanitize_form_values,
+    _safe_url,
 )
 
 router = APIRouter(tags=["system"])
@@ -119,43 +124,91 @@ async def reset_system_config(request: Request, application: CurrentApplication)
     return await _change_config(request, application, reset=True)
 
 
+def _is_blocked_metadata_host(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    host = hostname.strip("[]").lower()
+    if host in ("metadata.google.internal", "metadata"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_link_local:
+            return True
+    except ValueError:
+        pass
+    return False
+
+
 @router.post("/system/config/test", response_model=LLMTestConnectionResponse)
 async def test_system_config(
     request: Request,
     application: CurrentApplication,
+    body: LLMTestConnectionRequest = LLMTestConnectionRequest(),
 ) -> LLMTestConnectionResponse:
     current = application.settings.llm
-    data: dict[str, object] = {}
-    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    if content_type == "application/json":
-        try:
-            body = await request.json()
-            if isinstance(body, dict):
-                data = body
-        except Exception:
-            data = {}
-    elif content_type in ("application/x-www-form-urlencoded", "multipart/form-data"):
-        try:
-            form = await request.form()
-            data = dict(form)
-        except Exception:
-            data = {}
 
-    provider = str(data["provider"]).strip() if data.get("provider") else current.provider
-    base_url = str(data["base_url"]).strip() if data.get("base_url") else current.base_url
+    provider = body.provider.strip() if body.provider and body.provider.strip() else current.provider
+    raw_base_url = body.base_url.strip() if body.base_url and body.base_url.strip() else current.base_url
 
-    model = str(data["model"]).strip() if "model" in data else current.model
-    analysis_model = str(data["analysis_model"]).strip() if "analysis_model" in data else current.analysis_model
-    processing_model = str(data["processing_model"]).strip() if "processing_model" in data else current.processing_model
+    if not _safe_url(raw_base_url):
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Ошибка конфигурации подключения",
+            error="Ожидается абсолютный HTTP(S)-адрес без учётных данных, параметров и фрагмента",
+        )
 
-    posted_key = data.get("api_key")
-    api_key = str(posted_key).strip() if (posted_key and str(posted_key).strip()) else current.api_key
+    parsed_url = urlsplit(raw_base_url)
+    if _is_blocked_metadata_host(parsed_url.hostname):
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Ошибка конфигурации подключения",
+            error="Обращение к адресам метаданных запрещено",
+        )
 
-    proxy_mode = data.get("proxy_mode") if data.get("proxy_mode") in ("auto", "direct", "custom") else current.proxy_mode
-    posted_proxy_url = data.get("proxy_url")
-    proxy_url = str(posted_proxy_url).strip() if (posted_proxy_url and str(posted_proxy_url).strip()) else current.proxy_url
+    base_url = raw_base_url
+    is_same_base = (base_url.rstrip("/") == (current.base_url or "").rstrip("/"))
+
+    model = body.model.strip() if body.model is not None else current.model
+    analysis_model = body.analysis_model.strip() if body.analysis_model is not None else current.analysis_model
+    processing_model = body.processing_model.strip() if body.processing_model is not None else current.processing_model
+
+    proxy_mode = body.proxy_mode if body.proxy_mode in ("auto", "direct", "custom") else current.proxy_mode
+    posted_proxy_url = body.proxy_url.strip() if body.proxy_url and body.proxy_url.strip() else None
+
     if proxy_mode != "custom":
         proxy_url = None
+        is_same_proxy = True
+    else:
+        if posted_proxy_url is not None:
+            proxy_url = posted_proxy_url
+            is_same_proxy = bool(current.proxy_url and proxy_url.rstrip("/") == current.proxy_url.rstrip("/"))
+        elif is_same_base:
+            proxy_url = current.proxy_url
+            is_same_proxy = True
+        else:
+            proxy_url = None
+            is_same_proxy = False
+
+        if proxy_url is not None:
+            parsed_proxy = urlsplit(proxy_url)
+            if _is_blocked_metadata_host(parsed_proxy.hostname):
+                return LLMTestConnectionResponse(
+                    ok=False,
+                    message="Ошибка конфигурации подключения",
+                    error="Обращение к адресам метаданных запрещено",
+                )
+
+    posted_key = body.api_key.strip() if body.api_key and body.api_key.strip() else None
+    if posted_key is not None:
+        api_key = posted_key
+    elif is_same_base and is_same_proxy:
+        api_key = current.api_key
+    else:
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Для проверки нового адреса необходимо явно указать API-ключ",
+            error="Для проверки нового адреса необходимо явно указать API-ключ",
+        )
 
     secrets = proxy_secrets(proxy_url)
 

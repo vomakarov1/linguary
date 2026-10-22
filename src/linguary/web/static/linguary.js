@@ -284,7 +284,7 @@ async function testLLMConnection() {
     processing_model: getVal("processing_model"),
     api_key: getVal("api_key"),
     proxy_mode: getVal("proxy_mode"),
-    proxy_url: getVal("proxy_url"),
+    proxy_url: getVal("proxy_mode") === "custom" ? getVal("proxy_url") : undefined,
   };
 
   button.disabled = true;

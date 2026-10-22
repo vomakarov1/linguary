@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, Self
+from typing import Any, Literal, Self
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -911,6 +911,16 @@ class LLMTestConnectionRequest(BaseModel):
     api_key: str | None = None
     proxy_mode: Literal["auto", "direct", "custom"] | None = None
     proxy_url: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_empty_proxy_mode(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            mode = data.get("proxy_mode")
+            if isinstance(mode, str) and not mode.strip():
+                data = dict(data)
+                data["proxy_mode"] = None
+        return data
 
 
 class LLMTestConnectionResponse(BaseModel):
