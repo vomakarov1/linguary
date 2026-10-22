@@ -162,6 +162,9 @@ def _cohesive_runs(
 
 def _is_cohesive_with(previous: DocumentBlock, block: DocumentBlock) -> bool:
     """Составляют ли соседние блоки одно целое."""
+    prev_split = previous.attributes.get("split_group")
+    if prev_split and prev_split == block.attributes.get("split_group"):
+        return True
     if previous.parent_id is not None and previous.parent_id == block.parent_id:
         return True
     return previous.type is block.type and block.type in _COHESIVE_BLOCK_TYPES
