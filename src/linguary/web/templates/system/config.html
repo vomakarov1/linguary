@@ -136,7 +136,7 @@
     <button type="submit" {% if not can_submit %}disabled{% endif %}>Сохранить настройки</button>
   </form>
 
-  <form class="settings-form settings-reset" action="{{ config_url }}/reset" method="post" data-confirm="Сбросить все настройки к исходным значениям? Это действие отменит все пользовательские изменения.">
+  <form class="settings-form settings-reset" action="{{ config_url }}/reset" method="post" data-confirm="Сбросить все настройки к исходным значениям? Это действие отменит все пользовательские изменения." onsubmit="return confirm(this.getAttribute('data-confirm'));">
     {% if form_values.expected_revision is not none %}<input type="hidden" name="expected_revision" value="{{ form_values.expected_revision }}">{% endif %}
     <p>Сброс вернёт исходные настройки приложения, включая исходный ключ.</p>
     <button type="submit" {% if not can_submit %}disabled{% endif %}>Сбросить настройки</button>

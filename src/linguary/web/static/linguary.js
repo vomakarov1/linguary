@@ -4,11 +4,13 @@ document.addEventListener("submit", async (event) => {
     return;
   }
 
-  const confirmMessage = form.getAttribute("data-confirm") || form.dataset.confirm;
-  if (confirmMessage) {
-    if (!window.confirm(confirmMessage)) {
-      event.preventDefault();
-      return;
+  if (!(form.getAttribute("onsubmit") && form.getAttribute("onsubmit").includes("confirm"))) {
+    const confirmMessage = form.getAttribute("data-confirm") || form.dataset.confirm;
+    if (confirmMessage) {
+      if (!window.confirm(confirmMessage)) {
+        event.preventDefault();
+        return;
+      }
     }
   }
 
