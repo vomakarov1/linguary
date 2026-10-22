@@ -8,11 +8,18 @@
 
 from __future__ import annotations
 
+import ipaddress
+from urllib.parse import urlsplit
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from linguary.adapters.config import LLMSettings
+from linguary.adapters.config.settings import OPENAI_COMPATIBLE_PROVIDER, proxy_secrets
 from linguary.adapters.db.system_settings import SettingsRevisionConflict
 from linguary.adapters.config.system_settings import SystemSettingsValidationError
+from linguary.adapters.llm.connection_check import test_llm_connection
+from linguary.adapters.llm.openai_compatible import safe_detail
 from linguary.composition.system_settings import SettingsClosingError
 
 from linguary.web import labels
@@ -20,6 +27,8 @@ from linguary.web.dependencies import CurrentApplication
 from linguary.web.schemas import (
     EpubCheckConfigResponse,
     LLMConfigResponse,
+    LLMTestConnectionRequest,
+    LLMTestConnectionResponse,
     ServerConfigResponse,
     StorageConfigResponse,
     SystemConfigResponse,
@@ -30,6 +39,7 @@ from linguary.web.schemas import (
 from linguary.web.views import render, wants_html
 from linguary.web.system_settings_input import (
     SettingsInputError, read_settings_update, read_settings_reset, safe_form_values, sanitize_form_values,
+    _safe_url,
 )
 
 router = APIRouter(tags=["system"])
@@ -112,6 +122,141 @@ async def save_system_config(request: Request, application: CurrentApplication):
 @router.post("/system/config/reset", response_model=SystemConfigResponse)
 async def reset_system_config(request: Request, application: CurrentApplication):
     return await _change_config(request, application, reset=True)
+
+
+def _is_blocked_metadata_host(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    host = hostname.strip("[]").lower()
+    if host in ("metadata.google.internal", "metadata"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_link_local:
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+@router.post("/system/config/test", response_model=LLMTestConnectionResponse)
+async def test_system_config(
+    request: Request,
+    application: CurrentApplication,
+    body: LLMTestConnectionRequest = LLMTestConnectionRequest(),
+) -> LLMTestConnectionResponse:
+    current = application.settings.llm
+
+    provider = body.provider.strip() if body.provider and body.provider.strip() else current.provider
+    if provider != OPENAI_COMPATIBLE_PROVIDER:
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Ошибка конфигурации подключения",
+            error="Провайдер не поддерживается",
+        )
+    raw_base_url = body.base_url.strip() if body.base_url and body.base_url.strip() else current.base_url
+
+    if not _safe_url(raw_base_url):
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Ошибка конфигурации подключения",
+            error="Ожидается абсолютный HTTP(S)-адрес без учётных данных, параметров и фрагмента",
+        )
+
+    parsed_url = urlsplit(raw_base_url)
+    if _is_blocked_metadata_host(parsed_url.hostname):
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Ошибка конфигурации подключения",
+            error="Обращение к адресам метаданных запрещено",
+        )
+
+    base_url = raw_base_url
+    is_same_base = (base_url.rstrip("/") == (current.base_url or "").rstrip("/"))
+
+    model = body.model.strip() if body.model is not None else current.model
+    analysis_model = body.analysis_model.strip() if body.analysis_model is not None else current.analysis_model
+    processing_model = body.processing_model.strip() if body.processing_model is not None else current.processing_model
+
+    proxy_mode = body.proxy_mode if body.proxy_mode in ("auto", "direct", "custom") else current.proxy_mode
+    posted_proxy_url = body.proxy_url.strip() if body.proxy_url and body.proxy_url.strip() else None
+
+    if proxy_mode != "custom":
+        proxy_url = None
+        is_same_proxy = True
+    else:
+        if posted_proxy_url is not None:
+            proxy_url = posted_proxy_url
+            is_same_proxy = bool(current.proxy_url and proxy_url.rstrip("/") == current.proxy_url.rstrip("/"))
+        elif is_same_base:
+            proxy_url = current.proxy_url
+            is_same_proxy = True
+        else:
+            proxy_url = None
+            is_same_proxy = False
+
+        if proxy_url is not None:
+            try:
+                parsed_proxy = urlsplit(proxy_url)
+                if _is_blocked_metadata_host(parsed_proxy.hostname):
+                    return LLMTestConnectionResponse(
+                        ok=False,
+                        message="Ошибка конфигурации подключения",
+                        error="Обращение к адресам метаданных запрещено",
+                    )
+            except ValueError:
+                return LLMTestConnectionResponse(
+                    ok=False,
+                    message="Ошибка конфигурации подключения",
+                    error="Некорректный адрес прокси",
+                )
+
+    posted_key = body.api_key.strip() if body.api_key and body.api_key.strip() else None
+    if posted_key is not None:
+        api_key = posted_key
+    elif is_same_base and is_same_proxy:
+        api_key = current.api_key
+    else:
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Для проверки нового адреса необходимо явно указать API-ключ",
+            error="Для проверки нового адреса необходимо явно указать API-ключ",
+        )
+
+    secrets = proxy_secrets(proxy_url)
+
+    try:
+        test_settings = LLMSettings(
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            analysis_model=analysis_model,
+            processing_model=processing_model,
+            api_key=api_key,
+            proxy_mode=proxy_mode,
+            proxy_url=proxy_url,
+        )
+    except Exception as error:
+        cleaned_error = safe_detail(str(error), api_key=api_key, secrets=secrets)
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Ошибка конфигурации подключения",
+            error=cleaned_error,
+        )
+
+    ok, message = await test_llm_connection(test_settings)
+    if ok:
+        return LLMTestConnectionResponse(
+            ok=True,
+            message=message,
+            error=None,
+        )
+    return LLMTestConnectionResponse(
+        ok=False,
+        message="Не удалось подключиться к модели",
+        error=message,
+    )
+
 
 
 async def _change_config(request: Request, application, *, reset: bool):

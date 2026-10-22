@@ -360,3 +360,34 @@ def test_analysis_and_processing_models_are_read_from_environment(tmp_path: Path
     assert settings.llm.effective_analysis_model == "env-analysis-model"
     assert settings.llm.effective_processing_model == "env-processing-model"
 
+
+def test_loader_parses_proxy_mode_and_proxy_url(tmp_path: Path) -> None:
+    """Параметры proxy_mode и proxy_url считываются из секции [llm] TOML-конфигурации."""
+    content = """
+    [llm]
+    proxy_mode = "custom"
+    proxy_url = "http://127.0.0.1:8080"
+    """
+    settings = load_settings(environ={}, config_path=write_config(tmp_path, content))
+    assert settings.llm.proxy_mode == "custom"
+    assert settings.llm.proxy_url == "http://127.0.0.1:8080"
+
+
+@pytest.mark.parametrize("mode", ["auto", "direct"])
+def test_system_settings_update_ignores_proxy_url_when_mode_not_custom(mode: str) -> None:
+    """Для режимов, отличных от custom, переданный proxy_url очищается в None."""
+    from linguary.adapters.config.system_settings import SystemSettingsUpdate
+
+    update = SystemSettingsUpdate(
+        provider="openai_compatible",
+        model="test-model",
+        base_url="http://localhost:8080/v1",
+        requests_per_minute=30,
+        concurrency=2,
+        proxy_mode=mode,
+        proxy_url="http://stale-proxy.local:8080",
+    )
+    assert update.proxy_mode == mode
+    assert update.proxy_url is None
+
+

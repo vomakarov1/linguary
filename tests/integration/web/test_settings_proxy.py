@@ -34,6 +34,31 @@ def test_custom_without_url_html_json_422(configured_client, html):
     assert 'proxy_url' in response.text
 
 
+@pytest.mark.parametrize('mode', ['auto', 'direct'])
+@pytest.mark.parametrize('html', [False, True])
+def test_proxy_mode_direct_or_auto_with_stale_proxy_url_accepted(
+    configured_client, configured_application, mode, html
+):
+    values = payload(expected_revision=0, proxy_mode=mode, proxy_url=SECRET)
+    if html:
+        values['requests_per_minute'] = '30'
+        response = configured_client.post(
+            '/system/config',
+            data=values,
+            headers={'Accept': 'text/html'},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+    else:
+        response = configured_client.post('/system/config', json=values)
+        assert response.status_code == 200
+        assert response.json()['llm']['proxy_mode'] == mode
+        assert response.json()['llm']['has_proxy_url'] is False
+    assert configured_application.settings.llm.proxy_mode == mode
+    assert configured_application.settings.llm.proxy_url is None
+
+
+
 def test_proxy_url_credentials_in_other_fields_are_not_reflected(configured_client):
     response = configured_client.post('/system/config', json=payload(proxy_mode='custom', proxy_url=SECRET, model='p@ss'), headers={'Accept': 'text/html'})
     assert response.status_code == 422

@@ -11,13 +11,19 @@ from fastapi import Request
 
 from linguary.adapters.config import AppSettings
 from linguary.adapters.config.settings import proxy_secrets
-from linguary.adapters.config.system_settings import SystemSettingsUpdate, SystemSettingsValidationError
+from linguary.adapters.config.system_settings import SystemSettingsUpdate, SystemSettingsValidationError, UNSET
 from linguary.web import labels
 from linguary.web.schemas import SafeSettingsFormValues
 
-_SAVE_FIELDS = frozenset({'provider', 'model', 'api_key', 'base_url', 'requests_per_minute', 'concurrency', 'expected_revision', 'proxy_mode', 'proxy_url'})
-_REQUIRED_FIELDS = _SAVE_FIELDS - {'api_key', 'proxy_mode', 'proxy_url'}
+_SAVE_FIELDS = frozenset({
+    'provider', 'model', 'api_key', 'base_url', 'requests_per_minute',
+    'concurrency', 'expected_revision', 'proxy_mode', 'proxy_url',
+    'analysis_model', 'processing_model', 'temperature', 'timeout_seconds',
+})
+_OPTIONAL_FIELDS = {'api_key', 'proxy_mode', 'proxy_url', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds'}
+_REQUIRED_FIELDS = _SAVE_FIELDS - _OPTIONAL_FIELDS
 _INTEGER = re.compile(r'[+-]?[0-9]+\Z')
+_FLOAT = re.compile(r'[+-]?[0-9]+(?:\.[0-9]+)?\Z')
 _CREDENTIALS = re.compile(r'(?i)(bearer\s+|(?:api[_-]?key|token|password|secret|authorization)\s*[:=]|sk-[a-z0-9_-]{8,}|https?://[^/\s]+@)')
 
 
@@ -40,6 +46,18 @@ def _integer(value: object, *, form: bool) -> int | None:
         except ValueError:
             pass
     return None
+
+
+def _float(value: object, *, form: bool) -> float | None:
+    if type(value) in (int, float) and type(value) is not bool:
+        return float(value)
+    if form and isinstance(value, str) and _FLOAT.fullmatch(value.strip()):
+        try:
+            return float(value.strip())
+        except ValueError:
+            pass
+    return None
+
 
 
 def _secrets(current_settings: AppSettings, posted_key: object, posted_proxy: object = None) -> tuple[str, ...]:
@@ -93,6 +111,10 @@ def _projection(values: Mapping[str, object], current_settings: AppSettings, *, 
     return SafeSettingsFormValues(
         provider=provider if provider == 'openai_compatible' else '',
         model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('model'), secrets),
+        analysis_model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('analysis_model'), secrets),
+        processing_model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('processing_model'), secrets),
+        temperature=_float(fields.get('temperature'), form=form),
+        timeout_seconds=_float(fields.get('timeout_seconds'), form=form),
         base_url='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_url(_safe_text(fields.get('base_url'), secrets)),
         requests_per_minute=_integer(fields.get('requests_per_minute'), form=form),
         concurrency=_integer(fields.get('concurrency'), form=form),
@@ -103,13 +125,21 @@ def _projection(values: Mapping[str, object], current_settings: AppSettings, *, 
 
 def safe_form_values(current_settings: AppSettings, *, update: SystemSettingsUpdate | None = None, expected_revision: int | None = None) -> SafeSettingsFormValues:
     source = current_settings.llm if update is None else update
-    values = dict(provider=source.provider, model=source.model, base_url=source.base_url,
-                  requests_per_minute=source.requests_per_minute,
-                  concurrency=current_settings.worker.concurrency if update is None else update.concurrency,
-                  proxy_mode=source.proxy_mode,
-                  proxy_url=None if update is None else update.proxy_url,
-                  api_key=None if update is None else update.api_key,
-                  expected_revision=expected_revision)
+    values = dict(
+        provider=source.provider,
+        model=source.model,
+        analysis_model=source.analysis_model,
+        processing_model=source.processing_model,
+        temperature=source.temperature if (update is None or update.temperature is not UNSET) else current_settings.llm.temperature,
+        timeout_seconds=source.timeout_seconds,
+        base_url=source.base_url,
+        requests_per_minute=source.requests_per_minute,
+        concurrency=current_settings.worker.concurrency if update is None else update.concurrency,
+        proxy_mode=source.proxy_mode,
+        proxy_url=None if update is None else update.proxy_url,
+        api_key=None if update is None else update.api_key,
+        expected_revision=expected_revision,
+    )
     return _projection(values, current_settings, form=False)
 
 
@@ -176,6 +206,15 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
     for name in ('proxy_mode', 'proxy_url'):
         if name in values and not isinstance(values[name], str):
             errors[name] = labels.SETTINGS_STRING_FIELD
+    for name in ('analysis_model', 'processing_model'):
+        if name in values:
+            value = values[name]
+            if not isinstance(value, str):
+                errors[name] = labels.SETTINGS_STRING_FIELD
+            else:
+                strings[name] = value.strip()
+                if value.strip() and not _safe_text(value, secrets):
+                    errors[name] = labels.SETTINGS_SAFE_FIELD
     concurrency = _integer(values.get('concurrency'), form=form)
     if concurrency is None:
         errors['concurrency'] = labels.SETTINGS_INTEGER_FIELD
@@ -183,9 +222,39 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
     rate = None if raw_rate is None or (form and isinstance(raw_rate, str) and not raw_rate.strip()) else _integer(raw_rate, form=form)
     if raw_rate is not None and not (form and isinstance(raw_rate, str) and not raw_rate.strip()) and rate is None:
         errors['requests_per_minute'] = labels.SETTINGS_INTEGER_FIELD
+    temp: float | None | object = UNSET
+    if 'temperature' in values:
+        raw_temp = values['temperature']
+        if raw_temp is None or (isinstance(raw_temp, str) and not raw_temp.strip()):
+            temp = None
+        else:
+            temp = _float(raw_temp, form=form)
+            if temp is None:
+                errors['temperature'] = 'Ожидается число'
+            elif not (0.0 <= temp <= 2.0):
+                errors['temperature'] = 'Значение должно быть от 0.0 до 2.0'
+    raw_timeout = values.get('timeout_seconds')
+    timeout = None
+    if raw_timeout is not None and not (form and isinstance(raw_timeout, str) and not raw_timeout.strip()):
+        timeout = _float(raw_timeout, form=form)
+        if timeout is None:
+            errors['timeout_seconds'] = 'Ожидается число'
+        elif timeout <= 0:
+            errors['timeout_seconds'] = 'Ожидается положительное число'
+        elif timeout > 600.0:
+            errors['timeout_seconds'] = 'Значение не должно превышать 600 секунд'
     if not errors:
         try:
-            update = SystemSettingsUpdate(**strings, requests_per_minute=rate, concurrency=concurrency, api_key=posted_key, proxy_mode=values.get('proxy_mode'), proxy_url=values.get('proxy_url'))
+            update = SystemSettingsUpdate(
+                **strings,
+                requests_per_minute=rate,
+                concurrency=concurrency,
+                api_key=posted_key,
+                proxy_mode=values.get('proxy_mode'),
+                proxy_url=values.get('proxy_url'),
+                temperature=temp,
+                timeout_seconds=timeout,
+            )
         except SystemSettingsValidationError as error:
             errors[error.field] = error.message
     if errors:

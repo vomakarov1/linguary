@@ -26,6 +26,72 @@ def test_save_updates_get_and_persists(configured_client, configured_application
     assert configured_application.settings_store.load().overrides['model'] == 'new-model'
 
 
+def test_save_system_settings_updates_split_models_and_temperature(configured_client, configured_application):
+    values = payload(
+        analysis_model='analysis-v1',
+        processing_model='processing-v1',
+        temperature=0.8,
+        timeout_seconds=120.0,
+    )
+    response = configured_client.post('/system/config', json=values)
+    assert response.status_code == 200
+    data = response.json()
+    assert data['llm']['analysis_model'] == 'analysis-v1'
+    assert data['llm']['processing_model'] == 'processing-v1'
+    assert data['llm']['temperature'] == 0.8
+    assert data['llm']['timeout_seconds'] == 120.0
+
+    get_data = configured_client.get('/system/config').json()
+    assert get_data['llm']['analysis_model'] == 'analysis-v1'
+    assert get_data['llm']['processing_model'] == 'processing-v1'
+    assert get_data['llm']['temperature'] == 0.8
+    assert get_data['llm']['timeout_seconds'] == 120.0
+    assert configured_application.settings.llm.analysis_model == 'analysis-v1'
+    assert configured_application.settings.llm.processing_model == 'processing-v1'
+    assert configured_application.settings.llm.temperature == 0.8
+    assert configured_application.settings.llm.timeout_seconds == 120.0
+    stored_overrides = configured_application.settings_store.load().overrides
+    assert stored_overrides.get('analysis_model') == 'analysis-v1'
+    assert stored_overrides.get('processing_model') == 'processing-v1'
+    assert stored_overrides.get('temperature') == 0.8
+    assert stored_overrides.get('timeout_seconds') == 120.0
+
+
+def test_save_system_settings_resets_temperature_when_empty_or_none(configured_client, configured_application):
+    first = configured_client.post('/system/config', json=payload(temperature=0.8, expected_revision=0))
+    assert first.status_code == 200
+    assert first.json()['llm']['temperature'] == 0.8
+    assert configured_application.settings.llm.temperature == 0.8
+    assert configured_application.settings_store.load().overrides['temperature'] == 0.8
+
+    second = configured_client.post('/system/config', json=payload(temperature=None, expected_revision=1))
+    assert second.status_code == 200
+    assert second.json()['llm']['temperature'] is None
+    assert configured_application.settings.llm.temperature is None
+    assert configured_application.settings_store.load().overrides['temperature'] is None
+
+    third = configured_client.post('/system/config', json=payload(temperature=0.5, expected_revision=2))
+    assert third.status_code == 200
+    assert third.json()['llm']['temperature'] == 0.5
+
+    form_data = payload(temperature='', expected_revision=3)
+    fourth = configured_client.post(
+        '/system/config',
+        data=form_data,
+        headers={'content-type': 'application/x-www-form-urlencoded'},
+    )
+    assert fourth.status_code in (200, 303)
+    assert configured_application.settings.llm.temperature is None
+    assert configured_application.settings_store.load().overrides['temperature'] is None
+
+    configured_client.post('/system/config', json=payload(temperature=0.7, expected_revision=4))
+    assert configured_application.settings.llm.temperature == 0.7
+    no_temp_payload = payload(expected_revision=5)
+    configured_client.post('/system/config', json=no_temp_payload)
+    assert configured_application.settings.llm.temperature == 0.7
+
+
+
 @pytest.mark.parametrize('key', [None, '', '   '])
 def test_empty_key_keeps_current_key(configured_client, configured_application, key):
     values = payload()

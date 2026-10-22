@@ -114,3 +114,111 @@ def test_proxy_failed_commit_preserves_previous_row(engine):
     finally:
         event.remove(engine, 'commit', fail)
     assert store.load() == previous
+
+
+def test_system_settings_store_saves_extended_fields(engine):
+    store = SystemSettingsStore(engine)
+    extended = {
+        **OVERRIDES,
+        'analysis_model': 'analysis-model',
+        'processing_model': 'processing-model',
+        'temperature': 0.7,
+        'timeout_seconds': 120.0,
+    }
+    saved = store.save(extended, 'test-key', expected_revision=0)
+    assert saved.overrides == extended
+    loaded = store.load()
+    assert loaded == saved
+    assert loaded.overrides['analysis_model'] == 'analysis-model'
+    assert loaded.overrides['processing_model'] == 'processing-model'
+    assert loaded.overrides['temperature'] == 0.7
+    assert loaded.overrides['timeout_seconds'] == 120.0
+
+
+def test_overlay_settings_accepts_legacy_and_extended_records():
+    from linguary.adapters.config import AppSettings, LLMSettings
+    from linguary.adapters.config.system_settings import overlay_settings
+    from linguary.adapters.db.system_settings import StoredSystemSettings
+
+    initial = AppSettings(
+        llm=LLMSettings(
+            model="default-model",
+            analysis_model="init-analysis",
+            processing_model="init-proc",
+            temperature=0.2,
+            timeout_seconds=72.0,
+        )
+    )
+
+    legacy = StoredSystemSettings(
+        revision=1,
+        overrides=dict(
+            provider="openai_compatible",
+            model="legacy-model",
+            base_url="http://localhost:8080/v1",
+            requests_per_minute=10,
+            concurrency=2,
+        ),
+        api_key="legacy-key",
+    )
+    result_legacy = overlay_settings(initial, legacy)
+    assert result_legacy.llm.model == "legacy-model"
+    assert result_legacy.llm.analysis_model == "init-analysis"
+    assert result_legacy.llm.processing_model == "init-proc"
+    assert result_legacy.llm.temperature == 0.2
+    assert result_legacy.llm.timeout_seconds == 72.0
+
+    extended = StoredSystemSettings(
+        revision=2,
+        overrides=dict(
+            provider="openai_compatible",
+            model="ext-model",
+            base_url="http://localhost:8080/v1",
+            requests_per_minute=20,
+            concurrency=3,
+            analysis_model="ext-analysis",
+            processing_model="ext-proc",
+            temperature=0.7,
+            timeout_seconds=120.0,
+        ),
+        api_key="ext-key",
+    )
+    result_extended = overlay_settings(initial, extended)
+    assert result_extended.llm.model == "ext-model"
+    assert result_extended.llm.analysis_model == "ext-analysis"
+    assert result_extended.llm.processing_model == "ext-proc"
+    assert result_extended.llm.temperature == 0.7
+    assert result_extended.llm.timeout_seconds == 120.0
+
+
+def test_candidate_settings_propagates_split_models_and_inference_params():
+    from linguary.adapters.config import AppSettings, LLMSettings
+    from linguary.adapters.config.system_settings import SystemSettingsUpdate, candidate_settings
+
+    current = AppSettings(
+        llm=LLMSettings(
+            model="base",
+            analysis_model="old-analysis",
+            processing_model="old-proc",
+            temperature=0.5,
+            timeout_seconds=60.0,
+        )
+    )
+    update = SystemSettingsUpdate(
+        provider="openai_compatible",
+        model="new-base",
+        base_url="http://localhost:8080/v1",
+        requests_per_minute=15,
+        concurrency=4,
+        analysis_model="new-analysis",
+        processing_model="new-proc",
+        temperature=0.9,
+        timeout_seconds=180.0,
+    )
+    candidate = candidate_settings(current, update)
+    assert candidate.llm.model == "new-base"
+    assert candidate.llm.analysis_model == "new-analysis"
+    assert candidate.llm.processing_model == "new-proc"
+    assert candidate.llm.temperature == 0.9
+    assert candidate.llm.timeout_seconds == 180.0
+

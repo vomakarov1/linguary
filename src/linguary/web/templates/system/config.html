@@ -16,50 +16,127 @@
   {% if settings_error or not can_submit %}
   <p><a href="{{ config_url }}">{% if is_conflict or not can_submit %}Загрузить актуальные настройки{% else %}Вернуться к конфигурации{% endif %}</a></p>
   {% endif %}
-  {% for field, error in field_errors.items() %}<p id="settings-error-{{ field }}" role="alert">{{ error }}</p>{% endfor %}
+  {% for field, error in field_errors.items() if field not in ('provider', 'base_url', 'api_key', 'model', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'proxy_mode', 'proxy_url', 'requests_per_minute', 'concurrency') %}
+  <p class="notice" role="alert">{{ error }}</p>
+  {% endfor %}
   <form class="settings-form" action="{{ config_url }}" method="post">
     {% if form_values.expected_revision is not none %}<input type="hidden" name="expected_revision" value="{{ form_values.expected_revision }}">{% endif %}
-    <div class="settings-field">
-      <label for="settings-provider">Провайдер</label>
-      <select id="settings-provider" name="provider" {% if 'provider' in field_errors %}aria-invalid="true" aria-describedby="settings-error-provider"{% endif %}>
-        <option value="openai_compatible" {% if form_values.provider == 'openai_compatible' %}selected{% endif %}>OpenAI-совместимый</option>
-      </select>
-    </div>
-    {% for field, title, kind, value in [
-      ('model', 'Модель', 'text', form_values.model),
-      ('base_url', 'Адрес API', 'url', form_values.base_url),
-      ('requests_per_minute', 'Запросов в минуту', 'number', form_values.requests_per_minute),
-      ('concurrency', 'Одновременных задач', 'number', form_values.concurrency)
-    ] %}
-    <div class="settings-field">
-      <label for="settings-{{ field }}">{{ title }}</label>
-      <input id="settings-{{ field }}" name="{{ field }}" type="{{ kind }}" value="{{ value if value is not none else '' }}" {% if kind == 'number' %}min="1" step="1"{% endif %} {% if field in field_errors %}aria-invalid="true" aria-describedby="settings-error-{{ field }}"{% endif %}>
-      {% if field == 'requests_per_minute' %}<p>Оставьте число запросов в минуту пустым, чтобы снять ограничение.</p>{% endif %}
-    </div>
-    {% endfor %}
-    <div class="settings-field">
-      <label for="settings-api-key">Ключ API</label>
-      <input id="settings-api-key" name="api_key" type="password" autocomplete="new-password" {% if 'api_key' in field_errors %}aria-invalid="true" aria-describedby="settings-error-api_key"{% endif %}>
-      {% if data.llm.has_api_key %}<p>Ключ сохранён: <span>••••••••</span></p>{% else %}<p>Ключ не задан.</p>{% endif %}
-      <p>Пустое поле сохраняет текущий ключ. Чтобы заменить ключ, введите его заново.</p>
-    </div>
-    <div class="settings-field">
-      <label for="settings-proxy-mode">Соединение с LLM</label>
-      <select id="settings-proxy-mode" name="proxy_mode" {% if 'proxy_mode' in field_errors %}aria-invalid="true" aria-describedby="settings-error-proxy_mode"{% endif %}>
-        {% for mode, title in [('auto', 'Из окружения'), ('direct', 'Напрямую'), ('custom', 'Через прокси')] %}<option value="{{ mode }}" {% if form_values.proxy_mode == mode %}selected{% endif %}>{{ title }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="settings-field">
-      <label for="settings-proxy-url">Адрес прокси</label>
-      <input id="settings-proxy-url" name="proxy_url" type="password" autocomplete="new-password" {% if 'proxy_url' in field_errors %}aria-invalid="true" aria-describedby="settings-error-proxy_url"{% endif %}>
-      {% if data.llm.has_proxy_url %}<p>Адрес сохранён: <span>••••••••</span></p>{% else %}<p>Адрес не задан.</p>{% endif %}
-      <p>Для режима «Через прокси» укажите HTTP(S)-адрес. Логин и пароль можно включить в адрес. Пустое поле сохраняет прежний адрес. Выбор другого режима удаляет сохранённый адрес.</p>
-      <p>Адрес может начинаться с http:// даже для HTTPS API.</p>
-      <p>Если прокси запущен на хосте Docker, используйте host.docker.internal вместо localhost.</p>
-    </div>
+
+    <fieldset class="settings-group">
+      <legend>Провайдер и модели</legend>
+
+      <div class="settings-field" id="settings-field-provider">
+        <label for="settings-provider">Провайдер</label>
+        <select id="settings-provider" name="provider" {% if 'provider' in field_errors %}aria-invalid="true" aria-describedby="settings-error-provider"{% endif %}>
+          <option value="openai_compatible" {% if form_values.provider == 'openai_compatible' %}selected{% endif %}>OpenAI-совместимый</option>
+        </select>
+        {% if 'provider' in field_errors %}<span id="settings-error-provider" class="settings-field-error" role="alert">{{ field_errors['provider'] }}</span>{% endif %}
+      </div>
+
+      <div class="settings-field" id="settings-field-base_url">
+        <label for="settings-base_url">Адрес API</label>
+        <input id="settings-base_url" name="base_url" type="url" value="{{ form_values.base_url if form_values.base_url is not none else '' }}" {% if 'base_url' in field_errors %}aria-invalid="true" aria-describedby="settings-error-base_url"{% endif %}>
+        {% if 'base_url' in field_errors %}<span id="settings-error-base_url" class="settings-field-error" role="alert">{{ field_errors['base_url'] }}</span>{% endif %}
+      </div>
+
+      <div class="settings-field" id="settings-field-api_key">
+        <label for="settings-api-key">Ключ API</label>
+        <input id="settings-api-key" name="api_key" type="password" autocomplete="new-password" {% if 'api_key' in field_errors %}aria-invalid="true" aria-describedby="settings-error-api_key"{% endif %}>
+        {% if 'api_key' in field_errors %}<span id="settings-error-api_key" class="settings-field-error" role="alert">{{ field_errors['api_key'] }}</span>{% endif %}
+        {% if data.llm.has_api_key %}<p>Ключ сохранён: <span>••••••••</span></p>{% else %}<p>Ключ не задан.</p>{% endif %}
+        <p>Пустое поле сохраняет текущий ключ. Чтобы заменить ключ, введите его заново.</p>
+      </div>
+
+      <div class="settings-field" id="settings-field-model">
+        <label for="settings-model">Основная модель</label>
+        <input id="settings-model" name="model" type="text" value="{{ form_values.model if form_values.model is not none else '' }}" {% if 'model' in field_errors %}aria-invalid="true" aria-describedby="settings-error-model"{% endif %}>
+        {% if 'model' in field_errors %}<span id="settings-error-model" class="settings-field-error" role="alert">{{ field_errors['model'] }}</span>{% endif %}
+        <p>Используется по умолчанию для всех задач, если не переопределены раздельные модели.</p>
+      </div>
+
+      <div class="settings-field" id="settings-field-analysis_model">
+        <label for="settings-analysis_model">Модель анализа</label>
+        <input id="settings-analysis_model" name="analysis_model" type="text" value="{{ form_values.analysis_model if form_values.analysis_model is not none else '' }}" {% if 'analysis_model' in field_errors %}aria-invalid="true" aria-describedby="settings-error-analysis_model"{% endif %}>
+        {% if 'analysis_model' in field_errors %}<span id="settings-error-analysis_model" class="settings-field-error" role="alert">{{ field_errors['analysis_model'] }}</span>{% endif %}
+        <p>Модель для анализа текста и терминологии (опционально).</p>
+      </div>
+
+      <div class="settings-field" id="settings-field-processing_model">
+        <label for="settings-processing_model">Модель перевода</label>
+        <input id="settings-processing_model" name="processing_model" type="text" value="{{ form_values.processing_model if form_values.processing_model is not none else '' }}" {% if 'processing_model' in field_errors %}aria-invalid="true" aria-describedby="settings-error-processing_model"{% endif %}>
+        {% if 'processing_model' in field_errors %}<span id="settings-error-processing_model" class="settings-field-error" role="alert">{{ field_errors['processing_model'] }}</span>{% endif %}
+        <p>Модель для перевода фрагментов (опционально).</p>
+      </div>
+
+      <div class="settings-field settings-test-row">
+        <button type="button" id="settings-test-connection" class="button-secondary" {% if not can_submit %}disabled{% endif %}>Проверить подключение</button>
+        <span id="settings-test-status" class="settings-test-status" role="status"></span>
+      </div>
+    </fieldset>
+
+    <fieldset class="settings-group">
+      <legend>Параметры инференса</legend>
+
+      <div class="settings-field" id="settings-field-temperature">
+        <label for="settings-temperature">Температура</label>
+        <input id="settings-temperature" name="temperature" type="number" min="0" max="2" step="0.1" value="{{ form_values.temperature if form_values.temperature is not none else '' }}" {% if 'temperature' in field_errors %}aria-invalid="true" aria-describedby="settings-error-temperature"{% endif %}>
+        {% if 'temperature' in field_errors %}<span id="settings-error-temperature" class="settings-field-error" role="alert">{{ field_errors['temperature'] }}</span>{% endif %}
+        <p>Степень вариативности ответов (0.0 — 2.0). Оставьте пустым для значения провайдера по умолчанию.</p>
+      </div>
+
+      <div class="settings-field" id="settings-field-timeout_seconds">
+        <label for="settings-timeout_seconds">Таймаут запроса (сек)</label>
+        <input id="settings-timeout_seconds" name="timeout_seconds" type="number" min="1" max="600" step="1" value="{{ form_values.timeout_seconds if form_values.timeout_seconds is not none else '60.0' }}" {% if 'timeout_seconds' in field_errors %}aria-invalid="true" aria-describedby="settings-error-timeout_seconds"{% endif %}>
+        {% if 'timeout_seconds' in field_errors %}<span id="settings-error-timeout_seconds" class="settings-field-error" role="alert">{{ field_errors['timeout_seconds'] }}</span>{% endif %}
+        <p>Максимальное время ожидания ответа модели в секундах (по умолчанию 60).</p>
+      </div>
+    </fieldset>
+
+    <fieldset class="settings-group">
+      <legend>Сетевое подключение и прокси</legend>
+
+      <div class="settings-field" id="settings-field-proxy_mode">
+        <label for="settings-proxy-mode">Соединение с LLM</label>
+        <select id="settings-proxy-mode" name="proxy_mode" {% if 'proxy_mode' in field_errors %}aria-invalid="true" aria-describedby="settings-error-proxy_mode"{% endif %}>
+          {% for mode, title in [('auto', 'Из окружения'), ('direct', 'Напрямую'), ('custom', 'Через прокси')] %}
+          <option value="{{ mode }}" {% if form_values.proxy_mode == mode %}selected{% endif %}>{{ title }}</option>
+          {% endfor %}
+        </select>
+        {% if 'proxy_mode' in field_errors %}<span id="settings-error-proxy_mode" class="settings-field-error" role="alert">{{ field_errors['proxy_mode'] }}</span>{% endif %}
+      </div>
+
+      <div class="settings-field" id="settings-field-proxy-url" {% if form_values.proxy_mode != 'custom' %}hidden{% endif %}>
+        <label for="settings-proxy-url">Адрес прокси</label>
+        <input id="settings-proxy-url" name="proxy_url" type="password" autocomplete="new-password" {% if 'proxy_url' in field_errors %}aria-invalid="true" aria-describedby="settings-error-proxy_url"{% endif %}>
+        {% if 'proxy_url' in field_errors %}<span id="settings-error-proxy_url" class="settings-field-error" role="alert">{{ field_errors['proxy_url'] }}</span>{% endif %}
+        {% if data.llm.has_proxy_url %}<p>Адрес сохранён: <span>••••••••</span></p>{% else %}<p>Адрес не задан.</p>{% endif %}
+        <p>Для режима «Через прокси» укажите HTTP(S)-адрес. Логин и пароль можно включить в адрес. Пустое поле сохраняет прежний адрес. Выбор другого режима удаляет сохранённый адрес.</p>
+        <p>Адрес может начинаться с http:// даже для HTTPS API.</p>
+        <p>Если прокси запущен на хосте Docker, используйте host.docker.internal вместо localhost.</p>
+      </div>
+    </fieldset>
+
+    <fieldset class="settings-group">
+      <legend>Очередь и фоновая работа</legend>
+
+      <div class="settings-field" id="settings-field-requests_per_minute">
+        <label for="settings-requests_per_minute">Запросов в минуту</label>
+        <input id="settings-requests_per_minute" name="requests_per_minute" type="number" min="1" step="1" value="{{ form_values.requests_per_minute if form_values.requests_per_minute is not none else '' }}" {% if 'requests_per_minute' in field_errors %}aria-invalid="true" aria-describedby="settings-error-requests_per_minute"{% endif %}>
+        {% if 'requests_per_minute' in field_errors %}<span id="settings-error-requests_per_minute" class="settings-field-error" role="alert">{{ field_errors['requests_per_minute'] }}</span>{% endif %}
+        <p>Оставьте число запросов в минуту пустым, чтобы снять ограничение.</p>
+      </div>
+
+      <div class="settings-field" id="settings-field-concurrency">
+        <label for="settings-concurrency">Одновременных задач</label>
+        <input id="settings-concurrency" name="concurrency" type="number" min="1" step="1" value="{{ form_values.concurrency if form_values.concurrency is not none else '' }}" {% if 'concurrency' in field_errors %}aria-invalid="true" aria-describedby="settings-error-concurrency"{% endif %}>
+        {% if 'concurrency' in field_errors %}<span id="settings-error-concurrency" class="settings-field-error" role="alert">{{ field_errors['concurrency'] }}</span>{% endif %}
+      </div>
+    </fieldset>
+
     <button type="submit" {% if not can_submit %}disabled{% endif %}>Сохранить настройки</button>
   </form>
-  <form class="settings-form settings-reset" action="{{ config_url }}/reset" method="post">
+
+  <form class="settings-form settings-reset" action="{{ config_url }}/reset" method="post" data-confirm="Сбросить все настройки к исходным значениям? Это действие отменит все пользовательские изменения." onsubmit="return confirm(this.getAttribute('data-confirm'));">
     {% if form_values.expected_revision is not none %}<input type="hidden" name="expected_revision" value="{{ form_values.expected_revision }}">{% endif %}
     <p>Сброс вернёт исходные настройки приложения, включая исходный ключ.</p>
     <button type="submit" {% if not can_submit %}disabled{% endif %}>Сбросить настройки</button>

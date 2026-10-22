@@ -4,6 +4,16 @@ document.addEventListener("submit", async (event) => {
     return;
   }
 
+  if (!(form.getAttribute("onsubmit") && form.getAttribute("onsubmit").includes("confirm"))) {
+    const confirmMessage = form.getAttribute("data-confirm") || form.dataset.confirm;
+    if (confirmMessage) {
+      if (!window.confirm(confirmMessage)) {
+        event.preventDefault();
+        return;
+      }
+    }
+  }
+
   if (form.matches("[data-export-form]")) {
     await submitExportForm(event, form);
     return;
@@ -214,7 +224,107 @@ function pollResultHeader(attempt = 1) {
   }, 1500);
 }
 
+function initSettingsForm() {
+  const form = document.querySelector(".settings-form");
+  if (!(form instanceof HTMLFormElement)) {
+    return;
+  }
+
+  const proxyModeSelect = document.getElementById("settings-proxy-mode");
+  const proxyUrlContainer = document.getElementById("settings-field-proxy-url");
+  const proxyUrlInput = document.getElementById("settings-proxy-url");
+
+  function updateProxyVisibility() {
+    if (!proxyModeSelect || !proxyUrlContainer) {
+      return;
+    }
+    const isCustom = proxyModeSelect.value === "custom";
+    proxyUrlContainer.hidden = !isCustom;
+    proxyUrlContainer.style.display = isCustom ? "" : "none";
+    if (proxyUrlInput instanceof HTMLInputElement) {
+      proxyUrlInput.disabled = !isCustom;
+    }
+  }
+
+  if (proxyModeSelect instanceof HTMLSelectElement) {
+    proxyModeSelect.addEventListener("change", updateProxyVisibility);
+    updateProxyVisibility();
+  }
+
+  const testButton = document.getElementById("settings-test-connection");
+  if (testButton instanceof HTMLButtonElement) {
+    testButton.addEventListener("click", testLLMConnection);
+  }
+}
+
+async function testLLMConnection() {
+  const button = document.getElementById("settings-test-connection");
+  const status = document.getElementById("settings-test-status");
+  if (!(button instanceof HTMLButtonElement) || !(status instanceof HTMLElement)) {
+    return;
+  }
+
+  const form = button.closest("form");
+  if (!(form instanceof HTMLFormElement)) {
+    return;
+  }
+
+  const getVal = (name) => {
+    const el = form.elements.namedItem(name);
+    if (!el) return undefined;
+    if (el instanceof HTMLInputElement || el instanceof HTMLSelectElement) {
+      return el.value;
+    }
+    return undefined;
+  };
+
+  const payload = {
+    provider: getVal("provider"),
+    base_url: getVal("base_url"),
+    model: getVal("model"),
+    analysis_model: getVal("analysis_model"),
+    processing_model: getVal("processing_model"),
+    api_key: getVal("api_key"),
+    proxy_mode: getVal("proxy_mode"),
+    proxy_url: getVal("proxy_mode") === "custom" ? getVal("proxy_url") : undefined,
+  };
+
+  button.disabled = true;
+  status.className = "settings-test-status";
+  status.textContent = "Проверка подключения...";
+
+  try {
+    const response = await fetch("/system/config/test", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify(payload),
+      credentials: "same-origin",
+    });
+
+    const data = await response.json();
+    if (response.ok && data.ok) {
+      status.className = "settings-test-status ok";
+      status.textContent = data.message || "Подключение успешно установлено.";
+    } else {
+      status.className = "settings-test-status error";
+      status.textContent = data.error || data.message || "Ошибка подключения.";
+    }
+  } catch (_error) {
+    status.className = "settings-test-status error";
+    status.textContent = "Не удалось выполнить проверку связи.";
+  } finally {
+    button.disabled = false;
+  }
+}
+
+window.initSettingsForm = initSettingsForm;
+window.testLLMConnection = testLLMConnection;
+
 document.addEventListener("DOMContentLoaded", () => {
+  initSettingsForm();
   document.querySelectorAll("[data-result-block]").forEach((block) => {
     if (block instanceof HTMLElement) {
       pollResultBlock(block);

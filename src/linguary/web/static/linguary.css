@@ -236,6 +236,68 @@ p {
   padding-top: 1rem;
 }
 
+.settings-group {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1.25rem;
+  margin: 0;
+  background: var(--panel);
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-group legend {
+  font-weight: 600;
+  font-size: 1.05rem;
+  padding: 0 0.5rem;
+  color: var(--ink);
+}
+
+.settings-field-error {
+  color: var(--accent);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.settings-test-row {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  flex-wrap: wrap;
+  margin-top: 0.25rem;
+}
+
+.settings-test-status {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.settings-test-status.ok {
+  color: var(--accent-2);
+  font-weight: 600;
+}
+
+.settings-test-status.error {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.button-secondary {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.button-secondary:hover:not(:disabled) {
+  border-color: var(--muted);
+  background: var(--paper);
+}
+
+.settings-field[hidden],
+[hidden] {
+  display: none !important;
+}
+
 .tabs {
   display: flex;
   flex-wrap: wrap;
