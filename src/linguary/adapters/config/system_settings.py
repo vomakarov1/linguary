@@ -34,6 +34,17 @@ OPTIONAL_OVERRIDE_FIELDS = frozenset({'proxy_mode', 'analysis_model', 'processin
 ALLOWED_OVERRIDE_FIELDS = BASE_OVERRIDE_FIELDS | OPTIONAL_OVERRIDE_FIELDS
 
 
+class _UnsetSentinel:
+    def __repr__(self) -> str:
+        return '<UNSET>'
+
+    def __bool__(self) -> bool:
+        return False
+
+
+UNSET = _UnsetSentinel()
+
+
 @dataclass(frozen=True, slots=True)
 class SystemSettingsUpdate:
     provider: str = field(repr=False)
@@ -48,7 +59,7 @@ class SystemSettingsUpdate:
 
     analysis_model: str | None = None
     processing_model: str | None = None
-    temperature: float | None = None
+    temperature: float | None | object = UNSET
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
@@ -94,7 +105,7 @@ class SystemSettingsUpdate:
 
         analysis_model = None if self.analysis_model is None else _string(self.analysis_model, 'analysis_model')
         processing_model = None if self.processing_model is None else _string(self.processing_model, 'processing_model')
-        if self.temperature is not None:
+        if self.temperature is not None and self.temperature is not UNSET:
             if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
                 raise SystemSettingsValidationError('temperature', 'Ожидается число')
             if not (0.0 <= float(self.temperature) <= 2.0):
@@ -134,7 +145,7 @@ def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> Ap
         else update.processing_model
     )
     temperature = (
-        current.llm.temperature if update.temperature is None
+        current.llm.temperature if update.temperature is UNSET
         else update.temperature
     )
     timeout_seconds = (

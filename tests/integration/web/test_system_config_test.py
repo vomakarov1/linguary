@@ -230,3 +230,35 @@ def test_config_test_does_not_reveal_response_body_on_error(configured_client):
         assert data["ok"] is False
         assert "secret_internal_detail" not in response.text
         assert "internal-db-password-12345" not in response.text
+
+
+def test_config_test_rejects_invalid_proxy_url(configured_client):
+    response = configured_client.post(
+        "/system/config/test",
+        json={
+            "proxy_mode": "custom",
+            "proxy_url": "http://[invalid]",
+            "api_key": "test-key",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["message"] == "Ошибка конфигурации подключения"
+    assert data["error"] == "Некорректный адрес прокси"
+
+
+def test_config_test_rejects_unsupported_provider(configured_client):
+    response = configured_client.post(
+        "/system/config/test",
+        json={
+            "provider": "unsupported_provider",
+            "model": "test-model",
+            "api_key": "test-key",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["message"] == "Ошибка конфигурации подключения"
+    assert data["error"] == "Провайдер не поддерживается"

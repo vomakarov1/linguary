@@ -11,7 +11,7 @@ from fastapi import Request
 
 from linguary.adapters.config import AppSettings
 from linguary.adapters.config.settings import proxy_secrets
-from linguary.adapters.config.system_settings import SystemSettingsUpdate, SystemSettingsValidationError
+from linguary.adapters.config.system_settings import SystemSettingsUpdate, SystemSettingsValidationError, UNSET
 from linguary.web import labels
 from linguary.web.schemas import SafeSettingsFormValues
 
@@ -130,7 +130,7 @@ def safe_form_values(current_settings: AppSettings, *, update: SystemSettingsUpd
         model=source.model,
         analysis_model=source.analysis_model,
         processing_model=source.processing_model,
-        temperature=source.temperature,
+        temperature=source.temperature if (update is None or update.temperature is not UNSET) else current_settings.llm.temperature,
         timeout_seconds=source.timeout_seconds,
         base_url=source.base_url,
         requests_per_minute=source.requests_per_minute,
@@ -222,14 +222,17 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
     rate = None if raw_rate is None or (form and isinstance(raw_rate, str) and not raw_rate.strip()) else _integer(raw_rate, form=form)
     if raw_rate is not None and not (form and isinstance(raw_rate, str) and not raw_rate.strip()) and rate is None:
         errors['requests_per_minute'] = labels.SETTINGS_INTEGER_FIELD
-    raw_temp = values.get('temperature')
-    temp = None
-    if raw_temp is not None and not (form and isinstance(raw_temp, str) and not raw_temp.strip()):
-        temp = _float(raw_temp, form=form)
-        if temp is None:
-            errors['temperature'] = 'Ожидается число'
-        elif not (0.0 <= temp <= 2.0):
-            errors['temperature'] = 'Значение должно быть от 0.0 до 2.0'
+    temp: float | None | object = UNSET
+    if 'temperature' in values:
+        raw_temp = values['temperature']
+        if raw_temp is None or (isinstance(raw_temp, str) and not raw_temp.strip()):
+            temp = None
+        else:
+            temp = _float(raw_temp, form=form)
+            if temp is None:
+                errors['temperature'] = 'Ожидается число'
+            elif not (0.0 <= temp <= 2.0):
+                errors['temperature'] = 'Значение должно быть от 0.0 до 2.0'
     raw_timeout = values.get('timeout_seconds')
     timeout = None
     if raw_timeout is not None and not (form and isinstance(raw_timeout, str) and not raw_timeout.strip()):

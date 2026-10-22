@@ -15,7 +15,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from linguary.adapters.config import LLMSettings
-from linguary.adapters.config.settings import proxy_secrets
+from linguary.adapters.config.settings import OPENAI_COMPATIBLE_PROVIDER, proxy_secrets
 from linguary.adapters.db.system_settings import SettingsRevisionConflict
 from linguary.adapters.config.system_settings import SystemSettingsValidationError
 from linguary.adapters.llm.connection_check import test_llm_connection
@@ -148,6 +148,12 @@ async def test_system_config(
     current = application.settings.llm
 
     provider = body.provider.strip() if body.provider and body.provider.strip() else current.provider
+    if provider != OPENAI_COMPATIBLE_PROVIDER:
+        return LLMTestConnectionResponse(
+            ok=False,
+            message="Ошибка конфигурации подключения",
+            error="Провайдер не поддерживается",
+        )
     raw_base_url = body.base_url.strip() if body.base_url and body.base_url.strip() else current.base_url
 
     if not _safe_url(raw_base_url):
@@ -190,12 +196,19 @@ async def test_system_config(
             is_same_proxy = False
 
         if proxy_url is not None:
-            parsed_proxy = urlsplit(proxy_url)
-            if _is_blocked_metadata_host(parsed_proxy.hostname):
+            try:
+                parsed_proxy = urlsplit(proxy_url)
+                if _is_blocked_metadata_host(parsed_proxy.hostname):
+                    return LLMTestConnectionResponse(
+                        ok=False,
+                        message="Ошибка конфигурации подключения",
+                        error="Обращение к адресам метаданных запрещено",
+                    )
+            except ValueError:
                 return LLMTestConnectionResponse(
                     ok=False,
                     message="Ошибка конфигурации подключения",
-                    error="Обращение к адресам метаданных запрещено",
+                    error="Некорректный адрес прокси",
                 )
 
     posted_key = body.api_key.strip() if body.api_key and body.api_key.strip() else None

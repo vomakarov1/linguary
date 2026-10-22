@@ -130,3 +130,10 @@ def test_timeout_seconds_rejects_nonpositive_and_above_limit(timeout):
 @pytest.mark.parametrize('timeout', [0.1, 1, 60, 600, 600.0])
 def test_timeout_seconds_accepts_valid_range(timeout):
     assert update(timeout_seconds=timeout).timeout_seconds == float(timeout)
+
+
+def test_candidate_settings_temperature_reset_and_preserve():
+    current = AppSettings(llm=LLMSettings(temperature=0.7))
+    assert candidate_settings(current, update()).llm.temperature == 0.7
+    assert candidate_settings(current, update(temperature=None)).llm.temperature is None
+    assert candidate_settings(current, update(temperature=0.3)).llm.temperature == 0.3
