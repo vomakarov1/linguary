@@ -39,6 +39,10 @@ from linguary.adapters.epub.resources import (
     package_path,
     unreadable_epub_message,
 )
+from linguary.adapters.epub.splitting import (
+    SPLIT_MIN_CHARS,
+    split_inline_content,
+)
 from linguary.adapters.epub.support_matrix import (
     DroppedBlockLog,
     DropReason,
@@ -725,6 +729,15 @@ class _SectionBuilder:
         if reason is not None:
             self._drops.record(reason, structural_path)
             return
+        if block_type is BlockType.PARAGRAPH and len(content.text) >= SPLIT_MIN_CHARS:
+            split_blocks = self._split_and_add_paragraph(
+                element=element,
+                structural_path=structural_path,
+                content=content,
+                context=context,
+            )
+            if split_blocks:
+                return
         self._add_block(
             element=element,
             structural_path=structural_path,
@@ -733,6 +746,63 @@ class _SectionBuilder:
             support_status=block_support_status(block_type),
             context=context,
         )
+
+    def _split_and_add_paragraph(
+        self,
+        element: etree._Element | None,
+        structural_path: str,
+        content: InlineContent,
+        context: _BlockContext,
+    ) -> list[DocumentBlock]:
+        """Расщепляет длинный составной абзац на цепочку блоков по границам предложений."""
+        fragments = split_inline_content(content)
+        if len(fragments) <= 1:
+            return []
+
+        total_parts = len(fragments)
+        base_xpath = structural_path
+        block_type = BlockType.PARAGRAPH
+        element_id = element.get("id") if element is not None else None
+        tag = (local_name(element) if element is not None else None) or "p"
+        result_blocks: list[DocumentBlock] = []
+
+        for k, fragment in enumerate(fragments, start=1):
+            sub_path = f"{base_xpath}/text()[{k}]"
+            if k == 1:
+                attrs = dict(self._attributes(element, content=fragment, element_id=element_id))
+            else:
+                attrs = {"tag": tag}
+                if fragment.anchor_ids:
+                    attrs["anchor_ids"] = " ".join(fragment.anchor_ids)
+
+            attrs["split_group"] = base_xpath
+            attrs["split_index"] = str(k)
+            attrs["split_total"] = str(total_parts)
+
+            block = DocumentBlock.create(
+                document_id=self._book_id,
+                section_id=self.section_id,
+                type=block_type,
+                order=self._order,
+                text=fragment.text,
+                source_reference=SourceReference(
+                    resource_path=self._resource_path,
+                    structural_path=sub_path,
+                    element_id=element_id if k == 1 else None,
+                ),
+                support_status=block_support_status(block_type),
+                inline_annotations=fragment.annotations,
+                parent_id=context.parent_id,
+                attributes=attrs,
+            )
+            self.blocks.append(block)
+            self._order += 1
+            self._last_block = block
+            if k == 1:
+                self._pending_anchor_ids.clear()
+            result_blocks.append(block)
+
+        return result_blocks
 
     def _flush_run(
         self, run: _InlineRun, *, container: etree._Element, context: _BlockContext
@@ -744,9 +814,19 @@ class _SectionBuilder:
         if not content.text:
             return
         block_type = context.inherited_type or BlockType.PARAGRAPH
+        structural_path = f"{_structural_path(container)}/text()[{run.index}]"
+        if block_type is BlockType.PARAGRAPH and len(content.text) >= SPLIT_MIN_CHARS:
+            split_blocks = self._split_and_add_paragraph(
+                element=None,
+                structural_path=structural_path,
+                content=content,
+                context=context,
+            )
+            if split_blocks:
+                return
         self._add_block(
             element=None,
-            structural_path=f"{_structural_path(container)}/text()[{run.index}]",
+            structural_path=structural_path,
             type=block_type,
             content=content,
             support_status=block_support_status(block_type),

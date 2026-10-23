@@ -150,6 +150,11 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
 .linguary-anchors {
   display: none;
 }
+
+.linguary-split-continuation {
+  text-indent: 0 !important;
+  margin-top: 0.2em !important;
+}
 """
 
 
@@ -1628,6 +1633,17 @@ def _block_attributes(block: DocumentBlock, *, tag: str) -> dict[str, str]:
         attributes["class"] = "linguary-verse"
     if block.type is BlockType.PAGE_BREAK:
         attributes[f"{{{_EPUB_NAMESPACE}}}type"] = "pagebreak"
+    try:
+        split_index = int(str(block.attributes.get("split_index", "0")).strip())
+    except (ValueError, TypeError):
+        split_index = 0
+    if split_index > 1:
+        existing_class = attributes.get("class")
+        attributes["class"] = (
+            f"{existing_class} linguary-split-continuation"
+            if existing_class
+            else "linguary-split-continuation"
+        )
     return attributes
 
 
