@@ -316,3 +316,122 @@ def test_split_inline_content_returns_original_if_unsplit() -> None:
     result_monolithic = split_inline_content(monolithic_content)
     assert result_monolithic == (monolithic_content,)
 
+
+def test_split_sentences_preserves_country_abbreviations() -> None:
+    """Сокращения U.S., U.K., E.U. не принимаются за конец предложения перед заглавной буквой."""
+    text = (
+        "The U.S. Army was deployed across multiple operational theaters. "
+        "Meanwhile, the U.K. Government issued an official diplomatic statement. "
+        "Officials from the E.U. Parliament confirmed the adoption of the treaty. "
+        "Finally, all parties agreed to continue bilateral discussions."
+    )
+    slices = split_sentences(text, min_chars=0)
+    assert len(slices) == 4
+
+    fragments = [text[start:end] for start, end in slices]
+    assert fragments[0].startswith("The U.S. Army")
+    assert fragments[0].endswith("operational theaters. ")
+    assert fragments[1].startswith("Meanwhile, the U.K. Government")
+    assert fragments[1].endswith("diplomatic statement. ")
+    assert fragments[2].startswith("Officials from the E.U. Parliament")
+    assert fragments[2].endswith("adoption of the treaty. ")
+    assert fragments[3].startswith("Finally, all parties")
+
+
+def test_split_inline_content_monotonic_boundaries_with_overlapping_footnotes() -> None:
+    """Сдвиг границы сноски не нарушает монотонность границ, если сноска перекрывает следующую границу."""
+    s1 = "Sentence one is right here. "
+    s2 = "Sentence two is here. "
+    s3 = "Sentence three follows."
+    text = s1 + s2 + s3
+    b1 = len(s1)
+    b2 = len(s1) + len(s2)
+
+    fn_start = b1 - 3
+    fn_end = b2 + 2
+
+    content = InlineContent(
+        text=text,
+        annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=fn_start,
+                end=fn_end,
+                target="notes.xhtml#fn_wide",
+            ),
+        ),
+    )
+
+    fragments = split_inline_content(content, min_chars=0)
+    assert len(fragments) >= 1
+    reconstructed = "".join(f.text for f in fragments)
+    assert reconstructed == text
+    for f in fragments:
+        assert len(f.text) > 0
+
+    fn_to_end = InlineAnnotation(
+        type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+        start=b1 - 2,
+        end=len(text),
+        target="notes.xhtml#fn_end",
+    )
+    content_end = InlineContent(text=text, annotations=(fn_to_end,))
+    fragments_end = split_inline_content(content_end, min_chars=0)
+    assert len(fragments_end) == 1
+    assert fragments_end[0].text == text
+
+
+def test_split_sentences_preserves_compound_numbered_markers() -> None:
+    """Составные нумерованные маркеры пунктов (1.C., 1.F.2., 1.F.3.) не отсекаются в микрофрагменты."""
+    text1 = (
+        "1.C. The Project Gutenberg Literary Archive Foundation owns a compilation copyright. "
+        "Except for the limited right of replacement or refund, all other warranties are disclaimed. "
+        "General terms of use are subject to federal and state laws."
+    )
+    slices1 = split_sentences(text1, min_chars=0)
+    assert len(slices1) == 3
+    frags1 = [text1[start:end] for start, end in slices1]
+    assert frags1[0].startswith("1.C. The Project Gutenberg")
+    assert frags1[0].endswith("compilation copyright. ")
+
+    text2 = (
+        "1.F.2. LIMITED WARRANTY, DISCLAIMER OF DAMAGES - Except for the right of replacement. "
+        "If you discover a defect in this electronic work within 90 days, you are entitled to refund. "
+        "Neither the Foundation nor any other party distributes copies without compliance."
+    )
+    slices2 = split_sentences(text2, min_chars=0)
+    assert len(slices2) == 3
+    frags2 = [text2[start:end] for start, end in slices2]
+    assert frags2[0].startswith("1.F.2. LIMITED WARRANTY")
+    assert frags2[0].endswith("right of replacement. ")
+
+    text3 = "1.F.3. LIMITED RIGHT OF REPLACEMENT OR REFUND. If you discovered a defect, contact us."
+    slices3 = split_sentences(text3, min_chars=0)
+    assert len(slices3) == 2
+    frags3 = [text3[start:end] for start, end in slices3]
+    assert frags3[0] == "1.F.3. LIMITED RIGHT OF REPLACEMENT OR REFUND. "
+
+
+def test_split_sentences_decimal_numbers_and_multiple_compound_markers() -> None:
+    """Десятичные дроби не ломают деление предложений, а составные маркеры работают внутри одного текста."""
+    text1 = (
+        "The constant pi is approximately 3.14. It is used in mathematical formulas everywhere. "
+        "The value of e is roughly 2.718. It is also an important constant."
+    )
+    slices1 = split_sentences(text1, min_chars=0)
+    assert len(slices1) == 4
+
+    text2 = (
+        "1.A. First rule of the project. "
+        "1.B. Second rule of the project. "
+        "1.C. Third rule of the project."
+    )
+    slices2 = split_sentences(text2, min_chars=0)
+    assert len(slices2) == 3
+    frags2 = [text2[start:end] for start, end in slices2]
+    assert frags2[0] == "1.A. First rule of the project. "
+    assert frags2[1] == "1.B. Second rule of the project. "
+    assert frags2[2] == "1.C. Third rule of the project."
+
+
+

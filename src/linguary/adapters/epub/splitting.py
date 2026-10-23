@@ -93,6 +93,10 @@ _ABBREVIATIONS = frozenset(
         "oct",
         "nov",
         "dec",
+        "u.s",
+        "u.k",
+        "e.u",
+        "u.s.a",
     }
 )
 
@@ -202,6 +206,23 @@ def _find_split_points(text: str) -> list[int]:
         # Защита сокращений и титулов при одиночной точке
         if term == ".":
             dot_pos = match.start("term")
+
+            # Защита составных нумерованных маркеров списков и пунктов (напр. 1.C., 1.F.2.)
+            marker_match = re.search(
+                r"(?:^|[\s\"\'\u201c\u2018\u00ab(\[])([0-9A-Za-z]+(?:\.[0-9A-Za-z]+)+)$",
+                text[:dot_pos],
+            )
+            if marker_match:
+                marker = marker_match.group(1)
+                has_digit = any(c.isdigit() for c in marker)
+                has_alpha = any(c.isalpha() for c in marker)
+                if (
+                    (has_digit and has_alpha)
+                    or marker.count(".") >= 2
+                    or marker_match.start(1) == 0
+                ):
+                    continue
+
             word_match = re.search(r"([A-Za-z]+(?:\.[A-Za-z]+)*)$", text[:dot_pos])
             if word_match:
                 word = word_match.group(1).lower()
@@ -272,11 +293,21 @@ def split_inline_content(
     boundaries = [s[0] for s in slices] + [slices[-1][1]]
     adjusted_boundaries = [0]
     for b in boundaries[1:-1]:
-        for ann in content.annotations:
-            if ann.type is InlineAnnotationType.FOOTNOTE_REFERENCE and ann.start < b < ann.end:
-                b = ann.end
-        adjusted_boundaries.append(b)
+        changed = True
+        while changed:
+            changed = False
+            for ann in content.annotations:
+                if ann.type is InlineAnnotationType.FOOTNOTE_REFERENCE and ann.start < b < ann.end:
+                    new_b = max(b, ann.end)
+                    if new_b != b:
+                        b = new_b
+                        changed = True
+        if b > adjusted_boundaries[-1] and b < boundaries[-1]:
+            adjusted_boundaries.append(b)
     adjusted_boundaries.append(boundaries[-1])
+
+    if len(adjusted_boundaries) <= 2:
+        return (content,)
 
     fragments: list[InlineContent] = []
     for i in range(len(adjusted_boundaries) - 1):
