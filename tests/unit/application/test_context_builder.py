@@ -420,6 +420,21 @@ def test_short_opaque_dialogue_needs_translation() -> None:
     assert "короткий диалог с непрозрачной смысловой связью" in build_context().request.instructions
 
 
+def test_descriptive_passage_with_transparent_syntax_uses_glossary_only() -> None:
+    instructions = build_context().request.instructions
+    assert "описание обстановки или пейзажа" in instructions
+    assert "GLOSSARY_ONLY" in instructions
+    assert "sconce" in instructions
+    assert "damask" in instructions
+    assert "полный перевод здесь избыточен" in instructions
+
+
+def test_mode_calibration_prefers_glossary_only_for_transparent_syntax() -> None:
+    instructions = build_context().request.instructions
+    assert "кто сделал что где" in instructions
+    assert "не переводи весь абзац" in instructions
+
+
 def test_plan_self_check_preserves_help_for_difficult_blocks() -> None:
     instructions = build_context().request.instructions
     for requirement in ("60% блоков", "70% объёма", "15% блоков", "не переключай самые длинные блоки", "не лишай помощи сложные блоки"):
