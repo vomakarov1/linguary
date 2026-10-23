@@ -157,10 +157,20 @@ _CLOSING_PUNCTUATION = "\"'\u201d\u2019\u00bb\u203a"
 _CANDIDATE_PATTERN = re.compile(
     r"""
     (?P<term>\.\.\.+|…|(?:\.\s+){2,}\.|[.!?])
-    (?P<close>(?:["'\u201d\u2019\u00bb\u203a)\]*†‡]|[0-9]+|\[[0-9a-zA-Z]+\])*)
+    (?P<close>(?:["'\u201d\u2019\u00bb\u203a)\]*†‡0-9]|\[[0-9a-zA-Z]+\])*)
     (?P<space>\s+)
     """,
     re.VERBOSE,
+)
+
+
+_MARKER_PATTERN = re.compile(
+    r"(?:^|[\s\"\'\u201c\u2018\u00ab(\[])([0-9A-Za-z]+(?:\.[0-9A-Za-z]+)+)$"
+)
+_WORD_PATTERN = re.compile(r"([A-Za-z]+(?:\.[A-Za-z]+)*)$")
+_INITIAL_PATTERN = re.compile(r"(?:^|[\s\"\'\u201c(])([A-Z])$")
+_ATTRIBUTION_PATTERN = re.compile(
+    r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+([a-z]+)"
 )
 
 
@@ -206,38 +216,38 @@ def _find_split_points(text: str) -> list[int]:
         # Защита сокращений и титулов при одиночной точке
         if term == ".":
             dot_pos = match.start("term")
+            prefix_start = max(0, dot_pos - 64)
+            prefix = text[prefix_start:dot_pos]
 
             # Защита составных нумерованных маркеров списков и пунктов (напр. 1.C., 1.F.2.)
-            marker_match = re.search(
-                r"(?:^|[\s\"\'\u201c\u2018\u00ab(\[])([0-9A-Za-z]+(?:\.[0-9A-Za-z]+)+)$",
-                text[:dot_pos],
-            )
+            marker_match = _MARKER_PATTERN.search(prefix)
             if marker_match:
                 marker = marker_match.group(1)
                 has_digit = any(c.isdigit() for c in marker)
                 has_alpha = any(c.isalpha() for c in marker)
+                is_at_start = prefix_start == 0 and marker_match.start(1) == 0
                 if (
                     (has_digit and has_alpha)
                     or marker.count(".") >= 2
-                    or marker_match.start(1) == 0
+                    or is_at_start
                 ):
                     continue
 
-            word_match = re.search(r"([A-Za-z]+(?:\.[A-Za-z]+)*)$", text[:dot_pos])
+            word_match = _WORD_PATTERN.search(prefix)
             if word_match:
                 word = word_match.group(1).lower()
                 if word in _TITLES or word in _ABBREVIATIONS:
                     continue
 
             # Защита инициалов (H. G. Wells, A. Smith)
-            initial_match = re.search(r"(?:^|[\s\"\'\u201c(])([A-Z])$", text[:dot_pos])
+            initial_match = _INITIAL_PATTERN.search(prefix)
             if initial_match and re.match(r"[A-Z]", text[next_start:]):
                 continue
 
         # Защита слов автора с именем собственным в начале ("Stop!" Alice said.)
         if close and any(c in _CLOSING_PUNCTUATION for c in close):
-            attr_match = re.match(
-                r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+([a-z]+)", text[next_start:]
+            attr_match = _ATTRIBUTION_PATTERN.match(
+                text[next_start : next_start + 64]
             )
             if attr_match:
                 verb = attr_match.group(2).lower()

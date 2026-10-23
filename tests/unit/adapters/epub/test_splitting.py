@@ -434,4 +434,26 @@ def test_split_sentences_decimal_numbers_and_multiple_compound_markers() -> None
     assert frags2[2] == "1.C. Third rule of the project."
 
 
+def test_candidate_pattern_redos_safety() -> None:
+    """Знаки препинания с длинной последовательностью цифр без пробела не вызывают ReDoS."""
+    # Строка с длинным числовым индексом без пробела
+    pathological = "Section 4." + ("1234567890" * 5) + "X and some more words here to test safety."
+    slices = split_sentences(pathological, min_chars=0)
+    assert len(slices) >= 1
+    # Восстановление текста строго соблюдается
+    assert "".join(pathological[start:end] for start, end in slices) == pathological
+
+
+def test_long_paragraph_window_performance() -> None:
+    """Сверхдлинные абзацы со множеством сокращений обрабатываются быстро и детерминированно."""
+    unit = "Dr. Watson visited Mr. Holmes on Jan. 15. The letter was filed under vol. 2, no. 4. "
+    text = (unit * 100) + "Finally, the case was solved."
+    assert len(text) > 8000
+    slices = split_sentences(text)
+    # 100 повторений по 2 предложения + 1 финальное = 201 предложение
+    assert len(slices) == 201
+    assert "".join(text[start:end] for start, end in slices) == text
+
+
+
 
