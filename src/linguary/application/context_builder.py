@@ -881,10 +881,16 @@ _ANALYSIS_INSTRUCTIONS = """\
 а не квота, и решение по каждому блоку зависит от его реальной трудности.
 
 При понятных связях число незнакомых слов само по себе не требует TRANSLATE: \
-три уже найденных слова покрываются GLOSSARY_ONLY. Например, длинный сюжетный абзац \
+три уже найденных слова покрываются GLOSSARY_ONLY. Если предложение распадается на \
+понятные цепочки «кто сделал что где», не переводи весь абзац, даже если в нём встретились \
+два-три редких слова. Например, длинный сюжетный абзац \
 «He entered the courtyard, put down his valise and waited by the portcullis» имеет \
 ясную последовательность действий; courtyard, valise, portcullis достаточно объяснить \
-подсказками. Длинный доступный диалог «We will meet at the station at six. Bring \
+подсказками. Развёрнутое описание обстановки или пейзажа с простым синтаксисом и редкими \
+словами (например: «The oak-panelled parlour was lit by a single sconce, and a cold \
+draught stirred the faded damask curtains») тоже оставляй GLOSSARY_ONLY с подсказками \
+к sconce, damask: ход мысли и связи слов прозрачны, полный перевод здесь избыточен. \
+Длинный доступный диалог «We will meet at the station at six. Bring \
 your valise and wait near the carriage. If I am late, ask the porter to keep your \
 bag. The train will take us home before dark» тоже может остаться GLOSSARY_ONLY \
 с подсказками valise, carriage, porter: намерения и условия ясны. Такой диалог без \
