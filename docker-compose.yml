@@ -10,6 +10,8 @@ services:
       - LINGUARY_LLM_MODEL=${LINGUARY_LLM_MODEL:-gpt-4o-mini}
       - LINGUARY_LLM_API_KEY=${LINGUARY_LLM_API_KEY:-}
     volumes:
+      - ./src:/app/src
+      - ./alembic:/app/alembic
       - linguary_data:/data
     restart: unless-stopped
 
