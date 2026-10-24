@@ -1,4 +1,4 @@
-"""Сценарий экспорта книги: режимы, готовность и внешняя проверка (P2.T5)."""
+"""Book export use case: modes, readiness, and external validation (P2.T5)."""
 
 from __future__ import annotations
 
@@ -47,18 +47,18 @@ BOOK_ID = "book-1"
 
 @dataclass(frozen=True, slots=True)
 class FakeValidator:
-    """Внешний валидатор с заранее известным ответом."""
+    """External validator with a predetermined response."""
 
     report: ExportValidationReport
 
     def validate(self, request: ExportValidationRequest) -> ExportValidationReport:
-        """Отдаёт заготовленный отчёт независимо от содержимого книги."""
+        """Returns the prepared report regardless of book contents."""
         return replace(self.report, report_path=request.report_path)
 
 
 @pytest.fixture
 def imported(unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path) -> str:
-    """Импортированная книга набора в хранилище теста."""
+    """Imported fixture book in the test repository."""
     ImportBook(
         unit_of_work=unit_of_work,
         reader=EbookLibEpubReader(),
@@ -76,14 +76,14 @@ def imported(unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path) -> str:
 def export(
     unit_of_work: SqlAlchemyUnitOfWork, *, validator: FakeValidator | None = None
 ) -> ExportBook:
-    """Сценарий экспорта, настроенный на хранилище теста."""
+    """Export use case configured for the test store."""
     return ExportBook(
         unit_of_work=unit_of_work, writer=EpubExportWriter(), validator=validator
     )
 
 
 def command(tmp_path: Path, **overrides: object) -> ExportBookCommand:
-    """Команда экспорта в файл внутри директории теста."""
+    """Export command to a file within test directory."""
     arguments: dict[str, object] = {
         "book_id": BOOK_ID,
         "target_path": str(tmp_path / "export" / "book.epub"),
@@ -99,7 +99,7 @@ def make_ready(
     with_run: bool = True,
     tasks: tuple[ProcessingTask, ...] = (),
 ) -> None:
-    """Доводит книгу до состояния, в котором доступен полный экспорт."""
+    """Brings the book to a state where full export is available."""
     with unit_of_work.transaction() as transaction:
         book = transaction.books.get(BOOK_ID)
         assert book is not None
@@ -121,7 +121,7 @@ def make_ready(
 
 
 def status_of(unit_of_work: SqlAlchemyUnitOfWork) -> tuple[BookStatus, object]:
-    """Состояние книги и итог её последней внешней проверки."""
+    """Book status and the outcome of its latest external validation."""
     with unit_of_work.transaction() as transaction:
         book = transaction.books.get(BOOK_ID)
         assert book is not None
@@ -131,7 +131,7 @@ def status_of(unit_of_work: SqlAlchemyUnitOfWork) -> tuple[BookStatus, object]:
 def test_structure_only_export_needs_no_processing_results(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Технический цикл `import -> export` проходит без LLM и без обработки."""
+    """Technical `import -> export` cycle succeeds without LLM and without processing."""
     result = export(unit_of_work)(
         command(tmp_path, mode=ExportMode.STRUCTURE_ONLY)
     )
@@ -144,7 +144,7 @@ def test_structure_only_export_needs_no_processing_results(
 def test_full_export_is_rejected_before_processing_is_finished(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Полный экспорт недоступен книге, которая ещё обрабатывается."""
+    """Full export is unavailable for a book that is still being processed."""
     make_ready(unit_of_work, status=BookStatus.PROCESSING)
 
     with pytest.raises(ExportBookError, match="обработка ещё не завершена"):
@@ -154,7 +154,7 @@ def test_full_export_is_rejected_before_processing_is_finished(
 def test_full_export_is_rejected_while_mandatory_tasks_are_unfinished(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Незавершённая обязательная задача блокирует полный экспорт (PRD § 20)."""
+    """Unfinished mandatory tasks block full export (PRD § 20)."""
     make_ready(
         unit_of_work,
         tasks=(
@@ -179,7 +179,7 @@ def test_full_export_is_rejected_while_mandatory_tasks_are_unfinished(
 def test_finished_export_task_does_not_block_a_repeated_export(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Сама экспортная задача экспорт не блокирует."""
+    """The export task itself does not block export."""
     make_ready(
         unit_of_work,
         tasks=(
@@ -201,7 +201,7 @@ def test_finished_export_task_does_not_block_a_repeated_export(
 def test_successful_full_export_completes_the_book(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Успешный экспорт переводит книгу в завершённое состояние (ALG-06)."""
+    """Successful export transitions the book to completed state (ALG-06)."""
     make_ready(unit_of_work)
 
     result = export(unit_of_work)(command(tmp_path))
@@ -216,7 +216,7 @@ def test_successful_full_export_completes_the_book(
 def test_unavailable_validator_leaves_the_book_unchecked(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Недоступный EPUBCheck экспорт не ломает: книга помечается непроверенной."""
+    """Unavailable EPUBCheck does not fail export: the book is marked unvalidated."""
     make_ready(unit_of_work)
     validator = FakeValidator(
         ExportValidationReport(available=False, unavailable_reason="Java не найдена")
@@ -234,7 +234,7 @@ def test_unavailable_validator_leaves_the_book_unchecked(
 def test_clean_validator_report_marks_the_book_as_checked(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Доступный валидатор без ошибок даёт книге отметку об успешной проверке."""
+    """Available validator with no issues grants the book a passed status."""
     make_ready(unit_of_work)
     validator = FakeValidator(ExportValidationReport(available=True))
 
@@ -253,7 +253,7 @@ def test_clean_validator_report_marks_the_book_as_checked(
 def test_validator_warnings_do_not_block_the_export(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Предупреждения внешней проверки экспорт не блокируют (PRD § 20)."""
+    """External validation warnings do not block export (PRD § 20)."""
     make_ready(unit_of_work)
     validator = FakeValidator(
         ExportValidationReport(
@@ -275,7 +275,7 @@ def test_validator_warnings_do_not_block_the_export(
 def test_strict_mode_turns_warnings_into_a_failed_export(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """В строгом режиме предупреждение делает проверку неуспешной."""
+    """In strict mode, a warning marks validation as failed."""
     make_ready(unit_of_work)
     validator = FakeValidator(
         ExportValidationReport(
@@ -298,7 +298,7 @@ def test_strict_mode_turns_warnings_into_a_failed_export(
 def test_validator_errors_reject_the_export(
     imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Ошибки внешней проверки делают экспорт неуспешным, а отметку — видимой."""
+    """External validation errors reject export and record failed status."""
     make_ready(unit_of_work)
     validator = FakeValidator(
         ExportValidationReport(
@@ -324,7 +324,7 @@ def test_validator_errors_reject_the_export(
 def test_export_of_an_unknown_book_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
 ) -> None:
-    """Экспортировать книгу, которой нет в хранилище, нельзя."""
+    """Export of a book absent from the repository is rejected."""
     with pytest.raises(ExportBookError, match="нет в хранилище"):
         export(unit_of_work)(command(tmp_path))
 

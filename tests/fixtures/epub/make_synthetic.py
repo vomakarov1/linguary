@@ -1,16 +1,16 @@
-"""Собирает маленькую синтетическую книгу EPUB3 для сквозного теста.
+"""Builds a small synthetic EPUB3 book for end-to-end testing.
 
-Скрипт создаёт `synthetic_story.epub` рядом с собой: короткая оригинальная история на
-английском в трёх главах, с курсивом и полужирным, одной сноской (с внутренней ссылкой и
-обратной ссылкой), одним маленьким PNG-изображением (генерируется прямо здесь, без внешних
-файлов), одним списком и одной цитатой. Имена собственные и придуманный термин повторяются
-между главами, чтобы на файле можно было проверить сборку глоссария.
+The script creates `synthetic_story.epub` in the same directory: a short original English
+story across three chapters, containing italics and bold text, one footnote (with internal link
+and backlink), one small PNG image (generated inline, without external files), one list, and
+one blockquote. Proper nouns and an invented term recur across chapters to allow testing
+glossary assembly on the file.
 
-Запуск:
+Usage:
 
     uv run python tests/fixtures/epub/make_synthetic.py
 
-Пересобирает файл детерминированно — можно запускать повторно.
+Rebuilds the file deterministically — safe to run repeatedly.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ BOOK_LANGUAGE = "en"
 
 
 def make_tiny_png() -> bytes:
-    """Строит валидный 8x8 PNG (индексный градиент) без сторонних библиотек."""
+    """Constructs a valid 8x8 PNG (indexed gradient) without third-party libraries."""
 
     width = height = 8
 
@@ -213,7 +213,7 @@ def build() -> None:
         OUTPUT_PATH.unlink()
 
     with zipfile.ZipFile(OUTPUT_PATH, "w") as epub:
-        # mimetype идёт первым и без сжатия — этого требует спецификация EPUB.
+        # mimetype comes first and uncompressed, as required by the EPUB specification.
         epub.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", zipfile.ZIP_STORED)
 
         def add(name: str, content: str | bytes) -> None:
@@ -230,7 +230,7 @@ def build() -> None:
         add("OEBPS/images/marker.png", make_tiny_png())
 
     size_kb = OUTPUT_PATH.stat().st_size / 1024
-    print(f"Собрано: {OUTPUT_PATH} ({size_kb:.1f} КБ)")
+    print(f"Built: {OUTPUT_PATH} ({size_kb:.1f} KB)")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-"""Возврат к проверке глоссария: сброс результатов обработки (P3.T7, PRD § 11, § 21.5).
+"""Returning to glossary review: resetting processing results (P3.T7, PRD § 11, § 21.5).
 
-Тесты идут на настоящем SQLite: сброс — транзакция, которая удаляет запуск с его
-результатами и задачи отменённой работы, и проверять её имеет смысл там же, где она
-выполняется у пользователя.
+Tests run on real SQLite: reset is a transaction that deletes a run along with its
+results and tasks of cancelled work, and testing it makes sense where it executes
+for the user.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from linguary.domain import (
     TaskType,
 )
 
-#: Две главы по два абзаца: книга, обработку которой можно довести до конца.
+#: Two chapters with two paragraphs each: a book whose processing can be completed.
 TWO_CHAPTERS = ((SOURCE_TEXT, SOURCE_TEXT), (SOURCE_TEXT, SOURCE_TEXT))
 
 
@@ -57,7 +57,7 @@ def make_sequence(
     task_queue: SqliteTaskQueue,
     client: FakeLLMClient | InterruptingLLMClient,
 ) -> ChapterProcessingSequence:
-    """Последовательность задач обработки поверх настоящей очереди."""
+    """Chapter processing sequence on top of the real task queue."""
     process, _ = make_process_chapter(unit_of_work, client)
     return ChapterProcessingSequence(
         unit_of_work=unit_of_work, queue=task_queue, process_chapter=process
@@ -67,7 +67,7 @@ def make_sequence(
 def make_pool(
     task_queue: SqliteTaskQueue, sequence: ChapterProcessingSequence
 ) -> TaskWorkerPool:
-    """Воркер с единственным обработчиком — задачей обработки главы."""
+    """Worker pool with a single handler — chapter processing task."""
     return TaskWorkerPool(
         TaskRunner(
             queue=task_queue,
@@ -77,7 +77,7 @@ def make_pool(
 
 
 def book_status(unit_of_work: SqlAlchemyUnitOfWork) -> BookStatus:
-    """Текущее состояние книги."""
+    """Current book status."""
     with unit_of_work.transaction() as uow:
         book = uow.books.get(BOOK_ID)
     assert book is not None
@@ -85,7 +85,7 @@ def book_status(unit_of_work: SqlAlchemyUnitOfWork) -> BookStatus:
 
 
 async def process_first_chapter(unit_of_work: SqlAlchemyUnitOfWork) -> None:
-    """Обрабатывает первую главу книги: у запуска появляются результаты и заметки."""
+    """Processes the first chapter of the book: results and notes appear on the run."""
     process, _ = make_process_chapter(
         unit_of_work,
         FakeLLMClient.always(translated_reply(notes=(note_reply("b1"),))),
@@ -96,7 +96,7 @@ async def process_first_chapter(unit_of_work: SqlAlchemyUnitOfWork) -> None:
 async def test_reset_removes_results_and_keeps_the_analysis(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Сброс удаляет запуск с результатами, сохраняя импорт, блоки и анализ глав."""
+    """Reset removes run and results, keeping imports, blocks, and chapter analyses."""
     scenario = store_processing_book(unit_of_work)
     await process_first_chapter(unit_of_work)
 
@@ -121,7 +121,7 @@ async def test_reset_removes_results_and_keeps_the_analysis(
 async def test_reset_removes_processing_tasks_and_keeps_the_rest(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Сброс снимает задачи обработки и повторной генерации, анализ глав не трогает."""
+    """Reset clears processing and regeneration tasks, leaving chapter analysis untouched."""
     store_processing_book(unit_of_work, chapters=TWO_CHAPTERS)
     await task_queue.enqueue(
         TaskIdentity(
@@ -149,10 +149,10 @@ async def test_reset_removes_processing_tasks_and_keeps_the_rest(
 async def test_processed_book_can_be_processed_again_after_reset(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """После сброса обработка запускается заново и снова доходит до результатов.
+    """After reset, processing starts anew and reaches results again.
 
-    Идемпотентный ключ задачи живёт, пока живёт задача: успешная задача отменённого
-    запуска не дала бы поставить такую же задачу второй раз (PRD § 18.1).
+    The task idempotency key lives while the task lives: a successful task of a cancelled
+    run would have prevented enqueuing the same task a second time (PRD § 18.1).
     """
     store_processing_book(unit_of_work, chapters=TWO_CHAPTERS)
     sequence = make_sequence(
@@ -180,7 +180,7 @@ async def test_processed_book_can_be_processed_again_after_reset(
 async def test_late_result_of_a_running_task_is_not_saved(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Сброс во время выполняющейся задачи: её поздний результат не сохраняется (ALG-04)."""
+    """Reset during a running task: its late result is not saved (ALG-04)."""
     store_processing_book(unit_of_work)
     reset = ResetProcessing(unit_of_work=unit_of_work)
     client = InterruptingLLMClient(
@@ -202,7 +202,7 @@ async def test_late_result_of_a_running_task_is_not_saved(
 async def test_reset_of_a_book_without_processing_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Книга, обработка которой не начиналась, сбрасывать нечего (ALG-06)."""
+    """A book whose processing hasn't started has nothing to reset (ALG-06)."""
     store_processing_book(unit_of_work, status=BookStatus.GLOSSARY_REVIEW)
 
     with pytest.raises(BookStatusTransitionError, match="недопустимо"):
@@ -217,7 +217,7 @@ async def test_reset_of_a_book_without_processing_is_rejected(
 async def test_reset_of_an_unknown_book_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Сброс книги, которой нет в хранилище, отклоняется прикладной ошибкой."""
+    """Reset of a book absent from storage is rejected with an application error."""
     with pytest.raises(ResetProcessingError, match="нет в хранилище"):
         ResetProcessing(unit_of_work=unit_of_work)(
             ResetProcessingCommand(book_id="book-404")
@@ -227,7 +227,7 @@ async def test_reset_of_an_unknown_book_is_rejected(
 async def test_failed_task_of_a_cancelled_run_is_removed_too(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Неуспешная задача отменённого запуска тоже снимается: повторять её нечего."""
+    """A failed task of a cancelled run is removed as well: nothing to retry."""
     store_processing_book(unit_of_work)
     with unit_of_work.transaction() as uow:
         uow.tasks.add(

@@ -1,4 +1,4 @@
-"""Импорт EPUB: локальное хранилище ресурсов и матрица поддержки (P2.T3)."""
+"""EPUB import: local resource storage and support matrix (P2.T3)."""
 
 from __future__ import annotations
 
@@ -26,19 +26,19 @@ from linguary.domain import ImportWarningKind, SupportStatus
 
 ReadFixture = Callable[..., ImportedBook]
 
-#: Однопиксельное изображение: содержимое ресурса тестам безразлично, важен сам файл.
+#: Single-pixel image: content is irrelevant to tests, only file existence matters.
 IMAGE_BYTES = b"\x89PNG\r\n\x1a\n fake image payload"
 
 
 @pytest.fixture
 def storage_root(tmp_path: Path) -> Path:
-    """Корень локального хранилища ресурсов книг."""
+    """Root of the local book resources store."""
     return tmp_path / "storage"
 
 
 @pytest.fixture
 def resource_store(storage_root: Path) -> FilesystemEpubResourceStore:
-    """Хранилище ресурсов, которое проверяется этими тестами."""
+    """Resource store under test."""
     return FilesystemEpubResourceStore(root=storage_root)
 
 
@@ -48,7 +48,7 @@ def test_images_are_stored_under_the_book_directory(
     storage_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Изображения книги сохраняются в каталог книги и находятся по исходному пути."""
+    """Book images are saved into the book's directory and retrieved via original paths."""
     source = _book_with_image(tmp_path)
 
     stored = _store(reader, resource_store, source)
@@ -63,7 +63,7 @@ def test_stylesheet_is_preserved_without_internal_processing(
     resource_store: FilesystemEpubResourceStore,
     tmp_path: Path,
 ) -> None:
-    """Стиль книги переносится как есть: разбирать его импортёру незачем (PRD § 6)."""
+    """Book stylesheets are transferred as-is: no need for importer to parse them (PRD § 6)."""
     source = _book_with_image(tmp_path)
 
     imported = reader.read(_request(source))
@@ -84,7 +84,7 @@ def test_script_resource_is_dropped_with_warning(
     storage_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Сценарий не влияет на чтение книги: он не переносится и оставляет предупреждение."""
+    """Scripts have no effect on reading: dropped with an import warning."""
     source = _book_with_image(tmp_path)
 
     imported = reader.read(_request(source))
@@ -108,7 +108,7 @@ def test_script_resource_is_dropped_with_warning(
 def test_empty_decorative_elements_are_dropped_with_warning(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Пустой декоративный элемент пропускается, и пользователь видит предупреждение."""
+    """Empty decorative elements are skipped and emit an import warning."""
     source = build_epub(
         tmp_path / "decorations.epub",
         documents={
@@ -134,7 +134,7 @@ def test_empty_decorative_elements_are_dropped_with_warning(
 def test_repeated_page_break_is_dropped_with_warning(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Подряд идущие разрывы страницы описывают одну границу: второй пропускается."""
+    """Consecutive page breaks describe a single boundary: second is dropped."""
     source = build_epub(
         tmp_path / "page_breaks.epub",
         documents={
@@ -183,7 +183,7 @@ def test_repeated_page_break_is_dropped_with_warning(
 def test_page_break_is_recognised_by_whole_marker(
     markup: str, expected_type: str, reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Разрыв страницы опознаётся по отдельному признаку, а не по части чужого класса."""
+    """Page break is identified by a dedicated marker, not as a substring of another class."""
     source = build_epub(
         tmp_path / "page_break_marker.epub",
         documents={"chapter1.xhtml": xhtml_document(f"<p>Text.</p>{markup}")},
@@ -200,7 +200,7 @@ def test_page_break_is_recognised_by_whole_marker(
 def test_lost_manifest_resource_is_fatal(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Ресурс, объявленный в манифесте и потерянный в архиве, — `FATAL` (PRD § 6)."""
+    """A resource declared in manifest but missing from archive is `FATAL` (PRD § 6)."""
     source = build_epub(
         tmp_path / "lost_image.epub",
         documents={
@@ -222,7 +222,7 @@ def test_resource_path_leaving_the_book_directory_is_fatal(
     storage_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Ресурс с путём вида `../` отвергается, и за пределы хранилища ничего не пишется."""
+    """A resource path containing `../` traversal is rejected, writing nothing outside store."""
     source = build_epub(
         tmp_path / "zip_slip.epub",
         documents={
@@ -245,7 +245,7 @@ def test_resource_path_leaving_the_book_directory_is_fatal(
 def test_archive_with_too_many_files_is_fatal(
     reader: EbookLibEpubReader, storage_root: Path, tmp_path: Path
 ) -> None:
-    """Архив с числом файлов сверх лимита отвергается до записи в хранилище."""
+    """An archive with entries exceeding limit is rejected before writing to storage."""
     source = build_epub(
         tmp_path / "many_files.epub",
         documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
@@ -264,7 +264,7 @@ def test_archive_with_too_many_files_is_fatal(
 def test_archive_larger_than_the_limit_is_fatal(
     reader: EbookLibEpubReader, storage_root: Path, tmp_path: Path
 ) -> None:
-    """Архив, распаковка которого превышает лимит, отвергается до записи в хранилище."""
+    """An archive whose extraction size exceeds limit is rejected before storage write."""
     source = build_epub(
         tmp_path / "large.epub",
         documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
@@ -286,7 +286,7 @@ def test_repeated_store_forgets_resources_of_the_previous_import(
     storage_root: Path,
     tmp_path: Path,
 ) -> None:
-    """Повторный импорт начинает каталог книги заново: копий прошлого импорта не остаётся."""
+    """Repeated import reinitializes the book directory: no leftover copies from past import."""
     _store(reader, resource_store, _book_with_image(tmp_path))
     obsolete = storage_root / "book-1" / "resources" / "images" / "obsolete.png"
     obsolete.write_bytes(IMAGE_BYTES)
@@ -303,7 +303,7 @@ def test_import_use_case_saves_stored_paths_and_warnings(
     resource_store: FilesystemEpubResourceStore,
     tmp_path: Path,
 ) -> None:
-    """Сценарий импорта сохраняет пути копий ресурсов и предупреждения матрицы поддержки."""
+    """Import use case saves stored resource paths and support matrix warnings."""
     source = _book_with_image(tmp_path)
     import_book = ImportBook(
         unit_of_work=unit_of_work, reader=reader, resource_store=resource_store
@@ -339,7 +339,7 @@ def test_import_use_case_saves_stored_paths_and_warnings(
 def test_import_without_resource_store_keeps_document_only(
     unit_of_work: SqlAlchemyUnitOfWork, reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Без хранилища книга импортируется одной моделью документа, без копий ресурсов."""
+    """Without a resource store, book imports only the document model, omitting resource copies."""
     source = _book_with_image(tmp_path)
     import_book = ImportBook(unit_of_work=unit_of_work, reader=reader)
 
@@ -359,7 +359,7 @@ def test_illustrated_book_stores_every_image(
     resource_store: FilesystemEpubResourceStore,
     storage_root: Path,
 ) -> None:
-    """Книга с иллюстрациями сохраняет все свои изображения (PRD § 28.1)."""
+    """Illustrated book stores all its images (PRD § 28.1)."""
     imported = read_fixture("alice_rackham")
     source = Path(__file__).resolve().parents[2] / "fixtures" / "epub" / "alice_rackham.epub"
 
@@ -384,7 +384,7 @@ def test_illustrated_book_stores_every_image(
 
 
 def _book_with_image(directory: Path) -> Path:
-    """Книга с изображением, стилем и сценарием: три класса матрицы поддержки сразу."""
+    """A book with an image, stylesheet, and script: three support matrix classes at once."""
     return build_epub(
         directory / "illustrated.epub",
         documents={
@@ -408,7 +408,7 @@ def _store(
     *,
     book_id: str = "book-1",
 ) -> StoredResources:
-    """Читает книгу и сохраняет её ресурсы в хранилище."""
+    """Reads the book and stores its resources into the store."""
     imported = reader.read(_request(source, book_id=book_id))
     return store.store(
         StoreResourcesRequest(
@@ -418,15 +418,15 @@ def _store(
 
 
 def _resource(imported: ImportedBook, source_path: str):
-    """Ресурс книги по его пути внутри EPUB."""
+    """Resource of the book by its internal path inside EPUB."""
     for resource in imported.document.resources:
         if resource.source_path == source_path:
             return resource
-    raise AssertionError(f"ресурс {source_path} отсутствует в модели книги")
+    raise AssertionError(f"resource {source_path} is absent from book model")
 
 
 def _request(source: Path, *, book_id: str = "book-1") -> EpubReadRequest:
-    """Запрос на чтение книги, собранной в самом тесте."""
+    """Request to read an in-test synthesized book."""
     return EpubReadRequest(
         book_id=book_id, source_path=str(source), target_language="ru"
     )

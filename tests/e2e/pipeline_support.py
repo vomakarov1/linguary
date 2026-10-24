@@ -1,13 +1,13 @@
-"""Общая обвязка сквозных сценариев: ответы модели, чтение книги и заглушка EPUBCheck.
+"""Common test harness for end-to-end scenarios: model replies, book reading, and EPUBCheck stub.
 
-Оба сквозных сценария — прикладной (`test_mvp_pipeline.py`) и через Web UI
-(`test_web_pipeline.py`) — работают на одной синтетической книге и одних и тех же
-`fixture`-ответах, поэтому сборка ответов живёт здесь, а не дублируется в каждом файле.
+Both end-to-end scenarios — application-level (`test_mvp_pipeline.py`) and Web UI
+(`test_web_pipeline.py`) — run against the same synthetic book and fixture replies,
+so reply construction lives here rather than being duplicated across test files.
 
-Ответы готовятся только после импорта: их число и состав зависят от того, сколько глав
-и текстовых блоков дал разбор настоящего EPUB, а не от заранее записанной константы.
+Replies are prepared only after import: their count and composition depend on how many
+chapters and text blocks were parsed from the actual EPUB, rather than a hardcoded constant.
 
-Модуль намеренно без префикса `test_`: иначе pytest соберёт его как тестовый.
+This module intentionally lacks the `test_` prefix so pytest will not collect it as a test file.
 """
 
 from __future__ import annotations
@@ -29,13 +29,13 @@ from linguary.domain import CanonicalDocument, DocumentSection, TokenUsage
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
 
-#: Маленькая синтетическая книга сквозного теста (PRD § 28.1).
+#: Small synthetic book for end-to-end testing (PRD § 28.1).
 SYNTHETIC_EPUB = FIXTURE_ROOT / "epub" / "synthetic_story.epub"
 
-#: Сохранённые ответы модели, из которых собираются реплики под размеры глав.
+#: Stored model responses used to assemble replies matching chapter sizes.
 LLM_FIXTURE_ROOT = FIXTURE_ROOT / "llm"
 
-#: Отчёт EPUBCheck без единого замечания: книга проверена и претензий нет.
+#: Clean EPUBCheck report with zero messages: book verified without warnings.
 CLEAN_EPUBCHECK_REPORT: dict[str, object] = {
     "checker": {"checkerVersion": "5.1.0"},
     "messages": [],
@@ -45,12 +45,11 @@ CLEAN_EPUBCHECK_REPORT: dict[str, object] = {
 def llm_replies(
     document: CanonicalDocument, *, broken_reply_before_processing: bool = False
 ) -> tuple[FakeReply | Exception, ...]:
-    """Ответы анализа и обработки под реальные размеры глав импортированной книги.
+    """Analysis and translation replies sized to actual chapter dimensions of imported book.
 
-    Сначала по одному ответу анализа на главу, затем по одному ответу обработки. Флаг
-    `broken_reply_before_processing` вставляет между ними ответ с оборванным JSON: так
-    сценарий заодно проходит повтор неуспешного вызова и запись отказа в журнал модели
-    (PRD § 16, § 24).
+    First one analysis reply per chapter, then one translation reply per chapter. The
+    `broken_reply_before_processing` flag inserts a malformed JSON reply in between to test
+    retry of failed calls and logging failure in the model call log (PRD § 16, § 24).
     """
     analysis = read_fixture("analysis-template.json")
     translation = read_fixture("translation-template.json")
@@ -67,12 +66,12 @@ def llm_replies(
 
 
 def read_fixture(name: str) -> dict[str, object]:
-    """JSON-fixture ответа модели."""
+    """JSON fixture of model response."""
     return json.loads((LLM_FIXTURE_ROOT / name).read_text(encoding="utf-8"))
 
 
 def sequential_ids(prefix: str) -> Callable[[], str]:
-    """Предсказуемые идентификаторы задач: `<prefix>-1`, `<prefix>-2`, ..."""
+    """Predictable task identifiers: `<prefix>-1`, `<prefix>-2`, ..."""
     counter = 0
 
     def next_id() -> str:
@@ -84,14 +83,14 @@ def sequential_ids(prefix: str) -> Callable[[], str]:
 
 
 def exported_text(path: Path) -> str:
-    """Весь видимый текст собранного EPUB одной строкой."""
+    """All visible text of assembled EPUB as a single string."""
     return "\n".join(
         "".join(root.itertext()) for root in exported_documents(path).values()
     )
 
 
 def exported_documents(path: Path) -> dict[str, etree._Element]:
-    """XHTML-документы собранного EPUB."""
+    """XHTML documents of assembled EPUB."""
     parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
     with zipfile.ZipFile(path) as archive:
         return {
@@ -103,28 +102,28 @@ def exported_documents(path: Path) -> dict[str, etree._Element]:
 
 @dataclass(frozen=True, slots=True)
 class EpubCheckStub:
-    """Подменённый EPUBCheck: настройки адаптера и запись его командной строки."""
+    """Mock EPUBCheck: adapter settings and recorded command line."""
 
     settings: EpubCheckSettings
     argv_path: Path
 
     @property
     def was_called(self) -> bool:
-        """Запускал ли адаптер инструмент хотя бы раз."""
+        """Whether adapter invoked the tool at least once."""
         return self.argv_path.is_file()
 
     def argv(self) -> list[str]:
-        """Аргументы, с которыми адаптер запустил инструмент."""
+        """Arguments with which adapter invoked the tool."""
         return json.loads(self.argv_path.read_text(encoding="utf-8"))
 
 
 def install_epubcheck_stub(directory: Path) -> EpubCheckStub:
-    """Кладёт в директорию заглушку Java и файл инструмента, отдающую чистый отчёт.
+    """Installs a Java wrapper stub returning a clean report into directory.
 
-    Настоящий EPUBCheck в наборе не запускается: Java на машине может отсутствовать, а
-    качество самого инструмента — не предмет этих тестов. Заглушка ведёт себя как
-    настоящий вызов — разбирает `--json`, пишет туда отчёт и завершается нулём, — поэтому
-    шаг `Validate` сквозного сценария проходит целиком, вплоть до разбора отчёта.
+    Real EPUBCheck is not invoked: Java may not be installed on the machine, and the quality
+    of the external tool is not under test. The stub mimics real execution — parses `--json`,
+    writes report there, and exits with 0 — so the pipeline's Validate step runs to completion,
+    including report parsing.
     """
     directory.mkdir(parents=True, exist_ok=True)
     argv_path = directory / "argv.json"
@@ -165,7 +164,7 @@ def install_epubcheck_stub(directory: Path) -> EpubCheckStub:
 def _analysis_reply(
     section: DocumentSection, fixture: dict[str, object]
 ) -> FakeReply:
-    """Ответ анализа одной главы: план обработки покрывает все её текстовые блоки."""
+    """Analysis reply for one chapter: treatment plan covers all its textual blocks."""
     return FakeReply.of_payload(
         {
             "translation_instructions": fixture["translation_instructions"],
@@ -186,7 +185,7 @@ def _analysis_reply(
 
 
 def _translation_reply(aliases: list[str], fixture: dict[str, object]) -> FakeReply:
-    """Ответ обработки одной главы с переводом, подсказками и заметкой."""
+    """Translation reply for one chapter with translation, hints, and language note."""
     hint = fixture["glossary_hint"]
     note = fixture["language_note"]
     assert isinstance(hint, dict)
@@ -216,5 +215,5 @@ def _translation_reply(aliases: list[str], fixture: dict[str, object]) -> FakeRe
 
 
 def _block_aliases(section: DocumentSection) -> list[str]:
-    """Псевдонимы текстовых блоков главы в том виде, в каком их видит модель."""
+    """Text block aliases for the chapter as seen by the model."""
     return [f"b{index}" for index, _ in enumerate(textual_blocks(section), start=1)]

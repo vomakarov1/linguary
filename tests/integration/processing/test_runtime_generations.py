@@ -1,4 +1,4 @@
-"""Поколения сохраняют занятые сценарии и собирают все закрытия."""
+"""Generations retain active sequences and collect all close operations."""
 from dataclasses import replace
 import asyncio
 

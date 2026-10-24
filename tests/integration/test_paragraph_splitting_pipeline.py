@@ -1,4 +1,4 @@
-"""Сквозное тестирование конвейера деления составных абзацев и валидации EPUB (P3.T2)."""
+"""End-to-end testing of composite paragraph splitting pipeline and EPUB validation (P3.T2)."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _create_test_epub_with_composite_paragraphs(tmp_path: Path) -> Path:
 
 
 def test_pipeline_import_process_and_export_split_paragraphs(tmp_path: Path) -> None:
-    """Полный цикл импорта книги с составными абзацами, группировки обработки и экспорта в EPUB."""
+    """Full lifecycle of importing a book with composite paragraphs, grouping processing, and exporting to EPUB."""
     source_epub = _create_test_epub_with_composite_paragraphs(tmp_path)
 
     run = run_export(source_epub, tmp_path=tmp_path, book_id="split-book")
@@ -98,7 +98,7 @@ def test_pipeline_import_process_and_export_split_paragraphs(tmp_path: Path) -> 
 
     split_block_ids = {b.id for b in split_blocks}
     containing_units = [u for u in units if any(bid in split_block_ids for bid in u.block_ids)]
-    assert len(containing_units) == 1, "Все фрагменты составного абзаца должны попасть в один TranslationUnit"
+    assert len(containing_units) == 1, "All composite paragraph fragments must be grouped into a single TranslationUnit"
     assert all(bid in containing_units[0].block_ids for bid in split_block_ids)
 
     assert verify_exported_epub(run.path) == ()
@@ -121,7 +121,7 @@ def test_pipeline_import_process_and_export_split_paragraphs(tmp_path: Path) -> 
 
 
 def test_epubcheck_validity_for_split_paragraphs(tmp_path: Path) -> None:
-    """Экспортированный EPUB со стилизованными фрагментами абзацев валиден по стандарту EPUB 3 (0 ошибок в EPUBCheck)."""
+    """Exported EPUB with styled paragraph fragments is valid per EPUB 3 standard (0 errors in EPUBCheck)."""
     source_epub = _create_test_epub_with_composite_paragraphs(tmp_path)
 
     run_temp = run_export(source_epub, tmp_path=tmp_path, book_id="validation-book")

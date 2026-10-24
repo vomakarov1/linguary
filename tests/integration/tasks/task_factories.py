@@ -1,8 +1,8 @@
-"""Фабрики книги и ключей задач для тестов очереди.
+"""Book and task key factories for queue tests.
 
-Собирают минимальный валидный вход: доменные инварианты проверены отдельно, и тест очереди
-не должен спотыкаться на их нарушении. Все значения по умолчанию перекрываются именованными
-аргументами.
+Constructs minimal valid input: domain invariants are validated separately,
+and queue tests should not stumble on invariant violations. All default values
+can be overridden via keyword arguments.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def make_book(
     status: BookStatus = BookStatus.IMPORTING,
     source_epub_path: str = "/library/sample.epub",
 ) -> BookRecord:
-    """Запись книги, к которой привязываются задачи."""
+    """Book record to which tasks are attached."""
     return BookRecord(
         id=book_id,
         metadata=BookMetadata(title="The Sample Book", authors=("Jane Doe",)),
@@ -43,11 +43,11 @@ def make_identity(
     task_type: TaskType = TaskType.ANALYZE_CHAPTER,
     scope_id: str = SECTION_ID,
 ) -> TaskIdentity:
-    """Идемпотентный ключ задачи."""
+    """Task idempotency key."""
     return TaskIdentity(book_id=book_id, task_type=task_type, scope_id=scope_id)
 
 
 def sequential_task_ids(prefix: str = "task") -> Callable[[], str]:
-    """Генератор предсказуемых идентификаторов задач."""
+    """Predictable task identifier generator."""
     numbers = count(1)
     return lambda: f"{prefix}-{next(numbers)}"

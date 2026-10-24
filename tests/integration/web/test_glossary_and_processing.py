@@ -1,4 +1,4 @@
-"""Глоссарий, запуск обработки и возврат к проверке (API-01, P4.T2)."""
+"""Glossary, processing start, and return to review (API-01, P4.T2)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from linguary.domain import BookStatus
 def test_glossary_review_exposes_pending_items(
     client: TestClient, application: Application
 ) -> None:
-    """Экран глоссария показывает идентификатор и ожидающее решение первым."""
+    """Glossary screen displays the identifier and pending decision first."""
     candidate = glossary_candidate()
     scenario = store_book(
         application, glossary_candidates={0: (candidate,)},
@@ -87,7 +87,7 @@ def test_glossary_decision_returns_updated_item(
     expected_status: str,
     expected_label: str,
 ) -> None:
-    """Каждое действие сохраняет решение и возвращает обновлённый элемент."""
+    """Each action saves the decision and returns the updated item."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
     form = {"action": action}
@@ -112,7 +112,7 @@ def test_glossary_decision_returns_updated_item(
 def test_glossary_decision_redirects_browser_back_to_review(
     client: TestClient, application: Application
 ) -> None:
-    """HTML-действие по одному элементу оставляет пользователя на экране глоссария."""
+    """HTML action on a single item keeps the user on the glossary screen."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
 
@@ -130,7 +130,7 @@ def test_glossary_decision_redirects_browser_back_to_review(
 def test_accept_all_required_glossary_items(
     client: TestClient, application: Application
 ) -> None:
-    """Bulk-действие принимает все обязательные нерешённые элементы."""
+    """Bulk action accepts all required pending items."""
     first = glossary_candidate(candidate_id="candidate-first")
     second = glossary_candidate(
         candidate_id="candidate-second",
@@ -161,7 +161,7 @@ def test_accept_all_required_glossary_items(
 def test_accept_all_redirects_browser_back_to_review(
     client: TestClient, application: Application
 ) -> None:
-    """HTML bulk-действие возвращает пользователя к глоссарию."""
+    """HTML bulk action returns the user to the glossary screen."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
 
@@ -178,7 +178,7 @@ def test_accept_all_redirects_browser_back_to_review(
 def test_glossary_correction_requires_text(
     client: TestClient, application: Application
 ) -> None:
-    """Исправление без нового текста отклоняется как неполная HTTP-команда."""
+    """Correction without replacement text is rejected as an incomplete HTTP command."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
 
@@ -193,7 +193,7 @@ def test_glossary_correction_requires_text(
 def test_glossary_correction_changes_the_concept_type(
     client: TestClient, application: Application
 ) -> None:
-    """Исправление принимает тип понятия и возвращает его в элементе (QA-11, T2)."""
+    """Correction accepts the concept type and returns it in the item (QA-11, T2)."""
     candidate = glossary_candidate(
         source_text="Charlotte Russe", suggested_translation="Шарлотта Русс"
     )
@@ -212,7 +212,7 @@ def test_glossary_correction_changes_the_concept_type(
 def test_glossary_type_is_rejected_without_correction(
     client: TestClient, application: Application
 ) -> None:
-    """Тип понятия, как и текст варианта, принимается только исправлением."""
+    """Concept type, like translation text, is accepted only via correction."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
 
@@ -227,7 +227,7 @@ def test_glossary_type_is_rejected_without_correction(
 def test_glossary_note_is_saved_and_shown(
     client: TestClient, application: Application
 ) -> None:
-    """Указание переводчику сохраняется отдельным действием и возвращается в элементе."""
+    """Translator note is saved as a separate action and returned in the item."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
 
@@ -244,7 +244,7 @@ def test_glossary_note_is_saved_and_shown(
 def test_glossary_note_is_rejected_after_processing_started(
     client: TestClient, application: Application
 ) -> None:
-    """После старта обработки указание тоже заморожено: глоссарий только для чтения."""
+    """Once processing starts, the note is also frozen: glossary is read-only."""
     candidate = glossary_candidate()
     scenario = store_book(
         application,
@@ -263,7 +263,7 @@ def test_glossary_note_is_rejected_after_processing_started(
 def test_glossary_edit_is_rejected_after_processing_started(
     client: TestClient, application: Application
 ) -> None:
-    """После старта обработки глоссарий доступен только для чтения с кодом `409`."""
+    """Once processing starts, the glossary is read-only with status code `409`."""
     candidate = glossary_candidate()
     scenario = store_book(
         application,
@@ -286,7 +286,7 @@ def test_glossary_edit_is_rejected_after_processing_started(
 def test_processing_start_is_rejected_while_review_is_incomplete(
     configured_client: TestClient, configured_application: Application
 ) -> None:
-    """Необработанный важный термин не даёт открыть запуск обработки."""
+    """An unreviewed required term prevents initiating processing."""
     candidate = glossary_candidate()
     scenario = store_book(
         configured_application, glossary_candidates={0: (candidate,)},
@@ -305,7 +305,7 @@ def test_processing_start_is_rejected_while_review_is_incomplete(
 def test_processing_start_creates_run_and_chapter_tasks(
     configured_client: TestClient, configured_application: Application
 ) -> None:
-    """Завершённая проверка открывает запуск и ставит задачи обработки глав."""
+    """Completed review permits processing start and schedules chapter tasks."""
     candidate = glossary_candidate()
     scenario = store_book(
         configured_application, glossary_candidates={0: (candidate,)}
@@ -329,7 +329,7 @@ def test_processing_start_creates_run_and_chapter_tasks(
 def test_processing_start_without_configured_model_is_rejected(
     client: TestClient, application: Application
 ) -> None:
-    """Без локальной настройки модели запуск обработки возвращает `409`."""
+    """Without local model configuration, starting processing returns `409`."""
     scenario = store_book(application)
 
     response = client.post(f"/books/{scenario.book_id}/process")
@@ -348,7 +348,7 @@ def test_processing_start_without_configured_model_is_rejected(
 def test_reset_requires_explicit_confirmation(
     client: TestClient, application: Application, form: dict[str, str]
 ) -> None:
-    """Отсутствующее или отрицательное подтверждение не изменяет книгу."""
+    """Missing or negative confirmation does not alter the book."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     start_run(application, scenario)
 
@@ -363,7 +363,7 @@ def test_reset_requires_explicit_confirmation(
 def test_confirmed_reset_returns_book_to_glossary_review(
     client: TestClient, application: Application
 ) -> None:
-    """Подтверждённый сброс удаляет результаты и возвращает проверку глоссария."""
+    """Confirmed reset removes results and returns book to glossary review."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     start_run(
         application,
@@ -391,7 +391,7 @@ def test_confirmed_reset_returns_book_to_glossary_review(
 def test_unknown_glossary_resource_returns_404(
     client: TestClient, application: Application
 ) -> None:
-    """Неизвестные книга и понятие дают `404`, а не конфликт состояния."""
+    """Unknown book and concept return `404` rather than a state conflict."""
     scenario = store_book(application, glossary_candidates={0: (glossary_candidate(),)})
 
     assert client.get("/books/unknown/glossary").status_code == 404

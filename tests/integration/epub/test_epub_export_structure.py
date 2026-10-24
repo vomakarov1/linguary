@@ -1,4 +1,4 @@
-"""Экспорт EPUB: цикл `import -> export` без LLM на наборе книг (P2.T5)."""
+"""EPUB export: `import -> export` cycle without LLM on the book test suite (P2.T5)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from linguary.adapters.epub import EbookLibEpubReader, verify_exported_epub
 from linguary.application.ports.epub import EpubReadRequest, ExportWarningKind
 from linguary.domain import BlockType
 
-#: Набор тестовых EPUB (PRD § 28.1): каждая книга обязана пережить экспорт.
+#: Suite of test EPUBs (PRD § 28.1): every book must survive export.
 FIXTURES = (
     "synthetic_story",
     "beowulf",
@@ -25,7 +25,7 @@ FIXTURES = (
 
 
 def anchors_of(root) -> set[str]:
-    """Идентификаторы, объявленные в документе."""
+    """Identifiers declared within the document."""
     return {
         identifier
         for element in root.iter()
@@ -37,7 +37,7 @@ def anchors_of(root) -> set[str]:
 def test_structure_only_export_passes_built_in_checks(
     name: str, tmp_path: Path
 ) -> None:
-    """Каждая книга набора собирается заново и проходит встроенные проверки."""
+    """Each book in the fixture suite rebuilds and passes all built-in checks."""
     run = run_export(FIXTURE_DIRECTORY / f"{name}.epub", tmp_path=tmp_path)
 
     assert run.path.is_file()
@@ -48,7 +48,7 @@ def test_structure_only_export_passes_built_in_checks(
 def test_exported_book_imports_back_with_the_same_chapters(
     name: str, tmp_path: Path
 ) -> None:
-    """Собранная книга снова импортируется и сохраняет главы в том же порядке."""
+    """Rebuilt book imports back successfully, preserving chapters in the same order."""
     run = run_export(FIXTURE_DIRECTORY / f"{name}.epub", tmp_path=tmp_path)
 
     again = EbookLibEpubReader().read(
@@ -65,7 +65,7 @@ def test_exported_book_imports_back_with_the_same_chapters(
 
 @pytest.mark.parametrize("name", FIXTURES)
 def test_chapter_order_matches_the_source_book(name: str, tmp_path: Path) -> None:
-    """Порядок глав в собранной книге совпадает с порядком чтения исходной."""
+    """Chapter order in the exported book matches the reading order of the source book."""
     run = run_export(FIXTURE_DIRECTORY / f"{name}.epub", tmp_path=tmp_path)
 
     assert spine_hrefs(run.path) == tuple(
@@ -75,11 +75,11 @@ def test_chapter_order_matches_the_source_book(name: str, tmp_path: Path) -> Non
 
 
 def test_images_survive_export_including_those_inside_tables(tmp_path: Path) -> None:
-    """Изображения переносятся все, включая лежащие внутри таблиц.
+    """All images survive export, including those nested inside tables.
 
-    Импортёр разбирает таблицу единым блоком `PRESERVE_OPAQUE` и внутрь неё не спускается,
-    поэтому отдельного блока `Image` у части иллюстраций нет. Экспортёр переносит такой
-    блок исходной разметкой, и книга не теряет ни одной иллюстрации.
+    The importer parses a table as a single `PRESERVE_OPAQUE` block without descending
+    into it, so some illustrations lack a dedicated `Image` block. The exporter transfers
+    such blocks with their original markup, ensuring no illustrations are lost.
     """
     run = run_export(FIXTURE_DIRECTORY / "alice_rackham.epub", tmp_path=tmp_path)
 
@@ -102,7 +102,7 @@ def test_images_survive_export_including_those_inside_tables(tmp_path: Path) -> 
 
 
 def test_internal_links_and_footnotes_resolve_after_export(tmp_path: Path) -> None:
-    """Внутренние ссылки и ссылки на сноски в собранной книге разрешимы."""
+    """Internal links and footnote references in the exported book resolve properly."""
     run = run_export(FIXTURE_DIRECTORY / "beowulf.epub", tmp_path=tmp_path)
     documents = documents_of(run.path)
     anchors = {name: anchors_of(root) for name, root in documents.items()}
@@ -126,7 +126,7 @@ def test_internal_links_and_footnotes_resolve_after_export(tmp_path: Path) -> No
 
 
 def test_metadata_of_the_book_is_preserved(tmp_path: Path) -> None:
-    """Название, автор и язык книги переносятся в итоговый файл."""
+    """Title, author, and language of the book are carried over into the final file."""
     run = run_export(FIXTURE_DIRECTORY / "great_gatsby.epub", tmp_path=tmp_path)
     metadata = {
         element.tag.rpartition("}")[2]: element.text
@@ -143,11 +143,10 @@ def test_metadata_of_the_book_is_preserved(tmp_path: Path) -> None:
 
 
 def test_export_without_the_source_file_keeps_the_book_valid(tmp_path: Path) -> None:
-    """Пропавший исходный EPUB экспорт не ломает: книга собирается с предупреждением.
+    """A missing source EPUB does not break export: the book is built with a warning.
 
-    Предупреждения сводятся по виду и главе: в книге с иллюстрациями Gutenberg
-    конструкций `PRESERVE_OPAQUE` десятки, и строка на каждую превратила бы список
-    замечаний в шум.
+    Warnings are grouped by kind and chapter: Gutenberg illustrated books contain dozens
+    of `PRESERVE_OPAQUE` structures, and emitting a warning per instance would flood logs.
     """
     run = run_export(
         FIXTURE_DIRECTORY / "alice_rackham.epub", tmp_path=tmp_path, keep_source=False
@@ -163,10 +162,10 @@ def test_export_without_the_source_file_keeps_the_book_valid(tmp_path: Path) -> 
 
 
 def test_source_without_package_file_does_not_stop_export(tmp_path: Path) -> None:
-    """Исходный EPUB, потерявший объявление пакета после импорта, экспорт не обрывает.
+    """A source EPUB that lost its package file after import does not abort export.
 
-    Разметка `PRESERVE_OPAQUE` из такого архива не достаётся, и книга собирается так же,
-    как без исходного файла: блок переносится текстом с предупреждением.
+    `PRESERVE_OPAQUE` markup cannot be extracted from such an archive, so the book is built
+    just like when the source file is missing: blocks are exported as text with a warning.
     """
     source = build_epub(
         tmp_path / "book.epub",
@@ -198,7 +197,7 @@ def test_source_without_package_file_does_not_stop_export(tmp_path: Path) -> Non
 
 
 def test_htm_chapter_is_declared_as_xhtml(tmp_path: Path) -> None:
-    """Глава с расширением `.htm` объявляется в манифесте как XHTML-документ."""
+    """Chapter with `.htm` extension is declared in manifest as an XHTML document."""
     source = build_epub(
         tmp_path / "htm_chapter.epub",
         documents={"chapter01.htm": xhtml_document("<p>Text.</p>")},
@@ -215,7 +214,7 @@ def test_htm_chapter_is_declared_as_xhtml(tmp_path: Path) -> None:
 
 
 def _resolve(name: str, href: str) -> tuple[str, str]:
-    """Ссылка как пара «документ архива, якорь»."""
+    """Link represented as an (archive_document, anchor) pair."""
     path, _, fragment = href.partition("#")
     if not path:
         return name, fragment

@@ -1,11 +1,11 @@
-"""Общие фикстуры интеграционных тестов обработки книги.
+"""Common fixtures for book processing integration tests.
 
-База поднимается так же, как в тестах хранилища и задач: отдельный файл во временной
-директории и схема из миграции Alembic. Фикстуры соседних директорий pytest сюда
-не приносит, поэтому они собраны тем же способом, а не изобретены заново.
+The database is initialized in the same way as in storage and task tests: a separate file
+in a temporary directory and the schema from the Alembic migration. Since pytest does not
+import fixtures from neighboring directories, they are constructed consistently here.
 
-Задачи получают предсказуемые идентификаторы вместо `uuid4`: тест сравнивает состав
-очереди, и случайный идентификатор сделал бы вывод нечитаемым.
+Tasks receive predictable identifiers instead of `uuid4`: tests compare queue contents,
+and random identifiers would make test output unreadable.
 """
 
 from __future__ import annotations
@@ -22,19 +22,19 @@ from linguary.adapters.db.engine import build_database_url, create_database_engi
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.runtime import SqliteTaskQueue, SqliteTaskStore
 
-#: Корень репозитория: в нём лежат `alembic.ini` и каталог миграций.
+#: Repository root: contains `alembic.ini` and the migrations directory.
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:
-    """Путь к файлу базы данных теста."""
+    """Path to the test database file."""
     return tmp_path / "linguary.db"
 
 
 @pytest.fixture
 def migrated_database(database_path: Path) -> Config:
-    """База с применённой схемой: `alembic upgrade head` на пустом файле."""
+    """Database with applied schema: `alembic upgrade head` on an empty file."""
     config = Config(REPO_ROOT / "alembic.ini")
     config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", build_database_url(database_path))
@@ -44,7 +44,7 @@ def migrated_database(database_path: Path) -> Config:
 
 @pytest.fixture
 def engine(migrated_database: Config, database_path: Path) -> Iterator[Engine]:
-    """Движок SQLite поверх базы с применённой схемой."""
+    """SQLite engine on top of a database with applied schema."""
     engine = create_database_engine(database_path)
     try:
         yield engine
@@ -54,13 +54,13 @@ def engine(migrated_database: Config, database_path: Path) -> Iterator[Engine]:
 
 @pytest.fixture
 def unit_of_work(engine: Engine) -> SqlAlchemyUnitOfWork:
-    """Транзакционная граница поверх базы теста."""
+    """Transactional boundary on top of the test database."""
     return SqlAlchemyUnitOfWork.for_engine(engine)
 
 
 @pytest.fixture
 def processing_task_ids() -> Callable[[], str]:
-    """Предсказуемые идентификаторы задач: `task-1`, `task-2`, ..."""
+    """Predictable task identifiers: `task-1`, `task-2`, ..."""
     counter = 0
 
     def next_id() -> str:
@@ -73,5 +73,5 @@ def processing_task_ids() -> Callable[[], str]:
 
 @pytest.fixture
 def task_queue(engine: Engine, processing_task_ids: Callable[[], str]) -> SqliteTaskQueue:
-    """Очередь задач, которую видит прикладной слой."""
+    """Task queue visible to the application layer."""
     return SqliteTaskQueue(SqliteTaskStore.for_engine(engine, id_factory=processing_task_ids))

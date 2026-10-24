@@ -1,9 +1,9 @@
-"""Восстановление после неуспешной задачи: что видит пользователь и что может сделать.
+"""Recovery after a failed task: user-facing representation and available actions.
 
-Ошибка настройки LLM исправляется без нового файла: задача анализа повторяется кнопкой
-или повторным запуском анализа (QA-01). Книга, которую импортировать нельзя, переходит
-в «Импорт не удался», сообщение объясняет причину без внутренних путей, а вместо повтора
-предлагается загрузить другой файл (QA-02).
+LLM configuration errors can be fixed without re-uploading the file: analysis task is
+retried via the retry button or by restarting analysis (QA-01). Books that cannot be
+imported transition to "Import failed", the message explains the cause without internal
+paths, and prompts to upload another file instead of retrying (QA-02).
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ HTML_HEADERS = {"accept": "text/html"}
 
 @pytest.fixture
 def llm_client() -> FakeLLMClient:
-    """Провайдер, отвергающий ключ: так выглядит просроченный или неверный ключ."""
+    """Provider rejecting the key: simulates an expired or invalid API key."""
     return FakeLLMClient.always(
         LLMConfigurationError("провайдер fake не принял ключ или доступ к модели: 401")
     )
@@ -33,7 +33,7 @@ def llm_client() -> FakeLLMClient:
 async def analysis_stopped_by_rejected_key(
     client: TestClient, application: Application
 ) -> str:
-    """Запускает анализ книги, первая глава которого падает на ключе провайдера."""
+    """Launches book analysis where the first chapter fails on provider key error."""
     scenario = store_book(application, status=BookStatus.IMPORTED, analysed_chapters=())
     started = client.post(f"/books/{scenario.book_id}/analyze")
     assert started.status_code == 202
@@ -45,7 +45,7 @@ async def analysis_stopped_by_rejected_key(
 async def test_rejected_key_fails_analysis_with_a_retryable_configuration_error(
     configured_client: TestClient, configured_application: Application
 ) -> None:
-    """Ошибка ключа — ошибка настройки: книга та же, повтор доступен (QA-01)."""
+    """Key error is a configuration error: same book, retry is available (QA-01)."""
     book_id = await analysis_stopped_by_rejected_key(
         configured_client, configured_application
     )
@@ -62,7 +62,7 @@ async def test_rejected_key_fails_analysis_with_a_retryable_configuration_error(
 async def test_configuration_failure_is_retried_by_the_retry_button(
     configured_client: TestClient, configured_application: Application
 ) -> None:
-    """Кнопка «Повторить» возвращает задачу в очередь, а не отвечает 409 (QA-01)."""
+    """Retry button puts task back in queue instead of returning 409 (QA-01)."""
     book_id = await analysis_stopped_by_rejected_key(
         configured_client, configured_application
     )
@@ -77,7 +77,7 @@ async def test_configuration_failure_is_retried_by_the_retry_button(
 async def test_repeated_analysis_start_requeues_the_failed_chapter(
     configured_client: TestClient, configured_application: Application
 ) -> None:
-    """Повторное «Начать анализ» не возвращает старую упавшую задачу (QA-01)."""
+    """Repeated "Start analysis" does not return stale failed task (QA-01)."""
     book_id = await analysis_stopped_by_rejected_key(
         configured_client, configured_application
     )
@@ -92,7 +92,7 @@ async def test_repeated_analysis_start_requeues_the_failed_chapter(
 async def test_card_offers_retry_and_configuration_after_rejected_key(
     configured_client: TestClient, configured_application: Application
 ) -> None:
-    """Карточка не притворяется, что анализ идёт, и ведёт к настройкам LLM (QA-01)."""
+    """Card does not pretend analysis is running and links to LLM settings (QA-01)."""
     book_id = await analysis_stopped_by_rejected_key(
         configured_client, configured_application
     )
@@ -108,7 +108,7 @@ async def test_card_offers_retry_and_configuration_after_rejected_key(
 
 
 def upload_file(client: TestClient, path: Path) -> str:
-    """Загружает файл формой загрузки и возвращает идентификатор книги."""
+    """Uploads a file via upload form and returns book ID."""
     with path.open("rb") as file:
         response = client.post(
             "/books/upload",
@@ -123,7 +123,7 @@ def upload_file(client: TestClient, path: Path) -> str:
 async def rejected_import(
     client: TestClient, application: Application, tmp_path: Path
 ) -> str:
-    """Загружает файл с расширением EPUB, который архивом не является, и импортирует."""
+    """Uploads an EPUB-named file that is not a zip archive and imports it."""
     broken = tmp_path / "broken.epub"
     broken.write_bytes(b"this is not a zip archive")
     book_id = upload_file(client, broken)
@@ -135,7 +135,7 @@ async def rejected_import(
 async def test_unreadable_book_moves_to_import_failed(
     client: TestClient, application: Application, tmp_path: Path
 ) -> None:
-    """Неповторяемая ошибка импорта переводит книгу в «Импорт не удался» (QA-02)."""
+    """Non-retryable import error transitions book to "Import failed" (QA-02)."""
     book_id = await rejected_import(client, application, tmp_path)
 
     detail = client.get(f"/books/{book_id}").json()
@@ -149,7 +149,7 @@ async def test_unreadable_book_moves_to_import_failed(
 async def test_import_failure_message_hides_the_data_directory(
     client: TestClient, application: Application, tmp_path: Path
 ) -> None:
-    """Сообщение об ошибке импорта не раскрывает путь к каталогу данных (QA-02)."""
+    """Import error message does not expose application data directory path (QA-02)."""
     book_id = await rejected_import(client, application, tmp_path)
 
     [failure] = client.get(f"/books/{book_id}").json()["progress"]["failures"]
@@ -162,7 +162,7 @@ async def test_import_failure_message_hides_the_data_directory(
 async def test_import_failed_card_offers_another_file_instead_of_retry(
     client: TestClient, application: Application, tmp_path: Path
 ) -> None:
-    """Вместо неактивного «Повторить» карточка предлагает загрузить другой файл (QA-02)."""
+    """Instead of inactive retry button, card offers uploading another file (QA-02)."""
     book_id = await rejected_import(client, application, tmp_path)
 
     page = client.get(f"/books/{book_id}", headers=HTML_HEADERS).text

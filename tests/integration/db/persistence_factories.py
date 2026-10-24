@@ -1,8 +1,8 @@
-"""Фабрики доменных объектов для тестов хранилища.
+"""Domain object factories for storage tests.
 
-Собирают минимальные, но валидные сущности: доменные инварианты проверены пакетом B,
-и тест хранилища не должен спотыкаться на их нарушении. Все значения по умолчанию
-перекрываются именованными аргументами.
+Constructs minimal yet valid entities: domain invariants are validated
+by package B, and storage tests should not stumble on invariant violations.
+All default values can be overridden via keyword arguments.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ SECOND_BLOCK_ID = "block-2"
 RUN_ID = "run-1"
 ANALYSIS_ID = "analysis-1"
 
-#: Фиксированный момент времени: тесты не зависят от текущих часов.
+#: Fixed point in time: tests are decoupled from the system clock.
 CREATED_AT = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 
 
@@ -71,7 +71,7 @@ def make_book(
     status: BookStatus = BookStatus.IMPORTING,
     title: str = "The Sample Book",
 ) -> BookRecord:
-    """Запись книги."""
+    """Book record."""
     return BookRecord(
         id=book_id,
         metadata=BookMetadata(
@@ -96,7 +96,7 @@ def make_block(
     text: str = "It was a bright cold day in April.",
     parent_id: str | None = None,
 ) -> DocumentBlock:
-    """Текстовый блок со встроенной разметкой и служебными признаками."""
+    """Text block with inline markup and service attributes."""
     return DocumentBlock(
         id=block_id,
         section_id=section_id,
@@ -121,7 +121,7 @@ def make_block(
 
 
 def make_document(*, book_id: str = BOOK_ID) -> CanonicalDocument:
-    """Документ из одной главы с двумя блоками и одним ресурсом."""
+    """Document consisting of one chapter with two blocks and one resource."""
     section = DocumentSection(
         id=SECTION_ID,
         document_id=book_id,
@@ -151,7 +151,7 @@ def make_document(*, book_id: str = BOOK_ID) -> CanonicalDocument:
 
 
 def make_concept(*, book_id: str = BOOK_ID, concept_id: str = "concept-1") -> TermConcept:
-    """Понятие глоссария с двумя языковыми вариантами."""
+    """Glossary concept with two language variants."""
     return TermConcept(
         id=concept_id,
         book_id=book_id,
@@ -177,7 +177,7 @@ def make_concept(*, book_id: str = BOOK_ID, concept_id: str = "concept-1") -> Te
 
 
 def make_analysis(*, analysis_id: str = ANALYSIS_ID) -> ChapterAnalysis:
-    """Полный анализ главы: план, кандидаты и материалы `Before You Read`."""
+    """Full chapter analysis: treatment plan, candidates, and 'Before You Read' entries."""
     return ChapterAnalysis(
         id=analysis_id,
         section_id=SECTION_ID,
@@ -221,7 +221,7 @@ def make_run(
     book_id: str = BOOK_ID,
     status: ProcessingRunStatus = ProcessingRunStatus.ACTIVE,
 ) -> ProcessingRun:
-    """Запуск обработки со снимками глоссария и настроек LLM."""
+    """Processing run with glossary and LLM settings snapshots."""
     return ProcessingRun(
         id=run_id,
         book_id=book_id,
@@ -244,7 +244,7 @@ def make_run(
 
 
 def make_translated_result(*, block_id: str = BLOCK_ID) -> BlockProcessingResult:
-    """Результат режима `TRANSLATE` с подсказками, заметкой и замечанием."""
+    """Result for 'TRANSLATE' treatment with hints, language note, and warning."""
     return BlockProcessingResult(
         block_id=block_id,
         treatment=BlockTreatment.TRANSLATE,
@@ -272,7 +272,7 @@ def make_translated_result(*, block_id: str = BLOCK_ID) -> BlockProcessingResult
 def make_glossary_only_result(
     *, block_id: str = SECOND_BLOCK_ID
 ) -> BlockProcessingResult:
-    """Результат режима `GLOSSARY_ONLY`: подсказки без полного перевода."""
+    """Result for 'GLOSSARY_ONLY' treatment: hints without full translation."""
     return BlockProcessingResult(
         block_id=block_id,
         treatment=BlockTreatment.GLOSSARY_ONLY,
@@ -290,7 +290,7 @@ def make_task(
     attempts: int = 0,
     last_error: TaskError | None = None,
 ) -> ProcessingTask:
-    """Локальная задача обработки."""
+    """Local processing task."""
     return ProcessingTask(
         id=task_id,
         book_id=book_id,
@@ -305,7 +305,7 @@ def make_task(
 def make_llm_call(
     *, call_id: str = "call-1", book_id: str = BOOK_ID, success: bool = True
 ) -> LLMCallLog:
-    """Запись журнала вызовов LLM."""
+    """LLM call log entry."""
     return LLMCallLog(
         id=call_id,
         book_id=book_id,

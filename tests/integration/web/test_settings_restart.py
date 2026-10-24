@@ -1,4 +1,4 @@
-"""Сохранённые настройки и сброс при повторном запуске на том же каталоге данных."""
+"""Persisted settings and reset across application restarts on the same data directory."""
 from __future__ import annotations
 
 import asyncio

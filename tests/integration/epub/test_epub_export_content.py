@@ -1,8 +1,8 @@
-"""Экспорт EPUB: состав главы в полном режиме (P2.T5).
+"""EPUB export: chapter structure in full mode (P2.T5).
 
-Полный режим опирается на данные, которые появляются только в фазе 3, поэтому результаты
-обработки и учебные материалы здесь собираются вручную: LLM в сборке EPUB не участвует
-и участвовать не должен (PRD § 20).
+Full mode relies on data generated during phase 3, so processing results and learning
+materials are assembled manually here: LLM does not participate in EPUB generation
+and must not participate (PRD § 20).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ _SUMMARY = "Wren reaches Duskmere and learns that the marsh lights mislead trave
 
 @pytest.fixture
 def source(tmp_path: Path) -> Path:
-    """Книга из двух глав: три абзаца с оригинальной сноской и продолжение."""
+    """A book with two chapters: three paragraphs with an original footnote and continuation."""
     return build_epub(
         tmp_path / "source.epub",
         documents={
@@ -52,7 +52,7 @@ def source(tmp_path: Path) -> Path:
 
 
 def paragraphs_of(document: CanonicalDocument, section_index: int) -> tuple[DocumentBlock, ...]:
-    """Текстовые абзацы главы в порядке чтения."""
+    """Text paragraphs of the chapter in reading order."""
     section = document.ordered_sections[section_index]
     return tuple(
         block for block in section.ordered_blocks if block.type is BlockType.PARAGRAPH
@@ -60,7 +60,7 @@ def paragraphs_of(document: CanonicalDocument, section_index: int) -> tuple[Docu
 
 
 def outline(root) -> list[tuple[str, str]]:
-    """Содержимое главы как последовательность пар «тег, класс»."""
+    """Chapter contents represented as a sequence of (tag, class) pairs."""
     chapter = next(iter(elements(root, "section")))
     return [
         (element.tag.rpartition("}")[2], element.get("class", ""))
@@ -69,10 +69,10 @@ def outline(root) -> list[tuple[str, str]]:
 
 
 def export_with_results(source: Path, tmp_path: Path) -> tuple[Path, CanonicalDocument]:
-    """Собирает книгу со всеми слоями помощи первой главы.
+    """Builds a book with all help layers for the first chapter.
 
-    Идентификаторы блоков и разделов считаются от идентификатора книги, поэтому обе сборки
-    идут под одним `book_id`: иначе результаты обработки не нашли бы своих блоков.
+    Block and section IDs are derived from the book ID, so both builds run under the
+    same `book_id`, otherwise processing results would fail to match their blocks.
     """
     dry = run_export(source, tmp_path=tmp_path / "dry", book_id="book-1")
     document = dry.imported.document
@@ -138,7 +138,7 @@ def export_with_results(source: Path, tmp_path: Path) -> tuple[Path, CanonicalDo
 def test_chapter_follows_the_order_required_by_the_specification(
     source: Path, tmp_path: Path
 ) -> None:
-    """Глава идёт по PRD § 20: оригинал, перевод или подсказки, затем заметки."""
+    """Chapter follows PRD § 20: original, translation or hints, then notes."""
     path, _ = export_with_results(source, tmp_path)
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
 
@@ -156,7 +156,7 @@ def test_chapter_follows_the_order_required_by_the_specification(
 
 
 def test_first_chapter_has_no_previously_section(source: Path, tmp_path: Path) -> None:
-    """Перед первой главой раздела о предыдущей нет: её не существует."""
+    """Before the first chapter, there is no previously section: no prior chapter exists."""
     path, _ = export_with_results(source, tmp_path)
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
 
@@ -166,7 +166,7 @@ def test_first_chapter_has_no_previously_section(source: Path, tmp_path: Path) -
 def test_second_chapter_opens_with_the_summary_of_the_first(
     source: Path, tmp_path: Path
 ) -> None:
-    """Глава начинается разделом, собранным из сводки предыдущей главы (PRD § 19.2)."""
+    """Chapter starts with a section built from the previous chapter summary (PRD § 19.2)."""
     path, _ = export_with_results(source, tmp_path)
     chapter = documents_of(path)["OEBPS/chapter2.xhtml"]
     previously = next(
@@ -183,7 +183,7 @@ def test_second_chapter_opens_with_the_summary_of_the_first(
 def test_language_note_identifiers_do_not_touch_original_footnotes(
     source: Path, tmp_path: Path
 ) -> None:
-    """Заметки живут в своём пространстве имён `ln-{section_key}-{nnn}` (PRD § 19.3)."""
+    """Notes live in their own namespace `ln-{section_key}-{nnn}` (PRD § 19.3)."""
     path, _ = export_with_results(source, tmp_path)
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
     notes = [
@@ -202,7 +202,7 @@ def test_language_note_identifiers_do_not_touch_original_footnotes(
 
 
 def test_translation_carries_the_target_language(source: Path, tmp_path: Path) -> None:
-    """У перевода объявлен целевой язык: читалка не считает его продолжением оригинала."""
+    """Translation has target language attribute: reader does not treat it as original."""
     path, _ = export_with_results(source, tmp_path)
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
     translation = next(
@@ -216,7 +216,7 @@ def test_translation_carries_the_target_language(source: Path, tmp_path: Path) -
 
 
 def test_help_layers_have_their_own_stylesheet(source: Path, tmp_path: Path) -> None:
-    """Оформление слоёв помощи вынесено в отдельный стиль книги (PRD § 20)."""
+    """Styling of help layers is isolated in a separate book stylesheet (PRD § 20)."""
     path, _ = export_with_results(source, tmp_path)
 
     with zipfile.ZipFile(path) as archive:
@@ -230,7 +230,7 @@ def test_help_layers_have_their_own_stylesheet(source: Path, tmp_path: Path) -> 
 def test_glossary_hints_keep_original_and_translation(
     source: Path, tmp_path: Path
 ) -> None:
-    """Словарная подсказка показывает и оригинал выражения, и его перевод."""
+    """Glossary hint displays both the original phrase and its translation."""
     path, _ = export_with_results(source, tmp_path)
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
     hints = next(
@@ -244,7 +244,7 @@ def test_glossary_hints_keep_original_and_translation(
 
 
 def test_help_for_list_items_stays_inside_the_list_item(tmp_path: Path) -> None:
-    """Подсказки пункта списка не становятся соседями `li`: XHTML запрещает это."""
+    """Hints for list items stay inside `li`: XHTML disallows sibling placement."""
     source = build_epub(
         tmp_path / "source.epub",
         documents={
@@ -314,7 +314,7 @@ def test_help_for_list_items_stays_inside_the_list_item(tmp_path: Path) -> None:
 
 
 def test_footnote_reference_in_translation_stays_a_link(tmp_path: Path) -> None:
-    """Ссылка на сноску в переводе остаётся ссылкой, а не голой цифрой текста (QA-08)."""
+    """Footnote reference in translation remains a link rather than bare text numeral (QA-08)."""
     source = build_epub(
         tmp_path / "source.epub",
         documents={
@@ -366,7 +366,7 @@ def test_footnote_reference_in_translation_stays_a_link(tmp_path: Path) -> None:
 
 @pytest.fixture
 def book_with_notes_page(tmp_path: Path) -> Path:
-    """Две главы, между которыми стоит страница, где одни сноски."""
+    """Two chapters with a dedicated footnotes page standing between them."""
     return build_epub(
         tmp_path / "notes-source.epub",
         documents={
@@ -396,7 +396,7 @@ def book_with_notes_page(tmp_path: Path) -> Path:
 def test_notes_page_is_translated_but_not_dressed_as_a_chapter(
     book_with_notes_page: Path, tmp_path: Path
 ) -> None:
-    """Страница сносок: перевод есть, пересказа, «Before You Read» и разметки главы нет (QA-04)."""
+    """Notes page: translated, but without recap, Before You Read, or chapter markup (QA-04)."""
     dry = run_export(book_with_notes_page, tmp_path=tmp_path / "dry", book_id="book-1")
     document = dry.imported.document
     first, notes, second = document.ordered_sections
@@ -451,7 +451,7 @@ def test_notes_page_is_translated_but_not_dressed_as_a_chapter(
 
 
 def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
-    """Титул и оглавление не получают помощи, а первая сюжетная глава не получает previously."""
+    """Title and contents do not receive help, and the first story chapter gets no previously section."""
     epub_path = build_epub(
         tmp_path / "book_with_front_matter.epub",
         documents={
@@ -558,7 +558,7 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
 
     chapters = documents_of(run.path)
 
-    # 1. Проверяем вводный раздел (титул / оглавление)
+    # 1. Verify introductory section (title / contents)
     title_doc = chapters["OEBPS/title.xhtml"]
     title_text = "".join(title_doc.itertext())
     assert "linguary-glossary" not in [c for _, c in [((el.tag, el.get("class")) if el is not None else ("", "")) for el in elements(title_doc, "*")]]
@@ -566,20 +566,20 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
     assert "Перевод титула." not in title_text
     assert "Алиса" not in title_text
 
-    # 2. Проверяем первую сюжетную главу (Chapter 1)
+    # 2. Verify first story chapter (Chapter 1)
     ch1_doc = chapters["OEBPS/chapter1.xhtml"]
     ch1_text = "".join(ch1_doc.itertext())
     ch1_classes = [el.get("class") for el in elements(ch1_doc, "section") if el.get("class")]
     assert "linguary-previously" not in ch1_classes
     assert "Previously" not in ch1_text
     assert "title page" not in ch1_text
-    # Санитайзер Before You Read очистил мета-инструкцию в карточке
+    # Before You Read sanitizer stripped meta-instruction in card
     assert "Необычный, странный." in ch1_text
     assert "Передавай как" not in ch1_text
-    # Заметки главы 1 имеют префикс ln-ch01 (не сдвинуты из-за титула)
+    # Chapter 1 notes have prefix ln-ch01 (not shifted by front matter)
     assert [el.get("id") for el in elements(ch1_doc, "aside")] == ["ln-ch01-001"]
 
-    # 3. Проверяем вторую главу (Chapter 2) — содержит previously из главы 1
+    # 3. Verify second story chapter (Chapter 2) — contains previously from Chapter 1
     ch2_doc = chapters["OEBPS/chapter2.xhtml"]
     ch2_text = "".join(ch2_doc.itertext())
     ch2_classes = [el.get("class") for el in elements(ch2_doc, "section") if el.get("class")]

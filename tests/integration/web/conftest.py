@@ -1,12 +1,12 @@
-"""Общие фикстуры интеграционных тестов Web UI.
+"""Shared fixtures for Web UI integration tests.
 
-Приложение собирается тем же composition root, которым его собирает настоящий запуск:
-временный каталог данных, база со схемой из миграций Alembic и `FakeLLMClient` вместо
-провайдера. Так тест проверяет не только endpoints, но и состав зависимостей — в
-частности, что импорт получил хранилище ресурсов, а обработчики задач зарегистрированы.
+The application is wired using the same composition root as production:
+temporary data directory, database schema from Alembic migrations, and `FakeLLMClient`
+instead of real provider. This tests both HTTP endpoints and dependencies — in particular,
+verifying that import receives resource storage and task handlers are registered.
 
-Фоновый воркер в тестах выключен: задачи выполняются явным `drain`, иначе результат
-зависел бы от того, кто успел первым.
+Background worker is disabled in tests: tasks are drained explicitly via `drain`,
+otherwise outcomes would depend on timing races.
 """
 
 from __future__ import annotations
@@ -29,19 +29,19 @@ from linguary.adapters.llm import FakeLLMClient
 from linguary.composition import Application, build_application
 from linguary.web import create_app
 
-#: Набор тестовых EPUB (PRD § 28.1).
+#: Test EPUB fixture suite (PRD § 28.1).
 FIXTURE_DIRECTORY = Path(__file__).resolve().parents[2] / "fixtures" / "epub"
 
 
 @pytest.fixture
 def data_root(tmp_path: Path) -> Path:
-    """Каталог данных приложения в тесте."""
+    """Application data directory for the test."""
     return tmp_path / "linguary-data"
 
 
 @pytest.fixture
 def settings(data_root: Path) -> AppSettings:
-    """Локальная конфигурация теста: ненастроенная LLM — состояние первого запуска."""
+    """Local test settings: unconfigured LLM simulates first-launch state."""
     return AppSettings(
         llm=LLMSettings(),
         checks=CheckSettings(),
@@ -52,13 +52,13 @@ def settings(data_root: Path) -> AppSettings:
 
 @pytest.fixture
 def llm_client() -> FakeLLMClient:
-    """Клиент модели без заготовленных ответов: тесты этого пакета модель не вызывают."""
+    """Model client without prepared replies: tests in this package do not invoke LLM."""
     return FakeLLMClient()
 
 
 @pytest.fixture
 def web_task_ids() -> Callable[[], str]:
-    """Предсказуемые идентификаторы задач: `task-1`, `task-2`, ..."""
+    """Predictable task identifiers: `task-1`, `task-2`, ..."""
     counter = 0
 
     def next_id() -> str:
@@ -73,7 +73,7 @@ def web_task_ids() -> Callable[[], str]:
 def application(
     settings: AppSettings, llm_client: FakeLLMClient, web_task_ids: Callable[[], str]
 ) -> Iterator[Application]:
-    """Собранное приложение поверх временного каталога данных."""
+    """Assembled application over a temporary data directory."""
     built = build_application(
         settings=settings, llm_client=llm_client, task_id_factory=web_task_ids
     )
@@ -87,7 +87,7 @@ def application(
 def configured_application(
     settings: AppSettings, llm_client: FakeLLMClient, web_task_ids: Callable[[], str]
 ) -> Iterator[Application]:
-    """Приложение с фиктивно настроенной моделью для запуска обработки."""
+    """Application with fake configured model to enable starting processing."""
     configured = replace(
         settings,
         llm=LLMSettings(model="fake-model", api_key="test-key"),
@@ -103,10 +103,10 @@ def configured_application(
 
 @pytest.fixture
 def client(application: Application) -> Iterator[TestClient]:
-    """Тестовый клиент Web UI без фонового воркера.
+    """Web UI test client without background worker.
 
-    Клиент обращается по адресу самого приложения: сервер отвечает только по своим
-    именам, как и при настоящем запуске (PRD § 4.1).
+    Client connects using the application server base_url: server responds only
+    to configured hosts, matching production (PRD § 4.1).
     """
     app = create_app(application=application, run_background_worker=False)
     with TestClient(app, base_url=application.settings.server.base_url) as test_client:
@@ -117,7 +117,7 @@ def client(application: Application) -> Iterator[TestClient]:
 def configured_client(
     configured_application: Application,
 ) -> Iterator[TestClient]:
-    """Тестовый клиент с моделью, готовой открыть запуск обработки."""
+    """Test client with configured model ready to initiate a processing run."""
     app = create_app(
         application=configured_application, run_background_worker=False
     )

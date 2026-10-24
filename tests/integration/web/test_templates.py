@@ -1,4 +1,4 @@
-"""HTML-экраны серверного Web UI (P4.T4)."""
+"""HTML screens of server Web UI (P4.T4)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from linguary.web import create_app
 
 HTML_HEADERS = {"accept": "text/html"}
 
-#: Имя, которого заведомо нет в `PATH`: так машина теста выглядит машиной без Java.
+#: Name guaranteed not to exist in `PATH`: simulates a machine without Java.
 MISSING_JAVA = "linguary-java-that-does-not-exist"
 
 
@@ -37,7 +37,7 @@ MISSING_JAVA = "linguary-java-that-does-not-exist"
 def client_without_epubcheck(
     settings: AppSettings, llm_client: FakeLLMClient
 ) -> Iterator[TestClient]:
-    """Клиент приложения на машине, где внешней проверки EPUB нет."""
+    """Application client on a machine where external EPUB check is unavailable."""
     application = build_application(
         settings=settings,
         llm_client=llm_client,
@@ -56,7 +56,7 @@ def client_without_epubcheck(
 
 
 def test_root_redirects_to_books_screen(client: TestClient) -> None:
-    """Корень локального сервера открывает первый экран UI."""
+    """Root of local server opens the first UI screen."""
     redirect = client.get("/", headers=HTML_HEADERS, follow_redirects=False)
     response = client.get("/", headers=HTML_HEADERS)
 
@@ -70,7 +70,7 @@ def test_root_redirects_to_books_screen(client: TestClient) -> None:
 def test_books_screen_renders_upload_and_existing_books(
     client: TestClient, application: Application
 ) -> None:
-    """Список книг отдаёт HTML с загрузкой и строкой книги."""
+    """Book list returns HTML with upload form and book row."""
     store_book(application, status=BookStatus.GLOSSARY_REVIEW)
 
     response = client.get("/books", headers=HTML_HEADERS)
@@ -84,7 +84,7 @@ def test_books_screen_renders_upload_and_existing_books(
 def test_books_screen_warns_about_sending_the_book_to_an_external_provider(
     client: TestClient,
 ) -> None:
-    """Форма загрузки предупреждает, что текст книги уходит наружу (PRD § 4.1, § 21.2)."""
+    """Upload form warns that book text is sent to an external service (PRD § 4.1, § 21.2)."""
     response = client.get("/books", headers=HTML_HEADERS)
 
     assert response.status_code == 200
@@ -94,7 +94,7 @@ def test_books_screen_warns_about_sending_the_book_to_an_external_provider(
 def test_book_detail_screen_renders_progress_and_failed_actions(
     client: TestClient, application: Application
 ) -> None:
-    """Карточка показывает прогресс, навигацию и действия над книгой."""
+    """Card displays progress, navigation, and book actions."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -117,7 +117,7 @@ def test_book_detail_screen_renders_progress_and_failed_actions(
 def test_imported_book_screen_explains_missing_llm_configuration(
     client: TestClient, application: Application
 ) -> None:
-    """После импорта без LLM экран явно показывает, почему анализ не идёт дальше."""
+    """After import without LLM, screen explicitly explains why analysis cannot proceed."""
     scenario = store_book(
         application,
         status=BookStatus.IMPORTED,
@@ -135,7 +135,7 @@ def test_imported_book_screen_explains_missing_llm_configuration(
 def test_start_analysis_form_redirects_back_to_the_book(
     configured_client: TestClient, configured_application: Application
 ) -> None:
-    """HTML-команда анализа ставит задачу и возвращает браузер в карточку книги."""
+    """HTML analysis command schedules task and redirects browser to book card."""
     scenario = store_book(
         configured_application,
         status=BookStatus.IMPORTED,
@@ -158,7 +158,7 @@ def test_start_analysis_form_redirects_back_to_the_book(
 def test_glossary_screen_renders_read_only_state_after_processing_started(
     client: TestClient, application: Application
 ) -> None:
-    """После старта обработки HTML-глоссарий показывает режим только для чтения."""
+    """After processing starts, HTML glossary displays read-only mode."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -176,7 +176,7 @@ def test_glossary_screen_renders_read_only_state_after_processing_started(
 def test_glossary_screen_explains_analysis_read_only_state(
     client: TestClient, application: Application
 ) -> None:
-    """Во время анализа HTML-глоссарий объясняет временный режим только для чтения."""
+    """During analysis, HTML glossary explains temporary read-only state."""
     scenario = store_book(
         application,
         status=BookStatus.ANALYZING,
@@ -201,12 +201,11 @@ def test_glossary_screen_explains_analysis_read_only_state(
 def test_glossary_screen_folds_decision_actions_of_decided_items(
     client: TestClient, application: Application, status: BookStatus
 ) -> None:
-    """Решение по элементу можно изменить, пока глоссарий редактируется (QA-07).
+    """Decision on an item can be modified while glossary is editable (QA-07).
 
-    Действия решения у решённого элемента свёрнуты под «Изменить решение», чтобы
-    экран не разрастался, а правка указания остаётся доступной отдельно: род персонажа
-    и другие указания уровня книги видны позже, чем принимается перевод имени
-    (PRD § 11, § 21.3).
+    Decision actions for a decided item are collapsed under "Change decision" to prevent
+    screen clutter, while note editing remains accessible separately: character gender
+    and other book-level notes are visible after name translation is accepted (PRD § 11, § 21.3).
     """
     candidate = glossary_candidate()
     scenario = store_book(
@@ -239,7 +238,7 @@ def test_glossary_screen_folds_decision_actions_of_decided_items(
 def test_glossary_screen_offers_to_change_an_optional_hint(
     client: TestClient, application: Application
 ) -> None:
-    """Неудачную подсказку, не требующую внимания, тоже можно исправить (QA-07)."""
+    """An optional hint that does not require review can also be corrected (QA-07)."""
     candidate = glossary_candidate(
         source_text="entailed estate",
         suggested_translation="заповедное имение",
@@ -257,7 +256,7 @@ def test_glossary_screen_offers_to_change_an_optional_hint(
 def test_glossary_screen_names_return_to_the_model_variant_for_corrected_item(
     client: TestClient, application: Application
 ) -> None:
-    """У исправленного элемента «Принять» подписано как возврат к варианту модели."""
+    """For a corrected item, "Accept" is labeled as returning to the model variant."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
     application.approve_glossary(
@@ -279,7 +278,7 @@ def test_glossary_screen_names_return_to_the_model_variant_for_corrected_item(
 def test_glossary_screen_offers_to_change_the_concept_type(
     client: TestClient, application: Application
 ) -> None:
-    """Тип понятия виден по-русски и меняется в форме исправления (QA-11, T2)."""
+    """Concept type is visible in Russian and editable via correction form (QA-11, T2)."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
 
@@ -294,7 +293,7 @@ def test_glossary_screen_offers_to_change_the_concept_type(
 def test_glossary_screen_shows_other_spellings_of_the_item(
     client: TestClient, application: Application
 ) -> None:
-    """Объединённые написания одного имени видны в его элементе (QA-11)."""
+    """Merged spellings of the same name are visible in its item (QA-11)."""
     first = glossary_candidate(candidate_id="candidate-first", source_text="Mr. Bennet")
     second = glossary_candidate(
         candidate_id="candidate-second", source_text="MR BENNET", confidence=0.9
@@ -327,7 +326,7 @@ def test_glossary_page_marks_model_doubts(
 def test_book_detail_screen_starts_processing_after_glossary_is_complete(
     client: TestClient, application: Application
 ) -> None:
-    """После закрытия глоссария карточка книги предлагает запуск обработки."""
+    """After closing glossary, book card offers initiating processing."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
     application.approve_glossary(
@@ -350,7 +349,7 @@ def test_book_detail_screen_starts_processing_after_glossary_is_complete(
 def test_plan_and_warnings_screens_render_book_diagnostics(
     client: TestClient, application: Application
 ) -> None:
-    """HTML-экраны плана и предупреждений используют те же данные, что JSON API."""
+    """HTML plan and warning screens use the same data as JSON API."""
     scenario = store_book(
         application,
         chapters=(("Первый абзац.", "Второй абзац."),),
@@ -372,7 +371,7 @@ def test_plan_and_warnings_screens_render_book_diagnostics(
 def test_plan_screen_renders_empty_state_before_analysis(
     client: TestClient, application: Application
 ) -> None:
-    """До анализа HTML-вкладка плана объясняет, почему данных ещё нет."""
+    """Prior to analysis, HTML plan tab explains why data is not yet available."""
     scenario = store_book(
         application,
         status=BookStatus.IMPORTED,
@@ -389,7 +388,7 @@ def test_plan_screen_renders_empty_state_before_analysis(
 def test_result_screen_renders_blocks_and_export_status(
     client: TestClient, application: Application
 ) -> None:
-    """Результат показывает оригинал, перевод, подсказки и состояние EPUBCheck."""
+    """Result displays original, translation, hints, and EPUBCheck status."""
     scenario = store_book(
         application,
         status=BookStatus.COMPLETED,
@@ -423,7 +422,7 @@ def test_result_screen_renders_blocks_and_export_status(
 def test_result_screen_hides_export_action_before_processing_finishes(
     client: TestClient, application: Application
 ) -> None:
-    """До завершения обработки HTML-результат не предлагает собрать EPUB."""
+    """Before processing completes, HTML result does not offer building EPUB."""
     scenario = store_book(
         application,
         status=BookStatus.READY_TO_PROCESS,
@@ -440,7 +439,7 @@ def test_result_screen_hides_export_action_before_processing_finishes(
 def test_result_screen_explains_that_epub_is_stale_after_changes(
     client: TestClient, application: Application
 ) -> None:
-    """Готовый результат без актуального EPUB явно просит собрать книгу заново."""
+    """Completed result without up-to-date EPUB explicitly prompts rebuilding the book."""
     scenario = store_book(
         application,
         status=BookStatus.READY_TO_EXPORT,
@@ -464,7 +463,7 @@ def test_result_screen_explains_that_epub_is_stale_after_changes(
 def test_result_screen_offers_return_to_glossary_review(
     client: TestClient, application: Application
 ) -> None:
-    """Экран результата даёт подтверждаемый возврат к проверке глоссария (PRD § 21.5)."""
+    """Result screen provides confirmed return to glossary review (PRD § 21.5)."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -490,7 +489,7 @@ def test_result_screen_offers_return_to_glossary_review(
 def test_result_screen_hides_return_to_glossary_before_processing_starts(
     client: TestClient, application: Application
 ) -> None:
-    """До старта обработки возвращать нечего, и действия на экране нет."""
+    """Prior to processing start, there is nothing to reset, so action is hidden."""
     scenario = store_book(application, status=BookStatus.READY_TO_PROCESS)
 
     response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
@@ -502,7 +501,7 @@ def test_result_screen_hides_return_to_glossary_before_processing_starts(
 def test_reset_form_returns_the_browser_to_glossary_review(
     client: TestClient, application: Application
 ) -> None:
-    """Подтверждённый возврат из браузера снимает запуск и открывает глоссарий."""
+    """Confirmed return from browser cancels run and opens glossary."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     start_run(
         application,
@@ -525,7 +524,7 @@ def test_reset_form_returns_the_browser_to_glossary_review(
 
 
 def test_system_config_screen_renders_first_run_state(client: TestClient) -> None:
-    """Экран конфигурации показывает ненастроенную LLM и не раскрывает ключ."""
+    """Configuration screen displays unconfigured LLM and does not expose key."""
     response = client.get("/system/config", headers=HTML_HEADERS)
 
     assert response.status_code == 200
@@ -536,7 +535,7 @@ def test_system_config_screen_renders_first_run_state(client: TestClient) -> Non
 def test_system_config_screen_explains_how_to_configure_the_llm(
     client: TestClient,
 ) -> None:
-    """Рядом со статусом «LLM не настроена» экран показывает, что задать (PRD § 23)."""
+    """Alongside "LLM not configured" status, screen explains what to configure (PRD § 23)."""
     response = client.get("/system/config", headers=HTML_HEADERS)
 
     assert response.status_code == 200
@@ -547,7 +546,7 @@ def test_system_config_screen_explains_how_to_configure_the_llm(
 def test_system_config_screen_warns_about_the_external_provider(
     client: TestClient,
 ) -> None:
-    """Экран конфигурации предупреждает о передаче текста книги наружу (PRD § 21.6)."""
+    """Configuration screen warns about sending book text to external party (PRD § 21.6)."""
     response = client.get("/system/config", headers=HTML_HEADERS)
 
     assert response.status_code == 200
@@ -557,7 +556,7 @@ def test_system_config_screen_warns_about_the_external_provider(
 def test_system_config_screen_explains_how_to_enable_epubcheck(
     client_without_epubcheck: TestClient,
 ) -> None:
-    """Экран показывает, как включить недоступную проверку EPUB (PRD § 21.6)."""
+    """Screen explains how to enable unavailable EPUB check (PRD § 21.6)."""
     response = client_without_epubcheck.get("/system/config", headers=HTML_HEADERS)
 
     assert response.status_code == 200
@@ -566,7 +565,7 @@ def test_system_config_screen_explains_how_to_enable_epubcheck(
 
 
 def test_system_config_screen_renders_reading_settings(client: TestClient) -> None:
-    """Экран конфигурации отображает блок настройки уровня читателя (ReadingSettings)."""
+    """Configuration screen displays reader level settings block (ReadingSettings)."""
     response = client.get("/system/config", headers=HTML_HEADERS)
 
     assert response.status_code == 200
@@ -596,7 +595,7 @@ def test_glossary_screen_names_the_decision_in_russian(
     translation: str | None,
     label: str,
 ) -> None:
-    """Решение по элементу подписано по-русски, а не статусом `approved` (QA-06)."""
+    """Item decision is labeled in Russian rather than `approved` status (QA-06)."""
     candidate = glossary_candidate()
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
     application.approve_glossary(
@@ -619,7 +618,7 @@ def test_glossary_screen_names_the_decision_in_russian(
 def test_glossary_screen_shows_model_confidence(
     client: TestClient, application: Application
 ) -> None:
-    """Уверенность модели видна у каждого элемента глоссария (QA-14)."""
+    """Model confidence is displayed for each glossary item (QA-14)."""
     candidate = glossary_candidate(confidence=0.62, model_flagged_review=True)
     scenario = store_book(application, glossary_candidates={0: (candidate,)})
 
@@ -632,7 +631,7 @@ def test_glossary_screen_shows_model_confidence(
 def test_plan_screen_explains_what_a_complete_plan_means(
     client: TestClient, application: Application
 ) -> None:
-    """Полнота плана подписана понятно и с пояснением, а не одним словом (QA-14)."""
+    """Plan completeness is labeled clearly with explanation rather than a single word (QA-14)."""
     scenario = store_book(application)
 
     response = client.get(f"/books/{scenario.book_id}/plan", headers=HTML_HEADERS)
@@ -645,7 +644,7 @@ def test_plan_screen_explains_what_a_complete_plan_means(
 def test_plan_screen_explains_what_an_incomplete_plan_means(
     client: TestClient, application: Application
 ) -> None:
-    """Неполный план объясняет, чего в нём не хватает (QA-14)."""
+    """Incomplete plan explains what is still missing (QA-14)."""
     scenario = store_book(
         application, chapters=(("First.",), ("Second.",)), analysed_chapters=(0,)
     )
@@ -659,7 +658,7 @@ def test_plan_screen_explains_what_an_incomplete_plan_means(
 def test_notes_page_is_not_shown_as_an_ordinary_chapter(
     client: TestClient, application: Application
 ) -> None:
-    """Страница, где одни сноски, на экранах плана и результата не называется главой (QA-04)."""
+    """A notes-only page is not labeled as a regular chapter on plan and result screens (QA-04)."""
     scenario = store_book(
         application,
         status=BookStatus.COMPLETED,

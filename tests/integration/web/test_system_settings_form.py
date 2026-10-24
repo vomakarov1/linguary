@@ -1,4 +1,4 @@
-"""Браузерная форма настроек и безопасные ручные повторные отправки."""
+"""Browser settings form and secure manual resubmissions."""
 from html.parser import HTMLParser
 
 import pytest

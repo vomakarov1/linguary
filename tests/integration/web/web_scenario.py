@@ -1,11 +1,10 @@
-"""Состояния книги, которые показывают экраны Web UI.
+"""Book states rendered by Web UI screens.
 
-Экранам нужна книга, дошедшая до определённого места процесса: проанализированная,
-обрабатываемая, с неуспешной задачей или с предупреждениями импорта. Модуль кладёт такое
-состояние в настоящее хранилище приложения одной функцией, чтобы тест описывал только то,
-что проверяет.
+Screens require a book progressed to a specific pipeline stage: analysed, processing,
+with a failed task, or with import warnings. This module seeds such states in the real
+application storage via a single helper so that tests only describe what they verify.
 
-Модуль намеренно без префикса `test_`: иначе pytest соберёт его как тестовый.
+Intentionally omitted the `test_` prefix so pytest does not collect it as a test file.
 """
 
 from __future__ import annotations
@@ -51,28 +50,28 @@ RUN_ID = "run-web-1"
 SOURCE_LANGUAGE = "en"
 TARGET_LANGUAGE = "ru"
 
-#: Фиксированный момент времени: тест не зависит от текущих часов.
+#: Fixed timestamp: test does not depend on current system time.
 CREATED_AT = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 
-#: Абзац оригинала и его перевод.
+#: Source paragraph and its translation.
 SOURCE_TEXT = "It is a truth universally acknowledged."
 TRANSLATED_TEXT = "Общепризнанная истина гласит следующее."
 
 
 @dataclass(frozen=True, slots=True)
 class WebScenario:
-    """Книга в хранилище вместе с её канонической моделью."""
+    """Book in repository paired with its canonical document model."""
 
     document: CanonicalDocument
     book_id: str = BOOK_ID
     run_id: str = RUN_ID
 
     def section(self, index: int = 0) -> DocumentSection:
-        """Глава книги по порядку чтения."""
+        """Chapter section in reading order."""
         return self.document.ordered_sections[index]
 
     def block_ids(self, index: int = 0) -> tuple[str, ...]:
-        """Идентификаторы блоков главы в порядке исходного документа."""
+        """Block IDs of the chapter in original document order."""
         return tuple(block.id for block in self.section(index).ordered_blocks)
 
 
@@ -89,12 +88,12 @@ def store_book(
     glossary_candidates: Mapping[int, Sequence[GlossaryCandidate]] | None = None,
     notes_chapters: Sequence[int] = (),
 ) -> WebScenario:
-    """Кладёт книгу в хранилище приложения вместе с её анализом и предупреждениями.
+    """Stores a book in application repository along with its analysis and warnings.
 
-    `treatments` задаёт режимы блоков главы по её номеру от нуля; без них все блоки
-    получают полный перевод. `analysed_chapters` оставляет анализ только у перечисленных
-    глав: пустой набор означает книгу, которую ещё не анализировали. `notes_chapters` —
-    номера глав, которые состоят только из сносок книги.
+    `treatments` specifies block treatments by 0-based chapter index; without them all
+    blocks default to full translation. `analysed_chapters` restricts analysis to given
+    chapters: an empty sequence represents an unanalysed book. `notes_chapters` specifies
+    chapter indices composed entirely of footnotes.
     """
     document = _document(
         book_id=book_id, title=title, chapters=chapters, notes_chapters=notes_chapters
@@ -129,7 +128,7 @@ def glossary_candidate(
     confidence: float = 0.95,
     model_flagged_review: bool = False,
 ) -> GlossaryCandidate:
-    """Кандидат глоссария, принадлежащий анализу заданной главы."""
+    """Glossary candidate belonging to the analysis of the given chapter."""
     section_id = section_id_of(book_id, section_index)
     return GlossaryCandidate.create(
         id=candidate_id,
@@ -149,7 +148,7 @@ def start_run(
     *,
     results: Sequence[BlockProcessingResult] = (),
 ) -> None:
-    """Открывает запуск обработки книги и сохраняет готовые результаты блоков."""
+    """Opens a processing run for the book and saves prepared block results."""
     with application.unit_of_work.transaction() as uow:
         uow.runs.add(
             ProcessingRun(
@@ -171,7 +170,7 @@ def store_task(
     *,
     task: ProcessingTask,
 ) -> ProcessingTask:
-    """Кладёт задачу книги прямо в хранилище: экраны показывают её состояние."""
+    """Stores a book task directly into storage: screens display its state."""
     with application.unit_of_work.transaction() as uow:
         uow.tasks.add(task)
     return task
@@ -184,7 +183,7 @@ def running_task(
     section_index: int = 0,
     task_type: TaskType = TaskType.PROCESS_TRANSLATION_UNIT,
 ) -> ProcessingTask:
-    """Выполняющаяся задача главы: её глава показывается как текущая."""
+    """In-progress chapter task: its chapter displays as active."""
     return ProcessingTask(
         id=task_id,
         book_id=scenario.book_id,
@@ -201,7 +200,7 @@ def failed_task(
     error_type: ErrorType = ErrorType.TRANSIENT,
     message: str = "провайдер не ответил",
 ) -> ProcessingTask:
-    """Неуспешная задача главы с типизированной ошибкой (PRD § 16)."""
+    """Failed chapter task with a typed error (PRD § 16)."""
     return (
         ProcessingTask(
             id=task_id,
@@ -217,7 +216,7 @@ def failed_task(
 def translated_result(
     block_id: str, *, warnings: Sequence[ResultWarning] = ()
 ) -> BlockProcessingResult:
-    """Готовый перевод блока, при необходимости с замечанием (PRD § 15)."""
+    """Completed translation of a block, optionally with warnings (PRD § 15)."""
     return BlockProcessingResult(
         block_id=block_id,
         treatment=BlockTreatment.TRANSLATE,
@@ -227,7 +226,7 @@ def translated_result(
 
 
 def hinted_result(block_id: str) -> BlockProcessingResult:
-    """Блок со словарными подсказками вместо перевода (PRD § 10.1)."""
+    """Block with glossary hints instead of translation (PRD § 10.1)."""
     return BlockProcessingResult(
         block_id=block_id,
         treatment=BlockTreatment.GLOSSARY_ONLY,
@@ -238,21 +237,21 @@ def hinted_result(block_id: str) -> BlockProcessingResult:
 
 
 def repetition_warning(message: str = "Повтор фрагмента в переводе") -> ResultWarning:
-    """Непреградное замечание к результату обработки."""
+    """Non-blocking warning for a processing result."""
     return ResultWarning(kind=ResultWarningKind.REPETITION, message=message)
 
 
 def dropped_block_warning(
     section_id: str, *, message: str = "Сценарий на странице отброшен"
 ) -> BookImportWarning:
-    """Предупреждение импорта, привязанное к главе."""
+    """Import warning associated with a section."""
     return BookImportWarning(
         kind=ImportWarningKind.DROPPED_BLOCK, message=message, section_id=section_id
     )
 
 
 def section_id_of(book_id: str, order: int) -> str:
-    """Идентификатор главы книги по её порядковому номеру от нуля."""
+    """Section ID of a book by its 0-based order."""
     return f"{book_id}-section-{order + 1}"
 
 
@@ -263,7 +262,7 @@ def _document(
     chapters: Sequence[Sequence[str]],
     notes_chapters: Sequence[int] = (),
 ) -> CanonicalDocument:
-    """Книга из глав, заданных текстами их абзацев."""
+    """Book composed of chapters defined by their paragraph texts."""
     return CanonicalDocument(
         id=book_id,
         metadata=BookMetadata(title=title, authors=("Jane Austen",)),
@@ -290,10 +289,10 @@ def _section(
     texts: Sequence[str],
     block_type: BlockType = BlockType.PARAGRAPH,
 ) -> DocumentSection:
-    """Глава книги из абзацев.
+    """Chapter section composed of paragraphs.
 
-    Идентификатор главы включает книгу: разделы уникальны по всему хранилищу, и две
-    книги одного теста не могут делить одну строку раздела.
+    Section ID includes book ID: sections are unique across the repository,
+    preventing two books in a test from colliding on section rows.
     """
     section_id = section_id_of(book_id, order)
     return DocumentSection(
@@ -326,7 +325,7 @@ def _analysis(
     treatments: Sequence[BlockTreatment] | None,
     glossary_candidates: Sequence[GlossaryCandidate] = (),
 ) -> ChapterAnalysis:
-    """Полный анализ главы: план обработки покрывает все её текстовые блоки."""
+    """Full chapter analysis: treatment plan covers all its textual blocks."""
     blocks = section.ordered_blocks
     chosen = tuple(treatments or ()) or (BlockTreatment.TRANSLATE,) * len(blocks)
     return ChapterAnalysis.create(
@@ -344,7 +343,7 @@ def _analysis(
 
 
 def _book(*, book_id: str, title: str, status: BookStatus) -> BookRecord:
-    """Запись книги в заданном состоянии."""
+    """Book record in the specified state."""
     return BookRecord(
         id=book_id,
         metadata=BookMetadata(title=title, authors=("Jane Austen",)),

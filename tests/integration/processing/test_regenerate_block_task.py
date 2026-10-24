@@ -1,9 +1,9 @@
-"""Задача повторной генерации блока и состояние книги (P3.T7, ALG-02, ALG-06).
+"""Block regeneration task and book state (P3.T7, ALG-02, ALG-06).
 
-Здесь проверяется стык, ради которого сценарий существует: очередь на SQLite, воркер,
-`BlockRegenerationSequence` и `FakeLLMClient` работают вместе. Обработчик типа задачи
-`REGENERATE_BLOCK` регистрируется так же, как это сделает composition root фазы 4, —
-готовым `BlockRegenerationSequence.run_task`.
+Tests the integration point that motivates this scenario: SQLite queue, worker pool,
+`BlockRegenerationSequence`, and `FakeLLMClient` work together. The `REGENERATE_BLOCK`
+task handler is registered just as the phase 4 composition root will register it —
+via `BlockRegenerationSequence.run_task`.
 """
 
 from __future__ import annotations
@@ -39,10 +39,10 @@ from linguary.domain import (
     TaskType,
 )
 
-#: Другой перевод того же абзаца: по нему видно, что результат блока действительно заменён.
+#: Another translation of the same paragraph: shows the block result is indeed replaced.
 REGENERATED_TEXT = "Всем известно: одинокий богач непременно ищет себе жену."
 
-#: Второй повтор того же блока: он должен дойти до хранилища так же, как первый.
+#: Second regeneration of the same block: should reach storage just like the first.
 TWICE_REGENERATED_TEXT = "Известная всем истина: богатый холостяк ищет себе жену."
 
 
@@ -51,7 +51,7 @@ def make_sequence(
     task_queue: SqliteTaskQueue,
     client: LLMClient,
 ) -> BlockRegenerationSequence:
-    """Последовательность задач повторной генерации поверх настоящей очереди."""
+    """Block regeneration sequence on top of the real task queue."""
     regenerate, _ = make_regenerate_block(unit_of_work, client)
     return BlockRegenerationSequence(
         unit_of_work=unit_of_work, queue=task_queue, regenerate_block=regenerate
@@ -61,7 +61,7 @@ def make_sequence(
 def make_pool(
     task_queue: SqliteTaskQueue, sequence: BlockRegenerationSequence
 ) -> TaskWorkerPool:
-    """Воркер с единственным обработчиком — задачей повторной генерации."""
+    """Worker pool with a single handler — block regeneration task."""
     return TaskWorkerPool(
         TaskRunner(
             queue=task_queue, handlers={TaskType.REGENERATE_BLOCK: sequence.run_task}
@@ -70,7 +70,7 @@ def make_pool(
 
 
 def book_status(unit_of_work: SqlAlchemyUnitOfWork) -> BookStatus:
-    """Текущее состояние книги."""
+    """Current book status."""
     with unit_of_work.transaction() as uow:
         book = uow.books.get(BOOK_ID)
     assert book is not None
@@ -78,13 +78,13 @@ def book_status(unit_of_work: SqlAlchemyUnitOfWork) -> BookStatus:
 
 
 def translations(unit_of_work: SqlAlchemyUnitOfWork) -> list[str | None]:
-    """Переводы блоков запуска в порядке документа."""
+    """Translations of run blocks in document order."""
     with unit_of_work.transaction() as uow:
         return [item.translated_text for item in uow.results.list_for_run(RUN_ID)]
 
 
 async def process_chapter(unit_of_work: SqlAlchemyUnitOfWork) -> None:
-    """Доводит первую главу до результата: повторная генерация заменяет уже готовое."""
+    """Brings the first chapter to completion: regeneration replaces already finished results."""
     process, _ = make_process_chapter(
         unit_of_work, FakeLLMClient.always(translated_reply())
     )
@@ -92,7 +92,7 @@ async def process_chapter(unit_of_work: SqlAlchemyUnitOfWork) -> None:
 
 
 def regenerated_reply(text: str = REGENERATED_TEXT) -> FakeLLMClient:
-    """Клиент, отвечающий новым переводом единственного блока запроса."""
+    """Client answering with a new translation of the single requested block."""
     return FakeLLMClient.always(
         translation_reply([block_reply("b1", translated_text=text)])
     )
@@ -101,7 +101,7 @@ def regenerated_reply(text: str = REGENERATED_TEXT) -> FakeLLMClient:
 async def test_request_moves_the_book_through_processing_back_to_export(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Повторная генерация переводит книгу в `PROCESSING` и возвращает её обратно (ALG-06)."""
+    """Regeneration transitions book to `PROCESSING` and brings it back (ALG-06)."""
     scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
     await process_chapter(unit_of_work)
     sequence = make_sequence(unit_of_work, task_queue, regenerated_reply())
@@ -125,7 +125,7 @@ async def test_request_moves_the_book_through_processing_back_to_export(
 async def test_repeated_request_of_a_scheduled_block_does_not_duplicate_the_task(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Пока задача блока ждёт очереди, второй запрос новой задачи не создаёт (ALG-02)."""
+    """While a block task is queued, a second request does not create a duplicate (ALG-02)."""
     scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
     sequence = make_sequence(unit_of_work, task_queue, regenerated_reply())
 
@@ -140,10 +140,10 @@ async def test_repeated_request_of_a_scheduled_block_does_not_duplicate_the_task
 async def test_block_can_be_regenerated_twice(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Второй запрос по тому же блоку выполняется, а не возвращает прошлый результат.
+    """A second request for the same block runs rather than returning previous result.
 
-    Идемпотентный ключ задачи живёт, пока живёт задача: завершённая задача блока
-    снимается, иначе повторная генерация работала бы ровно один раз (PRD § 21.5).
+    The task idempotency key lives while the task lives: a completed block task is
+    cleared, otherwise block regeneration would only work once (PRD § 21.5).
     """
     scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
     await process_chapter(unit_of_work)
@@ -166,7 +166,7 @@ async def test_block_can_be_regenerated_twice(
 async def test_request_during_processing_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Пока книга обрабатывается, заменять результат блока нечем (PRD § 21.5)."""
+    """While the book is being processed, block replacement is rejected (PRD § 21.5)."""
     scenario = store_processing_book(
         unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT), (SOURCE_TEXT,))
     )
@@ -193,7 +193,7 @@ async def test_request_during_processing_is_rejected(
 async def test_two_regenerations_return_the_book_to_export_once_both_finish(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Книга ждёт `READY_TO_EXPORT`, пока не закончилась последняя повторная генерация."""
+    """The book waits for `READY_TO_EXPORT` until the last regeneration finishes."""
     scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
     await process_chapter(unit_of_work)
     sequence = make_sequence(unit_of_work, task_queue, regenerated_reply())
@@ -210,7 +210,7 @@ async def test_two_regenerations_return_the_book_to_export_once_both_finish(
 async def test_task_of_another_type_is_not_processed_as_a_regeneration(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Обработчик повторной генерации отвергает задачу чужого типа."""
+    """The regeneration handler rejects a task of an alien type."""
     store_processing_book(unit_of_work)
     sequence = make_sequence(unit_of_work, task_queue, FakeLLMClient())
     task = ProcessingTask(

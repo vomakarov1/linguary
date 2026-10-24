@@ -1,8 +1,8 @@
-"""Обработка главы: группы блоков, сохранение результата и учебные заметки (P3.T6, ALG-04).
+"""Chapter processing: block groups, result saving, and language notes (P3.T6, ALG-04).
 
-Тесты идут на настоящем SQLite и `FakeLLMClient`: сетевых вызовов в наборе нет, а всё,
-что касается транзакции и замены результатов, проверяется на том хранилище, которое
-получит пользователь.
+Tests run against real SQLite and `FakeLLMClient`: there are no network calls in the suite,
+and everything related to transactions and result replacement is verified against
+the actual storage delivered to users.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from linguary.application.use_cases.process_chapter import (
 )
 from linguary.domain import BlockProcessingResult, BlockTreatment, ResultWarningKind
 
-#: Абзац с намеренным повтором одного оборота: проверка повторов даёт предупреждение.
+#: Paragraph with intentional phrase repetition: repetition check triggers a warning.
 REPEATED_TRANSLATION = (
     "Он шёл и шёл вперёд, он шёл и шёл вперёд, он шёл и шёл вперёд, "
     "он шёл и шёл вперёд, и не видел конца."
@@ -37,14 +37,14 @@ REPEATED_TRANSLATION = (
 
 
 def command(section_id: str = "section-1") -> ProcessChapterCommand:
-    """Команда обработки главы книги."""
+    """Book chapter processing command."""
     return ProcessChapterCommand(book_id=BOOK_ID, section_id=section_id)
 
 
 def stored_results(
     unit_of_work: SqlAlchemyUnitOfWork, run_id: str
 ) -> tuple[BlockProcessingResult, ...]:
-    """Сохранённые результаты запуска в порядке блоков документа."""
+    """Stored run results in document block order."""
     with unit_of_work.transaction() as uow:
         return uow.results.list_for_run(run_id)
 
@@ -52,7 +52,7 @@ def stored_results(
 async def test_chapter_results_are_saved_for_every_block(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Успешная обработка сохраняет результат каждого блока главы (PRD § 14)."""
+    """Successful processing saves results for every block in the chapter (PRD § 14)."""
     scenario = store_processing_book(unit_of_work)
     client = FakeLLMClient.replying([translated_reply()])
     process, _ = make_process_chapter(unit_of_work, client)
@@ -71,7 +71,7 @@ async def test_chapter_results_are_saved_for_every_block(
 async def test_language_notes_are_saved_with_chapter_numbered_ids(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Заметки живут в своём пространстве идентификаторов `ln-chNN-NNN` (PRD § 19.3)."""
+    """Language notes reside in their own identifier namespace `ln-chNN-NNN` (PRD § 19.3)."""
     scenario = store_processing_book(unit_of_work)
     client = FakeLLMClient.replying(
         [translated_reply(notes=(note_reply("b1"), note_reply("b2")))]
@@ -91,7 +91,7 @@ async def test_language_notes_are_saved_with_chapter_numbered_ids(
 async def test_glossary_only_block_gets_hints_without_translation(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Режим из плана определяет состав результата блока (PRD § 10.1, § 15)."""
+    """Planned treatment determines block result composition (PRD § 10.1, § 15)."""
     scenario = store_processing_book(
         unit_of_work,
         treatments={
@@ -125,7 +125,7 @@ async def test_glossary_only_block_gets_hints_without_translation(
 async def test_hints_and_notes_repeating_before_you_read_are_not_saved(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Выражение из «Before You Read» не повторяется ни подсказкой, ни заметкой (QA-03)."""
+    """Expression from 'Before You Read' is not repeated as a hint or a note (QA-03)."""
     scenario = store_processing_book(
         unit_of_work,
         treatments={
@@ -192,7 +192,7 @@ async def test_new_fact_on_before_you_read_excerpt_is_saved(
 async def test_glossary_only_block_keeps_its_only_hint_even_if_explained(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Обязательная подсказка блока GLOSSARY_ONLY не отсеивается до пустого списка."""
+    """Mandatory hint of a GLOSSARY_ONLY block is not filtered out to an empty list."""
     scenario = store_processing_book(
         unit_of_work,
         treatments={
@@ -225,7 +225,7 @@ async def test_glossary_only_block_keeps_its_only_hint_even_if_explained(
 async def test_chapter_without_textual_blocks_does_not_call_the_model(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Глава-иллюстрация обрабатывается без обращения к модели (PRD § 10.1)."""
+    """Illustration chapter is processed without calling the model (PRD § 10.1)."""
     scenario = store_processing_book(unit_of_work, chapters=((None,),))
     client = FakeLLMClient()
     process, _ = make_process_chapter(unit_of_work, client)
@@ -240,7 +240,7 @@ async def test_chapter_without_textual_blocks_does_not_call_the_model(
 async def test_long_chapter_is_processed_by_several_units(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Глава, не помещающаяся в один запрос, обрабатывается группами (PRD § 10)."""
+    """Chapter not fitting into a single request is processed in groups (PRD § 10)."""
     scenario = store_processing_book(
         unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT),)
     )
@@ -259,7 +259,7 @@ async def test_long_chapter_is_processed_by_several_units(
 async def test_saved_units_are_not_requested_again(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Повтор задачи не платит за уже сохранённые группы (PRD § 18.1)."""
+    """Task retry does not pay for already saved groups (PRD § 18.1)."""
     scenario = store_processing_book(unit_of_work)
     first = FakeLLMClient.replying([translated_reply()])
     process, _ = make_process_chapter(unit_of_work, first)
@@ -277,7 +277,7 @@ async def test_saved_units_are_not_requested_again(
 async def test_partially_saved_chapter_continues_without_note_id_collision(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Повтор недоделанной главы продолжает нумерацию заметок, а не начинает её заново."""
+    """Retry of an incomplete chapter continues note numbering rather than restarting it."""
     scenario = store_processing_book(
         unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT),)
     )
@@ -308,7 +308,7 @@ async def test_partially_saved_chapter_continues_without_note_id_collision(
 async def test_repetition_warning_is_stored_and_does_not_block_saving(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Повторы в переводе остаются предупреждением и результат сохраняют (PRD § 15)."""
+    """Repetitions in translation produce a warning and do not block saving (PRD § 15)."""
     scenario = store_processing_book(unit_of_work, chapters=((SOURCE_TEXT,),))
     client = FakeLLMClient.replying(
         [translation_reply([block_reply("b1", translated_text=REPEATED_TRANSLATION)])]
@@ -328,7 +328,7 @@ async def test_repetition_warning_is_stored_and_does_not_block_saving(
 async def test_unanalysed_chapter_is_not_processed(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Глава без сохранённого анализа обрабатываться не может (PRD § 14)."""
+    """Chapter without saved analysis cannot be processed (PRD § 14)."""
     store_processing_book(
         unit_of_work,
         chapters=((SOURCE_TEXT,), (SOURCE_TEXT,)),
@@ -346,11 +346,11 @@ async def test_unanalysed_chapter_is_not_processed(
 async def test_rejected_variant_from_other_chapter_does_not_reach_the_request(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Вариант, отвергнутый пользователем, узнаётся по кандидатам всей книги (Д-4).
+    """Variant rejected by user is recognized across candidates of the entire book (D-4).
 
-    Анализ главы 2 кандидата Duskmere не вернул: вариант «Даскмир» предложил только
-    анализ главы 1. Указание `the marsh gate` и пункт указаний главы с ним всё равно
-    не доходят до запроса обработки главы 2.
+    Chapter 2 analysis did not return candidate Duskmere: variant "Даскмир" was proposed
+    only by chapter 1 analysis. Note `the marsh gate` and chapter instructions containing it
+    still do not reach the chapter 2 processing request.
     """
     store_book_with_rejected_variant(unit_of_work)
     client = FakeLLMClient.replying([translated_reply(("b1",))])

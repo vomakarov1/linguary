@@ -1,8 +1,8 @@
-"""Проход `импорт -> экспорт` и разбор собранного архива для тестов экспорта.
+"""Pass `import -> export` and archive parsing helper for export tests.
 
-Экспорту нужен вход импорта целиком: каноническая модель, копии ресурсов в хранилище
-и сам исходный архив (из него переносится разметка конструкций `PRESERVE_OPAQUE`).
-Собирать этот проход в каждом тесте заново незачем, поэтому он живёт здесь.
+Export requires the entire import input: canonical model, stored resource copies,
+and the source archive itself (used to carry over markup for `PRESERVE_OPAQUE` structures).
+Reassembling this pipeline in every single test is redundant, so it lives here.
 """
 
 from __future__ import annotations
@@ -33,14 +33,14 @@ _XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 
 @dataclass(frozen=True, slots=True)
 class ExportRun:
-    """Результат прохода: что импортировали и что собрали."""
+    """Pipeline execution result: what was imported and what was built."""
 
     imported: ImportedBook
     exported: ExportedBook
 
     @property
     def path(self) -> Path:
-        """Путь к собранному файлу книги."""
+        """Path to the built book file."""
         return Path(self.exported.path)
 
 
@@ -54,13 +54,13 @@ def run_export(
     keep_source: bool = True,
     export_source: Path | None = None,
 ) -> ExportRun:
-    """Импортирует книгу и собирает её заново.
+    """Imports a book and rebuilds it.
 
-    Без `block_results` и `learning_materials` получается режим `structure_only`:
-    книга собирается без результатов обработки и без учебных материалов.
-    `keep_source = False` прячет исходный архив от экспортёра — так проверяется книга,
-    у которой исходного файла на машине уже нет. `export_source` отдаёт экспортёру другой
-    архив вместо исходного — так проверяется книга, подменённая между импортом и экспортом.
+    Without `block_results` and `learning_materials` it runs in `structure_only` mode:
+    the book is rebuilt without processing results or learning materials.
+    `keep_source = False` hides the source archive from the exporter — testing a book
+    whose source file is no longer on the machine. `export_source` supplies a different
+    archive to the exporter — testing a book substituted between import and export.
     """
     imported = EbookLibEpubReader().read(
         EpubReadRequest(
@@ -85,12 +85,12 @@ def run_export(
     return ExportRun(imported=imported, exported=exported)
 
 
-#: Расширения документов книги: издания Gutenberg держат главы и в `.html`, и в `.htm`.
+#: Document extensions: Gutenberg releases store chapters in both `.html` and `.htm`.
 _DOCUMENT_SUFFIXES = (".xhtml", ".html", ".htm")
 
 
 def documents_of(path: Path) -> Mapping[str, etree._Element]:
-    """Разобранные XHTML-документы архива по их именам внутри него."""
+    """Parsed XHTML documents from the archive indexed by their internal names."""
     parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
     with zipfile.ZipFile(path) as archive:
         return {
@@ -101,19 +101,19 @@ def documents_of(path: Path) -> Mapping[str, etree._Element]:
 
 
 def elements(root: etree._Element, tag: str) -> tuple[etree._Element, ...]:
-    """Все элементы документа с указанным именем тега."""
+    """All elements in the document matching the given tag name."""
     return tuple(root.iter(f"{{{_XHTML_NAMESPACE}}}{tag}"))
 
 
 def package_of(path: Path) -> etree._Element:
-    """Разобранный файл пакета собранной книги."""
+    """Parsed package file of the built book."""
     parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
     with zipfile.ZipFile(path) as archive:
         return etree.fromstring(archive.read("OEBPS/content.opf"), parser=parser)
 
 
 def spine_hrefs(path: Path) -> tuple[str, ...]:
-    """Документы порядка чтения собранной книги в его порядке."""
+    """Spine documents of the built book in spine order."""
     package = package_of(path)
     manifest = {
         element.get("id"): element.get("href")

@@ -1,4 +1,4 @@
-"""Атомарное сохранение, сброс и отмена наблюдателя операции."""
+"""Atomic saving, resetting, and cancelling operation observers."""
 import asyncio
 from threading import Event
 

@@ -1,8 +1,8 @@
-"""Отказы HTML-форм показываются браузеру страницей, а не сырым JSON (QA-05).
+"""HTML form rejections are rendered as a page for browsers rather than raw JSON (QA-05).
 
-Браузер, отправивший форму, просит `text/html`. Такой запрос получает страницу ошибки
-с тем же кодом ответа, понятным текстом причины и ссылкой назад. Клиент JSON по-прежнему
-получает `{"detail": ...}`: контракт API-01 не меняется.
+A browser submitting a form asks for `text/html`. Such a request receives an error page
+with the same status code, human-readable reason, and a back link. A JSON client still
+receives `{"detail": ...}`: the API-01 contract is preserved.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from web_scenario import glossary_candidate, start_run, store_book
 from linguary.composition import Application
 from linguary.domain import BookStatus
 
-#: Заголовок, который браузер отправляет при обычной отправке формы.
+#: Header sent by the browser during regular form submissions.
 BROWSER_ACCEPT = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 }
@@ -25,7 +25,7 @@ SYNTHETIC_BOOK = FIXTURE_DIRECTORY / "synthetic_story.epub"
 
 
 def assert_error_page(response: Response, *, status_code: int, back_url: str) -> str:
-    """Проверяет, что отказ пришёл страницей с кодом и ссылкой назад."""
+    """Verifies that rejection arrived as a page with status code and back link."""
     assert response.status_code == status_code
     assert response.headers["content-type"].startswith("text/html")
     assert '{"detail"' not in response.text
@@ -35,7 +35,7 @@ def assert_error_page(response: Response, *, status_code: int, back_url: str) ->
 
 
 def upload_text_file(client: TestClient, headers: dict[str, str]) -> Response:
-    """Отправляет форму загрузки с файлом не в формате EPUB."""
+    """Submits the upload form with a non-EPUB file."""
     with SYNTHETIC_BOOK.open("rb") as file:
         return client.post(
             "/books/upload",
@@ -48,7 +48,7 @@ def upload_text_file(client: TestClient, headers: dict[str, str]) -> Response:
 def test_rejected_upload_shows_an_error_page_with_a_link_back(
     client: TestClient,
 ) -> None:
-    """Файл не в формате EPUB объясняется страницей со ссылкой на список книг."""
+    """Non-EPUB file is explained via a page with a link to the book list."""
     response = upload_text_file(
         client, {**BROWSER_ACCEPT, "referer": "http://127.0.0.1:8000/books"}
     )
@@ -60,7 +60,7 @@ def test_rejected_upload_shows_an_error_page_with_a_link_back(
 def test_rejected_upload_still_answers_json_to_an_api_client(
     client: TestClient,
 ) -> None:
-    """Клиент JSON получает прежний отказ `{"detail": ...}`."""
+    """JSON client receives the standard rejection `{"detail": ...}`."""
     response = upload_text_file(client, {"accept": "application/json"})
 
     assert response.status_code == 400
@@ -68,7 +68,7 @@ def test_rejected_upload_still_answers_json_to_an_api_client(
 
 
 def test_incomplete_upload_form_shows_an_error_page(client: TestClient) -> None:
-    """Форма без языков (`422`) объясняется страницей, а не списком ошибок схемы."""
+    """Form missing languages (`422`) is explained via a page, not a schema validation error list."""
     with SYNTHETIC_BOOK.open("rb") as file:
         response = client.post(
             "/books/upload",
@@ -83,7 +83,7 @@ def test_incomplete_upload_form_shows_an_error_page(client: TestClient) -> None:
 def test_unconfirmed_reset_shows_the_reason_on_a_page(
     client: TestClient, application: Application
 ) -> None:
-    """Сброс без подтверждения возвращает на страницу, с которой отправлена форма."""
+    """Unconfirmed reset returns to the page from which the form was submitted."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     start_run(application, scenario)
     result_page = f"/books/{scenario.book_id}/result"
@@ -101,7 +101,7 @@ def test_unconfirmed_reset_shows_the_reason_on_a_page(
 def test_analysis_without_llm_shows_a_conflict_page(
     client: TestClient, application: Application
 ) -> None:
-    """`409` без настроенной LLM показывается страницей и ведёт к карточке книги."""
+    """`409` without configured LLM is rendered as a page and links back to the book card."""
     scenario = store_book(
         application, status=BookStatus.IMPORTED, analysed_chapters=()
     )
@@ -119,7 +119,7 @@ def test_analysis_without_llm_shows_a_conflict_page(
 def test_glossary_decision_after_processing_started_shows_a_conflict_page(
     client: TestClient, application: Application
 ) -> None:
-    """Правка глоссария после старта обработки объясняется страницей (`409`)."""
+    """Glossary edit after processing start is explained via a page (`409`)."""
     candidate = glossary_candidate()
     scenario = store_book(
         application,
@@ -150,14 +150,14 @@ def test_glossary_decision_after_processing_started_shows_a_conflict_page(
 def test_not_found_shows_an_error_page(
     client: TestClient, method: str, path: str
 ) -> None:
-    """`404` браузеру — страница со ссылкой на список книг."""
+    """`404` for browser: error page with a link to the book list."""
     response = client.request(method, path, headers=BROWSER_ACCEPT)
 
     assert_error_page(response, status_code=404, back_url="/books")
 
 
 def test_not_found_still_answers_json_to_an_api_client(client: TestClient) -> None:
-    """Неизвестная книга для клиента JSON — прежний `{"detail": ...}`."""
+    """Unknown book for JSON client returns the standard `{"detail": ...}`."""
     response = client.get("/books/unknown")
 
     assert response.status_code == 404
@@ -174,7 +174,7 @@ def test_not_found_still_answers_json_to_an_api_client(client: TestClient) -> No
 def test_foreign_referer_is_not_offered_as_the_way_back(
     client: TestClient, referer: str
 ) -> None:
-    """Ссылка назад ведёт только внутрь приложения, даже если `Referer` чужой."""
+    """Back link points strictly inside the application, even if `Referer` is external."""
     response = client.post(
         "/tasks/unknown/retry", headers={**BROWSER_ACCEPT, "referer": referer}
     )

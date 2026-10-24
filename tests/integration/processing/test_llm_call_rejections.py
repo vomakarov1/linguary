@@ -1,4 +1,4 @@
-"""Отбракованный проверкой ответ связывается с вызовом модели."""
+"""Rejected validation reply is linked to the model call."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from processing_scenario import (
 
 
 class WithRawContent:
-    """Передаёт текст ответа вместе с разобранным ответом тестовой модели."""
+    """Passes raw reply text along with parsed reply of the test model."""
 
     def __init__(self, inner: FakeLLMClient) -> None:
         self.inner = inner

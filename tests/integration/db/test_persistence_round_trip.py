@@ -1,8 +1,8 @@
-"""Обратимость хранения: доменная сущность возвращается из базы без потерь.
+"""Storage round-trip: domain entities are recovered from the database without loss.
 
-Домен и таблицы связаны отдельными функциями преобразования, поэтому потеря поля не
-проявится ни как ошибка типов, ни как ошибка запроса — только как расхождение при чтении.
-Тесты сравнивают сущность целиком, а не отдельные поля.
+Domain entities and tables are connected by dedicated mapping functions, so a lost field
+will not manifest as a type error or a query error — only as a discrepancy upon reading.
+Tests compare the whole entity rather than individual fields.
 """
 
 from __future__ import annotations
@@ -37,13 +37,13 @@ from linguary.domain import (
 
 @pytest.fixture
 def stored_book(unit_of_work: SqlAlchemyUnitOfWork) -> None:
-    """Книга без канонического документа."""
+    """Book without a canonical document."""
     with unit_of_work.transaction() as uow:
         uow.books.add(make_book())
 
 
 def test_book_round_trip(unit_of_work: SqlAlchemyUnitOfWork, stored_book: None) -> None:
-    """Запись книги читается в точности такой, какой была сохранена."""
+    """Book record is read back exactly as it was stored."""
     with unit_of_work.transaction() as uow:
         stored = uow.books.get(BOOK_ID)
 
@@ -53,7 +53,7 @@ def test_book_round_trip(unit_of_work: SqlAlchemyUnitOfWork, stored_book: None) 
 def test_book_status_change_is_stored(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Смена состояния книги перезаписывает существующую строку."""
+    """Book status change overwrites the existing row."""
     with unit_of_work.transaction() as uow:
         uow.books.save(make_book(status=BookStatus.IMPORTED))
 
@@ -69,7 +69,7 @@ def test_book_status_change_is_stored(
 def test_document_round_trip(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Каноническая модель документа восстанавливается вместе с блоками и ресурсами."""
+    """Canonical document model is reconstructed along with its blocks and resources."""
     document = make_document()
     with unit_of_work.transaction() as uow:
         uow.documents.save(
@@ -87,7 +87,7 @@ def test_document_round_trip(
 def test_document_save_replaces_previous_structure(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Повторный импорт заменяет прежние разделы и блоки, а не добавляет их."""
+    """Repeated import replaces previous sections and blocks instead of appending them."""
     with unit_of_work.transaction() as uow:
         uow.documents.save(make_document())
         uow.documents.save(make_document())
@@ -103,7 +103,7 @@ def test_document_save_replaces_previous_structure(
 def test_import_warnings_round_trip(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Предупреждения импорта сохраняются вместе со своей привязкой."""
+    """Import warnings are stored along with their bindings."""
     warnings = (
         BookImportWarning(
             kind=ImportWarningKind.TOC_MISMATCH, message="Оглавление не совпало с spine."
@@ -127,7 +127,7 @@ def test_import_warnings_round_trip(
 def test_glossary_concept_round_trip(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Понятие глоссария читается вместе со всеми языковыми вариантами."""
+    """Glossary concept is read along with all language variants."""
     concept = make_concept()
     with unit_of_work.transaction() as uow:
         uow.glossary.save(concept)
@@ -143,7 +143,7 @@ def test_glossary_concept_round_trip(
 def test_glossary_save_replaces_variants(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Повторное сохранение понятия не размножает его варианты."""
+    """Repeated saving of a concept does not duplicate its variants."""
     with unit_of_work.transaction() as uow:
         uow.glossary.save(make_concept())
         uow.glossary.save(make_concept())
@@ -158,7 +158,7 @@ def test_glossary_save_replaces_variants(
 def test_glossary_delete_removes_concept(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Удаление понятия убирает его вместе с вариантами."""
+    """Deleting a concept removes it along with its variants."""
     with unit_of_work.transaction() as uow:
         uow.glossary.save(make_concept())
 
@@ -173,7 +173,7 @@ def test_glossary_delete_removes_concept(
 def test_chapter_analysis_round_trip(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Анализ главы восстанавливается вместе с планом, кандидатами и материалами."""
+    """Chapter analysis is reconstructed with plan, candidates, and materials."""
     analysis = make_analysis()
     with unit_of_work.transaction() as uow:
         uow.documents.save(make_document())
@@ -190,7 +190,7 @@ def test_chapter_analysis_round_trip(
 def test_chapter_analysis_save_replaces_previous(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Повторный анализ той же главы заменяет прежний, не нарушая уникальности."""
+    """Repeated analysis of the same chapter replaces the previous one without violating uniqueness."""
     with unit_of_work.transaction() as uow:
         uow.documents.save(make_document())
         uow.analyses.save(BOOK_ID, make_analysis())
@@ -206,7 +206,7 @@ def test_chapter_analysis_save_replaces_previous(
 def test_processing_run_round_trip(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Запуск обработки читается со снимками глоссария и настроек LLM."""
+    """Processing run is read with glossary and LLM settings snapshots."""
     run = make_run()
     with unit_of_work.transaction() as uow:
         uow.runs.add(run)
@@ -220,7 +220,7 @@ def test_processing_run_round_trip(
 def test_block_results_round_trip(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Результаты блоков читаются вместе с подсказками, заметками и замечаниями."""
+    """Block results are read along with hints, notes, and warnings."""
     results = [make_translated_result(), make_glossary_only_result()]
     with unit_of_work.transaction() as uow:
         uow.documents.save(make_document())
@@ -236,7 +236,7 @@ def test_block_results_round_trip(
 
 
 def test_task_round_trip(unit_of_work: SqlAlchemyUnitOfWork, stored_book: None) -> None:
-    """Задача читается со своим ключом, счётчиком попыток и ошибкой."""
+    """Task is read with its key, attempt counter, and error."""
     task = make_task(task_type=TaskType.PROCESS_TRANSLATION_UNIT, scope_id="unit-1")
     with unit_of_work.transaction() as uow:
         uow.tasks.add(task)
@@ -250,7 +250,7 @@ def test_task_round_trip(unit_of_work: SqlAlchemyUnitOfWork, stored_book: None) 
 def test_llm_call_log_round_trip(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Запись журнала читается вместе с токенами и стоимостью без потери точности."""
+    """Log entry is read with tokens and cost without precision loss."""
     entries = (make_llm_call(call_id="call-1"), make_llm_call(call_id="call-2", success=False))
     with unit_of_work.transaction() as uow:
         for entry in entries:
@@ -265,13 +265,13 @@ def test_llm_call_log_round_trip(
 def test_repository_is_unavailable_outside_transaction(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Обращение к репозиторию вне транзакции — ошибка контракта, а не тихая запись."""
+    """Accessing a repository outside a transaction is a contract violation rather than a silent write."""
     with pytest.raises(PersistenceError):
         unit_of_work.books.get(BOOK_ID)
 
 
 def test_nested_transaction_is_rejected(unit_of_work: SqlAlchemyUnitOfWork) -> None:
-    """Вложенная транзакция запрещена: границу задаёт один сценарий."""
+    """Nested transaction is prohibited: the boundary is defined by a single use case."""
     with unit_of_work.transaction(), pytest.raises(PersistenceError):
         with unit_of_work.transaction():
             pass
@@ -280,7 +280,7 @@ def test_nested_transaction_is_rejected(unit_of_work: SqlAlchemyUnitOfWork) -> N
 def test_failed_transaction_is_rolled_back(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Исключение внутри транзакции откатывает все изменения целиком (PRD § 17)."""
+    """Exception within a transaction rolls back all changes completely (PRD § 17)."""
     with pytest.raises(RuntimeError), unit_of_work.transaction() as uow:
         uow.books.add(make_book())
         uow.documents.save(make_document())
@@ -294,7 +294,7 @@ def test_failed_transaction_is_rolled_back(
 def test_saving_unknown_task_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Сохранение состояния несуществующей задачи не проходит молча."""
+    """Saving the state of an unknown task does not succeed silently."""
     with pytest.raises(PersistenceError), unit_of_work.transaction() as uow:
         uow.tasks.save(make_task(task_id="нет такой задачи"))
 

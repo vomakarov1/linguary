@@ -1,8 +1,8 @@
-"""Сборка небольших EPUB прямо в тесте.
+"""Building small EPUB files directly in tests.
 
-Набор `tests/fixtures/epub` намеренно не трогается: случаи `FATAL` и точечные проверки
-разметки требуют испорченных или предельно узких книг, которые удобнее собрать во временной
-директории теста, чем держать в репозитории.
+The fixture suite in `tests/fixtures/epub` is intentionally untouched: `FATAL` cases
+and targeted markup checks require broken or extremely narrow books that are more
+convenient to build in a test's temporary directory than to store in the repository.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-#: Каталог пакета внутри архива: манифест и документы лежат относительно него.
+#: Package directory inside the archive: manifest and documents are relative to it.
 PACKAGE_DIRECTORY = "OEBPS"
 
 _CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -48,16 +48,16 @@ def build_epub(
     omit_from_manifest: Sequence[str] = (),
     compression: int = zipfile.ZIP_STORED,
 ) -> Path:
-    """Собирает EPUB3 из готовых XHTML-документов и отдаёт путь к нему.
+    """Builds an EPUB3 from prepared XHTML documents and returns its path.
 
-    `omit_from_archive` объявляет файл в манифесте, но не кладёт его в архив: так
-    получается книга с потерянным документом порядка чтения или потерянным ресурсом.
-    `omit_from_manifest`, наоборот, кладёт файл в архив и оставляет его в порядке чтения,
-    но не объявляет в манифесте: так получается книга с битым манифестом.
-    `archive_files` кладёт файл в архив по указанному пути, не добавляя каталог пакета
-    и не объявляя его в манифесте: так получается ресурс, лежащий вне каталога книги.
-    `compression` сжимает записи архива: так получается книга, маленькая на диске
-    и огромная в распакованном виде.
+    `omit_from_archive` declares a file in manifest but does not place it in the archive:
+    creates a book with a missing spine document or missing resource.
+    `omit_from_manifest`, inversely, places the file in archive and keeps it in spine,
+    but omits manifest declaration: produces a book with a broken manifest.
+    `archive_files` places files in archive at given path without package directory prefix
+    or manifest entry: creates an out-of-package resource.
+    `compression` compresses archive entries: creates a book that is small on disk
+    but huge when decompressed.
     """
     order = list(spine) if spine is not None else list(documents)
     with zipfile.ZipFile(path, "w", compression) as archive:
@@ -93,7 +93,7 @@ def build_epub(
 
 
 def xhtml_document(body: str, *, title: str = "Chapter") -> str:
-    """Минимальный XHTML-документ с заданным телом."""
+    """Minimal XHTML document with the given body."""
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<html xmlns="http://www.w3.org/1999/xhtml" '
@@ -114,7 +114,7 @@ def _package(
     extra_files: Mapping[str, bytes],
     omit_from_manifest: Sequence[str] = (),
 ) -> str:
-    """Файл пакета OPF с манифестом и порядком чтения."""
+    """OPF package file with manifest and spine."""
     items = [
         f'<item id="{_item_id(href)}" href="{href}" '
         f'media-type="{_media_type(href)}"/>'
@@ -144,7 +144,7 @@ def _package(
 
 
 def _navigation(toc: Sequence[tuple[str, str]]) -> str:
-    """Документ навигации EPUB3 с перечисленными пунктами оглавления."""
+    """EPUB3 navigation document with the listed TOC entries."""
     entries = "".join(f'<li><a href="{href}">{title}</a></li>' for href, title in toc)
     return xhtml_document(
         f'<nav epub:type="toc" id="toc"><ol>{entries}</ol></nav>', title="Navigation"
@@ -152,10 +152,11 @@ def _navigation(toc: Sequence[tuple[str, str]]) -> str:
 
 
 def _item_id(href: str) -> str:
-    """Идентификатор элемента манифеста, выведенный из его пути."""
+    """Manifest item ID derived from its path."""
     return href.replace("/", "-").replace(".", "-")
 
 
 def _media_type(href: str) -> str:
-    """Тип содержимого по расширению файла."""
+    """MIME content type derived from file extension."""
+    return _MEDIA_TYPES.get(Path(href).suffix, "application/octet-stream")
     return _MEDIA_TYPES.get(Path(href).suffix, "application/octet-stream")

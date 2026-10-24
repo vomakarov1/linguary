@@ -1,18 +1,18 @@
-"""Сквозной сценарий MVP целиком через Web UI (PRD § 5, § 21, § 28.2).
+"""MVP end-to-end pipeline entirely via Web UI (PRD § 5, § 21, § 28.2).
 
-Прикладной сквозной тест (`test_mvp_pipeline.py`) вызывает сценарии напрямую и проверяет
-их связность. Здесь проверяется то, чего он не касается: пользователь проходит весь путь
-только запросами к локальному приложению — загружает EPUB, запускает анализ, утверждает
-глоссарий, запускает обработку, смотрит результат, собирает книгу и скачивает её. Ни одно
-состояние в хранилище руками не кладётся: всё, что видит тест, получено предыдущим шагом
-самого сценария.
+The application-level end-to-end test (`test_mvp_pipeline.py`) calls use cases directly
+and tests their wiring. This test exercises what it does not touch: the user traverses
+the entire workflow solely through HTTP requests to the local application — uploads EPUB,
+triggers analysis, approves glossary, starts processing, reviews results, builds the book,
+and downloads it. No state is manually inserted into storage: everything seen by the test
+was produced by the preceding step of the scenario itself.
 
-Отдельно закрывается шаг `Validate` из PRD § 28.2: EPUBCheck подменён заглушкой, поэтому
-экспорт доходит до внешней проверки и её разобранного отчёта, а не останавливается на
-`not_validated`, как при отсутствующей Java.
+Specifically covers the `Validate` step from PRD § 28.2: EPUBCheck is replaced with a stub,
+allowing export to complete through external verification and its parsed report rather than
+stopping at `not_validated` as would happen without Java.
 
-Модель заменена `FakeLLMClient`, фоновый воркер выключен: задачи выполняются явным
-`drain_tasks`, иначе результат зависел бы от того, кто успел первым.
+Model is replaced with `FakeLLMClient`, background worker is disabled: tasks are executed
+via explicit `drain_tasks`, ensuring deterministic ordering.
 """
 
 from __future__ import annotations
@@ -41,13 +41,13 @@ from linguary.application.context_builder import textual_blocks
 from linguary.composition import Application, build_application, drain_tasks
 from linguary.web import create_app
 
-#: Языки книги: пара MVP (PRD § 4).
+#: Book languages: MVP pair (PRD § 4).
 SOURCE_LANGUAGE = "en"
 TARGET_LANGUAGE = "ru"
 
 
 async def test_web_pipeline_from_upload_to_download(tmp_path: Path) -> None:
-    """Пользователь проходит весь сценарий MVP через Web UI и скачивает готовый EPUB."""
+    """User traverses the entire MVP workflow via Web UI and downloads the completed EPUB."""
     model = FakeLLMClient()
     stub = install_epubcheck_stub(tmp_path / "epubcheck")
     application = _application(tmp_path, model, epubcheck=stub.settings)
@@ -124,7 +124,7 @@ async def test_web_pipeline_from_upload_to_download(tmp_path: Path) -> None:
 
 
 async def test_web_pipeline_refuses_to_run_ahead_of_the_user(tmp_path: Path) -> None:
-    """Шаги сценария нельзя переставить: каждый следующий закрыт до готовности книги."""
+    """Pipeline steps cannot be reordered: each subsequent step is locked until the book is ready."""
     model = FakeLLMClient()
     application = _application(tmp_path, model)
     try:
@@ -154,7 +154,7 @@ async def test_web_pipeline_refuses_to_run_ahead_of_the_user(tmp_path: Path) -> 
 def _application(
     tmp_path: Path, model: FakeLLMClient, *, epubcheck: EpubCheckSettings | None = None
 ) -> Application:
-    """Приложение поверх временного каталога данных с настроенной фиктивной моделью."""
+    """Application on a temporary data directory with configured fake model."""
     settings = AppSettings(
         llm=LLMSettings(
             model="fake-model",
@@ -177,9 +177,9 @@ def _application(
 
 
 def _http_client(application: Application) -> TestClient:
-    """Клиент локального Web UI без фонового воркера.
+    """Client for local Web UI without background worker.
 
-    Обращается по адресу самого приложения: сервер отвечает только по своим именам.
+    Requests are directed to application base URL: server responds only on its designated hostnames.
     """
     return TestClient(
         create_app(application=application, run_background_worker=False),
@@ -188,7 +188,7 @@ def _http_client(application: Application) -> TestClient:
 
 
 def _upload(http: TestClient) -> str:
-    """Загружает синтетическую книгу через форму Web UI и отдаёт её идентификатор."""
+    """Uploads synthetic book via Web UI form and returns its identifier."""
     response = http.post(
         "/books/upload",
         files={
@@ -211,17 +211,17 @@ def _upload(http: TestClient) -> str:
 
 
 def _book(http: TestClient, book_id: str) -> dict:
-    """Карточка книги, как её видит пользователь."""
+    """Book card as seen by the user."""
     response = http.get(f"/books/{book_id}")
     assert response.status_code == 200
     return response.json()
 
 
 def _document(application: Application, book_id: str):
-    """Каноническая модель импортированной книги.
+    """Canonical model of the imported book.
 
-    Единственное обращение теста к хранилищу мимо HTTP: по числу глав и текстовых блоков
-    готовятся ответы модели, и Web UI такого разреза книги не отдаёт.
+    The test's sole direct storage access bypassing HTTP: model replies are prepared
+    based on chapter and text block counts, which the Web UI does not expose in this manner.
     """
     with application.unit_of_work.transaction() as transaction:
         document = transaction.documents.get(book_id)

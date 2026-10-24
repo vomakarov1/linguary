@@ -1,4 +1,4 @@
-"""Импорт EPUB: порядок чтения, разделы, блоки и стабильные идентификаторы (P2.T1)."""
+"""EPUB import: reading order, sections, blocks, and stable identifiers (P2.T1)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ ReadFixture = Callable[..., ImportedBook]
 def test_reading_order_gives_one_section_per_spine_document(
     read_fixture: ReadFixture,
 ) -> None:
-    """Одна секция-глава соответствует одному XHTML-документу порядка чтения."""
+    """One chapter section corresponds to one XHTML document in the reading order."""
     document = read_fixture("synthetic_story").document
 
     sections = document.ordered_sections
@@ -43,7 +43,7 @@ def test_reading_order_gives_one_section_per_spine_document(
 
 
 def test_section_titles_come_from_navigation(read_fixture: ReadFixture) -> None:
-    """Заголовок главы берётся из nav/toc, если он там есть."""
+    """Chapter title is taken from nav/toc if present there."""
     document = read_fixture("synthetic_story").document
 
     assert [section.title for section in document.ordered_sections] == [
@@ -73,7 +73,7 @@ def test_section_title_whitespace_is_collapsed(
     head_title: str,
     heading: str,
 ) -> None:
-    """Пробельные символы внутри заголовка раздела схлопываются до одного пробела."""
+    """Whitespace characters inside section title are collapsed to single spaces."""
     source = build_epub(
         tmp_path / "book.epub",
         documents={
@@ -102,7 +102,7 @@ def test_section_title_whitespace_is_collapsed(
 def test_block_identifiers_are_stable_across_repeated_import(
     read_fixture: ReadFixture, name: str
 ) -> None:
-    """Повторный импорт той же книги даёт те же идентификаторы блоков в том же порядке."""
+    """Repeated import of the same book produces identical block IDs in the same order."""
     first = [block.id for block in read_fixture(name).document.blocks()]
     second = [block.id for block in read_fixture(name).document.blocks()]
 
@@ -113,7 +113,7 @@ def test_block_identifiers_are_stable_across_repeated_import(
 def test_block_identifier_depends_only_on_position_in_document(
     read_fixture: ReadFixture,
 ) -> None:
-    """Идентификатор блока считается по документу, ресурсу и структурному пути (ALG-01)."""
+    """Block ID is computed from document, resource, and structural path (ALG-01)."""
     document = read_fixture("synthetic_story", book_id="book-1").document
     other_book = read_fixture("synthetic_story", book_id="book-2").document
 
@@ -131,7 +131,7 @@ def test_block_identifier_depends_only_on_position_in_document(
 def test_block_identifiers_survive_text_edits(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Правка текста блока идентификатор блока не меняет (PRD § 8)."""
+    """Editing block text does not change its block identifier (PRD § 8)."""
     body = "<h1>{title}</h1><p>{first}</p><p>Second paragraph.</p>"
     original = build_epub(
         tmp_path / "original.epub",
@@ -164,7 +164,7 @@ def test_block_identifiers_survive_text_edits(
 def test_blocks_keep_document_order_and_source_reference(
     read_fixture: ReadFixture,
 ) -> None:
-    """Блоки идут в порядке документа и помнят, из какого XHTML они пришли."""
+    """Blocks follow document order and retain their source XHTML origin."""
     document = read_fixture("synthetic_story").document
 
     for section in document.ordered_sections:
@@ -178,7 +178,7 @@ def test_blocks_keep_document_order_and_source_reference(
 
 
 def test_block_order_follows_the_source_document(read_fixture: ReadFixture) -> None:
-    """Порядок блоков раздела повторяет порядок элементов исходного XHTML."""
+    """Order of blocks in a section mirrors the element order of source XHTML."""
     document = read_fixture("synthetic_story").document
     blocks = document.ordered_sections[0].ordered_blocks
 
@@ -200,7 +200,7 @@ def test_block_order_follows_the_source_document(read_fixture: ReadFixture) -> N
 
 
 def test_structural_blocks_are_recognised_by_type(read_fixture: ReadFixture) -> None:
-    """Заголовок, абзацы, пункты списка, цитата и изображение попадают в свои типы."""
+    """Headings, paragraphs, list items, quotes, and images map to their respective block types."""
     document = read_fixture("synthetic_story").document
     first_chapter = document.ordered_sections[0].ordered_blocks
 
@@ -220,7 +220,7 @@ def test_structural_blocks_are_recognised_by_type(read_fixture: ReadFixture) -> 
 
 
 def test_nested_block_points_to_its_parent(read_fixture: ReadFixture) -> None:
-    """Вложенность блока фиксируется `parent_id`, а не растворяется в тексте."""
+    """Block nesting is preserved via `parent_id` rather than flattened into text."""
     document = read_fixture("synthetic_story").document
     footnotes = [
         block for block in document.blocks() if block.type is BlockType.FOOTNOTE
@@ -234,7 +234,7 @@ def test_nested_block_points_to_its_parent(read_fixture: ReadFixture) -> None:
 
 
 def test_image_block_refers_to_manifest_resource(read_fixture: ReadFixture) -> None:
-    """Блок изображения ссылается на ресурс книги, а сам ресурс есть в модели."""
+    """Image block points to a book resource, and the resource itself exists in model."""
     imported = read_fixture("synthetic_story")
     images = [
         block for block in imported.document.blocks() if block.type is BlockType.IMAGE
@@ -256,7 +256,7 @@ def test_image_block_refers_to_manifest_resource(read_fixture: ReadFixture) -> N
 def test_table_is_preserved_without_internal_processing(
     read_fixture: ReadFixture,
 ) -> None:
-    """Сложная таблица сохраняется как `PRESERVE_OPAQUE`, а не разбирается по ячейкам."""
+    """Complex tables are preserved as `PRESERVE_OPAQUE` rather than parsed cell-by-cell."""
     document = read_fixture("great_gatsby").document
     tables = [block for block in document.blocks() if block.type is BlockType.TABLE]
 
@@ -265,7 +265,7 @@ def test_table_is_preserved_without_internal_processing(
 
 
 def test_toc_mismatch_is_reported_as_warning(read_fixture: ReadFixture) -> None:
-    """Книга, где несколько глав лежат в одном документе, импортируется с предупреждением."""
+    """A book where multiple chapters reside in a single document imports with a warning."""
     imported = read_fixture("great_gatsby")
 
     mismatches = [
@@ -281,7 +281,7 @@ def test_toc_mismatch_is_reported_as_warning(read_fixture: ReadFixture) -> None:
 def test_matching_navigation_gives_no_mismatch_warning(
     read_fixture: ReadFixture,
 ) -> None:
-    """Совпадающее с документами оглавление предупреждения не порождает."""
+    """Matching navigation TOC does not produce mismatch warnings."""
     imported = read_fixture("synthetic_story")
 
     assert not [
@@ -292,7 +292,7 @@ def test_matching_navigation_gives_no_mismatch_warning(
 
 
 def test_metadata_is_read_from_package(read_fixture: ReadFixture) -> None:
-    """Метаданные книги читаются из файла пакета."""
+    """Book metadata is read from the package file."""
     document = read_fixture("synthetic_story").document
 
     assert document.metadata.title == "The Lamp at Duskmere"
@@ -315,7 +315,7 @@ def test_metadata_is_read_from_package(read_fixture: ReadFixture) -> None:
 def test_every_fixture_book_imports_without_fatal(
     read_fixture: ReadFixture, name: str
 ) -> None:
-    """Каждая книга набора импортируется без `FATAL` и даёт непустую модель (PRD § 28.1)."""
+    """Every fixture book imports without `FATAL` status and yields a non-empty model (PRD § 28.1)."""
     imported = read_fixture(name)
 
     assert imported.document.sections
@@ -329,7 +329,7 @@ def test_every_fixture_book_imports_without_fatal(
 def test_broken_archive_is_fatal(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Нечитаемый файл книги импортировать нельзя."""
+    """An unreadable book file cannot be imported."""
     source = tmp_path / "broken.epub"
     source.write_bytes(b"not an archive at all")
 
@@ -340,7 +340,7 @@ def test_broken_archive_is_fatal(
 def test_archive_without_package_file_is_fatal(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Архив без файла пакета OPF импортировать нельзя."""
+    """An archive missing the OPF package file cannot be imported."""
     source = build_epub(
         tmp_path / "no_package.epub",
         documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
@@ -354,7 +354,7 @@ def test_archive_without_package_file_is_fatal(
 def test_book_without_reading_order_is_fatal(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Отсутствие порядка чтения делает импорт невозможным."""
+    """Missing reading order prevents import."""
     source = build_epub(
         tmp_path / "no_spine.epub",
         documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
@@ -368,7 +368,7 @@ def test_book_without_reading_order_is_fatal(
 def test_unparsable_document_is_fatal(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """XHTML, который нельзя разобрать до блоков, делает импорт невозможным."""
+    """XHTML that cannot be parsed into blocks makes import impossible."""
     source = build_epub(
         tmp_path / "broken_xhtml.epub",
         documents={"chapter1.xhtml": '<?xml version="1.0"?><html><body><p>Text'},
@@ -381,7 +381,7 @@ def test_unparsable_document_is_fatal(
 def test_lost_reading_order_document_is_fatal(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Документ порядка чтения, потерянный в архиве, делает импорт невозможным."""
+    """A reading-order document lost from archive makes import impossible."""
     source = build_epub(
         tmp_path / "lost_document.epub",
         documents={
@@ -398,7 +398,7 @@ def test_lost_reading_order_document_is_fatal(
 def test_import_use_case_stores_document_warnings_and_status(
     unit_of_work: SqlAlchemyUnitOfWork, reader: EbookLibEpubReader
 ) -> None:
-    """Сценарий импорта сохраняет книгу, её модель и предупреждения одной транзакцией."""
+    """Import use case stores the book, its model, and warnings in a single transaction."""
     source = str(_fixture_path("great_gatsby"))
     import_book = ImportBook(unit_of_work=unit_of_work, reader=reader)
 
@@ -430,7 +430,7 @@ def test_import_use_case_stores_document_warnings_and_status(
 def test_repeated_import_keeps_block_identifiers(
     unit_of_work: SqlAlchemyUnitOfWork, reader: EbookLibEpubReader
 ) -> None:
-    """Повторный импорт книги не меняет идентификаторы уже сохранённых блоков."""
+    """Repeated import does not alter identifiers of previously stored blocks."""
     command = ImportBookCommand(
         book_id="book-1",
         source_epub_path=str(_fixture_path("synthetic_story")),
@@ -453,7 +453,7 @@ def test_repeated_import_keeps_block_identifiers(
 def test_import_is_rejected_after_book_moved_past_import(
     unit_of_work: SqlAlchemyUnitOfWork, reader: EbookLibEpubReader
 ) -> None:
-    """Книгу, ушедшую дальше по процессу, импортировать повторно нельзя."""
+    """A book that progressed beyond import cannot be re-imported."""
     command = ImportBookCommand(
         book_id="book-1",
         source_epub_path=str(_fixture_path("synthetic_story")),
@@ -480,12 +480,12 @@ def test_import_is_rejected_after_book_moved_past_import(
 
 
 def _request(source: Path) -> EpubReadRequest:
-    """Запрос на чтение книги, собранной в самом тесте."""
+    """Request to read an in-test synthesized EPUB book."""
     return EpubReadRequest(
         book_id="book-1", source_path=str(source), target_language="ru"
     )
 
 
 def _fixture_path(name: str) -> Path:
-    """Путь к книге тестового набора."""
+    """Path to a fixture EPUB in the test suite."""
     return Path(__file__).resolve().parents[2] / "fixtures" / "epub" / f"{name}.epub"

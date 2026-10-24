@@ -1,4 +1,4 @@
-"""Изменение настроек через HTTP при работе настоящей очереди и собственных клиентов."""
+"""Changing settings via HTTP while real task queue and owned clients are running."""
 from __future__ import annotations
 
 import asyncio
@@ -34,7 +34,7 @@ def payload(**changes):
 
 
 class Provider:
-    """Барьеры HTTP-вызовов и закрытий; записи наблюдений не содержат ключи."""
+    """HTTP call and close barriers; observation records do not expose keys."""
 
     def __init__(self):
         self.calls = []
@@ -51,7 +51,7 @@ class Provider:
         model = body["model"]
         expected_key = "old-generation-secret" if model == "old-model" else "new-generation-secret"
         if request.headers["Authorization"] != f"Bearer {expected_key}":
-            raise AssertionError("Поколение отправило неверный ключ авторизации")
+            raise AssertionError("Generation sent an invalid authorization key")
         index = len(self.calls)
         self.calls.append((str(request.url), model, self.clock()))
         self.entered[index].set()

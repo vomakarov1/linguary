@@ -1,4 +1,4 @@
-"""HTTP-контракты настроек, происхождение и безопасный повторный HTML."""
+"""Settings HTTP contracts, request origin, and safe resubmission HTML."""
 import asyncio
 from dataclasses import asdict
 from fastapi.testclient import TestClient

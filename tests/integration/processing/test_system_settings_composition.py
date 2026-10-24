@@ -1,4 +1,4 @@
-"""Сборка приложения загружает сохранённые настройки и сохраняет устойчивые службы."""
+"""Application build loads saved settings and preserves long-lived services."""
 from dataclasses import replace
 from pathlib import Path
 import traceback

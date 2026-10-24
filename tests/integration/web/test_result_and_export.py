@@ -1,4 +1,4 @@
-"""Результат по блокам, повторы и экспорт EPUB (API-01, P4.T3)."""
+"""Block-level results, retries, and EPUB export (API-01, P4.T3)."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from linguary.web.schemas import ResultBlockResponse
 def test_result_exposes_blocks_warnings_and_epubcheck_status(
     client: TestClient, application: Application
 ) -> None:
-    """Результат сохраняет порядок блоков и показывает замечания и EPUBCheck."""
+    """Result preserves block order and displays warnings and EPUBCheck status."""
     scenario = store_book(
         application,
         status=BookStatus.COMPLETED,
@@ -94,7 +94,7 @@ def test_result_exposes_blocks_warnings_and_epubcheck_status(
 def test_result_block_keeps_its_chapter_number_and_planned_treatment(
     client: TestClient, application: Application
 ) -> None:
-    """Отдельный блок читается со своим номером главы, режимом и сохранённым результатом."""
+    """Individual block is retrieved with its chapter number, treatment, and stored result."""
     scenario = store_book(
         application,
         status=BookStatus.COMPLETED,
@@ -119,7 +119,7 @@ def test_result_block_keeps_its_chapter_number_and_planned_treatment(
 def test_result_block_without_stored_result_shows_only_its_plan(
     client: TestClient, application: Application
 ) -> None:
-    """Ещё не обработанный блок отдаётся с режимом из плана и без результата."""
+    """Unprocessed block is returned with planned treatment and without result."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     block_id = scenario.block_ids()[0]
     start_run(application, scenario)
@@ -136,7 +136,7 @@ def test_result_block_without_stored_result_shows_only_its_plan(
 
 
 def test_unknown_book_result_returns_404(client: TestClient) -> None:
-    """Неизвестная книга не превращается в пустой результат."""
+    """Unknown book does not resolve into an empty result."""
     response = client.get("/books/unknown/result")
 
     assert response.status_code == 404
@@ -145,7 +145,7 @@ def test_unknown_book_result_returns_404(client: TestClient) -> None:
 def test_failed_task_retry_returns_pending_task(
     client: TestClient, application: Application
 ) -> None:
-    """Повтор снимает ошибку задачи и возвращает её новое состояние."""
+    """Retry clears task error and returns its new state."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     task = store_task(application, task=failed_task(scenario))
 
@@ -166,7 +166,7 @@ def test_failed_task_retry_returns_pending_task(
 
 
 def test_unknown_task_retry_returns_404(client: TestClient) -> None:
-    """Неизвестная задача отличается от конфликта состояния."""
+    """Unknown task retry is distinguished from a state conflict."""
     response = client.post("/tasks/unknown/retry")
 
     assert response.status_code == 404
@@ -175,7 +175,7 @@ def test_unknown_task_retry_returns_404(client: TestClient) -> None:
 def test_regeneration_returns_only_the_target_block(
     client: TestClient, application: Application
 ) -> None:
-    """Перегенерация ставит задачу и возвращает фрагмент выбранного блока."""
+    """Regeneration schedules a task and returns fragment of the target block."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     block_ids = scenario.block_ids()
     start_run(
@@ -214,7 +214,7 @@ def test_regeneration_returns_only_the_target_block(
 def test_regeneration_makes_the_previous_export_stale(
     client: TestClient, application: Application
 ) -> None:
-    """После изменения блока старая отметка EPUBCheck больше не считается актуальной."""
+    """After block modification, prior EPUBCheck status is invalidated."""
     scenario = store_book(application, status=BookStatus.COMPLETED)
     block_ids = scenario.block_ids()
     start_run(
@@ -244,7 +244,7 @@ def test_regeneration_makes_the_previous_export_stale(
 def test_html_regeneration_redirects_back_to_the_result_tab(
     client: TestClient, application: Application
 ) -> None:
-    """Браузерная форма не открывает голый HTML-фрагмент или JSON вместо страницы."""
+    """Browser form does not render a raw HTML fragment or JSON instead of a page."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     block_ids = scenario.block_ids()
     start_run(
@@ -268,7 +268,7 @@ def test_html_regeneration_redirects_back_to_the_result_tab(
 def test_fragment_regeneration_returns_the_updated_result_block(
     client: TestClient, application: Application
 ) -> None:
-    """Фронтенд получает один оформленный блок без перезагрузки всей страницы."""
+    """Frontend receives a single formatted block without reloading the full page."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     block_ids = scenario.block_ids()
     start_run(
@@ -297,10 +297,10 @@ def test_fragment_regeneration_returns_the_updated_result_block(
 def test_regenerating_block_shows_progress_right_after_refresh_is_requested(
     client: TestClient, application: Application
 ) -> None:
-    """Сразу после «Обновить» блок показывает, что перегенерация идёт (QA-14).
+    """Immediately after refresh request, block indicates that regeneration is running (QA-14).
 
-    Блок помечен занятым, кнопка неактивна и называет происходящее, а не остаётся
-    обычным «Обновить», по которому легко нажать ещё раз.
+    The block is marked busy, the button is disabled and reflects the in-progress state
+    instead of remaining an active button that could easily be clicked again.
     """
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     block_ids = scenario.block_ids()
@@ -324,7 +324,7 @@ def test_regenerating_block_shows_progress_right_after_refresh_is_requested(
 def test_fragment_result_block_polling_returns_the_current_block(
     client: TestClient, application: Application
 ) -> None:
-    """Опрос одного блока возвращает тот же частичный шаблон без создания задачи."""
+    """Polling a single block returns the same partial template without scheduling a task."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     block_ids = scenario.block_ids()
     start_run(
@@ -352,7 +352,7 @@ def test_fragment_result_block_polling_returns_the_current_block(
 def test_unknown_block_regeneration_returns_404(
     client: TestClient, application: Application
 ) -> None:
-    """Перегенерация неизвестного блока не создаёт фоновую задачу."""
+    """Regeneration of an unknown block does not schedule a background task."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     start_run(application, scenario)
 
@@ -368,7 +368,7 @@ def test_unknown_block_regeneration_returns_404(
 def test_export_is_rejected_with_unfinished_mandatory_task(
     client: TestClient, application: Application
 ) -> None:
-    """Обязательная незавершённая задача блокирует постановку экспорта с `409`."""
+    """Pending mandatory task prevents scheduling export with `409`."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     start_run(
         application,
@@ -403,7 +403,7 @@ def test_export_is_rejected_with_unfinished_mandatory_task(
 async def test_html_result_header_tracks_export_until_download_is_available(
     client: TestClient, application: Application
 ) -> None:
-    """Шапка результата показывает сборку EPUB и затем ссылку на скачивание."""
+    """Result header displays EPUB assembly and subsequently a download link."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     start_run(
         application,
@@ -440,7 +440,7 @@ async def test_html_result_header_tracks_export_until_download_is_available(
 async def test_download_serves_epub_only_after_successful_export(
     client: TestClient, application: Application
 ) -> None:
-    """До готовности скачивание запрещено, после неё возвращается EPUB-вложение."""
+    """Before completion download is rejected; once ready, an EPUB attachment is served."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     start_run(
         application,
@@ -468,7 +468,7 @@ async def test_download_serves_epub_only_after_successful_export(
 async def test_repeated_export_replaces_the_completed_task(
     client: TestClient, application: Application
 ) -> None:
-    """Завершённый идемпотентный ключ не мешает собрать EPUB повторно."""
+    """Completed idempotency key does not prevent building the EPUB again."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     start_run(
         application,
@@ -489,7 +489,7 @@ async def test_repeated_export_replaces_the_completed_task(
 
 
 def test_unknown_book_download_returns_404(client: TestClient) -> None:
-    """Скачивание неизвестной книги возвращает `404`."""
+    """Downloading an unknown book returns `404`."""
     response = client.get("/books/unknown/download")
 
     assert response.status_code == 404
@@ -498,7 +498,7 @@ def test_unknown_book_download_returns_404(client: TestClient) -> None:
 async def test_download_is_named_after_the_book_and_target_language(
     client: TestClient, application: Application
 ) -> None:
-    """Скачанная книга называется по названию и целевому языку, а не `translated.epub`."""
+    """Downloaded book is named after book title and target language rather than `translated.epub`."""
     scenario = store_book(
         application, status=BookStatus.READY_TO_EXPORT, title="The Keeper's Light"
     )
@@ -531,12 +531,12 @@ async def test_download_is_named_after_the_book_and_target_language(
     ],
 )
 def test_download_filename_is_safe_for_the_file_system(title: str, expected: str) -> None:
-    """Название из метаданных EPUB не выводит имя файла за пределы одного имени."""
+    """Title from EPUB metadata does not break the filename beyond a single filename."""
     assert download_filename(title, "ru") == expected
 
 
 def test_result_block_shows_footnote_marker_as_the_original_label() -> None:
-    """Экран результата показывает ссылку на сноску так же, как в оригинале (QA-08)."""
+    """Result screen displays footnote reference identically to the original label (QA-08)."""
     text = "Her face.[1] A pity."
     block = DocumentBlock.create(
         document_id="book-1",

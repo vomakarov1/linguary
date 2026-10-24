@@ -1,4 +1,4 @@
-"""Интеграционные тесты проверки соединения с LLM (POST /system/config/test)."""
+"""Integration tests for LLM connection check (POST /system/config/test)."""
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -73,7 +73,7 @@ def test_config_test_invalid_api_key_sanitized(configured_client):
 
 
 def test_config_test_unreachable_host(configured_client):
-    # Порт 59999 не слушает соединений
+    # Port 59999 does not listen for connections
     response = configured_client.post(
         "/system/config/test",
         json={

@@ -1,9 +1,9 @@
-"""Пределы распаковки архива на импорте: недоверенная книга не занимает машину (PRD § 6).
+"""Archive extraction limits during import: untrusted books do not overwhelm the host (PRD § 6).
 
-Файл EPUB — недоверенный вход: он может прийти от третьего лица и объявлять сотни
-гигабайт содержимого при небольшом размере на диске. Тест закрепляет, что пределы
-`ExtractionLimits` применяются до первого чтения записей архива, что отдельный документ
-порядка чтения ограничен своим пределом и что обычная книга по-прежнему импортируется.
+An EPUB file is untrusted input: it may originate from a third party and declare hundreds
+of gigabytes of uncompressed content while remaining tiny on disk. This test verifies
+that `ExtractionLimits` are enforced before entries are read, that individual reading-order
+documents are capped by their respective limit, and that regular books continue to import.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ from linguary.application.ports.epub import (
 
 ReadFixture = Callable[..., ImportedBook]
 
-#: Сколько байт объявляет запись-бомба: на диске она занимает единицы килобайт.
+#: Declared byte size of the compression bomb: takes only a few kilobytes on disk.
 BOMB_BYTES = 32 * 1024 * 1024
 
-#: Контейнер, в котором не объявлен файл пакета OPF.
+#: Container without OPF package file declared.
 CONTAINER_WITHOUT_ROOTFILE = (
     b'<?xml version="1.0" encoding="UTF-8"?>\n'
     b'<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" '
@@ -39,7 +39,7 @@ CONTAINER_WITHOUT_ROOTFILE = (
 
 
 def test_archive_declaring_more_than_the_limit_is_rejected(tmp_path: Path) -> None:
-    """Архив, заявивший объём больше допустимого, отвергается сообщением о пределе."""
+    """An archive declaring volume exceeding the limit is rejected with a limit message."""
     source = build_epub(
         tmp_path / "big.epub",
         documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
@@ -50,7 +50,7 @@ def test_archive_declaring_more_than_the_limit_is_rejected(tmp_path: Path) -> No
 
 
 def test_archive_with_too_many_entries_is_rejected(tmp_path: Path) -> None:
-    """Архив с числом файлов больше допустимого отвергается до чтения записей."""
+    """An archive with more entries than allowed is rejected before reading entries."""
     source = build_epub(
         tmp_path / "many.epub",
         documents={
@@ -64,10 +64,10 @@ def test_archive_with_too_many_entries_is_rejected(tmp_path: Path) -> None:
 
 
 def test_compressed_bomb_is_rejected_before_it_is_read(tmp_path: Path) -> None:
-    """Маленький архив, распаковывающийся в десятки мегабайт, до чтения не доходит.
+    """A small archive expanding into tens of megabytes is rejected prior to reading.
 
-    Отказ приходит от проверки объявленного объёма, а она идёт по оглавлению архива:
-    ни одна запись при этом не читается, и память машины не занимается.
+    The rejection triggers during declared volume validation over the zip central directory:
+    no entries are decompressed, sparing system memory.
     """
     source = build_epub(
         tmp_path / "bomb.epub",
@@ -83,10 +83,10 @@ def test_compressed_bomb_is_rejected_before_it_is_read(tmp_path: Path) -> None:
 
 
 def test_limit_rejection_names_sizes_and_hides_the_file_path(tmp_path: Path) -> None:
-    """Сообщение о пределе понятно пользователю и не раскрывает путь к файлу (QA-02).
+    """Limit rejection message is user-friendly and hides internal filesystem paths (QA-02).
 
-    Текст показывается в карточке книги, а файл лежит в каталоге данных приложения:
-    вместо пути и байтов пользователь видит объём книги и предел в мегабайтах.
+    The message is shown in the book card while the file lives in application storage:
+    instead of paths and byte counts, the user sees human-readable MB quantities.
     """
     source = build_epub(
         tmp_path / "bomb.epub",
@@ -105,7 +105,7 @@ def test_limit_rejection_names_sizes_and_hides_the_file_path(tmp_path: Path) -> 
 
 
 def test_missing_file_rejection_hides_the_file_path(tmp_path: Path) -> None:
-    """Ошибка файловой системы называет причину, а не путь в каталоге данных (QA-02)."""
+    """Filesystem error states the cause without exposing internal data directories (QA-02)."""
     missing = tmp_path / "books" / "book-1" / "source.epub"
 
     with pytest.raises(EpubImportFatalError) as error:
@@ -116,7 +116,7 @@ def test_missing_file_rejection_hides_the_file_path(tmp_path: Path) -> None:
 
 
 def test_spine_document_over_its_limit_is_rejected(tmp_path: Path) -> None:
-    """Документ порядка чтения крупнее своего предела отвергается отдельно."""
+    """A reading-order document exceeding its size limit is rejected separately."""
     source = build_epub(
         tmp_path / "long_chapter.epub",
         documents={"chapter1.xhtml": xhtml_document(f"<p>{'a' * 200_000}</p>")},
@@ -132,7 +132,7 @@ def test_spine_document_over_its_limit_is_rejected(tmp_path: Path) -> None:
 
 
 def test_book_within_the_limits_is_imported(tmp_path: Path) -> None:
-    """Книга в пределах распаковки импортируется как раньше."""
+    """A book within extraction limits imports as expected."""
     source = build_epub(
         tmp_path / "normal.epub",
         documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
@@ -148,7 +148,7 @@ def test_book_within_the_limits_is_imported(tmp_path: Path) -> None:
 def test_book_of_the_fixture_set_is_imported_with_default_limits(
     read_fixture: ReadFixture,
 ) -> None:
-    """Значения пределов по умолчанию не задевают книги тестового набора (PRD § 28.1)."""
+    """Default limits do not affect valid fixture books (PRD § 28.1)."""
     document = read_fixture("synthetic_story").document
 
     assert len(document.ordered_sections) == 3
@@ -195,7 +195,7 @@ def test_rejected_archive_is_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Архив, отвергнутый при открытии, закрывается сразу, а не ждёт сборки мусора."""
+    """An archive rejected on open is closed immediately without waiting for GC."""
     source = build_epub(
         tmp_path / "rejected.epub",
         documents={"chapter1.xhtml": xhtml_document("<p>Text.</p>")},
@@ -219,7 +219,7 @@ def test_rejected_archive_is_closed(
 
 
 def _read(source: Path, limits: ExtractionLimits) -> ImportedBook:
-    """Читает книгу читателем с заданными пределами распаковки."""
+    """Reads a book using a reader configured with the specified limits."""
     return EbookLibEpubReader(limits=limits).read(
         EpubReadRequest(
             book_id="book-1", source_path=str(source), target_language="ru"

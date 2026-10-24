@@ -1,9 +1,9 @@
-"""Загрузка EPUB: приём файла, регистрация книги и задача импорта (API-01, PRD § 21.2).
+"""EPUB upload: receiving file, registering book, and enqueuing import task (API-01, PRD § 21.2).
 
-Тест проходит весь стык загрузки: запрос браузера, сохранение файла в каталоге данных,
-запись книги в состоянии «Импортируется», задача очереди и её выполнение настоящим
-импортёром. Так проверяется и то, что composition root подключил импорту хранилище
-ресурсов: без него у книги не оказалось бы сохранённых копий.
+The test exercises the entire upload flow: browser request, saving file into data directory,
+registering book in "Importing" state, queueing task, and executing it via the real
+importer. This also verifies that the composition root connected resource storage
+to the importer: without it, the book would have no stored resource copies.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ from fastapi.testclient import TestClient
 from linguary.composition import Application, drain_tasks
 from linguary.domain import BookStatus, TaskStatus, TaskType
 
-#: Маленькая синтетическая книга набора фикстур (PRD § 28.1).
+#: Small synthetic book from the fixture suite (PRD § 28.1).
 SYNTHETIC_BOOK = FIXTURE_DIRECTORY / "synthetic_story.epub"
 
 
 def upload(client: TestClient, *, path: Path, filename: str | None = None):
-    """Отправляет книгу формой загрузки, как это делает браузер."""
+    """Submits a book via the upload form, simulating a browser."""
     with path.open("rb") as file:
         return client.post(
             "/books/upload",
@@ -33,7 +33,7 @@ def upload(client: TestClient, *, path: Path, filename: str | None = None):
 
 
 def test_upload_redirects_to_the_book_card(client: TestClient) -> None:
-    """Загрузка отвечает переходом на карточку книги (API-01)."""
+    """Upload redirects to the book card (API-01)."""
     response = upload(client, path=SYNTHETIC_BOOK)
 
     assert response.status_code == 303
@@ -41,7 +41,7 @@ def test_upload_redirects_to_the_book_card(client: TestClient) -> None:
 
 
 def test_uploaded_book_appears_in_the_list_as_importing(client: TestClient) -> None:
-    """Книга появляется в списке сразу после загрузки, в состоянии импорта (PRD § 18)."""
+    """Uploaded book appears in the list immediately in importing state (PRD § 18)."""
     upload(client, path=SYNTHETIC_BOOK, filename="Синтетическая история.epub")
 
     books = client.get("/books").json()["books"]
@@ -57,7 +57,7 @@ def test_uploaded_book_appears_in_the_list_as_importing(client: TestClient) -> N
 def test_upload_saves_the_file_into_the_data_directory(
     client: TestClient, application: Application
 ) -> None:
-    """Файл книги ложится в каталог данных под идентификатором книги (PRD § 22)."""
+    """Book file is stored in the data directory under the book ID (PRD § 22)."""
     location = upload(client, path=SYNTHETIC_BOOK).headers["location"]
     book_id = location.rsplit("/", 1)[-1]
 
@@ -70,7 +70,7 @@ def test_upload_saves_the_file_into_the_data_directory(
 def test_upload_enqueues_the_import_task(
     client: TestClient, application: Application
 ) -> None:
-    """Загрузка ставит задачу импорта, а не выполняет разбор в запросе (PRD § 18.1)."""
+    """Upload enqueues an import task instead of parsing in the request handler (PRD § 18.1)."""
     book_id = upload(client, path=SYNTHETIC_BOOK).headers["location"].rsplit("/", 1)[-1]
 
     with application.unit_of_work.transaction() as uow:
@@ -84,7 +84,7 @@ def test_upload_enqueues_the_import_task(
 async def test_import_task_imports_the_uploaded_book(
     client: TestClient, application: Application
 ) -> None:
-    """Задача импорта разбирает загруженную книгу настоящим импортёром."""
+    """Import task parses the uploaded book using the real importer."""
     book_id = upload(client, path=SYNTHETIC_BOOK).headers["location"].rsplit("/", 1)[-1]
 
     finished = await drain_tasks(application)
@@ -98,7 +98,7 @@ async def test_import_task_imports_the_uploaded_book(
 async def test_import_task_stores_book_resources(
     client: TestClient, application: Application
 ) -> None:
-    """Импорт сохраняет ресурсы книги: хранилище подключено составом зависимостей."""
+    """Import task persists book resources: storage wired via dependency composition."""
     book_id = upload(client, path=SYNTHETIC_BOOK).headers["location"].rsplit("/", 1)[-1]
 
     await drain_tasks(application)
@@ -121,7 +121,7 @@ async def test_import_task_stores_book_resources(
 def test_upload_rejects_files_that_are_not_epub(
     client: TestClient, filename: str, expected: str
 ) -> None:
-    """Файл не в формате EPUB отвергается с `400` и объяснением (PRD § 4)."""
+    """Non-EPUB file is rejected with `400` and an explanation (PRD § 4)."""
     response = upload(client, path=SYNTHETIC_BOOK, filename=filename)
 
     assert response.status_code == 400
@@ -129,7 +129,7 @@ def test_upload_rejects_files_that_are_not_epub(
 
 
 def test_upload_without_languages_is_rejected(client: TestClient) -> None:
-    """Без выбранных языков форма отвергается проверкой входа (PRD § 21.2)."""
+    """Form without chosen languages is rejected by input validation (PRD § 21.2)."""
     with SYNTHETIC_BOOK.open("rb") as file:
         response = client.post(
             "/books/upload",
@@ -142,7 +142,7 @@ def test_upload_without_languages_is_rejected(client: TestClient) -> None:
 def test_rejected_upload_leaves_no_file_behind(
     client: TestClient, application: Application
 ) -> None:
-    """Отвергнутая загрузка не оставляет ни файла, ни книги в списке."""
+    """Rejected upload leaves neither a file nor a book record."""
     upload(client, path=SYNTHETIC_BOOK, filename="book.txt")
 
     assert client.get("/books").json() == {"books": []}
@@ -150,7 +150,7 @@ def test_rejected_upload_leaves_no_file_behind(
 
 
 def test_empty_file_is_rejected(client: TestClient, tmp_path: Path) -> None:
-    """Пустой файл книги отвергается: импортировать нечего."""
+    """Empty book file is rejected: nothing to import."""
     empty = tmp_path / "empty.epub"
     empty.write_bytes(b"")
 

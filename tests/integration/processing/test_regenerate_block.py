@@ -1,8 +1,8 @@
-"""Повторная генерация обработки одного блока (P3.T7, PRD § 13, § 19.3, § 21.5).
+"""Regeneration of a single block's processing (P3.T7, PRD § 13, § 19.3, § 21.5).
 
-Проверяется главное обещание действия: заменяется результат выбранного блока и только
-его. Соседние блоки модель видит как контекст сцены, но не переводит, а их сохранённые
-результаты остаются нетронутыми.
+Verifies the primary promise of the action: replaces the result of the selected block
+and only that block. The model sees neighboring blocks as scene context but does not
+translate them, and their stored results remain untouched.
 """
 
 from __future__ import annotations
@@ -38,16 +38,16 @@ from linguary.application.use_cases.regenerate_block import (
 )
 from linguary.domain import BlockProcessingResult, BlockTreatment
 
-#: Другой перевод того же абзаца: по нему видно, что результат блока действительно заменён.
+#: Another translation of the same paragraph: demonstrates that the block result was replaced.
 REGENERATED_TEXT = "Всем известно: одинокий богач непременно ищет себе жену."
 
-#: Ответ не на целевом языке и длиннее порога проверки языка: такой результат отбраковывается.
+#: Response not in the target language and longer than language check threshold: rejected.
 UNTRANSLATED_TEXT = (
     "This paragraph came back in English instead of Russian, so the language check "
     "must reject the whole answer."
 )
 
-#: Глава из пяти различимых абзацев: по тексту видно, какие соседи попали в запрос.
+#: Chapter of five distinct paragraphs: makes it clear which neighbors entered the request.
 DISTINCT_CHAPTER = (
     "The first paragraph opens the scene.",
     "The second paragraph introduces the guest.",
@@ -60,13 +60,13 @@ DISTINCT_CHAPTER = (
 def stored_results(
     unit_of_work: SqlAlchemyUnitOfWork, run_id: str = RUN_ID
 ) -> tuple[BlockProcessingResult, ...]:
-    """Сохранённые результаты запуска в порядке блоков документа."""
+    """Stored run results in document block order."""
     with unit_of_work.transaction() as uow:
         return uow.results.list_for_run(run_id)
 
 
 def _delete_run(unit_of_work: SqlAlchemyUnitOfWork) -> None:
-    """Удаляет активный запуск книги: так выглядит возврат к проверке глоссария."""
+    """Deletes the active run of the book: represents returning to glossary review."""
     with unit_of_work.transaction() as uow:
         uow.runs.delete(RUN_ID)
 
@@ -77,7 +77,7 @@ async def process_chapter(
     aliases: tuple[str, ...],
     notes: Sequence[Mapping[str, Any]] = (),
 ) -> None:
-    """Обрабатывает первую главу целиком: у блоков появляются результаты и заметки."""
+    """Processes the first chapter entirely: blocks receive results and notes."""
     process, _ = make_process_chapter(
         unit_of_work, FakeLLMClient.always(translated_reply(aliases, notes=notes))
     )
@@ -87,7 +87,7 @@ async def process_chapter(
 async def test_regeneration_replaces_only_the_target_block(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Повторная генерация меняет выбранный блок и не трогает соседние (PRD § 21.5)."""
+    """Regeneration changes the selected block and leaves neighbors untouched (PRD § 21.5)."""
     scenario = store_processing_book(
         unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT),)
     )
@@ -112,7 +112,7 @@ async def test_regeneration_replaces_only_the_target_block(
 async def test_regeneration_replaces_notes_of_the_target_block(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Заметки заменяются вместе с блоком и не сталкиваются с чужими (PRD § 19.3)."""
+    """Notes are replaced together with the block and do not collide with others (PRD § 19.3)."""
     scenario = store_processing_book(unit_of_work)
     await process_chapter(
         unit_of_work, aliases=("b1", "b2"), notes=(note_reply("b1"), note_reply("b2"))
@@ -140,7 +140,7 @@ async def test_regeneration_replaces_notes_of_the_target_block(
 async def test_request_carries_neighbour_blocks_without_aliases(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Соседние абзацы идут в запрос контекстом сцены, а обрабатывается один блок."""
+    """Neighboring paragraphs enter the request as scene context, while only one block is processed."""
     scenario = store_processing_book(unit_of_work, chapters=(DISTINCT_CHAPTER,))
     client = FakeLLMClient.always(
         translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)])
@@ -162,7 +162,7 @@ async def test_request_carries_neighbour_blocks_without_aliases(
 async def test_neighbour_context_is_limited_by_the_builder(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Соседей ровно столько, сколько разрешает `ContextBuilder`, и только своей главы."""
+    """Neighbors count is exactly as limited by `ContextBuilder`, and only within its chapter."""
     scenario = store_processing_book(unit_of_work, chapters=(DISTINCT_CHAPTER,))
     client = FakeLLMClient.always(
         translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)])
@@ -184,7 +184,7 @@ async def test_neighbour_context_is_limited_by_the_builder(
 async def test_result_for_a_neighbour_block_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Модель, вернувшая заодно соседний блок, результата не сохраняет (ALG-04)."""
+    """A model returning an extra neighboring block has its result rejected (ALG-04)."""
     scenario = store_processing_book(unit_of_work)
     await process_chapter(unit_of_work, aliases=("b1", "b2"))
     client = FakeLLMClient.always(
@@ -211,7 +211,7 @@ async def test_result_for_a_neighbour_block_is_rejected(
 async def test_repeated_rejection_asks_the_model_again_with_the_alias(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Повтор получает уточнение с тем именем блока, которое видела модель (ALG-05)."""
+    """Retry receives clarification with the block alias that the model saw (ALG-05)."""
     scenario = store_processing_book(unit_of_work)
     client = FakeLLMClient.replying(
         [
@@ -234,7 +234,7 @@ async def test_repeated_rejection_asks_the_model_again_with_the_alias(
 async def test_late_result_of_a_cancelled_run_is_discarded(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Запуск исчез, пока ответ был в пути, — результат не сохраняется (ALG-04)."""
+    """Run vanished while the response was in flight — result is not saved (ALG-04)."""
     scenario = store_processing_book(unit_of_work)
     client = InterruptingLLMClient(
         inner=FakeLLMClient.always(
@@ -255,7 +255,7 @@ async def test_late_result_of_a_cancelled_run_is_discarded(
 async def test_block_outside_the_book_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Блок, которого нет в книге, повторной генерации не получает."""
+    """A block not belonging to the book does not get regenerated."""
     store_processing_book(unit_of_work)
     regenerate, _ = make_regenerate_block(unit_of_work, FakeLLMClient())
 
@@ -268,7 +268,7 @@ async def test_block_outside_the_book_is_rejected(
 async def test_non_textual_block_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Иллюстрация результата обработки не имеет: генерировать заново нечего (PRD § 10.1)."""
+    """Illustration has no processing result: nothing to regenerate (PRD § 10.1)."""
     scenario = store_processing_book(unit_of_work, chapters=((SOURCE_TEXT, None),))
     client = FakeLLMClient()
     regenerate, _ = make_regenerate_block(unit_of_work, client)
@@ -284,7 +284,7 @@ async def test_non_textual_block_is_rejected(
 async def test_block_outside_the_treatment_plan_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Блок, который план не отдаёт модели, обрабатывать нельзя (PRD § 14)."""
+    """A block not dispatched to the model by the treatment plan cannot be processed (PRD § 14)."""
     scenario = store_processing_book(
         unit_of_work,
         chapters=((SOURCE_TEXT, SOURCE_TEXT),),
@@ -303,7 +303,7 @@ async def test_block_outside_the_treatment_plan_is_rejected(
 async def test_regeneration_without_an_active_run_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Без активного запуска заменять нечего: результаты хранит запуск (PRD § 22)."""
+    """Without an active run there is nothing to replace: the run holds the results (PRD § 22)."""
     scenario = store_processing_book(unit_of_work)
     with unit_of_work.transaction() as uow:
         uow.runs.delete(RUN_ID)
@@ -318,7 +318,7 @@ async def test_regeneration_without_an_active_run_is_rejected(
 async def test_rejected_variant_from_other_chapter_does_not_reach_regeneration(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Повторная генерация сверяет указания с кандидатами всей книги, как обработка (Д-4)."""
+    """Regeneration validates directives against candidates across the whole book, like processing (D-4)."""
     scenario = store_book_with_rejected_variant(unit_of_work)
     client = FakeLLMClient.always(
         translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)])

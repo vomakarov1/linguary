@@ -1,4 +1,4 @@
-"""Ручной разбор настроек не раскрывает исходный запрос или ключ."""
+"""Manual parsing of settings does not expose the raw request or key."""
 import json
 from dataclasses import asdict
 from urllib.parse import urlencode

@@ -1,4 +1,4 @@
-"""Параллелизм обработки и предел частоты в настоящем composition root (PRD § 25)."""
+"""Processing concurrency and rate limiting in real composition root (PRD § 25)."""
 
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ from linguary.application.ports.llm import LLMClient, LLMPayload, LLMRequest, LL
 from linguary.composition import Application, build_application, drain_tasks
 from linguary.domain import BookStatus, TaskStatus
 
-#: Шесть глав по два абзаца: работы хватает на несколько воркеров.
+#: Six chapters of two paragraphs each: enough work for multiple workers.
 SIX_CHAPTERS = tuple((SOURCE_TEXT, SOURCE_TEXT) for _ in range(6))
 
 
 @dataclass(slots=True)
 class TimedLLMClient(LLMClient):
-    """Клиент, запоминающий моменты вызовов модели."""
+    """Client recording timestamps of model calls."""
 
     inner: FakeLLMClient
     started: list[float] = field(default_factory=list)
@@ -44,7 +44,7 @@ class TimedLLMClient(LLMClient):
 def settings(
     tmp_path: Path, *, concurrency: int = 1, requests_per_minute: int | None = None
 ) -> AppSettings:
-    """Настройки приложения с заданным параллелизмом и пределом частоты."""
+    """Application settings with specified concurrency and rate limit."""
     return AppSettings(
         llm=LLMSettings(
             model="fake-model",
@@ -61,7 +61,7 @@ def settings(
 def build(
     tmp_path: Path, processing_task_ids: Callable[[], str]
 ) -> Iterator[Callable[..., Application]]:
-    """Сборка приложения; всё собранное закрывается после теста."""
+    """Application builder; all created applications are disposed after test."""
     built: list[Application] = []
 
     def make(app_settings: AppSettings, client: LLMClient, **overrides: object) -> Application:
@@ -82,7 +82,7 @@ def build(
 def test_worker_concurrency_comes_from_settings(
     tmp_path: Path, build: Callable[..., Application]
 ) -> None:
-    """Параллелизм воркера задаётся секцией `[worker]`, а не кодом (PRD § 25)."""
+    """Worker concurrency is driven by `[worker]` section rather than hardcoded (PRD § 25)."""
     application = build(settings(tmp_path, concurrency=3), FakeLLMClient())
 
     assert application.worker_pool.concurrency == 3
@@ -91,7 +91,7 @@ def test_worker_concurrency_comes_from_settings(
 def test_explicit_worker_settings_override_configuration(
     tmp_path: Path, build: Callable[..., Application]
 ) -> None:
-    """Явно переданные настройки воркера важнее файла — так их задают тесты и CLI."""
+    """Explicit worker settings override configuration file — used by tests and CLI."""
     application = build(
         settings(tmp_path, concurrency=3),
         FakeLLMClient(),
@@ -104,7 +104,7 @@ def test_explicit_worker_settings_override_configuration(
 async def test_configured_parallel_processing_finishes_the_book(
     tmp_path: Path, build: Callable[..., Application]
 ) -> None:
-    """Приложение с параллелизмом из настроек доводит обработку книги до конца."""
+    """Application with configured concurrency finishes book processing."""
     application = build(
         settings(tmp_path, concurrency=4),
         FakeLLMClient.always(translated_reply()),
@@ -127,7 +127,7 @@ async def test_configured_parallel_processing_finishes_the_book(
 async def test_requests_per_minute_spaces_calls_of_all_workers(
     tmp_path: Path, build: Callable[..., Application]
 ) -> None:
-    """Предел частоты общий для всех воркеров: вызовы модели идут не чаще заданного шага."""
+    """Rate limit is shared across all workers: model calls do not exceed specified rate."""
     client = TimedLLMClient(inner=FakeLLMClient.always(translated_reply()))
     application = build(
         settings(tmp_path, concurrency=3, requests_per_minute=600), client

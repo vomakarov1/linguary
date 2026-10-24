@@ -1,7 +1,7 @@
-"""Удаление запуска обработки: что исчезает вместе с ним, а что остаётся.
+"""Deleting a processing run: what disappears with it and what remains.
 
-Возврат к проверке глоссария физически удаляет результаты текущего запуска (PRD § 22),
-но импорт, блоки книги и анализ глав сохраняются: их пересчитывать не нужно.
+Returning to glossary review physically deletes results of the current run (PRD § 22),
+but import, book blocks, and chapter analyses are preserved: they do not need recomputation.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 
 @pytest.fixture
 def processed_book(unit_of_work: SqlAlchemyUnitOfWork) -> None:
-    """Книга с импортом, анализом главы, запуском обработки и его результатами."""
+    """Book with import, chapter analysis, processing run, and its results."""
     with unit_of_work.transaction() as uow:
         uow.books.add(make_book())
         uow.documents.save(make_document())
@@ -47,7 +47,7 @@ def processed_book(unit_of_work: SqlAlchemyUnitOfWork) -> None:
 
 
 def count(engine: Engine, model: type[Base]) -> int:
-    """Число строк таблицы модели."""
+    """Row count for a model table."""
     with Session(engine) as session:
         return session.scalar(select(func.count()).select_from(model)) or 0
 
@@ -55,7 +55,7 @@ def count(engine: Engine, model: type[Base]) -> int:
 def test_stored_results_are_readable_before_deletion(
     unit_of_work: SqlAlchemyUnitOfWork, processed_book: None
 ) -> None:
-    """Сохранённые результаты читаются в порядке блоков исходного документа."""
+    """Stored results are readable in original document block order."""
     with unit_of_work.transaction() as uow:
         results = uow.results.list_for_run(RUN_ID)
 
@@ -67,7 +67,7 @@ def test_stored_results_are_readable_before_deletion(
 def test_deleting_run_removes_results_notes_and_warnings(
     unit_of_work: SqlAlchemyUnitOfWork, processed_book: None, engine: Engine
 ) -> None:
-    """Удаление запуска каскадно удаляет результаты блоков, заметки и замечания."""
+    """Deleting a run cascades to block results, notes, and warnings."""
     assert count(engine, BlockResultRow) == 2
     assert count(engine, LanguageNoteRow) == 1
     assert count(engine, ResultWarningRow) == 1
@@ -83,7 +83,7 @@ def test_deleting_run_removes_results_notes_and_warnings(
 def test_deleting_run_keeps_blocks_and_chapter_analysis(
     unit_of_work: SqlAlchemyUnitOfWork, processed_book: None, engine: Engine
 ) -> None:
-    """Импорт и анализ главы переживают удаление запуска обработки."""
+    """Import and chapter analysis survive the deletion of a processing run."""
     with unit_of_work.transaction() as uow:
         uow.runs.delete(RUN_ID)
 
@@ -102,7 +102,7 @@ def test_deleting_run_keeps_blocks_and_chapter_analysis(
 def test_replacing_results_does_not_duplicate_notes(
     unit_of_work: SqlAlchemyUnitOfWork, processed_book: None, engine: Engine
 ) -> None:
-    """Повторное сохранение результата блока заменяет прежний, а не добавляет второй."""
+    """Re-saving a block result replaces the previous one instead of adding a second."""
     with unit_of_work.transaction() as uow:
         uow.results.replace_results(RUN_ID, [make_translated_result()])
 

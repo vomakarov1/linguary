@@ -1,9 +1,9 @@
-"""Поздний результат обработки и активный запуск книги (P3.T6, ALG-04).
+"""Late processing result and active book run (P3.T6, ALG-04).
 
-Вызов модели идёт вне транзакции, поэтому между отправкой запроса и сохранением ответа
-пользователь успевает вернуться к проверке глоссария: запуск с его результатами удаляется
-(P3.T7). Транзакция сохранения обязана заметить это и отбросить пришедший результат —
-иначе в книге появились бы переводы из отменённого запуска.
+Model invocation occurs outside a transaction, so between request dispatch and reply persistence
+a user may return to glossary review: the run with its results is removed (P3.T7).
+The saving transaction must detect this and discard the arriving result —
+otherwise translations from a cancelled run would appear in the book.
 """
 
 from __future__ import annotations
@@ -38,12 +38,12 @@ from linguary.domain import (
 
 
 def command() -> ProcessChapterCommand:
-    """Команда обработки первой главы книги."""
+    """Command to process the first chapter of the book."""
     return ProcessChapterCommand(book_id=BOOK_ID, section_id="section-1")
 
 
 def reset_processing(unit_of_work: SqlAlchemyUnitOfWork) -> Callable[[], None]:
-    """Возврат к проверке глоссария: запуск с результатами удалён (PRD § 11, P3.T7)."""
+    """Reset to glossary review: run with results is deleted (PRD § 11, P3.T7)."""
 
     def reset() -> None:
         with unit_of_work.transaction() as uow:
@@ -63,7 +63,7 @@ def reset_processing(unit_of_work: SqlAlchemyUnitOfWork) -> Callable[[], None]:
 
 
 def start_new_run(unit_of_work: SqlAlchemyUnitOfWork) -> Callable[[], None]:
-    """Сброс обработки и новый запуск: у книги снова есть активный запуск, но другой."""
+    """Processing reset and new run: the book has an active run again, but a different one."""
     reset = reset_processing(unit_of_work)
 
     def restart() -> None:
@@ -96,7 +96,7 @@ def start_new_run(unit_of_work: SqlAlchemyUnitOfWork) -> Callable[[], None]:
 async def test_result_of_a_cancelled_run_is_discarded(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Запуска больше нет — результат не сохраняется, обработка главы останавливается."""
+    """The run no longer exists — result is not saved, chapter processing halts."""
     store_processing_book(
         unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT),)
     )
@@ -121,7 +121,7 @@ async def test_result_of_a_cancelled_run_is_discarded(
 async def test_result_of_a_previous_run_does_not_reach_the_new_one(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Ответ старого запуска не попадает в результаты нового запуска той же книги."""
+    """Reply from an old run does not reach results of the new run for the same book."""
     store_processing_book(unit_of_work)
     client = InterruptingLLMClient(
         inner=FakeLLMClient.always(translated_reply()),

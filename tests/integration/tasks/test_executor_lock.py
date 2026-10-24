@@ -1,8 +1,8 @@
-"""Отметка исполнителей очереди: кто ещё выполняет задачи той же базы (ALG-02).
+"""Tracking queue executors: identifying other workers operating on the same database (ALG-02).
 
-Восстановление прерванных задач опирается на единственный ответ отметки — один ли
-исполнитель работает с базой. Тесты закрепляют этот ответ для исполнителей, стартующих
-друг за другом, и то, что ушедший исполнитель перестаёт считаться живым.
+Recovery of interrupted tasks relies on a single query to the lock: whether the current
+executor is alone operating on the database. Tests verify this behavior for executors starting
+sequentially, and ensure that an executor that left is no longer counted as active.
 """
 
 from __future__ import annotations
@@ -16,12 +16,12 @@ from linguary.adapters.runtime import ExecutorLock
 
 @pytest.fixture
 def lock_path(tmp_path: Path) -> Path:
-    """Файл отметки исполнителей теста."""
+    """Lock file for tracking test executors."""
     return tmp_path / "linguary.db.executors.lock"
 
 
 def test_first_executor_is_alone(lock_path: Path) -> None:
-    """Исполнитель, рядом с которым никого нет, узнаёт, что он один."""
+    """An executor with no peers detects that it is alone."""
     lock = ExecutorLock(lock_path)
 
     try:
@@ -31,7 +31,7 @@ def test_first_executor_is_alone(lock_path: Path) -> None:
 
 
 def test_executor_started_next_to_a_working_one_is_not_alone(lock_path: Path) -> None:
-    """Второй исполнитель видит первого, и оба остаются отмеченными."""
+    """A second executor starting alongside an active one detects it is not alone, and both remain tracked."""
     first = ExecutorLock(lock_path)
     second = ExecutorLock(lock_path)
     try:
@@ -45,7 +45,7 @@ def test_executor_started_next_to_a_working_one_is_not_alone(lock_path: Path) ->
 
 
 def test_executor_that_left_is_no_longer_counted(lock_path: Path) -> None:
-    """После ухода исполнителя следующий снова стартует в одиночестве."""
+    """After an executor leaves, the subsequent executor starts alone again."""
     first = ExecutorLock(lock_path)
     first.join()
     first.share()
@@ -59,7 +59,7 @@ def test_executor_that_left_is_no_longer_counted(lock_path: Path) -> None:
 
 
 def test_joining_twice_is_rejected(lock_path: Path) -> None:
-    """Один объект отметки нельзя отметить повторно: вторая отметка повисла бы."""
+    """A single lock instance cannot join twice: the second entry would hang."""
     lock = ExecutorLock(lock_path)
     lock.join()
     try:

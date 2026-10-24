@@ -1,4 +1,4 @@
-"""Изолированный полный путь кандидата: fake проверяет контракт, но не качество модели."""
+"""Isolated full candidate path: fake verifies contract rather than model quality."""
 from dataclasses import dataclass
 from html import escape
 import hashlib
@@ -27,7 +27,7 @@ BOOK = 'content-plan-story'
 @pytest.fixture(autouse=True)
 def network_forbidden(monkeypatch):
     def forbidden(*args, **kwargs):
-        raise AssertionError('Сквозная проверка не должна обращаться к сети')
+        raise AssertionError('End-to-end check must not make network calls')
     monkeypatch.setattr(socket, 'create_connection', forbidden)
     monkeypatch.setattr(socket.socket, 'connect', forbidden)
     monkeypatch.setattr(httpx.Client, 'send', forbidden)

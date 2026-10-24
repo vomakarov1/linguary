@@ -1,4 +1,4 @@
-"""Миграции Alembic: применение на пустой базе и соответствие моделям."""
+"""Alembic migrations: application on an empty database and model compliance."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from sqlalchemy import Engine, JSON, inspect
 from linguary.adapters.db.engine import create_database_engine
 from linguary.adapters.db.models import Base
 
-#: Таблицы канонического блока SQL-01.
+#: Canonical SQL-01 tables.
 EXPECTED_TABLES = (
     "books",
     "sections",
@@ -39,7 +39,7 @@ EXPECTED_TABLES = (
 def test_upgrade_creates_schema_on_empty_database(
     alembic_config: Config, database_path: Path
 ) -> None:
-    """`alembic upgrade head` на пустом файле создаёт все таблицы SQL-01."""
+    """`alembic upgrade head` on an empty file creates all SQL-01 tables."""
     assert not database_path.exists()
 
     command.upgrade(alembic_config, "head")
@@ -55,7 +55,7 @@ def test_upgrade_creates_schema_on_empty_database(
 
 
 def test_migrated_schema_matches_models(engine: Engine) -> None:
-    """Схема после миграции совпадает с ORM-моделями: расхождений нет."""
+    """Schema after migration matches ORM models: no discrepancies."""
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
         differences = compare_metadata(context, Base.metadata)
@@ -63,7 +63,7 @@ def test_migrated_schema_matches_models(engine: Engine) -> None:
 
 
 def test_downgrade_removes_schema(alembic_config: Config, engine: Engine) -> None:
-    """Откат к базовой ревизии убирает все таблицы схемы."""
+    """Downgrade to base revision removes all schema tables."""
     command.downgrade(alembic_config, "base")
 
     tables = set(inspect(engine).get_table_names())
@@ -103,7 +103,7 @@ def test_downgrade_removes_schema(alembic_config: Config, engine: Engine) -> Non
 def test_migration_creates_required_index(
     engine: Engine, table: str, index_name: str
 ) -> None:
-    """Индексы SQL-01 создаются миграцией под ожидаемыми именами."""
+    """SQL-01 indexes are created by the migration under expected names."""
     names = {index["name"] for index in inspect(engine).get_indexes(table)}
     assert index_name in names, f"в таблице {table} нет индекса {index_name}: {sorted(names)}"
 

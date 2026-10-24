@@ -1,4 +1,4 @@
-"""Очередь локальных задач на настоящем SQLite: постановка и захват (ALG-02, P2.T7)."""
+"""Local task queue on real SQLite: enqueueing and claiming (ALG-02, P2.T7)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.runtime import SqliteTaskQueue
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
 
-#: Завершение захваченной задачи: успешное либо неуспешное.
+#: Finishing a claimed task: either succeeded or failed.
 FinishTask = Callable[[ProcessingTask], ProcessingTask]
 
 
@@ -20,7 +20,7 @@ async def test_enqueue_returns_existing_task_for_the_same_identity(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_book: None,
 ) -> None:
-    """Повторная постановка ключа `book_id + task_type + scope_id` дубликата не создаёт."""
+    """Repeated enqueue of the same key `book_id + task_type + scope_id` does not create a duplicate."""
     first = await task_queue.enqueue(make_identity())
 
     second = await task_queue.enqueue(make_identity())
@@ -35,7 +35,7 @@ async def test_enqueue_distinguishes_tasks_by_type_and_scope(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_book: None,
 ) -> None:
-    """Задачи разных типов и разных глав живут в очереди рядом."""
+    """Tasks of different types and different chapters coexist in the queue."""
     await task_queue.enqueue(make_identity(scope_id="section-1"))
     await task_queue.enqueue(make_identity(scope_id="section-2"))
     await task_queue.enqueue(make_identity(task_type=TaskType.EXPORT_BOOK, scope_id=""))
@@ -53,7 +53,7 @@ async def test_enqueue_distinguishes_tasks_by_type_and_scope(
 async def test_claim_takes_the_earliest_pending_task(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Захват идёт в порядке постановки задач в очередь."""
+    """Claiming proceeds in the order tasks were enqueued."""
     first = await task_queue.enqueue(make_identity(scope_id="section-1"))
     second = await task_queue.enqueue(make_identity(scope_id="section-2"))
 
@@ -67,7 +67,7 @@ async def test_claim_marks_task_running_and_counts_attempt(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_book: None,
 ) -> None:
-    """Захваченная задача становится `running`, а её попытка учтена."""
+    """Claimed task becomes `running` and its attempt is counted."""
     task = await task_queue.enqueue(make_identity())
 
     claimed = await task_queue.claim_next_pending()
@@ -83,7 +83,7 @@ async def test_claim_marks_task_running_and_counts_attempt(
 async def test_claim_returns_none_on_empty_queue(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Пустая очередь не отдаёт задачу."""
+    """Empty queue yields no task."""
     assert await task_queue.claim_next_pending() is None
 
 
@@ -97,10 +97,10 @@ async def test_claim_returns_none_on_empty_queue(
 async def test_finished_task_is_not_claimed_again(
     task_queue: SqliteTaskQueue, stored_book: None, finish: FinishTask
 ) -> None:
-    """Завершённая задача в очередь не возвращается (PRD § 18).
+    """Finished task is not claimed again (PRD § 18).
 
-    Успешная задача повторно не выполняется вовсе, неуспешную возвращает только явный
-    повтор пользователем.
+    A succeeded task is never executed again; a failed task is only returned
+    via an explicit user retry.
     """
     await task_queue.enqueue(make_identity())
     claimed = await task_queue.claim_next_pending()
@@ -113,7 +113,7 @@ async def test_finished_task_is_not_claimed_again(
 async def test_running_tasks_are_listed_for_recovery(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Незавершённые задачи видны отдельно: с них начинается восстановление после сбоя."""
+    """Running tasks are listed separately: crash recovery begins with them."""
     await task_queue.enqueue(make_identity(scope_id="section-1"))
     await task_queue.enqueue(make_identity(scope_id="section-2"))
     claimed = await task_queue.claim_next_pending()

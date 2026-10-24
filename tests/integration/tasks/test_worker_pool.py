@@ -1,4 +1,4 @@
-"""Ограничение параллелизма воркеров и их остановка (PRD § 25, P2.T7)."""
+"""Limiting worker parallelism and shutdown handling (PRD § 25, P2.T7)."""
 
 from __future__ import annotations
 
@@ -11,27 +11,27 @@ from linguary.adapters.runtime import SqliteTaskQueue, TaskWorkerPool, WorkerSet
 from linguary.application.task_runner import TaskHandler, TaskRunner
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
 
-#: Предел ожидания в тестах: страховка от зависания, а не часть проверки.
+#: Timeout limit in tests: safeguard against hanging, not part of the assertion.
 TIMEOUT_SECONDS = 5.0
 
-#: Ожидание встречи, которая по условию теста состояться не должна.
+#: Waiting for a rendezvous that by test design must not occur.
 IMPOSSIBLE_RENDEZVOUS_SECONDS = 0.2
 
 
 class InFlightCounter:
-    """Счётчик одновременно выполняемых обработчиков."""
+    """In-flight counter for simultaneously executing handlers."""
 
     def __init__(self) -> None:
         self.current = 0
         self.peak = 0
 
     def enter(self) -> None:
-        """Отмечает начало работы обработчика."""
+        """Marks the start of handler execution."""
         self.current += 1
         self.peak = max(self.peak, self.current)
 
     def leave(self) -> None:
-        """Отмечает завершение обработчика."""
+        """Marks the completion of handler execution."""
         self.current -= 1
 
 
@@ -41,12 +41,12 @@ def rendezvous_handler(
     *,
     timeout: float = TIMEOUT_SECONDS,
 ) -> TaskHandler:
-    """Обработчик, который завершается только вместе с остальными участниками встречи.
+    """Handler that completes only together with all rendezvous participants.
 
-    Встреча — управляемая точка синхронизации: обработчик не отпускает воркера, пока
-    нужное число задач не окажется в работе одновременно. Одновременность обеспечена
-    построением, а не удачным порядком выполнения корутин; если её нет, ожидание
-    оборвётся по таймауту и задача станет неуспешной.
+    The rendezvous is a controlled synchronization point: the handler does not release
+    the worker until the expected number of tasks are concurrently running.
+    Concurrency is ensured by design rather than coroutine scheduling luck; if absent,
+    the wait times out and the task fails.
     """
 
     async def handle(task: ProcessingTask) -> None:
@@ -62,7 +62,7 @@ def rendezvous_handler(
 
 
 async def enqueue_tasks(queue: SqliteTaskQueue, count: int) -> None:
-    """Ставит в очередь `count` задач анализа глав."""
+    """Enqueues `count` chapter analysis tasks."""
     for number in range(count):
         await queue.enqueue(make_identity(scope_id=f"section-{number}"))
 
@@ -70,7 +70,7 @@ async def enqueue_tasks(queue: SqliteTaskQueue, count: int) -> None:
 def make_pool(
     task_queue: SqliteTaskQueue, handler: TaskHandler, settings: WorkerSettings | None = None
 ) -> TaskWorkerPool:
-    """Пул воркеров над очередью с единственным обработчиком."""
+    """Worker pool over a queue with a single handler."""
     return TaskWorkerPool(
         TaskRunner(queue=task_queue, handlers={TaskType.ANALYZE_CHAPTER: handler}),
         settings,
@@ -81,7 +81,7 @@ def make_pool(
 async def test_simultaneous_handlers_are_limited_by_the_setting(
     task_queue: SqliteTaskQueue, stored_book: None, concurrency: int
 ) -> None:
-    """Одновременно выполняется ровно столько задач, сколько разрешает настройка."""
+    """Simultaneously executed tasks are strictly bounded by concurrency setting."""
     counter = InFlightCounter()
     await enqueue_tasks(task_queue, concurrency * 2)
     pool = make_pool(
@@ -100,11 +100,11 @@ async def test_simultaneous_handlers_are_limited_by_the_setting(
 async def test_default_setting_runs_tasks_one_after_another(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """По умолчанию вторая задача ждёт первую и одновременно с ней не выполняется.
+    """By default the second task waits for the first and does not run concurrently.
 
-    Обе задачи ждут встречи вдвоём. При параллелизме по умолчанию она невозможна, поэтому
-    ожидание обрывается, и обе задачи становятся неуспешными: это и есть доказательство
-    того, что одновременно работала одна задача (PRD § 25).
+    Both tasks wait for a rendezvous of 2 participants. With default concurrency this
+    is impossible, so the wait times out and both tasks fail: demonstrating that only
+    one task was running at a time (PRD § 25).
     """
     await enqueue_tasks(task_queue, 2)
     pool = make_pool(
@@ -123,7 +123,7 @@ async def test_default_setting_runs_tasks_one_after_another(
 async def test_pool_runs_until_stop_is_requested(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Постоянно работающий воркер ждёт новых задач и останавливается по запросу."""
+    """Continuously running worker waits for new tasks and shuts down on request."""
     executed = asyncio.Event()
 
     async def handle(task: ProcessingTask) -> None:
@@ -148,13 +148,13 @@ async def test_pool_runs_until_stop_is_requested(
     ],
 )
 def test_worker_settings_reject_meaningless_values(settings: dict[str, float]) -> None:
-    """Настройка воркера не принимает значений, при которых он не работает."""
+    """Worker settings reject invalid values under which it cannot run."""
     with pytest.raises(ValueError):
         WorkerSettings(**settings)
 
 
 class ControlledRunner:
-    """Каждый начатый захват остаётся занят до разрешения теста."""
+    """Each claimed task remains busy until released by the test."""
 
     def __init__(self):
         self.started = asyncio.Queue()

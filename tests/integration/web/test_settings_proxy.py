@@ -1,4 +1,4 @@
-"""Прокси: безопасный HTTP-контракт и реальная локальная маршрутизация."""
+"""Proxy: secure HTTP contract and real local routing."""
 import asyncio
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

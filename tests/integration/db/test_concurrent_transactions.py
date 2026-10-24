@@ -1,12 +1,12 @@
-"""Один unit of work обслуживает одновременные транзакции разных исполнений.
+"""A single unit of work serves concurrent transactions across different executions.
 
-Приложение собирается с единственным экземпляром транзакционной границы: с ним работают
-и веб-запросы в рабочих потоках FastAPI, и фоновый воркер очереди. Транзакция принадлежит
-исполнению, а не объекту, поэтому одновременная работа двух потоков — не вложенные
-транзакции и отказа не вызывает.
+The application is composed with a single instance of the transactional boundary: both
+FastAPI worker threads serving web requests and the background queue worker interact with it.
+A transaction belongs to the execution rather than the object, so simultaneous work from
+two threads does not constitute nested transactions and does not cause a failure.
 
-Вложенная транзакция того же исполнения остаётся ошибкой: сценарий обязан выбирать
-транзакционную границу явно.
+A nested transaction within the same execution remains an error: use cases must choose
+transaction boundaries explicitly.
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ import pytest
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.application.ports.persistence import PersistenceError
 
-#: Сколько раз каждый исполнитель открывает и закрывает транзакцию.
+#: How many times each executor opens and closes a transaction.
 _ROUNDS = 25
 
 
 def read_books(unit_of_work: SqlAlchemyUnitOfWork) -> int:
-    """Открывает транзакции подряд и возвращает число выполненных чтений."""
+    """Opens transactions sequentially and returns the number of completed reads."""
     for round_number in range(1, _ROUNDS + 1):
         with unit_of_work.transaction() as transaction:
             transaction.books.list_all()
@@ -34,7 +34,7 @@ def read_books(unit_of_work: SqlAlchemyUnitOfWork) -> int:
 def test_parallel_threads_do_not_share_one_transaction(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Транзакции разных потоков не мешают друг другу."""
+    """Transactions across different threads do not interfere with each other."""
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = [pool.submit(read_books, unit_of_work) for _ in range(4)]
         assert [result.result() for result in results] == [_ROUNDS] * 4
@@ -43,7 +43,7 @@ def test_parallel_threads_do_not_share_one_transaction(
 async def test_parallel_tasks_do_not_share_one_transaction(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Транзакции разных задач цикла событий не мешают друг другу."""
+    """Transactions across different event loop tasks do not interfere with each other."""
     results = await asyncio.gather(
         *(asyncio.to_thread(read_books, unit_of_work) for _ in range(4))
     )
@@ -54,7 +54,7 @@ async def test_parallel_tasks_do_not_share_one_transaction(
 def test_nested_transaction_is_still_rejected(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Вложенная транзакция одного исполнения по-прежнему отвергается."""
+    """Nested transaction within the same execution is still rejected."""
     with (
         unit_of_work.transaction(),
         pytest.raises(PersistenceError, match="вложенные транзакции"),
@@ -66,7 +66,7 @@ def test_nested_transaction_is_still_rejected(
 def test_repository_is_unavailable_after_the_transaction(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """После выхода из транзакции репозитории снова недоступны."""
+    """After exiting a transaction, repositories become unavailable again."""
     with unit_of_work.transaction() as transaction:
         transaction.books.list_all()
 

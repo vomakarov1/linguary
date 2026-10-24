@@ -1,9 +1,9 @@
-"""Общие фикстуры интеграционных тестов импорта EPUB.
+"""Shared fixtures for EPUB import integration tests.
 
-База данных поднимается так же, как в тестах хранилища: отдельный файл во временной
-директории и схема из миграции Alembic, а не из моделей. Фикстуры `tests/integration/db`
-видны только своей директории, поэтому здесь они собраны тем же способом, а не изобретены
-заново.
+The database is brought up just like in storage tests: a dedicated file in a temporary
+directory and schema created via Alembic migrations rather than from models. Fixtures
+in `tests/integration/db` are scoped to their directory, so here they are configured
+in the same manner rather than reinvented.
 """
 
 from __future__ import annotations
@@ -21,16 +21,16 @@ from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.epub import EbookLibEpubReader
 from linguary.application.ports.epub import EpubReadRequest, ImportedBook
 
-#: Корень репозитория: в нём лежат `alembic.ini` и каталог миграций.
+#: Repository root: contains `alembic.ini` and the migration directory.
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-#: Набор тестовых EPUB (PRD § 28.1).
+#: EPUB test fixture suite (PRD § 28.1).
 FIXTURE_DIRECTORY = REPO_ROOT / "tests" / "fixtures" / "epub"
 
 
 @pytest.fixture
 def reader() -> EbookLibEpubReader:
-    """Читатель EPUB, который проверяется этими тестами."""
+    """EPUB reader under test."""
     return EbookLibEpubReader()
 
 
@@ -38,7 +38,7 @@ def reader() -> EbookLibEpubReader:
 def read_fixture(
     reader: EbookLibEpubReader,
 ) -> Callable[..., ImportedBook]:
-    """Читает книгу набора по её имени без расширения."""
+    """Reads a fixture book by its stem name without extension."""
 
     def read(name: str, *, book_id: str = "book-1", **overrides: str) -> ImportedBook:
         return reader.read(
@@ -55,13 +55,13 @@ def read_fixture(
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:
-    """Путь к файлу базы данных теста."""
+    """Path to the test database file."""
     return tmp_path / "linguary.db"
 
 
 @pytest.fixture
 def migrated_database(database_path: Path) -> Config:
-    """База с применённой схемой: `alembic upgrade head` на пустом файле."""
+    """Database with applied schema: runs `alembic upgrade head` on an empty file."""
     config = Config(REPO_ROOT / "alembic.ini")
     config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", build_database_url(database_path))
@@ -71,7 +71,7 @@ def migrated_database(database_path: Path) -> Config:
 
 @pytest.fixture
 def engine(migrated_database: Config, database_path: Path) -> Iterator[Engine]:
-    """Движок SQLite поверх базы с применённой схемой."""
+    """SQLite engine backed by a migrated database."""
     engine = create_database_engine(database_path)
     try:
         yield engine
@@ -81,5 +81,5 @@ def engine(migrated_database: Config, database_path: Path) -> Iterator[Engine]:
 
 @pytest.fixture
 def unit_of_work(engine: Engine) -> SqlAlchemyUnitOfWork:
-    """Транзакционная граница поверх базы теста."""
+    """Transactional boundary over the test database."""
     return SqlAlchemyUnitOfWork.for_engine(engine)

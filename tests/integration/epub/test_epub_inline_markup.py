@@ -1,4 +1,4 @@
-"""Импорт EPUB: встроенное форматирование, ссылки и сноски (P2.T2)."""
+"""EPUB import: inline formatting, links, and footnotes (P2.T2)."""
 
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ from linguary.domain import (
 
 ReadFixture = Callable[..., ImportedBook]
 
-#: Разметка, которая не имеет смысла без адреса назначения.
+#: Annotations that require a target address.
 _TARGETED = (InlineAnnotationType.LINK, InlineAnnotationType.FOOTNOTE_REFERENCE)
 
 
 def anchor_index(document: CanonicalDocument) -> dict[str, DocumentBlock]:
-    """Отображение «путь ресурса#якорь → блок» для всей книги."""
+    """Mapping of "resource_path#anchor -> block" for the entire book."""
     index: dict[str, DocumentBlock] = {}
     for block in document.blocks():
         for anchor in block.attributes.get("anchor_ids", "").split():
@@ -33,7 +33,7 @@ def anchor_index(document: CanonicalDocument) -> dict[str, DocumentBlock]:
 
 
 def test_block_text_holds_no_markup(read_fixture: ReadFixture) -> None:
-    """`DocumentBlock.text` не содержит XHTML: оформление снято в разметку."""
+    """`DocumentBlock.text` contains no XHTML: markup is extracted into annotations."""
     document = read_fixture("dracula").document
 
     for block in document.blocks():
@@ -51,7 +51,7 @@ def test_block_text_holds_no_markup(read_fixture: ReadFixture) -> None:
 def test_inline_annotation_offsets_match_block_text(
     read_fixture: ReadFixture, annotation_type: InlineAnnotationType, expected: str
 ) -> None:
-    """Смещения разметки указывают ровно на оформленный фрагмент текста блока."""
+    """Annotation offsets point exactly to the styled text fragment in the block."""
     document = read_fixture("synthetic_story").document
     block = next(
         block
@@ -70,7 +70,7 @@ def test_inline_annotation_offsets_match_block_text(
 def test_emphasis_tags_map_to_distinct_annotation_types(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """`i`, `em`, `b` и `strong` дают разные виды встроенной разметки."""
+    """`i`, `em`, `b`, and `strong` yield distinct inline annotation types."""
     source = build_epub(
         tmp_path / "markup.epub",
         documents={
@@ -103,7 +103,7 @@ def test_emphasis_tags_map_to_distinct_annotation_types(
 def test_footnote_reference_resolves_to_original_footnote(
     read_fixture: ReadFixture,
 ) -> None:
-    """Ссылка на сноску ведёт к блоку сноски с её оригинальным идентификатором."""
+    """Footnote reference resolves to footnote block preserving its original identifier."""
     document = read_fixture("synthetic_story").document
     index = anchor_index(document)
 
@@ -128,7 +128,7 @@ def test_footnote_reference_resolves_to_original_footnote(
 def test_back_reference_from_footnote_returns_to_citation(
     read_fixture: ReadFixture,
 ) -> None:
-    """Обратная ссылка из текста сноски ведёт к блоку, где сноска процитирована."""
+    """Back reference from footnote text leads back to the citing block."""
     document = read_fixture("synthetic_story").document
     index = anchor_index(document)
 
@@ -157,7 +157,7 @@ def test_back_reference_from_footnote_returns_to_citation(
 def test_internal_links_resolve_for_both_href_styles(
     read_fixture: ReadFixture, name: str, expected_style: str
 ) -> None:
-    """Голая ссылка на фрагмент и ссылка с именем файла разрешаются одинаково."""
+    """Bare fragment link and filename-qualified link resolve identically."""
     document = read_fixture(name).document
     index = anchor_index(document)
 
@@ -178,7 +178,7 @@ def test_internal_links_resolve_for_both_href_styles(
 
 
 def test_original_footnotes_keep_their_identifiers(read_fixture: ReadFixture) -> None:
-    """Идентификаторы оригинальных сносок книги сохраняются без изменений."""
+    """Identifiers of the book's original footnotes remain intact."""
     document = read_fixture("beowulf").document
 
     footnote_ids = {
@@ -194,7 +194,7 @@ def test_original_footnotes_keep_their_identifiers(read_fixture: ReadFixture) ->
 def test_every_footnote_reference_points_to_a_footnote_block(
     read_fixture: ReadFixture,
 ) -> None:
-    """Книга со сносками восстанавливается без потери связей «ссылка → сноска»."""
+    """A book with footnotes recovers all link-to-footnote relationships without loss."""
     document = read_fixture("beowulf").document
     index = anchor_index(document)
 
@@ -214,7 +214,7 @@ def test_every_footnote_reference_points_to_a_footnote_block(
 def test_external_links_are_kept_as_written(
     reader: EbookLibEpubReader, tmp_path: Path
 ) -> None:
-    """Ссылка наружу книги не превращается во внутренний путь."""
+    """External links pointing outside the book are preserved as-is."""
     source = build_epub(
         tmp_path / "external.epub",
         documents={

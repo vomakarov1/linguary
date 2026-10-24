@@ -1,23 +1,21 @@
-"""Печатает сводку по каждому EPUB из набора тестовых фикстур.
+"""Prints a summary for each EPUB in the test fixture suite.
 
-Читает файлы как обычные zip-архивы (`zipfile` + `lxml`), не полагаясь на импортёр
-проекта — на момент написания скрипта импортёра ещё нет, а сам набор фикстур собирается
-именно для его будущей разработки.
+Reads files as standard zip archives (`zipfile` + `lxml`) without relying on the project's
+importer — at the time this script was written, the importer did not exist yet, and the fixture
+suite itself was assembled specifically for its future development.
 
-Для каждого `*.epub` в этой директории печатает: имя, размер, версию EPUB (`package/@version`
-из `content.opf`), число документов в spine, наличие nav (EPUB3) или toc.ncx (EPUB2), число
-изображений в манифесте, число внутренних ссылок и число элементов курсива/полужирного.
+For each `*.epub` in this directory, prints: name, size, EPUB version (`package/@version`
+from `content.opf`), number of spine documents, presence of nav (EPUB3) or toc.ncx (EPUB2),
+number of manifest images, number of internal links, and number of italic/bold elements.
 
-Внутренняя ссылка здесь — это `<a href="...">`, чьё значение содержит `#` (есть фрагмент).
-Реальные книги Project Gutenberg почти всегда ссылаются на сноски в форме
-`href="chapter.xhtml#fn1"` (путь + фрагмент), а не голым `href="#fn1"` — оба варианта
-одинаково остаются ссылками внутри самой книги, поэтому считаются вместе.
+An internal link here is `<a href="...">` containing `#` (has a fragment). Real books from
+Project Gutenberg almost always reference footnotes as `href="chapter.xhtml#fn1"` (path + fragment)
+rather than bare `href="#fn1"` — both remain internal links within the book, and are counted together.
 
-Перед разбором `content.opf` каждый файл проверяется на целостность через
-`zipfile.ZipFile.testzip()` — битый или обрезанный архив в наборе фикстур обесценил бы
-все тесты, которые на него полагаются.
+Prior to parsing `content.opf`, each file is checked for integrity via `zipfile.ZipFile.testzip()` —
+a corrupted or truncated archive would invalidate all tests relying on it.
 
-Запуск:
+Usage:
 
     uv run python tests/fixtures/epub/inspect_fixtures.py
 """
@@ -57,10 +55,10 @@ def find_opf_path(zf: zipfile.ZipFile) -> str:
     container = etree.fromstring(zf.read("META-INF/container.xml"))
     rootfile = container.find(f".//{{{CONTAINER_NS}}}rootfile")
     if rootfile is None:
-        raise ValueError("META-INF/container.xml не содержит rootfile")
+        raise ValueError("META-INF/container.xml does not contain rootfile")
     full_path = rootfile.get("full-path")
     if not full_path:
-        raise ValueError("rootfile без атрибута full-path")
+        raise ValueError("rootfile has no full-path attribute")
     return full_path
 
 
@@ -72,7 +70,7 @@ def inspect_book(path: Path) -> BookReport:
             bad_file = zf.testzip()
             report.testzip_ok = bad_file is None
             if bad_file is not None:
-                report.error = f"повреждён файл внутри архива: {bad_file}"
+                report.error = f"corrupted file inside archive: {bad_file}"
                 return report
 
             opf_path = find_opf_path(zf)
@@ -84,7 +82,7 @@ def inspect_book(path: Path) -> BookReport:
             manifest = opf_root.find(f"{{{OPF_NS}}}manifest")
             spine = opf_root.find(f"{{{OPF_NS}}}spine")
             if manifest is None or spine is None:
-                report.error = "content.opf без manifest или spine"
+                report.error = "content.opf missing manifest or spine"
                 return report
 
             items_by_id = {
@@ -117,15 +115,15 @@ def inspect_book(path: Path) -> BookReport:
                 try:
                     doc_bytes = zf.read(doc_path)
                 except KeyError:
-                    report.warnings.append(f"документ манифеста не найден в архиве: {doc_path}")
+                    report.warnings.append(f"manifest document not found in archive: {doc_path}")
                     continue
                 try:
                     doc_root = etree.fromstring(doc_bytes, etree.XMLParser(recover=True))
                 except etree.XMLSyntaxError as exc:
-                    report.warnings.append(f"{href}: не удалось разобрать XHTML ({exc})")
+                    report.warnings.append(f"{href}: failed to parse XHTML ({exc})")
                     continue
                 if doc_root is None:
-                    report.warnings.append(f"{href}: пустой результат разбора XHTML")
+                    report.warnings.append(f"{href}: empty XHTML parse result")
                     continue
 
                 for anchor in doc_root.iter():
@@ -145,27 +143,27 @@ def inspect_book(path: Path) -> BookReport:
 
 def format_report(report: BookReport) -> str:
     size_kb = report.size_bytes / 1024
-    lines = [f"=== {report.name} ({size_kb:.1f} КБ) ==="]
+    lines = [f"=== {report.name} ({size_kb:.1f} KB) ==="]
     lines.append(f"  testzip: {'OK' if report.testzip_ok else 'FAIL'}")
     if report.error:
-        lines.append(f"  ОШИБКА: {report.error}")
+        lines.append(f"  ERROR: {report.error}")
         return "\n".join(lines)
 
-    lines.append(f"  версия EPUB (package/@version): {report.epub_version}")
-    lines.append(f"  документов в spine: {report.spine_doc_count}")
-    lines.append(f"  nav/toc: {'есть' if report.has_nav_or_toc else 'нет'}")
-    lines.append(f"  изображений в манифесте: {report.image_count}")
-    lines.append(f"  внутренних ссылок (href с '#'): {report.internal_link_count}")
-    lines.append(f"  элементов i/em/b/strong: {report.italic_bold_count}")
+    lines.append(f"  EPUB version (package/@version): {report.epub_version}")
+    lines.append(f"  documents in spine: {report.spine_doc_count}")
+    lines.append(f"  nav/toc: {'yes' if report.has_nav_or_toc else 'no'}")
+    lines.append(f"  images in manifest: {report.image_count}")
+    lines.append(f"  internal links (href with '#'): {report.internal_link_count}")
+    lines.append(f"  i/em/b/strong elements: {report.italic_bold_count}")
     for warning in report.warnings:
-        lines.append(f"  предупреждение: {warning}")
+        lines.append(f"  warning: {warning}")
     return "\n".join(lines)
 
 
 def main() -> int:
     epub_files = sorted(FIXTURES_DIR.glob("*.epub"))
     if not epub_files:
-        print(f"В {FIXTURES_DIR} не найдено ни одного *.epub", file=sys.stderr)
+        print(f"No *.epub files found in {FIXTURES_DIR}", file=sys.stderr)
         return 1
 
     had_errors = False
@@ -176,7 +174,7 @@ def main() -> int:
         if report.error or not report.testzip_ok:
             had_errors = True
 
-    print(f"Всего файлов: {len(epub_files)}")
+    print(f"Total files: {len(epub_files)}")
     return 1 if had_errors else 0
 
 

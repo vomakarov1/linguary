@@ -1,9 +1,9 @@
-"""Состав зависимостей регистрирует обработчик каждого типа задач (ALG-02).
+"""Composition root registers a handler for each task type (ALG-02).
 
-До фазы 4 обработчиков не регистрировал никто, и задача любого типа, кроме импорта,
-честно падала с `PermanentError` «обработчик не зарегистрирован». Тест закрепляет
-обратное: каждый тип задач очереди доходит до своего сценария, поэтому неуспех задачи
-объясняется предметной причиной, а не отсутствием обработчика в собранном приложении.
+Before Phase 4, no handlers were registered, and a task of any type except import
+failed with a PermanentError "handler not registered". This test verifies the opposite:
+each queue task type reaches its use case, so task failures are explained by domain reasons
+rather than missing handlers in the composed application.
 """
 
 from __future__ import annotations
@@ -23,16 +23,16 @@ from linguary.domain import (
     TaskType,
 )
 
-#: Книга набора фикстур, путь к которой задаётся только в записи книги.
+#: Fixture suite book whose path is configured solely in the book record.
 SYNTHETIC_BOOK = FIXTURE_DIRECTORY / "synthetic_story.epub"
 
-#: Область задачи, которой в книге нет: сценарий обязан объяснить это по-своему,
-#: а не сообщить, что обработчика такого типа в приложении не собрано.
+#: Scope that does not exist in the book: the use case must explain this on its own,
+#: rather than reporting that no handler of this type was registered.
 MISSING_SCOPE = "scope-that-does-not-exist"
 
 
 def error_message(task: ProcessingTask) -> str:
-    """Сообщение об ошибке завершённой задачи."""
+    """Error message of a finished task."""
     assert task.last_error is not None
     return task.last_error.message
 
@@ -50,7 +50,7 @@ def error_message(task: ProcessingTask) -> str:
 async def test_every_task_type_reaches_its_use_case(
     application: Application, task_type: TaskType
 ) -> None:
-    """Задача каждого типа доходит до сценария, а не до отсутствующего обработчика."""
+    """Each task type reaches its use case rather than a missing handler error."""
     scenario = store_book(application)
     await application.task_queue.enqueue(
         TaskIdentity(
@@ -67,7 +67,7 @@ async def test_every_task_type_reaches_its_use_case(
 async def test_analysis_task_reports_the_missing_chapter(
     application: Application,
 ) -> None:
-    """Задача анализа доходит до сценария главы: он и объясняет отказ."""
+    """Analysis task reaches chapter use case, which provides the rejection reason."""
     scenario = store_book(application, analysed_chapters=())
     await application.task_queue.enqueue(
         TaskIdentity(
@@ -85,10 +85,10 @@ async def test_analysis_task_reports_the_missing_chapter(
 async def test_export_task_reaches_the_export_use_case(
     application: Application,
 ) -> None:
-    """Задача экспорта доходит до `ExportBook`: отказ приходит от состояния книги.
+    """Export task reaches `ExportBook`: rejection originates from book state.
 
-    Целевой файл экспортной задаче никто не передаёт — его выбирает раскладка каталога
-    данных, и другого места, где о ней известно, в приложении нет.
+    The destination file is not passed to the export task — it is selected by the data
+    directory layout, and there is no other place in the application aware of it.
     """
     scenario = store_book(application)
 
@@ -106,10 +106,10 @@ async def test_export_task_reaches_the_export_use_case(
 async def test_import_task_uses_the_path_from_the_book_record(
     application: Application,
 ) -> None:
-    """Задача импорта собирает команду из записи книги: путь берётся оттуда.
+    """Import task builds command from book record: path is taken from there.
 
-    Runner знает о задаче только идемпотентный ключ, поэтому команду сценария строит
-    состав зависимостей — иначе импортировать было бы нечего.
+    Runner only knows the task's idempotency key, so the use case command is built by
+    the composition root — otherwise there would be nothing to import.
     """
     scenario = store_book(application, status=BookStatus.IMPORTING)
     with application.unit_of_work.transaction() as uow:

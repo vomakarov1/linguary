@@ -1,9 +1,9 @@
-"""Блокирующие проверки результата обработки и повторы вызова (P3.T6, ALG-04, ALG-05).
+"""Blocking checks for processing results and call retries (P3.T6, ALG-04, ALG-05).
 
-Каждая проверка отбраковывает всю группу целиком: в хранилище не остаётся ни переводов,
-ни словарных подсказок, ни заметок этого ответа (PRD § 17). Ответы задаются текстом
-структурированного ответа, поэтому негодный ответ модели воспроизводится так же, как
-он пришёл бы от настоящего провайдера.
+Each check discards the entire block group: no translations, glossary hints,
+or language notes from that reply remain in storage (PRD § 17). Responses are defined
+by structured response text, so defective model replies are reproduced exactly as
+they would arrive from a real provider.
 """
 
 from __future__ import annotations
@@ -28,21 +28,21 @@ from linguary.application.retry_policy import ResultValidationError
 from linguary.application.use_cases.process_chapter import ProcessChapterCommand
 from linguary.domain import BlockTreatment
 
-#: Английский текст длиннее порога проверки языка: перевод на целевой язык не сделан.
+#: English text longer than language threshold: translation into target language was not performed.
 ENGLISH_TRANSLATION = (
     "It is a truth universally acknowledged that a single man in possession of "
     "a good fortune must be in want of a wife, whatever his own feelings may be."
 )
 
-#: Перевод, оборванный на полуслове: терминальной пунктуации нет, хотя в оригинале она есть.
+#: Translation truncated mid-sentence: missing terminal punctuation present in source.
 UNFINISHED_TRANSLATION = (
     "Общепризнанная истина гласит, что мужчина, располагающий средствами, непременно"
 )
 
-#: Ответ, оборванный пределом вывода: JSON не закрыт, и провайдер сообщил об обрыве.
+#: Response truncated by output limit: unclosed JSON, with truncation reported by provider.
 TRUNCATED_CONTENT = '{"blocks": [{"source_block_id": "b1", "treatment": "TRANSL'
 
-#: Отказ модели вместо перевода: формально корректный ответ, который в книгу не годится.
+#: Model refusal instead of translation: formally valid response unfit for the book.
 SERVICE_MESSAGE = (
     "Извините, но я не могу выполнить эту просьбу: как языковая модель я не перевожу "
     "художественные тексты целиком."
@@ -50,12 +50,12 @@ SERVICE_MESSAGE = (
 
 
 def command() -> ProcessChapterCommand:
-    """Команда обработки единственной главы книги."""
+    """Command for processing the single book chapter."""
     return ProcessChapterCommand(book_id=BOOK_ID, section_id="section-1")
 
 
 def assert_nothing_saved(unit_of_work: SqlAlchemyUnitOfWork, run_id: str) -> None:
-    """Отбракованная группа не оставляет в хранилище ничего (PRD § 17)."""
+    """Discarded group leaves nothing in storage (PRD § 17)."""
     with unit_of_work.transaction() as uow:
         assert uow.results.list_for_run(run_id) == ()
 
@@ -122,7 +122,7 @@ def assert_nothing_saved(unit_of_work: SqlAlchemyUnitOfWork, run_id: str) -> Non
 async def test_blocking_check_discards_the_whole_unit(
     unit_of_work: SqlAlchemyUnitOfWork, reply, reason: str
 ) -> None:
-    """Любая блокирующая проверка отменяет сохранение всей группы (PRD § 15)."""
+    """Any blocking check cancels saving of the entire group (PRD § 15)."""
     scenario = store_processing_book(unit_of_work)
     process, _ = make_process_chapter(
         unit_of_work, FakeLLMClient.always(reply), max_attempts=1
@@ -137,7 +137,7 @@ async def test_blocking_check_discards_the_whole_unit(
 async def test_treatment_of_the_answer_must_match_the_stored_plan(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Режим из плана — источник истины; расхождение отбраковывает группу (PRD § 14)."""
+    """Planned treatment is source of truth; discrepancy rejects the group (PRD § 14)."""
     scenario = store_processing_book(
         unit_of_work,
         chapters=((SOURCE_TEXT,),),
@@ -158,7 +158,7 @@ async def test_treatment_of_the_answer_must_match_the_stored_plan(
 async def test_repair_instruction_names_blocks_as_the_model_saw_them(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Повтор дописывает уточнение с псевдонимами и режимами блоков (ALG-05)."""
+    """Retry appends clarification with aliases and treatments of blocks (ALG-05)."""
     scenario = store_processing_book(unit_of_work)
     client = FakeLLMClient.replying(
         [translation_reply([block_reply("b1")]), translated_reply()]
@@ -178,7 +178,7 @@ async def test_repair_instruction_names_blocks_as_the_model_saw_them(
 async def test_transport_failure_retries_with_backoff_and_saves_nothing(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Сбой до транзакции исчерпывает попытки и не оставляет частичного результата."""
+    """Pre-transaction failure exhausts retry attempts and leaves no partial results."""
     scenario = store_processing_book(unit_of_work)
     client = FakeLLMClient.always(LLMTransportError("провайдер недоступен"))
     process, delays = make_process_chapter(unit_of_work, client, max_attempts=3)
@@ -194,7 +194,7 @@ async def test_transport_failure_retries_with_backoff_and_saves_nothing(
 async def test_transient_failure_of_one_unit_keeps_the_saved_one(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Группы сохраняются независимо: неудача второй не отменяет первую (PRD § 17)."""
+    """Groups are stored independently: failure of second does not discard first (PRD § 17)."""
     scenario = store_processing_book(
         unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT),)
     )
@@ -220,7 +220,7 @@ async def test_transient_failure_of_one_unit_keeps_the_saved_one(
 async def test_output_limit_truncation_is_not_retried_by_the_same_request(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Обрыв по лимиту вывода повтором не лечится: второго оплаченного вызова нет."""
+    """Output limit truncation is not retried: no second billed call is made."""
     scenario = store_processing_book(unit_of_work)
     client = FakeLLMClient.always(FakeReply(content=TRUNCATED_CONTENT, truncated=True))
     process, delays = make_process_chapter(unit_of_work, client, max_attempts=3)
@@ -237,7 +237,7 @@ async def test_output_limit_truncation_is_not_retried_by_the_same_request(
 async def test_unparsable_answer_without_truncation_is_still_retried(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Поломка формата без обрыва остаётся поводом для повтора: она случайна."""
+    """Format error without truncation is still retried: it is transient."""
     store_processing_book(unit_of_work)
     client = FakeLLMClient.replying(
         [FakeReply(content=TRUNCATED_CONTENT), translated_reply()]

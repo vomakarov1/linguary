@@ -1,4 +1,4 @@
-"""Тесты раздельной настройки моделей LLM для анализа и перевода."""
+"""Tests for separate LLM model configuration for analysis and translation."""
 
 from __future__ import annotations
 
@@ -14,14 +14,14 @@ from processing_scenario import BOOK_ID, store_processing_book
 
 
 class FailingClient:
-    """Клиент, отвергающий запросы ошибкой конфигурации для фиксации вызова в журнале."""
+    """Client rejecting requests with a configuration error to record the call in logs."""
 
     async def generate(self, request):
         raise LLMConfigurationError("Тестовая ошибка")
 
 
 def test_llm_snapshot_uses_effective_processing_model(tmp_path: Path) -> None:
-    """Снимок настроек при запуске обработки книги фиксирует effective_processing_model."""
+    """Settings snapshot when starting book processing records effective_processing_model."""
     settings = AppSettings(
         llm=LLMSettings(
             model="base-model",
@@ -41,7 +41,7 @@ def test_llm_snapshot_uses_effective_processing_model(tmp_path: Path) -> None:
 
 
 def test_llm_snapshot_falls_back_to_general_model(tmp_path: Path) -> None:
-    """Если processing_model не задан, снимок берёт общую model."""
+    """If processing_model is not set, snapshot falls back to general model."""
     settings = AppSettings(
         llm=LLMSettings(
             model="base-model",
@@ -59,7 +59,7 @@ def test_llm_snapshot_falls_back_to_general_model(tmp_path: Path) -> None:
 
 
 async def test_analysis_logs_analysis_model(tmp_path: Path) -> None:
-    """Анализ логирует вызовы под analysis_model."""
+    """Analysis logs calls under analysis_model."""
     settings = AppSettings(
         llm=LLMSettings(
             model="base-model",
@@ -85,7 +85,7 @@ async def test_analysis_logs_analysis_model(tmp_path: Path) -> None:
 
 
 async def test_processing_logs_processing_model(tmp_path: Path) -> None:
-    """Обработка (перевод) логирует вызовы под processing_model."""
+    """Processing (translation) logs calls under processing_model."""
     settings = AppSettings(
         llm=LLMSettings(
             model="base-model",

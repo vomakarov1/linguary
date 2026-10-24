@@ -1,4 +1,4 @@
-"""Машина состояний задачи в runner-е: исполнение, восстановление и повтор (P2.T7)."""
+"""Task state machine in the runner: execution, recovery, and retry (P2.T7)."""
 
 from __future__ import annotations
 
@@ -28,12 +28,12 @@ def make_runner(
     task_queue: SqliteTaskQueue,
     handlers: Mapping[TaskType, TaskHandler] | None = None,
 ) -> TaskRunner:
-    """Runner с указанным набором обработчиков."""
+    """Runner with the specified set of handlers."""
     return TaskRunner(queue=task_queue, handlers=handlers or {})
 
 
 def recording_handler(executed: list[str]) -> TaskHandler:
-    """Обработчик-двойник, отмечающий, какие задачи он выполнил."""
+    """Test double handler recording which tasks it executed."""
 
     async def handle(task: ProcessingTask) -> None:
         executed.append(task.id)
@@ -42,7 +42,7 @@ def recording_handler(executed: list[str]) -> TaskHandler:
 
 
 def failing_handler(error: Exception) -> TaskHandler:
-    """Обработчик-двойник, который всегда падает."""
+    """Test double handler that always fails."""
 
     async def handle(task: ProcessingTask) -> None:
         raise error
@@ -55,7 +55,7 @@ async def test_successful_task_becomes_succeeded(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_book: None,
 ) -> None:
-    """Успешно выполненная задача сохраняется как `succeeded` без ошибки."""
+    """Successfully completed task is stored as `succeeded` without error."""
     executed: list[str] = []
     task = await task_queue.enqueue(make_identity())
     runner = make_runner(
@@ -74,14 +74,14 @@ async def test_successful_task_becomes_succeeded(
 async def test_run_next_returns_none_on_empty_queue(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Пустая очередь не заставляет runner ничего выполнять."""
+    """Empty queue does not trigger any execution in the runner."""
     assert await make_runner(task_queue).run_next() is None
 
 
 async def test_failed_handler_marks_task_failed_with_typed_error(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Ошибка сценария даёт `failed` с типом, сообщением и технической деталью."""
+    """Handler failure yields `failed` status with type, message, and technical detail."""
     await task_queue.enqueue(make_identity())
     runner = make_runner(
         task_queue,
@@ -103,7 +103,7 @@ async def test_failed_handler_marks_task_failed_with_typed_error(
 async def test_error_classifier_defines_error_type(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Разбор ошибок подключается снаружи: runner собственной политики не изобретает."""
+    """Error classifier is plugged in externally: runner invents no policy of its own."""
     await task_queue.enqueue(make_identity())
     runner = TaskRunner(
         queue=task_queue,
@@ -123,10 +123,10 @@ async def test_error_classifier_defines_error_type(
 async def test_unregistered_task_type_fails_without_execution(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Тип без обработчика не выполняется втихую: задача падает с постоянной ошибкой.
+    """Unregistered task type fails without execution: task fails with permanent error.
 
-    Обработчики анализа главы, обработки `TranslationUnit` и повторной генерации появятся
-    в фазе 3; до этого runner честно сообщает, что выполнять задачу нечем.
+    Handlers for chapter analysis, `TranslationUnit` processing, and regeneration
+    are introduced in phase 3; before that the runner reports no available handler.
     """
     await task_queue.enqueue(make_identity(task_type=TaskType.PROCESS_TRANSLATION_UNIT))
     runner = make_runner(task_queue)
@@ -146,7 +146,7 @@ async def test_interrupted_tasks_fail_on_application_start(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_book: None,
 ) -> None:
-    """Задача, оставшаяся `running` после падения приложения, помечается прерванной."""
+    """Task remaining `running` after application crash is marked interrupted."""
     await task_queue.enqueue(make_identity())
     claimed = await task_queue.claim_next_pending()
     assert claimed is not None
@@ -166,7 +166,7 @@ async def test_interrupted_tasks_fail_on_application_start(
 async def test_recovery_leaves_finished_tasks_alone(
     task_queue: SqliteTaskQueue, stored_book: None
 ) -> None:
-    """Восстановление трогает только незавершённые задачи."""
+    """Recovery affects only unfinished tasks."""
     executed: list[str] = []
     await task_queue.enqueue(make_identity(scope_id="section-1"))
     pending = await task_queue.enqueue(make_identity(scope_id="section-2"))
@@ -188,7 +188,7 @@ async def test_retry_returns_failed_task_to_the_queue(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_book: None,
 ) -> None:
-    """Повтор возвращает неуспешную задачу в очередь, сохраняя счётчик попыток."""
+    """Retry returns failed task to the queue while preserving attempt count."""
     task = await task_queue.enqueue(make_identity())
     runner = make_runner(
         task_queue,
@@ -213,7 +213,7 @@ async def test_retried_task_is_executed_once_more(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_book: None,
 ) -> None:
-    """После повтора задача выполняется заново и доходит до `succeeded`."""
+    """Retried task is re-executed and reaches `succeeded`."""
     executed: list[str] = []
     task = await task_queue.enqueue(make_identity())
     failing = make_runner(
@@ -237,7 +237,7 @@ async def test_succeeded_task_is_not_retried(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_book: None,
 ) -> None:
-    """Успешно завершённую задачу повторить нельзя (PRD § 18)."""
+    """Succeeded task cannot be retried (PRD § 18)."""
     executed: list[str] = []
     task = await task_queue.enqueue(make_identity())
     await make_runner(
@@ -277,7 +277,7 @@ async def test_retry_refuses_tasks_it_must_not_restart(
     prepare: Callable[[ProcessingTask], ProcessingTask],
     message: str,
 ) -> None:
-    """Повтор доступен только для неуспешных задач с восстановимой ошибкой (PRD § 16)."""
+    """Retry is available only for failed tasks with a recoverable error (PRD § 16)."""
     task = await task_queue.enqueue(make_identity())
     await task_queue.save(prepare(task))
 
@@ -288,6 +288,6 @@ async def test_retry_refuses_tasks_it_must_not_restart(
 async def test_retry_of_unknown_task_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Повтор несуществующей задачи — ошибка сценария, а не тихая пустышка."""
+    """Retry of a nonexistent task is a use case error rather than a silent no-op."""
     with pytest.raises(RetryTaskError, match="нет в хранилище"):
         RetryTask(unit_of_work=unit_of_work)(RetryTaskCommand(task_id="task-404"))

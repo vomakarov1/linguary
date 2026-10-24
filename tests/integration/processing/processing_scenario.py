@@ -1,10 +1,10 @@
-"""Сборка книги, дошедшей до обработки, и заготовленных ответов модели (P3.T6).
+"""Building a book that has reached processing stage and prepared model replies (P3.T6).
 
-Обработка начинается там, где книга уже импортирована, все главы проанализированы,
-глоссарий проверен и запуск открыт. Модуль собирает это состояние в настоящем хранилище
-одной функцией, чтобы тест описывал только то, что проверяет.
+Processing begins where a book is already imported, all chapters analyzed,
+the glossary reviewed, and a processing run is active. This module constructs that
+state in real storage using a single function so that tests only describe what they verify.
 
-Модуль намеренно без префикса `test_`: иначе pytest соберёт его как тестовый.
+The module intentionally lacks a `test_` prefix: otherwise pytest would discover it as a test suite.
 """
 
 from __future__ import annotations
@@ -59,32 +59,32 @@ RUN_ID = "run-1"
 SOURCE_LANGUAGE = "en"
 TARGET_LANGUAGE = "ru"
 
-#: Абзац оригинала и его законченный русский перевод: тексты, на которых проверки молчат.
+#: Source paragraph and its finished Russian translation: texts against which checks pass cleanly.
 SOURCE_TEXT = "It is a truth universally acknowledged that a man must want a wife."
 TRANSLATED_TEXT = "Общепризнанная истина гласит, что мужчина непременно ищет жену."
 
-#: Фиксированный момент времени: тест не зависит от текущих часов.
+#: Fixed point in time: test does not depend on the current clock.
 CREATED_AT = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
 
 
 @dataclass(frozen=True, slots=True)
 class ProcessingScenario:
-    """Книга в состоянии `PROCESSING` вместе с её активным запуском."""
+    """Book in `PROCESSING` status along with its active processing run."""
 
     document: CanonicalDocument
     run_id: str = RUN_ID
 
     def section(self, index: int = 0) -> DocumentSection:
-        """Глава книги по порядку чтения."""
+        """Chapter of the book in reading order."""
         return self.document.ordered_sections[index]
 
     def block_ids(self, index: int = 0) -> tuple[str, ...]:
-        """Идентификаторы блоков главы в порядке исходного документа."""
+        """Block identifiers of the chapter in original document order."""
         return tuple(block.id for block in self.section(index).ordered_blocks)
 
 
 def build_document(chapters: Sequence[Sequence[str | None]]) -> CanonicalDocument:
-    """Книга из глав, заданных текстами их абзацев."""
+    """Book made of chapters defined by the texts of their paragraphs."""
     return CanonicalDocument(
         id=BOOK_ID,
         metadata=BookMetadata(title="Pride and Prejudice", authors=("Jane Austen",)),
@@ -110,13 +110,13 @@ def store_processing_book(
     glossary_candidates: Mapping[str, Sequence[tuple[str, str]]] | None = None,
     glossary_entries: Sequence[GlossarySnapshotEntry] = (),
 ) -> ProcessingScenario:
-    """Кладёт в хранилище книгу, готовую к обработке, вместе с активным запуском.
+    """Stores a book ready for processing along with an active run into persistence.
 
-    `analysed_sections` оставляет анализ только у перечисленных глав: обработка главы
-    без сохранённого анализа — отдельный запрещённый случай (PRD § 14).
-    `before_you_read` — пары «выражение, объяснение» подготовки к чтению каждой главы.
-    `glossary_candidates` — пары «исходный текст, вариант модели» анализа по главам,
-    `glossary_entries` — записи снимка глоссария запуска сверх решения по Mr. Bennet.
+    `analysed_sections` keeps analysis only for listed chapters: processing a chapter
+    without a saved analysis is an explicitly forbidden condition (PRD § 14).
+    `before_you_read` — pairs of (expression, explanation) for chapter preparation.
+    `glossary_candidates` — pairs of (source_text, model_variant) for per-chapter analysis.
+    `glossary_entries` — run glossary snapshot entries beyond the Mr. Bennet decision.
     """
     document = build_document(chapters)
     with unit_of_work.transaction() as uow:
@@ -141,8 +141,8 @@ def store_processing_book(
     return ProcessingScenario(document=document, run_id=run_id)
 
 
-#: Решения книги из третьего живого прогона: пользователь исправил вариант модели
-#: «Даскмир» на «Даскмер», а указание `the marsh gate` называет прежний вариант.
+#: Book decisions from the third live run: the user corrected the model variant
+#: "Даскмир" to "Даскмер", while the note `the marsh gate` mentions the former variant.
 REJECTED_VARIANT_GLOSSARY = (
     GlossarySnapshotEntry(
         source_text="Duskmere",
@@ -159,7 +159,7 @@ REJECTED_VARIANT_GLOSSARY = (
     ),
 )
 
-#: Указания главы 2 того же прогона: отвергнутый вариант назван без кавычек.
+#: Chapter 2 instructions of the same run: the rejected variant is named without quotes.
 REJECTED_VARIANT_INSTRUCTIONS = (
     "1. Сохранять иронию рассказчика.\n"
     "8. Термины из глоссария (болотные огни, Даскмир) использовать единообразно."
@@ -169,7 +169,7 @@ REJECTED_VARIANT_INSTRUCTIONS = (
 def store_book_with_rejected_variant(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> ProcessingScenario:
-    """Книга из двух глав: вариант «Даскмир» предложил только анализ главы 1 (Д-4)."""
+    """Book with two chapters: variant 'Даскмир' was proposed only in chapter 1 analysis (D-4)."""
     return store_processing_book(
         unit_of_work,
         chapters=((SOURCE_TEXT,), (SOURCE_TEXT,)),
@@ -181,12 +181,12 @@ def store_book_with_rejected_variant(
 
 @dataclass(slots=True)
 class InterruptingLLMClient(LLMClient):
-    """Клиент, который перед ответом даёт случиться событию у пользователя.
+    """Client that yields to a user-triggered event before replying.
 
-    Так воспроизводится гонка ALG-04: ответ модели уже в пути, а книга за это время
-    изменилась — например, пользователь вернулся к проверке глоссария. Иначе такую
-    последовательность пришлось бы имитировать заглушкой хранилища, а проверка активного
-    запуска живёт как раз в настоящей транзакции.
+    This reproduces race condition ALG-04: the model response is in flight while
+    the book state changes in the meantime (e.g., user returns to glossary review).
+    Otherwise such a sequence would have to be simulated with storage stubs, while
+    the active run check actually lives within a real transaction.
     """
 
     inner: FakeLLMClient
@@ -194,7 +194,7 @@ class InterruptingLLMClient(LLMClient):
 
     @property
     def call_count(self) -> int:
-        """Сколько запросов клиент получил."""
+        """How many requests the client received."""
         return self.inner.call_count
 
     async def generate[PayloadT: LLMPayload](
@@ -212,7 +212,7 @@ def make_process_chapter(
     max_unit_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS,
     checks: CheckSettings | None = None,
 ) -> tuple[ProcessChapter, list[float]]:
-    """Сценарий обработки главы вместе со списком выдержанных пауз повторов."""
+    """Chapter processing use case along with a list of recorded retry delays."""
     delays: list[float] = []
     scenario = ProcessChapter(
         unit_of_work=unit_of_work,
@@ -234,7 +234,7 @@ def make_regenerate_block(
     checks: CheckSettings | None = None,
     context_builder: ContextBuilder | None = None,
 ) -> tuple[RegenerateBlock, list[float]]:
-    """Сценарий повторной генерации блока вместе со списком выдержанных пауз повторов."""
+    """Block regeneration use case along with a list of recorded retry delays."""
     delays: list[float] = []
     scenario = RegenerateBlock(
         unit_of_work=unit_of_work,
@@ -249,7 +249,7 @@ def make_regenerate_block(
 
 
 def make_validator(checks: CheckSettings | None = None) -> TranslationResultValidator:
-    """Проверки результата с порогами настроек приложения."""
+    """Result validation checks with application settings thresholds."""
     settings = checks or CheckSettings()
     return TranslationResultValidator(
         target_language_min_share=settings.target_language_min_share,
@@ -260,7 +260,7 @@ def make_validator(checks: CheckSettings | None = None) -> TranslationResultVali
 
 
 def _recording_sleep(delays: list[float]) -> Callable[[float], Awaitable[None]]:
-    """Пауза повтора, которая ничего не ждёт, но записывает свою длительность."""
+    """Retry delay that does not block execution but records its duration."""
 
     async def sleep(seconds: float) -> None:
         delays.append(seconds)
@@ -269,7 +269,7 @@ def _recording_sleep(delays: list[float]) -> Callable[[float], Awaitable[None]]:
 
 
 def sequential_ids(prefix: str) -> Callable[[], str]:
-    """Предсказуемые идентификаторы: `unit-1`, `unit-2`, ..."""
+    """Predictable identifiers: `unit-1`, `unit-2`, ..."""
     counter = 0
 
     def next_id() -> str:
@@ -287,7 +287,7 @@ def block_reply(
     translated_text: str | None = TRANSLATED_TEXT,
     hints: Sequence[tuple[str, str]] = (),
 ) -> dict[str, Any]:
-    """Результат одного блока в ответе модели."""
+    """Result of a single block in the model reply."""
     return {
         "source_block_id": alias,
         "treatment": treatment.value,
@@ -306,7 +306,7 @@ def note_reply(
     note: str = "Ироническая формула зачина романа.",
     translated_excerpt: str | None = "Общепризнанная истина",
 ) -> dict[str, Any]:
-    """Языковая заметка ответа, привязанная к блоку запроса."""
+    """Language note of the reply bound to the request block."""
     return {
         "source_block_id": alias,
         "original_excerpt": original_excerpt,
@@ -322,7 +322,7 @@ def translation_reply(
     truncated: bool = False,
     usage: TokenUsage | None = None,
 ) -> FakeReply:
-    """Заготовленный ответ провайдера на обработку группы блоков."""
+    """Prepared provider reply for processing a block group."""
     payload = {"blocks": list(blocks), "language_notes": list(notes)}
     return FakeReply(
         content=json.dumps(payload, ensure_ascii=False),
@@ -338,7 +338,7 @@ def translated_reply(
     truncated: bool = False,
     usage: TokenUsage | None = None,
 ) -> FakeReply:
-    """Корректный ответ: полный перевод каждого блока группы."""
+    """Valid reply: full translation of each block in the group."""
     return translation_reply(
         [block_reply(alias) for alias in aliases],
         notes=notes,
@@ -348,7 +348,7 @@ def translated_reply(
 
 
 def _section(*, order: int, texts: Sequence[str | None]) -> DocumentSection:
-    """Глава книги из абзацев; `None` вместо текста даёт нетекстовый блок-иллюстрацию."""
+    """Book chapter from paragraphs; None instead of text yields a non-textual image block."""
     section_id = f"section-{order + 1}"
     return DocumentSection(
         id=section_id,
@@ -382,10 +382,10 @@ def _analysis(
     translation_instructions: str = "Сохранять иронию рассказчика.",
     candidates: Sequence[tuple[str, str]] = (),
 ) -> ChapterAnalysis:
-    """Полный анализ главы: план обработки покрывает все её текстовые блоки.
+    """Full chapter analysis: treatment plan covers all its textual blocks.
 
-    Нетекстовые блоки (изображение, разрыв страницы) в план не идут: их классифицирует
-    импортёр, и модели они не передаются (PRD § 10.1).
+    Non-textual blocks (images, page breaks) are not included in the plan: they are
+    classified by the importer and are not passed to the model (PRD § 10.1).
     """
     blocks = textual_blocks(section)
     chosen = (
@@ -424,7 +424,7 @@ def _analysis(
 
 
 def _book(status: BookStatus) -> BookRecord:
-    """Запись книги, дошедшей до обработки."""
+    """Book record that reached processing stage."""
     return BookRecord(
         id=BOOK_ID,
         metadata=BookMetadata(title="Pride and Prejudice", authors=("Jane Austen",)),
@@ -442,7 +442,23 @@ def _run(
     locked_terms: bool,
     extra_entries: Sequence[GlossarySnapshotEntry] = (),
 ) -> ProcessingRun:
-    """Активный запуск обработки со снимком глоссария и настроек LLM."""
+    """Active processing run with glossary and LLM settings snapshots."""
+    entries = [
+        GlossarySnapshotEntry(
+            source_text="Mr. Bennet",
+            translation="мистер Беннет",
+            type=ConceptType.PERSON,
+            status=TermStatus.LOCKED if locked_terms else TermStatus.SUGGESTED,
+        ),
+        *extra_entries,
+    ]
+    return ProcessingRun(
+        id=run_id,
+        book_id=BOOK_ID,
+        status=ProcessingRunStatus.ACTIVE,
+        glossary_snapshot=GlossarySnapshot(entries=tuple(entries)),
+        llm_settings_snapshot=LLMSettingsSnapshot(provider="fake", model="fake-model"),
+    )
     entries = [
         GlossarySnapshotEntry(
             source_text="Mr. Bennet",

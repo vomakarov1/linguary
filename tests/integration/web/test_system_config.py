@@ -1,8 +1,8 @@
-"""Состояние конфигурации и окружения (API-01, PRD § 21.6, § 23).
+"""Configuration state and environment (API-01, PRD § 21.6, § 23).
 
-Экран отвечает на вопрос «готово ли приложение работать», поэтому проверяется и обратное
-состояние — первый запуск без настроенной LLM и машина без Java. Отдельно проверяется,
-что ключ провайдера не попадает в ответ ни при каких настройках.
+The screen answers the question "is the application ready to run", so the reverse state
+is also verified — first launch without a configured LLM and machine without Java.
+Additionally, verifies that provider key does not leak into the response under any configuration.
 """
 
 from __future__ import annotations
@@ -17,13 +17,13 @@ from linguary.adapters.llm import FakeLLMClient
 from linguary.composition import build_application
 from linguary.web import create_app
 
-#: Ключ провайдера, которого не должно быть ни в одном ответе.
+#: Provider key that must not appear in any response.
 SECRET_KEY = "sk-secret-value-must-not-leak"
 
 
 @pytest.fixture
 def configured_client(settings: AppSettings, llm_client: FakeLLMClient):
-    """Клиент приложения с настроенной LLM и сервером, открытым в сеть."""
+    """Application client with configured LLM and server exposed to the network."""
     configured = replace(
         settings,
         llm=LLMSettings(model="gpt-5-mini", api_key=SECRET_KEY),
@@ -40,7 +40,7 @@ def configured_client(settings: AppSettings, llm_client: FakeLLMClient):
 
 
 def test_config_reports_llm_as_not_ready_on_the_first_run(client: TestClient) -> None:
-    """Без модели и ключа приложение честно сообщает, что LLM не настроена (PRD § 23)."""
+    """Without model and key, the application reports that LLM is not configured (PRD § 23)."""
     llm = client.get("/system/config").json()["llm"]
 
     assert llm["is_ready"] is False
@@ -50,7 +50,7 @@ def test_config_reports_llm_as_not_ready_on_the_first_run(client: TestClient) ->
 
 
 def test_config_shows_the_active_model(configured_client: TestClient) -> None:
-    """Настроенная LLM показывает читаемое имя активной модели (PRD § 23)."""
+    """Configured LLM exposes the human-readable name of the active model (PRD § 23)."""
     llm = configured_client.get("/system/config").json()["llm"]
 
     assert llm["is_ready"] is True
@@ -60,21 +60,21 @@ def test_config_shows_the_active_model(configured_client: TestClient) -> None:
 
 
 def test_config_never_exposes_the_api_key(configured_client: TestClient) -> None:
-    """Ключ провайдера не попадает в ответ ни одним полем (PRD § 23)."""
+    """Provider key does not leak into the response in any field (PRD § 23)."""
     response = configured_client.get("/system/config")
 
     assert SECRET_KEY not in response.text
 
 
 def test_config_warns_about_the_external_provider(client: TestClient) -> None:
-    """Экран конфигурации предупреждает о передаче текста книги наружу (PRD § 4.1)."""
+    """Configuration screen warns about sending book text to an external party (PRD § 4.1)."""
     warning = client.get("/system/config").json()["external_llm_warning"]
 
     assert "внешнему провайдеру LLM" in warning
 
 
 def test_config_reports_epubcheck_availability(client: TestClient) -> None:
-    """Доступность внешней проверки показывается с подсказкой, как её включить."""
+    """Availability of external verification is reported with a hint on how to enable it."""
     epubcheck = client.get("/system/config").json()["epubcheck"]
 
     assert isinstance(epubcheck["available"], bool)
@@ -87,7 +87,7 @@ def test_config_reports_epubcheck_availability(client: TestClient) -> None:
 
 
 def test_config_shows_where_data_is_stored(client: TestClient, data_root) -> None:
-    """Экран показывает каталог данных и файл базы (PRD § 22, UX notes)."""
+    """Screen displays data directory and database file location (PRD § 22, UX notes)."""
     storage = client.get("/system/config").json()["storage"]
 
     assert storage["data_root"] == str(data_root)
@@ -96,7 +96,7 @@ def test_config_shows_where_data_is_stored(client: TestClient, data_root) -> Non
 
 
 def test_config_reports_local_only_server(client: TestClient) -> None:
-    """По умолчанию приложение слушает только эту машину (PRD § 4.1)."""
+    """By default, the application listens only on localhost (PRD § 4.1)."""
     server = client.get("/system/config").json()["server"]
 
     assert server["host"] == "127.0.0.1"
@@ -108,7 +108,7 @@ def test_config_reports_local_only_server(client: TestClient) -> None:
 def test_config_warns_about_a_server_open_to_the_network(
     configured_client: TestClient,
 ) -> None:
-    """Адрес, открытый в сеть, сопровождается предупреждением (PRD § 4.1)."""
+    """Address exposed to the network is accompanied by a warning (PRD § 4.1)."""
     server = configured_client.get("/system/config").json()["server"]
 
     assert server["is_local_only"] is False
@@ -116,7 +116,7 @@ def test_config_warns_about_a_server_open_to_the_network(
 
 
 def test_config_reports_reading_settings(client: TestClient) -> None:
-    """Экран конфигурации возвращает настройки уровня читателя (PRD § 30)."""
+    """Configuration screen returns reader level settings (PRD § 30)."""
     reading = client.get("/system/config").json()["reading"]
 
     assert reading["reader_level"] == "b2"

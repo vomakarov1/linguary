@@ -1,9 +1,9 @@
-"""Общие фикстуры интеграционных тестов хранилища.
+"""Common fixtures for storage integration tests.
 
-База каждого теста — отдельный файл во временной директории, а не `:memory:`: режим WAL
-и частичные уникальные индексы проверяются только на файловой базе. Схема создаётся
-миграцией Alembic, поэтому все тесты работают ровно с той схемой, которую получит
-пользователь, а расхождение моделей и миграции ловится сразу.
+Each test database is a separate file in a temporary directory rather than `:memory:`: WAL mode
+and partial unique indexes are verified only on a file-based database. The schema is created
+by an Alembic migration, so all tests run against the exact schema the user gets,
+and any discrepancy between models and migration is caught immediately.
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ from sqlalchemy import Engine
 from linguary.adapters.db.engine import build_database_url, create_database_engine
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 
-#: Корень репозитория: в нём лежат `alembic.ini` и каталог миграций.
+#: Repository root: contains `alembic.ini` and the migrations directory.
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def make_alembic_config(database_url: str) -> Config:
-    """Конфигурация Alembic, направленная на указанную базу."""
+    """Alembic configuration pointing to the specified database."""
     config = Config(REPO_ROOT / "alembic.ini")
     config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", database_url)
@@ -33,32 +33,32 @@ def make_alembic_config(database_url: str) -> Config:
 
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:
-    """Путь к файлу базы данных теста."""
+    """Path to the test database file."""
     return tmp_path / "linguary.db"
 
 
 @pytest.fixture
 def database_url(database_path: Path) -> str:
-    """URL подключения к базе теста."""
+    """Connection URL for the test database."""
     return build_database_url(database_path)
 
 
 @pytest.fixture
 def alembic_config(database_url: str) -> Config:
-    """Конфигурация Alembic для базы теста."""
+    """Alembic configuration for the test database."""
     return make_alembic_config(database_url)
 
 
 @pytest.fixture
 def migrated_database(alembic_config: Config) -> Config:
-    """База с применённой схемой: `alembic upgrade head` на пустом файле."""
+    """Database with applied schema: `alembic upgrade head` on an empty file."""
     command.upgrade(alembic_config, "head")
     return alembic_config
 
 
 @pytest.fixture
 def engine(migrated_database: Config, database_path: Path) -> Iterator[Engine]:
-    """Движок SQLite поверх базы с применённой схемой."""
+    """SQLite engine on top of a database with applied schema."""
     engine = create_database_engine(database_path)
     try:
         yield engine
@@ -68,5 +68,5 @@ def engine(migrated_database: Config, database_path: Path) -> Iterator[Engine]:
 
 @pytest.fixture
 def unit_of_work(engine: Engine) -> SqlAlchemyUnitOfWork:
-    """Транзакционная граница поверх базы теста."""
+    """Transactional boundary on top of the test database."""
     return SqlAlchemyUnitOfWork.for_engine(engine)

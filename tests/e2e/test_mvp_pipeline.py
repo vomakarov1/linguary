@@ -1,4 +1,4 @@
-"""Сквозной сценарий MVP на синтетическом EPUB и заготовленных ответах LLM."""
+"""MVP end-to-end pipeline on synthetic EPUB and scripted LLM replies."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from linguary.domain import BookStatus, ErrorType, LLMCallStage, TaskType
 
 @dataclass(slots=True)
 class _RecordingLLMClient(LLMClient):
-    """`FakeLLMClient`, ответы которого подготавливаются после импорта EPUB."""
+    """`FakeLLMClient` whose replies are prepared after EPUB import."""
 
     inner: FakeLLMClient = field(default_factory=FakeLLMClient)
     requests: list[str] = field(default_factory=list)
@@ -44,7 +44,7 @@ class _RecordingLLMClient(LLMClient):
 
 
 def test_full_mvp_pipeline_exports_translated_epub(tmp_path: Path) -> None:
-    """`import -> analyze -> glossary -> process -> export` проходит без реального LLM."""
+    """`import -> analyze -> glossary -> process -> export` runs without real LLM."""
     client = _RecordingLLMClient()
     application = _application(tmp_path, client)
     try:
@@ -111,13 +111,13 @@ def test_full_mvp_pipeline_exports_translated_epub(tmp_path: Path) -> None:
         assert "Previously in Chapter" in book_text
         assert any(
             "Рен Колдер (женский род)" in text for text in client.requests
-        ), "переводческое указание глоссария не дошло до запроса обработки"
+        ), "glossary translation instruction was not passed to processing request"
     finally:
         application.dispose()
 
 
 def _application(tmp_path: Path, client: LLMClient) -> Application:
-    """Сборка приложения с отключённым EPUBCheck."""
+    """Builds application with disabled EPUBCheck."""
     settings = AppSettings(
         llm=LLMSettings(
             model="fake-model",
@@ -139,7 +139,7 @@ def _application(tmp_path: Path, client: LLMClient) -> Application:
 
 
 def _register_and_import(application: Application, tmp_path: Path) -> None:
-    """Копирует EPUB в каталог приложения и импортирует его через очередь."""
+    """Copies EPUB to application data directory and imports it via queue."""
     source = application.paths.source_epub("book-e2e")
     source.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(SYNTHETIC_EPUB, source)
@@ -159,7 +159,7 @@ def _register_and_import(application: Application, tmp_path: Path) -> None:
 
 
 def _document(application: Application):
-    """Импортированная каноническая модель книги."""
+    """Imported canonical document model of the book."""
     with application.unit_of_work.transaction() as transaction:
         document = transaction.documents.get("book-e2e")
     assert document is not None
@@ -167,7 +167,7 @@ def _document(application: Application):
 
 
 def _run(awaitable):
-    """Синхронный вызов асинхронного сценария внутри теста."""
+    """Synchronously executes an async scenario inside the test."""
     import asyncio
 
     return asyncio.run(awaitable)

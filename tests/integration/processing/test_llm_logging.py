@@ -1,4 +1,4 @@
-"""Журнал LLM-вызовов в настоящем composition root."""
+"""LLM call log in real composition root."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from processing_scenario import BOOK_ID, store_processing_book, translated_reply
 def application(
     tmp_path: Path, processing_task_ids: Callable[[], str]
 ) -> Iterator[Application]:
-    """Собранное приложение с журналирующим LLM-клиентом."""
+    """Composed application with logging LLM client."""
     settings = AppSettings(
         llm=LLMSettings(model="fake-model", api_key="test-key", max_attempts=2),
         checks=CheckSettings(),
@@ -53,7 +53,7 @@ def application(
 
 
 async def test_llm_calls_are_logged_per_attempt(application: Application) -> None:
-    """Неуспешная и успешная попытки одного вызова попадают в журнал без payload-ов."""
+    """Unsuccessful and successful attempts of a single call are logged without payloads."""
     scenario = store_processing_book(application.unit_of_work)
     await application.task_queue.enqueue(
         TaskIdentity(
@@ -280,7 +280,7 @@ async def test_reference_pricing_fills_cost_without_provider_cost(tmp_path: Path
 
 
 def _schema_error_document() -> dict[str, Any]:
-    """Повторный b1 с пустым переводом не проходит действующую схему."""
+    """Repeated b1 with empty translation violates active schema."""
     return {
         "model": "gateway/actual-model",
         "choices": [{"message": {"content": json.dumps({
@@ -308,7 +308,7 @@ async def _logged_format_error(
     pricing: TokenPricing | None = None,
     unreadable: bool = False,
 ) -> tuple[LLMResponseFormatError, LLMCallLog, str | None]:
-    """Проводит один локальный HTTP-вызов через настоящий журнал и SQLite."""
+    """Executes a single local HTTP call through real log and SQLite."""
     store_processing_book(application.unit_of_work)
     document = _schema_error_document() if document is None else document
     calls: list[httpx.Request] = []

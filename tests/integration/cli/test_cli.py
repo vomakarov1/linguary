@@ -1,4 +1,4 @@
-"""Интеграционные проверки CLI поверх настоящей сборки приложения."""
+"""CLI integration tests against real application build."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ SYNTHETIC_EPUB = FIXTURE_DIRECTORY / "synthetic_story.epub"
 def test_doctor_reports_configuration_without_secret(
     tmp_path: Path, capsys
 ) -> None:
-    """`doctor` показывает состояние окружения, но не печатает ключ провайдера."""
+    """`doctor` reports environment state without printing provider key."""
     config = _config(
         tmp_path,
         llm_model="fake-model",
@@ -36,7 +36,7 @@ def test_doctor_reports_configuration_without_secret(
 
 
 def test_doctor_reports_reader_level_override(tmp_path: Path, capsys) -> None:
-    """`doctor` с флагом --reader-level выводит переопределённый уровень."""
+    """`doctor` with --reader-level flag reports the overridden level."""
     config = _config(tmp_path)
     exit_code = main(["--config", str(config), "doctor", "--reader-level", "a2"])
     output = capsys.readouterr().out
@@ -45,7 +45,7 @@ def test_doctor_reports_reader_level_override(tmp_path: Path, capsys) -> None:
 
 
 def test_import_and_worker_once_import_the_book(tmp_path: Path, capsys) -> None:
-    """CLI импортирует EPUB через задачу очереди и разовую прогонку worker-а."""
+    """CLI imports EPUB via queue task and a single worker run."""
     config = _config(tmp_path)
 
     imported = main(
@@ -73,7 +73,7 @@ def test_import_and_worker_once_import_the_book(tmp_path: Path, capsys) -> None:
 
 
 def test_export_structure_only_writes_epub(tmp_path: Path, capsys) -> None:
-    """Технический экспорт CLI собирает EPUB без LLM-результатов."""
+    """Technical CLI export builds EPUB without LLM results."""
     config = _config(tmp_path)
     output_path = tmp_path / "smoke.epub"
     main(
@@ -108,7 +108,7 @@ def test_export_structure_only_writes_epub(tmp_path: Path, capsys) -> None:
 
 
 def test_export_defaults_to_full_mode(tmp_path: Path, capsys) -> None:
-    """CLI export по умолчанию и с --mode full использует полный экспорт."""
+    """CLI export defaults to full mode and uses full export with --mode full."""
     config = _config(tmp_path)
     output_path = tmp_path / "smoke.epub"
     main(
@@ -123,7 +123,7 @@ def test_export_defaults_to_full_mode(tmp_path: Path, capsys) -> None:
     )
     main(["--config", str(config), "worker", "--once"])
 
-    # По умолчанию --mode full на не готовой книге завершается с ошибкой
+    # By default --mode full fails on an unready book
     exit_code_default = main(
         [
             "--config",
@@ -138,7 +138,7 @@ def test_export_defaults_to_full_mode(tmp_path: Path, capsys) -> None:
     assert exit_code_default == 1
     assert "экспортировать целиком нельзя" in captured.err
 
-    # Явный --mode full ведёт себя аналогично
+    # Explicit --mode full behaves identically
     exit_code_full = main(
         [
             "--config",
@@ -160,7 +160,7 @@ def test_export_defaults_to_full_mode(tmp_path: Path, capsys) -> None:
 def test_analyze_without_llm_configuration_fails_before_queueing(
     tmp_path: Path, capsys
 ) -> None:
-    """Команда анализа без LLM-настройки не ставит задачу и не вызывает модель."""
+    """Analyze command without LLM configuration fails before scheduling and model call."""
     config = _config(tmp_path)
 
     exit_code = main(["--config", str(config), "analyze", "unknown-book"])
@@ -173,10 +173,10 @@ def test_analyze_without_llm_configuration_fails_before_queueing(
 def test_serve_starts_the_web_ui_on_the_configured_address(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`serve` слушает адрес из секции `[server]`, а не зашитый в команду запуска.
+    """`serve` listens on address from `[server]` section rather than hardcoded address.
 
-    Файл настроек уходит в окружение: фабрика создаёт приложение уже внутри сервера
-    и аргументов командной строки не видит.
+    The configuration file is passed via environment: the factory instantiates the application
+    inside the server and does not see command-line arguments.
     """
     config = _config(tmp_path, server_host="0.0.0.0", server_port=9100)
     started: dict[str, object] = {}
@@ -203,7 +203,7 @@ def _config(
     server_host: str | None = None,
     server_port: int | None = None,
 ) -> Path:
-    """Пишет изолированный конфиг CLI-теста."""
+    """Writes isolated configuration for CLI test."""
     lines = [
         "[storage]",
         f"data_root = {str(tmp_path / 'data')!r}",

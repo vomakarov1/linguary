@@ -1,9 +1,9 @@
-"""Задачи обработки глав и завершение обработки книги (P3.T6, ALG-02, ALG-06).
+"""Chapter processing tasks and book processing completion (P3.T6, ALG-02, ALG-06).
 
-Здесь проверяется стык, ради которого сценарий существует: очередь на SQLite, воркер,
-`ChapterProcessingSequence` и `FakeLLMClient` работают вместе. Обработчик типа задачи
-`PROCESS_TRANSLATION_UNIT` регистрируется так же, как это сделает composition root
-фазы 4, — готовым `ChapterProcessingSequence.run_task`.
+This verifies the junction for which the use case exists: SQLite queue, worker,
+`ChapterProcessingSequence`, and `FakeLLMClient` working together. The handler for task type
+`PROCESS_TRANSLATION_UNIT` is registered in the same way as the phase 4 composition root
+will do it — with `ChapterProcessingSequence.run_task`.
 """
 
 from __future__ import annotations
@@ -43,16 +43,16 @@ from linguary.domain import (
     TaskType,
 )
 
-#: Две главы по два абзаца: книга, обработку которой можно довести до конца.
+#: Two chapters of two paragraphs each: a book whose processing can be completed.
 TWO_CHAPTERS = ((SOURCE_TEXT, SOURCE_TEXT), (SOURCE_TEXT, SOURCE_TEXT))
 
 
 @dataclass(slots=True)
 class ChapterAwareLLMClient(LLMClient):
-    """Клиент, который срывает вызовы одной главы и отвечает на остальные.
+    """Client that fails calls for one chapter and answers the rest.
 
-    Нужен ровно для того, чтобы неуспех одной главы не был неуспехом всей книги
-    (PRD § 16): остальные главы обязаны дойти до результата.
+    Ensures that failure of one chapter is not failure of the whole book (PRD § 16):
+    the remaining chapters must finish successfully.
     """
 
     failing_chapter: str
@@ -71,7 +71,7 @@ def make_sequence(
     task_queue: SqliteTaskQueue,
     client: LLMClient,
 ) -> ChapterProcessingSequence:
-    """Последовательность задач обработки поверх настоящей очереди."""
+    """Chapter processing task sequence on top of real queue."""
     process, _ = make_process_chapter(unit_of_work, client)
     return ChapterProcessingSequence(
         unit_of_work=unit_of_work, queue=task_queue, process_chapter=process
@@ -80,10 +80,10 @@ def make_sequence(
 
 @dataclass(slots=True)
 class SlowLLMClient(LLMClient):
-    """Клиент, отвечающий с задержкой сети и считающий одновременные вызовы.
+    """Client replying with network latency and counting concurrent calls.
 
-    Мгновенный ответ не отдаёт управление циклу событий, и воркеры отработали бы
-    по очереди: параллельной обработки тест бы не увидел.
+    An instantaneous response does not yield to the event loop, causing workers
+    to execute sequentially without revealing parallelism.
     """
 
     inner: FakeLLMClient
@@ -105,10 +105,10 @@ class SlowLLMClient(LLMClient):
 
 @dataclass(slots=True)
 class SlowSavingQueue:
-    """Очередь, итог задачи в которой фиксируется с задержкой.
+    """Queue where task completion is persisted with a delay.
 
-    Так воспроизводится окно между концом обработчика и записью итога задачи runner-ом:
-    при параллельной обработке в это окно успевает закончиться соседняя глава.
+    Reproduces the window between handler completion and task completion write by runner:
+    during parallel processing a neighboring chapter finishes in this window.
     """
 
     inner: SqliteTaskQueue
@@ -136,7 +136,7 @@ def make_pool(
     *,
     concurrency: int = 1,
 ) -> TaskWorkerPool:
-    """Воркер с единственным обработчиком — задачей обработки главы."""
+    """Worker with a single handler — chapter processing task."""
     return TaskWorkerPool(
         TaskRunner(
             queue=task_queue,  # type: ignore[arg-type]
@@ -147,7 +147,7 @@ def make_pool(
 
 
 def book_status(unit_of_work: SqlAlchemyUnitOfWork) -> BookStatus:
-    """Текущее состояние книги."""
+    """Current status of the book."""
     with unit_of_work.transaction() as uow:
         book = uow.books.get(BOOK_ID)
     assert book is not None
@@ -157,7 +157,7 @@ def book_status(unit_of_work: SqlAlchemyUnitOfWork) -> BookStatus:
 async def test_start_enqueues_a_task_for_every_chapter_with_text(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Задачу получают только главы с текстом: обложке обрабатывать нечего."""
+    """Only chapters with text get a task: cover has nothing to process."""
     store_processing_book(
         unit_of_work, chapters=((SOURCE_TEXT,), (None,), (SOURCE_TEXT,))
     )
@@ -172,7 +172,7 @@ async def test_start_enqueues_a_task_for_every_chapter_with_text(
 async def test_repeated_start_does_not_duplicate_tasks(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Постановка задач идемпотентна по ключу книги, типа и главы (ALG-02)."""
+    """Task enqueueing is idempotent on book, type, and chapter key (ALG-02)."""
     store_processing_book(unit_of_work, chapters=TWO_CHAPTERS)
     sequence = make_sequence(unit_of_work, task_queue, FakeLLMClient())
 
@@ -187,7 +187,7 @@ async def test_repeated_start_does_not_duplicate_tasks(
 async def test_processed_book_becomes_ready_to_export(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Обработка всех глав переводит книгу в `READY_TO_EXPORT` (ALG-06)."""
+    """Processing all chapters transitions the book to `READY_TO_EXPORT` (ALG-06)."""
     scenario = store_processing_book(unit_of_work, chapters=TWO_CHAPTERS)
     sequence = make_sequence(
         unit_of_work, task_queue, FakeLLMClient.always(translated_reply())
@@ -207,10 +207,10 @@ async def test_processed_book_becomes_ready_to_export(
 async def test_parallel_processing_handles_every_chapter_once(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Несколько воркеров над одной базой обрабатывают каждую главу ровно один раз (PRD § 25).
+    """Multiple workers on one database process each chapter exactly once (PRD § 25).
 
-    Захват задач и запись результатов идут в SQLite одновременно из нескольких
-    воркеров: ни одна глава не должна достаться двоим, ни одна запись — потеряться.
+    Task claiming and result writing happen concurrently from multiple workers:
+    no chapter should be taken by two workers, and no record lost.
     """
     chapters = tuple((SOURCE_TEXT, SOURCE_TEXT) for _ in range(6))
     scenario = store_processing_book(unit_of_work, chapters=chapters)
@@ -236,11 +236,11 @@ async def test_parallel_processing_handles_every_chapter_once(
 async def test_chapters_finishing_together_complete_the_book(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Последние главы, закончившиеся одновременно, всё равно завершают обработку (ALG-06).
+    """The last chapters finishing concurrently still complete processing (ALG-06).
 
-    Каждая глава проверяет, остались ли незавершённые соседи, пока её собственный итог
-    ещё не записан. Если соседи проверяют друг друга в это окно, каждая видит другую
-    выполняющейся, и книга навсегда остаётся в `PROCESSING`.
+    Each chapter checks whether unfinished peers remain before its own result is written.
+    If peers check each other in this window, both see the other as running,
+    leaving the book permanently in `PROCESSING`.
     """
     store_processing_book(unit_of_work, chapters=TWO_CHAPTERS)
     queue = SlowSavingQueue(task_queue)
@@ -258,7 +258,7 @@ async def test_chapters_finishing_together_complete_the_book(
 async def test_failed_chapter_keeps_the_book_in_processing(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Неуспех одной главы не завершает обработку книги и не останавливает остальные."""
+    """Failure of one chapter does not finish book processing and does not stop others."""
     scenario = store_processing_book(unit_of_work, chapters=TWO_CHAPTERS)
     sequence = make_sequence(
         unit_of_work,
@@ -285,7 +285,7 @@ async def test_failed_chapter_keeps_the_book_in_processing(
 async def test_start_without_an_active_run_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Обработка не ставится, пока проверка глоссария не завершена запуском (PRD § 12)."""
+    """Processing cannot be started until glossary review creates a run (PRD § 12)."""
     store_processing_book(unit_of_work)
     with unit_of_work.transaction() as uow:
         uow.runs.delete("run-1")
@@ -298,7 +298,7 @@ async def test_start_without_an_active_run_is_rejected(
 async def test_task_of_another_type_is_not_processed_as_a_chapter(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
-    """Обработчик главы отвергает задачу чужого типа."""
+    """Chapter handler rejects tasks of an unexpected type."""
     store_processing_book(unit_of_work)
     sequence = make_sequence(unit_of_work, task_queue, FakeLLMClient())
     task = ProcessingTask(

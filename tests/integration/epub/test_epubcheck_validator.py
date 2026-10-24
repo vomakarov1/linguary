@@ -1,10 +1,10 @@
-"""Адаптер внешней проверки EPUBCheck: доступность, запуск и разбор отчёта (P2.T6).
+"""EPUBCheck external validation adapter: availability, invocation, and report parsing (P2.T6).
 
-Настоящий EPUBCheck здесь не запускается: Java на машине может отсутствовать, а сама
-проверка книги — предмет чужого инструмента, а не этих тестов. Вместо него подставляется
-исполняемый файл-заглушка, который записывает полученную командную строку, кладёт по пути
-`--json` заранее заданный отчёт и завершается заданным кодом. Так проверяются ровно те
-ветки, за которые отвечает адаптер (PRD § 20).
+Real EPUBCheck is not executed here: Java may be absent on the machine, and actual
+book validation is the domain of that external tool rather than these tests. Instead,
+an executable stub is used to record the received command line, write a pre-configured
+report to `--json`, and exit with the specified code. This covers the exact branches
+owned by the adapter (PRD § 20).
 """
 
 from __future__ import annotations
@@ -24,14 +24,14 @@ from linguary.application.ports.export_validation import (
     ExportValidationRequest,
 )
 
-#: Отчёт инструмента, не нашедшего в книге ничего.
+#: Report of a tool run finding no issues in the book.
 CLEAN_REPORT: dict[str, object] = {
     "checker": {"checkerVersion": "5.1.0", "filename": "book.epub"},
     "items": [],
     "messages": [],
 }
 
-#: Отчёт с сообщениями всех уровней, включая незнакомый адаптеру.
+#: Report with messages across all severity levels, including one unknown to the adapter.
 REPORT_WITH_MESSAGES: dict[str, object] = {
     "checker": {"checkerVersion": "5.1.0"},
     "messages": [
@@ -58,13 +58,13 @@ REPORT_WITH_MESSAGES: dict[str, object] = {
 
 @dataclass(frozen=True, slots=True)
 class Stub:
-    """Подменённый EPUBCheck: настройка адаптера и запись его командной строки."""
+    """Substituted EPUBCheck stub: adapter settings and recorded command line."""
 
     settings: EpubCheckSettings
     argv_path: Path
 
     def argv(self) -> list[str]:
-        """Аргументы, с которыми адаптер запустил инструмент."""
+        """Arguments with which the adapter executed the tool."""
         return json.loads(self.argv_path.read_text(encoding="utf-8"))
 
 
@@ -75,11 +75,11 @@ def install_stub(
     exit_code: int = 0,
     jar_directory: Path | None = None,
 ) -> Stub:
-    """Кладёт в директорию заглушку Java и файл инструмента.
+    """Installs a Java stub and tool file into the directory.
 
-    Заглушка ведёт себя как настоящий вызов: разбирает `--json`, пишет туда отчёт
-    (`report` равен `None` — не пишет ничего, как упавший до записи процесс) и завершается
-    заданным кодом.
+    The stub behaves like a real invocation: parses `--json`, writes the report there
+    (`report` set to `None` writes nothing, simulating a crash prior to output), and exits
+    with the given exit code.
     """
     argv_path = directory / "argv.json"
     payload = report if isinstance(report, str) or report is None else json.dumps(report)
@@ -119,7 +119,7 @@ def install_stub(
 
 @pytest.fixture
 def book(tmp_path: Path) -> Path:
-    """Экспортный артефакт, который отдаётся на проверку."""
+    """Export artifact passed for validation."""
     path = tmp_path / "export" / "book.epub"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"")
@@ -127,14 +127,14 @@ def book(tmp_path: Path) -> Path:
 
 
 def request_for(book: Path, **overrides: object) -> ExportValidationRequest:
-    """Запрос на проверку собранного файла."""
+    """Request to validate the generated file."""
     arguments: dict[str, object] = {"epub_path": str(book)}
     arguments.update(overrides)
     return ExportValidationRequest(**arguments)  # type: ignore[arg-type]
 
 
 def test_missing_java_leaves_the_book_unchecked(tmp_path: Path, book: Path) -> None:
-    """Без Java проверка не выполняется, а адаптер объясняет, как её включить."""
+    """Without Java, validation is skipped, and the adapter explains how to enable it."""
     stub = install_stub(tmp_path)
     validator = EpubCheckValidator(
         settings=EpubCheckSettings(
@@ -152,7 +152,7 @@ def test_missing_java_leaves_the_book_unchecked(tmp_path: Path, book: Path) -> N
 
 
 def test_missing_jar_leaves_the_book_unchecked(tmp_path: Path, book: Path) -> None:
-    """Java есть, а инструмента нет: проверка тоже не выполняется."""
+    """Java present but tool missing: validation is also skipped."""
     stub = install_stub(tmp_path)
     validator = EpubCheckValidator(
         settings=EpubCheckSettings(
@@ -171,7 +171,7 @@ def test_missing_jar_leaves_the_book_unchecked(tmp_path: Path, book: Path) -> No
 def test_jar_is_found_in_the_distribution_directory(
     tmp_path: Path, book: Path
 ) -> None:
-    """Ненастроенный инструмент ищется в каталоге установки, включая каталог версии."""
+    """Unconfigured tool is discovered in the distribution directory, including version folder."""
     stub = install_stub(tmp_path, jar_directory=tmp_path / "epubcheck-5.1.0")
 
     report = EpubCheckValidator(settings=stub.settings).validate(request_for(book))
@@ -183,7 +183,7 @@ def test_jar_is_found_in_the_distribution_directory(
 def test_clean_report_leaves_the_book_without_issues(
     tmp_path: Path, book: Path
 ) -> None:
-    """Успешная проверка: замечаний нет, отчёт сохранён рядом с артефактом."""
+    """Successful validation: no issues, report saved alongside the artifact."""
     stub = install_stub(tmp_path)
 
     report = EpubCheckValidator(settings=stub.settings).validate(request_for(book))
@@ -199,7 +199,7 @@ def test_clean_report_leaves_the_book_without_issues(
 def test_command_line_follows_the_official_contract(
     tmp_path: Path, book: Path
 ) -> None:
-    """Инструмент запускается контрактом `-jar <jar> <file.epub> --json <report>`."""
+    """Tool is invoked using `-jar <jar> <file.epub> --json <report>` contract."""
     stub = install_stub(tmp_path)
     target = tmp_path / "reports" / "book.json"
 
@@ -220,7 +220,7 @@ def test_command_line_follows_the_official_contract(
 def test_strict_mode_turns_on_the_strict_mode_of_the_tool(
     tmp_path: Path, book: Path
 ) -> None:
-    """Строгий режим передаётся самому инструменту, а не только сценарию экспорта."""
+    """Strict mode is passed to the tool itself, not only the export use case."""
     stub = install_stub(tmp_path)
 
     EpubCheckValidator(settings=stub.settings).validate(
@@ -233,7 +233,7 @@ def test_strict_mode_turns_on_the_strict_mode_of_the_tool(
 def test_report_messages_become_issues_of_their_severity(
     tmp_path: Path, book: Path
 ) -> None:
-    """Ошибки и предупреждения отчёта разбираются, служебные сообщения пропускаются."""
+    """Report errors and warnings become issues, informational messages are ignored."""
     stub = install_stub(tmp_path, report=REPORT_WITH_MESSAGES, exit_code=1)
 
     report = EpubCheckValidator(settings=stub.settings).validate(request_for(book))
@@ -252,7 +252,7 @@ def test_report_messages_become_issues_of_their_severity(
 def test_nonzero_exit_without_messages_is_reported_as_an_error(
     tmp_path: Path, book: Path
 ) -> None:
-    """Ненулевой код без замечаний в отчёте не выдаётся за успешную проверку."""
+    """Non-zero exit code without report messages is not treated as successful."""
     stub = install_stub(tmp_path, exit_code=1)
 
     report = EpubCheckValidator(settings=stub.settings).validate(request_for(book))
@@ -265,7 +265,7 @@ def test_nonzero_exit_without_messages_is_reported_as_an_error(
 def test_unknown_report_fields_do_not_break_the_parsing(
     tmp_path: Path, book: Path
 ) -> None:
-    """Незнакомые поля отчёта разбор не ломают: формат принадлежит чужому инструменту."""
+    """Unknown report fields do not break parsing: format belongs to third-party tool."""
     stub = install_stub(
         tmp_path,
         report={
@@ -292,7 +292,7 @@ def test_unknown_report_fields_do_not_break_the_parsing(
 def test_missing_report_of_an_available_tool_is_a_technical_error(
     tmp_path: Path, book: Path
 ) -> None:
-    """Инструмент запустился, но отчёта не оставил: это техническая ошибка проверки."""
+    """Tool ran but left no report: technical validation error."""
     stub = install_stub(tmp_path, report=None, exit_code=2)
 
     with pytest.raises(ExportValidationError, match="нельзя прочитать"):
@@ -302,7 +302,7 @@ def test_missing_report_of_an_available_tool_is_a_technical_error(
 def test_broken_report_of_an_available_tool_is_a_technical_error(
     tmp_path: Path, book: Path
 ) -> None:
-    """Оборванный JSON — тоже техническая ошибка, а не книга без замечаний."""
+    """Truncated JSON is also a technical error, not an issue-free book."""
     stub = install_stub(tmp_path, report='{"messages": [', exit_code=1)
 
     with pytest.raises(ExportValidationError, match="нельзя прочитать"):
@@ -312,7 +312,7 @@ def test_broken_report_of_an_available_tool_is_a_technical_error(
 def test_report_of_a_previous_run_is_not_taken_for_the_current_one(
     tmp_path: Path, book: Path
 ) -> None:
-    """Отчёт прошлого запуска не должен выдаваться за результат нового."""
+    """Report from a prior run must not be mistaken for the current result."""
     stub = install_stub(tmp_path, report=None)
     stale = book.with_suffix(".epubcheck.json")
     stale.write_text(json.dumps(CLEAN_REPORT), encoding="utf-8")

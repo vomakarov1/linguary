@@ -1,4 +1,4 @@
-"""Отбраковка успешного вызова в техническом журнале."""
+"""Rejection of a successful call in the technical log."""
 
 from __future__ import annotations
 

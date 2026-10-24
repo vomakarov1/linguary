@@ -1,4 +1,4 @@
-"""Импорт реальной книги Project Gutenberg сохраняет лицензию без передачи модели."""
+"""Importing a real Project Gutenberg book preserves the license without passing it to the model."""
 
 from pathlib import Path
 

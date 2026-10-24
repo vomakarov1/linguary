@@ -1,4 +1,4 @@
-"""План обработки и предупреждения книги (API-01, PRD § 15, § 21.6)."""
+"""Book processing plan and warnings (API-01, PRD § 15, § 21.6)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from linguary.domain import BlockTreatment, BookStatus
 def test_plan_summarises_chapters_and_treatments(
     client: TestClient, application: Application
 ) -> None:
-    """Сводка плана показывает главы и распределение режимов (UX notes)."""
+    """Plan summary displays chapters and treatment breakdown (UX notes)."""
     scenario = store_book(
         application,
         chapters=(("Первый абзац.", "Второй абзац."), ("Третий абзац.",)),
@@ -57,7 +57,7 @@ def test_plan_summarises_chapters_and_treatments(
 def test_plan_reports_partial_analysis(
     client: TestClient, application: Application
 ) -> None:
-    """Книга, проанализированная не целиком, показывается как незавершённая."""
+    """A book analysed only partially is shown as incomplete."""
     scenario = store_book(
         application,
         chapters=(("Первый абзац.",), ("Второй абзац.",)),
@@ -75,7 +75,7 @@ def test_plan_reports_partial_analysis(
 def test_plan_before_analysis_gives_409(
     client: TestClient, application: Application
 ) -> None:
-    """До анализа плана не существует: сводка отвергается `409`, а не отдаётся пустой."""
+    """Before analysis, no plan exists: summary responds with `409` rather than empty."""
     scenario = store_book(
         application, status=BookStatus.IMPORTED, analysed_chapters=()
     )
@@ -87,14 +87,14 @@ def test_plan_before_analysis_gives_409(
 
 
 def test_plan_of_unknown_book_gives_404(client: TestClient) -> None:
-    """Плана несуществующей книги нет — `404`."""
+    """Plan of a nonexistent book returns `404`."""
     assert client.get("/books/unknown/plan").status_code == 404
 
 
 def test_warnings_include_import_and_result_warnings(
     client: TestClient, application: Application
 ) -> None:
-    """Предупреждения импорта и замечания обработки показываются вместе (PRD § 21.6)."""
+    """Import warnings and processing issues are displayed together (PRD § 21.6)."""
     section_id = section_id_of("book-web-1", 0)
     scenario = store_book(
         application,
@@ -124,7 +124,7 @@ def test_warnings_include_import_and_result_warnings(
 def test_warnings_are_empty_for_a_clean_book(
     client: TestClient, application: Application
 ) -> None:
-    """Книга без замечаний отдаёт пустые списки, а не отказ."""
+    """A book with no warnings returns empty lists instead of an error."""
     scenario = store_book(application)
 
     warnings = client.get(f"/books/{scenario.book_id}/warnings").json()
@@ -133,5 +133,6 @@ def test_warnings_are_empty_for_a_clean_book(
 
 
 def test_warnings_of_unknown_book_give_404(client: TestClient) -> None:
-    """Предупреждений несуществующей книги нет — `404`."""
+    """Warnings for a nonexistent book return `404`."""
+    assert client.get("/books/unknown/warnings").status_code == 404
     assert client.get("/books/unknown/warnings").status_code == 404

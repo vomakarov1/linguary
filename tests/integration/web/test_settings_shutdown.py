@@ -1,4 +1,4 @@
-"""Завершение приложения дожидается отменённых наблюдателей и принятых изменений."""
+"""Application shutdown waits for cancelled observers and accepted changes."""
 import asyncio
 from threading import Event
 

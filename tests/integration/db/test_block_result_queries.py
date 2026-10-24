@@ -1,9 +1,9 @@
-"""Чтение результатов запуска: раскладка заметок и замечаний и счётчик обработанных.
+"""Reading run results: layout of notes and warnings and the count of processed blocks.
 
-Заметки и замечания читаются на весь запуск сразу, поэтому их принадлежность блоку —
-поведение репозитория, а не запроса к одной строке. Тесты закрепляют, что каждый блок
-получает свои записи в прежнем порядке, а число обработанных блоков считается отдельно
-от сборки самих результатов.
+Notes and warnings are loaded for the entire run at once, so their block affiliation
+is repository behavior rather than a single-row query. The tests ensure that each block
+receives its records in their original order, and the count of processed blocks is computed
+separately from assembling the results themselves.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from linguary.domain import (
 
 
 def annotated_result(block_id: str, *, marker: str) -> BlockProcessingResult:
-    """Перевод блока с двумя заметками и двумя замечаниями, помеченными своим блоком."""
+    """Block translation with two notes and two warnings tagged with their block."""
     return BlockProcessingResult(
         block_id=block_id,
         treatment=BlockTreatment.TRANSLATE,
@@ -59,7 +59,7 @@ def annotated_result(block_id: str, *, marker: str) -> BlockProcessingResult:
 def stored_results(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> tuple[BlockProcessingResult, ...]:
-    """Запуск с результатами двух блоков: у каждого свои заметки и замечания."""
+    """Run with results for two blocks: each has its own notes and warnings."""
     results = (
         annotated_result(BLOCK_ID, marker="first"),
         annotated_result(SECOND_BLOCK_ID, marker="second"),
@@ -76,7 +76,7 @@ def test_results_of_a_run_keep_their_own_notes_and_warnings(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_results: tuple[BlockProcessingResult, ...],
 ) -> None:
-    """Список результатов запуска отдаёт каждому блоку его заметки и замечания."""
+    """Run result listing assigns each block its own notes and warnings."""
     with unit_of_work.transaction() as uow:
         listed = uow.results.list_for_run(RUN_ID)
         single = uow.results.get(RUN_ID, SECOND_BLOCK_ID)
@@ -89,7 +89,7 @@ def test_count_for_run_matches_the_number_of_stored_results(
     unit_of_work: SqlAlchemyUnitOfWork,
     stored_results: tuple[BlockProcessingResult, ...],
 ) -> None:
-    """Счётчик обработанных блоков совпадает с числом сохранённых результатов."""
+    """Processed block count matches the number of stored results."""
     with unit_of_work.transaction() as uow:
         assert uow.results.count_for_run(RUN_ID) == len(stored_results)
 
@@ -97,7 +97,7 @@ def test_count_for_run_matches_the_number_of_stored_results(
 def test_count_for_run_without_results_is_zero(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Запуск, у которого нет ни одного результата, даёт ноль, а не ошибку."""
+    """Run without any results yields zero rather than an error."""
     with unit_of_work.transaction() as uow:
         uow.books.add(make_book())
         uow.runs.add(make_run())

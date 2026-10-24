@@ -1,17 +1,16 @@
-"""Конкурентный захват задачи: одну задачу не берут две попытки (ALG-02, P2.T7).
+"""Concurrent task claiming: no task is claimed by two attempts (ALG-02, P2.T7).
 
-Тест детерминирован по построению, а не по везению планировщика:
+The test is deterministic by design, not reliant on scheduler luck:
 
-- все попытки захвата стартуют из общей точки синхронизации (`threading.Barrier`), поэтому
-  окно между чтением кандидата и условным обновлением у них общее;
-- сценарий повторяется десятками раундов, и падение любого раунда валит тест;
-- утверждения проверяют инвариант «ровно один победитель, ровно одна попытка», который
-  обязан выполняться при любом порядке выполнения потоков, а не совпадение с ожидаемым
-  порядком.
+- all claim attempts start from a shared synchronization barrier (`threading.Barrier`),
+  so the window between candidate read and conditional update is shared among them;
+- the scenario runs across dozens of rounds, and any round failure fails the test;
+- assertions verify the invariant "exactly one winner, exactly one attempt", which
+  must hold under any thread execution order, rather than matching a particular order.
 
-Захват идёт через блокирующее хранилище напрямую: асинхронная обёртка очереди сводится
-к тому же вызову в отдельном потоке, и проверять конкурентность через цикл событий значило бы
-проверять `asyncio.to_thread`, а не транзакцию SQLite.
+Claiming goes through the blocking store directly: the async queue wrapper reduces
+to the same call on a separate thread, and testing concurrency through the event loop
+would test `asyncio.to_thread` rather than the SQLite transaction.
 """
 
 from __future__ import annotations
@@ -26,16 +25,16 @@ from task_factories import make_identity
 from linguary.adapters.runtime import SqliteTaskStore
 from linguary.domain import ProcessingTask, TaskStatus
 
-#: Число одновременных попыток захвата.
+#: Number of concurrent claim attempts.
 WORKERS = 8
 
-#: Число раундов: один раунд — одна задача и общий старт всех попыток.
+#: Number of rounds: one round per task with a shared start across all attempts.
 ROUNDS = 25
 
 
 @pytest.fixture
 def workers() -> Iterator[ThreadPoolExecutor]:
-    """Пул потоков, из которых задачу пытаются захватить одновременно."""
+    """Thread pool from which tasks are claimed concurrently."""
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         yield pool
 
@@ -43,7 +42,7 @@ def workers() -> Iterator[ThreadPoolExecutor]:
 def claim_together(
     task_store: SqliteTaskStore, pool: ThreadPoolExecutor, attempts: int
 ) -> list[ProcessingTask]:
-    """Запускает `attempts` попыток захвата с общего старта и возвращает захваченное."""
+    """Runs `attempts` claim attempts with a shared start and returns claimed tasks."""
     barrier = threading.Barrier(attempts)
 
     def attempt() -> ProcessingTask | None:
@@ -57,7 +56,7 @@ def claim_together(
 def test_single_pending_task_is_claimed_by_exactly_one_attempt(
     task_store: SqliteTaskStore, workers: ThreadPoolExecutor, stored_book: None
 ) -> None:
-    """Одну задачу забирает ровно одна попытка, и попытка учитывается один раз."""
+    """A single task is claimed by exactly one attempt, and the attempt is counted once."""
     for round_number in range(ROUNDS):
         task = task_store.enqueue(make_identity(scope_id=f"section-{round_number}"))
 
@@ -70,7 +69,7 @@ def test_single_pending_task_is_claimed_by_exactly_one_attempt(
 def test_every_pending_task_is_claimed_once(
     task_store: SqliteTaskStore, workers: ThreadPoolExecutor, stored_book: None
 ) -> None:
-    """Очередь из нескольких задач раздаётся конкурентным попыткам без пересечений."""
+    """A queue of multiple tasks is distributed across concurrent attempts without overlap."""
     expected = {
         task_store.enqueue(make_identity(scope_id=f"section-{number}")).id
         for number in range(WORKERS)

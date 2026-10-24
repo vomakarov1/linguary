@@ -1,4 +1,4 @@
-"""Список книг и карточка книги: состояние, прогресс и ошибки (API-01, PRD § 21.1, 21.4)."""
+"""Book list and book card: status, progress, and errors (API-01, PRD § 21.1, 21.4)."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def store_call(
     stage: LLMCallStage = LLMCallStage.TRANSLATION_UNIT,
     call_id: str = "call-1",
 ) -> None:
-    """Запись журнала об успешном вызове модели задачей книги."""
+    """Log record for a successful model invocation by a book task."""
     with application.unit_of_work.transaction() as uow:
         uow.llm_calls.add(
             LLMCallLog(
@@ -58,7 +58,7 @@ def store_call(
 
 
 def test_books_list_is_empty_before_the_first_upload(client: TestClient) -> None:
-    """Пустое хранилище даёт пустой список книг, а не отказ."""
+    """Empty store returns an empty books list rather than an error."""
     response = client.get("/books")
 
     assert response.status_code == 200
@@ -68,7 +68,7 @@ def test_books_list_is_empty_before_the_first_upload(client: TestClient) -> None
 def test_books_list_shows_status_in_russian(
     client: TestClient, application: Application
 ) -> None:
-    """Список книг называет состояние по-русски (PRD § 21.1)."""
+    """Books list presents localized status labels in Russian (PRD § 21.1)."""
     store_book(application, status=BookStatus.GLOSSARY_REVIEW)
 
     books = client.get("/books").json()["books"]
@@ -82,7 +82,7 @@ def test_books_list_shows_status_in_russian(
 def test_books_list_filters_by_status(
     client: TestClient, application: Application
 ) -> None:
-    """Фильтр `status` оставляет только книги в этом состоянии."""
+    """The `status` filter retains only books matching that status."""
     store_book(application, book_id="book-a", status=BookStatus.GLOSSARY_REVIEW)
     store_book(application, book_id="book-b", status=BookStatus.COMPLETED)
 
@@ -92,7 +92,7 @@ def test_books_list_filters_by_status(
 
 
 def test_unknown_status_filter_is_rejected(client: TestClient) -> None:
-    """Несуществующее состояние в запросе отвергается проверкой входа."""
+    """Unrecognized status query parameter is rejected by input validation."""
     response = client.get("/books", params={"status": "SLEEPING"})
 
     assert response.status_code == 422
@@ -101,7 +101,7 @@ def test_unknown_status_filter_is_rejected(client: TestClient) -> None:
 def test_book_detail_reports_progress_and_treatment_counts(
     client: TestClient, application: Application
 ) -> None:
-    """Карточка книги показывает прогресс и счётчики режимов (PRD § 21.4)."""
+    """Book detail card reports progress and treatment counters (PRD § 21.4)."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -133,7 +133,7 @@ def test_book_detail_reports_progress_and_treatment_counts(
 def test_book_detail_counts_processed_blocks_of_every_treatment(
     client: TestClient, application: Application
 ) -> None:
-    """Обработанным считается и блок со словарными подсказками (PRD § 10.1)."""
+    """Blocks with glossary hints are also counted as processed (PRD § 10.1)."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -147,7 +147,6 @@ def test_book_detail_counts_processed_blocks_of_every_treatment(
     )
 
     progress = client.get(f"/books/{scenario.book_id}").json()["progress"]
-
     assert progress["processed_blocks"] == 2
     assert progress["percent_complete"] == 100
 
@@ -155,7 +154,7 @@ def test_book_detail_counts_processed_blocks_of_every_treatment(
 def test_book_detail_names_the_current_chapter(
     client: TestClient, application: Application
 ) -> None:
-    """Выполняющаяся задача главы показывается как текущая глава (PRD § 21.4)."""
+    """Running chapter task is displayed as the current chapter (PRD § 21.4)."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -173,7 +172,7 @@ def test_book_detail_names_the_current_chapter(
 def test_book_detail_lists_every_running_chapter(
     client: TestClient, application: Application
 ) -> None:
-    """При параллельной обработке карточка показывает все выполняющиеся главы (QA-13)."""
+    """During parallel processing, the card displays all active chapters (QA-13)."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -196,7 +195,7 @@ def test_book_detail_lists_every_running_chapter(
 def test_book_detail_promises_an_estimate_after_the_first_chapter(
     client: TestClient, application: Application
 ) -> None:
-    """До первого вызова модели оценки нет — карточка говорит, когда она появится."""
+    """Before the first LLM call there is no estimate — the card indicates when it will appear."""
     scenario = store_book(
         application, status=BookStatus.ANALYZING, analysed_chapters=()
     )
@@ -218,7 +217,7 @@ def test_book_detail_promises_an_estimate_after_the_first_chapter(
 def test_book_detail_estimates_remaining_processing_time(
     client: TestClient, application: Application
 ) -> None:
-    """Оценка по медиане вызовов книги × оставшаяся работа ÷ параллелизм (QA-13)."""
+    """Estimate is median call time × remaining work ÷ concurrency (QA-13)."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -250,7 +249,7 @@ def test_book_detail_estimates_remaining_processing_time(
 def test_book_detail_ignores_calls_of_a_cancelled_run(
     client: TestClient, application: Application
 ) -> None:
-    """Вызовы задач, удалённых возвратом к проверке глоссария, в оценку не входят."""
+    """Calls from tasks deleted by returning to glossary review are excluded from estimate."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     start_run(application, scenario)
     store_task(application, task=running_task(scenario))
@@ -264,7 +263,7 @@ def test_book_detail_ignores_calls_of_a_cancelled_run(
 def test_finished_book_has_no_estimate(
     client: TestClient, application: Application
 ) -> None:
-    """Книга, над которой ничего не выполняется, оценки не получает."""
+    """A book with no active operations has no remaining estimate."""
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
 
     progress = client.get(f"/books/{scenario.book_id}").json()["progress"]
@@ -275,7 +274,7 @@ def test_finished_book_has_no_estimate(
 def test_book_detail_reports_failed_task_with_retry_flag(
     client: TestClient, application: Application
 ) -> None:
-    """Неуспешная задача показывается с русским объяснением и признаком повтора."""
+    """Failed task is reported with localized message and retry indicator."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     store_task(application, task=failed_task(scenario))
 
@@ -292,7 +291,7 @@ def test_book_detail_reports_failed_task_with_retry_flag(
 def test_permanent_failure_is_not_retryable(
     client: TestClient, application: Application
 ) -> None:
-    """Постоянная ошибка повтору не подлежит: нужен другой файл (PRD § 16)."""
+    """Permanent errors cannot be retried: requires a different source file (PRD § 16)."""
     scenario = store_book(application, status=BookStatus.PROCESSING)
     store_task(
         application,
@@ -310,7 +309,7 @@ def test_permanent_failure_is_not_retryable(
 def test_book_detail_counts_import_warnings(
     client: TestClient, application: Application
 ) -> None:
-    """Карточка книги сообщает, сколько предупреждений оставил импорт (PRD § 21.6)."""
+    """Book card reports how many warnings were recorded during import (PRD § 21.6)."""
     scenario = store_book(
         application,
         status=BookStatus.PROCESSING,
@@ -325,8 +324,9 @@ def test_book_detail_counts_import_warnings(
 
 
 def test_unknown_book_gives_404(client: TestClient) -> None:
-    """Карточка несуществующей книги — `404`, а не пустой ответ."""
+    """Nonexistent book returns `404` rather than an empty response."""
     response = client.get("/books/unknown")
 
     assert response.status_code == 404
     assert "unknown" in response.json()["detail"]
+

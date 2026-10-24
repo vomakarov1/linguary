@@ -1,4 +1,4 @@
-"""Идемпотентный ключ задачи `book_id + task_type + scope_id`."""
+"""Idempotency key for a task: `book_id + task_type + scope_id`."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from linguary.domain import TaskIdentity, TaskStatus, TaskType
 
 @pytest.fixture
 def stored_book(unit_of_work: SqlAlchemyUnitOfWork) -> None:
-    """Книга, к которой привязываются задачи теста."""
+    """Book to which test tasks are attached."""
     with unit_of_work.transaction() as uow:
         uow.books.add(make_book())
 
@@ -20,7 +20,7 @@ def stored_book(unit_of_work: SqlAlchemyUnitOfWork) -> None:
 def test_duplicate_identity_is_rejected(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Вторая задача с тем же ключом не сохраняется."""
+    """A second task with the same key is not stored."""
     with unit_of_work.transaction() as uow:
         uow.tasks.add(make_task(task_id="task-1"))
 
@@ -31,10 +31,10 @@ def test_duplicate_identity_is_rejected(
 def test_book_level_tasks_collide_on_empty_scope(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Две задачи экспорта одной книги различаются ключом, а не строкой `NULL`.
+    """Two export tasks for the same book collide on the key rather than NULL.
 
-    `scope_id` задач уровня книги — пустая строка: в SQLite `NULL != NULL`, и на
-    колонке с `NULL` уникальный индекс такие задачи бы не различил.
+    Book-level tasks have an empty string as `scope_id`: in SQLite `NULL != NULL`,
+    and a unique index on a column with `NULL` would not distinguish such tasks.
     """
     with unit_of_work.transaction() as uow:
         uow.tasks.add(make_task(task_id="export-1", task_type=TaskType.EXPORT_BOOK))
@@ -56,7 +56,7 @@ def test_different_identity_is_accepted(
     task_type: TaskType,
     scope_id: str,
 ) -> None:
-    """Задачи с разными ключами сосуществуют."""
+    """Tasks with different keys coexist."""
     with unit_of_work.transaction() as uow:
         uow.tasks.add(
             make_task(
@@ -74,7 +74,7 @@ def test_different_identity_is_accepted(
 def test_task_is_found_by_identity(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Задача находится по идемпотентному ключу."""
+    """Task is found by its idempotency key."""
     with unit_of_work.transaction() as uow:
         uow.tasks.add(
             make_task(
@@ -101,7 +101,7 @@ def test_task_is_found_by_identity(
 def test_task_transition_is_stored(
     unit_of_work: SqlAlchemyUnitOfWork, stored_book: None
 ) -> None:
-    """Переход состояния сохраняется вместе со счётчиком попыток и ошибкой."""
+    """State transition is stored along with attempt counter and error."""
     task = make_task()
     with unit_of_work.transaction() as uow:
         uow.tasks.add(task)

@@ -1,9 +1,9 @@
-"""Runner исполняет настоящую задачу импорта книги и её повтор (P2.T7).
+"""Task runner executes the real book import task and its retry (P2.T7).
 
-Здесь проверяется стык, ради которого runner существует: очередь на SQLite, воркер,
-синхронный прикладной сценарий `ImportBook` и адаптер EPUB работают вместе. Задача
-импорта появляется у книги, уже загруженной пользователем и находящейся в состоянии
-`IMPORTING` (PRD § 18), поэтому запись книги создаётся до постановки задачи.
+This verifies the exact junction for which the runner exists: SQLite queue, worker,
+synchronous application use case `ImportBook`, and the EPUB adapter work together.
+The import task is created for a book already uploaded by the user in `IMPORTING`
+status (PRD § 18), so the book record is created prior to enqueueing the task.
 """
 
 from __future__ import annotations
@@ -39,15 +39,15 @@ from linguary.domain import (
     TaskType,
 )
 
-#: Набор тестовых EPUB (PRD § 28.1).
+#: Set of test EPUB fixtures (PRD § 28.1).
 FIXTURE_DIRECTORY = Path(__file__).resolve().parents[2] / "fixtures" / "epub"
 
-#: Ключ задачи импорта книги: задача уровня книги, поэтому область пуста.
+#: Import task identity: book-level task, so scope is empty.
 IMPORT_IDENTITY = TaskIdentity(book_id=BOOK_ID, task_type=TaskType.IMPORT_BOOK)
 
 
 def import_handler(unit_of_work: SqlAlchemyUnitOfWork) -> Callable[[ProcessingTask], None]:
-    """Обработчик задачи импорта: собирает команду сценария из записи книги."""
+    """Import task handler: constructs the use case command from the book record."""
     import_book = ImportBook(unit_of_work=unit_of_work, reader=EbookLibEpubReader())
 
     def handle(task: ProcessingTask) -> None:
@@ -69,10 +69,10 @@ def import_handler(unit_of_work: SqlAlchemyUnitOfWork) -> Callable[[ProcessingTa
 def flaky_import_handler(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> Callable[[ProcessingTask], None]:
-    """Обработчик импорта, первая попытка которого срывается временной ошибкой.
+    """Flaky import handler whose first attempt fails with a transient error.
 
-    Временный сбой задача переживает и повторяется по действию пользователя, в отличие
-    от нечитаемого EPUB: тот требует другого файла, а не новой попытки (PRD § 16).
+    A task survives a transient failure and can be retried upon user action, unlike
+    an unreadable EPUB which requires a different file rather than a retry (PRD § 16).
     """
     handle_import = import_handler(unit_of_work)
     attempts = count(1)
@@ -90,7 +90,7 @@ def make_pool(
     unit_of_work: SqlAlchemyUnitOfWork,
     handler: Callable[[ProcessingTask], None] | None = None,
 ) -> TaskWorkerPool:
-    """Воркер с единственным обработчиком — задачей импорта книги."""
+    """Worker pool with a single handler for the book import task."""
     return TaskWorkerPool(
         TaskRunner(
             queue=task_queue,
@@ -104,7 +104,7 @@ def make_pool(
 
 
 def store_book(unit_of_work: SqlAlchemyUnitOfWork, *, source_epub_path: str) -> None:
-    """Кладёт в хранилище загруженную книгу в состоянии `IMPORTING`."""
+    """Stores an uploaded book in `IMPORTING` status in the persistence layer."""
     with unit_of_work.transaction() as uow:
         existing = uow.books.get(BOOK_ID)
         book = make_book(source_epub_path=source_epub_path)
@@ -117,7 +117,7 @@ def store_book(unit_of_work: SqlAlchemyUnitOfWork, *, source_epub_path: str) -> 
 async def test_import_task_imports_the_book(
     task_queue: SqliteTaskQueue, unit_of_work: SqlAlchemyUnitOfWork
 ) -> None:
-    """Задача импорта доходит до `succeeded`, а книга оказывается импортированной."""
+    """Import task reaches `succeeded`, and the book becomes imported."""
     store_book(unit_of_work, source_epub_path=str(FIXTURE_DIRECTORY / "synthetic_story.epub"))
     await task_queue.enqueue(IMPORT_IDENTITY)
 
@@ -135,7 +135,7 @@ async def test_import_task_imports_the_book(
 async def test_retried_import_task_does_not_duplicate_the_result(
     task_queue: SqliteTaskQueue, unit_of_work: SqlAlchemyUnitOfWork
 ) -> None:
-    """Повтор упавшей задачи импортирует книгу один раз, без второго набора глав."""
+    """Retry of a failed task imports the book once, without duplicate sections."""
     store_book(unit_of_work, source_epub_path=str(FIXTURE_DIRECTORY / "synthetic_story.epub"))
     task = await task_queue.enqueue(IMPORT_IDENTITY)
     pool = make_pool(task_queue, unit_of_work, flaky_import_handler(unit_of_work))
@@ -158,7 +158,7 @@ async def test_retried_import_task_does_not_duplicate_the_result(
 async def test_unreadable_epub_makes_the_task_not_retryable(
     task_queue: SqliteTaskQueue, unit_of_work: SqlAlchemyUnitOfWork
 ) -> None:
-    """Нечитаемый EPUB даёт постоянную ошибку: нужен другой файл, а не повтор (ALG-05)."""
+    """Unreadable EPUB produces a permanent error: requires another file, not a retry (ALG-05)."""
     store_book(unit_of_work, source_epub_path=str(FIXTURE_DIRECTORY / "missing.epub"))
     task = await task_queue.enqueue(IMPORT_IDENTITY)
 

@@ -1,9 +1,9 @@
-"""Разбор импортов пакета `linguary` и правила зависимостей между слоями.
+"""Import parsing for package `linguary` and inter-layer dependency rules.
 
-Модуль читает исходники как текст и разбирает их через `ast`, поэтому проверка не зависит
-от того, установлены ли сторонние библиотеки, и срабатывает даже на модулях, которые нельзя
-импортировать. Правила описываются декларативно (`LayerRule`), проверка возвращает список
-нарушений с точным местом.
+The module reads sources as text and parses them via `ast`, so verification does not
+depend on whether third-party libraries are installed, and works even on modules that
+cannot be imported. Rules are declared declaratively (`LayerRule`); verification returns
+a list of violations with exact source locations.
 """
 
 from __future__ import annotations
@@ -13,17 +13,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-#: Корень пакета в layout `src/`.
+#: Package root in `src/` layout.
 PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "linguary"
 
-#: Имя корневого пакета проекта.
+#: Project root package name.
 ROOT_PACKAGE = "linguary"
 
-#: Модули стандартной библиотеки текущего интерпретатора.
+#: Standard library modules for the current interpreter.
 STDLIB_MODULES = frozenset(sys.stdlib_module_names)
 
-#: Модули стандартной библиотеки, дающие доступ к файловой системе, сети, процессам и БД.
-#: Для `domain` и `application` это такая же внешняя технология, как сторонний драйвер.
+#: Standard library modules providing access to filesystem, network, processes, and DB.
+#: For `domain` and `application`, this is external technology akin to a third-party driver.
 INFRASTRUCTURE_STDLIB = frozenset(
     {
         "os",
@@ -49,13 +49,13 @@ INFRASTRUCTURE_STDLIB = frozenset(
     }
 )
 
-#: Вызовы, означающие прямую работу с файловой системой из кода слоя.
+#: Calls representing direct filesystem operations from layer code.
 FILESYSTEM_CALLS = frozenset({"open"})
 
 
 @dataclass(frozen=True)
 class SourceModule:
-    """Исходник одного модуля вместе с его dotted-именем и именем пакета."""
+    """Source of a single module along with its dotted name and package name."""
 
     module: str
     package: str
@@ -63,7 +63,7 @@ class SourceModule:
 
     @classmethod
     def from_path(cls, path: Path) -> SourceModule:
-        """Читает модуль по пути внутри `src/`."""
+        """Reads a module by path inside `src/`."""
         relative = path.resolve().relative_to(PACKAGE_ROOT.parent).with_suffix("")
         parts = list(relative.parts)
         is_package = parts[-1] == "__init__"
@@ -76,13 +76,13 @@ class SourceModule:
 
 @dataclass(frozen=True)
 class LayerRule:
-    """Правило зависимостей одного слоя.
+    """Dependency rule for a single layer.
 
-    :param layer: имя слоя для сообщений об ошибке;
-    :param package: dotted-имя пакета слоя;
-    :param allowed_internal: пакеты проекта, импорт которых слою разрешён;
-    :param allow_third_party: разрешены ли сторонние библиотеки и работа с файлами;
-    :param forbidden_stdlib: запрещённые модули стандартной библиотеки.
+    :param layer: layer name for error messages;
+    :param package: dotted package name of the layer;
+    :param allowed_internal: project packages permitted for import by the layer;
+    :param allow_third_party: whether third-party libraries and file operations are permitted;
+    :param forbidden_stdlib: forbidden standard library modules.
     """
 
     layer: str
@@ -93,14 +93,14 @@ class LayerRule:
 
     @property
     def directory(self) -> Path:
-        """Директория слоя внутри пакета."""
+        """Layer directory inside the package."""
         relative = self.package.removeprefix(f"{ROOT_PACKAGE}.").split(".")
         return PACKAGE_ROOT.joinpath(*relative)
 
 
 @dataclass(frozen=True)
 class Violation:
-    """Нарушение правила слоя с точным местом в исходнике."""
+    """Layer rule violation with exact location in source."""
 
     module: str
     line: int
@@ -140,8 +140,8 @@ ADAPTERS_RULE = LayerRule(
     allow_third_party=True,
 )
 
-#: Composition root: единственное место, которое знает и порты, и конкретные адаптеры.
-#: Представления ему неизвестны — зависимость идёт от них к нему, а не наоборот.
+#: Composition root: the only place aware of both ports and concrete adapters.
+#: Views are unknown to it — dependency points from them to it, not vice versa.
 COMPOSITION_RULE = LayerRule(
     layer="composition",
     package=f"{ROOT_PACKAGE}.composition",
@@ -156,8 +156,8 @@ COMPOSITION_RULE = LayerRule(
     allow_third_party=True,
 )
 
-#: Web UI: состав зависимостей берёт из `composition` и не зависит от CLI — другого
-#: представления того же приложения.
+#: Web UI: takes dependencies from `composition` and does not depend on CLI —
+#: another view of the same application.
 WEB_RULE = LayerRule(
     layer="web",
     package=f"{ROOT_PACKAGE}.web",
@@ -175,23 +175,23 @@ WEB_RULE = LayerRule(
 
 
 def iter_modules(directory: Path) -> list[Path]:
-    """Все `.py`-файлы слоя, отсортированные для стабильного вывода."""
+    """All `.py` files in the layer, sorted for deterministic output."""
     return sorted(directory.rglob("*.py"))
 
 
 def iter_public_modules(directory: Path) -> list[Path]:
-    """Модули слоя без пакетных `__init__.py`.
+    """Layer modules excluding package `__init__.py`.
 
-    Используется как защита от ложно-зелёного теста: если слой состоит из одних пустых
-    `__init__.py`, проверять в нём нечего.
+    Used as protection against false-positive test: if a layer consists solely of empty
+    `__init__.py`, there is nothing to check.
     """
     return [path for path in iter_modules(directory) if path.name != "__init__.py"]
 
 
 def imported_names(module: SourceModule) -> list[tuple[int, str]]:
-    """Все импортируемые модулем имена как пары «строка, dotted-имя».
+    """All names imported by a module as pairs of (line, dotted name).
 
-    Относительные импорты приводятся к абсолютным по имени пакета текущего модуля.
+    Relative imports are resolved to absolute names using current module's package.
     """
     names: list[tuple[int, str]] = []
     for node in ast.walk(ast.parse(module.source)):
@@ -203,7 +203,7 @@ def imported_names(module: SourceModule) -> list[tuple[int, str]]:
 
 
 def _absolute_import(node: ast.ImportFrom, package: str) -> str:
-    """Абсолютное имя источника для `from ... import ...`."""
+    """Absolute source name for `from ... import ...`."""
     if not node.level:
         return node.module or ""
     parts = package.split(".")
@@ -212,7 +212,7 @@ def _absolute_import(node: ast.ImportFrom, package: str) -> str:
 
 
 def check_module(module: SourceModule, rule: LayerRule) -> list[Violation]:
-    """Проверяет один модуль по правилу слоя."""
+    """Checks a single module against layer rule."""
     violations = [
         Violation(module=module.module, line=line, target=name, reason=reason)
         for line, name in imported_names(module)
@@ -223,7 +223,7 @@ def check_module(module: SourceModule, rule: LayerRule) -> list[Violation]:
 
 
 def _import_violation_reason(name: str, rule: LayerRule) -> str | None:
-    """Причина, по которой импорт запрещён слою, либо `None`, если импорт допустим."""
+    """Reason why import is forbidden for the layer, or `None` if import is allowed."""
     if not name:
         return None
     root = name.split(".")[0]
@@ -245,7 +245,7 @@ def _import_violation_reason(name: str, rule: LayerRule) -> str | None:
 
 
 def _filesystem_violations(module: SourceModule, rule: LayerRule) -> list[Violation]:
-    """Прямые обращения к файловой системе (вызов `open`) внутри слоя."""
+    """Direct filesystem accesses (`open` calls) within the layer."""
     if rule.allow_third_party:
         return []
     return [
@@ -263,7 +263,7 @@ def _filesystem_violations(module: SourceModule, rule: LayerRule) -> list[Violat
 
 
 def check_layer(rule: LayerRule) -> list[Violation]:
-    """Проверяет все модули слоя и возвращает нарушения по всему слою."""
+    """Checks all modules of the layer and returns violations across the whole layer."""
     violations: list[Violation] = []
     for path in iter_modules(rule.directory):
         violations.extend(check_module(SourceModule.from_path(path), rule))
@@ -271,5 +271,5 @@ def check_layer(rule: LayerRule) -> list[Violation]:
 
 
 def format_violations(violations: list[Violation]) -> str:
-    """Сообщение об ошибке для assert-а теста."""
+    """Error message for test assertion."""
     return "\n".join(f"  {violation}" for violation in violations)
