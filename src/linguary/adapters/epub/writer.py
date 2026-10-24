@@ -1,24 +1,24 @@
-"""Экспорт EPUB: сборка новой книги и встроенные технические проверки (PRD § 20).
+"""EPUB export: target book assembly and built-in technical checks (PRD § 20).
 
-Реализация порта `linguary.application.ports.epub.EpubWriter`. Сборка симметрична импорту:
-одна `DocumentSection` — один XHTML-документ порядка чтения, и он сохраняет путь исходного
-документа, поэтому внутренние ссылки книги остаются рабочими без переписывания адресов.
+Implementation of port `linguary.application.ports.epub.EpubWriter`. Assembly is symmetric to import:
+one `DocumentSection` corresponds to one reading-order XHTML document, retaining the source
+document path so that internal links remain valid without address rewriting.
 
-Глава собирается в порядке PRD § 20: `Previously in Chapter ...` из сводки предыдущей главы,
-`Before You Read`, затем каждый оригинальный блок, за ним перевод или словарные подсказки
-и `Language Notes` этого блока. LLM в сборке не участвует: экспортёр раскладывает готовые
-данные по разметке.
+A chapter is assembled in PRD § 20 order: `Previously in Chapter ...` from the previous chapter summary,
+`Before You Read`, then each original block followed by its translation or glossary hints
+and that block's `Language Notes`. The LLM does not participate in assembly: the exporter arranges
+ready-made data into markup.
 
-Блок `PRESERVE_OPAQUE` переносится исходной разметкой из EPUB книги — иначе теряется всё,
-внутрь чего импортёр не спускался: таблицы целиком и изображения внутри них. Опаковая копия
-делается только для блока без потомков: у блока-сноски с вложенными абзацами копия
-продублировала бы и текст, и идентификаторы.
+A `PRESERVE_OPAQUE` block is transferred using source markup from the EPUB book — otherwise anything
+the importer did not descend into would be lost: whole tables and images inside them. An opaque copy
+is made only for a leaf block: for a footnote block with nested paragraphs, an opaque copy would
+duplicate both text and identifiers.
 
-Порядок гарантий такой: сборка сама приводит книгу в корректное состояние (неразрешимая
-внутренняя ссылка разворачивается в текст, повторный `id` снимается, `<img>` без файла
-убирается — каждый случай с предупреждением), а `verify_exported_epub` независимо проверяет
-уже записанный файл. Ошибка встроенных проверок — `EpubExportFatalError`, и недособранный
-артефакт на диске не остаётся.
+The order of guarantees is as follows: assembly itself normalizes the book into a valid state
+(an unresolvable internal link unwraps into text, duplicate `id` is stripped, an `<img>` without a file
+is removed — each case with a warning), and `verify_exported_epub` independently validates
+the already-written file. A built-in check failure is an `EpubExportFatalError`, ensuring no partially-assembled
+artifact remains on disk.
 """
 
 from __future__ import annotations
@@ -65,21 +65,21 @@ _OPF_NAMESPACE = "http://www.idpf.org/2007/opf"
 _DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
 _CONTAINER_NAMESPACE = "urn:oasis:names:tc:opendocument:xmlns:container"
 
-#: Каталог пакета внутри архива: документы и ресурсы лежат относительно него.
+#: Package directory inside archive: documents and resources reside relative to it.
 _PACKAGE_DIRECTORY = "OEBPS"
 _PACKAGE_FILE = "content.opf"
 _NAVIGATION_FILE = "nav.xhtml"
 _STYLESHEET_FILE = "linguary.css"
 _MIMETYPE = "application/epub+zip"
 
-#: Оглавление исходной книги в формате EPUB2. Итоговая книга собирается как EPUB3 с
-#: собственным `nav`, а старый NCX описывает уже несуществующую структуру.
+#: Source book table of contents in EPUB2 format. The target book is assembled as EPUB3 with
+#: its own nav, whereas legacy NCX describes the no-longer-existing structure.
 _NCX_MEDIA_TYPE = "application/x-dtbncx+xml"
 
-#: Статусы поддержки, при которых ресурс попадает в итоговую книгу.
+#: Support statuses under which a resource is included in the target book.
 _EXPORTED_STATUSES = frozenset({SupportStatus.SUPPORTED, SupportStatus.PRESERVE_OPAQUE})
 
-#: Теги блоков по типу; заголовок берёт исходный уровень, если он известен.
+#: Block tags by type; heading retains original level if known.
 _BLOCK_TAGS: Mapping[BlockType, str] = {
     BlockType.PARAGRAPH: "p",
     BlockType.HEADING: "h2",
@@ -95,18 +95,18 @@ _BLOCK_TAGS: Mapping[BlockType, str] = {
 
 _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 
-#: Блоки, идущие подряд, собираются под общим родителем: импортёр разбирает список
-#: и цитату по элементам, и без обёртки книга получила бы список из одного пункта
-#: на каждый пункт.
+#: Consecutive blocks are grouped under a shared parent: importer splits lists
+#: and blockquotes into individual elements, and without a wrapper the book would produce a single-item list
+#: per item.
 _GROUPING_TAGS: Mapping[BlockType, str] = {
     BlockType.LIST_ITEM: "ul",
     BlockType.QUOTE: "blockquote",
 }
 
-#: Элементы, внутрь которых текст блока не пишется: их содержимое — сам элемент.
+#: Elements where block text is not written inside: their content is the element itself.
 _VOID_TAGS = frozenset({"img", "hr", "br"})
 
-#: Теги оформления по видам встроенной разметки.
+#: Styling tags by inline markup type.
 _ANNOTATION_TAGS: Mapping[InlineAnnotationType, str] = {
     InlineAnnotationType.ITALIC: "i",
     InlineAnnotationType.BOLD: "b",
@@ -115,8 +115,8 @@ _ANNOTATION_TAGS: Mapping[InlineAnnotationType, str] = {
     InlineAnnotationType.FOOTNOTE_REFERENCE: "a",
 }
 
-#: Оформление помощи (PRD § 20): оригинал остаётся основным слоем, помощь тише его —
-#: меньшим кеглем, с отступом и левой полосой, а не одним лишь цветом.
+#: Learning aids styling (PRD § 20): original remains the primary layer, aids are quieter with
+#: smaller font, indent, and left border rather than color alone.
 _STYLESHEET = """/* Linguary: оформление учебных слоёв поверх оригинала книги. */
 .linguary-previously,
 .linguary-before-you-read {
@@ -159,14 +159,14 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
 
 
 class EpubExportWriter(EpubWriter):
-    """Сборка итогового EPUB из канонической модели, ресурсов и результатов обработки."""
+    """Assembles target EPUB from canonical model, resources, and processing results."""
 
     def write(self, request: EpubWriteRequest) -> ExportedBook:
-        """Собирает книгу и проверяет собранный файл; ошибка проверок — `FATAL`.
+        """Assembles the book and validates the exported file; verification failure is `FATAL`.
 
-        Книга собирается рядом с итоговым файлом и занимает его место только после
-        успешных встроенных проверок: неудачная сборка не должна уносить с собой
-        прошлый удачный экспорт той же книги.
+        The book is assembled next to the target path and replaces it only after
+        passing built-in verification checks: an unsuccessful assembly must not destroy
+        a previous successful export of the same book.
         """
         warnings = _ExportWarnings()
         payloads = dict(_resource_payloads(request, warnings))
@@ -202,7 +202,7 @@ class EpubExportWriter(EpubWriter):
 
 @dataclass(slots=True)
 class _Chapter:
-    """Готовый документ главы: путь внутри книги, заголовок и дерево XHTML."""
+    """Ready chapter document: path inside book, title, and XHTML tree."""
 
     section_id: str
     href: str
@@ -212,7 +212,7 @@ class _Chapter:
 
 @dataclass(slots=True)
 class _Occurrences:
-    """Случаи одного вида расхождения в одной главе: пример и их число."""
+    """Occurrences of a single divergence kind in a single chapter: example and count."""
 
     example: str
     count: int = 1
@@ -220,12 +220,12 @@ class _Occurrences:
 
 @dataclass(slots=True)
 class _ExportWarnings:
-    """Замечания сборки, сведённые по виду и главе.
+    """Export warnings aggregated by kind and chapter.
 
-    Отдельная строка на каждый пропущенный разрыв страницы превратила бы список
-    предупреждений в шум: в изданиях Gutenberg таких конструкций сотни. Поэтому случаи
-    копятся, а пользователь получает по одному предупреждению на вид и главу — с примером
-    и числом затронутых мест.
+    A separate line for every dropped page break would turn the warning list into noise:
+    Gutenberg editions contain hundreds of such constructs. Occurrences are therefore
+    accumulated, and the user receives one warning per kind and chapter — with an example
+    and the count of affected occurrences.
     """
 
     _occurrences: dict[tuple[ExportWarningKind, str | None], _Occurrences] = field(
@@ -235,7 +235,7 @@ class _ExportWarnings:
     def record(
         self, kind: ExportWarningKind, *, section_id: str | None, detail: str
     ) -> None:
-        """Запоминает один случай расхождения итоговой книги с исходной."""
+        """Records a single instance of divergence between the exported and source book."""
         occurrences = self._occurrences.get((kind, section_id))
         if occurrences is None:
             self._occurrences[(kind, section_id)] = _Occurrences(example=detail)
@@ -243,7 +243,7 @@ class _ExportWarnings:
         occurrences.count += 1
 
     def collected(self) -> tuple[ExportWarning, ...]:
-        """Предупреждения экспорта по накопленным случаям."""
+        """Export warnings from accumulated occurrences."""
         return tuple(
             ExportWarning(
                 kind=kind,
@@ -261,12 +261,12 @@ class _ExportWarnings:
 def _resource_payloads(
     request: EpubWriteRequest, warnings: _ExportWarnings
 ) -> Iterable[tuple[str, bytes]]:
-    """Содержимое ресурсов книги для нового архива.
+    """Book resource contents for the new archive.
 
-    Ресурс без копии в хранилище книгу не ломает: так выглядит книга, импортированная
-    без хранилища ресурсов, — она собирается без иллюстраций, и пользователь видит
-    предупреждение. Объявленная копия, которой нет на диске, — другое дело: хранилище
-    повреждено, и собирать книгу с потерянным обязательным ресурсом нельзя.
+    A resource without a stored copy does not break the book: this is expected for a book imported
+    without a resource store — it is assembled without images, and the user receives a warning.
+    A declared copy missing from disk is a different matter: the store is corrupted,
+    and assembling a book with a missing required resource is forbidden.
     """
     for resource in request.document.resources:
         if resource.support_status not in _EXPORTED_STATUSES:
@@ -294,7 +294,7 @@ def _resource_payloads(
 
 
 def _resource_media_types(request: EpubWriteRequest) -> Mapping[str, str]:
-    """Типы содержимого ресурсов книги: их объявляет манифест исходной книги."""
+    """Book resource media types as declared in the source book manifest."""
     return {
         _contained_name(resource.source_path): resource.media_type
         for resource in request.document.resources
@@ -342,10 +342,10 @@ _FRONT_MATTER_TITLES = frozenset(
 def _is_front_matter(
     section: DocumentSection, document: CanonicalDocument | None = None
 ) -> bool:
-    """Определяет вводный служебный раздел (титульный лист, оглавление, front matter).
+    """Identifies introductory front matter sections (title page, table of contents, colophon).
 
-    Такие разделы не являются сюжетными главами: они не получают сносок и переводов,
-    не открывают книгу блоком пересказа и сами не служат источником для «Previously in...».
+    Such sections are not story chapters: they receive no footnotes or translations,
+    do not open the book with a recap block, and do not serve as sources for "Previously in...".
     """
     if section.is_notes_only:
         return False
@@ -402,11 +402,11 @@ def _is_front_matter(
 def _render_chapters(
     request: EpubWriteRequest, *, opaque: _OpaqueSource, warnings: _ExportWarnings
 ) -> tuple[_Chapter, ...]:
-    """Документы глав в порядке чтения.
+    """Chapter documents in reading order.
 
-    Вводные служебные разделы (титул, оглавление) и страница сносок пересказа не имеют,
-    и сюжетная глава после них вспоминает последнюю сюжетную главу до них.
-    Номер сюжетной главы не сдвигается из-за вводных разделов.
+    Introductory front matter sections (title page, table of contents) and notes pages have no recap,
+    and a story chapter following them recaps the last preceding story chapter.
+    Story chapter numbering is not displaced by front matter sections.
     """
     renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings)
     chapters: list[_Chapter] = []
@@ -430,7 +430,7 @@ def _render_chapters(
 
 
 class _ChapterRenderer:
-    """Сборка одного XHTML-документа главы."""
+    """Renders a single chapter XHTML document."""
 
     def __init__(
         self,
@@ -452,12 +452,12 @@ class _ChapterRenderer:
         previous: DocumentSection | None,
         is_front_matter: bool = False,
     ) -> _Chapter:
-        """Собирает главу целиком: учебные разделы, блоки и слои помощи.
+        """Assembles the whole chapter: learning sections, blocks, and aid layers.
 
-        Страница сносок собирается без разметки главы и без учебных разделов перед
-        текстом: её сноски переводятся, но главой она не является.
-        Вводные служебные разделы (титул, оглавление) собираются без учебных материалов,
-        сносок и перевода.
+        A notes page is assembled without chapter markup or learning sections before
+        the text: its footnotes are translated, but it is not a chapter itself.
+        Introductory front matter sections (title page, table of contents) are assembled without
+        learning materials, footnotes, or translations.
         """
         href = _contained_name(section.source_resource_path)
         root = _xhtml_document(
@@ -491,7 +491,7 @@ class _ChapterRenderer:
     def _append_previously(
         self, container: etree._Element, previous: DocumentSection | None
     ) -> None:
-        """Раздел `Previously in Chapter ...` из сводки предыдущей главы (PRD § 19.2)."""
+        """`Previously in Chapter ...` section from previous chapter summary (PRD § 19.2)."""
         if previous is None:
             return
         material = self._request.learning_materials.get(previous.id)
@@ -506,7 +506,7 @@ class _ChapterRenderer:
     def _append_before_you_read(
         self, container: etree._Element, section: DocumentSection
     ) -> None:
-        """Раздел `Before You Read` из анализа этой главы (PRD § 19.1)."""
+        """`Before You Read` section from this chapter's analysis (PRD § 19.1)."""
         material = self._request.learning_materials.get(section.id)
         if material is None or not material.before_you_read:
             return
@@ -528,7 +528,7 @@ class _ChapterRenderer:
         number: int,
         is_front_matter: bool = False,
     ) -> None:
-        """Блоки главы вместе со слоями помощи, в порядке исходного документа."""
+        """Chapter blocks with aid layers, in source document order."""
         blocks = section.ordered_blocks
         children: dict[str, list[DocumentBlock]] = {}
         for block in blocks:
@@ -554,7 +554,7 @@ class _ChapterRenderer:
         parent_type: BlockType | None = None,
         is_front_matter: bool = False,
     ) -> None:
-        """Соседние блоки одного уровня; подряд идущие пункты и цитаты — под обёрткой."""
+        """Sibling blocks at the same level; consecutive list items and blockquotes are placed under a wrapper."""
         group: etree._Element | None = None
         grouped: BlockType | None = None
         for block in blocks:
@@ -582,7 +582,7 @@ class _ChapterRenderer:
         parent_type: BlockType | None,
         is_front_matter: bool = False,
     ) -> None:
-        """Один блок: оригинал, вложенные блоки и слой помощи под ним."""
+        """A single block: original text, nested blocks, and aid layer beneath it."""
         nested = children.get(block.id, ())
         element = self._append_original(
             parent, block, nested=bool(nested), state=state, parent_type=parent_type
@@ -613,7 +613,7 @@ class _ChapterRenderer:
         state: _SectionState,
         parent_type: BlockType | None,
     ) -> etree._Element | None:
-        """Оригинальный блок; `PRESERVE_OPAQUE` без потомков — исходной разметкой."""
+        """Original block; `PRESERVE_OPAQUE` without descendants uses source markup."""
         if block.support_status is SupportStatus.PRESERVE_OPAQUE and not nested:
             copied = self._opaque.element(block)
             if copied is not None:
@@ -646,7 +646,7 @@ class _ChapterRenderer:
         state: _SectionState,
         parent_type: BlockType | None,
     ) -> etree._Element:
-        """Элемент блока по его типу вместе с текстом и встроенной разметкой."""
+        """Block element based on its type, complete with text and inline markup."""
         tag = _block_tag(block, parent_type=parent_type)
         element = _sub(parent, tag, _block_attributes(block, tag=tag))
         host = element
@@ -665,10 +665,10 @@ class _ChapterRenderer:
         state: _SectionState,
         inside: bool,
     ) -> None:
-        """Якоря блока: по ним на него ссылается сама книга.
+        """Block anchors: how the book text references this block.
 
-        Первый якорь становится идентификатором элемента, остальные остаются пустыми
-        `span`: терять их нельзя, иначе внутренняя ссылка книги станет неразрешимой.
+        The first anchor becomes the element's id attribute; remaining anchors become empty
+        `span` elements: losing them would make internal book references unresolvable.
         """
         pending = [
             anchor
@@ -692,7 +692,7 @@ class _ChapterRenderer:
     def _append_help(
         self, parent: etree._Element, block: DocumentBlock, *, state: _SectionState
     ) -> None:
-        """Перевод либо словарные подсказки и `Language Notes` этого блока (PRD § 20)."""
+        """Translation or glossary hints and `Language Notes` for this block (PRD § 20)."""
         result = self._request.block_results.get(block.id)
         if result is not None:
             self._append_result(parent, result, block=block, state=state)
@@ -727,11 +727,11 @@ class _ChapterRenderer:
         block: DocumentBlock,
         state: _SectionState,
     ) -> None:
-        """Перевод блока либо его словарные подсказки.
+        """Block translation or its glossary hints.
 
-        Метка `[^N]` в переводе становится ссылкой на ту же сноску, что и `N`-я ссылка
-        на сноску оригинала, с тем же видимым текстом. Идентификатор ссылки оригинала
-        не повторяется: обратная ссылка из сноски по-прежнему ведёт к оригиналу.
+        The `[^N]` mark in a translation becomes a link to the same footnote as the `N`-th footnote
+        reference in the original text, using the same link text. The original reference id
+        is not reused: the backlink from the footnote continues to point to the original.
         """
         if result.translated_text:
             translation = _sub(
@@ -762,7 +762,7 @@ class _ChapterRenderer:
 
 @dataclass(slots=True)
 class _SectionState:
-    """Состояние сборки одной главы: занятые идентификаторы и счётчик заметок."""
+    """Assembly state of a single chapter: allocated identifiers and note counter."""
 
     section: DocumentSection
     href: str
@@ -772,11 +772,11 @@ class _SectionState:
 
 
 class _OpaqueSource:
-    """Исходная книга как источник разметки для блоков `PRESERVE_OPAQUE`.
+    """Source book as the markup provider for `PRESERVE_OPAQUE` blocks.
 
-    Недоступный или неразбираемый исходный файл экспорт не останавливает: блок переносится
-    текстом, а пользователь получает предупреждение. Книга остаётся собираемой и тогда,
-    когда пользователь убрал исходный EPUB из файловой системы.
+    An inaccessible or unparseable source file does not halt export: the block is transferred
+    as text, and the user receives a warning. The book remains exportable even when
+    the user has removed the source EPUB from the filesystem.
     """
 
     def __init__(self, source_path: str | None) -> None:
@@ -811,7 +811,7 @@ class _OpaqueSource:
             self._archive = None
 
     def element(self, block: DocumentBlock) -> etree._Element | None:
-        """Копия исходного элемента блока либо `None`, если её не достать."""
+        """Copy of the source block element, or `None` if unavailable."""
         root = self._document(block.source_reference.resource_path)
         if root is None:
             return None
@@ -821,7 +821,7 @@ class _OpaqueSource:
         return _in_xhtml_namespace(deepcopy(found))
 
     def _document(self, resource_path: str) -> etree._Element | None:
-        """Разобранный исходный документ книги; результат разбора кешируется."""
+        """Parsed source document of the book; parse results are cached."""
         if resource_path in self._documents:
             return self._documents[resource_path]
         root = self._parse(resource_path)
@@ -846,12 +846,12 @@ class _OpaqueSource:
 def _resolve_references(
     chapters: Sequence[_Chapter], *, known_files: set[str], warnings: _ExportWarnings
 ) -> None:
-    """Приводит книгу к состоянию, в котором все внутренние связи разрешимы.
+    """Brings the book into a state where all internal references are resolvable.
 
-    Исходная книга может ссылаться на то, чего в канонической модели нет: на пустую
-    декорацию, отброшенную импортом, или на документ вне порядка чтения. Оставить такую
-    ссылку значит собрать книгу, которая не проходит собственные проверки, поэтому ссылка
-    разворачивается в обычный текст, а пользователь получает предупреждение.
+    The source book may reference constructs that do not exist in the canonical model:
+    an empty decoration dropped by import, or a document outside reading order. Leaving such
+    a reference would produce a book that fails its own verification checks, so the reference
+    is unwrapped into plain text, and the user receives a warning.
     """
     anchors = {chapter.href: _deduplicate_ids(chapter, warnings) for chapter in chapters}
     for chapter in chapters:
@@ -872,7 +872,7 @@ def _resolve_references(
 
 
 def _deduplicate_ids(chapter: _Chapter, warnings: _ExportWarnings) -> set[str]:
-    """Идентификаторы документа; повторный `id` снимается с более позднего элемента."""
+    """Document identifiers; duplicate `id` is stripped from later elements."""
     seen: set[str] = set()
     for element in chapter.root.iter():
         identifier = element.get("id")
@@ -901,7 +901,7 @@ def _resolve_link(
     anchors: Mapping[str, set[str]],
     warnings: _ExportWarnings,
 ) -> None:
-    """Оставляет ссылку, если она разрешима, иначе разворачивает её в текст."""
+    """Retains the link if it is resolvable, otherwise unwraps it into text."""
     href = element.get("href")
     if not href or _is_external(href):
         return
@@ -929,7 +929,7 @@ def _resolve_image(
     known_files: set[str],
     warnings: _ExportWarnings,
 ) -> None:
-    """Убирает изображение, файла которого в итоговой книге нет."""
+    """Removes an image whose file is absent from the target book."""
     source = element.get("src")
     if source and _is_external(source):
         return
@@ -955,7 +955,7 @@ def _append_book_payloads(
     chapters: Sequence[_Chapter],
     media_types: Mapping[str, str],
 ) -> None:
-    """Добавляет к ресурсам книги документы глав, навигацию, стиль и файл пакета."""
+    """Appends chapter documents, navigation, stylesheet, and package file to book resources."""
     payloads.update(
         {chapter.href: _serialize(chapter.root) for chapter in chapters}
     )
@@ -974,7 +974,7 @@ def _append_book_payloads(
 def _navigation(
     chapters: Sequence[_Chapter], *, document: CanonicalDocument
 ) -> etree._Element:
-    """Документ навигации EPUB3: оглавление ведёт к главам в порядке чтения."""
+    """EPUB3 navigation document: table of contents links to chapters in reading order."""
     root = _xhtml_document(
         title=document.metadata.title,
         language=document.source_language,
@@ -999,7 +999,7 @@ def _package(
     payloads: Mapping[str, bytes],
     media_types: Mapping[str, str],
 ) -> etree._Element:
-    """Файл пакета OPF: метаданные книги, манифест и порядок чтения."""
+    """OPF package file: book metadata, manifest, and reading order spine."""
     root = _element(
         f"{{{_OPF_NAMESPACE}}}package",
         {"version": "3.0", "unique-identifier": "pub-id"},
@@ -1017,7 +1017,7 @@ def _package(
 
 
 def _append_metadata(metadata: etree._Element, document: CanonicalDocument) -> None:
-    """Метаданные книги: сохраняются те, что прочитал импортёр (PRD § 20)."""
+    """Book metadata: retains metadata parsed by importer (PRD § 20)."""
     book_metadata = document.metadata
     identifier = _sub(metadata, f"{{{_DC_NAMESPACE}}}identifier", {"id": "pub-id"})
     identifier.text = book_metadata.identifier or f"urn:uuid:{document.id}"
@@ -1040,7 +1040,7 @@ def _manifest_items(
     payloads: Mapping[str, bytes],
     media_types: Mapping[str, str],
 ) -> Mapping[str, str]:
-    """Элементы манифеста; отдаёт идентификатор каждого файла книги."""
+    """Manifest items; returns the identifier for each book file."""
     identifiers: dict[str, str] = {}
     for number, href in enumerate(sorted(payloads), start=1):
         item_id = "nav" if href == _NAVIGATION_FILE else f"item-{number}"
@@ -1057,7 +1057,7 @@ def _manifest_items(
 
 
 def _write_archive(target: Path, *, payloads: Mapping[str, bytes]) -> None:
-    """Пишет архив книги: `mimetype` первым и без сжатия, затем контейнер и содержимое."""
+    """Writes the book archive: uncompressed `mimetype` first, then container and contents."""
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -1076,7 +1076,7 @@ def _write_archive(target: Path, *, payloads: Mapping[str, bytes]) -> None:
 
 
 def _container(package_href: str) -> etree._Element:
-    """`META-INF/container.xml`: где в архиве лежит файл пакета."""
+    """`META-INF/container.xml`: location of package file in archive."""
     root = _element(
         f"{{{_CONTAINER_NAMESPACE}}}container",
         {"version": "1.0"},
@@ -1094,7 +1094,7 @@ def _container(package_href: str) -> etree._Element:
 
 
 class ExportCheckKind(StrEnum):
-    """Что именно не сошлось во встроенной технической проверке (PRD § 20)."""
+    """Kind of verification failure during built-in technical check (PRD § 20)."""
 
     CONTAINER = "container"
     PACKAGE = "package"
@@ -1109,7 +1109,7 @@ class ExportCheckKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ExportCheckFailure:
-    """Одна несошедшаяся проверка собранного файла."""
+    """A single failed verification check for an exported file."""
 
     kind: ExportCheckKind
     message: str
@@ -1118,11 +1118,11 @@ class ExportCheckFailure:
 def verify_exported_epub(
     path: Path | str, *, expected_spine: Sequence[str] = ()
 ) -> tuple[ExportCheckFailure, ...]:
-    """Встроенные технические проверки собранного EPUB (PRD § 20).
+    """Built-in technical checks for an exported EPUB (PRD § 20).
 
-    Проверяется уже записанный файл, а не промежуточное состояние сборки: так проверка
-    видит ровно то, что увидит читалка, и её можно натравить на чужой или намеренно
-    испорченный файл. Внешние инструменты не нужны, проверка выполняется всегда.
+    Validates an already-written file rather than intermediate assembly state: this ensures
+    verification observes exactly what an e-reader would see, and allows testing against arbitrary
+    or deliberately malformed files. No external tools required; verification is always performed.
     """
     try:
         archive = zipfile.ZipFile(path)
@@ -1139,7 +1139,7 @@ def verify_exported_epub(
 def _verify_archive(
     archive: zipfile.ZipFile, *, expected_spine: Sequence[str]
 ) -> tuple[ExportCheckFailure, ...]:
-    """Проверки открытого архива книги."""
+    """Verification checks on an opened book archive."""
     names = frozenset(archive.namelist())
     failures: list[ExportCheckFailure] = []
     if "mimetype" not in names:
@@ -1177,7 +1177,7 @@ def _verify_archive(
 def _package_href(
     archive: zipfile.ZipFile, names: frozenset[str], failures: list[ExportCheckFailure]
 ) -> str | None:
-    """Путь к файлу пакета по `META-INF/container.xml`."""
+    """Package file path resolved via `META-INF/container.xml`."""
     if "META-INF/container.xml" not in names:
         failures.append(
             ExportCheckFailure(
@@ -1215,7 +1215,7 @@ def _package_href(
 
 @dataclass(frozen=True, slots=True)
 class _ManifestItem:
-    """Элемент манифеста: путь внутри архива и тип содержимого."""
+    """Manifest item: path inside archive and content media type."""
 
     item_id: str
     name: str
@@ -1227,7 +1227,7 @@ class _ManifestItem:
 def _manifest(
     package: etree._Element, *, directory: str, failures: list[ExportCheckFailure]
 ) -> Mapping[str, _ManifestItem]:
-    """Элементы манифеста по их идентификаторам."""
+    """Manifest items mapped by their identifiers."""
     items: dict[str, _ManifestItem] = {}
     for element in package.iter():
         if local_name(element) != "item":
@@ -1270,7 +1270,7 @@ def _spine(
     manifest: Mapping[str, _ManifestItem],
     failures: list[ExportCheckFailure],
 ) -> tuple[_ManifestItem, ...]:
-    """Документы порядка чтения; ссылка мимо манифеста — несошедшаяся проверка."""
+    """Reading-order documents; reference outside manifest is a failed check."""
     documents: list[_ManifestItem] = []
     for element in package.iter():
         if local_name(element) != "itemref":
@@ -1296,7 +1296,7 @@ def _spine(
 def _missing_manifest_files(
     manifest: Mapping[str, _ManifestItem], *, names: frozenset[str]
 ) -> list[ExportCheckFailure]:
-    """Файлы, объявленные манифестом, но отсутствующие в архиве."""
+    """Files declared by manifest but absent from the archive."""
     return [
         ExportCheckFailure(
             ExportCheckKind.RESOURCE,
@@ -1313,7 +1313,7 @@ def _parsed_documents(
     manifest: Mapping[str, _ManifestItem],
     failures: list[ExportCheckFailure],
 ) -> Mapping[str, etree._Element]:
-    """Разобранные XHTML-документы книги по их путям в архиве."""
+    """Parsed XHTML documents of the book by their archive paths."""
     documents: dict[str, etree._Element] = {}
     for item in manifest.values():
         if item.media_type != "application/xhtml+xml":
@@ -1335,7 +1335,7 @@ def _parsed_documents(
 def _duplicate_id_failures(
     name: str, root: etree._Element
 ) -> list[ExportCheckFailure]:
-    """Повторяющиеся идентификаторы внутри одного документа."""
+    """Duplicate identifiers within a single document."""
     seen: set[str] = set()
     failures: list[ExportCheckFailure] = []
     for element in root.iter():
@@ -1360,7 +1360,7 @@ def _navigation_failures(
     documents: Mapping[str, etree._Element],
     spine: Sequence[_ManifestItem],
 ) -> list[ExportCheckFailure]:
-    """Наличие и содержательность оглавления книги."""
+    """Presence and validity of the book table of contents."""
     navigations = [item for item in manifest.values() if "nav" in item.properties.split()]
     if not navigations:
         return [
@@ -1401,7 +1401,7 @@ def _navigation_failures(
 
 
 def _toc_targets(root: etree._Element, *, base: str) -> tuple[str, ...]:
-    """Документы, на которые ведут пункты оглавления, в порядке их следования."""
+    """Documents targeted by table of contents entries, in order of appearance."""
     targets: list[str] = []
     for navigation in root.iter():
         if local_name(navigation) != "nav":
@@ -1425,7 +1425,7 @@ def _reference_failures(
     names: frozenset[str],
     manifest: Mapping[str, _ManifestItem],
 ) -> list[ExportCheckFailure]:
-    """Разрешимость внутренних ссылок, ссылок на сноски и адресов изображений."""
+    """Resolvability of internal links, footnote references, and image paths."""
     anchors = {
         name: {
             identifier
@@ -1457,7 +1457,7 @@ def _link_failures(
     names: frozenset[str],
     anchors: Mapping[str, set[str]],
 ) -> list[ExportCheckFailure]:
-    """Внутренняя ссылка, которая никуда не ведёт."""
+    """Internal link that leads nowhere."""
     href = element.get("href")
     if not href or _is_external(href):
         return []
@@ -1487,7 +1487,7 @@ def _image_failures(
     names: frozenset[str],
     declared: set[str],
 ) -> list[ExportCheckFailure]:
-    """Изображение без файла в архиве или без объявления в манифесте."""
+    """Image without a file in the archive or without declaration in the manifest."""
     source = element.get("src")
     if not source or _is_external(source):
         return []
@@ -1515,7 +1515,7 @@ def _order_failures(
     documents: Mapping[str, etree._Element],
     expected: Sequence[str],
 ) -> list[ExportCheckFailure]:
-    """Порядок глав: он же в порядке чтения и он же в оглавлении."""
+    """Chapter order: matching between reading order and table of contents."""
     failures: list[ExportCheckFailure] = []
     actual = tuple(item.href for item in spine)
     if expected and actual != tuple(expected):
@@ -1552,7 +1552,7 @@ def _order_failures(
 
 
 def _parse(archive: zipfile.ZipFile, name: str) -> etree._Element | None:
-    """Разбирает файл архива как XML; неразбираемый файл даёт `None`."""
+    """Parses an archive file as XML; unparseable file produces `None`."""
     parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
     try:
         return etree.fromstring(archive.read(name), parser=parser)
@@ -1566,7 +1566,7 @@ def _element(
     *,
     nsmap: Mapping[str | None, str] | None = None,
 ) -> etree._Element:
-    """Элемент XHTML или указанного пространства имён с атрибутами."""
+    """Element in XHTML or specified namespace with attributes."""
     qualified = tag if tag.startswith("{") else f"{{{_XHTML_NAMESPACE}}}{tag}"
     element = etree.Element(qualified, nsmap=dict(nsmap) if nsmap else None)
     for name, value in (attributes or {}).items():
@@ -1577,14 +1577,14 @@ def _element(
 def _sub(
     parent: etree._Element, tag: str, attributes: Mapping[str, str] | None = None
 ) -> etree._Element:
-    """Создаёт дочерний элемент и добавляет его в конец родителя."""
+    """Creates a child element and appends it to the parent."""
     element = _element(tag, attributes)
     parent.append(element)
     return element
 
 
 def _xhtml_document(*, title: str, language: str, stylesheet: str) -> etree._Element:
-    """Каркас документа книги: заголовок, кодировка и ссылка на стиль."""
+    """Book document scaffold: title, encoding, and stylesheet link."""
     root = _element(
         "html",
         {"lang": language},
@@ -1599,7 +1599,7 @@ def _xhtml_document(*, title: str, language: str, stylesheet: str) -> etree._Ele
 
 
 def _serialize(root: etree._Element) -> bytes:
-    """Сериализует документ книги вместе с объявлением XML."""
+    """Serializes a book document along with XML declaration."""
     etree.cleanup_namespaces(root)
     return etree.tostring(
         root, xml_declaration=True, encoding="utf-8", pretty_print=True
@@ -1607,11 +1607,11 @@ def _serialize(root: etree._Element) -> bytes:
 
 
 def _block_tag(block: DocumentBlock, *, parent_type: BlockType | None) -> str:
-    """Тег элемента блока.
+    """Element tag for a block.
 
-    Заголовок сохраняет исходный уровень, а абзац внутри сноски остаётся абзацем: тип
-    блока внутри сноски унаследован от неё самой, и вторая `aside` внутри первой описывала
-    бы ту же сноску дважды.
+    Headings preserve their original level, and a paragraph inside a footnote remains a paragraph:
+    block type inside a footnote is inherited from the footnote itself, and a second `aside` inside
+    the first would describe the same footnote twice.
     """
     if block.type is BlockType.HEADING:
         tag = block.attributes.get("tag", "")
@@ -1622,7 +1622,7 @@ def _block_tag(block: DocumentBlock, *, parent_type: BlockType | None) -> str:
 
 
 def _block_attributes(block: DocumentBlock, *, tag: str) -> dict[str, str]:
-    """Атрибуты элемента блока: адрес изображения, описание и служебные пометки."""
+    """Element attributes for a block: image source, description, and auxiliary markers."""
     attributes: dict[str, str] = {}
     if block.type is BlockType.IMAGE:
         attributes["src"] = block.attributes.get("src", "")
@@ -1648,18 +1648,18 @@ def _block_attributes(block: DocumentBlock, *, tag: str) -> dict[str, str]:
 
 
 def _anchors(block: DocumentBlock) -> tuple[str, ...]:
-    """Идентификаторы, по которым на блок ссылается книга."""
+    """Identifiers through which the book references the block."""
     return tuple(block.attributes.get("anchor_ids", "").split())
 
 
 def _nestable(
     annotations: Sequence[InlineAnnotation],
 ) -> tuple[InlineAnnotation, ...]:
-    """Разметка, из которой можно построить дерево вложенных элементов.
+    """Markup suitable for constructing an element tree.
 
-    Разметка снята с корректного XHTML, поэтому обычно вложена правильно. Пересечение
-    без вложенности деревом не описывается, и такая разметка отбрасывается: потерять
-    оформление фрагмента лучше, чем собрать неправильный XHTML.
+    Markup was extracted from valid XHTML and is usually properly nested. Intersections
+    without strict containment cannot form a tree and are dropped: losing styling for a fragment
+    is preferable to generating invalid XHTML.
     """
     ordered = sorted(annotations, key=lambda item: (item.start, -item.end))
     kept: list[InlineAnnotation] = []
@@ -1678,7 +1678,7 @@ def _append_inline(
     annotations: Sequence[InlineAnnotation],
     state: _SectionState,
 ) -> None:
-    """Пишет текст блока в элемент, восстанавливая встроенную разметку."""
+    """Writes block text into the element, restoring inline markup."""
     _append_range(host, text, annotations, start=0, end=len(text), state=state)
 
 
@@ -1691,7 +1691,7 @@ def _append_range(
     end: int,
     state: _SectionState,
 ) -> None:
-    """Участок текста вместе с разметкой, которая внутри него начинается."""
+    """Text range along with markup annotations starting within it."""
     position = start
     index = 0
     while index < len(annotations):
@@ -1721,7 +1721,7 @@ def _append_range(
 def _target_attributes(
     annotation: InlineAnnotation, state: _SectionState
 ) -> dict[str, str]:
-    """Атрибуты элемента разметки: адрес ссылки и пометка ссылки на сноску."""
+    """Markup element attributes: link target and footnote reference marker."""
     if annotation.target is None:
         return {}
     attributes = {"href": _href_from_target(annotation.target, base=state.href)}
@@ -1731,10 +1731,10 @@ def _target_attributes(
 
 
 def _href_from_target(target: str, *, base: str) -> str:
-    """Адрес ссылки относительно документа главы.
+    """Link href relative to the chapter document.
 
-    Импортёр нормализует внутренние ссылки к виду «путь ресурса книги#фрагмент», то есть
-    относительно каталога пакета; в документе главы адрес должен быть относительно неё.
+    Importer normalizes internal links into "book resource path#fragment" format, i.e.
+    relative to the package directory; inside a chapter document the address must be relative to the chapter.
     """
     if _is_external(target):
         return target
@@ -1746,7 +1746,7 @@ def _href_from_target(target: str, *, base: str) -> str:
 
 
 def _append_text(host: etree._Element, text: str) -> None:
-    """Добавляет текст, превращая переносы строк блока в `<br/>`."""
+    """Appends text, converting block newlines into `<br/>`."""
     if not text:
         return
     parts = text.split("\n")
@@ -1757,7 +1757,7 @@ def _append_text(host: etree._Element, text: str) -> None:
 
 
 def _append_characters(host: etree._Element, text: str) -> None:
-    """Добавляет текст в конец содержимого элемента."""
+    """Appends characters to the tail of element content."""
     if not text:
         return
     if len(host):
@@ -1768,7 +1768,7 @@ def _append_characters(host: etree._Element, text: str) -> None:
 
 
 def _unwrap(element: etree._Element) -> None:
-    """Заменяет элемент его содержимым, сохраняя текст вокруг него."""
+    """Replaces element with its children while preserving surrounding text."""
     parent = element.getparent()
     if parent is None:
         return
@@ -1787,7 +1787,7 @@ def _unwrap(element: etree._Element) -> None:
 
 
 def _insert_text(parent: etree._Element, index: int, text: str) -> None:
-    """Дописывает текст в позицию перед указанным ребёнком."""
+    """Appends text before the specified child position."""
     if not text:
         return
     if index == 0:
@@ -1798,12 +1798,12 @@ def _insert_text(parent: etree._Element, index: int, text: str) -> None:
 
 
 def _paragraphs(text: str) -> tuple[str, ...]:
-    """Абзацы текста: пустая строка разделяет, одиночный перенос остаётся внутри."""
+    """Text paragraphs: empty line separates paragraphs, single newline remains inline."""
     return tuple(part.strip() for part in text.split("\n\n") if part.strip())
 
 
 def _previously_heading(previous_title: str) -> str:
-    """Заголовок раздела о предыдущей главе на языке оригинала (PRD § 19.2)."""
+    """Heading for previous chapter summary in original language (PRD § 19.2)."""
     title = previous_title.strip()
     if not title:
         return "Previously"
@@ -1815,7 +1815,7 @@ def _previously_heading(previous_title: str) -> str:
 
 
 def _looks_like_chapter_number(title: str) -> bool:
-    """Назван ли раздел просто номером — арабским или римским."""
+    """Whether the section is titled solely with a number (Arabic or Roman)."""
     candidate = title.rstrip(".").strip()
     if candidate.isdigit():
         return True
@@ -1823,7 +1823,7 @@ def _looks_like_chapter_number(title: str) -> bool:
 
 
 def _unique_id(candidate: str, used: set[str]) -> str:
-    """Идентификатор, которого ещё нет в документе."""
+    """Identifier unique within the document."""
     identifier = candidate
     suffix = 1
     while identifier in used:
@@ -1834,15 +1834,15 @@ def _unique_id(candidate: str, used: set[str]) -> str:
 
 
 def _contains_id(element: etree._Element, identifier: str) -> bool:
-    """Есть ли такой идентификатор в самом элементе или внутри него."""
+    """Whether identifier exists on the element itself or within its subtree."""
     return any(node.get("id") == identifier for node in element.iter())
 
 
 def _in_xhtml_namespace(element: etree._Element) -> etree._Element:
-    """Приводит скопированную разметку к пространству имён XHTML.
+    """Ensures copied markup conforms to the XHTML namespace.
 
-    Издания без объявленного пространства имён встречаются; без приведения такой фрагмент
-    сериализуется с пустым `xmlns` и перестаёт быть частью документа книги.
+    Editions lacking a declared namespace do occur; without adjustment such fragments
+    serialize with empty `xmlns` and cease to be part of the book document.
     """
     for node in element.iter():
         if isinstance(node.tag, str) and not node.tag.startswith("{"):
@@ -1852,7 +1852,7 @@ def _in_xhtml_namespace(element: etree._Element) -> etree._Element:
 
 
 def _element_at(root: etree._Element, structural_path: str) -> etree._Element | None:
-    """Элемент документа по структурному пути импортёра (ALG-01)."""
+    """Document element at importer's structural path (ALG-01)."""
     steps = [step for step in structural_path.split("/") if step]
     if not steps:
         return None
@@ -1872,7 +1872,7 @@ def _element_at(root: etree._Element, structural_path: str) -> etree._Element | 
 
 
 def _parse_step(step: str) -> tuple[str, int] | None:
-    """Шаг структурного пути вида `div[2]`; иные шаги не поддерживаются."""
+    """Structural path step formatted like `div[2]`; other steps are not supported."""
     tag, separator, rest = step.partition("[")
     if not separator or not rest.endswith("]") or not tag.isidentifier():
         return None
@@ -1883,7 +1883,7 @@ def _parse_step(step: str) -> tuple[str, int] | None:
 def _nth_child(
     parent: etree._Element, *, tag: str, index: int
 ) -> etree._Element | None:
-    """`index`-й потомок с указанным именем тега, считая с единицы."""
+    """1-based `index`-th child with the specified tag name."""
     seen = 0
     for child in parent:
         if local_name(child) != tag:
@@ -1895,7 +1895,7 @@ def _nth_child(
 
 
 def _resolve_target(href: str, *, base: str) -> tuple[str, str]:
-    """Адрес ссылки как пара «путь в архиве, фрагмент»."""
+    """Resolves link target into a (archive_path, fragment) pair."""
     path, _, fragment = href.partition("#")
     if not path:
         return base, fragment
@@ -1904,19 +1904,19 @@ def _resolve_target(href: str, *, base: str) -> tuple[str, str]:
 
 
 def _relative_href(base: str, target: str) -> str:
-    """Путь к файлу книги относительно документа `base`."""
+    """Path to target book file relative to `base` document."""
     directory = posixpath.dirname(base)
     return posixpath.relpath(target, directory) if directory else target
 
 
 def _is_external(href: str) -> bool:
-    """Ведёт ли адрес наружу книги."""
+    """Whether the address points outside the book."""
     scheme, separator, _ = href.partition(":")
     return bool(separator) and scheme.isalpha()
 
 
 def _contained_name(resource_path: str) -> str:
-    """Путь файла внутри каталога пакета; выход за его пределы недопустим."""
+    """File path inside package directory; traversing outside is forbidden."""
     normalized = posixpath.normpath(resource_path.replace("\\", "/").strip())
     if not normalized or normalized.startswith(("/", "..")):
         raise EpubExportFatalError(
@@ -1926,12 +1926,12 @@ def _contained_name(resource_path: str) -> str:
 
 
 def _media_type(href: str) -> str:
-    """Тип содержимого файла книги по его расширению."""
+    """Content media type for a book file based on its extension."""
     return _MEDIA_TYPES.get(posixpath.splitext(href)[1].lower(), "application/octet-stream")
 
 
-#: Типы содержимого файлов, которые собирает сам экспортёр. Типы ресурсов книги берутся
-#: из канонической модели, поэтому здесь их нет.
+#: Media types of files generated directly by the exporter. Book resource types are sourced
+#: from the canonical model and therefore not listed here.
 _MEDIA_TYPES: Mapping[str, str] = {
     ".xhtml": "application/xhtml+xml",
     ".html": "application/xhtml+xml",

@@ -1,13 +1,12 @@
-"""Очередь локальных задач в SQLite: постановка, захват и фиксация итога (ALG-02).
+"""SQLite-backed task queue: enqueueing, claiming, and persisting outcomes (ALG-02).
 
-Здесь живут блокирующие операции с базой. Захват задачи — единственное место приложения,
-где транзакция открывается явным `BEGIN IMMEDIATE`: писатель берёт блокировку записи сразу,
-до чтения кандидата, поэтому два воркера не читают одну и ту же строку как свободную.
-Условное обновление с проверкой числа изменённых строк остаётся вторым рубежом: даже если
-транзакцию когда-нибудь откроют отложенной, захваченная кем-то задача не будет захвачена
-повторно.
+Encapsulates blocking database operations. Task claiming is the only place in the application
+where a transaction opens with an explicit `BEGIN IMMEDIATE`: the writer acquires a write lock
+immediately before candidate inspection, preventing two workers from reading the same row as available.
+The conditional update verifying updated row count serves as a second barrier: even if a transaction
+were ever opened deferred, a task claimed concurrently would not be claimed twice.
 
-Переходы состояния задачи выполняет домен: адаптер отвечает за атомарность, а не за правила.
+Task state transitions are performed by domain entities: this adapter is responsible for atomicity, not business rules.
 """
 
 from __future__ import annotations
@@ -25,14 +24,14 @@ from linguary.adapters.db.models import ProcessingTaskRow
 from linguary.adapters.db.repositories import SqlAlchemyTaskRepository
 from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus
 
-#: Явное начало транзакции записи. Отложенная транзакция SQLite берёт блокировку только
-#: на первой записи, и повышение блокировки после чтения кандидата обрывается ошибкой
-#: вместо ожидания, поэтому захват начинается сразу с режима записи.
+#: Explicit write transaction start. A deferred SQLite transaction acquires write locks only
+#: on the first write, where upgrading locks after reading a candidate fails with an error
+#: instead of waiting; therefore claiming begins in write mode immediately.
 _BEGIN_IMMEDIATE = "BEGIN IMMEDIATE"
 
 
 class SqliteTaskStore:
-    """Блокирующие операции очереди задач поверх SQLite."""
+    """Blocking task queue operations backed by SQLite."""
 
     def __init__(
         self,
@@ -47,11 +46,11 @@ class SqliteTaskStore:
     def for_engine(
         cls, engine: Engine, *, id_factory: Callable[[], str] | None = None
     ) -> SqliteTaskStore:
-        """Очередь с фабрикой сессий по умолчанию для готового движка."""
+        """Task queue with default session factory for the given engine."""
         return cls(create_session_factory(engine), id_factory=id_factory)
 
     def enqueue(self, identity: TaskIdentity) -> ProcessingTask:
-        """Ставит задачу в очередь; повторная постановка того же ключа дубликата не создаёт."""
+        """Enqueues a task; reenqueuing an existing identity creates no duplicates."""
         existing = self._find(identity)
         if existing is not None:
             return existing
@@ -65,8 +64,8 @@ class SqliteTaskStore:
             with self._session_factory.begin() as session:
                 SqlAlchemyTaskRepository(session).add(task)
         except IntegrityError:
-            # Ключ занят другим писателем между проверкой и вставкой: очередь идемпотентна
-            # по ключу, поэтому возвращается уже поставленная задача.
+            # The key was claimed by another writer between lookup and insert: the queue is idempotent
+            # on identity, so return the already-enqueued task.
             stored = self._find(identity)
             if stored is None:
                 raise
@@ -74,7 +73,7 @@ class SqliteTaskStore:
         return task
 
     def claim_next_pending(self) -> ProcessingTask | None:
-        """Захватывает очередную задачу `pending`, переводя её в `running` (ALG-02)."""
+        """Claims the next `pending` task, transitioning it to `running` (ALG-02)."""
         session = self._session_factory()
         try:
             session.connection().exec_driver_sql(_BEGIN_IMMEDIATE)
@@ -97,12 +96,12 @@ class SqliteTaskStore:
             session.close()
 
     def save(self, task: ProcessingTask) -> None:
-        """Сохраняет новое состояние задачи; отменённую задачу не воскрешает.
+        """Persists updated task state without resurrecting canceled tasks.
 
-        Возврат к проверке глоссария удаляет задачи отменённого запуска, в том числе ту,
-        которая выполняется прямо сейчас (PRD § 21.5). Её итог фиксировать уже некуда:
-        отсутствие строки здесь — нормальный конец отменённой работы, а не сбой очереди,
-        и воркер из-за него останавливаться не должен.
+        Returning to glossary review deletes tasks from the canceled run, including
+        any task currently being executed (PRD § 21.5). There is no longer a row to record
+        its outcome: a missing row is normal completion for canceled work rather than a queue failure,
+        and workers must not crash because of it.
         """
         with self._session_factory.begin() as session:
             repository = SqlAlchemyTaskRepository(session)
@@ -111,20 +110,20 @@ class SqliteTaskStore:
             repository.save(task)
 
     def list_running(self) -> tuple[ProcessingTask, ...]:
-        """Задачи в состоянии `running` в порядке их создания."""
+        """Tasks currently in `running` state in creation order."""
         with self._session_factory() as session:
             return self._list_by_status(session, TaskStatus.RUNNING)
 
     def _find(self, identity: TaskIdentity) -> ProcessingTask | None:
-        """Задача по идемпотентному ключу."""
+        """Task by idempotent identity key."""
         with self._session_factory() as session:
             return SqlAlchemyTaskRepository(session).find_by_identity(identity)
 
     def _next_pending(self, session: Session) -> ProcessingTask | None:
-        """Кандидат на захват: самая ранняя задача `pending`.
+        """Next pending task candidate: earliest `pending` task.
 
-        Идентификатор в сортировке — устойчивый разрыв ничьей: отметки создания задач,
-        поставленных одной операцией, совпадают с точностью до записи в базу.
+        The identifier in ordering serves as a stable tie-breaker: timestamps of tasks
+        enqueued in a single batch may be identical down to database precision.
         """
         row = session.scalars(
             select(ProcessingTaskRow)
@@ -137,7 +136,7 @@ class SqliteTaskStore:
     def _list_by_status(
         self, session: Session, status: TaskStatus
     ) -> tuple[ProcessingTask, ...]:
-        """Задачи одного состояния в порядке их создания."""
+        """Tasks in a specific status in creation order."""
         rows = session.scalars(
             select(ProcessingTaskRow)
             .where(ProcessingTaskRow.status == status.value)
@@ -147,7 +146,7 @@ class SqliteTaskStore:
 
 
 def _new_task_id() -> str:
-    """Идентификатор новой задачи."""
+    """Unique identifier for a new task."""
     return str(uuid4())
 
 

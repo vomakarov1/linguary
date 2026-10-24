@@ -1,12 +1,12 @@
-"""Локальный воркер: сколько задач выполняется одновременно и когда он останавливается.
+"""Local worker pool: concurrency limits and shutdown orchestration.
 
-Параллелизм — настройка со значением по умолчанию в одну задачу (PRD § 25): последовательная
-обработка предсказуема, защищает от ограничений частоты запросов у провайдера LLM и не меняет
-результат, потому что задачи независимы по данным. Каждый воркер — отдельная корутина, которая
-берёт из очереди свою задачу; их число и есть предел одновременной работы.
+Concurrency is configurable with a default of one task (PRD § 25): sequential processing
+is predictable, avoids LLM provider rate limits, and yields identical results because tasks
+are data-independent. Each worker is an independent coroutine claiming its own task from the queue;
+their count defines the maximum concurrent workload.
 
-Внешняя очередь задач в MVP не используется (ADR § 3), поэтому свободных задач воркер ждёт
-коротким опросом базы.
+No external task broker is used in the MVP (ADR § 3), so workers wait for available tasks
+using short database polling.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from linguary.domain import ProcessingTask
 
 @dataclass(frozen=True, slots=True)
 class WorkerSettings:
-    """Настройки локального воркера."""
+    """Local worker settings."""
 
     concurrency: int = 1
     idle_delay_seconds: float = 0.05
@@ -35,7 +35,7 @@ class WorkerSettings:
 
 
 class TaskWorkerPool:
-    """Набор воркеров над одним runner-ом с ограничением одновременной работы."""
+    """Worker pool managing a TaskRunner with concurrency limits."""
 
     def __init__(self, runner: TaskRunner, settings: WorkerSettings | None = None) -> None:
         self._runner = runner
@@ -51,11 +51,11 @@ class TaskWorkerPool:
 
     @property
     def concurrency(self) -> int:
-        """Сколько задач воркер выполняет одновременно."""
+        """Number of tasks the worker executes concurrently."""
         return self._concurrency
 
     def set_concurrency(self, value: int) -> None:
-        """Меняет целевое число исполнителей без отмены занятой работы."""
+        """Adjusts target concurrency without cancelling in-flight work."""
         if type(value) is not int or value < 1:
             raise ValueError("параллелизм воркера должен быть положительным целым числом")
         self._concurrency = value
@@ -65,9 +65,9 @@ class TaskWorkerPool:
                 wake.set()
 
     async def drain(self) -> tuple[ProcessingTask, ...]:
-        """Выполняет задачи, пока очередь не опустеет, и возвращает завершённые.
+        """Executes tasks until queue is empty and returns completed tasks.
 
-        Режим разовой прогонки: им пользуются CLI и тесты, где ждать новых задач незачем.
+        Batch run mode: used by CLI and tests where waiting for new tasks is unnecessary.
         """
         finished: list[ProcessingTask] = []
         await asyncio.gather(
@@ -76,7 +76,7 @@ class TaskWorkerPool:
         return tuple(finished)
 
     async def run_forever(self) -> None:
-        """Управляет исполнителями до остановки, затем собирает их завершение."""
+        """Manages worker coroutines until stopped, then awaits their completion."""
         if self._running:
             raise RuntimeError("пул воркеров уже запущен")
         self._running = True
@@ -114,19 +114,19 @@ class TaskWorkerPool:
         self._changed.set()
 
     def request_stop(self) -> None:
-        """Запрещает новые захваты; начатые задачи завершаются без отмены."""
+        """Disallows new task claims; in-flight tasks finish without cancellation."""
         self._stop.set()
         self._changed.set()
         for wake in self._worker_wakes.values():
             wake.set()
 
     async def _drain_worker(self, finished: list[ProcessingTask]) -> None:
-        """Воркер разовой прогонки: работает, пока в очереди есть задачи."""
+        """Drain worker coroutine: processes tasks while the queue has work."""
         while (task := await self._runner.run_next()) is not None:
             finished.append(task)
 
     async def _polling_worker(self, slot: int, wake: asyncio.Event) -> None:
-        """Номер слота сохраняется до завершения уже начатого захвата."""
+        """Slot index is retained until completion of an already claimed task."""
         while not self._stop.is_set() and slot < self._concurrency:
             if len(self._busy_slots) >= self._concurrency:
                 wake.clear()
@@ -147,18 +147,18 @@ class TaskWorkerPool:
                 await self._wait_for_work(wake)
 
     async def _wait_for_work(self, wake: asyncio.Event) -> None:
-        """Опрос очереди прерывается остановкой или изменением размера пула."""
+        """Queue polling is interrupted by shutdown or pool resize."""
         with suppress(TimeoutError):
             await asyncio.wait_for(wake.wait(), timeout=self._settings.idle_delay_seconds)
         wake.clear()
 
 
 def to_async_handler(handler: Callable[[ProcessingTask], None]) -> TaskHandler:
-    """Делает из синхронного обработчика асинхронный.
+    """Adapts a synchronous task handler into an asynchronous one.
 
-    Сценарии `ImportBook` и `ExportBook` синхронны и заметное время проводят в разборе
-    EPUB и в SQLite. Выполненные прямо в корутине, они остановили бы цикл событий вместе
-    с остальными воркерами и Web UI, поэтому исполняются в отдельном потоке.
+    `ImportBook` and `ExportBook` use cases are synchronous and spend non-trivial time
+    in EPUB parsing and SQLite transactions. Executed directly in a coroutine, they would block
+    the event loop alongside other workers and the Web UI, and are therefore offloaded to a thread.
     """
 
     async def run(task: ProcessingTask) -> None:

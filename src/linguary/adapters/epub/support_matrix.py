@@ -1,15 +1,15 @@
-"""Матрица поддержки конструкций EPUB (PRD § 6).
+"""EPUB construct support matrix (PRD § 6).
 
-Импортёр обязан явно ответить, что он делает с каждой конструкцией книги:
+The importer must explicitly specify how it handles each book construct:
 
-- `SUPPORTED` — конструкция разобрана и полностью поддержана;
-- `PRESERVE_OPAQUE` — конструкция переносится в итоговый EPUB без внутренней обработки;
-- `DROP_WITH_WARNING` — конструкция пропущена, пользователь видит предупреждение;
-- `FATAL` — книгу импортировать нельзя; такой случай поднимает `EpubImportFatalError`
-  и до классификации отдельной конструкции не доходит.
+- `SUPPORTED` — construct is parsed and fully supported;
+- `PRESERVE_OPAQUE` — construct is transferred to the resulting EPUB without internal processing;
+- `DROP_WITH_WARNING` — construct is dropped, and a user-facing warning is emitted;
+- `FATAL` — book cannot be imported; this raises `EpubImportFatalError`
+  and halts before individual construct classification.
 
-Модуль знает только доменные типы: ни lxml, ни EbookLib, ни файловой системы здесь нет,
-поэтому решения матрицы одинаковы для читателя книги и для сохранения ресурсов.
+This module knows domain types only: no lxml, no EbookLib, and no filesystem dependencies exist here,
+so matrix decisions remain consistent across the book reader and resource persistence.
 """
 
 from __future__ import annotations
@@ -25,14 +25,14 @@ from linguary.domain import (
     SupportStatus,
 )
 
-#: Типы блоков, которые переносятся в итоговый EPUB без внутренней обработки: сложные
-#: таблицы, нестандартные контейнеры и декоративные конструкции (PRD § 6).
+#: Block types transferred to the target EPUB without internal processing: complex
+#: tables, non-standard containers, and decorative structures (PRD § 6).
 _PRESERVE_OPAQUE_BLOCK_TYPES = frozenset(
     {BlockType.TABLE, BlockType.OTHER, BlockType.PAGE_BREAK}
 )
 
-#: Типы содержимого ресурсов, которые в итоговой книге не нужны: сценарии не влияют
-#: на чтение, а переносить исполняемый код в учебный EPUB незачем.
+#: Resource media types that are not needed in the target publication: scripts do not affect
+#: reading, and there is no need to transfer executable code into a bilingual learning EPUB.
 _DROPPED_MEDIA_TYPES = frozenset(
     {
         "application/javascript",
@@ -43,15 +43,15 @@ _DROPPED_MEDIA_TYPES = frozenset(
     }
 )
 
-#: Число примеров структурных путей в тексте предупреждения об отброшенных блоках.
+#: Number of structural path examples displayed in the dropped block warning text.
 _EXAMPLES_IN_WARNING = 3
 
 
 class DropReason(StrEnum):
-    """Причина, по которой конструкция книги не попала в каноническую модель.
+    """Reason why a book construct was not included in the canonical model.
 
-    Список закрыт границами PRD § 6: пропускать разрешено пустой мусор, дублирующие
-    разрывы страницы и неподдержанные декоративные элементы, не влияющие на чтение.
+    The list is strictly bounded by PRD § 6: skipping is permitted for empty junk, duplicate
+    page breaks, and unsupported decorative elements that do not affect reading.
     """
 
     EMPTY_DECORATION = "empty_decoration"
@@ -59,7 +59,7 @@ class DropReason(StrEnum):
 
     @property
     def description(self) -> str:
-        """Человекочитаемое описание причины для предупреждения импорта."""
+        """Human-readable description of the reason for import warnings."""
         return _DROP_REASON_DESCRIPTIONS[self]
 
 
@@ -72,10 +72,10 @@ _DROP_REASON_DESCRIPTIONS = {
 
 
 def block_support_status(block_type: BlockType) -> SupportStatus:
-    """Статус поддержки блока по его типу.
+    """Block support status based on its block type.
 
-    Абзацы, заголовки, цитаты, пункты списка, изображения, сноски и стихи поддержаны
-    полностью; таблица, разрыв страницы и нераспознанная конструкция сохраняются целиком.
+    Paragraphs, headings, quotes, list items, images, footnotes, and poems are fully
+    supported; tables, page breaks, and unrecognized constructs are preserved as opaque blocks.
     """
     return (
         SupportStatus.PRESERVE_OPAQUE
@@ -85,11 +85,11 @@ def block_support_status(block_type: BlockType) -> SupportStatus:
 
 
 def resource_support_status(media_type: str) -> SupportStatus:
-    """Статус поддержки ресурса книги по типу его содержимого.
+    """Book resource support status based on its media type.
 
-    Изображения поддержаны полностью: экспортёр переносит их вместе с блоками `Image`.
-    Стили, шрифты, мультимедиа и незнакомые файлы переносятся как есть — разбирать их
-    импортёру незачем, а потерять оформление книги нельзя.
+    Images are fully supported: exporter transfers them alongside `Image` blocks.
+    Stylesheets, fonts, audio/video, and unrecognized files are transferred as-is: there is no need
+    for the importer to parse them, and the book's visual styling must not be lost.
     """
     normalized = media_type.strip().lower().partition(";")[0].strip()
     if normalized in _DROPPED_MEDIA_TYPES:
@@ -100,7 +100,7 @@ def resource_support_status(media_type: str) -> SupportStatus:
 
 
 def dropped_resource_warning(*, source_path: str, media_type: str) -> BookImportWarning:
-    """Предупреждение о ресурсе, который не попал в книгу (`DROP_WITH_WARNING`)."""
+    """Warning for a resource not transferred to the book (`DROP_WITH_WARNING`)."""
     return BookImportWarning(
         kind=ImportWarningKind.UNSUPPORTED_CONSTRUCT,
         message=(
@@ -112,13 +112,13 @@ def dropped_resource_warning(*, source_path: str, media_type: str) -> BookImport
 
 @dataclass(slots=True)
 class DroppedBlockLog:
-    """Отброшенные блоки одного документа и предупреждения о них.
+    """Dropped blocks of a single document and their associated warnings.
 
-    `DROP_WITH_WARNING` обязан оставить предупреждение, видимое пользователю (PRD § 6),
-    но отдельная строка на каждый пустой `<span>` превращает список предупреждений
-    в шум: в изданиях Gutenberg таких элементов сотни. Поэтому отбросы копятся по
-    причинам, а пользователь получает по одному предупреждению на причину — с числом
-    пропущенных конструкций и примерами их положения в исходном документе.
+    `DROP_WITH_WARNING` must leave a user-visible warning (PRD § 6),
+    but a separate line for every empty `<span>` turns the warning list
+    into noise: Gutenberg editions contain hundreds of such elements. Dropped blocks are therefore
+    aggregated by reason, and the user receives one warning per reason — with the count
+    of dropped constructs and examples of their positions in the source document.
     """
 
     resource_path: str
@@ -126,11 +126,11 @@ class DroppedBlockLog:
     _paths: dict[DropReason, list[str]] = field(default_factory=dict)
 
     def record(self, reason: DropReason, structural_path: str) -> None:
-        """Запоминает пропущенную конструкцию и её положение в документе."""
+        """Records a dropped construct and its location in the document."""
         self._paths.setdefault(reason, []).append(structural_path)
 
     def warnings(self) -> tuple[BookImportWarning, ...]:
-        """Предупреждения импорта по накопленным отбросам."""
+        """Import warnings for accumulated dropped blocks."""
         return tuple(
             BookImportWarning(
                 kind=ImportWarningKind.DROPPED_BLOCK,
@@ -145,7 +145,7 @@ class DroppedBlockLog:
 
 
 def _examples(paths: Sequence[str]) -> str:
-    """Примеры положения пропущенных конструкций в исходном документе."""
+    """Examples of dropped construct locations in the source document."""
     shown = ", ".join(paths[:_EXAMPLES_IN_WARNING])
     if len(paths) > _EXAMPLES_IN_WARNING:
         return f"Например: {shown} и другие"

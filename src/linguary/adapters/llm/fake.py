@@ -1,16 +1,16 @@
-"""Детерминированный клиент LLM для тестов и локальной отладки.
+"""Deterministic LLM client for tests and local debugging.
 
-Заменяет провайдера заранее заданными ответами и не выполняет сетевых вызовов. Нужен
-всем уровням проверки — unit, integration, сквозному сценарию (ADR § 3) — и режиму
-отладки CLI, поэтому живёт в пакете рядом с настоящим адаптером, а не в тестах.
+Replaces the provider with preconfigured replies and performs no network calls. Needed
+across all test levels — unit, integration, end-to-end scenarios (ADR § 3) — and CLI debug mode,
+which is why it resides in the package alongside the production adapter rather than in tests.
 
-Ответы задаются в том же виде, в каком их отдаёт провайдер: текстом структурированного
-ответа. Разбирает их тот же `parse_payload`, что и HTTP-клиент, поэтому сценарии
-«невалидный JSON», «обрыв по лимиту токенов» и «результат для чужих блоков»
-воспроизводятся точно так же, как с настоящей моделью, а не имитируются исключениями.
+Replies are configured in the same format as returned by the provider: raw structured response text.
+They are parsed by the same `parse_payload` used by the HTTP client, ensuring that scenarios
+such as "invalid JSON", "token limit truncation", and "results for unrecognized blocks"
+reproduce identically to a live model rather than being simulated via exceptions.
 
-Сделанные запросы сохраняются: по ним проверяется состав контекста, порядок вызовов
-и то, что уточняющая инструкция повтора действительно дописана к исходному запросу.
+Issued requests are recorded for inspecting context structure, call sequence,
+and verifying that retry instructions were properly appended to the original prompt.
 """
 
 from __future__ import annotations
@@ -28,23 +28,23 @@ from linguary.application.ports.llm import (
 )
 from linguary.domain import TokenUsage
 
-#: Провайдер и модель в ответах клиента: они попадают в журнал вызовов, и по ним видно,
-#: что запуск выполнен без обращения к настоящей модели.
+#: Provider and model in client replies: recorded in call logs to show that execution
+#: occurred without calling a live model.
 FAKE_PROVIDER = "fake"
 FAKE_MODEL = "fake-model"
 
 
 class FakeScenarioError(Exception):
-    """Сценарий клиента задан неверно: заготовленные ответы кончились.
+    """Client scenario configuration error: preconfigured replies exhausted.
 
-    Ошибка сборки теста, а не поведение модели, поэтому она не наследует `LLMError`
-    и не должна выглядеть как неудачный вызов, который можно повторить.
+    Represents a test setup defect rather than model behavior, so it does not inherit from `LLMError`
+    and must not look like a retryable invocation failure.
     """
 
 
 @dataclass(frozen=True, slots=True)
 class FakeReply:
-    """Один заготовленный ответ провайдера."""
+    """A single preconfigured provider response."""
 
     content: str
     truncated: bool = False
@@ -59,7 +59,7 @@ class FakeReply:
         truncated: bool = False,
         usage: TokenUsage | None = None,
     ) -> FakeReply:
-        """Ответ из готовой структуры: она сериализуется так же, как это делает модель."""
+        """Constructs a reply from a payload structure: serialized identically to model output."""
         return cls(
             content=json.dumps(payload, ensure_ascii=False),
             truncated=truncated,
@@ -67,18 +67,18 @@ class FakeReply:
         )
 
 
-#: Что клиент делает на очередной вызов: отвечает или поднимает ошибку. Исключением
-#: задаются неудачи вызова (`LLMTransportError` и другие наследники `LLMError`).
+#: Action performed by the client on each invocation: reply or raise an error. Exceptions
+#: represent invocation failures (`LLMTransportError` and other `LLMError` subclasses).
 type FakeScenarioStep = FakeReply | Exception
 
 
 @dataclass(slots=True)
 class FakeLLMClient(LLMClient):
-    """Клиент LLM с заранее заданными ответами.
+    """LLM client returning preconfigured responses.
 
-    Ответы берутся по порядку вызовов. Когда заготовленные ответы кончились, работает
-    `default`; без него сценарий считается исчерпанным, и клиент это сообщает, а не
-    отвечает случайным образом.
+    Replies are consumed in invocation order. When preconfigured replies are exhausted,
+    `default` is used; without it, the scenario is considered exhausted and reports an error
+    rather than returning random data.
     """
 
     replies: Sequence[FakeScenarioStep] = ()
@@ -88,24 +88,24 @@ class FakeLLMClient(LLMClient):
 
     @classmethod
     def always(cls, step: FakeScenarioStep, *, provider: str = FAKE_PROVIDER) -> FakeLLMClient:
-        """Клиент, отвечающий одинаково на любой запрос."""
+        """Client returning the same reply on every request."""
         return cls(default=step, provider=provider)
 
     @classmethod
     def replying(
         cls, steps: Iterable[FakeScenarioStep], *, provider: str = FAKE_PROVIDER
     ) -> FakeLLMClient:
-        """Клиент, отвечающий заданной последовательностью."""
+        """Client returning a fixed sequence of steps."""
         return cls(replies=tuple(steps), provider=provider)
 
     @property
     def call_count(self) -> int:
-        """Сколько запросов клиент получил."""
+        """Number of requests received by the client."""
         return len(self.requests)
 
     @property
     def last_request(self) -> LLMRequest[LLMPayload]:
-        """Последний полученный запрос."""
+        """Most recent request received."""
         if not self.requests:
             raise FakeScenarioError("клиент ещё не получал запросов")
         return self.requests[-1]
@@ -113,14 +113,14 @@ class FakeLLMClient(LLMClient):
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
-        """Отдаёт очередной заготовленный ответ, разобрав его как ответ провайдера."""
+        """Returns the next preconfigured response, parsing it as a provider payload."""
         step = self._next_step()
         self.requests.append(request)
         if isinstance(step, Exception):
             raise step
         payload = parse_payload(request.kind, step.content, contract_version=request.contract_version, truncated=step.truncated)
         return LLMResponse(
-            payload=payload,  # type: ignore[arg-type]  # схему выбирает request.kind
+            payload=payload,  # type: ignore[arg-type]  # schema selected by request.kind
             provider=self.provider,
             model=step.model,
             truncated=step.truncated,
@@ -128,7 +128,7 @@ class FakeLLMClient(LLMClient):
         )
 
     def _next_step(self) -> FakeScenarioStep:
-        """Шаг сценария для текущего вызова."""
+        """Scenario step for the current invocation."""
         index = len(self.requests)
         if index < len(self.replies):
             return self.replies[index]

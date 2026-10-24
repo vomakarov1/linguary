@@ -1,25 +1,25 @@
-"""Проверка собранного EPUB внешним EPUBCheck (PRD § 20).
+"""Validation of built EPUBs using external EPUBCheck (PRD § 20).
 
-Реализация порта `linguary.application.ports.export_validation.ExportValidator` поверх
-официального контракта командной строки:
+Implementation of `linguary.application.ports.export_validation.ExportValidator` port
+on top of the official command-line contract:
 
 ```text
 java -jar epubcheck.jar <file.epub> --json <report.json>
 ```
 
-EPUBCheck требует установленной Java, которой на машине пользователя может не быть
-(ADR § 6, риск 8), поэтому недоступность инструмента — обычный исход, а не ошибка:
-адаптер возвращает отчёт с `available = False` и причиной, по которой проверка не
-выполнялась. Java и `epubcheck.jar` берутся из локальной конфигурации (`EpubCheckSettings`),
-а если она их не задаёт — ищутся автоматически.
+EPUBCheck requires a Java installation that may not be present on the user's machine
+(ADR § 6, risk 8), so tool unavailability is a normal outcome rather than an error:
+the adapter returns a report with `available = False` and the reason why validation was not performed.
+Java and `epubcheck.jar` are read from local configuration (`EpubCheckSettings`),
+and if not specified, are located automatically.
 
-Адаптер сообщает только факты: доступен ли инструмент, что он нашёл и куда сохранён его
-отчёт. Решение по этим фактам — «непроверенная книга», «экспорт неуспешен», «предупреждения
-не блокируют» — принимает сценарий экспорта, и здесь оно не повторяется.
+The adapter reports facts only: whether the tool is available, what issues it identified, and where
+its report was saved. Decisions based on these facts — "unverified book", "export failed",
+"warnings are non-blocking" — are made by the export use case and are not duplicated here.
 
-Отчёт EPUBCheck — публичный контракт чужого инструмента, поэтому разбирается по факту:
-незнакомые поля и уровни игнорируются, а неполный отчёт (процесс упал раньше, чем дописал
-JSON) даёт `ExportValidationError` — техническую ошибку доступного инструмента.
+The EPUBCheck report is a public contract of a third-party tool, and is parsed as-is:
+unrecognized fields and severity levels are ignored, while an incomplete report (the process crashed
+before writing the full JSON) raises `ExportValidationError` — a technical error of an available tool.
 """
 
 from __future__ import annotations
@@ -40,16 +40,16 @@ from linguary.application.ports.export_validation import (
     ExportValidator,
 )
 
-#: Имя файла инструмента в дистрибутиве EPUBCheck.
+#: Tool filename in the EPUBCheck distribution.
 _JAR_NAME = "epubcheck.jar"
 
-#: Расширение отчёта, если сценарий экспорта не выбрал путь сам: отчёт кладётся рядом
-#: с экспортным артефактом (PRD § 20).
+#: Report extension if the export use case does not specify a path: the report is placed
+#: alongside the exported artifact (PRD § 20).
 _REPORT_SUFFIX = ".epubcheck.json"
 
-#: Каталоги, в которых `epubcheck.jar` ищется, когда он не задан настройкой. Кроме
-#: домашнего каталога приложения сюда входят каталоги пакетных менеджеров: инструмент
-#: чаще ставят ими, чем распаковывают вручную.
+#: Directories where `epubcheck.jar` is searched for when not specified in configuration.
+#: Along with the application home directory, this includes package manager directories
+#: as users frequently install the tool via package managers rather than manual extraction.
 _SEARCH_DIRECTORIES = (
     "~/.linguary/epubcheck",
     "/opt/homebrew/opt/epubcheck/libexec",
@@ -57,37 +57,37 @@ _SEARCH_DIRECTORIES = (
     "/usr/share/java/epubcheck",
 )
 
-#: Уровни сообщений EPUBCheck, значимые для экспорта. `INFO`, `USAGE` и `SUPPRESSED`
-#: описывают саму проверку, а не книгу, и в замечания не попадают.
+#: EPUBCheck message severity levels relevant to export. `INFO`, `USAGE`, and `SUPPRESSED`
+#: describe the check itself rather than the book, and are omitted from issues.
 _SEVERITIES: Mapping[str, ExportIssueSeverity] = {
     "FATAL": ExportIssueSeverity.ERROR,
     "ERROR": ExportIssueSeverity.ERROR,
     "WARNING": ExportIssueSeverity.WARNING,
 }
 
-#: Сколько ждать проверку одной книги. EPUBCheck разбирает книгу целиком, поэтому предел
-#: щедрый: он существует, чтобы зависший процесс не остановил экспорт навсегда.
+#: Timeout in seconds for validating a single book. EPUBCheck parses the entire book,
+#: so the limit is generous: it exists to prevent a stalled process from halting export indefinitely.
 _DEFAULT_TIMEOUT_SECONDS = 600.0
 
-#: Сколько символов вывода инструмента попадает в текст технической ошибки.
+#: Maximum characters from tool output included in technical error details.
 _OUTPUT_LIMIT = 500
 
 
 class _ToolUnavailable(Exception):
-    """EPUBCheck на машине не найден.
+    """EPUBCheck was not found on the machine.
 
-    Внутренняя ошибка адаптера: наружу она не выходит, а превращается в отчёт
-    с `available = False` и причиной для пользователя.
+    Internal adapter exception: not exposed externally, converted to a report
+    with `available = False` and a user-facing explanation.
     """
 
 
 @dataclass(frozen=True, slots=True)
 class EpubCheckSettings:
-    """Локальная конфигурация внешней проверки.
+    """Local configuration for external validation.
 
-    Пустые значения означают автоопределение: `java` ищется в `PATH`, а `epubcheck.jar` —
-    в известных каталогах установки. Явно заданный путь автоопределение отменяет: если
-    пользователь указал файл, а его нет, подставлять вместо него другой нельзя.
+    Empty values indicate autodetection: `java` is looked up in `PATH`, and `epubcheck.jar`
+    in known installation directories. Explicit paths override autodetection: if a user specifies
+    a path and it does not exist, falling back to another file is prohibited.
     """
 
     java_executable: str = "java"
@@ -104,11 +104,11 @@ class EpubCheckSettings:
 
 @dataclass(frozen=True, slots=True)
 class EpubCheckAvailability:
-    """Готовность внешней проверки на этой машине (PRD § 21.6).
+    """Readiness status of external validation on this machine (PRD § 21.6).
 
-    Экран конфигурации и `doctor` показывают её до всякого экспорта, поэтому ответ
-    отделён от самой проверки: собирать книгу ради него не нужно. Найденные пути
-    попадают в ответ, чтобы пользователь видел, какой именно инструмент будет вызван.
+    The configuration screen and `doctor` command inspect this before exporting books,
+    so the check is decoupled from validation itself: building an EPUB is not required.
+    Discovered paths are included in the result so the user can verify the exact executable invoked.
     """
 
     available: bool
@@ -118,13 +118,13 @@ class EpubCheckAvailability:
 
 
 class EpubCheckValidator(ExportValidator):
-    """Внешняя проверка экспортированного EPUB инструментом EPUBCheck."""
+    """External validation of exported EPUB using the EPUBCheck tool."""
 
     def __init__(self, *, settings: EpubCheckSettings | None = None) -> None:
         self._settings = settings or EpubCheckSettings()
 
     def availability(self) -> EpubCheckAvailability:
-        """Ищет Java и `epubcheck.jar`, ничего не проверяя."""
+        """Locate Java and `epubcheck.jar` without performing validation."""
         try:
             tool = _locate(self._settings)
         except _ToolUnavailable as unavailable:
@@ -134,7 +134,7 @@ class EpubCheckValidator(ExportValidator):
         )
 
     def validate(self, request: ExportValidationRequest) -> ExportValidationReport:
-        """Проверяет собранный файл; недоступный инструмент — не ошибка."""
+        """Validate built file; an unavailable tool is not treated as an error."""
         try:
             tool = _locate(self._settings)
         except _ToolUnavailable as unavailable:
@@ -157,10 +157,11 @@ class EpubCheckValidator(ExportValidator):
         request: ExportValidationRequest,
         report_path: Path,
     ) -> subprocess.CompletedProcess[str]:
-        """Запускает EPUBCheck; неудача самого запуска — техническая ошибка.
+        """Run EPUBCheck; process execution failure is treated as a technical error.
 
-        Прошлый отчёт удаляется до запуска: инструмент, упавший до записи файла, иначе
-        оставил бы адаптеру чужой отчёт, который тот принял бы за результат проверки.
+        Any previous report is deleted before execution: a tool that crashes before writing
+        its output would otherwise leave an outdated report that the adapter might mistake
+        for the current check result.
         """
         try:
             report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,7 +187,7 @@ class EpubCheckValidator(ExportValidator):
 
 @dataclass(frozen=True, slots=True)
 class _EpubCheckTool:
-    """Найденная пара «Java и jar-файл инструмента»."""
+    """Discovered pair of Java executable and tool jar file."""
 
     java: str
     jar: str
@@ -194,10 +195,10 @@ class _EpubCheckTool:
     def command(
         self, request: ExportValidationRequest, *, report_path: Path
     ) -> tuple[str, ...]:
-        """Командная строка проверки (PRD § 20).
+        """Validation command line (PRD § 20).
 
-        Строгий режим включается флагом самого инструмента: пользователь, открывший отчёт
-        руками, должен видеть тот же результат, что и приложение.
+        Strict mode is enabled via the tool's own flag: users opening the report manually
+        should see the same result as the application.
         """
         command = (
             self.java,
@@ -211,12 +212,12 @@ class _EpubCheckTool:
 
 
 def _locate(settings: EpubCheckSettings) -> _EpubCheckTool:
-    """Java и `epubcheck.jar` по настройке или автоопределением."""
+    """Locate Java and `epubcheck.jar` via settings or autodetection."""
     return _EpubCheckTool(java=_locate_java(settings), jar=_locate_jar(settings))
 
 
 def _locate_java(settings: EpubCheckSettings) -> str:
-    """Исполняемый файл Java; его отсутствие — причина недоступности проверки."""
+    """Locate Java executable; its absence indicates validation unavailability."""
     executable = shutil.which(settings.java_executable)
     if executable is None:
         raise _ToolUnavailable(
@@ -227,7 +228,7 @@ def _locate_java(settings: EpubCheckSettings) -> str:
 
 
 def _locate_jar(settings: EpubCheckSettings) -> str:
-    """Файл инструмента: заданный настройкой либо найденный в каталогах установки."""
+    """Locate tool jar: explicitly configured or discovered in installation directories."""
     if settings.jar_path is not None:
         configured = Path(settings.jar_path).expanduser()
         if not configured.is_file():
@@ -246,10 +247,10 @@ def _locate_jar(settings: EpubCheckSettings) -> str:
 
 
 def _jar_candidates(directories: Sequence[str]) -> Iterator[Path]:
-    """Файлы инструмента в каталогах поиска, включая каталог версии дистрибутива.
+    """Iterate candidate jar files in search directories, including single-level version subdirectories.
 
-    Дистрибутив EPUBCheck распаковывается каталогом с номером версии, поэтому рядом
-    с самим каталогом поиска просматривается и один уровень вложенности.
+    The EPUBCheck distribution extracts into a versioned subdirectory, so one level of
+    nesting beneath search directories is inspected as well.
     """
     for directory in directories:
         root = Path(directory).expanduser()
@@ -260,10 +261,10 @@ def _jar_candidates(directories: Sequence[str]) -> Iterator[Path]:
 
 
 def _report_path(request: ExportValidationRequest) -> Path:
-    """Куда инструмент пишет JSON-отчёт.
+    """Target path where the tool writes its JSON report.
 
-    Путь выбирает сценарий экспорта; без него отчёт ложится рядом с экспортным
-    артефактом под его же именем (PRD § 20).
+    Specified by the export use case; if omitted, the report is saved adjacent to the
+    exported artifact with the same basename (PRD § 20).
     """
     if request.report_path is not None:
         return Path(request.report_path)
@@ -273,10 +274,10 @@ def _report_path(request: ExportValidationRequest) -> Path:
 def _read_report(
     path: Path, *, completed: subprocess.CompletedProcess[str]
 ) -> Mapping[str, object]:
-    """Разбирает отчёт инструмента; нечитаемый отчёт — техническая ошибка.
+    """Parse the tool's JSON report; unparseable report is treated as a technical error.
 
-    Инструмент, который запустился, но не оставил разбираемого отчёта, не проверил книгу,
-    и выдавать это за успешную проверку нельзя.
+    A tool that executed but left an unparseable report did not complete validation,
+    and this cannot be reported as a successful check.
     """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -294,7 +295,7 @@ def _read_report(
 
 
 def _issues(payload: Mapping[str, object]) -> tuple[ExportValidationIssue, ...]:
-    """Замечания отчёта: сообщения значимых уровней в порядке их появления."""
+    """Extract issues from the report: messages with significant severity levels in appearance order."""
     messages = payload.get("messages")
     if not isinstance(messages, list):
         return ()
@@ -303,7 +304,7 @@ def _issues(payload: Mapping[str, object]) -> tuple[ExportValidationIssue, ...]:
 
 
 def _issue(message: Mapping[str, object]) -> ExportValidationIssue | None:
-    """Одно сообщение отчёта; незначимый уровень и пустой текст пропускаются."""
+    """Parse a single report message; insignificant severities and empty texts are skipped."""
     severity = _SEVERITIES.get(str(message.get("severity", "")).upper())
     if severity is None:
         return None
@@ -316,7 +317,7 @@ def _issue(message: Mapping[str, object]) -> ExportValidationIssue | None:
 
 
 def _message_text(message: Mapping[str, object]) -> str | None:
-    """Текст замечания с кодом инструмента: по коду ищут объяснение в документации."""
+    """Format issue message text with the tool code to facilitate looking up documentation."""
     code = _text(message.get("ID"))
     description = _text(message.get("message"))
     if code is not None and description is not None:
@@ -325,7 +326,7 @@ def _message_text(message: Mapping[str, object]) -> str | None:
 
 
 def _location(message: Mapping[str, object]) -> str | None:
-    """Место замечания в книге: первый документ со строкой и колонкой, если они есть."""
+    """Extract issue location in the book: first document with line and column if present."""
     locations = message.get("locations")
     if not isinstance(locations, list) or not locations:
         return None
@@ -346,11 +347,11 @@ def _location(message: Mapping[str, object]) -> str | None:
 def _failure_issues(
     completed: subprocess.CompletedProcess[str],
 ) -> tuple[ExportValidationIssue, ...]:
-    """Замечание о ненулевом коде выхода при отчёте без единого сообщения.
+    """Create an issue for a non-zero exit code when the report contains no messages.
 
-    Ненулевой код делает экспорт неуспешным (PRD § 20). Обычно инструмент объясняет его
-    сообщениями отчёта; если объяснения нет, причиной становится сам код выхода — иначе
-    неуспешная проверка выглядела бы как успешная.
+    A non-zero exit code indicates failed export (PRD § 20). Usually the tool explains it
+    via report messages; if absent, the exit code itself becomes the reason — otherwise
+    a failed validation would appear successful.
     """
     if not completed.returncode:
         return ()
@@ -366,7 +367,7 @@ def _failure_issues(
 
 
 def _output_detail(completed: subprocess.CompletedProcess[str]) -> str:
-    """Хвост вывода инструмента для технической детали ошибки."""
+    """Extract tail of tool process output for technical error detail."""
     output = (completed.stderr or completed.stdout or "").strip()
     if not output:
         return ""
@@ -374,7 +375,7 @@ def _output_detail(completed: subprocess.CompletedProcess[str]) -> str:
 
 
 def _text(value: object) -> str | None:
-    """Непустая строка поля отчёта либо `None`."""
+    """Return stripped non-empty string or `None`."""
     return value.strip() or None if isinstance(value, str) else None
 
 

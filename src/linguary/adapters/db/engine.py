@@ -1,18 +1,19 @@
-"""Подключение к SQLite: движок, PRAGMA-настройки соединения и фабрика сессий.
+"""SQLite connection: engine, connection PRAGMA configuration, and session factory.
 
-Путь к файлу базы приходит параметром: приложение берёт его из локальной конфигурации,
-тесты — из временной директории.
+The database file path is supplied as a parameter: the application reads it from the local
+configuration, while tests supply it from a temporary directory.
 
-Каждое соединение настраивается отдельно, потому что PRAGMA в SQLite действуют на
-соединение, а не на файл базы:
+Each connection is configured individually because SQLite PRAGMAs apply per connection,
+not per database file:
 
-- `foreign_keys=ON` — внешние ключи в SQLite по умолчанию выключены, и без этой PRAGMA
-  каскадное удаление и ссылочная целостность схемы просто не работают;
-- `journal_mode=WAL` — режим журнала (ADR § 3): читатели не блокируют писателя, что нужно
-  воркеру и Web UI, работающим с одной базой одновременно. Режим сохраняется в самом файле
-  базы, но задавать его на соединении безопасно и делает поведение явным;
-- `busy_timeout` — ожидание освобождения блокировки вместо немедленной ошибки `database is
-  locked` при параллельной записи.
+- `foreign_keys=ON` — SQLite has foreign keys disabled by default, and without this PRAGMA,
+  cascade deletion and schema referential integrity do not work;
+- `journal_mode=WAL` — Write-Ahead Logging mode (ADR § 3): readers do not block writers, which is
+  necessary for the worker and Web UI working concurrently on the same database. The mode is
+  persisted in the database file itself, but setting it on connection is safe and makes the
+  behavior explicit;
+- `busy_timeout` — wait for write lock release instead of an immediate `database is locked` error
+  under concurrent writes.
 """
 
 from __future__ import annotations
@@ -23,15 +24,15 @@ from typing import Any
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-#: Ожидание освобождения блокировки записи, миллисекунды.
+#: Write lock wait timeout in milliseconds.
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
-#: Значение пути, означающее базу в оперативной памяти.
+#: Path value representing an in-memory database.
 IN_MEMORY = ":memory:"
 
 
 def build_database_url(database_path: Path | str) -> str:
-    """URL подключения SQLAlchemy к файлу базы или к базе в памяти."""
+    """SQLAlchemy connection URL for a database file or in-memory database."""
     if str(database_path) == IN_MEMORY:
         return "sqlite+pysqlite://"
     return f"sqlite+pysqlite:///{Path(database_path).resolve()}"
@@ -43,7 +44,7 @@ def create_database_engine(
     busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
     echo: bool = False,
 ) -> Engine:
-    """Создаёт движок SQLite с настроенными PRAGMA на каждом соединении."""
+    """Create a SQLite engine configured with connection PRAGMAs."""
     engine = create_engine(build_database_url(database_path), echo=echo)
     configure_sqlite_connections(engine, busy_timeout_ms=busy_timeout_ms)
     return engine
@@ -52,7 +53,7 @@ def create_database_engine(
 def configure_sqlite_connections(
     engine: Engine, *, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS
 ) -> None:
-    """Подписывает движок на настройку PRAGMA при открытии соединения."""
+    """Register connection listeners on the engine to configure PRAGMAs upon connection."""
 
     @event.listens_for(engine, "connect")
     def _apply_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
@@ -66,11 +67,11 @@ def configure_sqlite_connections(
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:
-    """Фабрика сессий для unit of work.
+    """Session factory for the unit of work.
 
-    `expire_on_commit=False` оставляет прочитанные строки пригодными к использованию
-    после фиксации: репозитории возвращают доменные объекты, а не живые ORM-строки,
-    и повторное обращение к базе после коммита им не нужно.
+    `expire_on_commit=False` keeps retrieved rows usable after commit: repositories return
+    domain objects rather than live ORM rows, and no subsequent database queries are needed after
+    commit.
     """
     return sessionmaker(bind=engine, expire_on_commit=False)
 

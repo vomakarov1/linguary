@@ -1,13 +1,13 @@
-"""JSON Schema структурированного ответа для провайдера.
+"""Structured response JSON Schema for the provider.
 
-Провайдер получает схему ответа, а не описание формата словами: строгий структурированный
-вывод — обязательное требование к провайдеру MVP (PRD § 23).
+The provider receives a schema for its response rather than prose format descriptions:
+strict structured output is a mandatory provider requirement in the MVP (PRD § 23).
 
-Схема выводится из Pydantic-модели, но перед отправкой очищается от ключевых слов
-ограничения значений (`minLength`, `minItems`, `minimum` и подобных). Их поддержка
-у совместимых серверов различается, а строгий режим у части из них отвергает запрос
-целиком. Ограничения при этом не теряются: их проверяет разбор ответа на нашей стороне,
-и результат один — ответ, не соответствующий правилам, отбраковывается.
+The schema is derived from a Pydantic model, but is stripped of value validation keywords
+(`minLength`, `minItems`, `minimum`, etc.) before transmission. Support for these varies
+across compatible servers, and strict mode on some rejects the request outright. Validation
+constraints are not lost: our response parsing verifies them on arrival, with the same outcome —
+an invalid response is rejected and retried.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-#: Ключевые слова, описывающие структуру ответа. Всё остальное из схемы убирается.
+#: Keywords defining response structure. Everything else is stripped from the schema.
 _STRUCTURAL_KEYWORDS = frozenset(
     {
         "type",
@@ -35,18 +35,18 @@ _STRUCTURAL_KEYWORDS = frozenset(
 )
 
 
-#: Ключевые слова, значение которых — отображение «своё имя → подсхема». Их имена
-#: принадлежат ответу, а не схеме, и фильтрации по списку ключевых слов не подлежат.
+#: Keywords whose values are "custom name -> subschema" mappings. These keys
+#: belong to the payload rather than schema keywords, and are exempt from keyword filtering.
 _SCHEMA_MAPPINGS = frozenset({"properties", "$defs"})
 
 
 def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
-    """Схема ответа модели в виде, пригодном для строгого структурированного вывода."""
+    """Model response schema formatted for strict structured output."""
     return _strip(model.model_json_schema())
 
 
 def _strip(node: Any) -> Any:
-    """Оставляет в узле схемы только структурные ключевые слова."""
+    """Retains only structural keywords in a schema node."""
     if isinstance(node, dict):
         return {
             key: _strip_mapping(value) if key in _SCHEMA_MAPPINGS else _strip(value)
@@ -59,7 +59,7 @@ def _strip(node: Any) -> Any:
 
 
 def _strip_mapping(node: Any) -> Any:
-    """Обрабатывает набор именованных подсхем, сохраняя сами имена."""
+    """Processes a set of named subschemas while preserving the names."""
     if not isinstance(node, dict):
         return _strip(node)
     return {name: _strip(value) for name, value in node.items()}

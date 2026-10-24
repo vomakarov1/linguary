@@ -1,4 +1,4 @@
-"""Проверка и применение редактируемых настроек без раскрытия исходного ввода."""
+"""Validation and application of editable settings without exposing raw secret input."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace

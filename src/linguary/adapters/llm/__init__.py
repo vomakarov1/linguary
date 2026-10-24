@@ -1,8 +1,8 @@
-"""Адаптеры LLM: схемы структурированных ответов, HTTP-клиент и клиент для тестов.
+"""LLM adapters: structured response schemas, HTTP client, and mock client for tests.
 
-Здесь проходит граница провайдера: наружу отдаётся только порт
-`linguary.application.ports.llm.LLMClient`, а JSON-формат ответа, Pydantic и HTTP
-остаются внутри пакета (ADR § 3).
+Encapsulates provider specifics: only the `linguary.application.ports.llm.LLMClient`
+port is exposed externally, while JSON response formatting, Pydantic, and HTTP
+remain internal to the package (ADR § 3).
 """
 
 from linguary.adapters.llm.fake import (

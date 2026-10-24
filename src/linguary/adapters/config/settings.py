@@ -1,13 +1,13 @@
-"""Локальные настройки приложения: LLM, воркер и пороги автоматических проверок.
+"""Local application settings: LLM, worker, and automated check thresholds.
 
-Настройки описаны секциями и собраны в `AppSettings`. Каждый адаптер получает свою секцию,
-поэтому новый адаптер добавляет секцию, а не меняет общий контракт: настройки, которые
-пока живут рядом со своими адаптерами (`ExtractionLimits` импорта, `EpubCheckSettings`
-внешней проверки), позже переезжают сюда тем же способом.
+Settings are organized into sections and aggregated in `AppSettings`. Each adapter receives its
+dedicated section, so introducing a new adapter adds a section rather than altering the common
+contract: settings that currently live adjacent to their adapters (`ExtractionLimits` for import,
+`EpubCheckSettings` for external validation) can later be migrated here following the same pattern.
 
-Ключ провайдера — секрет: он не попадает ни в `repr`, ни в текст ошибок, ни в журнал
-вызовов. Исходный ключ читается из окружения или локального файла настроек вне
-репозитория; переопределение через веб-интерфейс хранится в SQLite каталога данных.
+The provider API key is a secret: it is excluded from `repr`, error text, and invocation logs.
+The initial key is loaded from the environment or a local configuration file outside the
+repository; overrides made via the web interface are persisted in SQLite within the data directory.
 """
 
 from __future__ import annotations
@@ -22,62 +22,62 @@ from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
 from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
 
-#: Провайдер первой реализации: HTTP API, совместимый с OpenAI chat completions
-#: и структурированными ответами (ADR § 3). Тот же адаптер обслуживает совместимые
-#: шлюзы и локальные серверы, поэтому отдельного имени провайдера у них нет.
+#: Provider of the initial implementation: HTTP API compatible with OpenAI chat completions
+#: and structured outputs (ADR § 3). The same adapter serves compatible gateways and local
+#: servers, so they do not have separate provider names.
 OPENAI_COMPATIBLE_PROVIDER = "openai_compatible"
 
-#: Базовый адрес по умолчанию. Локальный сервер или шлюз задаётся настройкой.
+#: Default base URL. Local server or gateway is configured via settings.
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
-#: Сколько ждать ответа модели на один вызов. Литературный перевод главы длинный,
-#: поэтому предел щедрый: он защищает от зависшего соединения, а не экономит время.
-# 10 000 выходных токенов при 53 токенах/с занимают около трёх минут;
-# резерв оставляет время для задержки провайдера и передачи ответа.
+#: How long to wait for a model response per call. Literary chapter translation is lengthy,
+#: so the limit is generous: it protects against stalled connections rather than optimizing for time.
+# 10,000 output tokens at 53 tokens/s take about three minutes;
+# the reserve allows time for provider latency and response transmission.
 DEFAULT_TIMEOUT_SECONDS = 600.0
 
-#: Сколько раз задача повторяется автоматически до перехода в `failed` (PRD § 16).
+#: How many times a task is retried automatically before transitioning to `failed` (PRD § 16).
 DEFAULT_MAX_ATTEMPTS = 3
 
-#: Каталог, в котором приложение держит базу, исходные книги, их ресурсы и собранные EPUB
-#: (PRD § 22). Лежит рядом с файлом настроек, вне репозитория.
+#: Directory where the application keeps the database, source books, resources, and built EPUBs
+#: (PRD § 22). Located adjacent to the config file, outside the repository.
 DEFAULT_DATA_ROOT = "~/.linguary"
 
-#: Имя файла базы внутри каталога данных.
+#: Database file name inside the data directory.
 DEFAULT_DATABASE_NAME = "linguary.db"
 
-#: Адрес, на котором работает локальный Web UI. Приложение хранит ключ провайдера и полный
-#: текст книги, поэтому по умолчанию оно доступно только с этой же машины; выставить его
-#: наружу можно единственным способом — явно задав другой адрес в локальной конфигурации.
+#: Host where the local Web UI runs. The application stores the provider API key and full book text,
+#: so by default it is accessible only from the same machine; exposing it externally is possible only
+#: by explicitly configuring a different address in the local configuration.
 DEFAULT_SERVER_HOST = "127.0.0.1"
 
-#: Имена петлевого интерфейса: по любому из них Web UI открывается на этой же машине.
+#: Loopback interface hostnames: the Web UI can be opened on this machine using any of them.
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
-#: Адреса, на которых сервер слушает сразу все интерфейсы. Как машину зовут в сети,
-#: приложение не знает, поэтому имена обращений к нему оно ограничить не может.
+#: Addresses where the server listens on all interfaces simultaneously. The application does not
+#: know the machine's network hostnames, so it cannot restrict host headers for them.
 _WILDCARD_HOSTS = ("0.0.0.0", "::", "*")
 
-#: Порт локального Web UI.
+#: Local Web UI port.
 DEFAULT_SERVER_PORT = 8000
 
-#: Сколько задач воркер выполняет одновременно (PRD § 25). Одна задача предсказуема
-#: и не упирается в ограничения частоты провайдера; ускорение — изменение этой настройки.
+#: How many tasks the worker executes concurrently (PRD § 25). A single task is predictable
+#: and avoids hitting provider rate limits; increasing concurrency speeds up processing.
 DEFAULT_WORKER_CONCURRENCY = 1
 
-#: Уровень читателя по умолчанию (PRD § 30).
+#: Default reader level (PRD § 30).
 DEFAULT_READER_LEVEL = "b2"
 
-#: Допустимые уровни владения языком читателя по CEFR.
+#: Supported CEFR reader language proficiency levels.
 SUPPORTED_READER_LEVELS = frozenset({"a2", "b1", "b2", "c1"})
 
 
 class SettingsError(ApplicationError):
-    """Локальная конфигурация непригодна: неразбираемый файл или недопустимое значение."""
+    """Local configuration is unusable: unparseable file or invalid value."""
 
 
 def validate_proxy(mode: object, url: object) -> None:
-    """Проверяет адрес без включения секретного ввода в исключение."""
+    """Validate proxy URL without exposing credentials in exceptions."""
     if mode not in ('auto', 'direct', 'custom'):
         raise SettingsError('Недопустимый режим соединения')
     if mode != 'custom':
@@ -99,7 +99,7 @@ def validate_proxy(mode: object, url: object) -> None:
 
 
 def proxy_secrets(url: object) -> tuple[str, ...]:
-    """Полный адрес и формы учётных данных для безопасной диагностики."""
+    """Full URL and credential variants for secure diagnostics."""
     if not isinstance(url, str) or not url.strip():
         return ()
     values = {url, unquote(url)}
@@ -120,27 +120,25 @@ def proxy_secrets(url: object) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class LLMSettings:
-    """Настройка провайдера LLM (PRD § 23).
+    """LLM provider configuration (PRD § 23).
 
-    Пустые `model` и `api_key` означают ненастроенную LLM — обычное состояние первого
-    запуска, а не ошибка: приложение показывает состояние конфигурации и не отправляет
-    запросов. Ошибкой оно становится в момент попытки создать клиент.
+    Empty `model` and `api_key` indicate unconfigured LLM — the expected state on first
+    launch rather than an error: the application displays configuration status and does not
+    send requests. It becomes an error only when attempting to instantiate a client.
 
-    `max_fragment_blocks` — сколько текстовых блоков главы уходит в один запрос анализа.
-    Настройка стоит рядом с `max_output_tokens`, потому что определяется тем же пределом:
-    глава, ответ на которую не помещается в лимит вывода модели, анализируется
-    последовательными фрагментами (PRD § 14).
+    `max_fragment_blocks` — how many chapter text blocks are sent in one analysis request.
+    This setting is placed alongside `max_output_tokens` because it is determined by the same limit:
+    a chapter whose response exceeds model output limits is analyzed in sequential fragments (PRD § 14).
 
-    `max_unit_source_chars` — сколько символов оригинала уходит в один запрос обработки
-    (PRD § 10). Анализ и обработка меряются разными величинами не случайно: ответ анализа
-    стоит примерно одинаково для блока любой длины, а ответ обработки — это полный
-    перевод, объём которого пропорционален объёму оригинала.
+    `max_unit_source_chars` — how many original characters are sent in a single processing request
+    (PRD § 10). Analysis and processing are measured in different units intentionally: analysis
+    response costs roughly the same for a block of any length, whereas processing response is a full
+    translation whose length is proportional to the original.
 
-    `requests_per_minute` — сколько запросов к модели приложение отправляет за минуту
-    всеми воркерами вместе. Не задано — частота не ограничивается: пределы у провайдеров
-    разные, и угадывать их приложение не берётся. Настройка живёт в секции LLM, потому
-    что это свойство провайдера и тарифа, а не воркера: тот же предел действует при любом
-    параллелизме.
+    `requests_per_minute` — rate limit for model requests sent across all workers combined.
+    When unset, request frequency is not throttled: providers have different limits and the application
+    does not guess them. The setting resides in the LLM section because it is a property of the provider
+    and pricing tier rather than the worker: the same limit applies under any concurrency.
     """
 
     provider: str = OPENAI_COMPATIBLE_PROVIDER
@@ -190,29 +188,29 @@ class LLMSettings:
 
     @property
     def effective_max_fragment_blocks(self) -> int:
-        """Явный предел или размер, рассчитанный по доступному выводу."""
+        """Explicit limit or size calculated from available output tokens."""
         return self.max_fragment_blocks or fragment_blocks_for(self.max_output_tokens)
 
     @property
     def effective_analysis_model(self) -> str:
-        """Модель для анализа: явная analysis_model или общая model."""
+        """Model for analysis: explicit analysis_model or fallback to model."""
         return self.analysis_model.strip() or self.model
 
     @property
     def effective_processing_model(self) -> str:
-        """Модель для обработки и перегенерации: явная processing_model или общая model."""
+        """Model for processing and regeneration: explicit processing_model or fallback to model."""
         return self.processing_model.strip() or self.model
 
     @property
     def is_ready(self) -> bool:
-        """Настроены ли модель и ключ, без которых вызывать провайдера нечем."""
+        """Whether model and API key are configured to allow provider calls."""
         return bool(self.model.strip()) and bool(self.api_key and self.api_key.strip())
 
     def ensure_ready(self) -> None:
-        """Проверяет, что анализ и обработку можно запускать (PRD § 23).
+        """Verify that analysis and processing can be started (PRD § 23).
 
-        Сообщение перечисляет недостающее, но самого ключа не содержит: оно попадает
-        в интерфейс и в диагностику CLI.
+        The message lists what is missing without exposing the API key itself: it is displayed
+        in the UI and CLI diagnostics.
         """
         missing = [
             name
@@ -231,11 +229,11 @@ class LLMSettings:
 
 @dataclass(frozen=True, slots=True)
 class CheckSettings:
-    """Пороговые значения автоматических проверок (PRD § 12, § 15).
+    """Automated check thresholds (PRD § 12, § 15).
 
-    Значения по умолчанию выбраны так, чтобы проверки ловили технический брак, а не
-    литературные решения: доля целевого алфавита сравнивается только на длинных полных
-    переводах, а повтор n-грамм остаётся предупреждением.
+    Defaults are selected so that checks detect technical defects rather than literary decisions:
+    target alphabet share is checked only on long full translations, while n-gram repetition remains
+    a warning.
     """
 
     glossary_confidence_threshold: float = 0.8
@@ -267,11 +265,11 @@ class CheckSettings:
 
 @dataclass(frozen=True, slots=True)
 class StorageSettings:
-    """Где приложение держит свои данные (PRD § 22).
+    """Where the application stores its data (PRD § 22).
 
-    Пустой `database_path` означает базу внутри каталога данных: пользователю достаточно
-    перенести один каталог, чтобы перенести всё приложение. Отдельный путь нужен там, где
-    база лежит не с книгами, — например на другом диске.
+    An empty `database_path` implies storing the database inside the data directory: users can
+    relocate the entire application by moving a single directory. A separate path is needed when
+    the database is stored away from books — for example on a different drive.
     """
 
     data_root: str = DEFAULT_DATA_ROOT
@@ -284,7 +282,7 @@ class StorageSettings:
 
 @dataclass(frozen=True, slots=True)
 class ServerSettings:
-    """Адрес локального Web UI (PRD § 21, § 4.1)."""
+    """Local Web UI server address (PRD § 21, § 4.1)."""
 
     host: str = DEFAULT_SERVER_HOST
     port: int = DEFAULT_SERVER_PORT
@@ -297,23 +295,22 @@ class ServerSettings:
 
     @property
     def is_local_only(self) -> bool:
-        """Доступен ли сервер только с этой машины.
+        """Whether the server is accessible only from this machine.
 
-        Пользователь должен видеть, что приложение с ключом провайдера и полным текстом
-        книги открыто в сеть, если он сам задал такой адрес.
+        The user must be aware that an application holding the provider API key and full book text
+        is exposed to the network if they explicitly configured such an address.
         """
         return self.host.strip() in _LOOPBACK_HOSTS
 
     @property
     def allowed_hosts(self) -> tuple[str, ...]:
-        """Имена в заголовке `Host`, с которыми Web UI принимает запросы (PRD § 4.1).
+        """Host header names accepted by the Web UI (PRD § 4.1).
 
-        Список закрывает перепривязку DNS: страница атакующего попадает в приложение под
-        своим именем, а по чужому имени приложение не отвечает. Локальный запуск открывают
-        и по адресу, и по имени `localhost`, поэтому равноправны все имена петлевого
-        интерфейса. Запуск на всех интерфейсах именами не ограничивается — `*` означает
-        любое имя: такой адрес владелец машины задаёт сам и видит предупреждение о нём
-        на экране конфигурации.
+        This list mitigates DNS rebinding: attacker pages reach the application under their own
+        domain, and the application does not answer foreign host headers. Local execution is accessed
+        via IP or `localhost`, so all loopback interface names are accepted equally. Running on wildcard
+        interfaces does not restrict names — `*` allows any host header: the owner configures such an
+        address deliberately and sees a warning on the configuration screen.
         """
         host = self.host.strip()
         if self.is_local_only:
@@ -324,19 +321,18 @@ class ServerSettings:
 
     @property
     def base_url(self) -> str:
-        """Адрес, по которому открывается Web UI."""
+        """Address where the Web UI can be accessed."""
         host = f"[{self.host}]" if ":" in self.host else self.host
         return f"http://{host}:{self.port}"
 
 
 @dataclass(frozen=True, slots=True)
 class WorkerPoolSettings:
-    """Фоновый воркер: сколько задач очереди выполняется одновременно (PRD § 25).
+    """Background worker: how many queue tasks are executed concurrently (PRD § 25).
 
-    Параллелизм ускоряет обработку глав, которые независимы по данным. Анализ глав
-    от него не ускоряется: следующая глава ставится в очередь только после сохранения
-    предыдущей (PRD § 13). Чем больше значение, тем скорее провайдер ответит отказом
-    по частоте запросов, — от этого защищает `LLMSettings.requests_per_minute`.
+    Concurrency speeds up chapter processing, which has independent data. Chapter analysis
+    does not speed up: the next chapter is queued only after persisting the previous one (PRD § 13).
+    Higher values may trigger provider rate limits — protected by `LLMSettings.requests_per_minute`.
     """
 
     concurrency: int = DEFAULT_WORKER_CONCURRENCY
@@ -348,13 +344,13 @@ class WorkerPoolSettings:
 
 @dataclass(frozen=True, slots=True)
 class ReadingSettings:
-    """Настройки уровня адаптации и помощи читателю при чтении книги (PRD § 30).
+    """Reader adaptation and assistance settings (PRD § 30).
 
-    `reader_level` определяет целевой уровень владения языком (CEFR):
-    - `a2`: начальный (высокая поддержка: 70–85% блоков TRANSLATE, плотные подсказки);
-    - `b1`: средний (повышенная поддержка: 50–70% блоков TRANSLATE, помощь при сомнениях);
-    - `b2`: выше среднего (по умолчанию: сбалансированная помощь, до 50–60% TRANSLATE);
-    - `c1`: продвинутый (минимальная помощь: преимущественно READ_AS_IS, 10–25% TRANSLATE).
+    `reader_level` defines the target CEFR language proficiency level:
+    - `a2`: elementary (high support: 70–85% TRANSLATE blocks, dense hints);
+    - `b1`: intermediate (increased support: 50–70% TRANSLATE blocks, assistance on doubt);
+    - `b2`: upper intermediate (default: balanced assistance, up to 50–60% TRANSLATE);
+    - `c1`: advanced (minimal assistance: predominantly READ_AS_IS, 10–25% TRANSLATE).
     """
 
     reader_level: str = DEFAULT_READER_LEVEL
@@ -374,7 +370,7 @@ class ReadingSettings:
 
 @dataclass(frozen=True, slots=True)
 class AppSettings:
-    """Локальная конфигурация приложения целиком."""
+    """Complete local application configuration."""
 
     llm: LLMSettings = field(default_factory=LLMSettings)
     checks: CheckSettings = field(default_factory=CheckSettings)

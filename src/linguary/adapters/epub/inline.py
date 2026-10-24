@@ -1,13 +1,13 @@
-"""Встроенное форматирование, ссылки и сноски внутри одного блока.
+"""Inline formatting, links, and footnotes within a single block.
 
-`DocumentBlock.text` хранится без XHTML (PRD § 7), поэтому оформление снимается отдельно:
-курсив, полужирный, смысловое выделение, внутренние ссылки и ссылки на сноски описываются
-`InlineAnnotation` со смещениями в уже нормализованном тексте блока.
+`DocumentBlock.text` is stored without XHTML (PRD § 7), so styling is extracted separately:
+italics, bold, semantic emphasis, internal hyperlinks, and footnote references are represented
+as `InlineAnnotation` with character offsets in the normalized block text.
 
-Здесь же собираются якоря блока: идентификаторы, по которым на блок ссылается сама книга.
-Ссылка на сноску Gutenberg указывает на `id` блочного элемента, а обратная ссылка из сноски —
-на `id` inline-элемента `<a>` внутри абзаца, поэтому одного `SourceReference.element_id`
-для восстановления связей не хватает.
+Block anchor IDs are also collected here: element IDs by which the book references the block.
+Gutenberg footnote references point to block element `id`, whereas the backlink inside the footnote
+points to an inline `<a>` element `id` within a paragraph, meaning a single `SourceReference.element_id`
+is insufficient for restoring links.
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ from lxml import etree
 
 from linguary.domain import InlineAnnotation, InlineAnnotationType
 
-#: Пробельные символы XHTML, которые схлопываются в один пробел. Неразрывный пробел
-#: сюда не входит: он несёт смысл и остаётся в тексте как есть.
+#: Collapsible XHTML whitespace characters replaced by a single space. Non-breaking space
+#: is excluded: it carries semantic meaning and is preserved as-is.
 _COLLAPSIBLE_WHITESPACE = re.compile(r"[ \t\r\n\f\v]+")
 
-#: Теги встроенного оформления и соответствующая им разметка.
+#: Inline styling tags and their corresponding annotation types.
 _ANNOTATION_TAGS: dict[str, InlineAnnotationType] = {
     "i": InlineAnnotationType.ITALIC,
     "em": InlineAnnotationType.EMPHASIS,
@@ -33,16 +33,16 @@ _ANNOTATION_TAGS: dict[str, InlineAnnotationType] = {
     "strong": InlineAnnotationType.BOLD,
 }
 
-#: Теги, которые не дают текста, но задают перенос строки внутри блока.
+#: Tags that produce no text directly but represent line breaks inside a block.
 _LINE_BREAK_TAGS = frozenset({"br"})
 
-#: Служебные теги: их содержимое не является текстом книги.
+#: Non-content tags whose text is excluded from book text.
 _NON_TEXT_TAGS = frozenset({"script", "style", "link", "meta", "base", "noscript"})
 
-#: Значения `epub:type` и классов, которыми издатели помечают ссылку на сноску.
+#: `epub:type` and class token markers indicating footnote references.
 _NOTE_REFERENCE_MARKERS = frozenset({"noteref", "footnoteref", "footnote-ref"})
 
-#: Схемы, по которым ссылка ведёт наружу книги и не нормализуется.
+#: Schemes indicating external URLs that are not normalized as internal paths.
 _EXTERNAL_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 _EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
@@ -50,7 +50,7 @@ _EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
 
 @dataclass(frozen=True, slots=True)
 class InlineContent:
-    """Текст блока вместе со снятым с него оформлением и якорями."""
+    """Block text together with extracted inline annotations and anchor IDs."""
 
     text: str
     annotations: tuple[InlineAnnotation, ...] = ()
@@ -58,19 +58,19 @@ class InlineContent:
 
 
 def local_name(element: etree._Element) -> str | None:
-    """Имя тега без пространства имён либо `None` для комментариев и инструкций."""
+    """Local tag name without namespace, or `None` for comments and processing instructions."""
     if not isinstance(element.tag, str):
         return None
     return etree.QName(element).localname
 
 
 def resolve_link_target(href: str, *, resource_path: str) -> str:
-    """Приводит `href` к виду «путь ресурса книги#фрагмент».
+    """Normalize `href` into the canonical form 'book_resource_path#fragment'.
 
-    Gutenberg почти всегда пишет `href="файл.xhtml#якорь"` даже для ссылки внутри того же
-    документа, а синтетические книги — голый `href="#якорь"`. Оба стиля дают одинаковый
-    результат, поэтому дальше по коду вариант ссылки уже не различается. Внешние ссылки
-    (`http:`, `mailto:`) остаются как есть.
+    Gutenberg almost always writes `href="file.xhtml#anchor"` even for intra-document links,
+    whereas synthetic test books often use bare `href="#anchor"`. Both formats yield identical
+    normalized results, eliminating format differences downstream. External links (`http:`, `mailto:`)
+    are preserved as-is.
     """
     if _EXTERNAL_SCHEME.match(href):
         return href
@@ -83,11 +83,10 @@ def resolve_link_target(href: str, *, resource_path: str) -> str:
 
 
 def footnote_element_ids(root: etree._Element) -> frozenset[str]:
-    """Идентификаторы элементов документа, которые являются сносками книги.
+    """Element IDs of documents that represent book footnotes.
 
-    Оригинальные идентификаторы сносок сохраняются без изменений: по ним экспортёр
-    восстанавливает внутренние ссылки книги, а учебные заметки живут в собственном
-    пространстве имён (PRD § 19.3).
+    Original footnote IDs are preserved verbatim: the exporter uses them to reconstruct internal
+    links, while educational language notes live in their own namespace (PRD § 19.3).
     """
     return frozenset(
         element_id
@@ -99,7 +98,7 @@ def footnote_element_ids(root: etree._Element) -> frozenset[str]:
 
 
 def is_footnote_element(element: etree._Element) -> bool:
-    """Помечен ли элемент как сноска книги."""
+    """Whether the element is marked as a book footnote."""
     if _epub_type_tokens(element) & {"footnote", "rearnote", "endnote", "note"}:
         return True
     return "footnote" in _class_tokens(element)
@@ -108,10 +107,10 @@ def is_footnote_element(element: etree._Element) -> bool:
 def is_footnote_reference(
     element: etree._Element, *, resource_path: str, footnote_ids: frozenset[str]
 ) -> bool:
-    """Ведёт ли ссылка на сноску книги.
+    """Whether the hyperlink points to a book footnote.
 
-    Признаком служит либо явная пометка издателя на самой ссылке или на обёртке `<sup>`,
-    либо то, что цель ссылки — известная сноска этого документа.
+    Identified either by explicit publisher markup on the link or surrounding `<sup>`,
+    or by pointing to a known footnote in the current document.
     """
     for candidate in (element, element.getparent()):
         if candidate is None:
@@ -129,11 +128,11 @@ def is_footnote_reference(
 
 
 class InlineContentBuilder:
-    """Накопитель текста блока и снятого с него оформления.
+    """Collector for block text and extracted inline annotations.
 
-    Смещения разметки считаются по уже нормализованному тексту, поэтому текст и разметка
-    строятся за один проход. Пустая и вышедшая за границы текста разметка отбрасывается:
-    домен такую не принимает.
+    Annotation offsets are calculated against normalized text, so text and markup
+    are accumulated in a single pass. Empty annotations or those exceeding bounds are discarded:
+    the domain layer rejects invalid offsets.
     """
 
     __slots__ = (
@@ -154,7 +153,7 @@ class InlineContentBuilder:
         self._anchor_ids: list[str] = []
 
     def add_text(self, raw: str | None) -> None:
-        """Добавляет текстовый узел, схлопывая пробельные последовательности."""
+        """Append a text node, collapsing whitespace sequences."""
         if not raw:
             return
         text = _COLLAPSIBLE_WHITESPACE.sub(" ", raw)
@@ -165,7 +164,7 @@ class InlineContentBuilder:
             self._length += len(text)
 
     def add_element(self, element: etree._Element, *, with_tail: bool = True) -> None:
-        """Добавляет inline-элемент со всем его содержимым и, по умолчанию, хвостом."""
+        """Append an inline element with its children and default tail text."""
         tag = local_name(element)
         if tag is None:
             self.add_text(element.tail if with_tail else None)
@@ -185,13 +184,13 @@ class InlineContentBuilder:
             self.add_text(element.tail)
 
     def add_children(self, element: etree._Element) -> None:
-        """Добавляет собственный текст элемента и всё его содержимое без хвоста."""
+        """Append element's own text and child elements without tail text."""
         self.add_text(element.text)
         for child in element:
             self.add_element(child)
 
     def build(self) -> InlineContent:
-        """Собирает текст блока и разметку, отбрасывая краевые пробелы."""
+        """Build block text and annotations, trimming leading and trailing whitespace."""
         raw = "".join(self._pieces)
         text = raw.strip()
         shift = len(raw) - len(raw.lstrip())
@@ -260,7 +259,7 @@ class InlineContentBuilder:
 def _build_annotation(
     type_: InlineAnnotationType, start: int, end: int, target: str | None, limit: int
 ) -> InlineAnnotation | None:
-    """Разметка, обрезанная по границам итогового текста, либо `None`, если она пуста."""
+    """Build annotation clamped to text bounds, or return `None` if empty."""
     start = max(start, 0)
     end = min(end, limit)
     if end <= start:
@@ -269,13 +268,13 @@ def _build_annotation(
 
 
 def _epub_type_tokens(element: etree._Element) -> frozenset[str]:
-    """Значения `epub:type` элемента как набор токенов."""
+    """Extract `epub:type` values as a set of tokens."""
     value = element.get(f"{{{_EPUB_NAMESPACE}}}type") or element.get("epub:type")
     return frozenset(value.split()) if value else frozenset()
 
 
 def _class_tokens(element: etree._Element) -> frozenset[str]:
-    """Классы элемента как набор токенов."""
+    """Extract element class values as a set of tokens."""
     value = element.get("class")
     return frozenset(value.split()) if value else frozenset()
 

@@ -1,9 +1,9 @@
-"""Проверка данных на внешних границах приложения.
+"""Data validation at application external boundaries.
 
-Публичный вход адаптера — `EpubCheckValidator` и его настройка `EpubCheckSettings`:
-реализация порта `ExportValidator` из `linguary.application.ports.export_validation`
-поверх внешнего EPUBCheck. Прикладной слой видит только порт и о Java, jar-файле
-и запуске процесса ничего не знает (ADR § 3).
+The adapter's public entry point is `EpubCheckValidator` and its configuration `EpubCheckSettings`:
+implementation of the `ExportValidator` port from `linguary.application.ports.export_validation`
+on top of external EPUBCheck. The application layer sees only the port and has no knowledge of
+Java, jar files, or process execution (ADR § 3).
 """
 
 from linguary.adapters.validation.epubcheck import (

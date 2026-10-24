@@ -1,18 +1,18 @@
-"""Unit of work поверх сессии SQLAlchemy.
+"""Unit of work on top of a SQLAlchemy session.
 
-Транзакционную границу задаёт прикладной сценарий: он открывает `transaction()`, выполняет
-изменения через репозитории и выходит из блока. Выход без исключения фиксирует изменения,
-исключение — откатывает их целиком, поэтому частично сохранённого результата одного
-`TranslationUnit` не возникает (PRD § 17).
+The transaction boundary is established by the application use case: it opens `transaction()`,
+executes modifications via repositories, and exits the block. Exiting without exceptions commits
+the changes, while exceptions roll back the entire transaction, ensuring that partially saved
+results for a single `TranslationUnit` never occur (PRD § 17).
 
-Репозитории существуют только внутри транзакции: обращение к ним снаружи — ошибка
-контракта, а не молчаливое открытие собственной транзакции.
+Repositories exist only within an active transaction: accessing them outside is a contract
+violation rather than a silent opening of an implicit transaction.
 
-Один экземпляр обслуживает всё приложение, поэтому активная сессия хранится не в самом
-объекте, а в контексте исполнения (`ContextVar`): веб-запрос в рабочем потоке FastAPI,
-фоновая задача воркера и корутина сценария работают одновременно, и каждая ведёт свою
-транзакцию. Общее поле сделало бы их одной транзакцией на всех, а вторая одновременная
-работа получала бы отказ «транзакция уже открыта».
+A single instance serves the entire application, so the active session is stored not on the
+object itself, but in the execution context (`ContextVar`): web requests in FastAPI worker threads,
+background worker tasks, and use case coroutines run concurrently, each managing its own
+transaction. A shared instance field would make them share a single transaction, causing concurrent
+operations to fail with "transaction already opened".
 """
 
 from __future__ import annotations
@@ -38,12 +38,12 @@ from linguary.adapters.db.repositories import (
 )
 from linguary.application.ports.persistence import PersistenceError
 
-#: Счётчик экземпляров: имя `ContextVar` служит только диагностике.
+#: Instance counter: `ContextVar` name is used solely for diagnostic purposes.
 _INSTANCES = count(1)
 
 
 class SqlAlchemyUnitOfWork:
-    """Транзакционная граница прикладного сценария поверх SQLite."""
+    """Transactional boundary for application use cases on top of SQLite."""
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
@@ -53,16 +53,17 @@ class SqlAlchemyUnitOfWork:
 
     @classmethod
     def for_engine(cls, engine: Engine) -> SqlAlchemyUnitOfWork:
-        """Unit of work с фабрикой сессий по умолчанию для готового движка."""
+        """Create a unit of work with a default session factory for a given engine."""
         return cls(create_session_factory(engine))
 
     @contextmanager
     def transaction(self) -> Iterator[SqlAlchemyUnitOfWork]:
-        """Открывает транзакцию и делает репозитории доступными.
+        """Open a transaction and make repositories accessible.
 
-        Вложенная транзакция того же исполнения по-прежнему запрещена: она означала бы,
-        что сценарий не выбрал транзакционную границу явно. Одновременная транзакция
-        другого запроса или фоновой задачи вложенной не считается — у неё свой контекст.
+        Nested transactions within the same execution context remain prohibited: they would
+        indicate that the use case failed to define an explicit transaction boundary. A concurrent
+        transaction in another request or background task is not considered nested because it has
+        its own context.
         """
         if self._current.get() is not None:
             raise PersistenceError(
@@ -79,46 +80,46 @@ class SqlAlchemyUnitOfWork:
 
     @property
     def books(self) -> SqlAlchemyBookRepository:
-        """Репозиторий книг."""
+        """Book repository."""
         return SqlAlchemyBookRepository(self._active_session())
 
     @property
     def documents(self) -> SqlAlchemyDocumentRepository:
-        """Репозиторий канонической модели документа."""
+        """Canonical document model repository."""
         return SqlAlchemyDocumentRepository(self._active_session())
 
     @property
     def glossary(self) -> SqlAlchemyGlossaryRepository:
-        """Репозиторий глоссария."""
+        """Glossary repository."""
         return SqlAlchemyGlossaryRepository(self._active_session())
 
     @property
     def analyses(self) -> SqlAlchemyChapterAnalysisRepository:
-        """Репозиторий анализа глав."""
+        """Chapter analysis repository."""
         return SqlAlchemyChapterAnalysisRepository(self._active_session())
 
     @property
     def runs(self) -> SqlAlchemyProcessingRunRepository:
-        """Репозиторий запусков обработки."""
+        """Processing run repository."""
         return SqlAlchemyProcessingRunRepository(self._active_session())
 
     @property
     def results(self) -> SqlAlchemyBlockResultRepository:
-        """Репозиторий результатов обработки блоков."""
+        """Block processing result repository."""
         return SqlAlchemyBlockResultRepository(self._active_session())
 
     @property
     def tasks(self) -> SqlAlchemyTaskRepository:
-        """Репозиторий локальных задач."""
+        """Local task repository."""
         return SqlAlchemyTaskRepository(self._active_session())
 
     @property
     def llm_calls(self) -> SqlAlchemyLLMCallLogRepository:
-        """Репозиторий журнала вызовов LLM."""
+        """LLM call log repository."""
         return SqlAlchemyLLMCallLogRepository(self._active_session())
 
     def _active_session(self) -> Session:
-        """Сессия транзакции, открытой в текущем исполнении."""
+        """Active transaction session in current execution context."""
         session = self._current.get()
         if session is None:
             raise PersistenceError(

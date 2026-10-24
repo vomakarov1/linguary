@@ -1,13 +1,13 @@
-"""Адаптеры формата EPUB: импорт книги в каноническую модель документа и её экспорт.
+"""EPUB format adapters: importing books into the canonical document model and exporting.
 
-Публичный вход адаптера — `EbookLibEpubReader`, `FilesystemEpubResourceStore`
-и `EpubExportWriter`, реализации портов `EpubReader`, `EpubResourceStore` и `EpubWriter`
-из `linguary.application.ports.epub`. Прикладной слой видит только порты и о EbookLib,
-lxml и файлах книги ничего не знает (ADR § 3).
+The adapter's public entry points are `EbookLibEpubReader`, `FilesystemEpubResourceStore`,
+and `EpubExportWriter`, which implement the `EpubReader`, `EpubResourceStore`, and `EpubWriter` ports
+from `linguary.application.ports.epub`. The application layer only sees the ports and has no knowledge
+of EbookLib, lxml, or raw book files (ADR § 3).
 
-`verify_exported_epub` вынесена в публичный API адаптера отдельно от писателя: те же
-встроенные технические проверки нужны диагностике через CLI и проверке чужого файла,
-а не только собственной сборке.
+`verify_exported_epub` is exposed in the public adapter API separately from the writer: the same
+built-in technical checks are needed for CLI diagnostics and third-party file inspection,
+not just our own exports.
 """
 
 from linguary.adapters.epub.reader import EbookLibEpubReader

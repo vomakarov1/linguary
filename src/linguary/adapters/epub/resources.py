@@ -1,13 +1,14 @@
-"""Сохранение ресурсов книги в локальное хранилище (PRD § 22).
+"""Persisting book resources to local storage (PRD § 22).
 
-Реализация порта `linguary.application.ports.epub.EpubResourceStore`. Каноническая модель
-знает ресурс по его пути внутри EPUB, а экспортёру нужен настоящий файл, поэтому импорт
-достаёт из архива всё, что переносится в итоговую книгу, и складывает под каталогом книги.
+Implementation of port `linguary.application.ports.epub.EpubResourceStore`. The canonical model
+identifies a resource by its path inside the EPUB, whereas the exporter requires an actual file,
+so import extracts everything transferred to the resulting book from the archive and stores it
+under the book directory.
 
-Архив здесь — недоверенный вход. Путь ресурса из манифеста и имя записи в архиве могут
-вести куда угодно, поэтому оба нормализуются, а запись разрешена только внутри каталога
-книги. Размер распакованного содержимого и число файлов ограничены: превышение лимита —
-`FATAL`, книга не импортируется, и в хранилище не остаётся ни одной копии её ресурсов.
+The archive here is untrusted input. The resource path from the manifest and the archive entry name
+may point anywhere, so both are normalized and writing is allowed only within the book directory.
+Extracted content size and file count are bounded: exceeding limits is `FATAL`, the book is not
+imported, and no copies of its resources remain in storage.
 """
 
 from __future__ import annotations
@@ -31,24 +32,24 @@ from linguary.application.ports.epub import (
 )
 from linguary.domain import CanonicalDocument, SupportStatus
 
-#: Статусы поддержки, при которых ресурс переносится в итоговую книгу и потому сохраняется.
+#: Support statuses where the resource is transferred to the resulting book and therefore saved.
 _STORED_STATUSES = frozenset({SupportStatus.SUPPORTED, SupportStatus.PRESERVE_OPAQUE})
 
-#: Подкаталог книги, в котором лежат копии ресурсов.
+#: Book subdirectory containing resource copies.
 _RESOURCES_DIRECTORY = "resources"
 
 
 @dataclass(frozen=True, slots=True)
 class ExtractionLimits:
-    """Пределы распаковки архива книги.
+    """Limits for unpacking a book archive.
 
-    Значения по умолчанию рассчитаны на художественную книгу с иллюстрациями и заведомо
-    больше любой книги набора; они существуют не ради экономии диска, а чтобы архив,
-    распаковывающийся в десятки гигабайт, не занял машину пользователя.
+    Defaults are sized for an illustrated fiction book and are well above any book
+    in the sample set; they exist not to save disk space, but to prevent an archive
+    expanding into tens of gigabytes from occupying the user's machine.
 
-    `max_document_bytes` ограничивает одну запись архива, которую импорт поднимает
-    в память: глава художественной книги заведомо меньше десятков мегабайт, и запись
-    такого размера читать незачем даже в пределах общего объёма.
+    `max_document_bytes` bounds a single archive entry that import loads into memory:
+    a fiction chapter is well under tens of megabytes, and there is no reason to read
+    an entry of such size even within the overall budget.
     """
 
     max_entries: int = 10_000
@@ -65,11 +66,11 @@ class ExtractionLimits:
 
 
 class FilesystemEpubResourceStore(EpubResourceStore):
-    """Хранилище ресурсов книги в каталоге локальной файловой системы.
+    """Storage for book resources in a local filesystem directory.
 
-    Ресурсы книги лежат в `<корень хранилища>/<book_id>/resources/<путь внутри EPUB>`.
-    Повторный импорт книги начинает каталог заново: копии ресурсов производны от архива,
-    и держать в хранилище файлы прошлого импорта незачем.
+    Book resources reside in `<storage_root>/<book_id>/resources/<path_inside_epub>`.
+    Reimporting a book starts the directory afresh: resource copies are derived from the archive,
+    and there is no reason to keep files from previous imports in storage.
     """
 
     def __init__(self, *, root: Path, limits: ExtractionLimits | None = None) -> None:
@@ -77,7 +78,7 @@ class FilesystemEpubResourceStore(EpubResourceStore):
         self._limits = limits or ExtractionLimits()
 
     def store(self, request: StoreResourcesRequest) -> StoredResources:
-        """Сохраняет ресурсы книги; нарушение матрицы поддержки даёт `FATAL`."""
+        """Stores book resources; support matrix violation results in `FATAL`."""
         book_directory = self._book_directory(request.book_id)
         with _ResourceArchive(request.source_path, limits=self._limits) as archive:
             planned = _plan(
@@ -91,7 +92,7 @@ class FilesystemEpubResourceStore(EpubResourceStore):
         return StoredResources(paths=paths)
 
     def _book_directory(self, book_id: str) -> Path:
-        """Каталог ресурсов книги внутри корня хранилища."""
+        """Book resource directory inside storage root."""
         directory = _contained_path(
             self._root, book_id, message=f"идентификатор книги {book_id!r}"
         )
@@ -100,7 +101,7 @@ class FilesystemEpubResourceStore(EpubResourceStore):
 
 @dataclass(frozen=True, slots=True)
 class _PlannedResource:
-    """Ресурс, найденная запись архива и путь, по которому он будет сохранён."""
+    """Resource, located archive entry, and the destination path where it will be saved."""
 
     source_path: str
     archive_name: str
@@ -108,7 +109,7 @@ class _PlannedResource:
 
 
 class _ResourceArchive:
-    """Архив книги: поиск записей по пути ресурса и извлечение их в хранилище."""
+    """Book archive: looks up entries by resource path and extracts them into storage."""
 
     def __init__(self, source_path: str, *, limits: ExtractionLimits) -> None:
         self._limits = limits
@@ -136,10 +137,10 @@ class _ResourceArchive:
         self._archive.close()
 
     def locate(self, resource_path: str) -> str | None:
-        """Имя записи архива для ресурса книги либо `None`, если её там нет.
+        """Archive entry name for a book resource, or `None` if absent.
 
-        Путь ресурса берётся из манифеста и доверия не заслуживает: `../` в нём выводит
-        за каталог пакета, а то и за сам архив, поэтому такой путь — `FATAL`.
+        Resource path originates from the manifest and cannot be trusted: `../` inside it
+        navigates outside the package directory or even the archive itself, making such a path `FATAL`.
         """
         name = self._archive_name(resource_path)
         decoded = unquote(name)
@@ -151,11 +152,11 @@ class _ResourceArchive:
     def extract(
         self, planned: Sequence[_PlannedResource], *, cleanup: Path
     ) -> Mapping[str, str]:
-        """Пишет запланированные ресурсы и отдаёт пути их копий.
+        """Writes planned resources and returns paths to their copies.
 
-        Фактический размер считается по мере записи: заголовки архива объявляют размер
-        файла, но обязать архив говорить правду нельзя. Превышение лимита оставляет
-        книгу неимпортированной, поэтому уже записанные копии удаляются.
+        Actual size is accumulated during writing: archive headers declare file sizes,
+        but an archive cannot be relied upon to report truthful values. Exceeding limits
+        leaves the book unimported, so already written copies are removed.
         """
         paths: dict[str, str] = {}
         written = 0
@@ -174,7 +175,7 @@ class _ResourceArchive:
         return paths
 
     def _archive_name(self, resource_path: str) -> str:
-        """Имя записи архива для пути ресурса; выход за корень архива — `FATAL`."""
+        """Archive entry name for resource path; traversing beyond archive root is `FATAL`."""
         joined = posixpath.join(self._directory, resource_path)
         normalized = posixpath.normpath(joined)
         if normalized.startswith(("..", "/")):
@@ -184,7 +185,7 @@ class _ResourceArchive:
         return normalized
 
     def _read(self, name: str) -> bytes:
-        """Содержимое записи архива; нечитаемая запись — `FATAL`."""
+        """Archive entry content; an unreadable entry is `FATAL`."""
         try:
             return self._archive.read(name)
         except (KeyError, OSError, zipfile.BadZipFile) as error:
@@ -193,19 +194,18 @@ class _ResourceArchive:
             ) from error
 
     def _check_limits(self) -> None:
-        """Проверяет объявленные архивом число файлов и размер распаковки."""
+        """Validates file count and extracted size declared by the archive."""
         check_extraction_limits(self._archive, limits=self._limits)
 
 
 def check_extraction_limits(
     archive: zipfile.ZipFile, *, limits: ExtractionLimits
 ) -> None:
-    """Сверяет объявленные архивом число файлов и объём распаковки с пределами.
+    """Checks archive-declared file count and extracted volume against limits.
 
-    Проверка идёт по оглавлению архива, до чтения хотя бы одной его записи: архив,
-    распаковывающийся в десятки гигабайт, не должен успеть занять память машины.
-    Объявленному размеру доверия нет, поэтому тот, кто читает записи, считает
-    прочитанные байты и сам.
+    Validation is performed against archive headers before reading any entries:
+    an archive expanding into tens of gigabytes must not occupy machine memory.
+    Declared sizes cannot be trusted, so the reader also tracks accumulated bytes itself.
     """
     entries = archive.infolist()
     if len(entries) > limits.max_entries:
@@ -221,20 +221,19 @@ def check_extraction_limits(
 
 
 def unreadable_epub_message(error: Exception) -> str:
-    """Сообщение о нечитаемом архиве книги для пользователя.
+    """User-facing message for an unreadable book archive.
 
-    Сообщение показывается в интерфейсе, поэтому пути к файлу в каталоге данных в нём
-    нет: ошибка файловой системы называет только причину, а полный путь остаётся
-    в цепочке исключений.
+    The message is displayed in the UI, so data directory file paths are omitted:
+    filesystem errors report only the reason, while the full path remains in the exception chain.
     """
     return f"EPUB нельзя прочитать: {failure_reason(error)}"
 
 
 def failure_reason(error: Exception) -> str:
-    """Причина сбоя чтения без пути к файлу.
+    """Failure reason without the file path.
 
-    `OSError` включает в текст имя файла, и это внутренний путь каталога данных; его
-    причина берётся из `strerror`. Остальные ошибки архива путей не содержат.
+    `OSError` includes the file name in text, which is an internal data directory path;
+    its reason is taken from `strerror`. Other archive errors contain no paths.
     """
     if isinstance(error, OSError):
         return error.strerror or type(error).__name__
@@ -242,7 +241,7 @@ def failure_reason(error: Exception) -> str:
 
 
 def format_size(size: int) -> str:
-    """Объём в байтах в привычных пользователю единицах: байты, КБ или МБ."""
+    """Size in bytes formatted in user-facing units: bytes, KB, or MB."""
     for unit, name in ((1024 * 1024, "МБ"), (1024, "КБ")):
         if size >= unit:
             value = f"{size / unit:.1f}".rstrip("0").rstrip(".").replace(".", ",")
@@ -251,11 +250,11 @@ def format_size(size: int) -> str:
 
 
 def package_path(archive: zipfile.ZipFile) -> str:
-    """Путь к файлу пакета OPF внутри архива по `META-INF/container.xml`.
+    """Path to the OPF package file inside archive via `META-INF/container.xml`.
 
-    Контейнер приходит из недоверенного архива, поэтому разбирается тем же ужесточённым
-    парсером, что и остальной XML книги: внешние сущности не подставляются, DTD не
-    загружается, в сеть парсер не ходит.
+    The container comes from an untrusted archive and is parsed with the same hardened
+    parser as the rest of the book XML: external entities are not resolved, DTD is not
+    loaded, and no network access occurs.
     """
     parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
     container = etree.fromstring(archive.read("META-INF/container.xml"), parser=parser)
@@ -272,15 +271,14 @@ def _plan(
     book_directory: Path,
     book_id: str,
 ) -> tuple[_PlannedResource, ...]:
-    """Что и куда будет записано.
+    """What and where will be written.
 
-    План строится целиком до первой записи: путь, ведущий за пределы каталога книги,
-    обязан остановить импорт до того, как в хранилище появится хоть один файл.
+    The plan is constructed entirely before the first write: a path leading outside
+    the book directory must halt import before any file appears in storage.
 
-    Ресурс манифеста, потерянный в архиве, — тоже `FATAL` (PRD § 6). До этой проверки
-    книга обычно не доходит: EbookLib читает содержимое манифеста при открытии книги
-    и отвергает её как нечитаемую раньше, — но целостность хранилища зависит не от того,
-    какая библиотека открыла архив.
+    A manifest resource missing from the archive is also `FATAL` (PRD § 6). Books rarely
+    reach this check because EbookLib reads manifest contents on opening and rejects
+    unreadable archives earlier, but storage integrity does not depend on which library opened the archive.
     """
     planned: list[_PlannedResource] = []
     for resource in document.resources:
@@ -308,13 +306,13 @@ def _plan(
 
 
 def _reset_directory(directory: Path) -> None:
-    """Очищает каталог ресурсов книги перед новым импортом."""
+    """Clears book resource directory before a new import."""
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True, exist_ok=True)
 
 
 def _contained_path(base: Path, relative: str, *, message: str) -> Path:
-    """Путь внутри `base`; выход за его пределы — `FATAL` (защита от zip slip)."""
+    """Path inside `base`; traversing outside is `FATAL` (zip-slip protection)."""
     normalized = relative.replace("\\", "/").strip()
     parts = tuple(part for part in normalized.split("/") if part and part != ".")
     candidate = Path(base, *parts)
@@ -340,3 +338,4 @@ __all__ = [
     "package_path",
     "unreadable_epub_message",
 ]
+

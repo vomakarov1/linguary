@@ -1,9 +1,9 @@
-"""Хранение данных: SQLite через SQLAlchemy, репозитории и unit of work.
+"""Data storage: SQLite via SQLAlchemy, repositories, and unit of work.
 
-Публичный вход адаптера: создать движок (`create_database_engine`) и получить транзакционную
-границу (`SqlAlchemyUnitOfWork.for_engine`). Схема таблиц описана в `models`, преобразование
-доменных сущностей — в `mapping`; прикладной слой их не импортирует и работает через порты
-`linguary.application.ports.persistence`.
+The adapter's public entry point: create an engine (`create_database_engine`) and obtain a
+transactional boundary (`SqlAlchemyUnitOfWork.for_engine`). The table schema is defined in `models`,
+and domain entity transformations are in `mapping`; the application layer does not import them and
+operates through `linguary.application.ports.persistence` ports.
 """
 
 from linguary.adapters.db.engine import (

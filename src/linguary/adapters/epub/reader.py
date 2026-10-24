@@ -1,14 +1,15 @@
-"""Импорт EPUB: контейнер и метаданные через EbookLib, XHTML через lxml.
+"""EPUB import: container and metadata via EbookLib, XHTML via lxml.
 
-Реализация порта `linguary.application.ports.epub.EpubReader`. Границы глав определяются
-порядком чтения: один XHTML-документ spine — одна `DocumentSection`, а заголовок берётся
-из nav/toc, если он там есть (PRD § 6). Несовпадение оглавления с разбиением по документам
-импорт не ломает и фиксируется предупреждением.
+Implementation of `linguary.application.ports.epub.EpubReader` port. Chapter boundaries
+are determined by reading order (spine): a single XHTML document in the spine corresponds
+to one `DocumentSection`, and the title is extracted from nav/toc if present (PRD § 6).
+Discrepancies between the TOC and document divisions do not break import and are recorded
+as warnings.
 
-Идентификатор блока считает доменная фабрика `DocumentBlock.create` по тройке
-`document_id + source_resource_path + structural_path` (ALG-01, PRD § 8); структурный путь —
-абсолютный XPath с индексами одноимённых тегов, он зависит только от положения элемента
-в документе и не зависит от его текста.
+Block IDs are calculated by the domain factory `DocumentBlock.create` based on the tuple
+`document_id + source_resource_path + structural_path` (ALG-01, PRD § 8); the structural path
+is an absolute XPath with tag sibling indices, depending strictly on the element's position
+in the document and independent of its text content.
 """
 
 from __future__ import annotations
@@ -72,8 +73,8 @@ from linguary.domain import (
 _XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 _EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
 
-#: Теги, встреча которых внутри элемента делает его контейнером: собственного текста
-#: у такого элемента нет, а блоки дают его потомки.
+#: Tags whose presence inside an element turns it into a container: such an element has no direct text,
+#: and blocks are produced by its descendants.
 _STRUCTURAL_TAGS = frozenset(
     {
         "p",
@@ -108,36 +109,35 @@ _STRUCTURAL_TAGS = frozenset(
     }
 )
 
-#: Теги, которые остаются одним блоком, даже если внутри есть структурные элементы.
-#: Таблица разбирается как целое (`PRESERVE_OPAQUE`), а не как набор ячеек.
+#: Tags that remain a single block even if structural elements exist inside.
+#: Tables are parsed as a whole (`PRESERVE_OPAQUE`) rather than as individual cells.
 _ALWAYS_LEAF_TAGS = frozenset({"table", "pre", "img", "hr"})
 
-#: Теги, блок для которых создаётся даже без текста: они сами по себе несут структуру.
+#: Tags for which a block is created even without text: they inherently represent structure.
 _KEEP_EMPTY_TAGS = frozenset({"img", "hr", "table"})
 
-#: Служебные теги документа: текстом книги не являются.
+#: Document auxiliary tags: not considered book content.
 _IGNORED_TAGS = frozenset({"head", "title", "script", "style", "link", "meta", "base"})
 
 _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 
-#: Классы и `epub:type`, которыми размечают стихотворную строку или строфу.
+#: Class and `epub:type` markers indicating verse lines or stanzas.
 _VERSE_MARKERS = frozenset({"l", "line", "verse", "poem", "stanza", "linegroup"})
 
-#: Признаки разрыва страницы и номера страницы печатного оригинала.
+#: Markers indicating page breaks and print original page numbers.
 _PAGE_BREAK_MARKERS = frozenset({"pagebreak", "pageno", "page-break", "pagenum"})
 
-#: Признак разрыва страницы как самостоятельная часть токена: целиком или отделённый
-#: дефисом, подчёркиванием или двоеточием (`x-ebookmaker-pageno`, `z3998:pagebreak`).
+#: Page break marker pattern matching whole tokens or parts separated by hyphen, underscore, or colon.
 _PAGE_BREAK_PATTERN = re.compile(
     r"(?:^|[-_:])(?:"
     + "|".join(re.escape(marker) for marker in sorted(_PAGE_BREAK_MARKERS))
     + r")(?:$|[-_:])"
 )
 
-#: Тип содержимого для ресурса, у которого манифест его не задал.
+#: Default media type for resources when unspecified in manifest.
 _DEFAULT_MEDIA_TYPE = "application/octet-stream"
 
-#: Язык оригинала, если в метаданных EPUB его нет.
+#: Default source language if missing from EPUB metadata.
 _DEFAULT_SOURCE_LANGUAGE = "en"
 
 _STRUCTURAL_QUALIFIED_NAMES = tuple(
@@ -149,7 +149,7 @@ _STRUCTURAL_QUALIFIED_NAMES = tuple(
 
 @dataclass(frozen=True, slots=True)
 class _SpineDocument:
-    """Документ порядка чтения: путь в книге и его содержимое."""
+    """Reading order document: path inside the book and its raw bytes."""
 
     resource_path: str
     content: bytes
@@ -157,10 +157,10 @@ class _SpineDocument:
 
 @dataclass(slots=True)
 class _InlineRun:
-    """Пробег inline-содержимого между блочными детьми контейнера.
+    """Run of inline content between block-level children of a container.
 
-    Порядковый номер пробега входит в структурный путь блока, поэтому у анонимного
-    блока такой же стабильный идентификатор, как у блока с собственным элементом.
+    The run index is included in the block's structural path, ensuring that anonymous
+    runs receive the same stable identity as blocks tied to explicit elements.
     """
 
     builder: InlineContentBuilder
@@ -169,10 +169,11 @@ class _InlineRun:
 
 @dataclass(frozen=True, slots=True)
 class _BlockContext:
-    """Контекст обхода: родительский блок и тип, навязанный контейнером.
+    """Traversal context: parent block identifier and inherited block type.
 
-    Абзац внутри цитаты — часть цитаты, абзац внутри сноски — часть сноски: тип задаётся
-    ближайшим значащим контейнером, а вложенность фиксируется `parent_id`.
+    Paragraphs inside blockquotes become part of the quote, paragraphs inside footnotes
+    become part of the footnote: type is governed by the nearest enclosing container,
+    and nesting is recorded via `parent_id`.
     """
 
     parent_id: str | None = None
@@ -180,21 +181,22 @@ class _BlockContext:
 
 
 class EbookLibEpubReader(EpubReader):
-    """Чтение EPUB в каноническую модель документа.
+    """Reading EPUB into the canonical document model.
 
-    Читатель не пишет файлы: копии ресурсов на диск сохраняет отдельный шаг импорта,
-    здесь фиксируется только сам факт ресурса и ссылка на него из блока `Image`.
+    The reader does not write files to disk: resource copying is handled by a separate
+    import step; this class only records the existence of resources and references to them
+    from `Image` blocks.
 
-    Архив — недоверенный вход, и объём распаковки ограничен теми же `ExtractionLimits`,
-    что и в хранилище ресурсов: читатель поднимает содержимое книги в память, поэтому
-    архив, распаковывающийся в десятки гигабайт, не должен дойти до чтения (PRD § 6).
+    Archives represent untrusted input, and extraction volume is constrained by `ExtractionLimits`
+    matching the resource store: the reader loads book content into memory, so archives that
+    expand into tens of gigabytes must be rejected before reading (PRD § 6).
     """
 
     def __init__(self, *, limits: ExtractionLimits | None = None) -> None:
         self._limits = limits or ExtractionLimits()
 
     def read(self, request: EpubReadRequest) -> ImportedBook:
-        """Читает книгу целиком; критичная структура даёт `EpubImportFatalError`."""
+        """Read entire book; fatal structural errors raise `EpubImportFatalError`."""
         book = _open_epub(request.source_path, limits=self._limits)
         warnings: list[BookImportWarning] = []
         documents = _reading_order(
@@ -237,11 +239,10 @@ class EbookLibEpubReader(EpubReader):
 
 
 def _open_epub(source_path: str, *, limits: ExtractionLimits) -> epub.EpubBook:
-    """Открывает контейнер EPUB; нечитаемый файл — `FATAL` (PRD § 6).
+    """Open EPUB container; unreadable archive raises `FATAL` (PRD § 6).
 
-    Пределы распаковки проверяются раньше самого чтения: EbookLib поднимает содержимое
-    манифеста в память целиком, и превышение должно останавливать импорт до первой
-    прочитанной записи архива.
+    Extraction limits are validated before reading: EbookLib loads the manifest into memory
+    in full, so exceeding limits must halt import before the first archive entry is read.
     """
     _check_archive_limits(source_path, limits=limits)
     try:
@@ -257,7 +258,7 @@ def _open_epub(source_path: str, *, limits: ExtractionLimits) -> epub.EpubBook:
 
 
 def _check_archive_limits(source_path: str, *, limits: ExtractionLimits) -> None:
-    """Сверяет оглавление архива с пределами распаковки, ничего из него не читая."""
+    """Validate archive table of contents against extraction limits without reading contents."""
     try:
         with zipfile.ZipFile(source_path) as archive:
             check_extraction_limits(archive, limits=limits)
@@ -272,11 +273,11 @@ def _reading_order(
     *,
     limits: ExtractionLimits,
 ) -> tuple[_SpineDocument, ...]:
-    """Документы порядка чтения; пустой spine — `FATAL` (PRD § 6).
+    """Extract reading order documents; an empty spine raises `FATAL` (PRD § 6).
 
-    Содержимое документов берётся из архива как есть, а не из EbookLib: библиотека
-    пересобирает XHTML при чтении и теряет часть разметки, а структурный путь блока
-    обязан совпадать с исходным документом книги.
+    Document contents are read directly from the archive rather than EbookLib: the library
+    reserializes XHTML during reading and loses formatting details, whereas structural XPaths
+    must match the original book document exactly.
     """
     with _ArchiveContents(source_path, limits=limits) as contents:
         documents = _spine_documents(book, contents, warnings)
@@ -292,7 +293,7 @@ def _spine_documents(
     contents: _ArchiveContents,
     warnings: list[BookImportWarning],
 ) -> tuple[_SpineDocument, ...]:
-    """Документы spine в порядке чтения, без повторов и недостающих элементов."""
+    """Spine documents in reading order, deduplicated and filtered."""
     documents: list[_SpineDocument] = []
     seen: set[str] = set()
     for entry in book.spine:
@@ -331,11 +332,10 @@ def _spine_documents(
 
 
 class _ArchiveContents:
-    """Доступ к файлам EPUB по пути относительно каталога OPF.
+    """Access EPUB files relative to the OPF package directory.
 
-    Объём распаковки ограничен: пределы сверяются с оглавлением архива до первого
-    чтения, а прочитанные байты считаются по мере чтения — объявленному размеру записи
-    архив обязать говорить правду нельзя.
+    Extraction volume is capped: limits are verified against the archive index prior to reading,
+    and read bytes are tracked on the fly — archive headers cannot be trusted for accurate file sizes.
     """
 
     def __init__(self, source_path: str, *, limits: ExtractionLimits) -> None:
@@ -362,7 +362,7 @@ class _ArchiveContents:
         self._archive.close()
 
     def read(self, resource_path: str) -> bytes:
-        """Содержимое файла книги; потеря обязательного документа — `FATAL`."""
+        """Read book entry bytes; missing mandatory documents raise `FATAL`."""
         name = posixpath.normpath(posixpath.join(self._directory, resource_path))
         for candidate in (name, unquote(name)):
             try:
@@ -374,10 +374,10 @@ class _ArchiveContents:
         )
 
     def _read_entry(self, name: str) -> bytes:
-        """Содержимое записи архива в пределах распаковки; отсутствующая — `KeyError`.
+        """Read archive entry bytes enforcing extraction limits; missing entry raises `KeyError`.
 
-        Документ порядка чтения ограничен отдельно: художественная глава заведомо
-        меньше десятков мегабайт, и запись такого размера читать незачем.
+        Reading order documents have dedicated limits: a literary chapter is well below
+        tens of megabytes, and entries of such size should not be read.
         """
         declared = self._archive.getinfo(name).file_size
         if declared > self._limits.max_document_bytes:
@@ -396,10 +396,10 @@ class _ArchiveContents:
 
 
 def _toc_titles(book: epub.EpubBook) -> Mapping[str, tuple[str, ...]]:
-    """Заголовки nav/toc, сгруппированные по документу порядка чтения.
+    """nav/toc titles grouped by spine document path.
 
-    EPUB2 отдаёт оглавление из NCX, EPUB3 — из nav; EbookLib приводит оба к одному виду,
-    поэтому версия книги здесь уже не различается.
+    EPUB2 provides TOC via NCX, EPUB3 via nav; EbookLib unifies them into a single representation,
+    so EPUB version differences are transparent here.
     """
     titles: dict[str, list[str]] = {}
     for href, title in _flatten_toc(book.toc):
@@ -411,7 +411,7 @@ def _toc_titles(book: epub.EpubBook) -> Mapping[str, tuple[str, ...]]:
 
 
 def _flatten_toc(entries: Iterable[object]) -> Iterator[tuple[str, str]]:
-    """Разворачивает возможно вложенное оглавление в плоскую последовательность."""
+    """Flatten potentially nested table of contents structure."""
     for entry in entries:
         if isinstance(entry, (list, tuple)):
             if entry and isinstance(entry[0], (epub.Link, epub.Section)):
@@ -429,10 +429,10 @@ def _flatten_toc(entries: Iterable[object]) -> Iterator[tuple[str, str]]:
 def _toc_mismatch_warnings(
     *, toc_titles: Mapping[str, tuple[str, ...]], spine_paths: Sequence[str]
 ) -> list[BookImportWarning]:
-    """Предупреждения о несовпадении оглавления с разбиением по документам (PRD § 6).
+    """Warnings regarding mismatch between TOC and document divisions (PRD § 6).
 
-    Книга всё равно импортируется по документам порядка чтения, поэтому несовпадение —
-    замечание, а не отказ: в реальных изданиях несколько глав часто лежат в одном XHTML.
+    The book is still imported following spine documents, so mismatches produce warnings
+    rather than failures: real-world publications often package multiple chapters into a single XHTML.
     """
     known = set(spine_paths)
     warnings: list[BookImportWarning] = []
@@ -470,10 +470,10 @@ def _toc_mismatch_warnings(
 
 
 def _resources(book: epub.EpubBook, *, book_id: str) -> tuple[DocumentResource, ...]:
-    """Ресурсы книги: всё, кроме документов порядка чтения.
+    """Book resources: everything except reading-order documents.
 
-    Идентификатор ресурса делается уникальным в пределах книги и хранилища: идентификаторы
-    манифеста уникальны только внутри своей книги.
+    Resource IDs are made unique within the book and storage: manifest IDs
+    are unique only within their own book.
     """
     resources: list[DocumentResource] = []
     seen: set[str] = set()
@@ -499,7 +499,7 @@ def _resources(book: epub.EpubBook, *, book_id: str) -> tuple[DocumentResource, 
 def _dropped_resource_warnings(
     resources: Sequence[DocumentResource],
 ) -> list[BookImportWarning]:
-    """Предупреждения о ресурсах, которые в итоговую книгу не переносятся (PRD § 6)."""
+    """Warnings regarding resources that are not transferred to the target publication (PRD § 6)."""
     return [
         dropped_resource_warning(
             source_path=resource.source_path, media_type=resource.media_type
@@ -510,7 +510,7 @@ def _dropped_resource_warnings(
 
 
 def _metadata(book: epub.EpubBook, *, source_path: str) -> BookMetadata:
-    """Метаданные книги; при отсутствии названия используется имя файла."""
+    """Book metadata; if title is missing, the source file stem is used."""
     title = _first_metadata(book, "title") or Path(source_path).stem
     return BookMetadata(
         title=title,
@@ -521,7 +521,7 @@ def _metadata(book: epub.EpubBook, *, source_path: str) -> BookMetadata:
 
 
 def _first_metadata(book: epub.EpubBook, name: str) -> str | None:
-    """Первое непустое значение элемента Dublin Core."""
+    """First non-empty value of a Dublin Core element."""
     for value, _ in book.get_metadata("DC", name):
         if value and value.strip():
             return value.strip()
@@ -529,7 +529,7 @@ def _first_metadata(book: epub.EpubBook, name: str) -> str | None:
 
 
 def _source_language(book: epub.EpubBook, *, request: EpubReadRequest) -> str:
-    """Язык оригинала: из запроса, иначе из метаданных книги."""
+    """Source language: from the request, otherwise from book metadata."""
     language = request.source_language or _first_metadata(book, "language")
     language = (language or _DEFAULT_SOURCE_LANGUAGE).strip()
     if language == request.target_language:
@@ -547,7 +547,7 @@ def _build_section(
     toc_titles: Mapping[str, tuple[str, ...]],
     manifest_paths: frozenset[str],
 ) -> tuple[DocumentSection, list[BookImportWarning]]:
-    """Строит раздел книги из одного документа порядка чтения."""
+    """Builds a book section from a single reading-order document."""
     root = _parse_document(document)
     body = _body(root, resource_path=document.resource_path)
     builder = _SectionBuilder(
@@ -576,7 +576,7 @@ def _build_section(
 
 
 def _parse_document(document: _SpineDocument) -> etree._Element:
-    """Разбирает XHTML документа; неразбираемый документ — `FATAL` (PRD § 6)."""
+    """Parses document XHTML; an unparseable document is `FATAL` (PRD § 6)."""
     parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
     try:
         return etree.fromstring(document.content, parser=parser)
@@ -587,7 +587,7 @@ def _parse_document(document: _SpineDocument) -> etree._Element:
 
 
 def _body(root: etree._Element, *, resource_path: str) -> etree._Element:
-    """Тело документа; без него разбирать до блоков нечего."""
+    """Document body; without it there is nothing to parse into blocks."""
     for candidate in (f"{{{_XHTML_NAMESPACE}}}body", "body"):
         body = root.find(candidate)
         if body is not None:
@@ -598,7 +598,7 @@ def _body(root: etree._Element, *, resource_path: str) -> etree._Element:
 
 
 def _section_id(book_id: str, resource_path: str) -> str:
-    """Идентификатор раздела, уникальный в пределах хранилища."""
+    """Section identifier unique within the repository."""
     return f"{book_id}:{resource_path}"
 
 
@@ -609,10 +609,10 @@ def _section_title(
     toc_titles: Mapping[str, tuple[str, ...]],
     blocks: Sequence[DocumentBlock],
 ) -> str:
-    """Заголовок главы: из nav/toc, иначе из `<title>`, иначе из первого заголовка.
+    """Chapter heading: from nav/toc, otherwise from `<title>`, otherwise from first heading.
 
-    Пробельные символы внутри заголовка схлопываются: вёрстка исходника часто разносит
-    номер и название главы отступами и переводами строк.
+    Whitespace within the heading is collapsed: source markup often separates
+    chapter number and title with indentation and line breaks.
     """
     titles = [_collapse_whitespace(title) for title in toc_titles.get(resource_path, ())]
     if titles and titles[0]:
@@ -631,17 +631,17 @@ def _section_title(
 
 
 def _collapse_whitespace(text: str) -> str:
-    """Схлопывает любые пробельные символы в одиночные пробелы и обрезает края."""
+    """Collapses any whitespace characters into single spaces and strips leading/trailing spaces."""
     return " ".join(text.split())
 
 
 class _SectionBuilder:
-    """Обход одного XHTML-документа в блоки раздела.
+    """Walks a single XHTML document into section blocks.
 
-    Обход идёт в порядке документа: элемент со структурными потомками считается
-    контейнером и блока сам не даёт, остальные элементы становятся блоками. Пробеги
-    inline-содержимого рядом с блочными детьми контейнера не теряются: из них собирается
-    отдельный блок, иначе подписи к иллюстрациям и боковые заметки исчезли бы из книги.
+    Traversal follows document order: an element with structural descendants is considered
+    a container and produces no block of its own; other elements become blocks. Inline content runs
+    adjacent to structural child elements in a container are preserved: they are collected into
+    a separate block, otherwise illustration captions and marginal notes would be lost.
     """
 
     def __init__(
@@ -668,11 +668,11 @@ class _SectionBuilder:
         )
 
     def import_warnings(self) -> list[BookImportWarning]:
-        """Замечания раздела: потерянные ресурсы и пропущенные конструкции."""
+        """Section warnings: missing resources and dropped constructs."""
         return [*self.warnings, *self._drops.warnings()]
 
     def walk(self, container: etree._Element, context: _BlockContext) -> None:
-        """Обходит содержимое контейнера, сохраняя порядок документа."""
+        """Traverses container contents while preserving document order."""
         run = _InlineRun(builder=self._new_content_builder())
         run.builder.add_text(container.text)
         for child in container:
@@ -693,7 +693,7 @@ class _SectionBuilder:
         self._flush_run(run, container=container, context=context)
 
     def _emit(self, element: etree._Element, context: _BlockContext) -> None:
-        """Создаёт блок для элемента либо спускается в него как в контейнер."""
+        """Emits a block for the element or recurses into it as a container."""
         if not _is_container(element):
             self._emit_leaf(element, context)
             return
@@ -719,7 +719,7 @@ class _SectionBuilder:
             self._pending_anchor_ids.remove(anchor_id)
 
     def _emit_leaf(self, element: etree._Element, context: _BlockContext) -> None:
-        """Создаёт блок для элемента без структурных потомков."""
+        """Emits a block for an element without structural descendants."""
         builder = self._new_content_builder()
         builder.add_children(element)
         content = builder.build()
@@ -754,7 +754,7 @@ class _SectionBuilder:
         content: InlineContent,
         context: _BlockContext,
     ) -> list[DocumentBlock]:
-        """Расщепляет длинный составной абзац на цепочку блоков по границам предложений."""
+        """Splits a long compound paragraph into a chain of blocks along sentence boundaries."""
         fragments = split_inline_content(content)
         if len(fragments) <= 1:
             return []
@@ -807,7 +807,7 @@ class _SectionBuilder:
     def _flush_run(
         self, run: _InlineRun, *, container: etree._Element, context: _BlockContext
     ) -> None:
-        """Закрывает пробег inline-содержимого и, если в нём был текст, делает из него блок."""
+        """Flushes an inline content run and, if it contains text, creates a block from it."""
         content = run.builder.build()
         run.index += 1
         run.builder = self._new_content_builder()
@@ -843,7 +843,7 @@ class _SectionBuilder:
         support_status: SupportStatus,
         context: _BlockContext,
     ) -> DocumentBlock:
-        """Добавляет блок в раздел и отдаёт его: он может стать родителем вложенных."""
+        """Adds a block to the section and returns it: it may become the parent of nested blocks."""
         element_id = element.get("id") if element is not None else None
         block = DocumentBlock.create(
             document_id=self._book_id,
@@ -874,7 +874,7 @@ class _SectionBuilder:
         content: InlineContent,
         element_id: str | None,
     ) -> dict[str, str]:
-        """Служебные признаки блока, не влияющие на его текст."""
+        """Auxiliary block attributes that do not affect its text."""
         attributes: dict[str, str] = {}
         if element is not None:
             attributes["tag"] = local_name(element) or ""
@@ -888,7 +888,7 @@ class _SectionBuilder:
         return attributes
 
     def _image_attributes(self, element: etree._Element) -> dict[str, str]:
-        """Ссылка на ресурс изображения и его текстовое описание."""
+        """Image resource reference and its text description."""
         attributes: dict[str, str] = {}
         source = element.get("src")
         if source:
@@ -917,12 +917,12 @@ class _SectionBuilder:
         content: InlineContent,
         block_type: BlockType,
     ) -> DropReason | None:
-        """Причина, по которой блок для элемента не создаётся, либо `None`.
+        """Reason why a block is not created for the element, or `None`.
 
-        Пустой элемент сохраняется, если он сам является структурой (изображение,
-        разделитель, таблица) либо служит целью внутренней ссылки книги. Разрыв страницы
-        сохраняется первым в цепочке: подряд идущие разрывы описывают одну и ту же границу
-        печатной страницы, и в книге для чтения второй из них лишний (PRD § 6).
+        An empty element is preserved if it is structural itself (image, divider, table)
+        or serves as a target of an internal book link. A page break is preserved as the first
+        in a chain: consecutive page breaks describe the same physical page boundary,
+        and the second one is redundant in an ebook (PRD § 6).
         """
         if block_type is BlockType.PAGE_BREAK and not content.text:
             return (
@@ -939,7 +939,7 @@ class _SectionBuilder:
         return DropReason.EMPTY_DECORATION
 
     def _follows_empty_page_break(self) -> bool:
-        """Был ли последний добавленный блок раздела пустым разрывом страницы."""
+        """Whether the last added section block was an empty page break."""
         last = self._last_block
         return last is not None and last.type is BlockType.PAGE_BREAK and not last.text
 
@@ -950,16 +950,16 @@ class _SectionBuilder:
 
 
 def _is_structural(element: etree._Element) -> bool:
-    """Даёт ли элемент блок или контейнер блоков."""
+    """Whether the element produces a block or block container."""
     return local_name(element) in _STRUCTURAL_TAGS
 
 
 def _is_anchor_only(element: etree._Element) -> bool:
-    """Пустой inline-элемент, существующий только как цель внутренней ссылки.
+    """Empty inline element existing solely as an internal link target.
 
-    Номера страниц печатного оригинала и якоря иллюстраций Gutenberg размечает пустыми
-    `<span>` и `<a>`. Текста они не несут, но на них ссылается оглавление и сама книга,
-    поэтому такой элемент становится отдельным блоком, а не растворяется в соседнем тексте.
+    Gutenberg marks original print page numbers and illustration anchors with empty
+    `<span>` and `<a>`. They contain no text, but are referenced by TOC and the book text,
+    so such an element becomes an individual block rather than dissolving into adjacent text.
     """
     if "".join(element.itertext()).strip():
         return False
@@ -969,7 +969,7 @@ def _is_anchor_only(element: etree._Element) -> bool:
 
 
 def _is_container(element: etree._Element) -> bool:
-    """Есть ли внутри элемента структурные потомки."""
+    """Whether the element has structural descendants inside."""
     if local_name(element) in _ALWAYS_LEAF_TAGS:
         return False
     return next(element.iterdescendants(*_STRUCTURAL_QUALIFIED_NAMES), None) is not None
@@ -978,7 +978,7 @@ def _is_container(element: etree._Element) -> bool:
 def _inherited_context(
     element: etree._Element, context: _BlockContext
 ) -> _BlockContext:
-    """Тип, который контейнер навязывает вложенным блокам."""
+    """Type imposed by the container onto nested blocks."""
     tag = local_name(element)
     if tag == "blockquote":
         return _BlockContext(parent_id=context.parent_id, inherited_type=BlockType.QUOTE)
@@ -992,7 +992,7 @@ def _inherited_context(
 def _leaf_type(
     element: etree._Element, *, context: _BlockContext, content: InlineContent
 ) -> BlockType:
-    """Тип блока для элемента без структурных потомков."""
+    """Block type for an element without structural descendants."""
     tag = local_name(element)
     if _is_page_break(element):
         return BlockType.PAGE_BREAK
@@ -1018,16 +1018,16 @@ def _leaf_type(
 
 
 def _is_page_break(element: etree._Element) -> bool:
-    """Помечен ли элемент как разрыв страницы печатного оригинала.
+    """Whether the element is marked as a print original page break.
 
-    Признак ищется как отдельная часть токена: издатели пишут и `pagebreak`, и собственные
-    классы вида `x-ebookmaker-pageno`, но `pagenote` разрывом страницы не является.
+    The marker is searched as an individual part of a token: publishers write both `pagebreak`
+    and custom classes like `x-ebookmaker-pageno`, but `pagenote` is not a page break.
     """
     return any(_PAGE_BREAK_PATTERN.search(token) for token in _markers(element))
 
 
 def _is_verse(element: etree._Element) -> bool:
-    """Помечен ли элемент как стихотворная строка или строфа."""
+    """Whether the element is marked as verse line or stanza."""
     markers = _markers(element)
     return bool(markers & _VERSE_MARKERS) or any(
         marker.startswith("z3998:verse") for marker in markers
@@ -1035,7 +1035,7 @@ def _is_verse(element: etree._Element) -> bool:
 
 
 def _markers(element: etree._Element) -> frozenset[str]:
-    """Классы и `epub:type` элемента одним набором токенов."""
+    """Element classes and `epub:type` as a single set of tokens."""
     tokens: set[str] = set()
     for value in (
         element.get("class"),
@@ -1048,10 +1048,10 @@ def _markers(element: etree._Element) -> frozenset[str]:
 
 
 def _structural_path(element: etree._Element) -> str:
-    """Абсолютный XPath элемента с индексами одноимённых тегов (ALG-01).
+    """Absolute XPath of an element with same-name tag indices (ALG-01).
 
-    Путь считается только по структуре документа, поэтому правка текста блока
-    идентификатор блока не меняет.
+    The path is computed solely from document structure, so editing block text
+    does not alter block identifier.
     """
     steps: list[str] = []
     current: etree._Element | None = element
@@ -1075,7 +1075,8 @@ def _structural_path(element: etree._Element) -> str:
 
 
 def _unique(values: Iterable[str | None]) -> tuple[str, ...]:
-    """Непустые значения без повторов, в порядке появления."""
+    """Non-empty values without duplicates, in order of appearance."""
+    return tuple(dict.fromkeys(value for value in values if value))
     return tuple(dict.fromkeys(value for value in values if value))
 
 

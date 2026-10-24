@@ -1,1 +1,1 @@
-"""Адаптеры: реализации портов прикладного слоя поверх внешних технологий."""
+"""Adapters: implementations of application layer ports on top of external technologies."""

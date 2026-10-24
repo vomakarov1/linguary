@@ -1,16 +1,16 @@
-"""Pydantic-схемы структурированных ответов модели (DTO-02, ADR § 3).
+"""Pydantic schemas for structured model responses (DTO-02, ADR § 3).
 
-Схемы описывают внешнюю границу: это единственное место, где известен JSON-формат ответа
-LLM. Провайдер получает их как JSON Schema строгого структурированного вывода, а разбор
-ответа даёт готовые к преобразованию объекты. Прикладной слой этих классов не видит.
+The schemas describe the external boundary: this is the only place where the LLM response JSON
+format is known. The provider receives them as strict structured output JSON Schema, and parsing
+the response yields objects ready for conversion. The application layer never sees these classes.
 
-Правила состава, которые видны в самом ответе, проверяются здесь: обязательный перевод
-для `TRANSLATE`, запрет перевода и подсказок там, где режим их не допускает, диапазон
-уверенности. Всё, что требует знания входа — покрытие блоков, их порядок, совпадение
-режима с сохранённым планом, язык результата, — проверяет прикладной слой (PRD § 15).
+Composition rules visible within the response itself are validated here: mandatory translation
+for `TRANSLATE`, prohibition of translation and hints where the treatment disallows them, confidence
+range. Everything requiring knowledge of the input — block coverage, block ordering, matching
+treatment against the stored plan, result language — is validated by the application layer (PRD § 15).
 
-Лишние поля запрещены: строгий структурированный вывод их не порождает, а в свободном
-ответе они означают, что модель отвечала не по схеме.
+Extra fields are forbidden: strict structured output does not produce them, and in a free-form
+response they indicate that the model did not adhere to the schema.
 """
 
 from __future__ import annotations
@@ -21,14 +21,14 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from linguary.domain import BlockTreatment, ConceptType
 
-#: Режимы обработки, которые модель выбирает и подтверждает. Нетекстовые режимы
-#: (`PRESERVE_ONLY`, `DROP_WITH_WARNING`) назначает импортёр по матрице поддержки,
-#: и такие блоки модели не передаются, поэтому в схеме их нет.
+#: Processing modes that the model selects and confirms. Non-textual modes
+#: (`PRESERVE_ONLY`, `DROP_WITH_WARNING`) are assigned by the importer based on the support
+#: matrix, and such blocks are not sent to the model, so they are not in the schema.
 type TextualTreatment = Literal["TRANSLATE", "GLOSSARY_ONLY", "READ_AS_IS"]
 
 
 class _ResponseModel(BaseModel):
-    """Общая настройка схем ответа модели."""
+    """Common configuration for model response schemas."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -94,7 +94,7 @@ class BlockResultSchema(_ResponseModel):
 
     @model_validator(mode="after")
     def _check_treatment_composition(self) -> BlockResultSchema:
-        """Состав результата обязан соответствовать заявленному режиму (PRD § 15)."""
+        """The result composition must correspond to the declared treatment (PRD § 15)."""
         treatment = BlockTreatment(self.treatment)
         has_translation = bool(self.translated_text and self.translated_text.strip())
         if treatment.requires_translation and not has_translation:

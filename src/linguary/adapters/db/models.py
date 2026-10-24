@@ -1,11 +1,11 @@
-"""ORM-модели SQLite-схемы MVP (SDD SQL-01).
+"""ORM models for the SQLite MVP schema (SDD SQL-01).
 
-Модели намеренно отделены от доменных сущностей. Домен состоит из `frozen=True, slots=True`
-dataclass-ов: у них нет ни изменяемых атрибутов, ни `__dict__`, поэтому отобразить их на
-таблицы напрямую нельзя. Преобразование в обе стороны выполняют функции `mapping.py`.
+Models are intentionally separated from domain entities. The domain consists of `frozen=True, slots=True`
+dataclasses: they have neither mutable attributes nor `__dict__`, and therefore cannot be mapped to
+tables directly. Bidirectional mapping is handled by functions in `mapping.py`.
 
-Перечисления домена — `StrEnum`, их значения совпадают с внешним представлением PRD, поэтому
-в базе они хранятся строками как есть; обратное преобразование делает тот же `mapping.py`.
+Domain enumerations are `StrEnum` instances whose values match the external PRD representation,
+so they are stored as raw strings in the database; `mapping.py` handles the reverse transformation.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ from linguary.application.ports.persistence import PersistenceError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
-#: Соглашение об именах ключей и индексов. Без него SQLite не даёт изменить или удалить
-#: безымянный constraint в batch-режиме Alembic: у миграции нет имени, за которое взяться.
+#: Naming convention for keys and constraints. Without it, SQLite cannot alter or drop
+#: an unnamed constraint in Alembic batch mode because the migration has no identifier to target.
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_N_name)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",
@@ -43,16 +43,16 @@ NAMING_CONVENTION = {
     "pk": "pk_%(table_name)s",
 }
 
-#: Условие частичного уникального индекса «один активный запуск обработки на книгу».
+#: Condition for the partial unique index enforcing "one active processing run per book".
 ACTIVE_RUN_CONDITION = "status = 'active'"
 
 
 class ContentJSONError(PersistenceError, DontWrapMixin):
-    """Ошибка новых JSON-полей без включения параметров SQL в сообщение."""
+    """Error for new JSON fields without embedding SQL parameters into the message."""
 
 
 class ContentObjectJSON(TypeDecorator[dict[str, Any]]):
-    """SQL NULL для legacy; ненулевой JSON обязан быть объектом."""
+    """SQL NULL for legacy rows; non-null JSON must be a dict/object."""
 
     impl = JSON
     cache_ok = True
@@ -83,11 +83,11 @@ class ContentObjectJSON(TypeDecorator[dict[str, Any]]):
 
 
 class UtcDateTime(TypeDecorator[datetime]):
-    """Момент времени, хранимый в UTC.
+    """Timestamp stored in UTC.
 
-    SQLite не хранит смещение часового пояса, поэтому значение приводится к UTC при
-    записи и возвращается с явным UTC при чтении. Момент без часового пояса считается
-    заданным в UTC.
+    SQLite does not store timezone offsets, so values are converted to UTC on write
+    and returned with an explicit UTC timezone on read. Naive datetimes are assumed
+    to be in UTC.
     """
 
     impl = DateTime
@@ -107,10 +107,10 @@ class UtcDateTime(TypeDecorator[datetime]):
 
 
 class DecimalAsText(TypeDecorator[Decimal]):
-    """Величина с фиксированной точностью, хранимая текстом.
+    """Fixed-precision numeric value stored as text.
 
-    Числовые колонки SQLite возвращают `float`, из-за чего стоимость вызова теряет
-    точность. Текстовое представление сохраняет её без потерь.
+    SQLite numeric columns return `float`, causing call cost calculations to lose
+    precision. Textual representation preserves precision without loss.
     """
 
     impl = String
@@ -124,13 +124,13 @@ class DecimalAsText(TypeDecorator[Decimal]):
 
 
 class Base(DeclarativeBase):
-    """Общий базовый класс ORM-моделей схемы."""
+    """Common base class for schema ORM models."""
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 class BookRow(Base):
-    """Книга: пользовательское состояние и связь с файлами на диске."""
+    """Book: user-facing state and association with files on disk."""
 
     __tablename__ = "books"
 
@@ -148,7 +148,7 @@ class BookRow(Base):
 
 
 class SectionRow(Base):
-    """Глава книги: один XHTML-документ порядка чтения."""
+    """Book section / chapter: a single XHTML document in spine order."""
 
     __tablename__ = "sections"
     __table_args__ = (UniqueConstraint("book_id", "order"),)
@@ -161,7 +161,7 @@ class SectionRow(Base):
 
 
 class DocumentBlockRow(Base):
-    """Стабильный блок документа: единица текста, результата и повторной генерации."""
+    """Stable document block: unit of text, result, and regeneration."""
 
     __tablename__ = "document_blocks"
     __table_args__ = (
@@ -177,8 +177,8 @@ class DocumentBlockRow(Base):
     text: Mapped[str] = mapped_column(Text)
     inline_annotations_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     attributes_json: Mapped[dict[str, str]] = mapped_column(JSON)
-    #: Ссылка отложенная: блоки одного раздела пишутся пакетом, и родитель не обязан
-    #: попасть в базу раньше вложенного блока.
+    #: Deferred foreign key: blocks of a section are written in batch, and parents
+    #: are not guaranteed to be inserted before child blocks.
     parent_id: Mapped[str | None] = mapped_column(
         ForeignKey(
             "document_blocks.id",
@@ -192,7 +192,7 @@ class DocumentBlockRow(Base):
 
 
 class ResourceRow(Base):
-    """Ресурс книги: изображение, шрифт или стиль, нужный экспортёру."""
+    """Book resource: image, font, or stylesheet required for export."""
 
     __tablename__ = "resources"
     __table_args__ = (UniqueConstraint("book_id", "source_path"),)
@@ -206,7 +206,7 @@ class ResourceRow(Base):
 
 
 class ImportWarningRow(Base):
-    """Непреградное замечание импорта, привязанное к книге, разделу или блоку."""
+    """Non-blocking import warning associated with a book, section, or block."""
 
     __tablename__ = "import_warnings"
 
@@ -221,7 +221,7 @@ class ImportWarningRow(Base):
 
 
 class TermConceptRow(Base):
-    """Понятие глоссария книги."""
+    """Glossary term concept of a book."""
 
     __tablename__ = "term_concepts"
 
@@ -236,7 +236,7 @@ class TermConceptRow(Base):
 
 
 class TermVariantRow(Base):
-    """Языковой вариант перевода понятия глоссария."""
+    """Language translation variant for a glossary concept."""
 
     __tablename__ = "term_variants"
 
@@ -250,7 +250,7 @@ class TermVariantRow(Base):
 
 
 class ChapterAnalysisRow(Base):
-    """Результат анализа одной главы: инструкции, сводка и `Before You Read`."""
+    """Analysis result for a chapter: instructions, summary, and `Before You Read`."""
 
     __tablename__ = "chapter_analyses"
     __table_args__ = (UniqueConstraint("book_id", "section_id"),)
@@ -266,7 +266,7 @@ class ChapterAnalysisRow(Base):
 
 
 class TreatmentPlanItemRow(Base):
-    """Режим обработки одного блока в плане главы."""
+    """Treatment mode for a single block in a chapter treatment plan."""
 
     __tablename__ = "treatment_plan_items"
     __table_args__ = (UniqueConstraint("analysis_id", "block_id"),)
@@ -281,7 +281,7 @@ class TreatmentPlanItemRow(Base):
 
 
 class GlossaryCandidateRow(Base):
-    """Кандидат глоссария, найденный при анализе главы."""
+    """Glossary candidate extracted during chapter analysis."""
 
     __tablename__ = "glossary_candidates"
 
@@ -299,7 +299,7 @@ class GlossaryCandidateRow(Base):
 
 
 class ProcessingRunRow(Base):
-    """Запуск обработки книги со снимком глоссария и настроек LLM."""
+    """Processing run of a book with glossary and LLM settings snapshots."""
 
     __tablename__ = "processing_runs"
     __table_args__ = (
@@ -320,7 +320,7 @@ class ProcessingRunRow(Base):
 
 
 class BlockResultRow(Base):
-    """Результат обработки одного блока в рамках запуска."""
+    """Processing result of a single block within a run."""
 
     __tablename__ = "block_results"
     __table_args__ = (UniqueConstraint("run_id", "block_id"),)
@@ -339,7 +339,7 @@ class BlockResultRow(Base):
 
 
 class LanguageNoteRow(Base):
-    """Языковой комментарий, привязанный ровно к одному блоку."""
+    """Language note linked to exactly one block."""
 
     __tablename__ = "language_notes"
     __table_args__ = (
@@ -361,7 +361,7 @@ class LanguageNoteRow(Base):
 
 
 class ResultWarningRow(Base):
-    """Непреградное замечание к результату обработки блока."""
+    """Non-blocking warning for a block processing result."""
 
     __tablename__ = "result_warnings"
     __table_args__ = (Index("ix_result_warnings_run_id_block_id", "run_id", "block_id"),)
@@ -378,10 +378,10 @@ class ResultWarningRow(Base):
 
 
 class ProcessingTaskRow(Base):
-    """Локальная возобновляемая задача обработки книги.
+    """Local resumable book processing task.
 
-    `scope_id` — пустая строка, а не NULL, для задач уровня книги: в SQLite `NULL != NULL`,
-    и на NULL уникальный индекс не различил бы две задачи импорта одной книги.
+    `scope_id` is an empty string rather than NULL for book-level tasks: in SQLite `NULL != NULL`,
+    and a unique index on NULL values would not distinguish duplicate import tasks for the same book.
     """
 
     __tablename__ = "processing_tasks"
@@ -400,9 +400,9 @@ class ProcessingTaskRow(Base):
 
 
 class LLMCallLogRow(Base):
-    """Запись технического журнала об одном вызове модели.
+    """Technical log entry for a single model call.
 
-    Текст ответа записывается отдельно только при включённой отладке.
+    Completion response text is stored separately only when debugging is enabled.
     """
 
     __tablename__ = "llm_call_logs"
@@ -456,7 +456,7 @@ __all__ = [
 
 
 class SystemSettingsRow(Base):
-    """Единственная запись переопределений настроек приложения."""
+    """Singleton row containing application settings overrides."""
 
     __tablename__ = "system_settings"
     __table_args__ = (

@@ -1,9 +1,10 @@
-"""Локальная конфигурация приложения: настройки адаптеров и их чтение.
+"""Local application configuration: adapter settings and their retrieval.
 
-Секции настроек описаны датаклассами (`LLMSettings`, `CheckSettings`, `StorageSettings`,
-`ServerSettings`, `WorkerPoolSettings`), а источники — файл `~/.linguary/config.toml` и переменные окружения —
-знает только загрузчик. Так адаптеры и прикладные сценарии получают готовые значения
-и не читают ни файлов, ни окружения сами.
+Configuration sections are defined as dataclasses (`LLMSettings`, `CheckSettings`,
+`StorageSettings`, `ServerSettings`, `WorkerPoolSettings`), while sources — the
+`~/.linguary/config.toml` file and environment variables — are known only to the loader.
+This enables adapters and application use cases to receive resolved values without reading files
+or environment variables directly.
 """
 
 from linguary.adapters.config.loader import (

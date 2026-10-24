@@ -1,13 +1,13 @@
-"""Разбор ответа модели и преобразование его во внутренние DTO прикладного слоя.
+"""Model response parsing and conversion into internal application DTOs.
 
-Здесь проходит граница Pydantic: снаружи — текст ответа провайдера, внутри — обычные
-датаклассы `linguary.application.llm_dto` (ADR § 3). Любая неудача разбора приводится
-к `LLMResponseFormatError`, чтобы политика повторов не разбирала исключения чужой
-библиотеки (PRD § 16).
+Defines the boundary for Pydantic: raw provider response text arrives on the outside,
+standard `linguary.application.llm_dto` dataclasses leave on the inside (ADR § 3).
+Any parsing failure is translated into `LLMResponseFormatError` so that retry policies
+do not inspect third-party library exceptions (PRD § 16).
 
-Обрыв генерации по лимиту токенов провайдер сообщает отдельно от содержимого. Оборванный
-JSON не разбирается вовсе, поэтому признак обрыва переносится в ошибку разбора: иначе
-причина выглядела бы как случайная поломка формата.
+Truncation due to token limits is communicated by the provider separately from content.
+Truncated JSON fails validation entirely, so the truncation flag is propagated into
+the format error: otherwise the cause would appear as random syntax corruption.
 """
 
 from __future__ import annotations
@@ -50,14 +50,14 @@ from linguary.domain import BlockTreatment
 from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
 from linguary.domain.errors import DomainError
 
-#: Схема ответа для каждого вида запроса.
+#: Response schema for each request kind.
 SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
     LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisSchema,
     LLMResponseKind.TRANSLATION_RESULT: TranslationResultSchema,
 }
 
 def schema_for(kind: LLMResponseKind, *, contract_version: int = 1) -> type[BaseModel]:
-    """Схема структурированного ответа для вида запроса."""
+    """Structured response schema for request kind."""
     if type(contract_version) is not int or contract_version not in (1, 2):
         raise LLMResponseFormatError("неизвестная версия контракта ответа")
     if contract_version == 2:
@@ -69,10 +69,10 @@ def schema_for(kind: LLMResponseKind, *, contract_version: int = 1) -> type[Base
 def parse_payload(
     kind: LLMResponseKind, content: str, *, contract_version: int = 1, truncated: bool = False
 ) -> LLMPayload:
-    """Разбирает текст ответа модели и отдаёт внутренний DTO.
+    """Parses model response text and returns application layer DTO.
 
-    `truncated` — сообщение провайдера об обрыве по лимиту токенов; оно попадает
-    в ошибку разбора, когда оборванный ответ не удаётся разобрать.
+    `truncated` indicates provider token limit truncation; included in the parsing
+    error when a truncated response cannot be validated.
     """
     schema = schema_for(kind, contract_version=contract_version)
     try:
@@ -95,7 +95,7 @@ def parse_payload(
 
 
 def _to_dto(validated: BaseModel) -> LLMPayload:
-    """Преобразует разобранный ответ в DTO прикладного слоя."""
+    """Converts validated schema object into an application layer DTO."""
     if isinstance(validated, ChapterAnalysisSchema):
         return _chapter_analysis(validated)
     if isinstance(validated, TranslationResultSchema):
@@ -104,7 +104,7 @@ def _to_dto(validated: BaseModel) -> LLMPayload:
 
 
 def _chapter_analysis(schema: ChapterAnalysisSchema) -> ChapterAnalysisResponse:
-    """DTO анализа главы."""
+    """Chapter analysis DTO."""
     return ChapterAnalysisResponse(
         content_plan=_content_plan(schema.content_plan) if isinstance(schema, ChapterAnalysisV2Schema) else None,
         translation_instructions=schema.translation_instructions,
@@ -118,7 +118,7 @@ def _chapter_analysis(schema: ChapterAnalysisSchema) -> ChapterAnalysisResponse:
 
 
 def _glossary_candidate(schema: GlossaryCandidateSchema) -> GlossaryCandidateResponse:
-    """DTO кандидата глоссария."""
+    """Glossary candidate DTO."""
     return GlossaryCandidateResponse(
         source_text=schema.source_text,
         type=schema.type,
@@ -130,7 +130,7 @@ def _glossary_candidate(schema: GlossaryCandidateSchema) -> GlossaryCandidateRes
 
 
 def _plan_item(schema: TreatmentPlanItemSchema) -> TreatmentPlanItemResponse:
-    """DTO элемента плана обработки."""
+    """Treatment plan item DTO."""
     return TreatmentPlanItemResponse(
         source_block_id=schema.source_block_id,
         treatment=BlockTreatment(schema.treatment),
@@ -138,14 +138,14 @@ def _plan_item(schema: TreatmentPlanItemSchema) -> TreatmentPlanItemResponse:
 
 
 def _before_you_read(schema: BeforeYouReadEntrySchema) -> BeforeYouReadEntryResponse:
-    """DTO материала Before You Read."""
+    """Before You Read material DTO."""
     return BeforeYouReadEntryResponse(
         expression=schema.expression, explanation=schema.explanation
     )
 
 
 def _translation_result(schema: TranslationResultSchema) -> TranslationResultResponse:
-    """DTO результата обработки группы блоков."""
+    """Block group translation result DTO."""
     return TranslationResultResponse(
         content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.content_evidence) if isinstance(schema, TranslationResultV2Schema) else (),
         blocks=tuple(_block_result(item) for item in schema.blocks),
@@ -154,7 +154,7 @@ def _translation_result(schema: TranslationResultSchema) -> TranslationResultRes
 
 
 def _block_result(schema: BlockResultSchema) -> BlockResultResponse:
-    """DTO результата одного блока."""
+    """Single block result DTO."""
     return BlockResultResponse(
         source_block_id=schema.source_block_id,
         treatment=BlockTreatment(schema.treatment),
@@ -164,14 +164,14 @@ def _block_result(schema: BlockResultSchema) -> BlockResultResponse:
 
 
 def _glossary_hint(schema: GlossaryHintSchema) -> GlossaryHintResponse:
-    """DTO словарной подсказки."""
+    """Glossary hint DTO."""
     return GlossaryHintResponse(
         original=schema.original, translation=schema.translation, note=schema.note or None
     )
 
 
 def _language_note(schema: LanguageNoteSchema) -> LanguageNoteResponse:
-    """DTO языковой заметки."""
+    """Language note DTO."""
     return LanguageNoteResponse(
         source_block_id=schema.source_block_id,
         original_excerpt=schema.original_excerpt,
@@ -183,10 +183,10 @@ def _language_note(schema: LanguageNoteSchema) -> LanguageNoteResponse:
 def _format_error(
     kind: LLMResponseKind, *, error: ValidationError, truncated: bool
 ) -> str:
-    """Сообщение об ошибке разбора: чем именно ответ не подошёл.
+    """Parsing error message explaining schema validation failures.
 
-    Обрыв по лимиту токенов называется прямо: иначе он выглядит как случайная поломка
-    формата, хотя лечится другим лимитом, а не повтором того же запроса.
+    Token limit truncation is explicitly stated: otherwise it appears as random syntax
+    corruption, whereas resolution requires a larger token budget rather than identical retries.
     """
     violations = ", ".join(
         sorted({str(item["type"]) for item in error.errors(include_input=False)})

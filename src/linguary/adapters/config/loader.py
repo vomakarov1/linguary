@@ -1,16 +1,16 @@
-"""Чтение локальной конфигурации: файл настроек и переменные окружения.
+"""Loading local configuration: config file and environment variables.
 
-Источники читаются по возрастанию приоритета: значения по умолчанию, затем файл
-`~/.linguary/config.toml`, затем окружение. Такой порядок позволяет держать общие
-настройки в файле, а ключ провайдера — только в окружении (PRD § 23).
+Sources are processed in order of increasing precedence: defaults, then the
+`~/.linguary/config.toml` file, then environment variables. This hierarchy allows keeping
+shared settings in a file while storing the provider API key solely in environment variables (PRD § 23).
 
-Файла может не быть — это обычное состояние первого запуска. Но путь, заданный явно
-переменной `LINGUARY_CONFIG`, обязан существовать: подставлять вместо указанного файла
-другой нельзя, иначе приложение молча заработает не на той конфигурации.
+The config file may not exist — this is the expected state on first launch. However, an explicitly
+specified path via `LINGUARY_CONFIG` must exist: substituting another file in its place is forbidden,
+as it would lead to silent execution with incorrect configuration.
 
-Опечатка в имени настройки — ошибка, а не молчаливо проигнорированная строка: иначе
-пользователь ищет причину в приложении, а не в своём файле. Значения настроек в тексты
-ошибок не попадают: одно из них — ключ провайдера.
+A typo in a setting name is treated as an error rather than silently ignored: otherwise, users might
+look for issues in the application rather than in their configuration file. Setting values are not
+included in error messages because one of them is the provider API key.
 """
 
 from __future__ import annotations
@@ -32,25 +32,25 @@ from linguary.adapters.config.settings import (
     WorkerPoolSettings,
 )
 
-#: Переменная окружения с путём к файлу настроек.
+#: Environment variable specifying the config file path.
 CONFIG_PATH_VARIABLE = "LINGUARY_CONFIG"
 
-#: Файл настроек по умолчанию. Лежит вне репозитория: в нём может быть ключ провайдера.
+#: Default configuration file path. Located outside the repository as it may contain provider API keys.
 DEFAULT_CONFIG_PATH = "~/.linguary/config.toml"
 
-#: Общий префикс переменных окружения приложения.
+#: Common prefix for application environment variables.
 ENVIRONMENT_PREFIX = "LINGUARY"
 
 
 def _as_str(value: object, name: str) -> str:
-    """Строковое значение настройки."""
+    """String setting value."""
     if not isinstance(value, str):
         raise SettingsError(f"настройка {name} должна быть строкой")
     return value
 
 
 def _as_float(value: object, name: str) -> float:
-    """Дробное значение настройки; строка из окружения приводится к числу."""
+    """Float setting value; string from environment is converted to a float."""
     if isinstance(value, bool) or not isinstance(value, int | float | str):
         raise SettingsError(f"настройка {name} должна быть числом")
     try:
@@ -60,7 +60,7 @@ def _as_float(value: object, name: str) -> float:
 
 
 def _as_int(value: object, name: str) -> int:
-    """Целое значение настройки; строка из окружения приводится к числу."""
+    """Integer setting value; string from environment is converted to an integer."""
     if isinstance(value, bool) or not isinstance(value, int | str):
         raise SettingsError(f"настройка {name} должна быть целым числом")
     try:
@@ -70,7 +70,7 @@ def _as_int(value: object, name: str) -> int:
 
 
 def _as_bool(value: object, name: str) -> bool:
-    """Логическое значение из TOML или окружения."""
+    """Boolean setting value from TOML or environment."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -82,7 +82,7 @@ def _as_bool(value: object, name: str) -> bool:
     raise SettingsError(f"настройка {name} должна быть логическим значением")
 
 
-#: Разбор значений секции `[llm]`: имя настройки и способ привести её значение к типу.
+#: Parsers for the [llm] section: setting name mapped to value conversion function.
 _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "provider": _as_str,
     "base_url": _as_str,
@@ -104,7 +104,7 @@ _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "output_price_per_mtok": _as_float,
 }
 
-#: Разбор значений секции `[checks]`.
+#: Parsers for the [checks] section.
 _CHECK_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "glossary_confidence_threshold": _as_float,
     "glossary_review_min_mentions": _as_int,
@@ -116,24 +116,24 @@ _CHECK_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "language_notes_per_chapter": _as_int,
 }
 
-#: Разбор значений секции `[storage]`.
+#: Parsers for the [storage] section.
 _STORAGE_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "data_root": _as_str,
     "database_path": _as_str,
 }
 
-#: Разбор значений секции `[server]`.
+#: Parsers for the [server] section.
 _SERVER_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "host": _as_str,
     "port": _as_int,
 }
 
-#: Разбор значений секции `[worker]`.
+#: Parsers for the [worker] section.
 _WORKER_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "concurrency": _as_int,
 }
 
-#: Разбор значений секции `[reading]`.
+#: Parsers for the [reading] section.
 _READING_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "reader_level": _as_str,
 }
@@ -144,10 +144,10 @@ def load_settings(
     environ: Mapping[str, str] | None = None,
     config_path: str | Path | None = None,
 ) -> AppSettings:
-    """Собирает локальную конфигурацию из файла настроек и окружения.
+    """Assemble local configuration from config file and environment.
 
-    `environ` и `config_path` задаются явно в тестах и при сборке приложения; без них
-    берутся окружение процесса и путь по умолчанию.
+    `environ` and `config_path` are specified explicitly in tests and application composition;
+    otherwise process environment and default path are used.
     """
     variables = os.environ if environ is None else environ
     path, is_explicit = _config_path(variables, config_path)
@@ -207,7 +207,7 @@ def load_settings(
 def _config_path(
     variables: Mapping[str, str], config_path: str | Path | None
 ) -> tuple[Path, bool]:
-    """Путь к файлу настроек и признак того, что его выбрал пользователь."""
+    """Path to the config file and flag indicating whether it was explicitly specified."""
     if config_path is not None:
         return Path(config_path).expanduser(), True
     configured = variables.get(CONFIG_PATH_VARIABLE, "").strip()
@@ -217,7 +217,7 @@ def _config_path(
 
 
 def _read_document(path: Path, *, is_explicit: bool) -> Mapping[str, object]:
-    """Разбирает файл настроек; отсутствие файла по умолчанию — не ошибка."""
+    """Parse configuration file; absence of the default file is not an error."""
     try:
         content = path.read_bytes()
     except FileNotFoundError as error:
@@ -239,7 +239,7 @@ def _section(
     fields: Mapping[str, Callable[[object, str], object]],
     variables: Mapping[str, str],
 ) -> dict[str, Any]:
-    """Значения одной секции: сначала из файла, затем перекрытые окружением."""
+    """Values for a single section: loaded from document first, then overridden by environment."""
     values = {**_from_document(document, name=name, fields=fields)}
     values.update(_from_environment(name=name, fields=fields, variables=variables))
     return values
@@ -251,7 +251,7 @@ def _from_document(
     name: str,
     fields: Mapping[str, Callable[[object, str], object]],
 ) -> dict[str, Any]:
-    """Значения секции файла настроек."""
+    """Section values loaded from the configuration file."""
     section = document.get(name, {})
     if not isinstance(section, Mapping):
         raise SettingsError(f"секция [{name}] файла настроек не является таблицей")
@@ -271,10 +271,10 @@ def _from_environment(
     fields: Mapping[str, Callable[[object, str], object]],
     variables: Mapping[str, str],
 ) -> dict[str, Any]:
-    """Значения секции, заданные переменными окружения.
+    """Section values defined by environment variables.
 
-    Пустая переменная считается незаданной: так пользователь снимает значение из окружения,
-    не удаляя саму переменную, и остаётся то, что задано файлом.
+    An empty environment variable is treated as unset: this allows users to clear an environment
+    override without unsetting the variable, falling back to what is defined in the file.
     """
     values: dict[str, Any] = {}
     for key, parse in fields.items():

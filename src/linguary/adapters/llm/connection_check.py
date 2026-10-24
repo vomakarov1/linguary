@@ -1,4 +1,4 @@
-"""Проверка подключения к языковой модели до запуска задач."""
+"""Connection check for the language model prior to task launch."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ async def test_llm_connection(
     *,
     timeout_seconds: float = 10.0,
 ) -> tuple[bool, str]:
-    """Проверяет доступность модели легковесным запросом без сохранения настроек."""
+    """Validates model availability with a lightweight request without saving settings."""
     model = ""
     for candidate in (settings.model, settings.analysis_model, settings.processing_model):
         if candidate and candidate.strip():

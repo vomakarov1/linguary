@@ -1,11 +1,11 @@
-"""Преобразование доменных сущностей в строки таблиц и обратно.
+"""Mapping between domain entities and database table rows.
 
-Домен состоит из неизменяемых dataclass-ов и ничего не знает о SQLAlchemy, поэтому связь
-«домен — таблица» вынесена в отдельные чистые функции: они не трогают сессию и не делают
-запросов. Репозитории собирают из них операции чтения и записи.
+The domain consists of immutable dataclasses and has no knowledge of SQLAlchemy, so the
+"domain - table" mapping is extracted into separate pure functions: they do not touch the
+session and perform no queries. Repositories compose read and write operations from them.
 
-Значения доменных `StrEnum` совпадают с внешним представлением PRD и хранятся строками как
-есть; при чтении строка снова разбирается в перечисление.
+Domain `StrEnum` values match the PRD external representation and are stored as raw strings;
+upon reading, strings are parsed back into enum members.
 """
 
 from __future__ import annotations
@@ -83,11 +83,11 @@ from linguary.domain import (
     TreatmentPlanItem,
 )
 
-# --- книга -------------------------------------------------------------------------
+# --- book -------------------------------------------------------------------------
 
 
 def to_book_row(record: BookRecord) -> BookRow:
-    """Строка книги из прикладной записи."""
+    """Convert an application book record to a database row."""
     validation = record.export_validation_status
     return BookRow(
         id=record.id,
@@ -105,7 +105,7 @@ def to_book_row(record: BookRecord) -> BookRow:
 
 
 def to_book_record(row: BookRow) -> BookRecord:
-    """Прикладная запись книги из строки таблицы."""
+    """Convert a database row to an application book record."""
     validation = row.export_validation_status
     return BookRecord(
         id=row.id,
@@ -126,11 +126,11 @@ def to_book_record(row: BookRow) -> BookRecord:
     )
 
 
-# --- каноническая модель документа -------------------------------------------------
+# --- canonical document model -------------------------------------------------
 
 
 def to_section_row(book_id: str, section: DocumentSection) -> SectionRow:
-    """Строка раздела."""
+    """Convert a document section to a database row."""
     return SectionRow(
         id=section.id,
         book_id=book_id,
@@ -141,7 +141,7 @@ def to_section_row(book_id: str, section: DocumentSection) -> SectionRow:
 
 
 def to_block_row(book_id: str, block: DocumentBlock) -> DocumentBlockRow:
-    """Строка блока документа."""
+    """Convert a document block to a database row."""
     return DocumentBlockRow(
         id=block.id,
         book_id=book_id,
@@ -170,7 +170,7 @@ def to_block_row(book_id: str, block: DocumentBlock) -> DocumentBlockRow:
 
 
 def to_block(row: DocumentBlockRow) -> DocumentBlock:
-    """Доменный блок из строки таблицы."""
+    """Convert a database row to a domain document block."""
     return DocumentBlock(
         id=row.id,
         section_id=row.section_id,
@@ -196,7 +196,7 @@ def to_block(row: DocumentBlockRow) -> DocumentBlock:
 def to_resource_row(
     book_id: str, resource: DocumentResource, stored_path: str | None
 ) -> ResourceRow:
-    """Строка ресурса книги вместе с путём его сохранённой копии."""
+    """Convert a book resource to a database row along with its stored path."""
     return ResourceRow(
         id=resource.id,
         book_id=book_id,
@@ -208,7 +208,7 @@ def to_resource_row(
 
 
 def to_resource(row: ResourceRow) -> DocumentResource:
-    """Доменный ресурс из строки таблицы."""
+    """Convert a database row to a domain document resource."""
     return DocumentResource(
         id=row.id,
         source_path=row.source_path,
@@ -223,7 +223,7 @@ def to_document(
     blocks: Sequence[DocumentBlockRow],
     resources: Sequence[ResourceRow],
 ) -> CanonicalDocument:
-    """Каноническая модель книги, собранная из строк всех её таблиц."""
+    """Reconstruct a canonical document model from rows across all its tables."""
     blocks_by_section: dict[str, list[DocumentBlockRow]] = {}
     for block in blocks:
         blocks_by_section.setdefault(block.section_id, []).append(block)
@@ -258,7 +258,7 @@ def to_document(
 
 
 def to_import_warning_row(book_id: str, warning: BookImportWarning) -> ImportWarningRow:
-    """Строка предупреждения импорта."""
+    """Convert an import warning to a database row."""
     return ImportWarningRow(
         book_id=book_id,
         section_id=warning.section_id,
@@ -269,7 +269,7 @@ def to_import_warning_row(book_id: str, warning: BookImportWarning) -> ImportWar
 
 
 def to_import_warning(row: ImportWarningRow) -> BookImportWarning:
-    """Доменное предупреждение импорта из строки таблицы."""
+    """Convert a database row to a domain import warning."""
     return BookImportWarning(
         kind=ImportWarningKind(row.kind),
         message=row.message,
@@ -278,11 +278,11 @@ def to_import_warning(row: ImportWarningRow) -> BookImportWarning:
     )
 
 
-# --- глоссарий ---------------------------------------------------------------------
+# --- glossary ---------------------------------------------------------------------
 
 
 def to_concept_row(concept: TermConcept) -> TermConceptRow:
-    """Строка понятия глоссария."""
+    """Convert a glossary term concept to a database row."""
     return TermConceptRow(
         id=concept.id,
         book_id=concept.book_id,
@@ -294,7 +294,7 @@ def to_concept_row(concept: TermConcept) -> TermConceptRow:
 
 
 def to_variant_row(variant: TermVariant) -> TermVariantRow:
-    """Строка языкового варианта понятия."""
+    """Convert a term variant to a database row."""
     return TermVariantRow(
         concept_id=variant.concept_id,
         language=variant.language,
@@ -304,7 +304,7 @@ def to_variant_row(variant: TermVariant) -> TermVariantRow:
 
 
 def to_concept(row: TermConceptRow, variants: Sequence[TermVariantRow]) -> TermConcept:
-    """Доменное понятие глоссария вместе с его вариантами."""
+    """Convert a concept row and variant rows to a domain term concept."""
     return TermConcept(
         id=row.id,
         book_id=row.book_id,
@@ -324,11 +324,11 @@ def to_concept(row: TermConceptRow, variants: Sequence[TermVariantRow]) -> TermC
     )
 
 
-# --- анализ главы ------------------------------------------------------------------
+# --- chapter analysis ------------------------------------------------------------------
 
 
 def to_analysis_row(book_id: str, analysis: ChapterAnalysis) -> ChapterAnalysisRow:
-    """Строка анализа главы вместе с учебными материалами главы."""
+    """Convert chapter analysis to a database row with chapter study materials."""
     return ChapterAnalysisRow(
         id=analysis.id,
         book_id=book_id,
@@ -345,7 +345,7 @@ def to_analysis_row(book_id: str, analysis: ChapterAnalysis) -> ChapterAnalysisR
 
 
 def to_plan_item_rows(analysis: ChapterAnalysis) -> list[TreatmentPlanItemRow]:
-    """Строки плана обработки блоков главы с сохранением их порядка."""
+    """Convert chapter treatment plan items to database rows preserving order."""
     return [
         TreatmentPlanItemRow(
             analysis_id=analysis.id,
@@ -358,7 +358,7 @@ def to_plan_item_rows(analysis: ChapterAnalysis) -> list[TreatmentPlanItemRow]:
 
 
 def to_candidate_row(candidate: GlossaryCandidate) -> GlossaryCandidateRow:
-    """Строка кандидата глоссария."""
+    """Convert a glossary candidate to a database row."""
     return GlossaryCandidateRow(
         id=candidate.id,
         analysis_id=candidate.analysis_id,
@@ -377,7 +377,7 @@ def to_analysis(
     plan_items: Sequence[TreatmentPlanItemRow],
     candidates: Sequence[GlossaryCandidateRow],
 ) -> ChapterAnalysis:
-    """Доменный анализ главы из строк его таблиц."""
+    """Reconstruct domain chapter analysis from database rows."""
     return ChapterAnalysis(
         id=row.id,
         section_id=row.section_id,
@@ -417,11 +417,11 @@ def to_analysis(
     )
 
 
-# --- запуск обработки и его результаты ----------------------------------------------
+# --- processing run and results ----------------------------------------------
 
 
 def to_run_row(run: ProcessingRun, created_at: datetime) -> ProcessingRunRow:
-    """Строка запуска обработки со снимками глоссария и настроек LLM."""
+    """Convert a processing run to a database row with glossary and LLM settings snapshots."""
     settings = run.llm_settings_snapshot
     return ProcessingRunRow(
         id=run.id,
@@ -448,7 +448,7 @@ def to_run_row(run: ProcessingRun, created_at: datetime) -> ProcessingRunRow:
 
 
 def to_run(row: ProcessingRunRow) -> ProcessingRun:
-    """Доменный запуск обработки из строки таблицы."""
+    """Convert a database row to a domain processing run."""
     return ProcessingRun(
         id=row.id,
         book_id=row.book_id,
@@ -470,7 +470,7 @@ def to_run(row: ProcessingRunRow) -> ProcessingRun:
 
 
 def to_result_row(run_id: str, result: BlockProcessingResult) -> BlockResultRow:
-    """Строка результата обработки блока."""
+    """Convert a block processing result to a database row."""
     return BlockResultRow(
         run_id=run_id,
         block_id=result.block_id,
@@ -485,7 +485,7 @@ def to_result_row(run_id: str, result: BlockProcessingResult) -> BlockResultRow:
 
 
 def to_note_rows(run_id: str, result: BlockProcessingResult) -> list[LanguageNoteRow]:
-    """Строки учебных заметок, привязанных к блоку результата."""
+    """Convert language notes attached to a block result into database rows."""
     return [
         LanguageNoteRow(
             run_id=run_id,
@@ -502,7 +502,7 @@ def to_note_rows(run_id: str, result: BlockProcessingResult) -> list[LanguageNot
 def to_result_warning_rows(
     run_id: str, result: BlockProcessingResult
 ) -> list[ResultWarningRow]:
-    """Строки непреградных замечаний к результату блока."""
+    """Convert non-blocking warnings of a block result into database rows."""
     return [
         ResultWarningRow(
             run_id=run_id,
@@ -519,7 +519,7 @@ def to_block_result(
     notes: Iterable[LanguageNoteRow],
     warnings: Iterable[ResultWarningRow],
 ) -> BlockProcessingResult:
-    """Доменный результат обработки блока вместе с заметками и замечаниями."""
+    """Reconstruct a domain block processing result with language notes and warnings."""
     return BlockProcessingResult(
         block_id=row.block_id,
         treatment=BlockTreatment(row.treatment),
@@ -550,11 +550,11 @@ def to_block_result(
     )
 
 
-# --- задачи и журнал LLM ------------------------------------------------------------
+# --- tasks and LLM log ------------------------------------------------------------
 
 
 def to_task_row(task: ProcessingTask, created_at: datetime) -> ProcessingTaskRow:
-    """Строка локальной задачи."""
+    """Convert a processing task to a database row."""
     error = task.last_error
     return ProcessingTaskRow(
         id=task.id,
@@ -571,7 +571,7 @@ def to_task_row(task: ProcessingTask, created_at: datetime) -> ProcessingTaskRow
 
 
 def to_task(row: ProcessingTaskRow) -> ProcessingTask:
-    """Доменная задача из строки таблицы."""
+    """Convert a database row to a domain processing task."""
     return ProcessingTask(
         id=row.id,
         book_id=row.book_id,
@@ -584,9 +584,9 @@ def to_task(row: ProcessingTaskRow) -> ProcessingTask:
 
 
 def to_llm_call_row(entry: LLMCallLog) -> LLMCallLogRow:
-    """Строка журнала вызовов LLM.
+    """Convert an LLM call log entry to a database row.
 
-    Полные тексты запроса и ответа в журнал не попадают: колонок под них в схеме нет.
+    Full prompt and completion texts are omitted from the log: schema has no columns for them.
     """
     error = entry.error
     usage = entry.usage
@@ -611,7 +611,7 @@ def to_llm_call_row(entry: LLMCallLog) -> LLMCallLogRow:
 
 
 def to_llm_call(row: LLMCallLogRow) -> LLMCallLog:
-    """Доменная запись журнала вызовов LLM из строки таблицы."""
+    """Convert a database row to a domain LLM call log entry."""
     has_usage = row.prompt_tokens is not None or row.completion_tokens is not None
     return LLMCallLog(
         id=row.id,
@@ -639,13 +639,13 @@ def to_llm_call(row: LLMCallLogRow) -> LLMCallLog:
 def _to_task_error(
     error_type: str | None, message: str | None, detail: str | None
 ) -> TaskError | None:
-    """Типизированная ошибка из трёх колонок либо `None`, если ошибки не было."""
+    """Construct a typed task error from three columns or return `None` if no error occurred."""
     if error_type is None or message is None:
         return None
     return TaskError(type=ErrorType(error_type), message=message, detail=detail)
 
 
-# --- содержательный план: отдельный строгий формат хранения версии 2 -----------------
+# --- content plan: dedicated strict v2 storage format -----------------
 
 
 def _object(value: object, fields: set[str]) -> dict[str, Any]:

@@ -1,8 +1,8 @@
-"""Журналирование обращений к LLM без сохранения текста книги.
+"""Logging LLM calls without storing book text.
 
-Адаптер оборачивает любой `LLMClient` и пишет по одной записи на каждый фактический
-вызов модели. Полные запросы и ответы намеренно не сохраняются: в них находится текст
-книги, а журнал нужен для диагностики статусов, стоимости и ошибок (PRD § 24).
+Wraps any `LLMClient` and records one log entry per actual model call.
+Full request and response contents are intentionally omitted to avoid storing book text,
+while preserving diagnostics for status codes, token cost, and errors (PRD § 24).
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ type LoggedObserver = Callable[[LLMCallLog, LLMRequest, LLMResponse | Exception]
 
 @dataclass(slots=True)
 class LoggingLLMClient(LLMClient):
-    """Декоратор `LLMClient`, записывающий технический журнал вызовов."""
+    """`LLMClient` decorator recording technical call logs."""
 
     inner: LLMClient
     unit_of_work: UnitOfWork
@@ -49,7 +49,7 @@ class LoggingLLMClient(LLMClient):
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
-        """Выполняет вызов модели и фиксирует его итог, если запрос привязан к книге."""
+        """Invokes the model and logs the call outcome if the request is associated with a book."""
         if self._observation_failed:
             raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены")
         if request.book_id is None or request.stage is None:
@@ -104,7 +104,7 @@ class LoggingLLMClient(LLMClient):
     def _cost_of(
         self, usage: TokenUsage | None, *, provider_cost: Decimal | None
     ) -> Decimal | None:
-        """Сохраняет цену провайдера либо вычисляет стоимость известных токенов."""
+        """Preserves provider-reported cost or computes token cost from pricing configuration."""
         if provider_cost is not None:
             return provider_cost
         return self.pricing.cost_of(usage) if self.pricing is not None else None
@@ -124,7 +124,7 @@ class LoggingLLMClient(LLMClient):
         response_text: str | None = None,
         outcome: LLMResponse | Exception | None = None,
     ) -> None:
-        """Записывает одну строку журнала в короткой транзакции."""
+        """Records a single log entry within a short transaction."""
         if request.book_id is None or request.stage is None:
             return
         entry = LLMCallLog(
@@ -158,25 +158,25 @@ class LoggingLLMClient(LLMClient):
                 raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены") from None
 
     def _duration_ms(self, started_at: datetime) -> int:
-        """Длительность вызова в миллисекундах."""
+        """Call duration in milliseconds."""
         return max(0, int((self._now() - started_at).total_seconds() * 1000))
 
     def _new_id(self) -> str:
-        """Идентификатор записи журнала."""
+        """Log entry identifier."""
         return (self.id_factory or _uuid)()
 
     def _now(self) -> datetime:
-        """Текущее время в UTC."""
+        """Current time in UTC."""
         return (self.clock or _utc_now)()
 
 
 def _uuid() -> str:
-    """Новый UUID строкой."""
+    """New UUID string."""
     return str(uuid4())
 
 
 def _utc_now() -> datetime:
-    """Текущий момент в UTC."""
+    """Current UTC timestamp."""
     return datetime.now(UTC)
 
 

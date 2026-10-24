@@ -1,21 +1,20 @@
-"""Ограничитель частоты запросов к модели, общий для всех воркеров процесса.
+"""Model request rate limiter shared across all workers in a process.
 
-Параллельная обработка (PRD § 25) умножает частоту запросов к провайдеру, а у провайдеров
-есть предел запросов в минуту: превысив его, приложение получает отказ `429`, и задачи
-тратят попытки на ожидание. Декоратор над `LLMClient` держит между запросами шаг
-`60 / requests_per_minute` секунд, сколько бы воркеров ни обращалось к модели.
+Parallel processing (PRD § 25) multiplies provider request frequency, while providers
+enforce requests-per-minute limits: exceeding limits results in HTTP `429` errors and wastes
+task retry attempts on waiting. This decorator over `LLMClient` maintains an interval of
+`60 / requests_per_minute` seconds between requests, regardless of worker count.
 
-Шаг равномерный, без накопления: простой не копит запас на пачку запросов, потому что
-провайдеры считают частоту скользящим окном и пачку всё равно отвергнут.
+Interval pacing is uniform without token bucket bursting: idle periods do not accumulate
+request credits, as providers evaluate rates using sliding windows and reject bursts anyway.
 
-Отказ по частоте с заголовком `Retry-After` сдвигает следующий свободный момент для всех:
-провайдер сказал, когда он снова примет запрос, и остальным воркерам незачем получать
-тот же отказ раньше срока. Паузу перед повтором самого отвергнутого запроса выбирает
-политика повторов (`RetryPolicy`) по тому же значению.
+A rate limit rejection carrying a `Retry-After` header delays the next available dispatch slot
+for all workers: the provider announced when it will accept requests again, so peer workers
+should not trigger the same rejection prematurely. The retry delay for the failed request itself
+is scheduled by the retry policy (`RetryPolicy`) using the same duration.
 
-Очередь моментов защищена блокировкой потоков, а не цикла событий: ограничитель живёт
-столько же, сколько приложение, и не должен зависеть от того, в каком цикле событий
-или потоке его позвали.
+The schedule queue is guarded by a thread lock rather than an event loop lock: the limiter's
+lifecycle matches the application process and must not depend on which event loop or thread invokes it.
 """
 
 from __future__ import annotations
@@ -36,12 +35,12 @@ from linguary.application.ports.llm import (
 type Clock = Callable[[], float]
 type Sleep = Callable[[float], Awaitable[None]]
 
-#: Секунд в минуте: предел задаётся в запросах в минуту, как его публикуют провайдеры.
+#: Seconds per minute: rate limits are specified in requests per minute (RPM) as published by providers.
 _SECONDS_PER_MINUTE = 60
 
 
 class LLMRateLimiter:
-    """Общие резервации запросов и независимая пауза провайдера."""
+    """Shared request reservations and independent provider cool-down delay."""
 
     def __init__(
         self,
@@ -66,7 +65,7 @@ class LLMRateLimiter:
     def set_limit(self, value: int | None) -> None:
         if value is not None and (type(value) is not int or value < 1):
             raise ValueError("предел частоты запросов должен быть положительным целым числом")
-        # Деление целых не преобразует огромный предел в float до расчёта отношения.
+        # Integer division avoids casting huge limits to float before ratio calculation.
         interval = None if value is None else _SECONDS_PER_MINUTE / value
         with self._lock:
             self._requests_per_minute = value
@@ -96,7 +95,7 @@ class LLMRateLimiter:
             await self._sleep(delay)
 
     def hold(self, seconds: float) -> None:
-        """Продлевает общий запрет провайдера, не меняя числовые слоты."""
+        """Extends provider cool-down period without altering numerical reservation slots."""
         with self._lock:
             self._provider_blocked_until = max(
                 self._provider_blocked_until, self._clock() + seconds
@@ -104,7 +103,7 @@ class LLMRateLimiter:
 
 
 class RateLimitedLLMClient(LLMClient):
-    """Декоратор над клиентом с собственным или общим ограничителем."""
+    """LLMClient decorator backed by an owned or shared rate limiter."""
 
     def __init__(
         self,

@@ -1,8 +1,8 @@
-"""Токенизация предложений и диалогов для расщепления длинных абзацев книги.
+"""Sentence and dialogue tokenization for splitting long book paragraphs.
 
-Выполняет интеллектуальное деление длинных составных абзацев (PRD/ADR-paragraph-splitting)
-на самостоятельные смысловые фрагменты по границам предложений и реплик диалогов
-без разрыва сокращений, инициалов, кавычек и многоточий.
+Performs intelligent division of long compound paragraphs (PRD/ADR-paragraph-splitting)
+into independent semantic fragments along sentence and dialogue turn boundaries
+without splitting abbreviations, initials, quotes, or ellipses.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from linguary.domain import InlineAnnotation, InlineAnnotationType
 SPLIT_MIN_CHARS: int = 800
 SPLIT_MIN_SENTENCES: int = 2
 
-#: Почётные титулы и обращения, после точки которых с заглавной буквы следует имя,
-#: а не начало нового предложения.
+#: Honorific titles and salutations where a trailing period is followed by a capitalized name,
+#: rather than the start of a new sentence.
 _TITLES = frozenset(
     {
         "mr",
@@ -49,7 +49,7 @@ _TITLES = frozenset(
     }
 )
 
-#: Общепринятые сокращения, точка в которых не завершает предложение.
+#: Common abbreviations where a trailing period does not terminate a sentence.
 _ABBREVIATIONS = frozenset(
     {
         "e.g",
@@ -100,7 +100,7 @@ _ABBREVIATIONS = frozenset(
     }
 )
 
-#: Глаголы атрибуции речи, связывающие реплику с автором.
+#: Speech attribution verbs linking a dialogue line to the speaker.
 _ATTRIBUTION_VERBS = frozenset(
     {
         "said",
@@ -175,7 +175,7 @@ _ATTRIBUTION_PATTERN = re.compile(
 
 
 def _find_split_points(text: str) -> list[int]:
-    """Находит индексы границ предложений и реплик диалога в тексте."""
+    """Finds indices of sentence and dialogue boundaries in text."""
     split_points: list[int] = []
 
     for match in _CANDIDATE_PATTERN.finditer(text):
@@ -188,18 +188,18 @@ def _find_split_points(text: str) -> list[int]:
 
         next_char = text[next_start]
 
-        # Обработка реплик через тире
+        # Handle dialogue turns introduced with a dash
         if next_char in "—–-":
             after_dash = re.match(r"[—–-]+\s*([^\s])", text[next_start:])
             if after_dash:
                 char_after_dash = after_dash.group(1)
-                # Если после тире строчные слова автора (напр. "— said Alice") — не делим
+                # If lowercase author words follow dash (e.g. "— said Alice") — do not split
                 if char_after_dash.islower():
                     continue
             else:
                 continue
         elif next_char.islower():
-            # Строчная буква после знака препинания (слова автора: "Hello!" said Alice)
+            # Lowercase letter after punctuation mark (author words: "Hello!" said Alice)
             continue
         elif not (
             next_char.isupper()
@@ -208,18 +208,18 @@ def _find_split_points(text: str) -> list[int]:
         ):
             continue
 
-        # Десятичные дроби (например, 3.14) не являются концом предложения
+        # Decimal fractions (e.g. 3.14) are not sentence ends
         if term == "." and match.start("term") > 0 and text[match.start("term") - 1].isdigit():
             if close and close[0].isdigit():
                 continue
 
-        # Защита сокращений и титулов при одиночной точке
+        # Protect abbreviations and titles on single dot
         if term == ".":
             dot_pos = match.start("term")
             prefix_start = max(0, dot_pos - 64)
             prefix = text[prefix_start:dot_pos]
 
-            # Защита составных нумерованных маркеров списков и пунктов (напр. 1.C., 1.F.2.)
+            # Protect composite numbered list/item markers (e.g. 1.C., 1.F.2.)
             marker_match = _MARKER_PATTERN.search(prefix)
             if marker_match:
                 marker = marker_match.group(1)
@@ -239,12 +239,12 @@ def _find_split_points(text: str) -> list[int]:
                 if word in _TITLES or word in _ABBREVIATIONS:
                     continue
 
-            # Защита инициалов (H. G. Wells, A. Smith)
+            # Protect initials (H. G. Wells, A. Smith)
             initial_match = _INITIAL_PATTERN.search(prefix)
             if initial_match and re.match(r"[A-Z]", text[next_start:]):
                 continue
 
-        # Защита слов автора с именем собственным в начале ("Stop!" Alice said.)
+        # Protect author attribution with a proper noun at start ("Stop!" Alice said.)
         if close and any(c in _CLOSING_PUNCTUATION for c in close):
             attr_match = _ATTRIBUTION_PATTERN.match(
                 text[next_start : next_start + 64]
@@ -265,11 +265,11 @@ def split_sentences(
     min_chars: int = SPLIT_MIN_CHARS,
     min_sentences: int = SPLIT_MIN_SENTENCES,
 ) -> tuple[tuple[int, int], ...]:
-    """Разбивает текст на полуинтервалы [start, end) по границам предложений.
+    """Splits text into half-open intervals [start, end) along sentence boundaries.
 
-    Если длина текста меньше `min_chars` или количество найденных предложений меньше
-    `min_sentences`, текст возвращается монолитным срезом `((0, len(text)),)`.
-    Конкатенация всех срезов посимвольно сохраняет исходный текст без потерь.
+    If text length is below `min_chars` or the number of detected sentences is below
+    `min_sentences`, the text is returned as a monolithic slice `((0, len(text)),)`.
+    Concatenating all slices character-for-character preserves the original text without loss.
     """
     if len(text) < min_chars:
         return ((0, len(text)),)
@@ -288,18 +288,18 @@ def split_inline_content(
     min_chars: int = SPLIT_MIN_CHARS,
     min_sentences: int = SPLIT_MIN_SENTENCES,
 ) -> tuple[InlineContent, ...]:
-    """Проецирует встроенную разметку и якоря на фрагменты расщеплённого абзаца.
+    """Projects inline markup and anchors onto split paragraph fragments.
 
-    Смещения разметки пересчитываются по формуле `[start - offset, end - offset)`,
-    сквозные аннотации подрезаются на границах фрагментов, ссылки на сноски не
-    рассекаются, а якоря исходного абзаца закрепляются за первым фрагментом.
-    Если деление не состоялось, возвращается кортеж из одного исходного объекта `content`.
+    Markup offsets are recalculated via `[start - offset, end - offset)`,
+    spanning annotations are clipped at fragment boundaries, footnote references
+    are never cut across, and anchors of the original paragraph attach to the first fragment.
+    If splitting does not occur, a single-element tuple of the original `content` object is returned.
     """
     slices = split_sentences(content.text, min_chars=min_chars, min_sentences=min_sentences)
     if len(slices) <= 1:
         return (content,)
 
-    # Проверяем, чтобы границы срезов не рассекали ссылки на сноски
+    # Ensure slice boundaries do not bisect footnote references
     boundaries = [s[0] for s in slices] + [slices[-1][1]]
     adjusted_boundaries = [0]
     for b in boundaries[1:-1]:

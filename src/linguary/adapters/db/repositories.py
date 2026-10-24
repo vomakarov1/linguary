@@ -1,11 +1,11 @@
-"""Реализации портов хранения поверх SQLAlchemy.
+"""SQLAlchemy-based storage port implementations.
 
-Каждый репозиторий работает с уже открытой сессией: транзакционную границу задаёт
-`SqlAlchemyUnitOfWork`, а не отдельная операция. Репозиторий принимает и возвращает
-доменные сущности; строки таблиц наружу не выходят.
+Each repository operates on an already open session: the transaction boundary is defined
+by `SqlAlchemyUnitOfWork`, not individual operations. Repositories accept and return
+domain entities; database table rows are never exposed.
 
-Технические отметки времени (`created_at`) принадлежат хранилищу: доменные сущности их
-не содержат, поэтому репозиторий проставляет их при добавлении и сохраняет при обновлении.
+Technical timestamps (`created_at`) belong to the persistence layer: domain entities do not
+contain them, so repositories assign them upon insertion and preserve them upon updates.
 """
 
 from __future__ import annotations
@@ -52,28 +52,28 @@ from linguary.domain import (
 
 
 class SqlAlchemyBookRepository:
-    """Книги и их пользовательское состояние."""
+    """Books and their user-facing state."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def add(self, book: BookRecord) -> None:
-        """Добавляет новую книгу."""
+        """Add a new book."""
         self._session.add(mapping.to_book_row(book))
         self._session.flush()
 
     def save(self, book: BookRecord) -> None:
-        """Перезаписывает существующую книгу целиком."""
+        """Overwrite an existing book completely."""
         self._session.merge(mapping.to_book_row(book))
         self._session.flush()
 
     def get(self, book_id: str) -> BookRecord | None:
-        """Книга по идентификатору либо `None`, если её нет."""
+        """Get a book by identifier or return `None` if not found."""
         row = self._session.get(BookRow, book_id)
         return None if row is None else mapping.to_book_record(row)
 
     def list_all(self) -> tuple[BookRecord, ...]:
-        """Все книги в порядке добавления."""
+        """List all books in insertion order."""
         rows = self._session.scalars(
             select(BookRow).order_by(BookRow.created_at, BookRow.id)
         ).all()
@@ -81,7 +81,7 @@ class SqlAlchemyBookRepository:
 
 
 class SqlAlchemyDocumentRepository:
-    """Каноническая модель документа и предупреждения импорта."""
+    """Canonical document model and import warnings."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -92,11 +92,11 @@ class SqlAlchemyDocumentRepository:
         *,
         stored_resource_paths: Mapping[str, str] | None = None,
     ) -> None:
-        """Сохраняет документ целиком, заменяя прежние разделы, блоки и ресурсы.
+        """Save the document completely, replacing previous sections, blocks, and resources.
 
-        Разделы записываются отдельным шагом: из-за самоссылки `document_blocks.parent_id`
-        SQLAlchemy не может упорядочить вставку таблиц сам, и блоки ушли бы в базу раньше
-        своих разделов.
+        Sections are written in a separate step: due to the self-referential
+        `document_blocks.parent_id`, SQLAlchemy cannot automatically order table inserts,
+        and blocks would otherwise be sent to the database before their sections.
         """
         paths = stored_resource_paths or {}
         self._session.execute(
@@ -121,7 +121,7 @@ class SqlAlchemyDocumentRepository:
         self._session.flush()
 
     def get(self, book_id: str) -> CanonicalDocument | None:
-        """Каноническая модель книги либо `None`, если такой книги нет."""
+        """Get canonical document model for a book or `None` if the book does not exist."""
         book = self._session.get(BookRow, book_id)
         if book is None:
             return None
@@ -139,7 +139,7 @@ class SqlAlchemyDocumentRepository:
         return mapping.to_document(book, sections, blocks, resources)
 
     def stored_resource_paths(self, book_id: str) -> Mapping[str, str]:
-        """Пути сохранённых ресурсов книги по их исходным путям."""
+        """Map of stored book resource paths by their source paths."""
         rows = self._session.execute(
             select(ResourceRow.source_path, ResourceRow.stored_path).where(
                 ResourceRow.book_id == book_id, ResourceRow.stored_path.is_not(None)
@@ -150,14 +150,14 @@ class SqlAlchemyDocumentRepository:
     def add_import_warnings(
         self, book_id: str, warnings: Sequence[BookImportWarning]
     ) -> None:
-        """Добавляет предупреждения импорта книги."""
+        """Add book import warnings."""
         self._session.add_all(
             mapping.to_import_warning_row(book_id, warning) for warning in warnings
         )
         self._session.flush()
 
     def import_warnings(self, book_id: str) -> tuple[BookImportWarning, ...]:
-        """Предупреждения импорта книги."""
+        """Get book import warnings."""
         rows = self._session.scalars(
             select(ImportWarningRow)
             .where(ImportWarningRow.book_id == book_id)
@@ -167,13 +167,13 @@ class SqlAlchemyDocumentRepository:
 
 
 class SqlAlchemyGlossaryRepository:
-    """Понятия глоссария книги вместе с их языковыми вариантами."""
+    """Book glossary concepts together with their language variants."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def save(self, concept: TermConcept) -> None:
-        """Сохраняет понятие вместе с вариантами, заменяя прежнюю запись."""
+        """Save a concept with its variants, replacing any existing record."""
         self._session.execute(
             delete(TermVariantRow).where(TermVariantRow.concept_id == concept.id)
         )
@@ -184,12 +184,12 @@ class SqlAlchemyGlossaryRepository:
         self._session.flush()
 
     def get(self, concept_id: str) -> TermConcept | None:
-        """Понятие по идентификатору либо `None`."""
+        """Get a concept by identifier or return `None`."""
         row = self._session.get(TermConceptRow, concept_id)
         return None if row is None else mapping.to_concept(row, self._variants(concept_id))
 
     def list_for_book(self, book_id: str) -> tuple[TermConcept, ...]:
-        """Все понятия глоссария книги."""
+        """List all glossary concepts for a book."""
         rows = self._session.scalars(
             select(TermConceptRow)
             .where(TermConceptRow.book_id == book_id)
@@ -198,14 +198,14 @@ class SqlAlchemyGlossaryRepository:
         return tuple(mapping.to_concept(row, self._variants(row.id)) for row in rows)
 
     def delete(self, concept_id: str) -> None:
-        """Удаляет понятие вместе с его вариантами."""
+        """Delete a concept along with its variants."""
         self._session.execute(
             delete(TermConceptRow).where(TermConceptRow.id == concept_id)
         )
         self._session.flush()
 
     def _variants(self, concept_id: str) -> Sequence[TermVariantRow]:
-        """Варианты понятия в устойчивом порядке."""
+        """Get concept variants in stable order."""
         return self._session.scalars(
             select(TermVariantRow)
             .where(TermVariantRow.concept_id == concept_id)
@@ -214,13 +214,13 @@ class SqlAlchemyGlossaryRepository:
 
 
 class SqlAlchemyChapterAnalysisRepository:
-    """Анализ главы: план обработки, кандидаты глоссария и материалы главы."""
+    """Chapter analysis: treatment plan, glossary candidates, and chapter materials."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def save(self, book_id: str, analysis: ChapterAnalysis) -> None:
-        """Сохраняет анализ главы, заменяя прежний анализ той же главы."""
+        """Save chapter analysis, replacing any previous analysis of the same chapter."""
         self._session.execute(
             delete(ChapterAnalysisRow).where(
                 ChapterAnalysisRow.book_id == book_id,
@@ -237,7 +237,7 @@ class SqlAlchemyChapterAnalysisRepository:
         self._session.flush()
 
     def get_for_section(self, book_id: str, section_id: str) -> ChapterAnalysis | None:
-        """Анализ конкретной главы либо `None`, если глава ещё не анализировалась."""
+        """Get analysis for a specific chapter or `None` if the chapter has not been analyzed."""
         row = self._session.scalars(
             select(ChapterAnalysisRow).where(
                 ChapterAnalysisRow.book_id == book_id,
@@ -247,7 +247,7 @@ class SqlAlchemyChapterAnalysisRepository:
         return None if row is None else self._to_analysis(row)
 
     def list_for_book(self, book_id: str) -> tuple[ChapterAnalysis, ...]:
-        """Анализы всех проанализированных глав книги в порядке чтения."""
+        """List analyses for all analyzed chapters of a book in reading order."""
         rows = self._session.scalars(
             select(ChapterAnalysisRow)
             .join(SectionRow, SectionRow.id == ChapterAnalysisRow.section_id)
@@ -257,7 +257,7 @@ class SqlAlchemyChapterAnalysisRepository:
         return tuple(self._to_analysis(row) for row in rows)
 
     def _to_analysis(self, row: ChapterAnalysisRow) -> ChapterAnalysis:
-        """Собирает доменный анализ вместе с планом и кандидатами."""
+        """Assemble domain analysis along with treatment plan and candidates."""
         plan_items = self._session.scalars(
             select(TreatmentPlanItemRow)
             .where(TreatmentPlanItemRow.analysis_id == row.id)
@@ -272,18 +272,18 @@ class SqlAlchemyChapterAnalysisRepository:
 
 
 class SqlAlchemyProcessingRunRepository:
-    """Запуски обработки книги."""
+    """Book processing runs."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def add(self, run: ProcessingRun) -> None:
-        """Добавляет новый запуск обработки."""
+        """Add a new processing run."""
         self._session.add(mapping.to_run_row(run, datetime.now(UTC)))
         self._session.flush()
 
     def save(self, run: ProcessingRun) -> None:
-        """Перезаписывает существующий запуск, сохраняя отметку его создания."""
+        """Update an existing processing run, preserving its creation timestamp."""
         row = mapping.to_run_row(run, datetime.now(UTC))
         result = self._session.execute(
             update(ProcessingRunRow)
@@ -299,14 +299,14 @@ class SqlAlchemyProcessingRunRepository:
         self._session.flush()
 
     def get(self, run_id: str) -> ProcessingRun | None:
-        """Запуск по идентификатору либо `None`."""
+        """Get a processing run by identifier or return `None`."""
         row = self._session.get(ProcessingRunRow, run_id)
         return None if row is None else mapping.to_run(row)
 
     def active_for_book(self, book_id: str) -> ProcessingRun | None:
-        """Единственный активный запуск книги либо `None`.
+        """Get the single active run for a book or return `None`.
 
-        Единственность гарантирует частичный уникальный индекс схемы.
+        Uniqueness is guaranteed by the schema's partial unique index.
         """
         row = self._session.scalars(
             select(ProcessingRunRow).where(
@@ -317,7 +317,7 @@ class SqlAlchemyProcessingRunRepository:
         return None if row is None else mapping.to_run(row)
 
     def delete(self, run_id: str) -> None:
-        """Удаляет запуск вместе с результатами блоков, заметками и замечаниями."""
+        """Delete a run along with block results, language notes, and warnings."""
         self._session.execute(
             delete(ProcessingRunRow).where(ProcessingRunRow.id == run_id)
         )
@@ -325,7 +325,7 @@ class SqlAlchemyProcessingRunRepository:
 
 
 class SqlAlchemyBlockResultRepository:
-    """Результаты обработки блоков вместе с заметками и замечаниями."""
+    """Block processing results along with language notes and warnings."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -333,7 +333,7 @@ class SqlAlchemyBlockResultRepository:
     def replace_results(
         self, run_id: str, results: Sequence[BlockProcessingResult]
     ) -> None:
-        """Заменяет результаты перечисленных блоков одной операцией (PRD § 17)."""
+        """Replace results for the specified blocks in a single operation (PRD § 17)."""
         block_ids = [result.block_id for result in results]
         if not block_ids:
             return
@@ -351,7 +351,7 @@ class SqlAlchemyBlockResultRepository:
         self._session.flush()
 
     def get(self, run_id: str, block_id: str) -> BlockProcessingResult | None:
-        """Результат обработки одного блока в рамках запуска."""
+        """Get the processing result of a single block within a run."""
         row = self._session.scalars(
             select(BlockResultRow).where(
                 BlockResultRow.run_id == run_id, BlockResultRow.block_id == block_id
@@ -364,11 +364,11 @@ class SqlAlchemyBlockResultRepository:
         )
 
     def list_for_run(self, run_id: str) -> tuple[BlockProcessingResult, ...]:
-        """Все результаты запуска в порядке блоков исходного документа.
+        """List all results of a run in source document block order.
 
-        Заметки и замечания читаются двумя запросами на весь запуск и раскладываются
-        по блокам в памяти: запрос на каждый результат превращал бы чтение книги
-        в тысячи обращений к базе.
+        Language notes and warnings are fetched via two bulk queries for the entire run
+        and grouped in memory: per-result queries would otherwise turn book loading
+        into thousands of database roundtrips.
         """
         rows = self._session.scalars(
             select(BlockResultRow)
@@ -389,10 +389,10 @@ class SqlAlchemyBlockResultRepository:
         )
 
     def count_for_run(self, run_id: str) -> int:
-        """Сколько блоков запуска уже обработано.
+        """Count how many blocks in the run have already been processed.
 
-        Карточка книги обновляется опросом и берёт из результатов только их число,
-        поэтому счёт выполняется базой, а не сборкой доменных результатов.
+        The book card is updated via polling and only requires the result count,
+        so counting is executed by the database rather than domain object assembly.
         """
         return (
             self._session.scalar(
@@ -404,7 +404,7 @@ class SqlAlchemyBlockResultRepository:
         )
 
     def _notes(self, run_id: str, block_id: str) -> Sequence[LanguageNoteRow]:
-        """Заметки блока в устойчивом порядке."""
+        """Get block language notes in stable order."""
         return self._session.scalars(
             select(LanguageNoteRow)
             .where(LanguageNoteRow.run_id == run_id, LanguageNoteRow.block_id == block_id)
@@ -412,7 +412,7 @@ class SqlAlchemyBlockResultRepository:
         ).all()
 
     def _warnings(self, run_id: str, block_id: str) -> Sequence[ResultWarningRow]:
-        """Замечания к результату блока в устойчивом порядке."""
+        """Get block result warnings in stable order."""
         return self._session.scalars(
             select(ResultWarningRow)
             .where(
@@ -422,7 +422,7 @@ class SqlAlchemyBlockResultRepository:
         ).all()
 
     def _run_notes(self, run_id: str) -> Sequence[LanguageNoteRow]:
-        """Заметки всех блоков запуска в том же порядке, что и заметки одного блока."""
+        """Get language notes for all blocks in a run in the same order as per-block notes."""
         return self._session.scalars(
             select(LanguageNoteRow)
             .where(LanguageNoteRow.run_id == run_id)
@@ -430,7 +430,7 @@ class SqlAlchemyBlockResultRepository:
         ).all()
 
     def _run_warnings(self, run_id: str) -> Sequence[ResultWarningRow]:
-        """Замечания ко всем блокам запуска в том же порядке, что и замечания блока."""
+        """Get warnings for all blocks in a run in the same order as per-block warnings."""
         return self._session.scalars(
             select(ResultWarningRow)
             .where(ResultWarningRow.run_id == run_id)
@@ -439,18 +439,18 @@ class SqlAlchemyBlockResultRepository:
 
 
 class SqlAlchemyTaskRepository:
-    """Локальные возобновляемые задачи обработки."""
+    """Local resumable processing tasks."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def add(self, task: ProcessingTask) -> None:
-        """Добавляет задачу; повтор идемпотентного ключа отвергается хранилищем."""
+        """Add a task; duplicate idempotency keys are rejected by the store."""
         self._session.add(mapping.to_task_row(task, datetime.now(UTC)))
         self._session.flush()
 
     def save(self, task: ProcessingTask) -> None:
-        """Сохраняет новое состояние задачи, не трогая отметку её создания."""
+        """Save updated task state without modifying its creation timestamp."""
         row = mapping.to_task_row(task, datetime.now(UTC))
         result = self._session.execute(
             update(ProcessingTaskRow)
@@ -468,12 +468,12 @@ class SqlAlchemyTaskRepository:
         self._session.flush()
 
     def get(self, task_id: str) -> ProcessingTask | None:
-        """Задача по идентификатору либо `None`."""
+        """Get a task by identifier or return `None`."""
         row = self._session.get(ProcessingTaskRow, task_id)
         return None if row is None else mapping.to_task(row)
 
     def find_by_identity(self, identity: TaskIdentity) -> ProcessingTask | None:
-        """Задача по идемпотентному ключу `book_id + task_type + scope_id`."""
+        """Find a task by its idempotency key `book_id + task_type + scope_id`."""
         row = self._session.scalars(
             select(ProcessingTaskRow).where(
                 ProcessingTaskRow.book_id == identity.book_id,
@@ -484,7 +484,7 @@ class SqlAlchemyTaskRepository:
         return None if row is None else mapping.to_task(row)
 
     def list_for_book(self, book_id: str) -> tuple[ProcessingTask, ...]:
-        """Задачи книги в порядке их создания."""
+        """List tasks for a book in creation order."""
         rows = self._session.scalars(
             select(ProcessingTaskRow)
             .where(ProcessingTaskRow.book_id == book_id)
@@ -493,7 +493,7 @@ class SqlAlchemyTaskRepository:
         return tuple(mapping.to_task(row) for row in rows)
 
     def delete(self, task_id: str) -> None:
-        """Удаляет задачу вместе с её идемпотентным ключом."""
+        """Delete a task along with its idempotency key."""
         self._session.execute(
             delete(ProcessingTaskRow).where(ProcessingTaskRow.id == task_id)
         )
@@ -501,13 +501,13 @@ class SqlAlchemyTaskRepository:
 
 
 class SqlAlchemyLLMCallLogRepository:
-    """Технический журнал вызовов LLM."""
+    """Technical log of LLM calls."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def add(self, entry: LLMCallLog, *, response_text: str | None = None) -> None:
-        """Добавляет запись журнала."""
+        """Add a log entry."""
         row = mapping.to_llm_call_row(entry)
         row.response_text = response_text
         self._session.add(row)
@@ -516,7 +516,7 @@ class SqlAlchemyLLMCallLogRepository:
     def mark_rejected(
         self, call_id: str, *, error: TaskError, response_text: str | None
     ) -> None:
-        """Помечает отбракованный ответ, сохраняя расход токенов и стоимость."""
+        """Mark a rejected response, preserving token usage and cost."""
         row = self._session.get(LLMCallLogRow, call_id)
         if row is None:
             raise PersistenceError(f"запись вызова LLM {call_id} не найдена")
@@ -528,12 +528,12 @@ class SqlAlchemyLLMCallLogRepository:
         self._session.flush()
 
     def response_text_for(self, call_id: str) -> str | None:
-        """Сохранённый текст ответа, если он был записан."""
+        """Retrieve stored response text if it was recorded."""
         row = self._session.get(LLMCallLogRow, call_id)
         return None if row is None else row.response_text
 
     def list_for_book(self, book_id: str) -> tuple[LLMCallLog, ...]:
-        """Записи журнала по книге в порядке выполнения вызовов."""
+        """List log entries for a book in invocation order."""
         rows = self._session.scalars(
             select(LLMCallLogRow)
             .where(LLMCallLogRow.book_id == book_id)
@@ -545,7 +545,7 @@ class SqlAlchemyLLMCallLogRepository:
 def _by_block[RowT: (LanguageNoteRow, ResultWarningRow)](
     rows: Iterable[RowT],
 ) -> Mapping[str, Sequence[RowT]]:
-    """Строки, разложенные по блокам с сохранением исходного порядка."""
+    """Rows grouped by block while preserving original order."""
     grouped: dict[str, list[RowT]] = {}
     for row in rows:
         grouped.setdefault(row.block_id, []).append(row)

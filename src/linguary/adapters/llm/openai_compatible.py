@@ -1,17 +1,16 @@
-"""Клиент LLM поверх HTTP API, совместимого с OpenAI chat completions (ADR § 3).
+"""LLM client over OpenAI-compatible chat completions HTTP API (ADR § 3).
 
-Реализация порта `linguary.application.ports.llm.LLMClient` для первого провайдера MVP.
-Выбран совместимый контракт, а не SDK конкретного вендора: тот же адаптер обслуживает
-шлюзы и локальные серверы, отличаясь только базовым адресом и моделью в настройке, —
-второй адаптер для этого не нужен.
+Implementation of port `linguary.application.ports.llm.LLMClient` for the MVP's primary provider.
+A compatible contract was chosen over vendor-specific SDKs: the same adapter serves gateways
+and local inference servers, differing only in base URL and configured model — a second adapter
+is not needed for this.
 
-Запрос всегда требует строгий структурированный ответ по схеме вида запроса: свободный
-текст модели MVP не принимает (PRD § 23).
+Requests always demand a strict structured output schema corresponding to the request kind:
+free text is rejected by the MVP design (PRD § 23).
 
-Ошибки приводятся к типам порта прямо здесь, потому что различить их можно только тут:
-отказ по ключу — это настройка, ограничение частоты и сбой провайдера — временная
-неудача, отвергнутый запрос — постоянная. Ключ провайдера не попадает ни в одно
-сообщение об ошибке (PRD § 24).
+Errors are mapped to port exception types right here where distinguishing context is available:
+authorization failure reflects configuration, rate limits and server errors are transient,
+and rejected requests are permanent. The provider API key is never exposed in error messages (PRD § 24).
 """
 
 from __future__ import annotations
@@ -39,36 +38,36 @@ from linguary.application.ports.llm import (
 )
 from linguary.domain import TokenUsage
 
-#: Путь метода генерации в совместимом API.
+#: Path for chat completion endpoint in compatible API.
 _COMPLETIONS_PATH = "chat/completions"
 
-#: Коды, означающие, что провайдер не принял ключ или доступ к модели.
+#: HTTP status codes indicating rejected credentials or model access.
 _AUTHORIZATION_STATUSES = frozenset({401, 403})
 
-#: Код ограничения частоты запросов: временная неудача (PRD § 16).
+#: Rate limit status code: transient failure (PRD § 16).
 _RATE_LIMIT_STATUS = 429
 
-#: Код нехватки средств на счёте провайдера: повтор без пополнения ответит тем же.
+#: Insufficient credits status code: retrying without top-up produces identical result.
 _PAYMENT_REQUIRED_STATUS = 402
 
-#: Причина завершения, которой провайдер сообщает об обрыве по лимиту токенов.
+#: Finish reason indicating generation cut off due to token limits.
 _LENGTH_FINISH_REASON = "length"
 
-#: Сколько символов ответа провайдера попадает в текст ошибки.
+#: Number of response characters included in error details.
 _DETAIL_LIMIT = 300
 
 
 class OpenAICompatibleLLMClient(LLMClient):
-    """Вызов модели через совместимый с OpenAI HTTP API."""
+    """Model invocation via OpenAI-compatible HTTP API."""
 
     def __init__(
         self, *, settings: LLMSettings, http_client: httpx.AsyncClient | None = None
     ) -> None:
-        """Создаёт клиент; ненастроенная LLM не даёт создать его вовсе.
+        """Creates the client; unconfigured LLM settings prevent creation altogether.
 
-        Проверка стоит в конструкторе, а не в вызове: сценарии анализа и обработки
-        не должны стартовать без ключа и модели (PRD § 23), а собранное приложение
-        либо имеет рабочий клиент, либо показывает состояние конфигурации.
+        Validation is placed in the constructor rather than invocation: analysis and processing
+        workflows must not start without a key and model (PRD § 23), ensuring a built application
+        either possesses a working client or surfaces its configuration state.
         """
         settings.ensure_ready()
         self._settings = settings
@@ -90,7 +89,7 @@ class OpenAICompatibleLLMClient(LLMClient):
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
-        """Выполняет запрос и возвращает разобранный структурированный ответ."""
+        """Executes request and returns parsed structured response."""
         document = await self._post(_body(request, settings=self._settings))
         usage = _usage(document)
         cost = _cost(document)
@@ -118,7 +117,7 @@ class OpenAICompatibleLLMClient(LLMClient):
                 error.__suppress_context__ = True
             raise
         return LLMResponse(
-            payload=payload,  # type: ignore[arg-type]  # схему выбирает request.kind
+            payload=payload,  # type: ignore[arg-type]  # schema selected by request.kind
             provider=self._settings.provider,
             model=model,
             truncated=truncated,
@@ -131,7 +130,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         return safe_detail(text, api_key=self._settings.api_key, secrets=self._proxy_secrets)
 
     async def aclose(self) -> None:
-        """Закрывает HTTP-соединения, если клиент создавал их сам."""
+        """Closes underlying HTTP connections if created internally."""
         if self._owns_http:
             await self._http.aclose()
 
@@ -142,7 +141,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         await self.aclose()
 
     async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Отправляет запрос провайдеру и отдаёт разобранное тело успешного ответа."""
+        """Sends request to provider and returns parsed JSON body on success."""
         try:
             response = await self._http.post(
                 _endpoint(self._settings.base_url),
@@ -169,12 +168,12 @@ class OpenAICompatibleLLMClient(LLMClient):
 
 
 def _endpoint(base_url: str) -> str:
-    """Полный адрес метода генерации."""
+    """Full URL to completions endpoint."""
     return f"{base_url.rstrip('/')}/{_COMPLETIONS_PATH}"
 
 
 def _headers(settings: LLMSettings) -> dict[str, str]:
-    """Заголовки запроса вместе с ключом провайдера."""
+    """Request headers including provider authorization token."""
     return {
         "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
@@ -182,7 +181,7 @@ def _headers(settings: LLMSettings) -> dict[str, str]:
 
 
 def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
-    """Тело запроса: сообщения и схема требуемого структурированного ответа."""
+    """Request payload: message list and required structured output schema."""
     body: dict[str, Any] = {
         "model": settings.model,
         "messages": [
@@ -208,7 +207,7 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
 def _raise_for_status(
     response: httpx.Response, *, provider: str, api_key: str | None, secrets: tuple[str, ...] = ()
 ) -> None:
-    """Приводит неуспешный ответ провайдера к типу ошибки порта (PRD § 16)."""
+    """Maps provider error response status to port exception hierarchy (PRD § 16)."""
     status = response.status_code
     if status < 400:
         return
@@ -230,10 +229,10 @@ def _raise_for_status(
 
 
 def _retry_after(response: httpx.Response) -> float | None:
-    """Пауза из заголовка `Retry-After`: число секунд или момент в формате HTTP-даты.
+    """Retry-After delay in seconds or parsed HTTP-date timestamp.
 
-    Нечитаемое или отрицательное значение считается несообщённым: провайдер ничего
-    внятного не сказал, и паузу выбирает политика повторов сама.
+    An unparseable or negative value is treated as absent: the provider communicated
+    no usable value, leaving delay determination to the retry policy.
     """
     raw = response.headers.get("Retry-After", "").strip()
     if not raw:
@@ -248,7 +247,7 @@ def _retry_after(response: httpx.Response) -> float | None:
 
 
 def _seconds_until(http_date: str) -> float | None:
-    """Сколько секунд осталось до момента, заданного HTTP-датой."""
+    """Seconds remaining until the target HTTP-date timestamp."""
     try:
         moment = parsedate_to_datetime(http_date)
     except (TypeError, ValueError, IndexError):
@@ -259,12 +258,12 @@ def _seconds_until(http_date: str) -> float | None:
 
 
 def _utc_now() -> datetime:
-    """Текущий момент в UTC."""
+    """Current timestamp in UTC."""
     return datetime.now(UTC)
 
 
 def _document(response: httpx.Response, *, api_key: str | None, secrets: tuple[str, ...] = ()) -> dict[str, Any]:
-    """Тело успешного ответа провайдера."""
+    """Successful response JSON body."""
     try:
         document = response.json()
     except ValueError as error:
@@ -281,7 +280,7 @@ def _document(response: httpx.Response, *, api_key: str | None, secrets: tuple[s
 
 
 def _choice(document: dict[str, Any]) -> dict[str, Any]:
-    """Первый вариант ответа модели."""
+    """First generation choice from the model response."""
     choices = document.get("choices")
     if not isinstance(choices, list) or not choices:
         raise LLMResponseFormatError("ответ провайдера не содержит вариантов генерации")
@@ -292,7 +291,7 @@ def _choice(document: dict[str, Any]) -> dict[str, Any]:
 
 
 def _content(choice: dict[str, Any]) -> str:
-    """Текст структурированного ответа модели."""
+    """Structured response message text."""
     message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
@@ -301,23 +300,23 @@ def _content(choice: dict[str, Any]) -> str:
 
 
 def _finish_reason(choice: dict[str, Any]) -> str | None:
-    """Причина завершения генерации, если провайдер её сообщает."""
+    """Generation finish reason reported by provider, if present."""
     reason = choice.get("finish_reason")
     return reason if isinstance(reason, str) else None
 
 
 def _model(document: dict[str, Any], *, fallback: str) -> str:
-    """Модель, которой провайдер выполнил запрос.
+    """Model name reported by provider for this call.
 
-    Совместимые шлюзы подставляют собственное имя модели, и в журнал вызовов должно
-    попасть именно оно (PRD § 24).
+    Compatible gateways often substitute actual model identifiers, which should
+    be accurately recorded in call logs (PRD § 24).
     """
     model = document.get("model")
     return model if isinstance(model, str) and model.strip() else fallback
 
 
 def _usage(document: dict[str, Any]) -> TokenUsage | None:
-    """Объём токенов вызова, если провайдер его сообщает (PRD § 24)."""
+    """Token usage metrics reported by provider (PRD § 24)."""
     usage = document.get("usage")
     if not isinstance(usage, dict):
         return None
@@ -332,7 +331,7 @@ def _usage(document: dict[str, Any]) -> TokenUsage | None:
 
 
 def _cost(document: dict[str, Any]) -> Decimal | None:
-    """Стоимость вызова по данным провайдера, если шлюз сообщил число."""
+    """Call cost reported by provider if supported by gateway."""
     usage = document.get("usage")
     if not isinstance(usage, dict):
         return None
@@ -344,14 +343,14 @@ def _cost(document: dict[str, Any]) -> Decimal | None:
 
 
 def safe_detail(text: str, *, api_key: str | None, secrets: tuple[str, ...] = ()) -> str:
-    """Убирает ключ этого клиента до усечения технических деталей."""
+    """Redacts secrets and API keys prior to truncating technical details."""
     for secret in sorted((*secrets, *((api_key,) if api_key else ())), key=len, reverse=True):
         text = text.replace(secret, "[REDACTED]")
     return text
 
 
 def _detail(response: httpx.Response, *, api_key: str | None, secrets: tuple[str, ...] = ()) -> str:
-    """Хвост ответа провайдера для технической детали ошибки."""
+    """Appended provider response snippet for technical error details."""
     try:
         text = safe_detail(response.text, api_key=api_key, secrets=secrets).strip()
     except (UnicodeDecodeError, httpx.ResponseNotRead):

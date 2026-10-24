@@ -1,4 +1,4 @@
-"""Хранилище настроек с атомарной проверкой редакции."""
+"""Settings store with atomic revision check."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from linguary.adapters.db.models import SystemSettingsRow
 
 
 class SettingsStoreError(SettingsError):
-    """Настройки не удалось прочитать или записать."""
+    """Settings could not be read or written."""
 
 
 class SettingsRevisionConflict(SettingsError):
-    """Настройки изменены другой операцией."""
+    """Settings were modified by another operation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +29,7 @@ class StoredSystemSettings:
 
 
 class SystemSettingsStore:
-    """Короткая транзакция SQLite сериализует проверку редакции и запись."""
+    """Short SQLite transaction serializes revision check and write."""
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine

@@ -1,18 +1,18 @@
-"""Отметка работающих исполнителей очереди: кто ещё выполняет задачи той же базы.
+"""Tracking active queue executors: identifying other workers operating on the same database.
 
-Очередь допускает несколько исполнителей: фоновый воркер Web UI и `linguary worker`
-атомарно захватывают задачи и друг другу не мешают. Мешает им только восстановление после
-аварии (ALG-02): при старте задачи `running` объявляются прерванными, а это верно лишь
-тогда, когда их никто не исполняет. Задача другого живого исполнителя в `running` честно
-выполняется, и пометить её `failed` — значит дать пользователю повторить её, пока она ещё
-идёт, то есть отправить тот же `TranslationUnit` в модель дважды.
+The queue allows multiple executors: background Web UI workers and `linguary worker`
+atomically acquire tasks without conflict. The only point of contention is crash
+recovery (ALG-02): at startup, `running` tasks are declared interrupted, which is valid only
+when no one is actively executing them. A running task belonging to another live executor is actively
+in progress, and marking it `failed` would let the user retry it while still running,
+submitting the same `TranslationUnit` to the model twice.
 
-Поэтому каждый исполнитель на всё время работы держит разделяемую блокировку файла рядом
-с базой, а восстановление выполняет только тот, кому при старте досталась исключительная:
-её получает лишь исполнитель, рядом с которым других нет. Блокировку держит ОС, и процесс,
-завершившийся аварийно, освобождает её сам, поэтому отметка не устаревает и её не нужно
-продлевать. Задачи процесса, упавшего рядом с живым исполнителем, остаются `running`
-до ближайшего старта в одиночестве — лучше позже, чем погасить чужую работу.
+Therefore, every executor holds a shared lock on a file next to the database for its lifetime,
+and recovery is executed only by the one that obtained an exclusive lock at startup:
+only an executor running with no peers acquires it. The lock is managed by the OS, and a crashed
+process releases it automatically, so markers never become stale or require heartbeats.
+Tasks belonging to a process that crashed alongside a live executor remain `running`
+until the next isolated startup — delayed recovery is preferable to killing someone else's work.
 """
 
 from __future__ import annotations
@@ -23,20 +23,20 @@ from pathlib import Path
 
 
 class ExecutorLock:
-    """Участие одного исполнителя очереди в общей отметке исполнителей базы."""
+    """Tracks a single queue executor's participation in the database executor lock."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
         self._descriptor: int | None = None
 
     def join(self) -> bool:
-        """Отмечает исполнителя и сообщает, один ли он работает с базой.
+        """Registers the executor and reports whether it is operating alone.
 
-        `True` означает, что других исполнителей нет и задачи `running` никто не
-        выполняет. Тогда исполнитель держит исключительную блокировку, пока не вызовет
-        `share`: восстановление выполняется под ней, иначе исполнитель, стартовавший
-        следом, успел бы захватить задачу, и восстановление погасило бы уже её.
-        `False` — рядом есть другие исполнители, и отметка сразу разделяемая.
+        `True` indicates no other executors are active and `running` tasks are abandoned.
+        In this case the executor retains an exclusive lock until calling `share`:
+        recovery is performed under this lock, preventing a subsequently started executor
+        from grabbing a task that recovery would then cancel.
+        `False` indicates peer executors are active, immediately downgrading to a shared lock.
         """
         if self._descriptor is not None:
             raise RuntimeError("исполнитель уже отмечен")
@@ -52,17 +52,17 @@ class ExecutorLock:
         return alone
 
     def share(self) -> None:
-        """Пускает рядом других исполнителей, сохраняя собственную отметку.
+        """Allows peer executors to run alongside while preserving own registration.
 
-        Разделяемая блокировка ждёт только чужой исключительной, а её держат лишь на
-        время восстановления при старте, поэтому ожидание короткое.
+        A shared lock only blocks on an exclusive lock held during startup recovery,
+        keeping wait times negligible.
         """
         if self._descriptor is None:
             raise RuntimeError("исполнитель не отмечен")
         fcntl.flock(self._descriptor, fcntl.LOCK_SH)
 
     def leave(self) -> None:
-        """Снимает отметку исполнителя; повторный вызов ничего не делает."""
+        """Releases the executor registration; idempotent."""
         if self._descriptor is None:
             return
         descriptor, self._descriptor = self._descriptor, None
@@ -70,7 +70,7 @@ class ExecutorLock:
 
 
 def _try_exclusive(descriptor: int) -> bool:
-    """Берёт исключительную блокировку без ожидания, если других исполнителей нет."""
+    """Acquires an exclusive lock without blocking if no other executors are present."""
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
