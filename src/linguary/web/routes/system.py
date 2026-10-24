@@ -29,6 +29,7 @@ from linguary.web.schemas import (
     LLMConfigResponse,
     LLMTestConnectionRequest,
     LLMTestConnectionResponse,
+    ReadingConfigResponse,
     ServerConfigResponse,
     StorageConfigResponse,
     SystemConfigResponse,
@@ -87,6 +88,9 @@ def _config_response(application) -> SystemConfigResponse:
             warning=(
                 None if server.is_local_only else labels.NON_LOCAL_SERVER_WARNING
             ),
+        ),
+        reading=ReadingConfigResponse(
+            reader_level=settings.reading.normalized_level,
         ),
     )
     return response

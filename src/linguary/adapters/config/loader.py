@@ -25,6 +25,7 @@ from linguary.adapters.config.settings import (
     AppSettings,
     CheckSettings,
     LLMSettings,
+    ReadingSettings,
     ServerSettings,
     SettingsError,
     StorageSettings,
@@ -132,6 +133,11 @@ _WORKER_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "concurrency": _as_int,
 }
 
+#: Разбор значений секции `[reading]`.
+_READING_FIELDS: Mapping[str, Callable[[object, str], object]] = {
+    "reader_level": _as_str,
+}
+
 
 def load_settings(
     *,
@@ -184,6 +190,14 @@ def load_settings(
                 document,
                 name="worker",
                 fields=_WORKER_FIELDS,
+                variables=variables,
+            )
+        ),
+        reading=ReadingSettings(
+            **_section(
+                document,
+                name="reading",
+                fields=_READING_FIELDS,
                 variables=variables,
             )
         ),

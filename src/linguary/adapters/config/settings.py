@@ -65,6 +65,12 @@ DEFAULT_SERVER_PORT = 8000
 #: и не упирается в ограничения частоты провайдера; ускорение — изменение этой настройки.
 DEFAULT_WORKER_CONCURRENCY = 1
 
+#: Уровень читателя по умолчанию (PRD § 30).
+DEFAULT_READER_LEVEL = "b2"
+
+#: Допустимые уровни владения языком читателя по CEFR.
+SUPPORTED_READER_LEVELS = frozenset({"a2", "b1", "b2", "c1"})
+
 
 class SettingsError(ApplicationError):
     """Локальная конфигурация непригодна: неразбираемый файл или недопустимое значение."""
@@ -341,6 +347,32 @@ class WorkerPoolSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ReadingSettings:
+    """Настройки уровня адаптации и помощи читателю при чтении книги (PRD § 30).
+
+    `reader_level` определяет целевой уровень владения языком (CEFR):
+    - `a2`: начальный (высокая поддержка: 70–85% блоков TRANSLATE, плотные подсказки);
+    - `b1`: средний (повышенная поддержка: 50–70% блоков TRANSLATE, помощь при сомнениях);
+    - `b2`: выше среднего (по умолчанию: сбалансированная помощь, до 50–60% TRANSLATE);
+    - `c1`: продвинутый (минимальная помощь: преимущественно READ_AS_IS, 10–25% TRANSLATE).
+    """
+
+    reader_level: str = DEFAULT_READER_LEVEL
+
+    def __post_init__(self) -> None:
+        normalized = self.reader_level.strip().lower()
+        if normalized not in SUPPORTED_READER_LEVELS:
+            raise SettingsError(
+                f"недопустимый уровень читателя: {self.reader_level!r}. "
+                f"Поддерживаются: {', '.join(sorted(SUPPORTED_READER_LEVELS))}"
+            )
+
+    @property
+    def normalized_level(self) -> str:
+        return self.reader_level.strip().lower()
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     """Локальная конфигурация приложения целиком."""
 
@@ -349,6 +381,7 @@ class AppSettings:
     storage: StorageSettings = field(default_factory=StorageSettings)
     server: ServerSettings = field(default_factory=ServerSettings)
     worker: WorkerPoolSettings = field(default_factory=WorkerPoolSettings)
+    reading: ReadingSettings = field(default_factory=ReadingSettings)
 
 
 __all__ = [
@@ -356,14 +389,17 @@ __all__ = [
     "DEFAULT_DATABASE_NAME",
     "DEFAULT_DATA_ROOT",
     "DEFAULT_MAX_ATTEMPTS",
+    "DEFAULT_READER_LEVEL",
     "DEFAULT_SERVER_HOST",
     "DEFAULT_SERVER_PORT",
     "DEFAULT_TIMEOUT_SECONDS",
     "DEFAULT_WORKER_CONCURRENCY",
     "OPENAI_COMPATIBLE_PROVIDER",
+    "SUPPORTED_READER_LEVELS",
     "AppSettings",
     "CheckSettings",
     "LLMSettings",
+    "ReadingSettings",
     "ServerSettings",
     "SettingsError",
     "StorageSettings",

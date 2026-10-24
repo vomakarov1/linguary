@@ -521,6 +521,7 @@ def _context_builder(settings: AppSettings, *, content_plan_profile: str = "lega
         max_unit_source_chars=settings.llm.max_unit_source_chars,
         regeneration_context_blocks=DEFAULT_REGENERATION_CONTEXT_BLOCKS,
         language_notes_per_chapter=settings.checks.language_notes_per_chapter,
+        reader_level=settings.reading.normalized_level,
     )
 
 

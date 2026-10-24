@@ -9,7 +9,10 @@ import pytest
 from linguary.adapters.config import (
     CONFIG_PATH_VARIABLE,
     CheckSettings,
+    DEFAULT_READER_LEVEL,
     LLMSettings,
+    ReadingSettings,
+    SUPPORTED_READER_LEVELS,
     SettingsError,
     load_settings,
 )
@@ -389,5 +392,48 @@ def test_system_settings_update_ignores_proxy_url_when_mode_not_custom(mode: str
     )
     assert update.proxy_mode == mode
     assert update.proxy_url is None
+
+
+def test_reading_settings_default() -> None:
+    """По умолчанию уровень читателя B2."""
+    settings = ReadingSettings()
+    assert settings.reader_level == DEFAULT_READER_LEVEL
+    assert settings.normalized_level == "b2"
+
+
+@pytest.mark.parametrize("level", ["a2", "b1", "b2", "c1", " A2 ", "B1", "B2", "C1"])
+def test_reading_settings_valid_levels(level: str) -> None:
+    """Поддерживаемые уровни CEFR принимаются с нормализацией регистра и пробелов."""
+    settings = ReadingSettings(reader_level=level)
+    assert settings.normalized_level == level.strip().lower()
+
+
+@pytest.mark.parametrize("invalid", ["", "a1", "c2", "beginner", "advanced", "xyz"])
+def test_reading_settings_invalid_level_raises(invalid: str) -> None:
+    """Недопустимый уровень читателя вызывает SettingsError."""
+    with pytest.raises(SettingsError, match="недопустимый уровень читателя"):
+        ReadingSettings(reader_level=invalid)
+
+
+def test_reading_settings_loaded_from_toml(tmp_path: Path) -> None:
+    """Секция [reading] в TOML считывается в AppSettings.reading."""
+    content = """
+    [reading]
+    reader_level = "b1"
+    """
+    settings = load_settings(environ={}, config_path=write_config(tmp_path, content))
+    assert settings.reading.reader_level == "b1"
+    assert settings.reading.normalized_level == "b1"
+
+
+def test_reading_settings_loaded_from_environment(tmp_path: Path) -> None:
+    """Переменная окружения LINGUARY_READING_READER_LEVEL переопределяет уровень."""
+    settings = load_settings(
+        environ={"LINGUARY_READING_READER_LEVEL": "a2"},
+        config_path=write_config(tmp_path, ""),
+    )
+    assert settings.reading.reader_level == "a2"
+    assert settings.reading.normalized_level == "a2"
+
 
 

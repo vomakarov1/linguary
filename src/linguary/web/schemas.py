@@ -850,6 +850,14 @@ class WorkerConfigResponse(BaseModel):
     concurrency: int
 
 
+class ReadingConfigResponse(BaseModel):
+    """Настройки уровня читателя (PRD § 30)."""
+
+    reader_level: str
+    supported_levels: list[str] = Field(default_factory=lambda: ["a2", "b1", "b2", "c1"])
+    default_level: str = "b2"
+
+
 class SystemConfigResponse(BaseModel):
     """Экран конфигурации и окружения целиком (API-01, PRD § 21.6)."""
 
@@ -859,6 +867,9 @@ class SystemConfigResponse(BaseModel):
     server: ServerConfigResponse
     worker: WorkerConfigResponse
     revision: int
+    reading: ReadingConfigResponse = Field(
+        default_factory=lambda: ReadingConfigResponse(reader_level="b2")
+    )
     external_llm_warning: str = Field(default=labels.EXTERNAL_LLM_WARNING)
 
 
@@ -952,6 +963,7 @@ __all__ = [
     "PlanBlockResponse",
     "ProcessingPlanResponse",
     "ProcessingStartResponse",
+    "ReadingConfigResponse",
     "ResetProcessingRequest",
     "ResetProcessingResponse",
     "ResultBlockResponse",

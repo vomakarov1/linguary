@@ -31,7 +31,17 @@ def test_doctor_reports_configuration_without_secret(
     assert exit_code == 0
     assert "LLM: ready" in output
     assert "EPUBCheck:" in output
+    assert "Reader level: b2" in output
     assert "secret-value-that-must-stay-hidden" not in output
+
+
+def test_doctor_reports_reader_level_override(tmp_path: Path, capsys) -> None:
+    """`doctor` с флагом --reader-level выводит переопределённый уровень."""
+    config = _config(tmp_path)
+    exit_code = main(["--config", str(config), "doctor", "--reader-level", "a2"])
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Reader level: a2" in output
 
 
 def test_import_and_worker_once_import_the_book(tmp_path: Path, capsys) -> None:

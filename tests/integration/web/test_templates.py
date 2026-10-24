@@ -565,6 +565,19 @@ def test_system_config_screen_explains_how_to_enable_epubcheck(
     assert "~/.linguary/epubcheck" in response.text
 
 
+def test_system_config_screen_renders_reading_settings(client: TestClient) -> None:
+    """Экран конфигурации отображает блок настройки уровня читателя (ReadingSettings)."""
+    response = client.get("/system/config", headers=HTML_HEADERS)
+
+    assert response.status_code == 200
+    assert "Уровень читателя (ReadingSettings)" in response.text
+    assert "Поддерживаемые уровни владения языком (CEFR)" in response.text
+    assert "[reading]" in response.text
+    assert 'reader_level = "b2"' in response.text
+    assert "Уровень читателя" in response.text
+
+
+
 @pytest.mark.parametrize(
     ("decision", "translation", "label"),
     [

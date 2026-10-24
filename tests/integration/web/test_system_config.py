@@ -113,3 +113,13 @@ def test_config_warns_about_a_server_open_to_the_network(
 
     assert server["is_local_only"] is False
     assert "не только с этой машины" in server["warning"]
+
+
+def test_config_reports_reading_settings(client: TestClient) -> None:
+    """Экран конфигурации возвращает настройки уровня читателя (PRD § 30)."""
+    reading = client.get("/system/config").json()["reading"]
+
+    assert reading["reader_level"] == "b2"
+    assert reading["default_level"] == "b2"
+    assert reading["supported_levels"] == ["a2", "b1", "b2", "c1"]
+

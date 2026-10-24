@@ -38,6 +38,7 @@ def build_context(
     texts: tuple[str, ...] = ("It is a truth universally acknowledged.",),
     candidates: tuple[object, ...] = (),
     max_accumulated_candidates: int = 200,
+    reader_level: str = "b2",
 ):
     """Контекст анализа первой главы книги из двух глав."""
     section = make_analysis_section(
@@ -47,7 +48,10 @@ def build_context(
         section_id="section-2", title="Chapter 2", order=1, texts=(NEIGHBOUR_TEXT,)
     )
     document = make_analysis_document((section, neighbour))
-    builder = ContextBuilder(max_accumulated_candidates=max_accumulated_candidates)
+    builder = ContextBuilder(
+        max_accumulated_candidates=max_accumulated_candidates,
+        reader_level=reader_level,
+    )
     return builder.for_chapter_analysis(
         document=document,
         section=section,
@@ -284,6 +288,33 @@ def test_instructions_describe_every_textual_treatment() -> None:
 
 def test_analysis_instructions_name_reader_level_b1_b2() -> None:
     assert "B1–B2" in build_context().request.instructions
+
+
+def test_analysis_instructions_adapt_to_reader_level() -> None:
+    """Инструкция анализа адаптирует ориентиры под уровень читателя (PRD § 30)."""
+    a2_instructions = build_context(reader_level="a2").request.instructions
+    assert "A2" in a2_instructions
+    assert "70–85%" in a2_instructions
+
+    b1_instructions = build_context(reader_level="b1").request.instructions
+    assert "B1" in b1_instructions
+    assert "50–70%" in b1_instructions
+
+    b2_instructions = build_context(reader_level="b2").request.instructions
+    assert "B1–B2" in b2_instructions
+    assert "60%" in b2_instructions
+
+    c1_instructions = build_context(reader_level="c1").request.instructions
+    assert "C1" in c1_instructions
+    assert "65–85%" in c1_instructions
+
+
+def test_before_you_read_instructions_use_advance_organizer() -> None:
+    """Инструкция Before You Read требует тематические опоры и семантические ловушки."""
+    instructions = build_context().request.instructions
+    assert "advance organizer" in instructions
+    assert "thematic / setting anchors" in instructions
+    assert "semantic traps" in instructions
 
 
 def test_analysis_instructions_give_long_block_examples_for_lighter_modes() -> None:

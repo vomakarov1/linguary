@@ -146,8 +146,21 @@
 <section class="metrics">
   <div><strong>{{ data.llm.provider }}</strong><span>Провайдер</span></div>
   <div><strong>{{ data.llm.model or "—" }}</strong><span>Модель</span></div>
+  <div><strong>{{ data.reading.reader_level|upper }}</strong><span>Уровень читателя</span></div>
   <div><strong>{% if data.epubcheck.available %}Да{% else %}Нет{% endif %}</strong><span>EPUBCheck</span></div>
   <div><strong>{% if data.server.is_local_only %}Локально{% else %}Сеть{% endif %}</strong><span>Сервер</span></div>
+</section>
+
+<section class="panel">
+  <h2>Уровень читателя (ReadingSettings)</h2>
+  <p>Текущий уровень: <strong>{{ data.reading.reader_level|upper }}</strong>{% if data.reading.reader_level == data.reading.default_level %} (по умолчанию){% endif %}</p>
+  <ul>
+    <li>Поддерживаемые уровни владения языком (CEFR): <code>a2</code>, <code>b1</code>, <code>b2</code>, <code>c1</code> (значение по умолчанию — <code>b2</code>).</li>
+    <li>Настройка задаётся в конфигурационном файле TOML в новой секции <code>[reading]</code>:</li>
+  </ul>
+  <pre><code>[reading]
+reader_level = "{{ data.reading.reader_level }}"</code></pre>
+  <p>Также уровень можно переопределить переменной окружения <code>LINGUARY_READING_READER_LEVEL</code> или аргументом командной строки <code>--reader-level</code>.</p>
 </section>
 
 <section class="panel">

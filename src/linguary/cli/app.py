@@ -14,12 +14,18 @@ import os
 import shutil
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
 import uvicorn
 
-from linguary.adapters.config import CONFIG_PATH_VARIABLE, SettingsError, load_settings
+from linguary.adapters.config import (
+    CONFIG_PATH_VARIABLE,
+    SUPPORTED_READER_LEVELS,
+    SettingsError,
+    load_settings,
+)
 from linguary.application.errors import ApplicationError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.export_book import ExportBookCommand, ExportMode
@@ -42,40 +48,63 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     """Парсер командной строки."""
-    parser = argparse.ArgumentParser(prog="linguary")
+    reader_parent = argparse.ArgumentParser(add_help=False)
+    reader_parent.add_argument(
+        "--reader-level",
+        choices=sorted(SUPPORTED_READER_LEVELS),
+        help="уровень читателя (a2, b1, b2, c1)",
+    )
+
+    parser = argparse.ArgumentParser(prog="linguary", parents=[reader_parent])
     parser.add_argument("--config", help="путь к TOML-файлу настроек")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    serve = subparsers.add_parser("serve", help="запустить локальный Web UI")
+    serve = subparsers.add_parser(
+        "serve", parents=[reader_parent], help="запустить локальный Web UI"
+    )
     serve.set_defaults(handler=_serve)
 
-    doctor = subparsers.add_parser("doctor", help="проверить локальную конфигурацию")
+    doctor = subparsers.add_parser(
+        "doctor", parents=[reader_parent], help="проверить локальную конфигурацию"
+    )
     doctor.set_defaults(handler=_doctor)
 
-    import_book = subparsers.add_parser("import", help="загрузить EPUB и поставить импорт")
+    import_book = subparsers.add_parser(
+        "import", parents=[reader_parent], help="загрузить EPUB и поставить импорт"
+    )
     import_book.add_argument("epub", help="путь к EPUB-файлу")
     import_book.add_argument("--book-id", help="идентификатор книги")
     import_book.add_argument("--source-language", default="en", help="исходный язык")
     import_book.add_argument("--target-language", default="ru", help="целевой язык")
     import_book.set_defaults(handler=_import)
 
-    analyze = subparsers.add_parser("analyze", help="поставить задачи анализа книги")
+    analyze = subparsers.add_parser(
+        "analyze", parents=[reader_parent], help="поставить задачи анализа книги"
+    )
     analyze.add_argument("book_id")
     analyze.set_defaults(handler=_analyze)
 
-    process = subparsers.add_parser("process", help="поставить задачи обработки книги")
+    process = subparsers.add_parser(
+        "process", parents=[reader_parent], help="поставить задачи обработки книги"
+    )
     process.add_argument("book_id")
     process.set_defaults(handler=_process)
 
-    worker = subparsers.add_parser("worker", help="выполнить локальную очередь задач")
+    worker = subparsers.add_parser(
+        "worker", parents=[reader_parent], help="выполнить локальную очередь задач"
+    )
     worker.add_argument("--once", action="store_true", help="выполнить очередь и выйти")
     worker.set_defaults(handler=_worker)
 
-    retry = subparsers.add_parser("retry", help="повторить неуспешную задачу")
+    retry = subparsers.add_parser(
+        "retry", parents=[reader_parent], help="повторить неуспешную задачу"
+    )
     retry.add_argument("task_id")
     retry.set_defaults(handler=_retry)
 
-    export = subparsers.add_parser("export", help="собрать EPUB книги")
+    export = subparsers.add_parser(
+        "export", parents=[reader_parent], help="собрать EPUB книги"
+    )
     export.add_argument("book_id")
     export.add_argument("--output", required=True, help="куда записать EPUB")
     export.add_argument(
@@ -102,6 +131,8 @@ def _serve(args: argparse.Namespace) -> int:
     settings = load_settings(config_path=args.config)
     if args.config:
         os.environ[CONFIG_PATH_VARIABLE] = args.config
+    if getattr(args, "reader_level", None):
+        os.environ["LINGUARY_READING_READER_LEVEL"] = args.reader_level
     uvicorn.run(
         "linguary.web.app:create_app",
         factory=True,
@@ -129,6 +160,7 @@ def _doctor(args: argparse.Namespace) -> int:
         print(f"Data root: {application.paths.data_root}")
         print(f"Database: {application.paths.database_path}")
         print(f"Server: {application.settings.server.base_url}")
+        print(f"Reader level: {application.settings.reading.normalized_level}")
         return 0
     finally:
         asyncio.run(application.aclose())
@@ -246,6 +278,12 @@ def _export(args: argparse.Namespace) -> int:
 def _application(args: argparse.Namespace):
     """Собирает приложение по настройкам CLI."""
     settings = load_settings(config_path=args.config)
+    reader_level = getattr(args, "reader_level", None)
+    if reader_level is not None:
+        settings = replace(
+            settings,
+            reading=replace(settings.reading, reader_level=reader_level),
+        )
     return build_application(settings=settings)
 
 
