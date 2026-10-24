@@ -574,6 +574,8 @@ def test_system_config_screen_renders_reading_settings(client: TestClient) -> No
     assert "[reading]" in response.text
     assert 'reader_level = "b2"' in response.text
     assert "Уровень читателя" in response.text
+    assert 'name="reader_level"' in response.text
+    assert 'id="settings-reader_level"' in response.text
 
 
 

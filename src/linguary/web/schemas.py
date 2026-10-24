@@ -876,6 +876,7 @@ type SettingsField = Literal[
     "provider", "model", "api_key", "base_url", "requests_per_minute",
     "concurrency", "expected_revision", "form", "proxy_mode", "proxy_url",
     "analysis_model", "processing_model", "temperature", "timeout_seconds",
+    "reader_level",
 ]
 
 
@@ -904,6 +905,7 @@ class SafeSettingsFormValues:
     processing_model: str = field(default="", repr=False)
     temperature: float | None = None
     timeout_seconds: float | None = None
+    reader_level: str = "b2"
 
 
 class ErrorResponse(BaseModel):

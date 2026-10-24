@@ -5,7 +5,13 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from linguary.adapters.config.settings import AppSettings, OPENAI_COMPATIBLE_PROVIDER, SettingsError, validate_proxy
+from linguary.adapters.config.settings import (
+    AppSettings,
+    OPENAI_COMPATIBLE_PROVIDER,
+    SUPPORTED_READER_LEVELS,
+    SettingsError,
+    validate_proxy,
+)
 
 if TYPE_CHECKING:
     from linguary.adapters.db.system_settings import StoredSystemSettings
@@ -30,7 +36,7 @@ def _positive_integer(value: object, name: str) -> None:
 
 
 BASE_OVERRIDE_FIELDS = frozenset({'provider', 'model', 'base_url', 'requests_per_minute', 'concurrency'})
-OPTIONAL_OVERRIDE_FIELDS = frozenset({'proxy_mode', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds'})
+OPTIONAL_OVERRIDE_FIELDS = frozenset({'proxy_mode', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'reader_level'})
 ALLOWED_OVERRIDE_FIELDS = BASE_OVERRIDE_FIELDS | OPTIONAL_OVERRIDE_FIELDS
 
 
@@ -61,6 +67,7 @@ class SystemSettingsUpdate:
     processing_model: str | None = None
     temperature: float | None | object = UNSET
     timeout_seconds: float | None = None
+    reader_level: str | None = None
 
     def __post_init__(self) -> None:
         mode = self.proxy_mode
@@ -123,6 +130,14 @@ class SystemSettingsUpdate:
             object.__setattr__(self, 'analysis_model', analysis_model)
         if processing_model is not None:
             object.__setattr__(self, 'processing_model', processing_model)
+        if self.reader_level is not None:
+            level = _string(self.reader_level, 'reader_level').lower()
+            if level not in SUPPORTED_READER_LEVELS:
+                raise SystemSettingsValidationError(
+                    'reader_level',
+                    f"Недопустимый уровень читателя. Поддерживаются: {', '.join(sorted(SUPPORTED_READER_LEVELS))}"
+                )
+            object.__setattr__(self, 'reader_level', level)
 
 
 def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> AppSettings:
@@ -152,6 +167,10 @@ def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> Ap
         current.llm.timeout_seconds if update.timeout_seconds is None
         else update.timeout_seconds
     )
+    reading = (
+        current.reading if update.reader_level is None
+        else replace(current.reading, reader_level=update.reader_level)
+    )
 
     return replace(
         current,
@@ -170,6 +189,7 @@ def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> Ap
             api_key=update.api_key if update.api_key is not None else current.llm.api_key,
         ),
         worker=replace(current.worker, concurrency=update.concurrency),
+        reading=reading,
     )
 
 

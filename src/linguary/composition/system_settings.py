@@ -106,6 +106,7 @@ class SystemSettingsService:
                         base_url=candidate.llm.base_url,
                         requests_per_minute=candidate.llm.requests_per_minute,
                         concurrency=candidate.worker.concurrency,
+                        reader_level=candidate.reading.reader_level,
                     )
                     result = await asyncio.to_thread(
                         self._store.save, overrides, candidate.llm.api_key,

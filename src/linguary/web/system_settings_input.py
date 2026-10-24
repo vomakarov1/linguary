@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from fastapi import Request
 
 from linguary.adapters.config import AppSettings
-from linguary.adapters.config.settings import proxy_secrets
+from linguary.adapters.config.settings import SUPPORTED_READER_LEVELS, proxy_secrets
 from linguary.adapters.config.system_settings import SystemSettingsUpdate, SystemSettingsValidationError, UNSET
 from linguary.web import labels
 from linguary.web.schemas import SafeSettingsFormValues
@@ -19,8 +19,9 @@ _SAVE_FIELDS = frozenset({
     'provider', 'model', 'api_key', 'base_url', 'requests_per_minute',
     'concurrency', 'expected_revision', 'proxy_mode', 'proxy_url',
     'analysis_model', 'processing_model', 'temperature', 'timeout_seconds',
+    'reader_level',
 })
-_OPTIONAL_FIELDS = {'api_key', 'proxy_mode', 'proxy_url', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds'}
+_OPTIONAL_FIELDS = {'api_key', 'proxy_mode', 'proxy_url', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'reader_level'}
 _REQUIRED_FIELDS = _SAVE_FIELDS - _OPTIONAL_FIELDS
 _INTEGER = re.compile(r'[+-]?[0-9]+\Z')
 _FLOAT = re.compile(r'[+-]?[0-9]+(?:\.[0-9]+)?\Z')
@@ -108,6 +109,12 @@ def _projection(values: Mapping[str, object], current_settings: AppSettings, *, 
     fields = {name: value for name, value in values.items() if name in _SAVE_FIELDS and name not in duplicate_fields}
     provider = _safe_text(fields.get('provider'), secrets)
     revision = _integer(fields.get('expected_revision'), form=form)
+    raw_reader_level = fields.get('reader_level')
+    if isinstance(raw_reader_level, str) and raw_reader_level.strip().lower() in SUPPORTED_READER_LEVELS:
+        reader_level = raw_reader_level.strip().lower()
+    else:
+        reader_level = current_settings.reading.reader_level
+
     return SafeSettingsFormValues(
         provider=provider if provider == 'openai_compatible' else '',
         model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('model'), secrets),
@@ -120,6 +127,7 @@ def _projection(values: Mapping[str, object], current_settings: AppSettings, *, 
         concurrency=_integer(fields.get('concurrency'), form=form),
         proxy_mode=fields.get('proxy_mode') if fields.get('proxy_mode') in ('auto', 'direct', 'custom') else current_settings.llm.proxy_mode,
         expected_revision=revision if revision is not None and revision >= 0 else None,
+        reader_level=reader_level,
     )
 
 
@@ -139,6 +147,7 @@ def safe_form_values(current_settings: AppSettings, *, update: SystemSettingsUpd
         proxy_url=None if update is None else update.proxy_url,
         api_key=None if update is None else update.api_key,
         expected_revision=expected_revision,
+        reader_level=current_settings.reading.reader_level if update is None or update.reader_level is None else update.reader_level,
     )
     return _projection(values, current_settings, form=False)
 
@@ -243,6 +252,17 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
             errors['timeout_seconds'] = 'Ожидается положительное число'
         elif timeout > 600.0:
             errors['timeout_seconds'] = 'Значение не должно превышать 600 секунд'
+    reader_level = None
+    if 'reader_level' in values:
+        raw_level = values.get('reader_level')
+        if not isinstance(raw_level, str):
+            errors['reader_level'] = labels.SETTINGS_STRING_FIELD
+        else:
+            cleaned_level = raw_level.strip().lower()
+            if cleaned_level not in SUPPORTED_READER_LEVELS:
+                errors['reader_level'] = f"Недопустимый уровень читателя. Поддерживаются: {', '.join(sorted(SUPPORTED_READER_LEVELS))}"
+            else:
+                reader_level = cleaned_level
     if not errors:
         try:
             update = SystemSettingsUpdate(
@@ -254,6 +274,7 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
                 proxy_url=values.get('proxy_url'),
                 temperature=temp,
                 timeout_seconds=timeout,
+                reader_level=reader_level,
             )
         except SystemSettingsValidationError as error:
             errors[error.field] = error.message

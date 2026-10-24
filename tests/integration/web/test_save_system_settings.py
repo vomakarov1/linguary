@@ -289,3 +289,24 @@ def test_large_positive_rate_json_save_matches_database_and_runtime(configured_c
     assert configured_application.settings.llm.requests_per_minute == rate
     assert configured_application.rate_limiter.requests_per_minute == rate
     assert configured_client.get('/system/config').json() == data
+
+
+def test_save_system_settings_updates_reader_level(configured_client, configured_application):
+    assert configured_application.settings.reading.reader_level == 'b2'
+    response = configured_client.post('/system/config', json=payload(reader_level='a2'))
+    assert response.status_code == 200
+    data = response.json()
+    assert data['reading']['reader_level'] == 'a2'
+    assert configured_application.settings.reading.reader_level == 'a2'
+    assert configured_application.settings_store.load().overrides['reader_level'] == 'a2'
+
+    get_data = configured_client.get('/system/config').json()
+    assert get_data['reading']['reader_level'] == 'a2'
+
+
+def test_save_system_settings_rejects_invalid_reader_level(configured_client):
+    response = configured_client.post('/system/config', json=payload(reader_level='z9'))
+    assert response.status_code == 422
+    data = response.json()
+    assert 'reader_level' in data['field_errors']
+

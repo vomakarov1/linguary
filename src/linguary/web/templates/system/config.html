@@ -16,7 +16,7 @@
   {% if settings_error or not can_submit %}
   <p><a href="{{ config_url }}">{% if is_conflict or not can_submit %}Загрузить актуальные настройки{% else %}Вернуться к конфигурации{% endif %}</a></p>
   {% endif %}
-  {% for field, error in field_errors.items() if field not in ('provider', 'base_url', 'api_key', 'model', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'proxy_mode', 'proxy_url', 'requests_per_minute', 'concurrency') %}
+  {% for field, error in field_errors.items() if field not in ('provider', 'base_url', 'api_key', 'model', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'proxy_mode', 'proxy_url', 'requests_per_minute', 'concurrency', 'reader_level') %}
   <p class="notice" role="alert">{{ error }}</p>
   {% endfor %}
   <form class="settings-form" action="{{ config_url }}" method="post">
@@ -130,6 +130,22 @@
         <label for="settings-concurrency">Одновременных задач</label>
         <input id="settings-concurrency" name="concurrency" type="number" min="1" step="1" value="{{ form_values.concurrency if form_values.concurrency is not none else '' }}" {% if 'concurrency' in field_errors %}aria-invalid="true" aria-describedby="settings-error-concurrency"{% endif %}>
         {% if 'concurrency' in field_errors %}<span id="settings-error-concurrency" class="settings-field-error" role="alert">{{ field_errors['concurrency'] }}</span>{% endif %}
+      </div>
+    </fieldset>
+
+    <fieldset class="settings-group">
+      <legend>Уровень читателя</legend>
+
+      <div class="settings-field" id="settings-field-reader_level">
+        <label for="settings-reader_level">Уровень читателя (CEFR)</label>
+        <select id="settings-reader_level" name="reader_level" {% if 'reader_level' in field_errors %}aria-invalid="true" aria-describedby="settings-error-reader_level"{% endif %}>
+          <option value="a2" {% if form_values.reader_level == 'a2' %}selected{% endif %}>A2 — начальный (высокая языковая поддержка, 70–85% перевода)</option>
+          <option value="b1" {% if form_values.reader_level == 'b1' %}selected{% endif %}>B1 — средний (повышенная поддержка, 50–70% перевода)</option>
+          <option value="b2" {% if form_values.reader_level == 'b2' %}selected{% endif %}>B2 — выше среднего (по умолчанию, сбалансированная поддержка)</option>
+          <option value="c1" {% if form_values.reader_level == 'c1' %}selected{% endif %}>C1 — продвинутый (минимальная помощь, погружение в оригинал)</option>
+        </select>
+        {% if 'reader_level' in field_errors %}<span id="settings-error-reader_level" class="settings-field-error" role="alert">{{ field_errors['reader_level'] }}</span>{% endif %}
+        <p>Определяет долю переводимых блоков (TRANSLATE), подсказок (GLOSSARY_ONLY) и текста в оригинале (READ_AS_IS) при подготовке билингвы.</p>
       </div>
     </fieldset>
 
