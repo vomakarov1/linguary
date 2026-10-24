@@ -1,8 +1,8 @@
-"""Двойники хранилища и очереди для unit-тестов анализа главы (P3.T3).
+"""Storage and task queue fakes for chapter analysis unit tests (P3.T3).
 
-Прикладной сценарий работает с портами `UnitOfWork` и `TaskQueue`, поэтому unit-тест
-обходится памятью: ни SQLite, ни EPUB, ни сети здесь нет. Модуль намеренно без префикса
-`test_`, иначе pytest соберёт его как тестовый.
+The application use case interacts with UnitOfWork and TaskQueue ports, so unit tests
+run purely in-memory: no SQLite, no EPUB, and no network. The module intentionally omits
+the 'test_' prefix, otherwise pytest would collect it as a test file.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ BOOK_ID = "book-1"
 SOURCE_LANGUAGE = "en"
 TARGET_LANGUAGE = "ru"
 
-#: Порог уверенности, ниже которого кандидат глоссария требует внимания (PRD § 12).
+#: Confidence threshold below which a glossary candidate requires review (PRD § 12).
 CONFIDENCE_THRESHOLD = 0.8
 
 
@@ -59,7 +59,7 @@ def analysis_reply(
     usage: TokenUsage | None = None,
     **overrides: Any,
 ) -> FakeReply:
-    """Корректный ответ анализа главы для перечисленных псевдонимов блоков."""
+    """Valid chapter analysis response for the specified block aliases."""
     payload: dict[str, Any] = {
         "glossary_candidates": candidates
         if candidates is not None
@@ -100,14 +100,14 @@ def make_analyze_chapter(
     max_attempts: int = 3,
     max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
 ) -> tuple[AnalyzeChapter, list[float]]:
-    """Сценарий анализа главы вместе со списком выдержанных пауз повторов."""
+    """Chapter analysis use case alongside recorded retry delays."""
     delays: list[float] = []
 
     async def sleep(seconds: float) -> None:
         delays.append(seconds)
 
     scenario = AnalyzeChapter(
-        unit_of_work=unit_of_work,  # type: ignore[arg-type]  # двойник порта хранения
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]  # storage port fake
         llm_client=client,
         retry_policy=RetryPolicy(max_attempts=max_attempts),
         glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
@@ -119,7 +119,7 @@ def make_analyze_chapter(
 
 
 def sequential_ids() -> Callable[[], str]:
-    """Предсказуемые идентификаторы записей анализа: `id-1`, `id-2`, ..."""
+    """Predictable analysis record identifiers: 'id-1', 'id-2', ..."""
     counter = 0
 
     def next_id() -> str:
@@ -138,7 +138,7 @@ def make_analysis_block(
     type: BlockType = BlockType.PARAGRAPH,
     support_status: SupportStatus = SupportStatus.SUPPORTED,
 ) -> DocumentBlock:
-    """Блок главы со стабильным идентификатором."""
+    """A chapter block with a stable identifier."""
     return DocumentBlock.create(
         document_id=BOOK_ID,
         section_id=section_id,
@@ -161,7 +161,7 @@ def make_analysis_section(
     texts: Sequence[str] = ("It is a truth universally acknowledged.",),
     blocks: Sequence[DocumentBlock] | None = None,
 ) -> DocumentSection:
-    """Глава книги из простых абзацев либо из готовых блоков."""
+    """A book chapter constructed from plain paragraphs or existing blocks."""
     return DocumentSection(
         id=section_id,
         document_id=BOOK_ID,
@@ -180,7 +180,7 @@ def make_analysis_section(
 def make_analysis_document(
     sections: Sequence[DocumentSection] | None = None,
 ) -> CanonicalDocument:
-    """Книга с переданными главами."""
+    """A book containing the given chapters."""
     return CanonicalDocument(
         id=BOOK_ID,
         metadata=BookMetadata(title="Pride and Prejudice", authors=("Jane Austen",)),
@@ -200,7 +200,7 @@ def make_analysis_candidate(
     model_flagged_review: bool = False,
     note: str = "",
 ) -> GlossaryCandidate:
-    """Кандидат глоссария, накопленный предыдущей главой."""
+    """A glossary candidate accumulated by a previous chapter."""
     return GlossaryCandidate.create(
         id=f"candidate-{analysis_id}-{source_text}",
         analysis_id=analysis_id,
@@ -220,7 +220,7 @@ def make_chapter_analysis(
     section_id: str = "section-1",
     candidates: Sequence[GlossaryCandidate] = (),
 ) -> ChapterAnalysis:
-    """Анализ главы, из которого важны только кандидаты глоссария."""
+    """Chapter analysis where only glossary candidates matter."""
     return ChapterAnalysis.create(
         id=id,
         section_id=section_id,
@@ -233,7 +233,7 @@ def make_chapter_analysis(
 
 
 def make_book_record(status: BookStatus = BookStatus.IMPORTED) -> BookRecord:
-    """Запись книги в состоянии, из которого запускают анализ."""
+    """Book record in the status from which analysis is initiated."""
     return BookRecord(
         id=BOOK_ID,
         metadata=BookMetadata(title="Pride and Prejudice", authors=("Jane Austen",)),
@@ -247,7 +247,7 @@ def make_book_record(status: BookStatus = BookStatus.IMPORTED) -> BookRecord:
 
 @dataclass(slots=True)
 class FakeBookRepository:
-    """Книги в памяти."""
+    """In-memory books repository."""
 
     records: dict[str, BookRecord] = field(default_factory=dict)
 
@@ -266,7 +266,7 @@ class FakeBookRepository:
 
 @dataclass(slots=True)
 class FakeDocumentRepository:
-    """Каноническая модель документа в памяти."""
+    """In-memory canonical document repository."""
 
     documents: dict[str, CanonicalDocument] = field(default_factory=dict)
 
@@ -293,10 +293,10 @@ class FakeDocumentRepository:
 
 @dataclass(slots=True)
 class FakeChapterAnalysisRepository:
-    """Анализы глав в памяти, в порядке чтения книги.
+    """In-memory chapter analyses ordered by book reading sequence.
 
-    Порядок повторяет контракт `ChapterAnalysisRepository.list_for_book`: анализы
-    возвращаются по порядку глав документа, а не по времени сохранения.
+    The order mirrors ChapterAnalysisRepository.list_for_book contract: analyses
+    are returned in document chapter order rather than save timestamp order.
     """
 
     documents: FakeDocumentRepository
@@ -327,7 +327,7 @@ class FakeChapterAnalysisRepository:
 
 @dataclass(slots=True)
 class FakeGlossaryRepository:
-    """Понятия глоссария книги в памяти."""
+    """In-memory book glossary concepts repository."""
 
     concepts: dict[str, TermConcept] = field(default_factory=dict)
 
@@ -348,10 +348,10 @@ class FakeGlossaryRepository:
 
 @dataclass(slots=True)
 class FakeProcessingRunRepository:
-    """Запуски обработки книги в памяти.
+    """In-memory book processing runs repository.
 
-    Единственность активного запуска проверяет тот же доменный `active_run`, что и
-    репозиторий SQLAlchemy: двойник не должен быть мягче настоящего хранилища.
+    Active run uniqueness is validated by the same domain active_run function as
+    in the SQLAlchemy repository: the fake must not be more lenient than real persistence.
     """
 
     runs: dict[str, ProcessingRun] = field(default_factory=dict)
@@ -375,7 +375,7 @@ class FakeProcessingRunRepository:
 
 
 class FakeUnitOfWork:
-    """Транзакционная граница в памяти: коммит и откат не имитируются."""
+    """In-memory transactional boundary: commit and rollback are no-ops."""
 
     def __init__(
         self,
@@ -419,11 +419,10 @@ class FakeUnitOfWork:
 
 
 class FakeTaskQueue:
-    """Очередь задач в памяти с проверкой одновременно выполняемых задач.
+    """In-memory task queue tracking concurrently running tasks.
 
-    Захват задачи повторяет контракт `TaskQueue`: `pending -> running` с увеличением
-    счётчика попыток. Очередь запоминает порядок захвата и наибольшее число задач
-    анализа, выполнявшихся одновременно.
+    Claiming a task mirrors the TaskQueue contract: 'pending -> running' with an incremented
+    attempt counter. The queue records claim order and maximum concurrent running tasks.
     """
 
     def __init__(self) -> None:
@@ -470,7 +469,7 @@ class FakeTaskQueue:
 
     @property
     def has_work(self) -> bool:
-        """Осталась ли в очереди работа: задача `pending` или выполняемая задача."""
+        """Whether pending or running work remains in the queue."""
         return any(
             task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
             for task in self.tasks
@@ -490,10 +489,10 @@ def make_glossary_book(
     *,
     status: BookStatus = BookStatus.GLOSSARY_REVIEW,
 ) -> FakeUnitOfWork:
-    """Книга с сохранёнными анализами глав, дошедшая до проверки глоссария.
+    """Book with stored chapter analyses advanced to glossary review.
 
-    Каждому анализу отводится своя глава документа: репозиторий анализов отдаёт их
-    в порядке чтения книги, и без документа он вернул бы пустой список.
+    Each analysis is assigned to its own document section: analysis repository returns
+    them in reading order, and without a document it would return an empty tuple.
     """
     document = make_analysis_document(
         tuple(

@@ -1,7 +1,7 @@
-"""Готовые ответы модели для тестов схем, разбора и клиентов.
+"""Pre-built model responses for schema tests, parsing, and clients.
 
-Фабрики собирают структуру ответа в том виде, в каком её отдаёт провайдер, и позволяют
-точечно испортить одно поле: тесты отличаются одной строкой, а не копией всего ответа.
+Factories assemble response structures matching provider outputs and allow
+targeted overrides of individual fields: tests differ by a single line rather than duplicating whole payloads.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from typing import Any
 
 
 def analysis_payload(**overrides: Any) -> dict[str, Any]:
-    """Корректный ответ анализа главы."""
+    """Valid chapter analysis response."""
     payload: dict[str, Any] = {
         "glossary_candidates": [
             {
@@ -44,7 +44,7 @@ def analysis_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def translation_payload(**overrides: Any) -> dict[str, Any]:
-    """Корректный ответ обработки группы блоков."""
+    """Valid block group processing response."""
     payload: dict[str, Any] = {
         "blocks": [
             block_payload(),
@@ -71,7 +71,7 @@ def translation_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def block_payload(**overrides: Any) -> dict[str, Any]:
-    """Результат одного блока: по умолчанию полный перевод."""
+    """Result of a single block: defaults to full translation."""
     payload: dict[str, Any] = {
         "source_block_id": "block-1",
         "treatment": "TRANSLATE",
@@ -83,5 +83,5 @@ def block_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def as_content(payload: dict[str, Any]) -> str:
-    """Ответ в том виде, в каком его отдаёт провайдер, — текстом."""
+    """Response serialized as text, exactly as returned by a provider."""
     return json.dumps(payload, ensure_ascii=False)

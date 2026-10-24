@@ -1,4 +1,4 @@
-"""Ограничитель частоты запросов к модели: общий предел для всех воркеров."""
+"""Model request rate limiter: shared limit across all workers."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from llm_payload_factories import as_content, translation_payload
 
 
 class ManualClock:
-    """Время, которое идёт только тогда, когда тест или пауза его сдвигают."""
+    """Time that advances only when explicitly stepped by a test or sleep."""
 
     def __init__(self) -> None:
         self.now = 0.0
@@ -29,19 +29,19 @@ class ManualClock:
 
 
 def request() -> LLMRequest[TranslationResultResponse]:
-    """Любой запрос обработки."""
+    """Any processing request."""
     return LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
 
 
 def reply() -> FakeReply:
-    """Корректный ответ обработки."""
+    """Valid processing reply."""
     return FakeReply(content=as_content(translation_payload()))
 
 
 def limited(
     inner: FakeLLMClient, clock: ManualClock, *, requests_per_minute: int = 60
 ) -> RateLimitedLLMClient:
-    """Ограничитель с управляемым временем."""
+    """Rate limiter with controlled time."""
     return RateLimitedLLMClient(
         inner=inner,
         requests_per_minute=requests_per_minute,
@@ -51,7 +51,7 @@ def limited(
 
 
 async def test_first_request_is_not_delayed() -> None:
-    """Первый запрос уходит сразу: ограничивать ещё нечего."""
+    """First request is dispatched immediately: nothing to throttle yet."""
     clock = ManualClock()
     client = limited(FakeLLMClient.always(reply()), clock)
 
@@ -61,7 +61,7 @@ async def test_first_request_is_not_delayed() -> None:
 
 
 async def test_simultaneous_requests_are_spaced_by_the_limit() -> None:
-    """Одновременные запросы нескольких воркеров расходятся по времени на шаг предела."""
+    """Simultaneous requests from multiple workers are spaced apart by the rate step."""
     clock = ManualClock()
     inner = FakeLLMClient.always(reply())
     client = limited(inner, clock, requests_per_minute=30)
@@ -73,7 +73,7 @@ async def test_simultaneous_requests_are_spaced_by_the_limit() -> None:
 
 
 async def test_idle_time_is_not_saved_up_for_a_burst() -> None:
-    """После простоя запрос идёт без ожидания, но следующий снова держит шаг."""
+    """After idle time, request proceeds without delay, but the next resumes spacing."""
     clock = ManualClock()
     client = limited(FakeLLMClient.always(reply()), clock, requests_per_minute=60)
 
@@ -86,7 +86,7 @@ async def test_idle_time_is_not_saved_up_for_a_burst() -> None:
 
 
 async def test_retry_after_pauses_every_worker() -> None:
-    """Отказ провайдера по частоте с `Retry-After` придерживает запросы всех воркеров."""
+    """Provider 429 response with Retry-After pauses requests for all workers."""
     clock = ManualClock()
     inner = FakeLLMClient.replying(
         [LLMTransportError("429", retry_after_seconds=20.0), reply()]
@@ -101,13 +101,13 @@ async def test_retry_after_pauses_every_worker() -> None:
 
 
 def test_limit_must_be_positive() -> None:
-    """Предел в ноль запросов в минуту означал бы вечное ожидание."""
+    """A limit of zero requests per minute would mean waiting indefinitely."""
     with pytest.raises(ValueError):
         RateLimitedLLMClient(inner=FakeLLMClient(), requests_per_minute=0)
 
 
 class ControlledClock:
-    """Ожидания разрешаются только явным переводом часов."""
+    """Waits are resolved only by explicitly advancing the clock."""
 
     def __init__(self):
         self.now = 0.0

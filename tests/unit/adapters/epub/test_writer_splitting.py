@@ -1,4 +1,4 @@
-"""Тесты оформления продолжений расщеплённых абзацев в writer.py (P3.T1)."""
+"""Tests for split paragraph continuation styling in writer.py (P3.T1)."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _make_block(
 
 
 def test_writer_adds_split_continuation_class_to_subsequent_fragments() -> None:
-    """Фрагменты со split_index > 1 получают класс linguary-split-continuation."""
+    """Fragments with split_index > 1 receive the 'linguary-split-continuation' class."""
     b2 = _make_block(1, "Second fragment", split_group="/body/p[1]", split_index="2", split_total="3")
     attrs2 = _block_attributes(b2, tag="p")
     assert "class" in attrs2
@@ -71,17 +71,17 @@ def test_writer_adds_split_continuation_class_to_subsequent_fragments() -> None:
     assert "class" in attrs3
     assert "linguary-split-continuation" in attrs3["class"]
 
-    # Безопасное приведение: пробелы вокруг индекса обрабатываются корректно
+    # Safe conversion: whitespace around the index is handled properly
     b_spaced = _make_block(3, "Spaced fragment", split_group="/body/p[1]", split_index=" 2 ", split_total="3")
     assert "linguary-split-continuation" in _block_attributes(b_spaced, tag="p")["class"]
 
-    # Некорректный индекс не падает и не добавляет класс
+    # Invalid index does not raise and does not add the class
     b_invalid = _make_block(4, "Invalid index", split_group="/body/p[1]", split_index="invalid", split_total="3")
     assert "linguary-split-continuation" not in _block_attributes(b_invalid, tag="p").get("class", "")
 
 
 def test_writer_preserves_default_class_for_first_fragment() -> None:
-    """Для первого фрагмента (split_index = 1) и обычных блоков класс продолжения не добавляется."""
+    """Continuation class is not added to the first fragment (split_index = 1) or regular blocks."""
     b1 = _make_block(0, "First fragment", split_group="/body/p[1]", split_index="1", split_total="3")
     attrs1 = _block_attributes(b1, tag="p")
     assert "linguary-split-continuation" not in attrs1.get("class", "")
@@ -92,21 +92,21 @@ def test_writer_preserves_default_class_for_first_fragment() -> None:
 
 
 def test_writer_stylesheet_defines_split_continuation_style() -> None:
-    """Таблица стилей _STYLESHEET содержит селектор .linguary-split-continuation со сбросом отступов."""
+    """The stylesheet _STYLESHEET contains selector .linguary-split-continuation resetting indents."""
     assert ".linguary-split-continuation" in _STYLESHEET
     assert "text-indent: 0" in _STYLESHEET
     assert "margin-top:" in _STYLESHEET
 
 
 def test_writer_renders_valid_xhtml_structure() -> None:
-    """Разметка продолжений абзацев формирует валидную структуру XHTML без вложенности <p> в <p>."""
+    """Markup of paragraph continuations produces valid XHTML without nesting <p> inside <p>."""
     b1 = _make_block(0, "Opening sentence.", split_group="/body/p[1]", split_index="1", split_total="2")
     b2 = _make_block(1, "Continuation sentence.", split_group="/body/p[1]", split_index="2", split_total="2")
 
     attrs1 = _block_attributes(b1, tag="p")
     attrs2 = _block_attributes(b2, tag="p")
 
-    # Формируем фрагмент XHTML
+    # Form XHTML fragment
     p1 = etree.Element("p", attrs1)
     p1.text = b1.text
     p2 = etree.Element("p", attrs2)

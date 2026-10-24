@@ -1,4 +1,4 @@
-"""Блокирующие проверки и предупреждения результата обработки (P3.T6, ALG-04, PRD § 15)."""
+"""Blocking validations and warnings for processing results (P3.T6, ALG-04, PRD § 15)."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from linguary.domain import (
     TranslationUnit,
 )
 
-#: Полный перевод длиннее порога проверки языка, оставшийся на языке оригинала.
+#: Full translation longer than the language check threshold, remaining in the source language.
 ENGLISH_TRANSLATION = (
     "It is a truth universally acknowledged that a single man in possession "
     "of a good fortune must be in want of a wife."
@@ -57,7 +57,7 @@ def validate(
     truncated: bool = False,
     checks: CheckSettings | None = None,
 ) -> tuple[BlockProcessingResult, ...]:
-    """Проверка ответа модели с порогами приложения."""
+    """Validates the model response against application thresholds."""
     return make_validator(checks).validate(
         payload,
         unit=unit,
@@ -74,18 +74,18 @@ def rejection(
     truncated: bool = False,
     checks: CheckSettings | None = None,
 ) -> ResultValidationError:
-    """Отбраковка группы, которую вернула проверка."""
+    """Rejection of the unit returned by validation."""
     with pytest.raises(ResultValidationError) as rejected:
         validate(payload, unit=unit, truncated=truncated, checks=checks)
     return rejected.value
 
 
 def with_fields(block: BlockResultResponse, **fields: object) -> BlockResultResponse:
-    """Ответ модели, который прошёл бы схему адаптера, но нарушает правило состава.
+    """A model response that would pass adapter schema validation but violates structural rules.
 
-    DTO проверяет состав блока относительно названного им же режима, поэтому такой ответ
-    нельзя собрать конструктором. Проверка состава относительно плана — последний рубеж
-    ALG-04, и проверять его надо именно на ответе, который правила DTO обошёл.
+    The DTO checks block structure against its self-declared treatment, so such a response
+    cannot be constructed normally. Validating structure against the plan is the last line of
+    ALG-04, and it must be tested against a response that bypassed DTO rules.
     """
     for name, value in fields.items():
         object.__setattr__(block, name, value)
@@ -93,7 +93,7 @@ def with_fields(block: BlockResultResponse, **fields: object) -> BlockResultResp
 
 
 def test_valid_result_is_accepted() -> None:
-    """Корректный ответ модели превращается в результаты блоков группы."""
+    """A valid model response is converted into unit block processing results."""
     blocks = make_blocks(2)
     unit = make_unit(blocks)
 
@@ -135,7 +135,7 @@ def test_extra_lines_retry_message_requires_full_own_text(source: str) -> None:
 
 
 def test_real_neighbour_heading_remains_rejected() -> None:
-    """Искусственный 31d97195: чужой заголовок нельзя принять или склеить."""
+    """Synthetic case 31d97195: an extraneous heading cannot be accepted or merged."""
     block = make_block(order=0, text='"We shall return."')
     unit = make_unit((block,))
     own_translation = "«Мы вернёмся»."
@@ -229,7 +229,7 @@ def test_tail_before_closing_quote_untouched(text: str) -> None:
 
 
 def test_result_takes_treatment_from_plan() -> None:
-    """Режим сохранённого результата берётся из плана, а не из ответа модели."""
+    """The treatment of the saved result is taken from the plan, not from the model response."""
     blocks = make_blocks(2)
     unit = make_unit(
         blocks, treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)
@@ -245,7 +245,7 @@ def test_result_takes_treatment_from_plan() -> None:
 
 
 def test_language_notes_get_identifiers_from_factory() -> None:
-    """Заметки ответа привязываются к своим блокам и получают идентификаторы сценария."""
+    """Response language notes are attached to their blocks and receive scenario identifiers."""
     blocks = make_blocks(2)
     unit = make_unit(blocks)
     payload = make_response(
@@ -263,7 +263,7 @@ def test_language_notes_get_identifiers_from_factory() -> None:
 
 
 def test_missing_block_discards_the_whole_unit() -> None:
-    """Пропущенный блок отменяет сохранение всей группы (PRD § 17)."""
+    """A missing block discards the entire unit from being saved (PRD § 17)."""
     blocks = make_blocks(2)
     unit = make_unit(blocks)
     payload = make_response((make_block_result(blocks[0]),))
@@ -272,7 +272,7 @@ def test_missing_block_discards_the_whole_unit() -> None:
 
 
 def test_unknown_block_discards_the_whole_unit() -> None:
-    """Результат для блока вне группы отбраковывает ответ целиком."""
+    """A result for a block outside the unit rejects the response completely."""
     blocks = make_blocks(2)
     unit = make_unit(blocks[:1])
     payload = make_response(
@@ -283,7 +283,7 @@ def test_unknown_block_discards_the_whole_unit() -> None:
 
 
 def test_repeated_block_is_rejected() -> None:
-    """Дважды возвращённый блок — не порядок, а повтор: сообщение называет его прямо."""
+    """A duplicated block is a duplicate rather than reordering: the error message says so."""
     blocks = make_blocks(2)
     unit = make_unit(blocks)
     payload = make_response(
@@ -298,7 +298,7 @@ def test_repeated_block_is_rejected() -> None:
 
 
 def test_reordered_blocks_are_rejected() -> None:
-    """Порядок блоков ответа обязан совпадать с порядком блоков группы."""
+    """The order of blocks in the response must match the order of blocks in the unit."""
     blocks = make_blocks(2)
     unit = make_unit(blocks)
     payload = make_response(
@@ -309,7 +309,7 @@ def test_reordered_blocks_are_rejected() -> None:
 
 
 def test_note_for_block_outside_the_unit_is_rejected() -> None:
-    """Заметка о чужом блоке — тот же неизвестный идентификатор, только в другом поле."""
+    """A note for an extraneous block is an unknown identifier, just in another field."""
     blocks = make_blocks(2)
     unit = make_unit(blocks[:1])
     payload = make_response(
@@ -320,7 +320,7 @@ def test_note_for_block_outside_the_unit_is_rejected() -> None:
 
 
 def test_treatment_mismatch_discards_the_whole_unit() -> None:
-    """Режим из ответа модели план не переопределяет (PRD § 14)."""
+    """A treatment in the model response does not override the plan (PRD § 14)."""
     blocks = make_blocks(1)
     unit = make_unit(blocks, treatments=(BlockTreatment.GLOSSARY_ONLY,))
     payload = make_response((make_block_result(blocks[0]),))
@@ -329,7 +329,7 @@ def test_treatment_mismatch_discards_the_whole_unit() -> None:
 
 
 def test_translate_without_translation_is_rejected() -> None:
-    """Блок `TRANSLATE` без полного перевода не сохраняется (PRD § 15)."""
+    """A `TRANSLATE` block without full translation is rejected (PRD § 15)."""
     blocks = make_blocks(1)
     unit = make_unit(blocks)
     payload = make_response(
@@ -340,7 +340,7 @@ def test_translate_without_translation_is_rejected() -> None:
 
 
 def test_read_as_is_with_glossary_hints_is_rejected() -> None:
-    """Блок `READ_AS_IS` не получает ни перевода, ни словарных подсказок (PRD § 10.1)."""
+    """A `READ_AS_IS` block receives neither translation nor glossary hints (PRD § 10.1)."""
     blocks = make_blocks(1)
     unit = make_unit(blocks, treatments=(BlockTreatment.READ_AS_IS,))
     payload = make_response(
@@ -360,7 +360,7 @@ def test_read_as_is_with_glossary_hints_is_rejected() -> None:
 
 
 def test_glossary_only_without_hints_is_rejected() -> None:
-    """Блок `GLOSSARY_ONLY` без словарных подсказок не сохраняется."""
+    """A `GLOSSARY_ONLY` block without glossary hints is rejected."""
     blocks = make_blocks(1)
     unit = make_unit(blocks, treatments=(BlockTreatment.GLOSSARY_ONLY,))
     payload = make_response(
@@ -381,7 +381,7 @@ def test_glossary_only_without_hints_is_rejected() -> None:
 
 
 def test_provider_token_limit_stop_is_rejected() -> None:
-    """Ответ, обрезанный пределом вывода, отбраковывается даже при полном составе."""
+    """A response truncated by output token limit is rejected even if structurally complete."""
     blocks = make_blocks(1)
     unit = make_unit(blocks)
 
@@ -391,7 +391,7 @@ def test_provider_token_limit_stop_is_rejected() -> None:
 
 
 def test_translation_without_terminal_punctuation_is_rejected() -> None:
-    """Перевод законченного предложения обязан заканчиваться знаком конца предложения."""
+    """Translation of a finished sentence must end with terminal punctuation."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -406,7 +406,7 @@ def test_translation_without_terminal_punctuation_is_rejected() -> None:
 
 
 def test_heading_without_terminal_punctuation_is_accepted() -> None:
-    """Перевод заголовка не обязан заканчиваться точкой: её нет и в оригинале."""
+    """Heading translation does not have to end with a period: the source has none either."""
     blocks = (make_block(order=0, text="Chapter One"),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -417,7 +417,7 @@ def test_heading_without_terminal_punctuation_is_accepted() -> None:
 
 
 def test_unbalanced_quote_is_rejected() -> None:
-    """Незакрытая кавычка в переводе — признак оборванной генерации."""
+    """An unclosed quotation mark in translation is a sign of truncated generation."""
     blocks = (make_block(order=0, text='He said: "Go there."'),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -428,7 +428,7 @@ def test_unbalanced_quote_is_rejected() -> None:
 
 
 def test_quote_left_open_in_the_source_is_accepted() -> None:
-    """Многоабзацная прямая речь открывает кавычку в каждом абзаце — это не обрыв."""
+    """Multi-paragraph direct speech opens quotes on each paragraph — not a truncation."""
     blocks = (make_block(order=0, text='"Go there. And do not look back.'),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -443,7 +443,7 @@ def test_quote_left_open_in_the_source_is_accepted() -> None:
 
 
 def test_translation_in_the_wrong_language_is_rejected() -> None:
-    """Полный перевод на языке оригинала не сохраняется (PRD § 15)."""
+    """Full translation in the source language is rejected (PRD § 15)."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -454,7 +454,7 @@ def test_translation_in_the_wrong_language_is_rejected() -> None:
 
 
 def test_short_translation_is_not_checked_for_language() -> None:
-    """Короткая строка проверку языка не проходит: имя собственное — законный перевод."""
+    """Short strings bypass language checking: proper nouns are legitimate translations."""
     blocks = (make_block(order=0, text="Mr. Bennet."),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -465,7 +465,7 @@ def test_short_translation_is_not_checked_for_language() -> None:
 
 
 def test_glossary_hints_are_not_checked_for_language() -> None:
-    """Словарная подсказка законно состоит из слова исходного языка (PRD § 15)."""
+    """A glossary hint legitimately consists of a source language word (PRD § 15)."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks, treatments=(BlockTreatment.GLOSSARY_ONLY,))
     payload = make_response(
@@ -489,7 +489,7 @@ def test_glossary_hints_are_not_checked_for_language() -> None:
 
 
 def test_service_message_is_rejected() -> None:
-    """Отказ модели вместо перевода в книгу не попадает."""
+    """A model refusal instead of translation does not enter the book."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -505,7 +505,7 @@ def test_service_message_is_rejected() -> None:
 
 
 def test_repetition_is_stored_as_warning() -> None:
-    """Явный повтор сохраняется предупреждением и обработку не останавливает."""
+    """An obvious repetition is recorded as a warning and does not halt processing."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks)
     repeated = "и всё повторялось снова и снова "
@@ -520,7 +520,7 @@ def test_repetition_is_stored_as_warning() -> None:
 
 
 def test_result_without_repetition_has_no_warnings() -> None:
-    """Обычный перевод предупреждений не получает."""
+    """A normal translation produces no warnings."""
     blocks = make_blocks(1)
     unit = make_unit(blocks)
 
@@ -528,7 +528,7 @@ def test_result_without_repetition_has_no_warnings() -> None:
 
 
 def test_rejection_carries_expected_blocks_and_treatments() -> None:
-    """Отбраковка несёт всё, из чего строится уточняющая инструкция повтора (ALG-05)."""
+    """Rejection carries everything needed to build a retry prompt (ALG-05)."""
     blocks = make_blocks(2)
     unit = make_unit(
         blocks, treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)
@@ -547,7 +547,7 @@ def test_rejection_carries_expected_blocks_and_treatments() -> None:
 
 
 def test_scenario_expectation_replaces_the_default() -> None:
-    """Сценарий, адресовавший блоки псевдонимами, перечисляет в повторе их же."""
+    """A scenario addressing blocks by aliases lists those same aliases on retry."""
     blocks = make_blocks(2)
     unit = make_unit(blocks)
     aliases = ResultExpectation(
@@ -577,7 +577,7 @@ def test_scenario_expectation_replaces_the_default() -> None:
 def test_language_threshold_comes_from_settings(
     min_length: int, expected: bool
 ) -> None:
-    """Минимальная длина проверки языка — настройка, а не константа проверки."""
+    """Minimum language check length is a setting, not a hardcoded validator constant."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -594,7 +594,7 @@ def _accepted(
     unit: TranslationUnit,
     checks: CheckSettings,
 ) -> bool:
-    """Приняла ли проверка ответ модели."""
+    """Whether validation accepted the model response."""
     try:
         validate(payload, unit=unit, checks=checks)
     except ResultValidationError:
@@ -603,7 +603,7 @@ def _accepted(
 
 
 def test_results_keep_the_order_of_the_unit() -> None:
-    """Результаты возвращаются в порядке блоков группы: его ждёт сохранение."""
+    """Results are returned in unit block order: storage expects this ordering."""
     blocks = make_blocks(3)
     unit = make_unit(blocks)
 
@@ -615,7 +615,7 @@ def test_results_keep_the_order_of_the_unit() -> None:
 
 
 def test_footnote_markers_stay_only_in_translation_and_only_known_ones() -> None:
-    """В переводе остаются метки существующих ссылок на сноски, в помощи меток нет (QA-08)."""
+    """The translation retains markers for existing footnote links; hints contain none (QA-08)."""
     text = "Nobody liked her face.1 It was a pity."
     block = replace(
         make_block(order=0, text=text),
@@ -655,7 +655,7 @@ def test_footnote_markers_stay_only_in_translation_and_only_known_ones() -> None
     ],
 )
 def test_word_mixing_latin_and_cyrillic_is_rejected(translated_text: str) -> None:
-    """Слово из смеси латиницы и кириллицы отбраковывает группу (Н-1)."""
+    """A word mixing Latin and Cyrillic scripts rejects the unit (H-1)."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -669,7 +669,7 @@ def test_word_mixing_latin_and_cyrillic_is_rejected(translated_text: str) -> Non
 
 
 def test_mixed_word_in_language_note_is_rejected() -> None:
-    """Заметка пишется на целевом языке и проверяется так же, как перевод."""
+    """A note is written in the target language and validated just like translation."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -696,7 +696,7 @@ def test_mixed_word_in_language_note_is_rejected() -> None:
     ],
 )
 def test_latin_words_in_russian_text_are_allowed(translated_text: str) -> None:
-    """Целиком латинские слова и дефисные соединения — не нарушение (Н-1)."""
+    """Entirely Latin words and hyphenated compounds are not violations (H-1)."""
     blocks = (make_block(order=0, text=SOURCE_TEXT),)
     unit = make_unit(blocks)
     payload = make_response(
@@ -709,7 +709,7 @@ def test_latin_words_in_russian_text_are_allowed(translated_text: str) -> None:
 
 
 def test_retry_joins_own_authorial_tail_without_dropping_it() -> None:
-    """Искусственный dcfb5251: собственное окончание остаётся после объединения."""
+    """Synthetic case dcfb5251: authorial tail remains preserved after joining."""
     block = make_block(order=0, text='"We shall return." He left.')
     unit = make_unit((block,))
     speech = "«Мы вернёмся»."

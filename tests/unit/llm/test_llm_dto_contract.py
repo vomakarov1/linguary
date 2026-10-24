@@ -1,4 +1,4 @@
-"""Внутренние DTO ответов LLM: что они гарантируют прикладному слою (DTO-02)."""
+"""Internal LLM response DTOs: guarantees provided to the application layer (DTO-02)."""
 
 from __future__ import annotations
 
@@ -19,17 +19,17 @@ from linguary.domain import BlockTreatment, ConceptType
 
 
 def hint() -> GlossaryHintResponse:
-    """Словарная подсказка для блока."""
+    """Glossary hint for a block."""
     return GlossaryHintResponse(original="entailed", translation="заповедный")
 
 
 def test_payload_error_is_an_application_error() -> None:
-    """Ошибка DTO остаётся ошибкой прикладного слоя и не тянет за собой чужие типы."""
+    """DTO error remains an application layer error and does not introduce foreign types."""
     assert issubclass(LLMPayloadError, ApplicationError)
 
 
 def test_translate_block_requires_translation() -> None:
-    """Для режима `TRANSLATE` полный перевод обязателен."""
+    """For 'TRANSLATE' treatment, a full translation is required."""
     with pytest.raises(LLMPayloadError):
         BlockResultResponse(
             source_block_id="block-1", treatment=BlockTreatment.TRANSLATE
@@ -37,7 +37,7 @@ def test_translate_block_requires_translation() -> None:
 
 
 def test_read_as_is_block_rejects_glossary_hints() -> None:
-    """Блок `READ_AS_IS` не получает словарных подсказок."""
+    """A 'READ_AS_IS' block does not receive glossary hints."""
     with pytest.raises(LLMPayloadError):
         BlockResultResponse(
             source_block_id="block-1",
@@ -47,7 +47,7 @@ def test_read_as_is_block_rejects_glossary_hints() -> None:
 
 
 def test_glossary_only_block_rejects_full_translation() -> None:
-    """Полный перевод допустим только для `TRANSLATE`."""
+    """Full translation is allowed only for 'TRANSLATE'."""
     with pytest.raises(LLMPayloadError):
         BlockResultResponse(
             source_block_id="block-1",
@@ -65,7 +65,7 @@ def test_glossary_only_block_rejects_full_translation() -> None:
     ],
 )
 def test_non_textual_treatment_has_no_model_result(treatment: BlockTreatment) -> None:
-    """Нетекстовые блоки модели не передаются, и результата от неё не имеют."""
+    """Non-textual blocks are not passed to the model and have no result from it."""
     with pytest.raises(LLMPayloadError):
         BlockResultResponse(source_block_id="block-1", treatment=treatment)
     with pytest.raises(LLMPayloadError):
@@ -73,7 +73,7 @@ def test_non_textual_treatment_has_no_model_result(treatment: BlockTreatment) ->
 
 
 def test_glossary_candidate_confidence_is_bounded() -> None:
-    """Уверенность кандидата глоссария лежит в диапазоне 0..1."""
+    """Glossary candidate confidence must be in the 0..1 range."""
     with pytest.raises(LLMPayloadError):
         GlossaryCandidateResponse(
             source_text="Mr. Bennet",
@@ -85,7 +85,7 @@ def test_glossary_candidate_confidence_is_bounded() -> None:
 
 
 def test_chapter_analysis_requires_summary_and_instructions() -> None:
-    """Анализ без сводки главы и инструкций перевода бессмыслен (PRD § 14, § 19.2)."""
+    """Analysis without chapter summary and translation instructions is meaningless (PRD § 14, § 19.2)."""
     with pytest.raises(LLMPayloadError):
         ChapterAnalysisResponse(translation_instructions="Переводи", chapter_summary="  ")
     with pytest.raises(LLMPayloadError):
@@ -93,7 +93,7 @@ def test_chapter_analysis_requires_summary_and_instructions() -> None:
 
 
 def test_language_note_belongs_to_one_block() -> None:
-    """Языковая заметка привязана ровно к одному блоку (PRD § 19.3)."""
+    """A language note is bound to exactly one block (PRD § 19.3)."""
     result = TranslationResultResponse(
         blocks=(
             BlockResultResponse(
@@ -116,6 +116,6 @@ def test_language_note_belongs_to_one_block() -> None:
 
 
 def test_note_without_block_is_rejected() -> None:
-    """Заметка без блока не привязывается к результату."""
+    """A note without a block cannot be attached to a result."""
     with pytest.raises(LLMPayloadError):
         LanguageNoteResponse(source_block_id="  ", original_excerpt="excerpt", note="текст")

@@ -1,4 +1,4 @@
-"""Вычислительная группа блоков и проверка её результата (PRD § 10, § 15)."""
+"""Computational block group and validation of its results (PRD § 10, § 15)."""
 
 from __future__ import annotations
 
@@ -21,14 +21,14 @@ from linguary.domain import (
 
 
 def make_unit(count: int = 3) -> tuple[TranslationUnit, tuple[str, ...]]:
-    """Группа из нескольких блоков режима `TRANSLATE`."""
+    """A group of multiple blocks with 'TRANSLATE' treatment."""
     blocks = make_blocks(count)
     unit = TranslationUnit.of_blocks(id="unit-1", blocks=blocks, plan=make_plan(blocks))
     return unit, tuple(block.id for block in blocks)
 
 
 def translated(block_id: str) -> BlockProcessingResult:
-    """Результат полного перевода блока."""
+    """A full translation result for a block."""
     return BlockProcessingResult(
         block_id=block_id,
         treatment=BlockTreatment.TRANSLATE,
@@ -44,7 +44,7 @@ def translated(block_id: str) -> BlockProcessingResult:
     ],
 )
 def test_unit_rejects_non_textual_block(treatment: BlockTreatment) -> None:
-    """Нетекстовый блок не попадает в группу, а не отфильтровывается молча."""
+    """A non-textual block cannot be added to a group and is not silently filtered out."""
     blocks = make_blocks(1)
     with pytest.raises(NonTextualBlockError):
         TranslationUnit.of_blocks(
@@ -53,7 +53,7 @@ def test_unit_rejects_non_textual_block(treatment: BlockTreatment) -> None:
 
 
 def test_unit_takes_treatment_from_plan() -> None:
-    """Режимы блоков группы берутся из сохранённого плана главы."""
+    """Block treatments for the group are taken from the stored chapter plan."""
     blocks = make_blocks(2)
     plan = TreatmentPlan.of_treatments(
         SECTION_ID,
@@ -67,7 +67,7 @@ def test_unit_takes_treatment_from_plan() -> None:
 
 
 def test_unit_rejects_block_missing_from_plan() -> None:
-    """Блок без сохранённого режима в группу не попадает."""
+    """A block without a stored treatment cannot be added to the group."""
     blocks = make_blocks(2)
     with pytest.raises(UnknownBlockError):
         TranslationUnit.of_blocks(
@@ -76,7 +76,7 @@ def test_unit_rejects_block_missing_from_plan() -> None:
 
 
 def test_unit_rejects_blocks_out_of_order() -> None:
-    """Группа состоит из последовательных блоков в порядке документа."""
+    """A group consists of consecutive blocks in document order."""
     blocks = make_blocks(2)
     with pytest.raises(BlockOrderError):
         TranslationUnit.of_blocks(
@@ -85,26 +85,26 @@ def test_unit_rejects_blocks_out_of_order() -> None:
 
 
 def test_unit_rejects_empty_group() -> None:
-    """Пустая группа блоков модели не отправляется."""
+    """An empty block group is not submitted to the model."""
     with pytest.raises(TranslationUnitError):
         TranslationUnit.of_blocks(id="unit-1", blocks=(), plan=make_plan(()))
 
 
 def test_unit_accepts_complete_result() -> None:
-    """Полный и упорядоченный результат группы проходит проверку."""
+    """A complete and ordered group result passes validation."""
     unit, ids = make_unit()
     unit.validate_results([translated(block_id) for block_id in ids])
 
 
 def test_unit_rejects_missing_block_result() -> None:
-    """Отсутствие результата хотя бы для одного блока отменяет всю группу."""
+    """A missing result for even a single block invalidates the entire group."""
     unit, ids = make_unit()
     with pytest.raises(MissingBlockResultError):
         unit.validate_results([translated(block_id) for block_id in ids[:-1]])
 
 
 def test_unit_rejects_unknown_block_result() -> None:
-    """Результат для чужого блока отменяет всю группу."""
+    """A result for an unexpected block invalidates the entire group."""
     unit, ids = make_unit()
     results = [translated(block_id) for block_id in ids]
     results.append(translated("foreign-block"))
@@ -113,7 +113,7 @@ def test_unit_rejects_unknown_block_result() -> None:
 
 
 def test_unit_rejects_reordered_result() -> None:
-    """Порядок блоков в ответе совпадает с порядком исходного документа."""
+    """The order of blocks in the response must match the original document order."""
     unit, ids = make_unit()
     results = [translated(block_id) for block_id in reversed(ids)]
     with pytest.raises(BlockOrderError):
@@ -121,7 +121,7 @@ def test_unit_rejects_reordered_result() -> None:
 
 
 def test_unit_rejects_treatment_that_contradicts_plan() -> None:
-    """Режим в ответе модели подтверждает план, а не переопределяет его."""
+    """Treatment in the model response confirms the plan rather than overriding it."""
     unit, ids = make_unit(2)
     results = [
         translated(ids[0]),

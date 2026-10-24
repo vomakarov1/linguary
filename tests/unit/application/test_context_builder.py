@@ -1,4 +1,4 @@
-"""Состав контекста анализа главы (P3.T3, PRD § 13)."""
+"""Chapter analysis context composition (P3.T3, PRD § 13)."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from linguary.domain import BlockTreatment, BlockType, ConceptType, SupportStatu
 
 NEIGHBOUR_TEXT = "The neighbouring chapter must never reach the model."
 
-#: Глава из четырёх абзацев: при пределе в два блока она делится на два фрагмента.
+#: A chapter with four paragraphs: with a two-block limit it splits into two fragments.
 FRAGMENTED_TEXTS = (
     "Paragraph one.",
     "Paragraph two.",
@@ -40,7 +40,7 @@ def build_context(
     max_accumulated_candidates: int = 200,
     reader_level: str = "b2",
 ):
-    """Контекст анализа первой главы книги из двух глав."""
+    """Chapter analysis context for the first chapter of a two-chapter book."""
     section = make_analysis_section(
         section_id="section-1", title="Chapter 1", order=0, texts=texts
     )
@@ -55,12 +55,12 @@ def build_context(
     return builder.for_chapter_analysis(
         document=document,
         section=section,
-        accumulated_candidates=candidates,  # type: ignore[arg-type]  # фабрика двойников
+        accumulated_candidates=candidates,  # type: ignore[arg-type]  # test double factory
     )
 
 
 def build_fragment_context(*, order: int = 0, fragment_count: int = 2):
-    """Контекст одного фрагмента главы, поделённой по два блока."""
+    """Context for one fragment of a chapter split into two blocks per fragment."""
     section = make_analysis_section(
         section_id="section-1", title="Chapter 1", order=0, texts=FRAGMENTED_TEXTS
     )
@@ -78,7 +78,7 @@ def build_fragment_context(*, order: int = 0, fragment_count: int = 2):
 
 
 def test_analysis_context_contains_chapter_blocks() -> None:
-    """Текст каждого блока главы попадает в запрос под своим псевдонимом."""
+    """Text of each chapter block enters the request under its alias."""
     context = build_context(texts=("First paragraph.", "Second paragraph."))
 
     input_text = context.request.input_text
@@ -88,7 +88,7 @@ def test_analysis_context_contains_chapter_blocks() -> None:
 
 
 def test_analysis_context_excludes_neighbour_chapters() -> None:
-    """Текст соседних глав в контекст анализа не передаётся (PRD § 13)."""
+    """Text of neighbouring chapters is excluded from the analysis context (PRD § 13)."""
     context = build_context()
 
     assert NEIGHBOUR_TEXT not in context.request.input_text
@@ -96,7 +96,7 @@ def test_analysis_context_excludes_neighbour_chapters() -> None:
 
 
 def test_analysis_context_names_book_chapter_and_languages() -> None:
-    """Запрос называет книгу, главу и языки издания."""
+    """The request names the book, chapter, and publication languages."""
     input_text = build_context().request.input_text
 
     assert "Pride and Prejudice" in input_text
@@ -135,7 +135,7 @@ def test_analysis_context_names_book_chapter_and_languages() -> None:
     ],
 )
 def test_non_textual_blocks_stay_out_of_context(block) -> None:
-    """`PRESERVE_ONLY` и нетекстовые блоки модели не передаются (PRD § 10.1)."""
+    """`PRESERVE_ONLY` and non-textual blocks are not passed to the model (PRD § 10.1)."""
     textual = make_analysis_block(
         section_id="section-1", order=0, text="A textual paragraph."
     )
@@ -151,7 +151,7 @@ def test_non_textual_blocks_stay_out_of_context(block) -> None:
 
 
 def test_preserved_block_text_stays_out_of_the_request() -> None:
-    """Текст конструкции, перенесённой как есть, модель не видит (ADR § 3)."""
+    """Text of a block preserved opaque is not visible to the model (ADR § 3)."""
     textual = make_analysis_block(
         section_id="section-1", order=0, text="A textual paragraph."
     )
@@ -171,7 +171,7 @@ def test_preserved_block_text_stays_out_of_the_request() -> None:
 
 
 def test_accumulated_candidates_reach_the_request() -> None:
-    """Кандидаты предыдущих глав передаются как принятые решения книги."""
+    """Candidates from previous chapters are passed as book decisions."""
     context = build_context(
         candidates=(
             make_analysis_candidate(
@@ -185,12 +185,12 @@ def test_accumulated_candidates_reach_the_request() -> None:
 
 
 def test_empty_accumulated_candidates_are_stated_explicitly() -> None:
-    """Отсутствие принятых решений описано словами, а не пустотой в запросе."""
+    """Absence of accumulated decisions is stated in words rather than an empty section."""
     assert "Предыдущие главы" in build_context().request.input_text
 
 
 def test_accumulated_candidates_are_deduplicated_and_limited() -> None:
-    """Повторы схлопываются, а список обрезается настроенным пределом."""
+    """Duplicates are collapsed, and the list is capped at the configured limit."""
     context = build_context(
         candidates=(
             make_analysis_candidate(source_text="Longbourn", analysis_id="analysis-1"),
@@ -206,7 +206,7 @@ def test_accumulated_candidates_are_deduplicated_and_limited() -> None:
 
 
 def test_obvious_spellings_of_one_decision_reach_the_request_once() -> None:
-    """Написания одного имени с точкой и без передаются одним решением (QA-11)."""
+    """Variants of a single name with and without a dot are sent as a single decision (QA-11)."""
     context = build_context(
         candidates=(
             make_analysis_candidate(
@@ -227,10 +227,10 @@ def test_obvious_spellings_of_one_decision_reach_the_request_once() -> None:
 
 
 def test_instructions_keep_named_things_out_of_persons() -> None:
-    """Предметы и блюда, названные в честь людей, модель не делает персонажами (QA-11).
+    """Objects and dishes named after people are not classified as characters by the model (QA-11).
 
-    Перевод предлагается ровно для той формы, что стоит в тексте: короткое имя не
-    подменяется полным из принятых решений.
+    The translation is suggested strictly for the form appearing in the text: a short name is not
+    substituted by a full name from accepted decisions.
     """
     instructions = build_context().request.instructions
 
@@ -240,7 +240,7 @@ def test_instructions_keep_named_things_out_of_persons() -> None:
 
 
 def test_aliases_map_back_to_stable_block_ids() -> None:
-    """Псевдоним запроса возвращается к стабильному идентификатору блока."""
+    """The request alias maps back to the stable block ID."""
     section = make_analysis_section(texts=("First.", "Second."))
     document = make_analysis_document((section,))
 
@@ -253,7 +253,7 @@ def test_aliases_map_back_to_stable_block_ids() -> None:
 
 
 def test_expectation_describes_aliases_and_target_language() -> None:
-    """Ожидаемый результат перечисляет то, что модель видела: псевдонимы блоков."""
+    """Expected result describes what the model saw: block aliases."""
     context = build_context(texts=("First.", "Second."))
 
     expectation = context.expectation
@@ -264,7 +264,7 @@ def test_expectation_describes_aliases_and_target_language() -> None:
 
 
 def test_unknown_alias_is_rejected() -> None:
-    """Псевдоним, которого в запросе не было, к блоку не приводится."""
+    """An alias not present in the request cannot be mapped to a block."""
     context = build_context()
 
     with pytest.raises(ContextBuildError):
@@ -272,7 +272,7 @@ def test_unknown_alias_is_rejected() -> None:
 
 
 def test_instructions_describe_every_textual_treatment() -> None:
-    """Инструкция называет все режимы обработки и оба языка издания (PRD § 10.1)."""
+    """Instructions describe every treatment mode and both publication languages (PRD § 10.1)."""
     instructions = build_context().request.instructions
 
     for treatment in (
@@ -291,7 +291,7 @@ def test_analysis_instructions_name_reader_level_b1_b2() -> None:
 
 
 def test_analysis_instructions_adapt_to_reader_level() -> None:
-    """Инструкция анализа адаптирует ориентиры под уровень читателя (PRD § 30)."""
+    """Analysis instructions adapt guidance to the reader level (PRD § 30)."""
     a2_instructions = build_context(reader_level="a2").request.instructions
     assert "A2" in a2_instructions
     assert "70–85%" in a2_instructions
@@ -310,7 +310,7 @@ def test_analysis_instructions_adapt_to_reader_level() -> None:
 
 
 def test_before_you_read_instructions_use_advance_organizer() -> None:
-    """Инструкция Before You Read требует тематические опоры и семантические ловушки."""
+    """Before You Read instructions require thematic anchors and semantic traps."""
     instructions = build_context().request.instructions
     assert "advance organizer" in instructions
     assert "thematic / setting anchors" in instructions
@@ -331,7 +331,7 @@ def test_analysis_instructions_state_length_is_not_criterion() -> None:
 
 
 def test_instructions_name_every_glossary_concept_type() -> None:
-    """Инструкция называет каждый тип понятия глоссария (PRD § 12)."""
+    """Instructions name every glossary concept type (PRD § 12)."""
     instructions = build_context().request.instructions
 
     for concept_type in ConceptType:
@@ -339,7 +339,7 @@ def test_instructions_name_every_glossary_concept_type() -> None:
 
 
 def test_instructions_require_chapter_summary_in_source_language() -> None:
-    """Инструкция требует сводку главы и материал `Before You Read` (PRD § 19)."""
+    """Instructions require a chapter summary and `Before You Read` material (PRD § 19)."""
     instructions = build_context().request.instructions
 
     assert "chapter_summary" in instructions
@@ -349,7 +349,7 @@ def test_instructions_require_chapter_summary_in_source_language() -> None:
 
 
 def test_chapter_without_textual_blocks_has_no_context() -> None:
-    """Главу без текста анализировать нечем: контекст не собирается."""
+    """A chapter without text has nothing to analyze: context cannot be built."""
     section = make_analysis_section(
         blocks=(
             make_analysis_block(
@@ -364,13 +364,13 @@ def test_chapter_without_textual_blocks_has_no_context() -> None:
 
 
 def test_negative_candidate_limit_is_rejected() -> None:
-    """Отрицательный предел числа накопленных решений — ошибка настройки."""
+    """A negative candidate limit is a configuration error."""
     with pytest.raises(ContextBuildError):
         ContextBuilder(max_accumulated_candidates=-1)
 
 
 def test_fragment_context_contains_only_its_own_blocks() -> None:
-    """Фрагмент главы видит свои блоки и не видит ни остальной главы, ни соседней."""
+    """A chapter fragment sees only its own blocks and neither the rest of the chapter nor neighbours."""
     context = build_fragment_context(order=1)
 
     input_text = context.request.input_text
@@ -383,7 +383,7 @@ def test_fragment_context_contains_only_its_own_blocks() -> None:
 
 
 def test_fragment_context_names_its_place_in_the_chapter() -> None:
-    """Запрос фрагмента называет его номер в главе: сводки соединяются по порядку."""
+    """The fragment request states its chapter index: summaries merge in sequence order."""
     input_text = build_fragment_context(order=0).request.input_text
 
     assert "Фрагмент главы: 1-й из 2" in input_text
@@ -391,7 +391,7 @@ def test_fragment_context_names_its_place_in_the_chapter() -> None:
 
 
 def test_fragment_instructions_describe_a_part_of_the_chapter() -> None:
-    """Фрагменту сказано, что он видит часть главы, а сводка описывает только её."""
+    """The fragment is told it sees part of a chapter, and the summary describes only that part."""
     whole = chapter_analysis_instructions(
         source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE
     )
@@ -413,7 +413,7 @@ def test_analysis_instructions_forbid_block_labels() -> None:
 
 
 def test_fragment_instructions_keep_the_rest_of_the_chapter_instruction() -> None:
-    """Кроме границ фрагмента и сводки инструкция та же: выверенный текст не теряется."""
+    """Aside from fragment bounds and summary, the instructions are identical."""
     whole = chapter_analysis_instructions(
         source_language=SOURCE_LANGUAGE, target_language=TARGET_LANGUAGE
     ).splitlines()
@@ -435,7 +435,7 @@ def test_fragment_instructions_keep_the_rest_of_the_chapter_instruction() -> Non
 
 
 def test_fragment_outside_the_chapter_is_rejected() -> None:
-    """Фрагмент, номер которого выходит за число фрагментов главы, не собирается."""
+    """A fragment whose index exceeds the chapter fragment count cannot be built."""
     with pytest.raises(ContextBuildError):
         build_fragment_context(order=1, fragment_count=1)
 

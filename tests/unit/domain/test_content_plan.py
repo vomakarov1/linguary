@@ -1,4 +1,4 @@
-"""Точные привязки и неизменяемый контракт содержательного плана."""
+"""Exact anchors and immutable contract of the content plan."""
 from dataclasses import FrozenInstanceError, replace
 
 import pytest

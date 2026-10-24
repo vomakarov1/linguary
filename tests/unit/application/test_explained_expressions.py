@@ -1,4 +1,4 @@
-"""Отсев повторов `Before You Read` в подсказках и заметках блока (PRD § 19.3, QA-03)."""
+"""Filtering of `Before You Read` repeats in block hints and notes (PRD § 19.3, QA-03)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from linguary.domain import (
 
 
 def test_expression_words_ignore_case_punctuation_and_spacing() -> None:
-    """Регистр, пунктуация, пробелы и вид апострофа на сравнение не влияют."""
+    """Casing, punctuation, whitespace, and apostrophe style do not affect comparison."""
     assert expression_words("  “Keep One’s  head,”\n") == ("keep", "one's", "head")
 
 
@@ -33,7 +33,7 @@ def test_expression_words_ignore_case_punctuation_and_spacing() -> None:
     ],
 )
 def test_repeated_expression_is_recognised(explained: str, text: str) -> None:
-    """Повтор выражения узнаётся и в другой записи, и в словоформах, и частью."""
+    """Repeated expressions are recognized across spellings, word forms, and as sub-phrases."""
     assert ExplainedExpressions([explained]).covers(text)
 
 
@@ -53,12 +53,12 @@ def test_repeated_expression_is_recognised(explained: str, text: str) -> None:
     ],
 )
 def test_unrelated_text_is_not_treated_as_repeat(explained: str, text: str) -> None:
-    """Короткие общие слова и длинные фрагменты с другим смыслом повтором не считаются."""
+    """Short common words and long excerpts with different meaning are not treated as repeats."""
     assert not ExplainedExpressions([explained]).covers(text)
 
 
 def test_repeats_are_removed_from_hints_and_notes() -> None:
-    """Повторная подсказка и заметка отбрасываются, остальное не меняется."""
+    """Repeated hints and notes are discarded, leaving the rest unchanged."""
     explained = ExplainedExpressions(["heaved and groaned"], explanations=[("heaved and groaned", "Пояснение.")])
     result = BlockProcessingResult(
         block_id="block-1",
@@ -80,7 +80,7 @@ def test_repeats_are_removed_from_hints_and_notes() -> None:
 
 
 def test_required_hints_survive_when_all_of_them_repeat() -> None:
-    """Блок GLOSSARY_ONLY не остаётся без обязательных подсказок, заметки при этом уходят."""
+    """A GLOSSARY_ONLY block is not left without required hints, while notes are dropped."""
     explained = ExplainedExpressions(["heaved and groaned"], explanations=[("heaved and groaned", "Пояснение.")])
     result = BlockProcessingResult(
         block_id="block-1",
@@ -98,11 +98,11 @@ def test_required_hints_survive_when_all_of_them_repeat() -> None:
 
 
 def test_note_with_whole_sentence_excerpt_explaining_the_expression_is_a_repeat() -> None:
-    """Заметка, чей отрывок — вся фраза, но объясняет она выражение `Before You Read`, уходит.
+    """A note whose excerpt is the entire sentence but explains a `Before You Read` expression is dropped.
 
-    Модель часто берёт в отрывок заметки целое предложение. По отрывку такой повтор
-    не узнать — он больше чем вдвое длиннее выражения, — зато его выдаёт сама заметка:
-    она называет объяснённое выражение (живой прогон, дефект Д-3).
+    The model often takes an entire sentence as a note excerpt. Such a repeat cannot be detected
+    by the excerpt alone (it is more than twice as long as the expression), but the note text itself
+    reveals it: it names the explained expression (live run, defect D-3).
     """
     explained = ExplainedExpressions(["gatekeeper's edge"], explanations=[("gatekeeper's edge", "Gatekeeper's edge — «резкость привратницы»: edge здесь — резкость, острота тона.")])
     result = _translated(
@@ -121,7 +121,7 @@ def test_note_with_whole_sentence_excerpt_explaining_the_expression_is_a_repeat(
 
 
 def test_note_on_a_long_sentence_explaining_something_else_survives() -> None:
-    """Заметка к длинной фразе, где выражение лишь встретилось, а объясняется другое, остаётся."""
+    """A note on a long sentence where the expression merely appears, but something else is explained, is kept."""
     explained = ExplainedExpressions(["heaved and groaned"], explanations=[("heaved and groaned", "Пояснение.")])
     note = LanguageNote(
         id="ln-ch01-003",
@@ -137,7 +137,7 @@ def test_note_on_a_long_sentence_explaining_something_else_survives() -> None:
 
 
 def test_short_word_in_note_text_does_not_make_a_repeat() -> None:
-    """Короткое общее слово объяснённого выражения в тексте заметки повтором не делает."""
+    """A short common word from the explained expression appearing in the note text does not make it a repeat."""
     explained = ExplainedExpressions(["heave to"])
     note = LanguageNote(
         id="ln-ch01-004",
@@ -150,7 +150,7 @@ def test_short_word_in_note_text_does_not_make_a_repeat() -> None:
 
 
 def test_without_expressions_result_is_unchanged() -> None:
-    """Глава без `Before You Read` ничего не отсеивает."""
+    """A chapter without `Before You Read` filters out nothing."""
     result = BlockProcessingResult(
         block_id="block-1",
         treatment=BlockTreatment.TRANSLATE,
@@ -190,7 +190,7 @@ def test_unrelated_note_kept() -> None:
 
 
 def _translated(*notes: LanguageNote) -> BlockProcessingResult:
-    """Результат блока `TRANSLATE` с переданными заметками."""
+    """Result of a `TRANSLATE` block with the provided notes."""
     return BlockProcessingResult(
         block_id="block-1",
         treatment=BlockTreatment.TRANSLATE,
@@ -200,7 +200,7 @@ def _translated(*notes: LanguageNote) -> BlockProcessingResult:
 
 
 def _note(note_id: str, excerpt: str) -> LanguageNote:
-    """Заметка к блоку с заданным фрагментом оригинала."""
+    """Note for a block with a given original excerpt."""
     return LanguageNote(
         id=note_id, block_id="block-1", original_excerpt=excerpt, note="Пояснение."
     )
@@ -268,7 +268,7 @@ def test_note_without_available_explanation_kept() -> None:
 def test_grab_note_with_new_rhetorical_fact_in_same_sentence_kept(
     separator: str, source: str,
 ) -> None:
-    """Риторический факт остаётся рядом с определением в одном предложении."""
+    """A rhetorical fact is preserved alongside the definition in the same sentence."""
     expression = "make a grab at"
     explanation = "попытка схватить"
     note = LanguageNote(

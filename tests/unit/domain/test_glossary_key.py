@@ -1,4 +1,4 @@
-"""Ключ группировки написаний одного понятия глоссария (QA-11, PRD § 11)."""
+"""Grouping key for spelling variants of a single glossary concept (QA-11, PRD § 11)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from linguary.domain import glossary_key, translations_conflict
     ],
 )
 def test_obvious_spellings_share_the_key(first: str, second: str) -> None:
-    """Регистр, типографика, пробелы и точка после сокращения понятия не меняют."""
+    """Case, typography, whitespace, and abbreviation dots do not change the concept key."""
     assert glossary_key(first) == glossary_key(second)
 
 
@@ -40,12 +40,12 @@ def test_obvious_spellings_share_the_key(first: str, second: str) -> None:
     ],
 )
 def test_different_spellings_keep_different_keys(first: str, second: str) -> None:
-    """Ключ не объединяет то, что не является очевидным вариантом написания."""
+    """The key does not merge spellings that are not obvious variants."""
     assert glossary_key(first) != glossary_key(second)
 
 
 def test_typographic_variants_of_translation_are_not_a_conflict() -> None:
-    """Разная типографика одного перевода не делает его спорным."""
+    """Different typography of the same translation does not create a conflict."""
     assert not translations_conflict(["фабрика Вонки", "Фабрика  Вонки"])
     assert not translations_conflict(["«Вонка»", "“Вонка”"])
     assert translations_conflict(["Чарли", "Чарли Баккет"])

@@ -1,4 +1,4 @@
-"""Структурное покрытие по конечным видимым артефактам, без оценки смысла."""
+"""Structural coverage on final visible artifacts, without semantic evaluation."""
 from dataclasses import replace
 
 import pytest

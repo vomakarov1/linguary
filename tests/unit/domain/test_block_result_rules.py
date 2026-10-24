@@ -1,4 +1,4 @@
-"""Состав результата обработки блока по его режиму (PRD § 14-15)."""
+"""Block processing result structure by its treatment (PRD § 14-15)."""
 
 from __future__ import annotations
 
@@ -20,13 +20,13 @@ HINT = GlossaryHint(original="bright cold day", translation="ясный моро
 
 
 def test_translate_requires_full_translation() -> None:
-    """Для `TRANSLATE` полный перевод обязателен."""
+    """For 'TRANSLATE', a full translation is required."""
     with pytest.raises(BlockResultError):
         BlockProcessingResult(block_id=BLOCK_ID, treatment=BlockTreatment.TRANSLATE)
 
 
 def test_translate_accepts_translation_with_hints() -> None:
-    """Для `TRANSLATE` словарные подсказки допустимы вместе с переводом."""
+    """For 'TRANSLATE', glossary hints are permitted alongside the translation."""
     result = BlockProcessingResult(
         block_id=BLOCK_ID,
         treatment=BlockTreatment.TRANSLATE,
@@ -37,13 +37,13 @@ def test_translate_accepts_translation_with_hints() -> None:
 
 
 def test_glossary_only_requires_hints() -> None:
-    """Для `GLOSSARY_ONLY` словарные подсказки обязательны."""
+    """For 'GLOSSARY_ONLY', glossary hints are required."""
     with pytest.raises(BlockResultError):
         BlockProcessingResult(block_id=BLOCK_ID, treatment=BlockTreatment.GLOSSARY_ONLY)
 
 
 def test_glossary_only_forbids_full_translation() -> None:
-    """Для `GLOSSARY_ONLY` полного перевода быть не должно."""
+    """For 'GLOSSARY_ONLY', there must be no full translation."""
     with pytest.raises(BlockResultError):
         BlockProcessingResult(
             block_id=BLOCK_ID,
@@ -54,7 +54,7 @@ def test_glossary_only_forbids_full_translation() -> None:
 
 
 def test_read_as_is_forbids_translation_and_hints() -> None:
-    """Для `READ_AS_IS` нет ни перевода, ни словарных подсказок."""
+    """For 'READ_AS_IS', there is neither translation nor glossary hints."""
     with pytest.raises(BlockResultError):
         BlockProcessingResult(
             block_id=BLOCK_ID,
@@ -64,7 +64,7 @@ def test_read_as_is_forbids_translation_and_hints() -> None:
 
 
 def test_read_as_is_allows_language_note() -> None:
-    """`Language Notes` возможны при любом текстовом режиме."""
+    """Language Notes are allowed for any textual treatment."""
     result = BlockProcessingResult(
         block_id=BLOCK_ID,
         treatment=BlockTreatment.READ_AS_IS,
@@ -89,13 +89,13 @@ def test_read_as_is_allows_language_note() -> None:
     ],
 )
 def test_non_textual_block_has_no_result(treatment: BlockTreatment) -> None:
-    """Блок, не попадающий в LLM, результата обработки не имеет."""
+    """A block that does not go to the LLM has no processing result."""
     with pytest.raises(NonTextualBlockError):
         BlockProcessingResult(block_id=BLOCK_ID, treatment=treatment)
 
 
 def test_note_belongs_to_its_own_block() -> None:
-    """Заметка привязана ровно к тому блоку, чей это результат."""
+    """A note is attached strictly to the block whose result it belongs to."""
     with pytest.raises(BlockResultError):
         BlockProcessingResult(
             block_id=BLOCK_ID,
@@ -113,7 +113,7 @@ def test_note_belongs_to_its_own_block() -> None:
 
 
 def test_warnings_do_not_block_result() -> None:
-    """Предупреждение сохраняется вместе с результатом и обработку не отменяет."""
+    """A warning is saved alongside the result and does not cancel processing."""
     result = BlockProcessingResult(
         block_id=BLOCK_ID,
         treatment=BlockTreatment.TRANSLATE,
@@ -128,6 +128,6 @@ def test_warnings_do_not_block_result() -> None:
 
 
 def test_hint_requires_both_sides() -> None:
-    """Словарная подсказка бессмысленна без оригинала или перевода."""
+    """A glossary hint is meaningless without either the original or the translation."""
     with pytest.raises(BlockResultError):
         GlossaryHint(original="chin", translation="   ")

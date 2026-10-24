@@ -1,4 +1,4 @@
-"""Разбор ответа модели и его преобразование во внутренние DTO прикладного слоя."""
+"""Model response parsing and mapping to internal application DTOs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from linguary.domain import BlockTreatment, ConceptType
 
 
 def test_chapter_analysis_is_mapped_to_dto() -> None:
-    """Ответ анализа главы превращается в DTO прикладного слоя целиком."""
+    """Chapter analysis response maps completely to application DTO."""
     payload = parse_payload(
         LLMResponseKind.CHAPTER_ANALYSIS, as_content(analysis_payload())
     )
@@ -28,7 +28,7 @@ def test_chapter_analysis_is_mapped_to_dto() -> None:
 
 
 def test_translation_result_is_mapped_to_dto() -> None:
-    """Ответ обработки группы блоков превращается в DTO прикладного слоя целиком."""
+    """Block group processing response maps completely to application DTO."""
     payload = parse_payload(
         LLMResponseKind.TRANSLATION_RESULT, as_content(translation_payload())
     )
@@ -44,7 +44,7 @@ def test_translation_result_is_mapped_to_dto() -> None:
 
 
 def test_read_as_is_block_is_mapped_without_content() -> None:
-    """Блок `READ_AS_IS` попадает в DTO без перевода и подсказок."""
+    """A 'READ_AS_IS' block is mapped into DTO without translation or hints."""
     payload = parse_payload(
         LLMResponseKind.TRANSLATION_RESULT,
         as_content(
@@ -73,13 +73,13 @@ def test_read_as_is_block_is_mapped_without_content() -> None:
     ],
 )
 def test_invalid_response_gives_format_error(content: str) -> None:
-    """Неразбираемый ответ приводится к ошибке формата, а не к ошибке чужой библиотеки."""
+    """An unparseable response yields a format error rather than a third-party library error."""
     with pytest.raises(LLMResponseFormatError):
         parse_payload(LLMResponseKind.TRANSLATION_RESULT, content)
 
 
 def test_truncated_response_is_reported_as_truncated() -> None:
-    """Обрыв по лимиту токенов виден в ошибке разбора и назван причиной."""
+    """Token limit truncation is reflected in parse error as the cause."""
     with pytest.raises(LLMResponseFormatError) as error:
         parse_payload(
             LLMResponseKind.TRANSLATION_RESULT, '{"blocks": [{"source', truncated=True
@@ -90,7 +90,7 @@ def test_truncated_response_is_reported_as_truncated() -> None:
 
 
 def test_format_error_does_not_expose_full_response() -> None:
-    """Текст ошибки не выносит наружу весь ответ: в нём может быть текст книги."""
+    """Error message does not leak the entire response which may contain book text."""
     content = "не json, " + "текст книги " * 200
 
     with pytest.raises(LLMResponseFormatError) as error:
@@ -100,7 +100,7 @@ def test_format_error_does_not_expose_full_response() -> None:
 
 
 def test_response_of_wrong_kind_is_rejected() -> None:
-    """Ответ анализа на запрос обработки не принимается за результат обработки."""
+    """An analysis response to a translation request is rejected as invalid."""
     with pytest.raises(LLMResponseFormatError):
         parse_payload(
             LLMResponseKind.TRANSLATION_RESULT, as_content(analysis_payload())

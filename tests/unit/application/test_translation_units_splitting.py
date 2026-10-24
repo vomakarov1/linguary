@@ -1,4 +1,4 @@
-"""Тесты защиты фрагментов расщеплённого абзаца от разрыва в translation_units.py (P2.T2)."""
+"""Tests for protecting split paragraph fragments from being separated across translation_units.py (P2.T2)."""
 
 from __future__ import annotations
 
@@ -49,29 +49,29 @@ def _make_block(
 
 
 def test_is_cohesive_with_matches_split_group() -> None:
-    """Блоки с одинаковым атрибутом split_group признаются связными."""
+    """Blocks with the same split_group attribute are considered cohesive."""
     b1 = _make_block(0, "Fragment 1", split_group="/body/p[1]", split_index="1", split_total="2")
     b2 = _make_block(1, "Fragment 2", split_group="/body/p[1]", split_index="2", split_total="2")
     b3 = _make_block(2, "Fragment 3", split_group="/body/p[2]", split_index="1", split_total="2")
     b4 = _make_block(3, "Regular paragraph")
 
-    # Одинаковый split_group -> связные
+    # Same split_group -> cohesive
     assert _is_cohesive_with(b1, b2) is True
 
-    # Разные split_group -> несвязные
+    # Different split_group -> not cohesive
     assert _is_cohesive_with(b2, b3) is False
 
-    # Один со split_group, другой без -> несвязные
+    # One with split_group, other without -> not cohesive
     assert _is_cohesive_with(b3, b4) is False
 
-    # Обычные абзацы Paragraph без split_group -> несвязные
+    # Normal Paragraph blocks without split_group -> not cohesive
     b5 = _make_block(4, "Another regular paragraph")
     assert _is_cohesive_with(b4, b5) is False
 
 
 def test_plan_translation_units_keeps_split_group_together() -> None:
-    """Фрагменты одного расщеплённого абзаца не разрываются между TranslationUnit."""
-    # Обычный блок (400 символов) + 2 фрагмента расщеплённого абзаца по 400 символов
+    """Fragments of a single split paragraph are not split across TranslationUnits."""
+    # Regular block (400 chars) + 2 fragments of a split paragraph of 400 chars each
     b0 = _make_block(0, "A" * 400)
     b1 = _make_block(1, "B" * 400, split_group="/body/p[2]", split_index="1", split_total="2")
     b2 = _make_block(2, "C" * 400, split_group="/body/p[2]", split_index="2", split_total="2")
@@ -79,8 +79,8 @@ def test_plan_translation_units_keeps_split_group_together() -> None:
     blocks = (b0, b1, b2)
     plan = make_plan(blocks)
 
-    # При лимите 1000 символов все три блока (1200) не помещаются в один запрос.
-    # Фрагменты b1 и b2 связны, поэтому b0 уходит в первый юнит, а b1+b2 целиком — во второй.
+    # With a 1000-char limit, all three blocks (1200) cannot fit into one request.
+    # Fragments b1 and b2 are cohesive, so b0 goes to unit 1, and b1+b2 together go to unit 2.
     units = plan_translation_units(
         blocks,
         plan,
@@ -94,20 +94,20 @@ def test_plan_translation_units_keeps_split_group_together() -> None:
 
 
 def test_plan_translation_units_handles_adjacent_different_split_groups() -> None:
-    """Два соседних расщеплённых абзаца образуют самостоятельные связные группы."""
-    # Группа A (два фрагмента по 400 символов = 800)
+    """Two adjacent split paragraphs form independent cohesive groups."""
+    # Group A (two fragments of 400 chars = 800)
     a1 = _make_block(0, "A" * 400, split_group="/body/p[1]", split_index="1", split_total="2")
     a2 = _make_block(1, "B" * 400, split_group="/body/p[1]", split_index="2", split_total="2")
 
-    # Группа B (два фрагмента по 400 символов = 800)
+    # Group B (two fragments of 400 chars = 800)
     b1 = _make_block(2, "C" * 400, split_group="/body/p[2]", split_index="1", split_total="2")
     b2 = _make_block(3, "D" * 400, split_group="/body/p[2]", split_index="2", split_total="2")
 
     blocks = (a1, a2, b1, b2)
     plan = make_plan(blocks)
 
-    # При лимите 1000 символов обе группы (1600) не влезут вместе,
-    # но каждая группа по отдельности (800 <= 1000) помещается в свой TranslationUnit.
+    # With a 1000-char limit, both groups (1600) cannot fit together,
+    # but each group individually (800 <= 1000) fits into its own TranslationUnit.
     units = plan_translation_units(
         blocks,
         plan,

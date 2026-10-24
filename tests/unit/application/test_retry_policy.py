@@ -1,4 +1,4 @@
-"""Классификация ошибок и правила повторов вызова модели (P3.T2, ALG-05)."""
+"""Error classification and model invocation retry rules (P3.T2, ALG-05)."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ TARGET_LANGUAGE = "ru"
 
 
 def expectation(*, blocks: tuple[ExpectedBlock, ...] | None = None) -> ResultExpectation:
-    """Ожидаемый результат группы: два блока с разными режимами обработки."""
+    """Expected unit result: two blocks with different treatments."""
     return ResultExpectation(
         target_language=TARGET_LANGUAGE,
         blocks=blocks
@@ -57,17 +57,17 @@ def expectation(*, blocks: tuple[ExpectedBlock, ...] | None = None) -> ResultExp
 
 
 def validation_error(message: str = "в ответе нет блока block-2") -> ResultValidationError:
-    """Отбраковка результата блокирующей проверкой."""
+    """Result rejection by blocking validation."""
     return ResultValidationError(message, expectation=expectation())
 
 
 def policy(max_attempts: int = 3, **overrides: Any) -> RetryPolicy:
-    """Политика повторов с заданным числом попыток."""
+    """Retry policy with specified number of attempts."""
     return RetryPolicy(max_attempts=max_attempts, **overrides)
 
 
 def translation_request() -> LLMRequest[TranslationResultResponse]:
-    """Исходный запрос обработки группы блоков."""
+    """Initial request for processing a block unit."""
     return LLMRequest.for_translation(
         instructions="Переводи художественно, соблюдая глоссарий.",
         input_text="block-1: It is a truth…\nblock-2: My dear Mr. Bennet",
@@ -75,7 +75,7 @@ def translation_request() -> LLMRequest[TranslationResultResponse]:
 
 
 def reply_for(block_ids: tuple[str, ...]) -> FakeReply:
-    """Ответ модели с результатом ровно для указанных блоков."""
+    """Model reply with results for exactly the specified blocks."""
     payload: dict[str, Any] = {
         "blocks": [
             {
@@ -192,12 +192,12 @@ def reply_for(block_ids: tuple[str, ...]) -> FakeReply:
     ],
 )
 def test_error_is_classified_by_its_type(error: Exception, expected: ErrorType) -> None:
-    """Каждая ветка ALG-05 определяется типом исключения, а не текстом сообщения."""
+    """Each ALG-05 branch is determined by exception type rather than message text."""
     assert classify_error(error).type is expected
 
 
 def test_classified_error_keeps_message_and_technical_detail() -> None:
-    """Ошибка задачи несёт короткое сообщение и техническую деталь для интерфейса."""
+    """A task error carries a short message and technical detail for the interface."""
     task_error = classify_error(LLMTransportError("провайдер недоступен"))
 
     assert task_error.message == "провайдер недоступен"
@@ -205,12 +205,12 @@ def test_classified_error_keeps_message_and_technical_detail() -> None:
 
 
 def test_error_without_message_is_named_by_its_class() -> None:
-    """Ошибка без текста не оставляет пользователя с пустым сообщением."""
+    """An error without text does not leave the user with an empty message."""
     assert classify_error(LLMTransportError("")).message == "LLMTransportError"
 
 
 def test_permanent_error_is_not_retried_on_the_first_attempt() -> None:
-    """`PermanentError` повтору не подлежит: нужен другой файл или настройка."""
+    """A `PermanentError` cannot be retried: a different file or configuration is required."""
     decision = policy().decide(EpubImportFatalError("EPUB нечитаем"), attempts=1)
 
     assert decision.action is RetryAction.GIVE_UP
@@ -228,11 +228,11 @@ def test_permanent_error_is_not_retried_on_the_first_attempt() -> None:
 def test_configuration_error_is_not_retried_but_stays_retryable_by_user(
     error: Exception,
 ) -> None:
-    """Ошибка настройки LLM не повторяется сама, но задачу можно повторить (QA-01).
+    """LLM configuration errors are not retried automatically, but the task can be retried (QA-01).
 
-    Новая попытка с тем же ключом получит тот же отказ, поэтому политика её не делает.
-    Книга же пригодна: после исправления настроек пользователь повторяет задачу, и
-    другой файл для этого не нужен.
+    A new attempt with the same key would get the same failure, so policy does not retry it.
+    The book itself is valid: once settings are fixed, the user retries the task, and no new
+    file is required.
     """
     decision = policy().decide(error, attempts=1)
 
@@ -242,7 +242,7 @@ def test_configuration_error_is_not_retried_but_stays_retryable_by_user(
 
 
 def test_exhausted_attempts_stop_retrying_a_retryable_error() -> None:
-    """Число попыток ограничено настройкой: временная ошибка тоже кончается `failed`."""
+    """The number of attempts is bounded by configuration: transient errors also end in `failed`."""
     decision = policy(max_attempts=3).decide(LLMTransportError("таймаут"), attempts=3)
 
     assert decision.action is RetryAction.GIVE_UP
@@ -250,19 +250,19 @@ def test_exhausted_attempts_stop_retrying_a_retryable_error() -> None:
 
 
 def test_single_attempt_setting_disables_retries() -> None:
-    """Настройка в одну попытку означает отсутствие автоматических повторов."""
+    """A single attempt setting means no automatic retries."""
     decision = policy(max_attempts=1).decide(LLMTransportError("таймаут"), attempts=1)
 
     assert decision.action is RetryAction.GIVE_UP
 
 
 def test_last_attempt_before_the_limit_is_still_retried() -> None:
-    """Предел попыток срабатывает ровно на своём значении, а не раньше."""
+    """The attempt limit triggers at exactly its configured value, not sooner."""
     assert policy(max_attempts=3).decide(LLMTransportError("таймаут"), attempts=2).should_retry
 
 
 def test_transient_error_is_retried_with_growing_backoff() -> None:
-    """Временная ошибка повторяется с паузой, которая растёт от попытки к попытке."""
+    """A transient error is retried with a backoff that grows from attempt to attempt."""
     retry_policy = policy(max_attempts=5, backoff_seconds=1.0, max_backoff_seconds=30.0)
 
     delays = [
@@ -274,7 +274,7 @@ def test_transient_error_is_retried_with_growing_backoff() -> None:
 
 
 def test_backoff_does_not_grow_beyond_its_limit() -> None:
-    """Пауза перед повтором ограничена: задача не растягивается на минуты ожидания."""
+    """Backoff delay is bounded: tasks are not stretched into minutes of waiting."""
     retry_policy = policy(max_attempts=10, backoff_seconds=1.0, max_backoff_seconds=4.0)
 
     decision = retry_policy.decide(LLMTransportError("429"), attempts=9)
@@ -283,9 +283,9 @@ def test_backoff_does_not_grow_beyond_its_limit() -> None:
 
 
 def test_provider_retry_after_extends_the_backoff() -> None:
-    """Пауза перед повтором не короче той, что попросил провайдер заголовком `Retry-After`.
+    """Retry backoff is no shorter than requested by the provider's `Retry-After` header.
 
-    Повтор раньше срока снова получит отказ по частоте и сожжёт попытку зря.
+    Retrying earlier would trigger rate limiting again and waste an attempt.
     """
     retry_policy = policy(max_attempts=5, backoff_seconds=1.0, max_backoff_seconds=30.0)
 
@@ -298,7 +298,7 @@ def test_provider_retry_after_extends_the_backoff() -> None:
 
 
 def test_short_retry_after_does_not_shorten_the_backoff() -> None:
-    """Короткий `Retry-After` не отменяет растущей паузы повторов."""
+    """A short `Retry-After` does not override growing exponential backoff."""
     retry_policy = policy(max_attempts=5, backoff_seconds=1.0, max_backoff_seconds=30.0)
 
     decision = retry_policy.decide(
@@ -309,7 +309,7 @@ def test_short_retry_after_does_not_shorten_the_backoff() -> None:
 
 
 def test_retry_after_is_bounded() -> None:
-    """Непомерный `Retry-After` не превращает одну задачу в часы ожидания."""
+    """An excessive `Retry-After` does not turn a single task into hours of waiting."""
     retry_policy = policy(
         max_attempts=5,
         backoff_seconds=1.0,
@@ -325,7 +325,7 @@ def test_retry_after_is_bounded() -> None:
 
 
 def test_model_output_error_is_retried_with_the_same_request() -> None:
-    """Невалидный ответ модели повторяется тем же запросом без уточнений."""
+    """An invalid model response is retried with the same request without repairs."""
     request = translation_request()
 
     decision = policy().decide(LLMResponseFormatError("ответ не разбирается"), attempts=1)
@@ -339,7 +339,7 @@ def test_model_output_error_is_retried_with_the_same_request() -> None:
 
 
 def test_output_limit_truncation_is_not_retried() -> None:
-    """Обрыв по лимиту вывода повтору не подлежит: тот же запрос даст тот же обрыв."""
+    """Output token limit truncation is not retried: the same request would truncate again."""
     decision = policy(max_attempts=3).decide(
         LLMResponseFormatError("обрыв ответа по лимиту токенов", truncated=True),
         attempts=1,
@@ -352,7 +352,7 @@ def test_output_limit_truncation_is_not_retried() -> None:
 
 
 def test_validation_error_is_retried_with_repair_instruction() -> None:
-    """Отбракованный результат повторяется с уточняющей инструкцией (ALG-05)."""
+    """A rejected result is retried with a repair instruction (ALG-05)."""
     decision = policy().decide(validation_error(), attempts=1)
 
     assert decision.action is RetryAction.RETRY_WITH_REPAIR
@@ -361,7 +361,7 @@ def test_validation_error_is_retried_with_repair_instruction() -> None:
 
 
 def test_repair_instruction_is_appended_to_the_original_request() -> None:
-    """Уточнение дописывается к исходному запросу и не заменяет собранный контекст."""
+    """The repair instruction is appended to the original request and does not replace context."""
     request = translation_request()
     decision = policy().decide(validation_error(), attempts=1)
 
@@ -375,7 +375,7 @@ def test_repair_instruction_is_appended_to_the_original_request() -> None:
 
 
 def test_repair_instruction_names_blocks_treatments_and_language() -> None:
-    """Уточнение перечисляет ожидаемые блоки, режимы обработки и целевой язык."""
+    """The repair instruction names expected blocks, treatments, and target language."""
     instruction = build_repair_instruction(expectation(), violation="в ответе нет блока block-2")
 
     assert "block-1" in instruction
@@ -387,7 +387,7 @@ def test_repair_instruction_names_blocks_treatments_and_language() -> None:
 
 
 def test_repair_instruction_omits_treatments_the_model_chooses_itself() -> None:
-    """Для анализа главы режимы выбирает модель: уточнение их не диктует."""
+    """For chapter analysis, treatments are chosen by the model: repairs do not dictate them."""
     instruction = build_repair_instruction(
         expectation(blocks=(ExpectedBlock(block_id="block-1"),))
     )
@@ -397,7 +397,7 @@ def test_repair_instruction_omits_treatments_the_model_chooses_itself() -> None:
 
 
 def test_repair_instruction_without_expectation_still_reports_rejection() -> None:
-    """Нарушение без сведений об ожидаемом результате не даёт пустой инструкции."""
+    """A violation without expectation details still yields a non-empty repair instruction."""
     decision = policy().decide(ResultValidationError("не тот язык"), attempts=1)
 
     assert decision.repair_instruction is not None
@@ -405,7 +405,7 @@ def test_repair_instruction_without_expectation_still_reports_rejection() -> Non
 
 
 def test_request_of_a_forbidden_retry_is_refused() -> None:
-    """Решение «не повторять» не даёт запроса следующей попытки."""
+    """A 'give up' decision refuses to construct a next request."""
     decision = policy().decide(LLMConfigurationError("LLM не настроена"), attempts=1)
 
     with pytest.raises(RetryPolicyError):
@@ -417,25 +417,25 @@ def test_request_of_a_forbidden_retry_is_refused() -> None:
     [pytest.param(0, id="zero"), pytest.param(-1, id="negative")],
 )
 def test_attempt_number_starts_from_one(attempts: int) -> None:
-    """Номер попытки — счётчик сделанных вызовов, и он не может быть нулевым."""
+    """The attempt number counts completed invocations and cannot be zero or negative."""
     with pytest.raises(RetryPolicyError):
         policy().decide(LLMTransportError("таймаут"), attempts=attempts)
 
 
 def test_policy_requires_at_least_one_attempt() -> None:
-    """Политика без единой попытки бессмысленна и не собирается."""
+    """A policy with zero attempts is invalid and cannot be constructed."""
     with pytest.raises(RetryPolicyError):
         RetryPolicy(max_attempts=0)
 
 
 def test_expectation_requires_target_language() -> None:
-    """Ожидаемый результат без целевого языка не описывает того, что нужно повторить."""
+    """An expectation without a target language does not adequately describe retry requirements."""
     with pytest.raises(RetryPolicyError):
         ResultExpectation(target_language=" ")
 
 
 def test_expectation_rejects_duplicate_blocks() -> None:
-    """Один блок не может ожидаться дважды: результат сохраняется по `block_id`."""
+    """The same block cannot be expected twice: results are keyed by `block_id`."""
     with pytest.raises(RetryPolicyError):
         ResultExpectation(
             target_language=TARGET_LANGUAGE,
@@ -444,13 +444,13 @@ def test_expectation_rejects_duplicate_blocks() -> None:
 
 
 def test_expectation_rejects_non_textual_treatment() -> None:
-    """Нетекстовый блок модели не передаётся, значит и ожидать его результат нельзя."""
+    """Non-textual blocks are not sent to the model, so expecting results for them is invalid."""
     with pytest.raises(RetryPolicyError):
         ExpectedBlock(block_id="block-1", treatment=BlockTreatment.PRESERVE_ONLY)
 
 
 async def test_retried_call_carries_the_repair_instruction_to_the_model() -> None:
-    """Повторный вызов уходит модели с уточнением поверх исходной инструкции."""
+    """The retried invocation is sent to the model with repairs layered over the prompt."""
     client = FakeLLMClient.replying(
         [reply_for(("block-99",)), reply_for(("block-1", "block-2"))]
     )

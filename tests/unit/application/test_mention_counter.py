@@ -1,4 +1,4 @@
-"""Подсчёт упоминаний по исходному тексту книги."""
+"""Mention counting across the source text of the book."""
 
 from analysis_fakes import make_analysis_document, make_analysis_section
 

@@ -1,4 +1,4 @@
-"""Оценка оставшегося времени анализа и обработки книги (QA-13)."""
+"""Remaining time estimation for book analysis and processing (QA-13)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from linguary.web.labels import remaining_time_label
 
 
 def test_no_calls_yet_gives_no_estimate() -> None:
-    """До первого вызова модели мерить нечем: оценки нет, а не ноль."""
+    """Before the first model call there is nothing to measure: no estimate rather than zero."""
     assert (
         estimate_remaining_seconds(
             durations_ms=(), completed_blocks=0, remaining_blocks=100
@@ -19,7 +19,7 @@ def test_no_calls_yet_gives_no_estimate() -> None:
 
 
 def test_estimate_is_median_call_times_remaining_calls() -> None:
-    """Медиана длительности вызова × оставшиеся вызовы: один вызов на главу из 10 блоков."""
+    """Median call duration * remaining calls: one call per 10-block chapter."""
     seconds = estimate_remaining_seconds(
         durations_ms=(40_000, 50_000, 60_000),
         completed_blocks=30,
@@ -30,7 +30,7 @@ def test_estimate_is_median_call_times_remaining_calls() -> None:
 
 
 def test_one_slow_retry_does_not_stretch_the_estimate() -> None:
-    """Медиана, а не среднее: один затянувшийся вызов оценку не раздувает."""
+    """Median rather than mean: a single delayed retry does not inflate the estimate."""
     seconds = estimate_remaining_seconds(
         durations_ms=(50_000, 50_000, 900_000),
         completed_blocks=30,
@@ -41,7 +41,7 @@ def test_one_slow_retry_does_not_stretch_the_estimate() -> None:
 
 
 def test_parallelism_divides_the_estimate() -> None:
-    """Несколько глав одновременно — во столько же раз меньше ждать."""
+    """Multiple chapters in parallel proportionally reduce wait time."""
     seconds = estimate_remaining_seconds(
         durations_ms=(40_000,),
         completed_blocks=10,
@@ -53,7 +53,7 @@ def test_parallelism_divides_the_estimate() -> None:
 
 
 def test_rate_limit_bounds_the_gain_of_parallelism() -> None:
-    """Предел частоты запросов не даёт параллелизму ускорить работу сверх него."""
+    """Rate limit bounds the parallelism speedup."""
     seconds = estimate_remaining_seconds(
         durations_ms=(10_000,),
         completed_blocks=10,
@@ -66,7 +66,7 @@ def test_rate_limit_bounds_the_gain_of_parallelism() -> None:
 
 
 def test_finished_stage_needs_no_more_time() -> None:
-    """Когда оставшейся работы нет, ждать нечего."""
+    """When no work remains, there is nothing left to wait for."""
     assert (
         estimate_remaining_seconds(
             durations_ms=(40_000,), completed_blocks=10, remaining_blocks=0
@@ -86,5 +86,5 @@ def test_finished_stage_needs_no_more_time() -> None:
     ],
 )
 def test_remaining_time_is_named_roughly(seconds: int | None, label: str) -> None:
-    """Оценка грубая, поэтому называется «примерно» и округляется до минут вверх."""
+    """The estimate is rough, so it is phrased as approximate and rounded up to minutes."""
     assert remaining_time_label(seconds) == label

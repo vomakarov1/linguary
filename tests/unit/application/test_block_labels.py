@@ -1,4 +1,4 @@
-"""Служебные метки блоков не входят в текст анализа."""
+"""Service block labels are excluded from analysis text."""
 
 from linguary.application.block_labels import without_block_labels
 

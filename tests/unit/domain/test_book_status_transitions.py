@@ -1,4 +1,4 @@
-"""Машина состояний книги: таблица переходов ALG-06 (PRD § 18)."""
+"""Book state machine: transition table ALG-06 (PRD § 18)."""
 
 from __future__ import annotations
 
@@ -105,7 +105,7 @@ from linguary.domain import (
 def test_allowed_transition(
     source: BookStatus | None, event: BookEvent, target: BookStatus
 ) -> None:
-    """Каждая строка таблицы ALG-06 выполняется и разрешена."""
+    """Each row of table ALG-06 is executable and permitted."""
     assert apply_book_event(source, event) is target
     assert is_transition_allowed(source, target)
 
@@ -123,7 +123,7 @@ def test_allowed_transition(
 def test_transition_outside_table_is_rejected(
     source: BookStatus, target: BookStatus
 ) -> None:
-    """Переход вне таблицы запрещён и отклоняется ошибкой."""
+    """A transition outside the table is forbidden and rejected with an error."""
     assert not is_transition_allowed(source, target)
     with pytest.raises(BookStatusTransitionError):
         ensure_transition_allowed(source, target)
@@ -146,19 +146,19 @@ def test_transition_outside_table_is_rejected(
     ],
 )
 def test_event_in_wrong_status_is_rejected(source: BookStatus, event: BookEvent) -> None:
-    """Событие, недопустимое в текущем состоянии, отклоняется ошибкой."""
+    """An event invalid in the current state is rejected with an error."""
     with pytest.raises(BookStatusTransitionError):
         apply_book_event(source, event)
 
 
 def test_failed_is_reachable_only_from_importing() -> None:
-    """`FAILED` зарезервирован за постоянной ошибкой уровня книги."""
+    """'FAILED' is reserved for a permanent book-level error."""
     sources = [status for status in BookStatus if is_transition_allowed(status, BookStatus.FAILED)]
     assert sources == [BookStatus.IMPORTING]
 
 
 def test_allowed_targets_lists_reachable_statuses() -> None:
-    """Из состояния обработки книга уходит либо к экспорту, либо к проверке глоссария."""
+    """From the processing state, a book transitions either to export or to glossary review."""
     assert allowed_targets(BookStatus.PROCESSING) == frozenset(
         {BookStatus.READY_TO_EXPORT, BookStatus.GLOSSARY_REVIEW}
     )
@@ -173,7 +173,7 @@ def test_allowed_targets_lists_reachable_statuses() -> None:
     ],
 )
 def test_retryable_task_failure_keeps_book_status(error_type: ErrorType) -> None:
-    """Неуспех повторяемой задачи состояние книги не меняет."""
+    """Failure of a retryable task does not change the book status."""
     assert (
         status_after_task_failure(
             BookStatus.PROCESSING,
@@ -185,7 +185,7 @@ def test_retryable_task_failure_keeps_book_status(error_type: ErrorType) -> None
 
 
 def test_permanent_import_error_fails_the_book() -> None:
-    """Постоянная ошибка импорта переводит книгу в `FAILED`."""
+    """A permanent import error transitions the book to 'FAILED'."""
     assert (
         status_after_task_failure(
             BookStatus.IMPORTING,
@@ -197,7 +197,7 @@ def test_permanent_import_error_fails_the_book() -> None:
 
 
 def test_permanent_error_of_other_task_keeps_book_status() -> None:
-    """Постоянная ошибка задачи вне импорта не роняет книгу целиком."""
+    """A permanent error in a non-import task does not fail the entire book."""
     assert (
         status_after_task_failure(
             BookStatus.PROCESSING,

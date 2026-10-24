@@ -1,4 +1,4 @@
-"""Решения пользователя по глоссарию и старт обработки (P3.T5, PRD § 11-12, § 21.3)."""
+"""User glossary decisions and processing start (P3.T5, PRD § 11-12, § 21.3)."""
 
 from __future__ import annotations
 
@@ -42,12 +42,12 @@ from linguary.domain import (
 
 LLM_SETTINGS = LLMSettingsSnapshot(provider="openai_compatible", model="gpt-test")
 
-#: Уверенно переведённый термин: подсказка, решения не требует.
+#: High-confidence translated term: hint, does not require a decision.
 HINT = "entailed estate"
 
 
 def hint_candidate() -> GlossaryCandidate:
-    """Кандидат, который проверки не требует и старту обработки не мешает."""
+    """Candidate that does not require review and does not prevent starting processing."""
     return make_analysis_candidate(
         source_text=HINT,
         type=ConceptType.TERM,
@@ -60,7 +60,7 @@ def glossary_book(
     *candidates: GlossaryCandidate,
     status: BookStatus = BookStatus.GLOSSARY_REVIEW,
 ) -> FakeUnitOfWork:
-    """Книга с одной проанализированной главой и её кандидатами глоссария."""
+    """Book with a single analyzed chapter and its glossary candidates."""
     unit_of_work = make_glossary_book(
         (make_chapter_analysis(candidates=candidates),), status=status
     )
@@ -73,18 +73,18 @@ def glossary_book(
 
 
 def approve(unit_of_work: FakeUnitOfWork) -> ApproveGlossary:
-    """Сценарий решений по глоссарию поверх двойника хранилища."""
+    """Glossary decisions use case on top of storage double."""
     return ApproveGlossary(
-        unit_of_work=unit_of_work,  # type: ignore[arg-type]  # двойник порта хранения
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]  # storage port double
         glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
         id_factory=sequential_ids(),
     )
 
 
 def start(unit_of_work: FakeUnitOfWork) -> StartProcessing:
-    """Сценарий старта обработки поверх двойника хранилища."""
+    """Start processing use case on top of storage double."""
     return StartProcessing(
-        unit_of_work=unit_of_work,  # type: ignore[arg-type]  # двойник порта хранения
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]  # storage port double
         glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
         llm_settings_snapshot=LLM_SETTINGS,
         id_factory=sequential_ids(),
@@ -97,7 +97,7 @@ def command(
     source_text: str = "Mr. Bennet",
     translation: str | None = None,
 ) -> GlossaryDecisionCommand:
-    """Решение пользователя по одному элементу глоссария книги."""
+    """User decision for a single book glossary item."""
     return GlossaryDecisionCommand(
         book_id=BOOK_ID,
         source_text=source_text,
@@ -107,7 +107,7 @@ def command(
 
 
 def started_book() -> FakeUnitOfWork:
-    """Книга, обработка которой уже запущена с зафиксированным глоссарием."""
+    """Book whose processing is already started with a frozen glossary."""
     unit_of_work = glossary_book(make_analysis_candidate(), hint_candidate())
     approve(unit_of_work)(command(GlossaryDecision.ACCEPT))
     start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
@@ -146,7 +146,7 @@ def test_accept_all_touches_only_items_requiring_review() -> None:
 
 
 def test_accept_stores_approved_decision() -> None:
-    """Принятие сохраняет вариант модели как утверждённое решение."""
+    """Acceptance saves the model variant as an approved decision."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     concept = approve(unit_of_work)(command(GlossaryDecision.ACCEPT))
@@ -160,7 +160,7 @@ def test_accept_stores_approved_decision() -> None:
 
 
 def test_accept_all_awaiting_decides_every_pending_item() -> None:
-    """Массовое принятие закрывает все ждущие решения элементы за один вызов."""
+    """Bulk acceptance resolves all pending items in a single call."""
     unit_of_work = glossary_book(
         make_analysis_candidate(),
         make_analysis_candidate(
@@ -191,7 +191,7 @@ def test_accept_all_awaiting_decides_every_pending_item() -> None:
 
 
 def test_accept_all_awaiting_is_rejected_after_processing_started() -> None:
-    """Массовое принятие подчиняется тому же запрету, что и решение по элементу."""
+    """Bulk acceptance follows the same restriction as item-level decisions."""
     unit_of_work = glossary_book(
         make_analysis_candidate(), status=BookStatus.PROCESSING
     )
@@ -203,7 +203,7 @@ def test_accept_all_awaiting_is_rejected_after_processing_started() -> None:
 
 
 def test_correct_stores_user_translation() -> None:
-    """Исправление сохраняет вариант пользователя вместо предложенного моделью."""
+    """Correction stores the user's translation instead of the one proposed by the model."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     concept = approve(unit_of_work)(
@@ -221,7 +221,7 @@ def test_correct_stores_user_translation() -> None:
     [pytest.param(None, id="no-translation"), pytest.param("   ", id="blank")],
 )
 def test_correction_without_translation_is_rejected(translation: str | None) -> None:
-    """Исправление без варианта перевода решением не считается."""
+    """A correction without a translation variant is not considered a valid decision."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     with pytest.raises(GlossaryReviewError):
@@ -243,7 +243,7 @@ def test_correction_without_translation_is_rejected(translation: str | None) -> 
 def test_decision_other_than_correction_rejects_translation(
     decision: GlossaryDecision,
 ) -> None:
-    """Вариант перевода принимает только исправление: остальные действия меняют статус."""
+    """Only correction accepts a translation variant; other actions change status."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     with pytest.raises(GlossaryReviewError):
@@ -253,7 +253,7 @@ def test_decision_other_than_correction_rejects_translation(
 
 
 def test_lock_keeps_corrected_translation() -> None:
-    """Фиксация сохраняет исправленный вариант и переписывает прежнее решение."""
+    """Locking preserves the corrected variant and overwrites the previous decision."""
     unit_of_work = glossary_book(make_analysis_candidate())
     scenario = approve(unit_of_work)
     corrected = scenario(command(GlossaryDecision.CORRECT, translation="мистер Беннетт"))
@@ -269,7 +269,7 @@ def test_lock_keeps_corrected_translation() -> None:
 
 
 def test_skip_leaves_item_as_optional_hint() -> None:
-    """Пропущенный как неважный элемент остаётся необязательной подсказкой."""
+    """An item skipped as non-essential remains an optional hint."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     concept = approve(unit_of_work)(command(GlossaryDecision.SKIP))
@@ -281,7 +281,7 @@ def test_skip_leaves_item_as_optional_hint() -> None:
 
 
 def test_decision_on_unknown_item_is_rejected() -> None:
-    """Решение принимается только по элементу глоссария этой книги."""
+    """A decision can only be made on a glossary item of this book."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     with pytest.raises(GlossaryReviewError, match="Winston Smith"):
@@ -291,7 +291,7 @@ def test_decision_on_unknown_item_is_rejected() -> None:
 
 
 def test_review_of_unknown_book_is_rejected() -> None:
-    """Глоссарий читается только у существующей книги."""
+    """Glossary can only be read for an existing book."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     with pytest.raises(GlossaryReviewError):
@@ -307,7 +307,7 @@ def test_review_of_unknown_book_is_rejected() -> None:
     ],
 )
 def test_glossary_is_read_only_after_processing_started(status: BookStatus) -> None:
-    """После старта обработки решения глоссария не меняются (PRD § 11, § 21.3)."""
+    """After processing starts, glossary decisions cannot be modified (PRD § 11, § 21.3)."""
     unit_of_work = glossary_book(make_analysis_candidate(), status=status)
 
     with pytest.raises(GlossaryReviewError, match="только"):
@@ -317,7 +317,7 @@ def test_glossary_is_read_only_after_processing_started(status: BookStatus) -> N
 
 
 def test_decisions_are_frozen_after_start() -> None:
-    """Запущенная обработка закрывает глоссарий для правки, а снимок остаётся прежним."""
+    """Running processing locks the glossary against edits, and the snapshot remains unchanged."""
     unit_of_work = started_book()
 
     with pytest.raises(GlossaryReviewError):
@@ -332,7 +332,7 @@ def test_decisions_are_frozen_after_start() -> None:
 
 
 def test_processing_does_not_start_while_decisions_are_pending() -> None:
-    """Обработка не запускается, пока среди требующих внимания есть необработанные."""
+    """Processing does not start while there are unresolved items requiring review."""
     unit_of_work = glossary_book(make_analysis_candidate(), hint_candidate())
 
     with pytest.raises(GlossaryReviewIncompleteError, match="Mr. Bennet"):
@@ -345,7 +345,7 @@ def test_processing_does_not_start_while_decisions_are_pending() -> None:
 
 
 def test_start_freezes_glossary_snapshot() -> None:
-    """Старт обработки замораживает решения снимком запуска (PRD § 11)."""
+    """Starting processing freezes decisions into a run snapshot (PRD § 11)."""
     unit_of_work = glossary_book(make_analysis_candidate(), hint_candidate())
     approve(unit_of_work)(
         command(GlossaryDecision.CORRECT, translation="мистер Беннетт")
@@ -373,7 +373,7 @@ def test_start_freezes_glossary_snapshot() -> None:
     ],
 )
 def test_start_moves_book_to_processing(status: BookStatus) -> None:
-    """Старт обработки переводит книгу в `PROCESSING` (ALG-06)."""
+    """Starting processing transitions the book to `PROCESSING` (ALG-06)."""
     unit_of_work = glossary_book(hint_candidate(), status=status)
 
     start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
@@ -391,7 +391,7 @@ def test_start_moves_book_to_processing(status: BookStatus) -> None:
     ],
 )
 def test_processing_does_not_start_outside_review(status: BookStatus) -> None:
-    """Из состояния, не дошедшего до проверки глоссария, обработка не запускается."""
+    """Processing does not start from a state prior to glossary review."""
     unit_of_work = glossary_book(hint_candidate(), status=status)
 
     with pytest.raises(BookStatusTransitionError):
@@ -401,7 +401,7 @@ def test_processing_does_not_start_outside_review(status: BookStatus) -> None:
 
 
 def test_second_active_run_is_rejected() -> None:
-    """У книги не бывает двух активных запусков обработки (ADR § 3)."""
+    """A book cannot have two active processing runs (ADR § 3)."""
     unit_of_work = started_book()
 
     with pytest.raises(GlossaryReviewError, match="уже идёт обработка"):
@@ -411,7 +411,7 @@ def test_second_active_run_is_rejected() -> None:
 
 
 def test_suggested_note_of_the_chapter_reaches_the_review() -> None:
-    """Указание, предложенное анализом главы, видно в проверке глоссария."""
+    """A note suggested by chapter analysis is visible in glossary review."""
     unit_of_work = glossary_book(make_analysis_candidate(note="женский род"))
 
     item = approve(unit_of_work).review(BOOK_ID).item_for("Mr. Bennet")
@@ -421,7 +421,7 @@ def test_suggested_note_of_the_chapter_reaches_the_review() -> None:
 
 
 def test_decision_keeps_the_note_of_the_chapter() -> None:
-    """Решение без своего указания сохраняет то, что предложила глава."""
+    """A decision without its own note preserves what the chapter suggested."""
     unit_of_work = glossary_book(make_analysis_candidate(note="женский род"))
 
     concept = approve(unit_of_work)(command(GlossaryDecision.ACCEPT))
@@ -430,7 +430,7 @@ def test_decision_keeps_the_note_of_the_chapter() -> None:
 
 
 def test_note_of_the_user_replaces_the_note_of_the_chapter() -> None:
-    """Указание пользователя старше предложенного главой, в том числе пустое."""
+    """The user's note takes precedence over the chapter's suggestion, including an empty note."""
     unit_of_work = glossary_book(make_analysis_candidate(note="женский род"))
 
     corrected = approve(unit_of_work).set_note(
@@ -447,10 +447,10 @@ def test_note_of_the_user_replaces_the_note_of_the_chapter() -> None:
 
 
 def test_note_edit_keeps_the_corrected_translation() -> None:
-    """Правка указания не возвращает вариант модели поверх исправления пользователя.
+    """Editing a note does not restore the model variant over the user's correction.
 
-    Ради этого указание и правится отдельным действием: род персонажа виден позже,
-    чем принимается перевод имени, и исправленный вариант терять нельзя.
+    For this reason the note is edited as a separate action: character gender becomes known
+    later than name translation is accepted, and the corrected variant must not be lost.
     """
     unit_of_work = glossary_book(make_analysis_candidate())
     decided = approve(unit_of_work)(
@@ -469,7 +469,7 @@ def test_note_edit_keeps_the_corrected_translation() -> None:
 
 
 def test_note_edit_of_unknown_concept_is_rejected() -> None:
-    """Указание по понятию, которого в книге нет, не сохраняется."""
+    """A note for a concept not present in the book is rejected."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     with pytest.raises(GlossaryNotFoundError):
@@ -479,7 +479,7 @@ def test_note_edit_of_unknown_concept_is_rejected() -> None:
 
 
 def test_note_is_frozen_in_the_snapshot_of_the_run() -> None:
-    """Снимок запуска несёт указание вместе с вариантом перевода (PRD § 11)."""
+    """The launch snapshot carries the note together with the translation variant (PRD § 11)."""
     unit_of_work = glossary_book(make_analysis_candidate(note="женский род"), hint_candidate())
     approve(unit_of_work)(command(GlossaryDecision.LOCK))
 
@@ -490,7 +490,7 @@ def test_note_is_frozen_in_the_snapshot_of_the_run() -> None:
 
 
 def test_decision_can_be_changed_after_implicit_acceptance_by_note() -> None:
-    """Принятое вместе с указанием решение можно исправить до старта обработки (QA-07)."""
+    """A decision accepted implicitly along with a note can be corrected before processing starts (QA-07)."""
     unit_of_work = glossary_book(make_analysis_candidate())
     implicit = approve(unit_of_work).set_note(
         GlossaryNoteCommand(
@@ -516,9 +516,9 @@ def test_decision_can_be_changed_after_implicit_acceptance_by_note() -> None:
 
 
 def test_correction_changes_the_concept_type() -> None:
-    """Исправление меняет тип понятия, ошибочно выбранный моделью (QA-11, T2).
+    """Correction changes the concept type chosen mistakenly by the model (QA-11, T2).
 
-    Тип держится и при следующих решениях и уходит в снимок запуска.
+    The type is retained in subsequent decisions and included in the launch snapshot.
     """
     unit_of_work = glossary_book(
         make_analysis_candidate(
@@ -548,7 +548,7 @@ def test_correction_changes_the_concept_type() -> None:
 
 
 def test_type_is_accepted_only_with_correction() -> None:
-    """Тип понятия меняется только исправлением, как и вариант перевода."""
+    """Concept type is only accepted with a correction, just like a translation variant."""
     unit_of_work = glossary_book(make_analysis_candidate())
 
     with pytest.raises(GlossaryReviewError):
@@ -563,10 +563,10 @@ def test_type_is_accepted_only_with_correction() -> None:
 
 
 def test_skip_does_not_pass_the_unconfirmed_note_of_the_model() -> None:
-    """Пропуск не передаёт обработке указание, которого пользователь не подтверждал.
+    """Skipping does not propagate a note that was not confirmed by the user.
 
-    Иначе «женский род», ошибочно предложенный десерту, уходит модели обработки
-    вместе с пропущенным элементом (QA-11).
+    Otherwise "feminine gender", mistakenly suggested for a dessert, would reach
+    the processing model with the skipped item (QA-11).
     """
     unit_of_work = glossary_book(
         make_analysis_candidate(
@@ -587,7 +587,7 @@ def test_skip_does_not_pass_the_unconfirmed_note_of_the_model() -> None:
 
 
 def test_skip_keeps_the_note_saved_by_the_user() -> None:
-    """Указание, которое пользователь сохранил сам, пропуск не снимает."""
+    """A note saved directly by the user is preserved upon skipping."""
     unit_of_work = glossary_book(make_analysis_candidate(note="женский род"))
     approve(unit_of_work).set_note(
         GlossaryNoteCommand(
@@ -612,7 +612,7 @@ def test_skip_keeps_the_note_saved_by_the_user() -> None:
 
 
 def test_decision_replaces_diverging_decisions_of_other_spellings() -> None:
-    """Новое решение по элементу убирает прежние решения по его другим написаниям."""
+    """A new decision on an item removes previous decisions on its other spellings."""
     unit_of_work = glossary_book(
         make_analysis_candidate(source_text="Mr Bennet"),
         make_analysis_candidate(source_text="Mr. Bennet"),

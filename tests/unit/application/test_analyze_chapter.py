@@ -1,4 +1,4 @@
-"""Сценарий анализа главы: запрос, проверка ответа и сохранение (P3.T3, PRD § 14)."""
+"""Chapter analysis scenario: request, response validation, and persistence (P3.T3, PRD § 14)."""
 
 from __future__ import annotations
 
@@ -36,18 +36,18 @@ from linguary.domain import (
 
 
 def two_block_book() -> FakeUnitOfWork:
-    """Книга из одной главы с двумя абзацами."""
+    """A book with one chapter of two paragraphs."""
     section = make_analysis_section(texts=("First paragraph.", "Second paragraph."))
     return FakeUnitOfWork(document=make_analysis_document((section,)))
 
 
 def command() -> AnalyzeChapterCommand:
-    """Команда анализа единственной главы книги."""
+    """Command to analyze the single chapter of the book."""
     return AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-1")
 
 
 async def test_saved_analysis_keeps_chapter_summary_and_materials() -> None:
-    """Сохранённый анализ несёт сводку главы, инструкции и `Before You Read`."""
+    """Saved analysis preserves chapter summary, instructions, and `Before You Read`."""
     unit_of_work = two_block_book()
     scenario, _ = make_analyze_chapter(unit_of_work, FakeLLMClient.always(analysis_reply()))
 
@@ -62,7 +62,7 @@ async def test_saved_analysis_keeps_chapter_summary_and_materials() -> None:
 
 
 async def test_saved_plan_covers_chapter_blocks_in_document_order() -> None:
-    """План обработки покрывает блоки главы и хранит их стабильные идентификаторы."""
+    """The processing plan covers chapter blocks and stores their stable identifiers."""
     unit_of_work = two_block_book()
     section = unit_of_work.documents.get(BOOK_ID).section("section-1")  # type: ignore[union-attr]
     scenario, _ = make_analyze_chapter(
@@ -83,7 +83,7 @@ async def test_saved_plan_covers_chapter_blocks_in_document_order() -> None:
 
 
 async def test_requires_review_is_computed_by_application() -> None:
-    """`requires_review` вычисляет приложение, а не модель (DTO-01, PRD § 12)."""
+    """`requires_review` is computed by the application, not the model (DTO-01, PRD § 12)."""
     unit_of_work = two_block_book()
     scenario, _ = make_analyze_chapter(
         unit_of_work,
@@ -121,7 +121,7 @@ async def test_requires_review_is_computed_by_application() -> None:
 
 
 async def test_low_confidence_candidate_requires_review() -> None:
-    """Уверенность ниже настроенного порога делает кандидата требующим внимания."""
+    """Confidence below the configured threshold marks the candidate as requiring attention."""
     unit_of_work = two_block_book()
     scenario, _ = make_analyze_chapter(
         unit_of_work,
@@ -147,7 +147,7 @@ async def test_low_confidence_candidate_requires_review() -> None:
 
 
 async def test_request_carries_previous_chapter_candidates_only() -> None:
-    """В запрос главы попадают решения предыдущих глав, но не их текст (PRD § 13)."""
+    """The chapter request includes decisions from previous chapters, but not their text (PRD § 13)."""
     first = make_analysis_section(
         section_id="section-1", title="Chapter 1", order=0, texts=("First chapter text.",)
     )
@@ -168,7 +168,7 @@ async def test_request_carries_previous_chapter_candidates_only() -> None:
 
 
 async def test_repeated_analysis_skips_candidates_of_following_chapters() -> None:
-    """Повторный анализ главы в середине книги не видит решений следующих глав."""
+    """Repeated analysis of a middle chapter does not see decisions of subsequent chapters."""
     sections = tuple(
         make_analysis_section(
             section_id=f"section-{number}",
@@ -231,9 +231,9 @@ async def test_repeated_analysis_skips_candidates_of_following_chapters() -> Non
 async def test_user_decision_outranks_model_candidate_in_next_chapter(
     status: TermStatus, expected: str, absent: str
 ) -> None:
-    """Анализ следующей главы видит решение пользователя, а не вариант модели (Д-1).
+    """Next chapter analysis sees user decisions rather than model candidates (D-1).
 
-    Пропущенный элемент решением не считается: главе идёт вариант модели.
+    A skipped item is not considered a decision: the chapter gets the model candidate.
     """
     sections = tuple(
         make_analysis_section(
@@ -288,7 +288,7 @@ async def test_user_decision_outranks_model_candidate_in_next_chapter(
 def _decision(
     concept_id: str, source_text: str, translation: str, status: TermStatus
 ) -> TermConcept:
-    """Решение пользователя по элементу глоссария книги."""
+    """User decision on a book glossary item."""
     return TermConcept(
         id=concept_id,
         book_id=BOOK_ID,
@@ -307,11 +307,11 @@ def _decision(
 
 
 async def test_repeated_analysis_sees_user_decisions_of_whole_book() -> None:
-    """Повторный анализ главы видит решения пользователя по всей книге (Н-3).
+    """Repeated chapter analysis sees user decisions across the whole book (N-3).
 
-    Решения по понятиям этой и следующих глав приходят в анализ так же, как решения
-    предыдущих глав; кандидаты следующих глав без решения и пропущенные элементы —
-    нет: вариант модели следующей главы этой главе ничего не даёт.
+    Decisions for concepts in this and subsequent chapters enter the analysis just like decisions
+    from previous chapters; candidates of subsequent chapters without decisions and skipped items
+    do not: the model variant of a subsequent chapter contributes nothing to this chapter.
     """
     sections = tuple(
         make_analysis_section(
@@ -368,11 +368,11 @@ async def test_repeated_analysis_sees_user_decisions_of_whole_book() -> None:
 
 
 async def test_glossary_note_in_analysis_context_drops_rejected_variant() -> None:
-    """Указание элемента глоссария в контексте анализа не несёт отвергнутый вариант.
+    """A glossary item note in the analysis context drops a rejected variant.
 
-    Третий живой прогон: в контексте анализа главы 2 указание `the marsh gate`
-    называло «Даскмир», хотя решение пользователя по Duskmere — «Даскмер».
-    Решение по другому понятию и его формы при этом остаются.
+    Third live run: in the context of chapter 2 analysis, the note for `the marsh gate`
+    referred to the rejected form ("Daskmir"), even though the user decision for Duskmere was "Daskmer".
+    The decision for another concept and its inflections are preserved.
     """
     sections = tuple(
         make_analysis_section(
@@ -447,7 +447,7 @@ async def test_glossary_note_in_analysis_context_drops_rejected_variant() -> Non
 
 
 async def test_chapter_without_text_is_analysed_without_the_model() -> None:
-    """Глава без текстовых блоков не даёт вызова модели, но получает полный анализ."""
+    """A chapter without text blocks does not call the model, but receives a complete analysis."""
     section = make_analysis_section(
         blocks=(
             make_analysis_block(
@@ -469,7 +469,7 @@ async def test_chapter_without_text_is_analysed_without_the_model() -> None:
 
 
 async def test_missing_block_in_plan_is_retried_with_repair_instruction() -> None:
-    """Неполный план отбраковывается и повторяется с уточняющей инструкцией (ALG-05)."""
+    """An incomplete plan is rejected and retried with a clarifying repair instruction (ALG-05)."""
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (analysis_reply(aliases=("b1",)), analysis_reply(aliases=("b1", "b2")))
@@ -487,7 +487,7 @@ async def test_missing_block_in_plan_is_retried_with_repair_instruction() -> Non
 
 
 async def test_unknown_block_in_plan_is_rejected() -> None:
-    """План с чужим блоком не сохраняется и вызывает повтор."""
+    """A plan with an unknown block is rejected and triggers a retry."""
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (
@@ -504,7 +504,7 @@ async def test_unknown_block_in_plan_is_rejected() -> None:
 
 
 async def test_duplicated_block_in_plan_is_rejected() -> None:
-    """Два режима на один блок — негодный план: он тоже повторяется."""
+    """Duplicate treatment for a block is an invalid plan and is also retried."""
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (
@@ -518,7 +518,7 @@ async def test_duplicated_block_in_plan_is_rejected() -> None:
 
 
 async def test_mixed_script_glossary_variant_is_rejected() -> None:
-    """Вариант глоссария из смеси алфавитов отбраковывается и повторяется (ALG-04)."""
+    """A glossary variant with mixed scripts is rejected and retried (ALG-04)."""
     unit_of_work = two_block_book()
     mixed = {
         "source_text": "PGLAF",
@@ -543,7 +543,7 @@ async def test_mixed_script_glossary_variant_is_rejected() -> None:
 
 
 async def test_transient_error_is_retried_after_backoff() -> None:
-    """Временная ошибка повторяется, и цикл выдерживает паузу политики (ALG-05)."""
+    """A transient error is retried, respecting the policy backoff delay (ALG-05)."""
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (LLMTransportError("429 Too Many Requests"), analysis_reply())
@@ -557,7 +557,7 @@ async def test_transient_error_is_retried_after_backoff() -> None:
 
 
 async def test_exhausted_attempts_leave_no_saved_analysis() -> None:
-    """Исчерпав попытки, сценарий поднимает ошибку и анализа не сохраняет."""
+    """When attempts are exhausted, the scenario raises an error without saving an analysis."""
     unit_of_work = two_block_book()
     client = FakeLLMClient.always(LLMTransportError("провайдер недоступен"))
     scenario, _ = make_analyze_chapter(unit_of_work, client, max_attempts=2)
@@ -570,7 +570,7 @@ async def test_exhausted_attempts_leave_no_saved_analysis() -> None:
 
 
 async def test_result_reports_token_usage_of_successful_call() -> None:
-    """Результат несёт объём токенов вызова для ориентиров стоимости (PRD § 29.1)."""
+    """The result reports call token usage for cost estimation (PRD § 29.1)."""
     unit_of_work = two_block_book()
     usage = TokenUsage(prompt_tokens=1200, completion_tokens=300)
     scenario, _ = make_analyze_chapter(
@@ -581,7 +581,7 @@ async def test_result_reports_token_usage_of_successful_call() -> None:
 
 
 async def test_unknown_book_is_rejected() -> None:
-    """Анализ книги, которой нет в хранилище, невозможен."""
+    """Analyzing a book not present in storage is rejected."""
     scenario, _ = make_analyze_chapter(FakeUnitOfWork(), FakeLLMClient.always(analysis_reply()))
 
     with pytest.raises(AnalyzeChapterError):
@@ -589,7 +589,7 @@ async def test_unknown_book_is_rejected() -> None:
 
 
 async def test_unknown_section_is_rejected() -> None:
-    """Анализ главы, которой нет в книге, невозможен."""
+    """Analyzing a chapter not present in the book is rejected."""
     scenario, _ = make_analyze_chapter(two_block_book(), FakeLLMClient.always(analysis_reply()))
 
     with pytest.raises(AnalyzeChapterError):

@@ -1,4 +1,4 @@
-"""Тесты для модуля токенизации предложений и проекции встроенной разметки."""
+"""Tests for sentence tokenization and inline markup projection."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ from linguary.domain import InlineAnnotation, InlineAnnotationType
 
 
 def test_split_sentences_skips_short_paragraphs() -> None:
-    """Короткие абзацы (меньше min_chars) не дробятся."""
+    """Short paragraphs (below min_chars) are not split."""
     short_text = "First sentence. Second sentence. Third sentence."
     assert len(short_text) < SPLIT_MIN_CHARS
     slices = split_sentences(short_text)
     assert slices == ((0, len(short_text)),)
 
-    # Длинный текст, но состоящий из одного монолитного предложения без границ
+    # Long text consisting of a single monolithic sentence without boundaries
     monolithic_text = "Word " * 200
     assert len(monolithic_text) >= SPLIT_MIN_CHARS
     slices_monolithic = split_sentences(monolithic_text)
@@ -29,7 +29,7 @@ def test_split_sentences_skips_short_paragraphs() -> None:
 
 
 def test_split_sentences_preserves_titles_and_abbreviations() -> None:
-    """Сокращения и титулы (Mr., Dr., e.g., vol.) не разрывают предложение."""
+    """Abbreviations and titles (Mr., Dr., e.g., vol.) do not break a sentence."""
     text = (
         "Mr. Smith visited Dr. Watson in London to discuss Prof. Moriarty and his strange plans. "
         "Dr. Watson suggested they consult Mrs. Hudson before making any final decisions. "
@@ -37,7 +37,7 @@ def test_split_sentences_preserves_titles_and_abbreviations() -> None:
         "All materials were cataloged according to vol. 1 and no. 5 of the society records. "
         "Finally, they decided to proceed with the investigation tomorrow morning."
     )
-    # Запускаем с min_chars=0 для проверки логики токенизации на фрагменте
+    # Run with min_chars=0 to test tokenization logic on the fragment
     slices = split_sentences(text, min_chars=0)
     assert len(slices) == 5
 
@@ -54,7 +54,7 @@ def test_split_sentences_preserves_titles_and_abbreviations() -> None:
 
 
 def test_split_sentences_handles_initials() -> None:
-    """Инициалы (H. G. Wells, J. K. Rowling) не принимаются за границы предложений."""
+    """Initials (H. G. Wells, J. K. Rowling) are not treated as sentence boundaries."""
     text = (
         "H. G. Wells wrote fantastic novels about time travel and Martian invaders. "
         "Meanwhile, C. S. Lewis and J. R. R. Tolkien discussed philology in Oxford. "
@@ -70,8 +70,8 @@ def test_split_sentences_handles_initials() -> None:
 
 
 def test_split_sentences_handles_dialogue_quotes() -> None:
-    """Диалоговые реплики в кавычках делятся с учётом слов автора и прямой речи."""
-    # Реплика с атрибуцией автора строчными буквами: граница после слов автора
+    """Dialogue lines in quotes are split taking speech tags and direct speech into account."""
+    # Speech line with lowercase attribution: boundary after author words
     text1 = '"I see," said Alice. "What do you mean?" asked the Hatter. "Nothing!" she replied.'
     slices1 = split_sentences(text1, min_chars=0)
     assert len(slices1) == 3
@@ -79,14 +79,14 @@ def test_split_sentences_handles_dialogue_quotes() -> None:
     assert text1[slices1[1][0]:slices1[1][1]] == '"What do you mean?" asked the Hatter. '
     assert text1[slices1[2][0]:slices1[2][1]] == '"Nothing!" she replied.'
 
-    # Реплика с восклицанием и атрибуцией имени собственного
+    # Speech line with exclamation and proper noun attribution
     text2 = '"Stop!" Alice said. "Never!" the Queen shouted.'
     slices2 = split_sentences(text2, min_chars=0)
     assert len(slices2) == 2
     assert text2[slices2[0][0]:slices2[0][1]] == '"Stop!" Alice said. '
     assert text2[slices2[1][0]:slices2[1][1]] == '"Never!" the Queen shouted.'
 
-    # Реплика с действием (не атрибуция речи): деление происходит сразу после кавычек
+    # Speech line with action (not speech attribution): split occurs immediately after quotes
     text3 = '"Stop!" The King stood up. "You must not do that."'
     slices3 = split_sentences(text3, min_chars=0)
     assert len(slices3) == 3
@@ -94,7 +94,7 @@ def test_split_sentences_handles_dialogue_quotes() -> None:
     assert text3[slices3[1][0]:slices3[1][1]] == "The King stood up. "
     assert text3[slices3[2][0]:slices3[2][1]] == '"You must not do that."'
 
-    # Типографские кавычки («ёлочки» и фигурные)
+    # Typographic quotes (guillemets and curly quotes)
     text4 = '“I see,” said Alice. “What do you mean?”'
     slices4 = split_sentences(text4, min_chars=0)
     assert len(slices4) == 2
@@ -103,7 +103,7 @@ def test_split_sentences_handles_dialogue_quotes() -> None:
 
 
 def test_split_sentences_handles_em_dash_dialogues() -> None:
-    """Диалоги через тире делятся по репликам без разрыва слов автора."""
+    """Dash dialogues are split by lines without breaking author words."""
     text1 = "— I see, — said Alice. — What do you mean? — Nothing! — she replied."
     slices1 = split_sentences(text1, min_chars=0)
     assert len(slices1) == 3
@@ -119,29 +119,29 @@ def test_split_sentences_handles_em_dash_dialogues() -> None:
 
 
 def test_split_sentences_handles_ellipsis() -> None:
-    """Многоточия не разрывают середину предложения и слова автора."""
-    # Многоточие перед строчной атрибуцией речи
+    """Ellipses do not break sentence midpoints and author words."""
+    # Ellipsis before lowercase speech attribution
     text1 = '"Wait..." said Alice. "I am coming."'
     slices1 = split_sentences(text1, min_chars=0)
     assert len(slices1) == 2
     assert text1[slices1[0][0]:slices1[0][1]] == '"Wait..." said Alice. '
     assert text1[slices1[1][0]:slices1[1][1]] == '"I am coming."'
 
-    # Многоточие перед новым предложением с заглавной буквы
+    # Ellipsis before a new sentence starting with uppercase
     text2 = "She hesitated... Then she turned and ran quickly down the hall."
     slices2 = split_sentences(text2, min_chars=0)
     assert len(slices2) == 2
     assert text2[slices2[0][0]:slices2[0][1]] == "She hesitated... "
     assert text2[slices2[1][0]:slices2[1][1]] == "Then she turned and ran quickly down the hall."
 
-    # Многоточие в середине предложения (пауза)
+    # Ellipsis in sentence midpoint (pause)
     text3 = "She was... well, she was rather confused by the Hatter."
     slices3 = split_sentences(text3, min_chars=0)
     assert len(slices3) == 1
 
 
 def test_split_sentences_text_reconstruction_invariant() -> None:
-    """Конкатенация срезов строго восстанавливает исходный текст абзаца."""
+    """Concatenation of slices strictly reconstructs the original paragraph text."""
     samples = [
         "Short paragraph.",
         "Mr. Smith and Dr. Watson met. They talked about books.",
@@ -166,7 +166,7 @@ def test_split_sentences_text_reconstruction_invariant() -> None:
         reconstructed = "".join(sample[start:end] for start, end in slices)
         assert reconstructed == sample
 
-        # Проверяем непрерывность срезов
+        # Verify slice continuity
         assert slices[0][0] == 0
         assert slices[-1][1] == len(sample)
         for i in range(len(slices) - 1):
@@ -174,7 +174,7 @@ def test_split_sentences_text_reconstruction_invariant() -> None:
 
 
 def test_split_inline_content_shifts_annotation_offsets() -> None:
-    """Смещения аннотаций корректно сдвигаются по формуле [start - offset, end - offset)."""
+    """Annotation offsets are correctly shifted using the [start - offset, end - offset) formula."""
     text = "First sentence is simple. Second sentence contains bold text inside it."
     bold_target = "bold text"
     bold_start = text.index(bold_target)
@@ -191,10 +191,10 @@ def test_split_inline_content_shifts_annotation_offsets() -> None:
     fragments = split_inline_content(content, min_chars=0)
     assert len(fragments) == 2
 
-    # Первый фрагмент не содержит разметку
+    # First fragment contains no markup
     assert fragments[0].annotations == ()
 
-    # Второй фрагмент содержит смещённую разметку
+    # Second fragment contains shifted markup
     assert len(fragments[1].annotations) == 1
     shifted_ann = fragments[1].annotations[0]
     assert shifted_ann.type is InlineAnnotationType.BOLD
@@ -205,9 +205,9 @@ def test_split_inline_content_shifts_annotation_offsets() -> None:
 
 
 def test_split_inline_content_clips_spanning_annotations() -> None:
-    """Сквозная разметка (например, курсив на несколько предложений) подрезается на границах."""
+    """Spanning markup (e.g. italics over multiple sentences) is clipped at boundaries."""
     text = "First sentence is here. Second sentence follows."
-    # Курсив охватывает часть первого предложения и часть второго
+    # Italic spans part of the first sentence and part of the second
     italic_start = text.index("sentence is here")
     italic_end = text.index("follows") + len("follows")
 
@@ -221,14 +221,14 @@ def test_split_inline_content_clips_spanning_annotations() -> None:
     fragments = split_inline_content(content, min_chars=0)
     assert len(fragments) == 2
 
-    # В первом фрагменте разметка обрезана на границе фрагмента
+    # In the first fragment, markup is clipped at the fragment boundary
     assert len(fragments[0].annotations) == 1
     ann0 = fragments[0].annotations[0]
     assert ann0.type is InlineAnnotationType.ITALIC
     assert ann0.start == italic_start
     assert ann0.end == len(fragments[0].text)
 
-    # Во втором фрагменте разметка начинается с 0 и заканчивается на относительном смещении
+    # In the second fragment, markup starts at 0 and ends at the relative offset
     assert len(fragments[1].annotations) == 1
     ann1 = fragments[1].annotations[0]
     assert ann1.type is InlineAnnotationType.ITALIC
@@ -238,7 +238,7 @@ def test_split_inline_content_clips_spanning_annotations() -> None:
 
 
 def test_split_inline_content_preserves_footnote_references() -> None:
-    """Ссылки на сноски не рассекаются и сохраняются в соответствующих фрагментах."""
+    """Footnote references are not bisected and are preserved in their respective fragments."""
     text = "First sentence with note.1 Second sentence with note.2"
     fn1_start = text.index("1")
     fn1_end = fn1_start + 1
@@ -266,7 +266,7 @@ def test_split_inline_content_preserves_footnote_references() -> None:
     fragments = split_inline_content(content, min_chars=0)
     assert len(fragments) == 2
 
-    # Первый фрагмент сохраняет fn1
+    # First fragment preserves fn1
     assert len(fragments[0].annotations) == 1
     assert fragments[0].annotations[0] == InlineAnnotation(
         type=InlineAnnotationType.FOOTNOTE_REFERENCE,
@@ -275,7 +275,7 @@ def test_split_inline_content_preserves_footnote_references() -> None:
         target="notes.xhtml#fn1",
     )
 
-    # Второй фрагмент сохраняет fn2 со сдвигом
+    # Second fragment preserves fn2 with shift
     assert len(fragments[1].annotations) == 1
     offset = len(fragments[0].text)
     assert fragments[1].annotations[0] == InlineAnnotation(
@@ -287,7 +287,7 @@ def test_split_inline_content_preserves_footnote_references() -> None:
 
 
 def test_split_inline_content_anchors_assigned_to_first_fragment() -> None:
-    """Якоря блока присваиваются только первому фрагменту, последующие получают пустые кортежи."""
+    """Block anchors are assigned only to the first fragment; subsequent fragments receive empty tuples."""
     content = InlineContent(
         text="First sentence here. Second sentence here. Third sentence here.",
         anchor_ids=("anchor-1", "anchor-2"),
@@ -301,7 +301,7 @@ def test_split_inline_content_anchors_assigned_to_first_fragment() -> None:
 
 
 def test_split_inline_content_returns_original_if_unsplit() -> None:
-    """Если деление не состоялось, возвращается исходный объект InlineContent."""
+    """If no splitting occurs, the original InlineContent object is returned."""
     short_content = InlineContent(
         text="Short text.",
         anchor_ids=("a1",),
@@ -318,7 +318,7 @@ def test_split_inline_content_returns_original_if_unsplit() -> None:
 
 
 def test_split_sentences_preserves_country_abbreviations() -> None:
-    """Сокращения U.S., U.K., E.U. не принимаются за конец предложения перед заглавной буквой."""
+    """Abbreviations U.S., U.K., E.U. are not treated as end-of-sentence before a capital letter."""
     text = (
         "The U.S. Army was deployed across multiple operational theaters. "
         "Meanwhile, the U.K. Government issued an official diplomatic statement. "
@@ -339,7 +339,7 @@ def test_split_sentences_preserves_country_abbreviations() -> None:
 
 
 def test_split_inline_content_monotonic_boundaries_with_overlapping_footnotes() -> None:
-    """Сдвиг границы сноски не нарушает монотонность границ, если сноска перекрывает следующую границу."""
+    """Shifting footnote boundary does not violate monotonic boundaries when a footnote overlaps the next boundary."""
     s1 = "Sentence one is right here. "
     s2 = "Sentence two is here. "
     s3 = "Sentence three follows."
@@ -382,7 +382,7 @@ def test_split_inline_content_monotonic_boundaries_with_overlapping_footnotes() 
 
 
 def test_split_sentences_preserves_compound_numbered_markers() -> None:
-    """Составные нумерованные маркеры пунктов (1.C., 1.F.2., 1.F.3.) не отсекаются в микрофрагменты."""
+    """Compound numbered section markers (1.C., 1.F.2., 1.F.3.) are not cut into micro-fragments."""
     text1 = (
         "1.C. The Project Gutenberg Literary Archive Foundation owns a compilation copyright. "
         "Except for the limited right of replacement or refund, all other warranties are disclaimed. "
@@ -413,7 +413,7 @@ def test_split_sentences_preserves_compound_numbered_markers() -> None:
 
 
 def test_split_sentences_decimal_numbers_and_multiple_compound_markers() -> None:
-    """Десятичные дроби не ломают деление предложений, а составные маркеры работают внутри одного текста."""
+    """Decimals do not break sentence splitting, and compound markers work within a single text."""
     text1 = (
         "The constant pi is approximately 3.14. It is used in mathematical formulas everywhere. "
         "The value of e is roughly 2.718. It is also an important constant."
@@ -435,22 +435,24 @@ def test_split_sentences_decimal_numbers_and_multiple_compound_markers() -> None
 
 
 def test_candidate_pattern_redos_safety() -> None:
-    """Знаки препинания с длинной последовательностью цифр без пробела не вызывают ReDoS."""
-    # Строка с длинным числовым индексом без пробела
+    """Punctuation with a long sequence of digits without spaces does not cause ReDoS."""
+    # String with a long numeric index without spaces
     pathological = "Section 4." + ("1234567890" * 5) + "X and some more words here to test safety."
     slices = split_sentences(pathological, min_chars=0)
     assert len(slices) >= 1
-    # Восстановление текста строго соблюдается
+    # Text reconstruction is strictly preserved
     assert "".join(pathological[start:end] for start, end in slices) == pathological
 
 
 def test_long_paragraph_window_performance() -> None:
-    """Сверхдлинные абзацы со множеством сокращений обрабатываются быстро и детерминированно."""
+    """Ultra-long paragraphs with many abbreviations are processed quickly and deterministically."""
     unit = "Dr. Watson visited Mr. Holmes on Jan. 15. The letter was filed under vol. 2, no. 4. "
     text = (unit * 100) + "Finally, the case was solved."
     assert len(text) > 8000
     slices = split_sentences(text)
-    # 100 повторений по 2 предложения + 1 финальное = 201 предложение
+    # 100 repetitions of 2 sentences + 1 final = 201 sentences
+    assert len(slices) == 201
+    assert "".join(text[start:end] for start, end in slices) == text
     assert len(slices) == 201
     assert "".join(text[start:end] for start, end in slices) == text
 

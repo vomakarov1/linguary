@@ -1,7 +1,7 @@
-"""Клиент LLM поверх совместимого HTTP API: запрос, разбор ответа и разбор неудач.
+"""LLM client over compatible HTTP API: request, response parsing, and error mapping.
 
-Сети в тестах нет: провайдер подменяется транспортом httpx, поэтому проверяется ровно
-то, что делает адаптер, — тело запроса, чтение ответа и приведение неудач к типам порта.
+There is no actual network access in tests: the provider is mocked via httpx transport,
+verifying exactly what the adapter does: request payload, response reading, and port error mapping.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ API_KEY = "test-key-must-not-leak"
 
 
 def settings(**overrides: Any) -> LLMSettings:
-    """Настроенная LLM: модель и ключ заданы."""
+    """Configured LLM: model and key provided."""
     values: dict[str, Any] = {
         "base_url": "https://provider.test/v1",
         "model": "test-model",
@@ -44,7 +44,7 @@ def settings(**overrides: Any) -> LLMSettings:
 
 
 def completion(content: str, **overrides: Any) -> dict[str, Any]:
-    """Ответ совместимого API вокруг структурированного содержимого."""
+    """Compatible API response wrapping structured content."""
     document: dict[str, Any] = {
         "model": "test-model",
         "choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
@@ -55,7 +55,7 @@ def completion(content: str, **overrides: Any) -> dict[str, Any]:
 
 
 def client_over(handler: Any, **settings_overrides: Any) -> OpenAICompatibleLLMClient:
-    """Клиент поверх подменённого транспорта."""
+    """Client over mocked transport."""
     return OpenAICompatibleLLMClient(
         settings=settings(**settings_overrides),
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
@@ -63,12 +63,12 @@ def client_over(handler: Any, **settings_overrides: Any) -> OpenAICompatibleLLMC
 
 
 def responding(document: dict[str, Any], *, status_code: int = 200) -> Any:
-    """Транспорт, отвечающий одним и тем же документом."""
+    """Transport responding with the same document."""
     return lambda request: httpx.Response(status_code, json=document)
 
 
 def schema_error_content() -> str:
-    """Минимальный ответ с пустым переводом TRANSLATE из воспроизведения дефекта."""
+    """Minimal response with empty TRANSLATE translation from bug reproduction."""
     return as_content({
         "blocks": [{
             "source_block_id": "b1", "treatment": "TRANSLATE",
@@ -79,7 +79,7 @@ def schema_error_content() -> str:
 
 
 async def format_error_from(document: dict[str, Any]) -> LLMResponseFormatError:
-    """Получает ошибку через настоящий HTTP-клиент без обращения к сети."""
+    """Produces error via real HTTP client without network calls."""
     client = client_over(responding(document))
     with pytest.raises(LLMResponseFormatError) as caught:
         await client.generate(
@@ -182,7 +182,7 @@ async def test_unreadable_http_document_keeps_metadata_none() -> None:
 
 
 async def test_successful_call_returns_parsed_payload() -> None:
-    """Успешный вызов даёт разобранный DTO вместе с данными вызова."""
+    """A successful call returns parsed DTO alongside call metadata."""
     client = client_over(responding(completion(as_content(translation_payload()))))
 
     response = await client.generate(
@@ -217,7 +217,7 @@ async def test_client_without_provider_cost_leaves_none() -> None:
 
 
 async def test_chapter_analysis_call_returns_analysis_payload() -> None:
-    """Запрос анализа главы разбирается по схеме анализа."""
+    """Chapter analysis request is parsed using the analysis schema."""
     client = client_over(responding(completion(as_content(analysis_payload()))))
 
     response = await client.generate(
@@ -229,7 +229,7 @@ async def test_chapter_analysis_call_returns_analysis_payload() -> None:
 
 
 async def test_request_asks_provider_for_structured_output() -> None:
-    """Запрос содержит ключ, инструкцию, содержимое и схему строгого ответа."""
+    """Request contains key, instruction, content, and strict response schema."""
     sent: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -260,7 +260,7 @@ async def test_request_asks_provider_for_structured_output() -> None:
 
 
 async def test_optional_generation_settings_are_omitted_when_unset() -> None:
-    """Незаданные лимит вывода и температура в запрос не попадают."""
+    """Unset output limit and temperature are omitted from the request."""
     sent: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -279,7 +279,7 @@ async def test_optional_generation_settings_are_omitted_when_unset() -> None:
 
 
 async def test_token_limit_stop_is_reported() -> None:
-    """Обрыв ответа по лимиту токенов виден прикладному слою (PRD § 15)."""
+    """Token limit response truncation is exposed to the application layer (PRD § 15)."""
     document = completion(
         as_content(translation_payload()),
         choices=[
@@ -299,7 +299,7 @@ async def test_token_limit_stop_is_reported() -> None:
 
 
 async def test_truncated_content_gives_format_error_with_token_limit_flag() -> None:
-    """Оборванный по лимиту токенов ответ не разбирается и сообщает о причине."""
+    """A response truncated by token limit fails parsing and reports the cause."""
     document = completion(
         '{"blocks": [{"source',
         choices=[{"message": {"content": '{"blocks": [{"source'}, "finish_reason": "length"}],
@@ -317,7 +317,7 @@ async def test_truncated_content_gives_format_error_with_token_limit_flag() -> N
 
 
 async def test_missing_usage_is_not_invented() -> None:
-    """Провайдер без данных о токенах не даёт выдуманного объёма (PRD § 24)."""
+    """A provider without token data does not invent usage metrics (PRD § 24)."""
     document = completion(as_content(translation_payload()))
     document.pop("usage")
     client = client_over(responding(document))
@@ -345,7 +345,7 @@ async def test_missing_usage_is_not_invented() -> None:
 async def test_provider_status_is_mapped_to_port_error(
     status_code: int, expected: type[Exception]
 ) -> None:
-    """Каждый неуспешный код провайдера превращается в свой тип ошибки порта (PRD § 16)."""
+    """Each failed provider HTTP status maps to its specific port error type (PRD § 16)."""
     client = client_over(responding({"error": {"message": "нет"}}, status_code=status_code))
 
     with pytest.raises(expected):
@@ -355,7 +355,7 @@ async def test_provider_status_is_mapped_to_port_error(
 
 
 async def test_payment_required_names_the_balance() -> None:
-    """Отказ из-за нехватки средств называет причину, а не ключ или модель (PRD § 16)."""
+    """Rejection due to insufficient funds states the cause, not the key or model (PRD § 16)."""
     client = client_over(responding({"error": {"message": "нет"}}, status_code=402))
 
     with pytest.raises(LLMProviderError, match="не хватает средств"):
@@ -383,7 +383,7 @@ async def test_retry_after_is_passed_with_transient_error(
     expected: float | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Пауза, которую провайдер просит заголовком `Retry-After`, доходит до политики повторов."""
+    """Pause requested by provider via Retry-After header reaches retry policy."""
     monkeypatch.setattr(
         openai_compatible, "_utc_now", lambda: datetime(2015, 10, 21, 7, 28, 0, tzinfo=UTC)
     )
@@ -403,7 +403,7 @@ async def test_retry_after_is_passed_with_transient_error(
 
 
 async def test_provider_error_does_not_expose_api_key() -> None:
-    """Ключ провайдера не попадает в текст ошибки (PRD § 24)."""
+    """Provider key is not leaked in error message (PRD § 24)."""
     client = client_over(responding({"error": "invalid api key"}, status_code=401))
 
     with pytest.raises(LLMConfigurationError) as error:
@@ -422,7 +422,7 @@ async def test_provider_error_does_not_expose_api_key() -> None:
     ],
 )
 async def test_transport_failure_is_transient(failure: Exception) -> None:
-    """Таймаут и обрыв связи — временная неудача, задачу можно повторить (PRD § 16)."""
+    """Timeout and connection dropped are transient errors; task can be retried (PRD § 16)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise failure
@@ -446,7 +446,7 @@ async def test_transport_failure_is_transient(failure: Exception) -> None:
 async def test_response_without_generation_gives_format_error(
     document: dict[str, Any],
 ) -> None:
-    """Ответ провайдера без сгенерированного содержимого — ошибка формата."""
+    """Provider response without generated content is a format error."""
     client = client_over(responding(document))
 
     with pytest.raises(LLMResponseFormatError):
@@ -465,7 +465,7 @@ async def test_response_without_generation_gives_format_error(
     ],
 )
 async def test_unconfigured_llm_does_not_start_calls(overrides: dict[str, Any]) -> None:
-    """Без модели или ключа клиент не создаётся и запросов не отправляет (PRD § 23)."""
+    """Without model or key, client is not created and sends no requests (PRD § 23)."""
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -479,7 +479,7 @@ async def test_unconfigured_llm_does_not_start_calls(overrides: dict[str, Any]) 
 
 
 async def test_gateway_model_name_is_taken_from_response() -> None:
-    """Имя модели берётся из ответа: совместимый шлюз подставляет своё (PRD § 24)."""
+    """Model name is taken from response: compatible gateway may substitute its own (PRD § 24)."""
     document = completion(as_content(translation_payload()), model="gateway/other-model")
     client = client_over(responding(document))
 
@@ -491,7 +491,7 @@ async def test_gateway_model_name_is_taken_from_response() -> None:
 
 
 def _json(request: httpx.Request) -> dict[str, Any]:
-    """Тело отправленного запроса."""
+    """Sent request body."""
     return json.loads(request.content.decode("utf-8"))
 
 

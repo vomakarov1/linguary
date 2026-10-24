@@ -1,4 +1,4 @@
-"""Клиент LLM для тестов: детерминированность, сценарии и запись запросов."""
+"""LLM client for tests: determinism, scenarios, and request recording."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ from linguary.domain import TokenUsage
 
 
 def translation_request() -> LLMRequest[TranslationResultResponse]:
-    """Запрос обработки группы блоков."""
+    """Block group processing request."""
     return LLMRequest.for_translation(
         instructions="Переводи", input_text="block-1: text"
     )
 
 
 async def test_prepared_reply_is_parsed_like_a_provider_answer() -> None:
-    """Заготовленный ответ разбирается тем же способом, что и ответ провайдера."""
+    """A pre-arranged reply is parsed in the same manner as a provider response."""
     client = FakeLLMClient.always(FakeReply.of_payload(translation_payload()))
 
     response = await client.generate(translation_request())
@@ -34,7 +34,7 @@ async def test_prepared_reply_is_parsed_like_a_provider_answer() -> None:
 
 
 async def test_replies_are_returned_in_order() -> None:
-    """Сценарий отвечает заданной последовательностью, а не случайным ответом."""
+    """The scenario replies with the specified sequence rather than random responses."""
     client = FakeLLMClient.replying(
         [
             FakeReply.of_payload(translation_payload(language_notes=[])),
@@ -54,7 +54,7 @@ async def test_replies_are_returned_in_order() -> None:
 
 
 async def test_same_scenario_gives_the_same_result_twice() -> None:
-    """Один и тот же сценарий даёт один и тот же результат: ответы детерминированы."""
+    """The same scenario yields identical results: responses are deterministic."""
     payload = translation_payload()
 
     async def run() -> tuple[str, ...]:
@@ -67,7 +67,7 @@ async def test_same_scenario_gives_the_same_result_twice() -> None:
 
 
 async def test_requests_are_recorded() -> None:
-    """Сделанные запросы сохраняются: по ним проверяется состав контекста."""
+    """Outbound requests are recorded to verify context composition."""
     client = FakeLLMClient.always(FakeReply.of_payload(analysis_payload()))
 
     await client.generate(
@@ -80,7 +80,7 @@ async def test_requests_are_recorded() -> None:
 
 
 async def test_analysis_scenario_returns_analysis_payload() -> None:
-    """Сценарий анализа главы отдаёт DTO анализа."""
+    """A chapter analysis scenario returns an analysis DTO."""
     client = FakeLLMClient.always(FakeReply.of_payload(analysis_payload()))
 
     response = await client.generate(
@@ -92,7 +92,7 @@ async def test_analysis_scenario_returns_analysis_payload() -> None:
 
 
 async def test_invalid_json_scenario_gives_format_error() -> None:
-    """Сценарий невалидного ответа воспроизводит ошибку формата."""
+    """An invalid response scenario reproduces a format error."""
     client = FakeLLMClient.always(FakeReply(content="сейчас переведу"))
 
     with pytest.raises(LLMResponseFormatError):
@@ -100,7 +100,7 @@ async def test_invalid_json_scenario_gives_format_error() -> None:
 
 
 async def test_truncated_scenario_reports_token_limit_stop() -> None:
-    """Сценарий обрыва по лимиту токенов виден в ответе клиента."""
+    """A token limit truncation scenario is reflected in the client response."""
     client = FakeLLMClient.always(
         FakeReply.of_payload(translation_payload(), truncated=True)
     )
@@ -111,7 +111,7 @@ async def test_truncated_scenario_reports_token_limit_stop() -> None:
 
 
 async def test_mismatched_blocks_scenario_is_delivered_to_application() -> None:
-    """Ответ для чужих блоков клиент отдаёт как есть: отбраковывает его приложение."""
+    """The client passes responses for unexpected blocks as-is: the application rejects them."""
     client = FakeLLMClient.always(
         FakeReply.of_payload(
             translation_payload(
@@ -127,7 +127,7 @@ async def test_mismatched_blocks_scenario_is_delivered_to_application() -> None:
 
 
 async def test_failure_scenario_raises_prepared_error() -> None:
-    """Сценарий неудачного вызова поднимает заданную ошибку порта."""
+    """A failure scenario raises the configured port error."""
     client = FakeLLMClient.replying(
         [LLMTransportError("провайдер недоступен"), FakeReply.of_payload(translation_payload())]
     )
@@ -141,7 +141,7 @@ async def test_failure_scenario_raises_prepared_error() -> None:
 
 
 async def test_usage_is_reported_when_scenario_sets_it() -> None:
-    """Заданный объём токенов попадает в ответ клиента (PRD § 24)."""
+    """Configured token usage appears in the client response (PRD § 24)."""
     client = FakeLLMClient.always(
         FakeReply.of_payload(
             translation_payload(), usage=TokenUsage(prompt_tokens=10, completion_tokens=20)
@@ -155,7 +155,7 @@ async def test_usage_is_reported_when_scenario_sets_it() -> None:
 
 
 async def test_exhausted_scenario_is_reported() -> None:
-    """Кончившиеся ответы клиент сообщает, а не отвечает произвольным образом."""
+    """Exhausted responses are reported rather than returning arbitrary data."""
     client = FakeLLMClient.replying([FakeReply.of_payload(translation_payload())])
 
     await client.generate(translation_request())
@@ -165,7 +165,7 @@ async def test_exhausted_scenario_is_reported() -> None:
 
 
 async def test_client_without_requests_has_no_last_request() -> None:
-    """Обращение к последнему запросу до первого вызова — ошибка сборки сценария."""
+    """Accessing the last request before any call is made is a scenario configuration error."""
     client = FakeLLMClient()
 
     with pytest.raises(FakeScenarioError):

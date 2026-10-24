@@ -1,4 +1,4 @@
-"""Порядок задач анализа глав (P3.T3, PRD § 13, § 25)."""
+"""Chapter analysis task order (P3.T3, PRD § 13, § 25)."""
 
 from __future__ import annotations
 
@@ -44,10 +44,10 @@ WORKER_COUNT = 4
 
 
 class YieldingLLMClient:
-    """Клиент, отдающий управление циклу событий внутри вызова.
+    """Client yielding control to the event loop during a call.
 
-    Без этого весь вызов модели проходит без единой точки переключения, и параллельные
-    воркеры никогда не пересекаются — проверка порядка стала бы бессмысленной.
+    Without this, the entire model call completes without a single yield point,
+    and parallel workers would never interleave, making order checks meaningless.
     """
 
     def __init__(self, inner: FakeLLMClient) -> None:
@@ -61,7 +61,7 @@ class YieldingLLMClient:
 
 
 def make_book(chapters: int = CHAPTER_COUNT) -> FakeUnitOfWork:
-    """Книга из нескольких глав по одному абзацу в каждой."""
+    """A book with multiple chapters, each containing one paragraph."""
     sections = tuple(
         make_analysis_section(
             section_id=f"section-{number}",
@@ -79,17 +79,17 @@ def make_book(chapters: int = CHAPTER_COUNT) -> FakeUnitOfWork:
 def make_sequence(
     unit_of_work: FakeUnitOfWork, queue: FakeTaskQueue, client: LLMClient
 ) -> ChapterAnalysisSequence:
-    """Последовательность анализа глав поверх двойников хранилища и очереди."""
+    """Chapter analysis sequence on top of storage and queue doubles."""
     analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
     return ChapterAnalysisSequence(
-        unit_of_work=unit_of_work,  # type: ignore[arg-type]  # двойник порта хранения
-        queue=queue,  # type: ignore[arg-type]  # двойник порта очереди
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]  # storage port double
+        queue=queue,  # type: ignore[arg-type]  # queue port double
         analyze_chapter=analyze_chapter,
     )
 
 
 async def drain(runner: TaskRunner, queue: FakeTaskQueue) -> None:
-    """Выполняет очередь несколькими одновременными воркерами."""
+    """Drains the queue using multiple concurrent workers."""
 
     async def worker() -> None:
         while queue.has_work:
@@ -100,13 +100,13 @@ async def drain(runner: TaskRunner, queue: FakeTaskQueue) -> None:
 
 
 async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
-    """Главы анализируются по одной и строго в порядке чтения книги."""
+    """Chapters are analyzed one at a time, strictly in reading order."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
     sequence = make_sequence(unit_of_work, queue, YieldingLLMClient(client))
     runner = TaskRunner(
-        queue=queue,  # type: ignore[arg-type]  # двойник порта очереди
+        queue=queue,  # type: ignore[arg-type]  # queue port double
         handlers={TaskType.ANALYZE_CHAPTER: sequence.run_task},
     )
 
@@ -124,7 +124,7 @@ async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
 
 
 async def test_start_moves_book_to_analyzing_and_queues_first_chapter() -> None:
-    """Запуск анализа переводит книгу в `ANALYZING` и ставит первую главу (ALG-06)."""
+    """Starting analysis transitions the book to `ANALYZING` and queues the first chapter (ALG-06)."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     sequence = make_sequence(
@@ -141,13 +141,13 @@ async def test_start_moves_book_to_analyzing_and_queues_first_chapter() -> None:
 
 
 async def test_completed_analysis_moves_book_to_glossary_review() -> None:
-    """После последней главы книга уходит на проверку глоссария (ALG-06)."""
+    """After the last chapter, the book advances to glossary review (ALG-06)."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
     sequence = make_sequence(unit_of_work, queue, client)
     runner = TaskRunner(
-        queue=queue,  # type: ignore[arg-type]  # двойник порта очереди
+        queue=queue,  # type: ignore[arg-type]  # queue port double
         handlers={TaskType.ANALYZE_CHAPTER: sequence.run_task},
     )
 
@@ -160,7 +160,7 @@ async def test_completed_analysis_moves_book_to_glossary_review() -> None:
 
 
 async def test_start_resumes_from_first_unanalysed_chapter() -> None:
-    """Повторный запуск продолжает с первой непроанализированной главы (PRD § 18)."""
+    """Restarting resumes from the first unanalyzed chapter (PRD § 18)."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
@@ -176,7 +176,7 @@ async def test_start_resumes_from_first_unanalysed_chapter() -> None:
 
 
 async def test_foreign_task_type_is_rejected() -> None:
-    """Обработчик анализа не берётся выполнять задачу чужого типа."""
+    """The analysis handler rejects tasks of an alien type."""
     unit_of_work = make_book()
     sequence = make_sequence(
         unit_of_work,
@@ -191,7 +191,7 @@ async def test_foreign_task_type_is_rejected() -> None:
 
 
 async def test_analysis_does_not_start_before_import_is_finished() -> None:
-    """Книга, которая ещё импортируется, к анализу не допускается (ALG-06)."""
+    """A book that is still importing cannot start analysis (ALG-06)."""
     unit_of_work = make_book()
     unit_of_work.books.save(make_book_record(status=BookStatus.IMPORTING))
     sequence = make_sequence(
@@ -205,7 +205,7 @@ async def test_analysis_does_not_start_before_import_is_finished() -> None:
 
 
 async def test_unknown_book_cannot_start_analysis() -> None:
-    """Анализ книги, которой нет в хранилище, не запускается."""
+    """Analysis cannot be started for a book not in storage."""
     sequence = make_sequence(
         FakeUnitOfWork(), FakeTaskQueue(), FakeLLMClient.always(analysis_reply())
     )
@@ -215,12 +215,11 @@ async def test_unknown_book_cannot_start_analysis() -> None:
 
 
 async def test_repeated_start_retries_analysis_stopped_by_llm_configuration() -> None:
-    """Анализ, упавший на ключе провайдера, продолжается повторным запуском (QA-01).
+    """Analysis stopped by provider configuration error is retried upon restart (QA-01).
 
-    Первая глава падает с `LLMConfigurationError`: остальные главы в очередь не ставятся,
-    и книга остаётся в `ANALYZING`. Пользователь исправляет ключ и снова запускает анализ —
-    та же задача возвращается в очередь, и книга доходит до проверки глоссария без
-    повторной загрузки файла.
+    The first chapter fails with `LLMConfigurationError`: subsequent chapters are not queued,
+    and the book stays in `ANALYZING`. When the user fixes the key and starts analysis again,
+    the same task is reenqueued, and the book reaches glossary review without reimporting.
     """
     unit_of_work = make_book()
     queue = FakeTaskQueue()
@@ -230,7 +229,7 @@ async def test_repeated_start_retries_analysis_stopped_by_llm_configuration() ->
     )
     sequence = make_sequence(unit_of_work, queue, client)
     runner = TaskRunner(
-        queue=queue,  # type: ignore[arg-type]  # двойник порта очереди
+        queue=queue,  # type: ignore[arg-type]  # queue port double
         handlers={TaskType.ANALYZE_CHAPTER: sequence.run_task},
     )
     first = await sequence.start(BOOK_ID)
@@ -253,7 +252,7 @@ async def test_repeated_start_retries_analysis_stopped_by_llm_configuration() ->
 
 
 async def test_repeated_start_keeps_a_permanently_failed_analysis_task() -> None:
-    """Повторный запуск не возвращает в очередь задачу с постоянной ошибкой."""
+    """Restarting does not re-enqueue a permanently failed task."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     sequence = make_sequence(

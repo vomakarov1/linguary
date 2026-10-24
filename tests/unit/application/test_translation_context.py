@@ -1,4 +1,4 @@
-"""Контекст запроса обработки группы блоков (P3.T6, PRD § 13, ALG-04)."""
+"""Processing request context for a block unit (P3.T6, PRD § 13, ALG-04)."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ from linguary.domain import (
 
 SOURCE_LANGUAGE = "en"
 
-#: Сводка и указания главы: выжимка анализа, которая уходит в каждый запрос обработки.
+#: Chapter summary and instructions: analysis digest passed to each processing request.
 CHAPTER_SUMMARY = "Mr. Bennet visits the new neighbour."
 CHAPTER_INSTRUCTIONS = "Сохранять иронию рассказчика."
 
@@ -58,7 +58,7 @@ CHAPTER_INSTRUCTIONS = "Сохранять иронию рассказчика."
 def make_section(
     blocks: tuple[DocumentBlock, ...], *, title: str = "Chapter 1", order: int = 0
 ) -> DocumentSection:
-    """Глава книги из переданных блоков."""
+    """Book chapter from the provided blocks."""
     return DocumentSection(
         id=SECTION_ID,
         document_id=BOOK_ID,
@@ -70,7 +70,7 @@ def make_section(
 
 
 def make_document(section: DocumentSection) -> CanonicalDocument:
-    """Книга из одной главы."""
+    """Single-chapter book."""
     return CanonicalDocument(
         id=BOOK_ID,
         metadata=BookMetadata(title="Pride and Prejudice", authors=("Jane Austen",)),
@@ -81,7 +81,7 @@ def make_document(section: DocumentSection) -> CanonicalDocument:
 
 
 def make_analysis(unit: TranslationUnit) -> ChapterAnalysis:
-    """Сохранённый анализ главы с планом обработки её блоков."""
+    """Saved chapter analysis with block treatment plan."""
     return ChapterAnalysis.create(
         id="analysis-1",
         section_id=SECTION_ID,
@@ -98,7 +98,7 @@ def make_analysis(unit: TranslationUnit) -> ChapterAnalysis:
 def make_snapshot(
     *, locked: bool = True, suggested: bool = True
 ) -> GlossarySnapshot:
-    """Снимок глоссария запуска с обязательным и необязательным решением."""
+    """Launch glossary snapshot with mandatory and optional decisions."""
     entries = []
     if locked:
         entries.append(
@@ -130,7 +130,7 @@ def build_context(
     snapshot: GlossarySnapshot | None = None,
     builder: ContextBuilder | None = None,
 ):
-    """Контекст обработки главы из двух блоков."""
+    """Processing context for a two-block chapter."""
     blocks = make_blocks(len(treatments))
     unit = make_unit(blocks, treatments=treatments)
     section = make_section(blocks)
@@ -144,7 +144,7 @@ def build_context(
 
 
 def test_request_asks_for_translation_result() -> None:
-    """Запрос обработки просит структурированный результат перевода, а не анализ."""
+    """Processing request asks for a structured translation result rather than an analysis."""
     context, _ = build_context()
 
     assert context.request.kind is LLMResponseKind.TRANSLATION_RESULT
@@ -199,7 +199,7 @@ def test_translation_instructions_forbid_plot_retelling_notes() -> None:
 
 
 def test_context_carries_blocks_under_aliases_with_their_treatment() -> None:
-    """Блоки уходят модели псевдонимами `b1..bN` вместе с режимом из плана."""
+    """Blocks are sent to the model under aliases `b1..bN` together with their planned treatment."""
     context, unit = build_context()
 
     assert context.aliases == ("b1", "b2")
@@ -210,7 +210,7 @@ def test_context_carries_blocks_under_aliases_with_their_treatment() -> None:
 
 
 def test_context_carries_chapter_digest() -> None:
-    """В запрос идут сводка главы и указания переводчику из сохранённого анализа."""
+    """The request includes the chapter summary and translator instructions from the saved analysis."""
     context, _ = build_context()
 
     assert CHAPTER_SUMMARY in context.request.input_text
@@ -230,7 +230,7 @@ def test_chapter_digest_has_no_block_labels() -> None:
 
 
 def test_mandatory_glossary_entries_are_separated_from_suggestions() -> None:
-    """Зафиксированные решения стоят обязательными указаниями, остальные — подсказками."""
+    """Locked decisions appear as mandatory directives, others as hints."""
     context, _ = build_context()
 
     text = context.request.input_text
@@ -242,7 +242,7 @@ def test_mandatory_glossary_entries_are_separated_from_suggestions() -> None:
 
 
 def test_book_without_locked_terms_says_so() -> None:
-    """Книга без зафиксированных решений сообщает об этом, а не молчит."""
+    """A book without locked terms explicitly states so rather than remaining silent."""
     context, _ = build_context(snapshot=make_snapshot(locked=False))
 
     assert "Обязательных переводческих указаний по этой книге нет." in (
@@ -252,7 +252,7 @@ def test_book_without_locked_terms_says_so() -> None:
 
 
 def test_suggestions_are_limited_but_mandatory_entries_are_not() -> None:
-    """Ограничение контекста режет подсказки и не трогает обязательные указания."""
+    """Context capping curtails suggestions while leaving mandatory directives intact."""
     snapshot = GlossarySnapshot(
         entries=tuple(
             GlossarySnapshotEntry(
@@ -277,7 +277,7 @@ def test_suggestions_are_limited_but_mandatory_entries_are_not() -> None:
 
 
 def test_expectation_names_aliases_with_planned_treatments() -> None:
-    """Ожидание повтора перечисляет псевдонимы и режимы, которые видела модель (ALG-05)."""
+    """Retry expectation lists aliases and treatments seen by the model (ALG-05)."""
     context, _ = build_context()
 
     assert context.expectation.target_language == TARGET_LANGUAGE
@@ -289,7 +289,7 @@ def test_expectation_names_aliases_with_planned_treatments() -> None:
 
 
 def test_response_aliases_are_translated_into_block_ids() -> None:
-    """Ответ модели возвращается к стабильным идентификаторам блоков до проверок."""
+    """Model response aliases are mapped back to stable block IDs before validations."""
     context, unit = build_context(treatments=(BlockTreatment.TRANSLATE,))
     payload = make_response(
         (
@@ -315,7 +315,7 @@ def test_response_aliases_are_translated_into_block_ids() -> None:
 
 
 def test_unknown_alias_in_response_discards_the_unit() -> None:
-    """Псевдоним не из запроса отбраковывает группу с ожиданием для повтора (ALG-05)."""
+    """An alias not from the request discards the unit with retry expectation (ALG-05)."""
     context, _ = build_context(treatments=(BlockTreatment.TRANSLATE,))
     payload = TranslationResultResponse(
         blocks=(
@@ -334,7 +334,7 @@ def test_unknown_alias_in_response_discards_the_unit() -> None:
 
 
 def test_note_about_block_outside_the_request_discards_the_unit() -> None:
-    """Заметка о блоке вне запроса — тот же чужой идентификатор (PRD § 19.3)."""
+    """A note referring to a block outside the request is likewise a foreign ID (PRD § 19.3)."""
     context, _ = build_context(treatments=(BlockTreatment.TRANSLATE,))
     payload = make_response(
         (
@@ -358,7 +358,7 @@ def test_note_about_block_outside_the_request_discards_the_unit() -> None:
 
 
 def test_unit_of_another_chapter_is_rejected() -> None:
-    """Группа блоков другой главы контекста не получает."""
+    """A block unit from another chapter does not receive context."""
     blocks = make_blocks(1)
     other = make_block(order=0, section_id="section-2")
     section = make_section(blocks)
@@ -375,11 +375,11 @@ def test_unit_of_another_chapter_is_rejected() -> None:
 
 
 def test_glossary_note_reaches_the_model_with_its_decision() -> None:
-    """Переводческое указание идёт модели рядом со своим вариантом перевода.
+    """Translation instruction is provided to the model alongside its translation variant.
 
-    Одного варианта перевода мало там, где решение уровня книги влияет на согласование:
-    имя приходит из глоссария одинаковым, а род персонажа без указания каждая глава
-    выбирает заново (PRD § 11).
+    A translation variant alone is insufficient when a book-level decision affects agreement:
+    a name comes from the glossary consistently, while character gender without instruction
+    would be picked anew by each chapter (PRD § 11).
     """
     snapshot = GlossarySnapshot(
         entries=(
@@ -400,17 +400,17 @@ def test_glossary_note_reaches_the_model_with_its_decision() -> None:
 
 
 def test_glossary_without_notes_keeps_the_list_clean() -> None:
-    """Без указаний список решений не обрастает пояснением про скобки."""
+    """Without instructions, the decision list does not acquire notes about parentheses."""
     context, _ = build_context()
 
     assert "принято для всей книги" not in context.request.input_text
 
 
 def test_expressions_of_before_you_read_are_not_explained_twice() -> None:
-    """Объяснённые до чтения выражения главы модель получает как запрет повтора.
+    """Expressions explained before reading are passed to the model as a duplicate prevention rule.
 
-    `Before You Read` собран на анализе, а подсказки и заметки рождаются позже:
-    без этого списка один оборот объясняется читателю трижды, что запрещает § 19.3.
+    `Before You Read` is assembled during analysis, while hints and notes are created later:
+    without this list, a single turn of phrase could be explained three times, violating § 19.3.
     """
     blocks = make_blocks(1)
     unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
@@ -437,11 +437,10 @@ def test_expressions_of_before_you_read_are_not_explained_twice() -> None:
 
 
 def test_footnote_backlink_does_not_reach_the_model() -> None:
-    """Ссылку возврата сноски модель не видит и в перевод не переносит.
+    """The model does not see a footnote backlink and does not transfer it to translation.
 
-    Для книги «↩» — навигация, которую экспортёр восстановит из разметки блока сам.
-    Модель же принимает её за текст сноски и копирует значок в перевод, где он
-    никуда не ведёт.
+    For the book, "↩" is navigation that the exporter reconstructs from block markup.
+    The model treats it as footnote text and copies the symbol to translation, where it leads nowhere.
     """
     text = "A starglass is a lens ground from marsh quartz. ↩"
     footnote = DocumentBlock.create(
@@ -487,10 +486,10 @@ def test_footnote_backlink_does_not_reach_the_model() -> None:
 def test_backlink_of_notes_page_into_another_file_does_not_reach_the_model(
     target: str,
 ) -> None:
-    """Ссылка возврата со страницы сносок ведёт в другой файл и отсекается так же (Д-2).
+    """Backlinks from a notes page into another file are stripped the same way (D-2).
 
-    У отдельной страницы сносок возврат всегда уходит в главу, где стоит ссылка на сноску:
-    без этого значок «↩» доходил до модели и оставался мёртвым в переводе.
+    On a dedicated notes page, the backlink always points to the chapter where the footnote
+    reference is located: otherwise the "↩" symbol reaches the model and stays dead in the translation.
     """
     text = "Duskmere was founded in a single rainy spring. ↩"
     footnote = DocumentBlock.create(
@@ -534,7 +533,7 @@ def test_backlink_of_notes_page_into_another_file_does_not_reach_the_model(
     ],
 )
 def test_footnote_ending_with_an_outside_link_keeps_its_text(target: str) -> None:
-    """Ссылка на внешний адрес или на файл без якоря — текст сноски, а не возврат."""
+    """A link to an external URL or to a file without an anchor is footnote text, not a backlink."""
     text = "See the town chronicle."
     footnote = DocumentBlock.create(
         document_id=BOOK_ID,
@@ -569,7 +568,7 @@ def test_footnote_ending_with_an_outside_link_keeps_its_text(target: str) -> Non
 
 
 def test_link_inside_a_paragraph_survives_for_the_model() -> None:
-    """Отсечение хвоста касается только сноски: обычная ссылка абзаца остаётся текстом."""
+    """Stripping the tail applies only to footnotes: normal paragraph links remain text."""
     text = "Netherfield Park is let at last."
     paragraph = DocumentBlock.create(
         document_id=BOOK_ID,
@@ -606,7 +605,7 @@ def test_link_inside_a_paragraph_survives_for_the_model() -> None:
 def _paragraph_with_noteref(
     text: str = "Nobody liked her face.1 It was a pity.", *, order: int = 0
 ) -> DocumentBlock:
-    """Абзац с единственной ссылкой на сноску «1» посреди текста, как её снимает импорт."""
+    """Paragraph with a single footnote reference '1' mid-text, as captured by import."""
     start = text.index("1")
     return DocumentBlock.create(
         document_id=BOOK_ID,
@@ -629,7 +628,7 @@ def _paragraph_with_noteref(
 
 
 def test_footnote_reference_reaches_the_model_as_a_marker() -> None:
-    """Номер ссылки на сноску модель видит меткой, а не цифрой текста (QA-08)."""
+    """The model sees a footnote reference number as a marker rather than text digits (QA-08)."""
     paragraph = _paragraph_with_noteref()
     unit = make_unit((paragraph,), treatments=(BlockTreatment.TRANSLATE,))
     section = make_section((paragraph,))
@@ -648,7 +647,7 @@ def test_footnote_reference_reaches_the_model_as_a_marker() -> None:
 
 
 def test_footnote_reference_is_dropped_from_neighbour_context() -> None:
-    """В соседних абзацах повторной генерации ссылки на сноску нет вовсе."""
+    """Footnote reference is completely dropped from neighbouring paragraphs."""
     neighbour = _paragraph_with_noteref("Before the storm 1 came, they slept.")
     target = DocumentBlock.create(
         document_id=BOOK_ID,
@@ -675,7 +674,7 @@ def test_footnote_reference_is_dropped_from_neighbour_context() -> None:
 
 
 def test_translation_context_carries_expressions_of_before_you_read() -> None:
-    """Выражения «Before You Read» доходят до сценария для отсева повторов (QA-03)."""
+    """'Before You Read' expressions reach the scenario for duplicate filtering (QA-03)."""
     blocks = make_blocks(1)
     unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
     section = make_section(blocks)
@@ -698,7 +697,7 @@ def test_translation_context_carries_expressions_of_before_you_read() -> None:
 
 
 def test_notes_page_has_no_before_you_read_to_protect() -> None:
-    """У страницы сносок нет «Before You Read» в книге: повторять её подсказкам нечего."""
+    """A notes page has no 'Before You Read' in the book: its hints have nothing to repeat."""
     note = make_block(order=0, type=BlockType.FOOTNOTE, text="1 A plain face, of course.")
     unit = make_unit((note,), treatments=(BlockTreatment.TRANSLATE,))
     section = make_section((note,))
@@ -721,8 +720,8 @@ def test_notes_page_has_no_before_you_read_to_protect() -> None:
     assert "уже объяснены до начала чтения" not in context.request.input_text
 
 
-#: Указания главы 2 из живого прогона: модель назначила в них переводы и род вопреки
-#: запрету промпта, а пользователь потом исправил оба решения в глоссарии (Д-1).
+#: Chapter 2 instructions from a live run: the model assigned translations and gender in them
+#: contrary to prompt prohibitions, and the user subsequently corrected both in the glossary (D-1).
 STALE_CHAPTER_INSTRUCTIONS = "\n".join(
     (
         "1. Сохранять иронию рассказчика.",
@@ -735,7 +734,7 @@ STALE_CHAPTER_INSTRUCTIONS = "\n".join(
 
 
 def user_decisions_snapshot(status: TermStatus = TermStatus.APPROVED) -> GlossarySnapshot:
-    """Снимок запуска с решениями пользователя по имени и топониму."""
+    """Launch snapshot with user decisions on a name and place."""
     return GlossarySnapshot(
         entries=(
             GlossarySnapshotEntry(
@@ -758,7 +757,7 @@ def user_decisions_snapshot(status: TermStatus = TermStatus.APPROVED) -> Glossar
 def context_with_instructions(
     instructions: str, snapshot: GlossarySnapshot
 ) -> str:
-    """Текст запроса обработки главы с указаниями и кандидатами её анализа."""
+    """Processing request text for a chapter with instructions and analysis candidates."""
     blocks = make_blocks(1)
     unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
     section = make_section(blocks)
@@ -790,7 +789,7 @@ def context_with_instructions(
 
 @pytest.mark.parametrize("status", [TermStatus.APPROVED, TermStatus.LOCKED])
 def test_user_decision_reaches_the_model_as_mandatory(status: TermStatus) -> None:
-    """Принятое, исправленное и зафиксированное решение модель получает обязательным (Д-1)."""
+    """Accepted, corrected, and locked decisions reach the model as mandatory (D-1)."""
     text = context_with_instructions(CHAPTER_INSTRUCTIONS, user_decisions_snapshot(status))
 
     mandatory = text.index("Обязательные переводческие решения книги")
@@ -801,11 +800,11 @@ def test_user_decision_reaches_the_model_as_mandatory(status: TermStatus) -> Non
 
 
 def test_chapter_instructions_contradicting_user_decisions_are_dropped() -> None:
-    """Указание главы с другим переводом или другим родом решение глоссария не перекрывает.
+    """Chapter instructions with a conflicting translation or gender do not override glossary decisions.
 
-    Живой прогон, дефект Д-1: указания главы 2 называли «Даскмир» и мужской род, хотя
-    пользователь исправил топоним на «Даскмер» и указал женский род, — и глава 2 вышла
-    с «Даскмира» и «Рен ответил».
+    Live run, defect D-1: chapter 2 instructions stated the rejected name ("Daskmir") and masculine gender,
+    even though the user corrected the place to "Daskmer" and specified feminine gender,
+    causing chapter 2 to yield the rejected form and masculine verbs.
     """
     text = context_with_instructions(STALE_CHAPTER_INSTRUCTIONS, user_decisions_snapshot())
 
@@ -817,14 +816,14 @@ def test_chapter_instructions_contradicting_user_decisions_are_dropped() -> None
 
 
 def test_prompt_puts_glossary_decisions_above_chapter_instructions() -> None:
-    """Контекст прямо говорит, что решение глоссария сильнее указаний главы."""
+    """The context explicitly states that glossary decisions override chapter instructions."""
     text = context_with_instructions(CHAPTER_INSTRUCTIONS, user_decisions_snapshot())
 
     assert "сильнее указаний переводчику главы" in text
 
 
 def test_skipped_decisions_leave_chapter_instructions_intact() -> None:
-    """Пропущенный элемент остаётся подсказкой и указаний главы не вытесняет."""
+    """Skipped items remain hints and do not displace chapter instructions."""
     text = context_with_instructions(
         STALE_CHAPTER_INSTRUCTIONS, user_decisions_snapshot(TermStatus.SUGGESTED)
     )
@@ -834,7 +833,7 @@ def test_skipped_decisions_leave_chapter_instructions_intact() -> None:
 
 
 def test_footnote_that_is_a_link_entirely_keeps_its_text() -> None:
-    """Сноска, целиком ставшая ссылкой в книгу, не теряет текст: возвратом она не бывает."""
+    """A footnote consisting entirely of a link into the book retains its text: it is not a backlink."""
     text = "See chapter two."
     footnote = DocumentBlock.create(
         document_id=BOOK_ID,
@@ -869,10 +868,10 @@ def test_footnote_that_is_a_link_entirely_keeps_its_text() -> None:
 
 
 def test_glossary_note_naming_rejected_variant_of_other_concept_is_dropped() -> None:
-    """Указание элемента глоссария не приносит в контекст отвергнутый вариант (Н-2).
+    """A glossary item note does not introduce a rejected variant into the context (N-2).
 
-    Живой прогон: указание `marsh gate`, принятое через «Принять все», дословно
-    уходило в блок обязательных решений с «Даскмир» рядом с «Duskmere -> Даскмер».
+    Live run: the note for `marsh gate`, accepted via "Accept All", literally went into
+    the mandatory decisions block with the rejected variant next to "Duskmere -> Daskmer".
     """
     decisions = user_decisions_snapshot()
     snapshot = GlossarySnapshot(
@@ -910,11 +909,11 @@ def test_glossary_note_naming_rejected_variant_of_other_concept_is_dropped() -> 
 
 
 def test_rejected_variant_is_known_from_other_chapters_of_the_book() -> None:
-    """Отвергнутый вариант берётся из кандидатов всей книги, а не только этой главы (Д-4).
+    """Rejected variants are taken from all book candidates, not just this chapter (D-4).
 
-    Третий живой прогон: анализ главы 2 кандидата Duskmere не вернул — понятие уже
-    было в решениях главы 1, — и в запрос главы 2 целиком ушли указание `the marsh
-    gate` с «Даскмир» и пункт указаний главы, называющий «Даскмир» без кавычек.
+    Third live run: analysis of chapter 2 did not return the Duskmere candidate (the concept
+    was already in chapter 1 decisions), and chapter 2 request received the entire note for
+    `the marsh gate` with the rejected form and the chapter instruction mentioning it without quotes.
     """
     blocks = make_blocks(1)
     unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))

@@ -1,4 +1,4 @@
-"""Учебные материалы главы и журнал вызовов LLM (PRD § 19, § 24)."""
+"""Chapter learning materials and LLM call log (PRD § 19, § 24)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ SECTION_ID = "section-1"
 
 
 def make_note(ordinal: int, block_id: str) -> LanguageNote:
-    """Заметка с идентификатором из собственного пространства имён."""
+    """A note with an identifier from its own namespace."""
     return LanguageNote(
         id=build_language_note_id(chapter_number=3, ordinal=ordinal),
         block_id=block_id,
@@ -35,7 +35,7 @@ def make_note(ordinal: int, block_id: str) -> LanguageNote:
 
 
 def test_material_collects_notes_of_one_block() -> None:
-    """Заметки показываются рядом с блоком, к которому относятся."""
+    """Notes are shown alongside the block they refer to."""
     material = LearningMaterial.for_chapter(
         section_id=SECTION_ID,
         before_you_read=[
@@ -51,7 +51,7 @@ def test_material_collects_notes_of_one_block() -> None:
 
 
 def test_material_rejects_duplicate_note_ids() -> None:
-    """Идентификаторы заметок главы уникальны."""
+    """Chapter note identifiers are unique."""
     with pytest.raises(DomainError):
         LearningMaterial(
             section_id=SECTION_ID,
@@ -60,7 +60,7 @@ def test_material_rejects_duplicate_note_ids() -> None:
 
 
 def test_note_requires_block() -> None:
-    """Групповых заметок нет: каждая привязана ровно к одному блоку."""
+    """There are no grouped notes: each is attached strictly to a single block."""
     with pytest.raises(DomainError):
         LanguageNote(
             id="ln-ch03-001",
@@ -71,13 +71,13 @@ def test_note_requires_block() -> None:
 
 
 def test_before_you_read_entry_requires_explanation() -> None:
-    """Выражение без объяснения учебным материалом не является."""
+    """An expression without an explanation is not a learning material."""
     with pytest.raises(DomainError):
         BeforeYouReadEntry(expression="to strike thirteen", explanation="  ")
 
 
 def make_log(*, success: bool = True, error: TaskError | None = None) -> LLMCallLog:
-    """Запись журнала об одном вызове модели."""
+    """A log entry for a single model call."""
     return LLMCallLog(
         id="call-1",
         book_id="book-1",
@@ -95,7 +95,7 @@ def make_log(*, success: bool = True, error: TaskError | None = None) -> LLMCall
 
 
 def test_call_log_keeps_diagnostics_without_payload() -> None:
-    """Журнал хранит диагностику вызова, но не текст запроса и ответа."""
+    """The log stores call diagnostics, but not request or response payloads."""
     log = make_log()
     assert log.usage is not None
     assert log.usage.total_tokens == 1250
@@ -103,13 +103,13 @@ def test_call_log_keeps_diagnostics_without_payload() -> None:
 
 
 def test_failed_call_requires_error() -> None:
-    """Неуспешный вызов без ошибки в журнал не пишется."""
+    """An unsuccessful call without an error is not recorded in the log."""
     with pytest.raises(LLMCallLogError):
         make_log(success=False)
 
 
 def test_successful_call_has_no_error() -> None:
-    """Успешный вызов ошибку не содержит."""
+    """A successful call contains no error."""
     with pytest.raises(LLMCallLogError):
         make_log(
             success=True,
@@ -118,5 +118,5 @@ def test_successful_call_has_no_error() -> None:
 
 
 def test_token_usage_without_provider_data() -> None:
-    """Провайдер может не сообщить объём токенов."""
+    """The provider may omit token counts."""
     assert TokenUsage().total_tokens is None

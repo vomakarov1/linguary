@@ -1,4 +1,4 @@
-"""Инварианты канонического документа, разделов и блоков (PRD § 6-7)."""
+"""Invariants of canonical document, sections, and blocks (PRD § 6-7)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from linguary.domain import (
 
 
 def test_document_returns_blocks_in_reading_order() -> None:
-    """Блоки книги перечисляются в порядке чтения, а не в порядке создания."""
+    """Book blocks are listed in reading order, not creation order."""
     blocks = make_blocks(3)
     section = make_section(reversed(blocks))
     document = make_document([section])
@@ -36,21 +36,21 @@ def test_document_returns_blocks_in_reading_order() -> None:
 
 
 def test_document_finds_block_by_id() -> None:
-    """Блок книги доступен по стабильному идентификатору."""
+    """A book block is accessible by its stable identifier."""
     blocks = make_blocks(2)
     document = make_document([make_section(blocks)])
     assert document.block(blocks[1].id) is blocks[1]
 
 
 def test_document_rejects_unknown_block_id() -> None:
-    """Обращение к чужому блоку отклоняется, а не возвращает пустой результат."""
+    """Accessing a non-existent block is rejected rather than returning an empty result."""
     document = make_document([make_section(make_blocks(1))])
     with pytest.raises(UnknownBlockError):
         document.block("missing-block")
 
 
 def test_document_rejects_duplicate_section_order() -> None:
-    """Две главы не могут занимать одно место в порядке чтения."""
+    """Two chapters cannot share the same position in reading order."""
     with pytest.raises(DocumentStructureError):
         make_document(
             [
@@ -61,7 +61,7 @@ def test_document_rejects_duplicate_section_order() -> None:
 
 
 def test_document_rejects_same_source_and_target_language() -> None:
-    """Книга переводится с одного языка на другой."""
+    """A book is translated from one language to another."""
     with pytest.raises(DocumentStructureError):
         CanonicalDocument(
             id=DOCUMENT_ID,
@@ -72,14 +72,14 @@ def test_document_rejects_same_source_and_target_language() -> None:
 
 
 def test_section_rejects_block_from_other_section() -> None:
-    """Раздел не принимает блок чужой главы."""
+    """A section does not accept a block from another chapter."""
     foreign = make_block(section_id="section-2")
     with pytest.raises(DocumentStructureError):
         make_section([foreign])
 
 
 def test_section_rejects_duplicate_block_order() -> None:
-    """Порядковые номера блоков внутри главы уникальны."""
+    """Block sequence numbers within a chapter are unique."""
     first = make_block(order=0, structural_path="/body/p[1]")
     second = make_block(order=0, structural_path="/body/p[2]")
     with pytest.raises(DocumentStructureError):
@@ -87,7 +87,7 @@ def test_section_rejects_duplicate_block_order() -> None:
 
 
 def test_section_rejects_missing_parent_block() -> None:
-    """Вложенность указывает на блок той же главы."""
+    """Nesting references a block within the same chapter."""
     child = DocumentBlock(
         id="child",
         section_id=SECTION_ID,
@@ -104,7 +104,7 @@ def test_section_rejects_missing_parent_block() -> None:
 
 
 def test_section_accepts_nested_block() -> None:
-    """Пункт списка ссылается на родительский блок той же главы."""
+    """A list item references a parent block within the same chapter."""
     parent = make_block(order=0, type=BlockType.OTHER)
     child = DocumentBlock(
         id="child",
@@ -121,7 +121,7 @@ def test_section_accepts_nested_block() -> None:
 
 
 def test_block_rejects_annotation_outside_text() -> None:
-    """Разметка не может выходить за пределы текста блока."""
+    """Markup cannot extend beyond the block text boundaries."""
     with pytest.raises(DocumentStructureError):
         DocumentBlock(
             id="block-1",
@@ -139,7 +139,7 @@ def test_block_rejects_annotation_outside_text() -> None:
 
 
 def test_block_keeps_markup_separate_from_text() -> None:
-    """Текст блока хранится без XHTML, а разметка — смещениями в этом тексте."""
+    """Block text is stored without XHTML, while markup is stored as offsets within this text."""
     block = DocumentBlock(
         id="block-1",
         section_id=SECTION_ID,
@@ -158,19 +158,19 @@ def test_block_keeps_markup_separate_from_text() -> None:
 
 
 def test_link_annotation_requires_target() -> None:
-    """Ссылка и сноска бессмысленны без адреса назначения."""
+    """A link or footnote reference is meaningless without a destination target."""
     with pytest.raises(DocumentStructureError):
         InlineAnnotation(type=InlineAnnotationType.LINK, start=0, end=3)
 
 
 def test_annotation_rejects_empty_range() -> None:
-    """Разметка охватывает хотя бы один символ."""
+    """Markup covers at least one character."""
     with pytest.raises(DocumentStructureError):
         InlineAnnotation(type=InlineAnnotationType.BOLD, start=4, end=4)
 
 
 def test_block_rejects_fatal_support_status() -> None:
-    """Конструкция со статусом FATAL блоком не становится: импорт невозможен."""
+    """A construct with status FATAL does not become a block: import is impossible."""
     with pytest.raises(DocumentStructureError):
         DocumentBlock(
             id="block-1",
@@ -220,7 +220,7 @@ def test_block_rejects_fatal_support_status() -> None:
 def test_section_of_only_footnotes_is_a_notes_page(
     types: tuple[BlockType, ...], texts: tuple[str, ...], expected: bool
 ) -> None:
-    """Раздел из одних сносок — страница сносок, а не глава (QA-04)."""
+    """A section consisting solely of footnotes is a notes page, not a chapter (QA-04)."""
     blocks = [
         make_block(order=index, type=type_, text=text)
         for index, (type_, text) in enumerate(zip(types, texts, strict=True))
@@ -230,7 +230,7 @@ def test_section_of_only_footnotes_is_a_notes_page(
 
 
 def test_nested_paragraph_of_a_footnote_does_not_make_it_a_chapter() -> None:
-    """Абзацы внутри сноски — её часть, а не текст главы."""
+    """Paragraphs inside a footnote are part of the footnote, not chapter text."""
     note = make_block(order=0, type=BlockType.FOOTNOTE, text="")
     inner = DocumentBlock(
         id="inner",

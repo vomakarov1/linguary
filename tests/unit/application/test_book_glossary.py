@@ -1,4 +1,4 @@
-"""Глоссарий книги: сборка из кандидатов глав и отбор требующих внимания (P3.T5, PRD § 11-12)."""
+"""Book glossary: assembly from chapter candidates and selection of items requiring review (P3.T5, PRD § 11-12)."""
 
 from __future__ import annotations
 
@@ -31,14 +31,14 @@ TARGET_LANGUAGE = "ru"
 
 
 def chapter_one(*candidates: GlossaryCandidate) -> ChapterAnalysis:
-    """Анализ первой главы книги с её кандидатами глоссария."""
+    """Analysis of the first book chapter with its glossary candidates."""
     return make_chapter_analysis(
         id="analysis-1", section_id="section-1", candidates=candidates
     )
 
 
 def chapter_two(*candidates: GlossaryCandidate) -> ChapterAnalysis:
-    """Анализ второй главы книги с её кандидатами глоссария."""
+    """Analysis of the second book chapter with its glossary candidates."""
     return make_chapter_analysis(
         id="analysis-2", section_id="section-2", candidates=candidates
     )
@@ -53,7 +53,7 @@ def decision(
     language: str = TARGET_LANGUAGE,
     concept_id: str = "concept-1",
 ) -> TermConcept:
-    """Сохранённое решение пользователя по элементу глоссария."""
+    """Saved user decision on a glossary item."""
     return TermConcept(
         id=concept_id,
         book_id=BOOK_ID,
@@ -71,7 +71,7 @@ def decision(
 def review(
     *analyses: ChapterAnalysis, decisions: Sequence[TermConcept] = ()
 ) -> GlossaryReview:
-    """Глоссарий книги, собранный из переданных анализов глав."""
+    """Book glossary assembled from the provided chapter analyses."""
     return build_glossary_review(
         book_id=BOOK_ID,
         analyses=analyses,
@@ -136,7 +136,7 @@ def test_model_doubts_sorted_first_among_suggestions() -> None:
 def test_named_entity_requires_review_at_full_confidence(
     concept_type: ConceptType,
 ) -> None:
-    """Имя, место, организация и вымышленное понятие требуют решения при любой уверенности."""
+    """A person, place, organization, or fictional concept requires review at any confidence."""
     book = review(
         chapter_one(
             make_analysis_candidate(
@@ -155,7 +155,7 @@ def test_named_entity_requires_review_at_full_confidence(
 
 
 def test_confident_term_stays_optional_hint() -> None:
-    """Уверенно переведённый термин решения не требует и остаётся подсказкой."""
+    """A term translated with high confidence does not require review and stays as a hint."""
     book = review(
         chapter_one(
             make_analysis_candidate(
@@ -174,7 +174,7 @@ def test_confident_term_stays_optional_hint() -> None:
 
 
 def test_term_below_confidence_threshold_requires_review() -> None:
-    """Уверенность ниже настроенного порога переводит термин в требующие внимания."""
+    """Confidence below the configured threshold marks the term as requiring review."""
     book = review(
         chapter_one(
             make_analysis_candidate(
@@ -190,7 +190,7 @@ def test_term_below_confidence_threshold_requires_review() -> None:
 
 
 def test_model_flag_from_any_chapter_requires_review() -> None:
-    """Пометка модели хотя бы в одной главе делает общий элемент требующим внимания."""
+    """A model flag from any single chapter marks the shared item as requiring review."""
     book = review(
         chapter_one(
             make_analysis_candidate(
@@ -220,7 +220,7 @@ def test_model_flag_from_any_chapter_requires_review() -> None:
 
 
 def test_conflicting_translations_between_chapters_require_review() -> None:
-    """Разные варианты перевода одного текста в разных главах требуют решения."""
+    """Conflicting translations of the same text across chapters require review."""
     book = review(
         chapter_one(
             make_analysis_candidate(
@@ -249,7 +249,7 @@ def test_conflicting_translations_between_chapters_require_review() -> None:
 
 
 def test_type_requiring_review_wins_over_more_confident_chapter() -> None:
-    """Тип, требующий решения всегда, побеждает тип уверенной главы."""
+    """A concept type always requiring review wins over the type of a more confident chapter."""
     book = review(
         chapter_one(
             make_analysis_candidate(
@@ -277,7 +277,7 @@ def test_type_requiring_review_wins_over_more_confident_chapter() -> None:
 
 
 def test_review_shows_pending_items_first() -> None:
-    """Сначала показывается то, что ждёт решения, затем решённое и подсказки."""
+    """Pending items are shown first, followed by decided items and hints."""
     book = review(
         chapter_one(
             make_analysis_candidate(
@@ -304,7 +304,7 @@ def test_review_shows_pending_items_first() -> None:
 
 
 def test_decision_completes_review_of_item() -> None:
-    """Принятое решение снимает элемент с проверки, не меняя его признака внимания."""
+    """An accepted decision completes the review of an item without altering its review flag."""
     book = review(
         chapter_one(make_analysis_candidate(source_text="Mr. Bennet")),
         decisions=(decision("Mr. Bennet"),),
@@ -319,7 +319,7 @@ def test_decision_completes_review_of_item() -> None:
 
 
 def test_pending_items_block_processing() -> None:
-    """Необработанные требующие внимания элементы не дают запустить обработку."""
+    """Pending items requiring review block processing from starting."""
     book = review(chapter_one(make_analysis_candidate(source_text="Mr. Bennet")))
 
     with pytest.raises(GlossaryReviewIncompleteError, match="Mr. Bennet"):
@@ -327,14 +327,14 @@ def test_pending_items_block_processing() -> None:
 
 
 def test_decision_without_candidates_is_not_shown() -> None:
-    """Решение по тексту, которого в книге больше нет, в проверку не входит."""
+    """A decision for text no longer present in the book is excluded from review."""
     book = review(chapter_one(), decisions=(decision("Mr. Bennet"),))
 
     assert book.items == ()
 
 
 def test_snapshot_carries_status_of_each_decision() -> None:
-    """Снимок передаёт модели зафиксированные решения как обязательные, прочие — как подсказки."""
+    """The snapshot passes locked decisions to the model as mandatory, and others as hints."""
     book = review(
         chapter_one(
             make_analysis_candidate(source_text="Mr. Bennet"),
@@ -362,7 +362,7 @@ def test_snapshot_carries_status_of_each_decision() -> None:
 
 
 def test_snapshot_skips_decision_without_target_language_variant() -> None:
-    """Решение без варианта на целевом языке модели ничего не навязывает."""
+    """A decision without a target language variant does not enforce anything on the model."""
     book = review(
         chapter_one(make_analysis_candidate(source_text="Mr. Bennet")),
         decisions=(decision("Mr. Bennet", language="de", text="Herr Bennet"),),
@@ -372,14 +372,14 @@ def test_snapshot_skips_decision_without_target_language_variant() -> None:
 
 
 def chapter_three(*candidates: GlossaryCandidate) -> ChapterAnalysis:
-    """Анализ третьей главы книги с её кандидатами глоссария."""
+    """Analysis of the third book chapter with its glossary candidates."""
     return make_chapter_analysis(
         id="analysis-3", section_id="section-3", candidates=candidates
     )
 
 
 def wonka(spelling: str, *, analysis_id: str, confidence: float = 0.9) -> GlossaryCandidate:
-    """Упоминание мистера Вонки в одной главе под заданным написанием."""
+    """Mention of Mr. Wonka in a single chapter under a given spelling."""
     return make_analysis_candidate(
         source_text=spelling,
         suggested_translation="мистер Вонка",
@@ -389,9 +389,9 @@ def wonka(spelling: str, *, analysis_id: str, confidence: float = 0.9) -> Glossa
 
 
 def test_obvious_spellings_of_one_name_are_one_item() -> None:
-    """Написания с точкой и без, в разном регистре — один элемент проверки (QA-11).
+    """Spellings with and without a dot, across cases, form a single review item (QA-11).
 
-    Элемент показан самым частым написанием, остальные написания видны в нём.
+    The item is displayed with the most frequent spelling, with other spellings listed.
     """
     book = review(
         chapter_one(wonka("Mr Wonka", analysis_id="analysis-1", confidence=0.99)),
@@ -426,7 +426,7 @@ def test_obvious_spellings_of_one_name_are_one_item() -> None:
 
 
 def test_decision_made_under_another_spelling_is_found() -> None:
-    """Решение, принятое по одному написанию, действует для всего элемента."""
+    """A decision made under one spelling applies to the entire item."""
     book = review(
         chapter_one(wonka("Mr Wonka", analysis_id="analysis-1")),
         chapter_two(wonka("Mr. Wonka", analysis_id="analysis-2")),
@@ -442,10 +442,10 @@ def test_decision_made_under_another_spelling_is_found() -> None:
 
 
 def test_diverging_decisions_of_spellings_are_not_merged_silently() -> None:
-    """Разные прежние решения по написаниям одного элемента помечаются конфликтом.
+    """Different previous decisions for spellings of the same item are marked as a conflict.
 
-    Действует зафиксированное решение, прочие видны как вытесненные и в снимок
-    запуска не попадают: снимок получает ровно одно решение на элемент.
+    The locked decision takes effect, others are marked as superseded and excluded from the
+    launch snapshot: the snapshot receives exactly one decision per item.
     """
     book = review(
         chapter_one(wonka("Mr Wonka", analysis_id="analysis-1")),
@@ -473,7 +473,7 @@ def test_diverging_decisions_of_spellings_are_not_merged_silently() -> None:
 
 
 def test_matching_decisions_of_spellings_are_not_a_conflict() -> None:
-    """Одинаковые решения по разным написаниям конфликтом не считаются."""
+    """Matching decisions across different spellings are not considered a conflict."""
     book = review(
         chapter_one(wonka("Mr Wonka", analysis_id="analysis-1")),
         chapter_two(wonka("Mr. Wonka", analysis_id="analysis-2")),

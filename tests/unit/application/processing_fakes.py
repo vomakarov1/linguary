@@ -1,7 +1,7 @@
-"""Фабрики блоков, групп и ответов обработки для unit-тестов (P3.T6).
+"""Block, unit, and processing response factories for unit tests (P3.T6).
 
-Собирают минимально валидные объекты, чтобы тест описывал только то, что проверяет.
-Модуль намеренно без префикса `test_`: иначе pytest соберёт его как тестовый.
+Assemble minimally valid objects so each test describes only what it checks.
+The module intentionally omits the 'test_' prefix: otherwise pytest would collect it as a test file.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ BOOK_ID = "book-1"
 SECTION_ID = "section-1"
 TARGET_LANGUAGE = "ru"
 
-#: Абзац оригинала и его законченный русский перевод — тексты, на которых проверки молчат.
+#: Source paragraph and its completed Russian translation: texts on which validators pass silently.
 SOURCE_TEXT = "It is a truth universally acknowledged."
 TRANSLATED_TEXT = "Общепризнанная истина гласит следующее."
 
@@ -44,7 +44,7 @@ def make_block(
     support_status: SupportStatus = SupportStatus.SUPPORTED,
     section_id: str = SECTION_ID,
 ) -> DocumentBlock:
-    """Блок главы со стабильным идентификатором."""
+    """A chapter block with a stable identifier."""
     return DocumentBlock.create(
         document_id=BOOK_ID,
         section_id=section_id,
@@ -63,7 +63,7 @@ def make_block(
 def make_blocks(
     count: int, *, text: str = SOURCE_TEXT, section_id: str = SECTION_ID
 ) -> tuple[DocumentBlock, ...]:
-    """Несколько одинаковых абзацев главы подряд."""
+    """Several identical consecutive chapter paragraphs."""
     return tuple(
         make_block(order=index, text=text, section_id=section_id)
         for index in range(count)
@@ -76,7 +76,7 @@ def make_plan(
     treatments: Sequence[BlockTreatment] | None = None,
     section_id: str = SECTION_ID,
 ) -> TreatmentPlan:
-    """План главы: один режим на все блоки либо режим для каждого по порядку."""
+    """Chapter plan: a single treatment for all blocks or sequential treatments per block."""
     ordered = tuple(blocks)
     chosen = (
         tuple(treatments)
@@ -94,7 +94,7 @@ def make_unit(
     treatments: Sequence[BlockTreatment] | None = None,
     id: str = "unit-1",
 ) -> TranslationUnit:
-    """Группа блоков с режимами из плана."""
+    """Block group with treatments from the plan."""
     ordered = tuple(blocks)
     return TranslationUnit.of_blocks(
         id=id, blocks=ordered, plan=make_plan(ordered, treatments=treatments)
@@ -104,7 +104,7 @@ def make_unit(
 def make_hint(
     *, original: str = "entailed", translation: str = "заповедный", note: str | None = None
 ) -> GlossaryHintResponse:
-    """Словарная подсказка в ответе модели."""
+    """Glossary hint in model response."""
     return GlossaryHintResponse(original=original, translation=translation, note=note)
 
 
@@ -115,7 +115,7 @@ def make_block_result(
     translated_text: str | None = TRANSLATED_TEXT,
     glossary_hints: tuple[GlossaryHintResponse, ...] = (),
 ) -> BlockResultResponse:
-    """Результат одного блока в ответе модели: по умолчанию полный перевод."""
+    """Result of a single block in model response: defaults to full translation."""
     return BlockResultResponse(
         source_block_id=block.id,
         treatment=treatment,
@@ -131,7 +131,7 @@ def make_note(
     note: str = "Ироническая формула зачина.",
     translated_excerpt: str | None = "Общепризнанная истина",
 ) -> LanguageNoteResponse:
-    """Языковая заметка ответа, привязанная к блоку."""
+    """Language note in model response attached to a block."""
     return LanguageNoteResponse(
         source_block_id=block.id,
         original_excerpt=original_excerpt,
@@ -145,14 +145,14 @@ def make_response(
     *,
     language_notes: Iterable[LanguageNoteResponse] = (),
 ) -> TranslationResultResponse:
-    """Ответ модели на обработку группы блоков."""
+    """Model response for block group processing."""
     return TranslationResultResponse(
         blocks=tuple(blocks), language_notes=tuple(language_notes)
     )
 
 
 def translated_response(unit: TranslationUnit) -> TranslationResultResponse:
-    """Корректный ответ на всю группу: полный перевод каждого блока по плану."""
+    """Valid response for the entire group: full translation of each block per plan."""
     return make_response(
         make_block_result(
             item.block,
@@ -169,7 +169,7 @@ def translated_response(unit: TranslationUnit) -> TranslationResultResponse:
 
 
 def make_validator(checks: CheckSettings | None = None) -> TranslationResultValidator:
-    """Валидатор с порогами приложения: умолчания живут в `CheckSettings`, не здесь."""
+    """Validator with application thresholds: defaults live in CheckSettings, not here."""
     settings = checks or CheckSettings()
     return TranslationResultValidator(
         target_language_min_share=settings.target_language_min_share,
@@ -180,7 +180,7 @@ def make_validator(checks: CheckSettings | None = None) -> TranslationResultVali
 
 
 def note_ids() -> Callable[[], str]:
-    """Предсказуемые идентификаторы заметок: `ln-ch01-001`, `ln-ch01-002`, ..."""
+    """Predictable note identifiers: 'ln-ch01-001', 'ln-ch01-002', ..."""
     counter = 0
 
     def next_id() -> str:

@@ -1,4 +1,4 @@
-"""Резервный сценарий длинной главы в сценарии анализа (P3.T4, PRD § 14, ALG-03)."""
+"""Fallback scenario for a long chapter in the chapter analysis workflow (P3.T4, PRD § 14, ALG-03)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from linguary.application.ports.llm import LLMTransportError
 from linguary.application.use_cases.analyze_chapter import AnalyzeChapterCommand
 from linguary.domain import CoverageStatus, TokenUsage
 
-#: Глава из четырёх абзацев: при пределе в два блока она делится на два фрагмента.
+#: A chapter with four paragraphs: with a two-block limit it splits into two fragments.
 CHAPTER_TEXTS = (
     "Paragraph one.",
     "Paragraph two.",
@@ -35,23 +35,23 @@ CHAPTER_TEXTS = (
 
 
 def four_block_book() -> FakeUnitOfWork:
-    """Книга из одной главы в четыре абзаца."""
+    """A book with one chapter of four paragraphs."""
     section = make_analysis_section(texts=CHAPTER_TEXTS)
     return FakeUnitOfWork(document=make_analysis_document((section,)))
 
 
 def command() -> AnalyzeChapterCommand:
-    """Команда анализа единственной главы книги."""
+    """Command to analyze the single chapter of the book."""
     return AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-1")
 
 
 def fragment_reply(**overrides: Any) -> FakeReply:
-    """Ответ модели по фрагменту из двух блоков."""
+    """Model response for a two-block fragment."""
     return analysis_reply(aliases=("b1", "b2"), **overrides)
 
 
 async def test_chapter_within_the_limit_is_analysed_by_one_request() -> None:
-    """Глава в пределах порога дробления уходит в модель одним запросом."""
+    """A chapter within the splitting threshold is sent to the model in a single request."""
     unit_of_work = four_block_book()
     client = FakeLLMClient.always(analysis_reply(aliases=("b1", "b2", "b3", "b4")))
     scenario, _ = make_analyze_chapter(unit_of_work, client, max_fragment_blocks=4)
@@ -66,7 +66,7 @@ async def test_chapter_within_the_limit_is_analysed_by_one_request() -> None:
 
 
 async def test_long_chapter_is_analysed_by_fragments_and_merged() -> None:
-    """Длинная глава уходит в модель по фрагментам и собирается в один анализ."""
+    """A long chapter is sent to the model in fragments and merged into a single analysis."""
     unit_of_work = four_block_book()
     section = unit_of_work.documents.get(BOOK_ID).section("section-1")  # type: ignore[union-attr]
     client = FakeLLMClient.replying(
@@ -129,7 +129,7 @@ async def test_whole_chapter_before_you_read_capped() -> None:
 
 
 async def test_fragment_request_carries_only_its_own_blocks() -> None:
-    """Фрагмент видит свои блоки и не видит блоков соседних фрагментов (PRD § 13)."""
+    """A fragment sees only its own blocks and not blocks from neighbouring fragments (PRD § 13)."""
     client = FakeLLMClient.always(fragment_reply())
     scenario, _ = make_analyze_chapter(
         four_block_book(), client, max_fragment_blocks=2
@@ -148,7 +148,7 @@ async def test_fragment_request_carries_only_its_own_blocks() -> None:
 
 
 async def test_fragment_request_uses_the_fragment_instruction() -> None:
-    """Фрагменту говорят, что он видит часть главы, и называют его место в ней."""
+    """The fragment is informed that it sees part of a chapter and its position is given."""
     client = FakeLLMClient.always(fragment_reply())
     scenario, _ = make_analyze_chapter(
         four_block_book(), client, max_fragment_blocks=2
@@ -168,7 +168,7 @@ async def test_fragment_request_uses_the_fragment_instruction() -> None:
 
 
 async def test_candidates_of_every_fragment_reach_the_chapter_analysis() -> None:
-    """Кандидаты глоссария всех фрагментов попадают в анализ главы (ALG-03)."""
+    """Glossary candidates from every fragment reach the chapter analysis (ALG-03)."""
     client = FakeLLMClient.replying(
         (
             fragment_reply(
@@ -210,7 +210,7 @@ async def test_candidates_of_every_fragment_reach_the_chapter_analysis() -> None
 
 
 async def test_attempts_and_token_usage_are_summed_over_fragments() -> None:
-    """Попытки и расход токенов фрагментов складываются в итог главы (PRD § 29.1)."""
+    """Attempts and token usage across fragments are summed into the chapter total (PRD § 29.1)."""
     client = FakeLLMClient.replying(
         (
             LLMTransportError("429 Too Many Requests"),
@@ -230,7 +230,7 @@ async def test_attempts_and_token_usage_are_summed_over_fragments() -> None:
 
 
 async def test_failed_fragment_leaves_the_chapter_unanalysed() -> None:
-    """Неудача одного фрагмента не даёт молча неполный анализ главы (ALG-03)."""
+    """Failure of a single fragment does not silently produce an incomplete chapter analysis (ALG-03)."""
     unit_of_work = four_block_book()
     client = FakeLLMClient.replying(
         (

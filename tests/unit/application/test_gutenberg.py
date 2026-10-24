@@ -1,4 +1,4 @@
-"""Служебный текст Project Gutenberg не передаётся на обработку."""
+"""Project Gutenberg boilerplate text is not sent for processing."""
 
 from linguary.application.gutenberg import preserve_gutenberg_boilerplate
 from linguary.domain import (

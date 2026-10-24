@@ -1,4 +1,4 @@
-"""Метки ссылок на сноски в переводе блока (PRD § 7, § 20, QA-08)."""
+"""Footnote reference markers in block translation (PRD § 7, § 20, QA-08)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ TEXT = "Her face.[1] It was, 2 said Tom, a pity."
 
 
 def _block() -> DocumentBlock:
-    """Абзац с двумя ссылками на сноски: «[1]» и «2», перечисленными не по порядку."""
+    """A paragraph with two footnote references: '[1]' and '2', listed out of order."""
     first = TEXT.index("[1]")
     second = TEXT.index("2")
     return DocumentBlock.create(
@@ -51,7 +51,7 @@ def _block() -> DocumentBlock:
 
 
 def test_references_are_numbered_in_text_order() -> None:
-    """`[^1]` — первая по тексту ссылка на сноску, другая разметка не считается."""
+    """'[^1]' is the first footnote reference in text order; other markup is ignored."""
     assert [reference.target for reference in footnote_references(_block())] == [
         "notes.xhtml#fn1",
         "notes.xhtml#fn2",
@@ -59,7 +59,7 @@ def test_references_are_numbered_in_text_order() -> None:
 
 
 def test_markers_become_references_and_unknown_ones_disappear() -> None:
-    """Метка превращается в ссылку оригинала, метка без ссылки отбрасывается."""
+    """A marker becomes an original reference; a marker without a reference is discarded."""
     segments = translation_segments("Её лицо.[^1] Жаль, [^2] сказал Том [^3].", _block())
 
     assert [
@@ -68,10 +68,10 @@ def test_markers_become_references_and_unknown_ones_disappear() -> None:
 
 
 def test_labels_replace_markers_like_in_the_original() -> None:
-    """Для экранов метка показывается видимым текстом ссылки оригинала."""
+    """For screens, the marker is displayed with the visible text of the original reference."""
     assert with_reference_labels("Её лицо.[^1] Жаль.", _block()) == "Её лицо.[1] Жаль."
 
 
 def test_markers_are_removed_without_hanging_spaces() -> None:
-    """Снятая метка не оставляет пробела перед знаком препинания."""
+    """A stripped marker leaves no whitespace before punctuation."""
     assert without_footnote_markers("her face [^1], it was") == "her face, it was"

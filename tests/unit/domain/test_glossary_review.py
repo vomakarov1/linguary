@@ -1,4 +1,4 @@
-"""Вычисление `requires_review` и инварианты глоссария (PRD § 11-12)."""
+"""Computation of 'requires_review' and glossary invariants (PRD § 11-12)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ THRESHOLD = 0.7
     ],
 )
 def test_named_entity_always_requires_review(concept_type: ConceptType) -> None:
-    """Имя, место, организация и вымышленное понятие всегда требуют решения."""
+    """A person, place, organization, or fictional concept always requires review."""
     assert compute_requires_review(
         type=concept_type,
         confidence=1.0,
@@ -38,7 +38,7 @@ def test_named_entity_always_requires_review(concept_type: ConceptType) -> None:
 
 
 def test_confident_term_does_not_require_review() -> None:
-    """Обычный термин с высокой уверенностью остаётся необязательной подсказкой."""
+    """A standard term with high confidence remains an optional hint."""
     assert not compute_requires_review(
         type=ConceptType.TERM,
         confidence=0.9,
@@ -80,7 +80,7 @@ def test_frequency_review_rule(
 def test_term_review_rules(
     confidence: float, model_flagged_review: bool, conflict: bool, expected: bool
 ) -> None:
-    """Каждое условие PRD § 12 самостоятельно переводит термин в требующие внимания."""
+    """Each condition of PRD § 12 independently triggers review for a term."""
     assert (
         compute_requires_review(
             type=ConceptType.TERM,
@@ -94,7 +94,7 @@ def test_term_review_rules(
 
 
 def test_candidate_factory_computes_review_flag() -> None:
-    """Итоговый признак вычисляет приложение, а не модель."""
+    """The final review flag is computed by the application, not the model."""
     candidate = GlossaryCandidate.create(
         id="cand-1",
         analysis_id="analysis-1",
@@ -110,7 +110,7 @@ def test_candidate_factory_computes_review_flag() -> None:
 
 
 def test_candidate_review_flag_is_immutable() -> None:
-    """После сохранения признак необходимости проверки не редактируется."""
+    """After saving, the review requirement flag cannot be modified."""
     candidate = GlossaryCandidate.create(
         id="cand-1",
         analysis_id="analysis-1",
@@ -130,7 +130,7 @@ def test_candidate_review_flag_is_immutable() -> None:
     [pytest.param(-0.1, id="below-zero"), pytest.param(1.1, id="above-one")],
 )
 def test_candidate_rejects_confidence_out_of_range(confidence: float) -> None:
-    """Уверенность модели лежит в диапазоне 0..1."""
+    """Model confidence must be in the 0..1 range."""
     with pytest.raises(GlossaryError):
         GlossaryCandidate(
             id="cand-1",
@@ -145,7 +145,7 @@ def test_candidate_rejects_confidence_out_of_range(confidence: float) -> None:
 
 
 def test_review_rules_reject_threshold_out_of_range() -> None:
-    """Порог уверенности — настройка в диапазоне 0..1."""
+    """Confidence threshold is a setting in the 0..1 range."""
     with pytest.raises(GlossaryError):
         compute_requires_review(
             type=ConceptType.TERM,
@@ -163,12 +163,12 @@ def test_review_rules_reject_threshold_out_of_range() -> None:
     ],
 )
 def test_merge_conflict_detection(translations: tuple[str, ...], expected: bool) -> None:
-    """Конфликт возникает только при действительно разных вариантах перевода."""
+    """A conflict arises only when translation variants genuinely differ."""
     assert translations_conflict(translations) is expected
 
 
 def test_locked_concept_requires_mandatory_variant() -> None:
-    """Зафиксированное понятие обязано иметь обязательный вариант перевода."""
+    """A locked concept must have an approved or locked translation variant."""
     with pytest.raises(GlossaryError):
         TermConcept(
             id="concept-1",
@@ -188,7 +188,7 @@ def test_locked_concept_requires_mandatory_variant() -> None:
 
 
 def test_concept_prefers_strongest_variant() -> None:
-    """Для языка выбирается вариант с наиболее сильным статусом."""
+    """For a given language, the variant with the strongest status is selected."""
     concept = TermConcept(
         id="concept-1",
         book_id="book-1",
@@ -216,7 +216,7 @@ def test_concept_prefers_strongest_variant() -> None:
 
 
 def test_concept_rejects_variant_of_other_concept() -> None:
-    """Вариант принадлежит своему понятию."""
+    """A variant belongs to its own concept."""
     with pytest.raises(GlossaryError):
         TermConcept(
             id="concept-1",

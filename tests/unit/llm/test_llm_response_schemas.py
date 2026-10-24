@@ -1,4 +1,4 @@
-"""Схемы структурированных ответов модели: что именно граница адаптера отбраковывает."""
+"""Structured model response schemas: what the adapter boundary rejects."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ from linguary.domain import BlockTreatment
 
 
 def test_correct_analysis_response_passes_schema() -> None:
-    """Корректный ответ анализа главы схема принимает."""
+    """Valid chapter analysis response passes schema validation."""
     schema = ChapterAnalysisSchema.model_validate_json(as_content(analysis_payload()))
 
     assert [item.source_block_id for item in schema.treatment_plan] == ["block-1", "block-2"]
 
 
 def test_correct_translation_response_passes_schema() -> None:
-    """Корректный ответ обработки группы блоков схема принимает."""
+    """Valid block group processing response passes schema validation."""
     schema = TranslationResultSchema.model_validate_json(as_content(translation_payload()))
 
     assert [block.source_block_id for block in schema.blocks] == ["block-1", "block-2"]
@@ -38,7 +38,7 @@ def test_correct_translation_response_passes_schema() -> None:
     ],
 )
 def test_invalid_json_is_rejected(content: str) -> None:
-    """Ответ, который не является объектом JSON, схема не принимает."""
+    """A response that is not a JSON object is rejected by the schema."""
     with pytest.raises(ValidationError):
         TranslationResultSchema.model_validate_json(content)
 
@@ -56,7 +56,7 @@ def test_invalid_json_is_rejected(content: str) -> None:
     ],
 )
 def test_block_result_without_block_id_is_rejected(payload: dict[str, object]) -> None:
-    """Результат без идентификатора блока некуда сохранить, и схема его отбраковывает."""
+    """A result without a block identifier cannot be stored and is rejected by the schema."""
     with pytest.raises(ValidationError):
         BlockResultSchema.model_validate(payload)
 
@@ -71,7 +71,7 @@ def test_block_result_without_block_id_is_rejected(payload: dict[str, object]) -
     ],
 )
 def test_unknown_treatment_is_rejected(treatment: str) -> None:
-    """Режим вне трёх текстовых модель выбрать не может."""
+    """The model cannot choose a treatment outside the three textual ones."""
     with pytest.raises(ValidationError):
         BlockResultSchema.model_validate(block_payload(treatment=treatment))
 
@@ -84,13 +84,13 @@ def test_unknown_treatment_is_rejected(treatment: str) -> None:
     ],
 )
 def test_translate_without_translation_is_rejected(payload: dict[str, object]) -> None:
-    """Для режима `TRANSLATE` полный перевод обязателен (PRD § 15)."""
+    """For 'TRANSLATE' treatment, a full translation is required (PRD § 15)."""
     with pytest.raises(ValidationError):
         BlockResultSchema.model_validate(payload)
 
 
 def test_read_as_is_with_glossary_hints_is_rejected() -> None:
-    """Блок `READ_AS_IS` не получает ни перевода, ни словарных подсказок (PRD § 15)."""
+    """A 'READ_AS_IS' block receives neither translation nor glossary hints (PRD § 15)."""
     payload = block_payload(
         treatment="READ_AS_IS",
         translated_text=None,
@@ -102,7 +102,7 @@ def test_read_as_is_with_glossary_hints_is_rejected() -> None:
 
 
 def test_read_as_is_without_content_passes_schema() -> None:
-    """Блок `READ_AS_IS` без перевода и подсказок корректен."""
+    """A 'READ_AS_IS' block without translation or hints is valid."""
     schema = BlockResultSchema.model_validate(
         block_payload(treatment="READ_AS_IS", translated_text=None, glossary_hints=[])
     )
@@ -111,7 +111,7 @@ def test_read_as_is_without_content_passes_schema() -> None:
 
 
 def test_glossary_only_without_hints_is_rejected() -> None:
-    """Для режима `GLOSSARY_ONLY` словарные подсказки обязательны (PRD § 15)."""
+    """For 'GLOSSARY_ONLY' treatment, glossary hints are required (PRD § 15)."""
     payload = block_payload(
         treatment="GLOSSARY_ONLY", translated_text=None, glossary_hints=[]
     )
@@ -121,7 +121,7 @@ def test_glossary_only_without_hints_is_rejected() -> None:
 
 
 def test_glossary_only_with_full_translation_is_rejected() -> None:
-    """Полный перевод допустим только для `TRANSLATE` (PRD § 15)."""
+    """Full translation is allowed only for 'TRANSLATE' (PRD § 15)."""
     payload = block_payload(
         treatment="GLOSSARY_ONLY",
         translated_text="Полный перевод",
@@ -137,7 +137,7 @@ def test_glossary_only_with_full_translation_is_rejected() -> None:
     [pytest.param(-0.1, id="below-range"), pytest.param(1.5, id="above-range")],
 )
 def test_glossary_candidate_confidence_range_is_enforced(confidence: float) -> None:
-    """Уверенность кандидата глоссария лежит в диапазоне 0..1 (DTO-02)."""
+    """Glossary candidate confidence must be in the 0..1 range (DTO-02)."""
     payload = analysis_payload()
     payload["glossary_candidates"][0]["confidence"] = confidence
 
@@ -146,16 +146,16 @@ def test_glossary_candidate_confidence_range_is_enforced(confidence: float) -> N
 
 
 def test_unexpected_field_is_rejected() -> None:
-    """Лишнее поле означает, что модель отвечала не по схеме."""
+    """An unexpected field indicates the model did not adhere to the schema."""
     with pytest.raises(ValidationError):
         ChapterAnalysisSchema.model_validate(analysis_payload(commentary="я старалась"))
 
 
 def test_schema_treatments_match_textual_domain_treatments() -> None:
-    """Набор режимов схемы совпадает с текстовыми режимами домена.
+    """Schema treatments match textual domain treatments.
 
-    Расхождение означало бы, что модели предлагают режим, которого нет в домене,
-    или что новый текстовый режим до схемы не доехал.
+    A mismatch would indicate the model is offered a treatment missing from the domain,
+    or that a new textual treatment was not added to the schema.
     """
     domain_treatments = {
         treatment.value for treatment in BlockTreatment if treatment.is_textual
@@ -165,7 +165,7 @@ def test_schema_treatments_match_textual_domain_treatments() -> None:
 
 
 def _treatment_values() -> set[str]:
-    """Значения режима обработки, объявленные схемой результата блока."""
+    """Treatment values declared in the block result schema."""
     schema = BlockResultSchema.model_json_schema()
     field = schema["properties"]["treatment"]
     if "$ref" in field:
@@ -181,10 +181,10 @@ def _treatment_values() -> set[str]:
     ],
 )
 def test_strict_json_schema_has_no_value_constraints(model: type) -> None:
-    """Схема для провайдера описывает структуру и не содержит ограничений значений.
+    """The provider schema defines structure without value constraints.
 
-    Их поддержка у совместимых серверов различается, а строгий режим у части из них
-    отвергает такой запрос целиком.
+    Support varies among compatible servers, and strict mode in some of them
+    rejects such requests entirely.
     """
     rendered = repr(strict_json_schema(model))
 
@@ -201,7 +201,7 @@ def test_strict_json_schema_has_no_value_constraints(model: type) -> None:
     ],
 )
 def test_strict_json_schema_forbids_additional_properties(model: type) -> None:
-    """Каждый объект схемы запрещает лишние поля: этого требует строгий вывод."""
+    """Each schema object forbids additional properties, as required by strict output."""
     schema = strict_json_schema(model)
     objects = [
         node
@@ -215,10 +215,10 @@ def test_strict_json_schema_forbids_additional_properties(model: type) -> None:
 
 
 def test_treatment_plan_item_asks_only_for_block_and_treatment() -> None:
-    """Элемент плана обработки — только блок и режим, без обоснования (QA-13).
+    """Treatment plan item contains only block and treatment, without justification (QA-13).
 
-    Обоснование режима нигде не сохранялось, а каждый его экземпляр — выходные токены
-    ответа анализа, от объёма которых зависит его длительность.
+    Treatment reasons were not stored anywhere, while each added output tokens
+    to the analysis response, directly impacting latency.
     """
     schema = strict_json_schema(ChapterAnalysisSchema)
     plan_items = [
@@ -236,7 +236,7 @@ def test_treatment_plan_item_asks_only_for_block_and_treatment() -> None:
 
 
 def test_treatment_plan_item_with_reason_is_rejected() -> None:
-    """Ответ со старым полем обоснования идёт не по схеме, и схема его отбраковывает."""
+    """A response with the legacy reason field violates the schema and is rejected."""
     payload = analysis_payload()
     payload["treatment_plan"][0]["reason"] = "обычный повествовательный абзац"
 
@@ -245,7 +245,7 @@ def test_treatment_plan_item_with_reason_is_rejected() -> None:
 
 
 def _walk(node: object) -> list[object]:
-    """Все узлы схемы, включая вложенные определения."""
+    """All schema nodes, including nested definitions."""
     found = [node]
     if isinstance(node, dict):
         for value in node.values():

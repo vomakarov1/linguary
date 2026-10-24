@@ -1,4 +1,4 @@
-"""Тесты ConfiguredLLMClient: подготовка клиентов, выбор моделей и закрытие ресурсов."""
+"""Tests for ConfiguredLLMClient: client preparation, model selection, and resource closure."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from linguary.composition.llm import ConfiguredLLMClient
 
 
 def test_configured_client_unready_does_not_prepare() -> None:
-    """Ненастроенный клиент при подготовке не создаёт соединений."""
+    """An unconfigured client creates no connections during preparation."""
     settings = LLMSettings()
     client = ConfiguredLLMClient(settings)
     client.prepare()
@@ -17,7 +17,7 @@ def test_configured_client_unready_does_not_prepare() -> None:
 
 
 def test_configured_client_prepare_prepares_effective_models() -> None:
-    """Подготовка инициализирует клиенты для обеих эффективных моделей."""
+    """Preparation initializes clients for both effective models."""
     settings = LLMSettings(
         model="base-model",
         analysis_model="analysis-model",
@@ -31,7 +31,7 @@ def test_configured_client_prepare_prepares_effective_models() -> None:
 
 
 def test_configured_client_single_model_prepares_once() -> None:
-    """Если задана только общая model, создаётся один клиент."""
+    """If only the general model is configured, a single client is created."""
     settings = LLMSettings(
         model="base-model",
         api_key="synthetic-key",
@@ -43,7 +43,7 @@ def test_configured_client_single_model_prepares_once() -> None:
 
 @pytest.mark.asyncio
 async def test_configured_client_aclose_closes_all() -> None:
-    """Закрытие закрывает все созданные клиенты и очищает реестр."""
+    """Closing shuts down all created clients and clears the registry."""
     settings = LLMSettings(
         model="base-model",
         analysis_model="analysis-model",

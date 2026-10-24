@@ -1,7 +1,7 @@
-"""Фабрики доменных объектов для unit-тестов.
+"""Domain object factories for unit tests.
 
-Собирают минимально валидные сущности, чтобы тест описывал только то, что проверяет.
-Модуль намеренно без префикса `test_`: иначе pytest соберёт его как тестовый.
+Assemble minimally valid entities so that each test specifies only what it checks.
+The module intentionally omits the 'test_' prefix: otherwise pytest would collect it as a test module.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def make_block(
     resource_path: str = RESOURCE_PATH,
     type: BlockType = BlockType.PARAGRAPH,
 ) -> DocumentBlock:
-    """Абзац главы со стабильным идентификатором."""
+    """A chapter paragraph with a stable identifier."""
     return DocumentBlock.create(
         document_id=document_id,
         section_id=section_id,
@@ -49,7 +49,7 @@ def make_block(
 
 
 def make_blocks(count: int, *, section_id: str = SECTION_ID) -> tuple[DocumentBlock, ...]:
-    """Несколько последовательных абзацев одной главы."""
+    """Several sequential paragraphs of a single chapter."""
     return tuple(make_block(order=index, section_id=section_id) for index in range(count))
 
 
@@ -59,7 +59,7 @@ def make_section(
     section_id: str = SECTION_ID,
     order: int = 0,
 ) -> DocumentSection:
-    """Глава книги с переданными блоками."""
+    """A book chapter containing the given blocks."""
     return DocumentSection(
         id=section_id,
         document_id=DOCUMENT_ID,
@@ -71,7 +71,7 @@ def make_section(
 
 
 def make_document(sections: Iterable[DocumentSection] = ()) -> CanonicalDocument:
-    """Книга с переданными главами."""
+    """A book containing the given chapters."""
     return CanonicalDocument(
         id=DOCUMENT_ID,
         metadata=BookMetadata(title="Nineteen Eighty-Four", authors=("George Orwell",)),
@@ -87,7 +87,7 @@ def make_plan(
     treatment: BlockTreatment = BlockTreatment.TRANSLATE,
     section_id: str = SECTION_ID,
 ) -> TreatmentPlan:
-    """План, назначающий всем блокам один режим обработки."""
+    """A plan that assigns the same treatment to all blocks."""
     return TreatmentPlan.of_treatments(
         section_id, ((block.id, treatment) for block in blocks)
     )

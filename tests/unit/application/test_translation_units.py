@@ -1,4 +1,4 @@
-"""Формирование `TranslationUnit` из блоков главы и её плана (P3.T6, PRD § 10)."""
+"""Building `TranslationUnit`s from chapter blocks and treatment plan (P3.T6, PRD § 10)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def plan_units(
     plan: TreatmentPlan | None = None,
     max_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS,
 ) -> tuple[TranslationUnit, ...]:
-    """Группы блоков с предсказуемыми идентификаторами."""
+    """Block groups with predictable identifiers."""
     return plan_translation_units(
         blocks,
         plan if plan is not None else make_plan(blocks),
@@ -38,12 +38,12 @@ def plan_units(
 
 
 def sizes(units: tuple[TranslationUnit, ...]) -> tuple[int, ...]:
-    """Объём исходного текста каждой группы в символах."""
+    """Source text character count for each group."""
     return tuple(sum(len(block.text) for block in unit.blocks) for unit in units)
 
 
 def test_short_chapter_becomes_single_unit() -> None:
-    """Глава, помещающаяся в предел размера, уходит в модель одним запросом."""
+    """A chapter that fits within the size limit is sent to the model in a single request."""
     blocks = make_blocks(5)
 
     units = plan_units(blocks)
@@ -54,7 +54,7 @@ def test_short_chapter_becomes_single_unit() -> None:
 
 
 def test_unit_keeps_treatment_from_plan() -> None:
-    """Режим блока в группе берётся из сохранённого плана, а не назначается заново."""
+    """Block treatment in the unit is taken from the stored plan rather than reassigned."""
     blocks = make_blocks(3)
     plan = make_plan(
         blocks,
@@ -75,7 +75,7 @@ def test_unit_keeps_treatment_from_plan() -> None:
 
 
 def test_long_chapter_splits_by_source_size() -> None:
-    """Глава длиннее предела делится на группы, ни одна из которых предел не превышает."""
+    """A chapter longer than the limit is split into units, none of which exceed the limit."""
     blocks = make_blocks(10, text="a" * 100)
 
     units = plan_units(blocks, max_source_chars=250)
@@ -85,7 +85,7 @@ def test_long_chapter_splits_by_source_size() -> None:
 
 
 def test_units_are_evenly_sized_instead_of_leaving_a_tail() -> None:
-    """Глава делится ровными долями, а не кусками предела: нарезка дала бы (400, 100)."""
+    """The chapter is split evenly rather than by max chunks: chunking would yield (400, 100)."""
     blocks = make_blocks(5, text="a" * 100)
 
     units = plan_units(blocks, max_source_chars=400)
@@ -94,7 +94,7 @@ def test_units_are_evenly_sized_instead_of_leaving_a_tail() -> None:
 
 
 def test_unit_size_counts_characters_not_blocks() -> None:
-    """Предел меряется объёмом оригинала: длинный абзац уходит один, короткие — вместе."""
+    """The limit is measured by source text volume: a long paragraph goes alone, short ones together."""
     blocks = (
         make_block(order=0, text="a" * 200),
         make_block(order=1, text="b" * 20),
@@ -110,7 +110,7 @@ def test_unit_size_counts_characters_not_blocks() -> None:
 
 
 def test_block_longer_than_limit_becomes_its_own_unit() -> None:
-    """Блок длиннее предела не делится: он уходит в модель отдельным запросом."""
+    """A block longer than the limit is not split: it is sent to the model as its own unit."""
     blocks = (
         make_block(order=0, text="a" * 50),
         make_block(order=1, text="b" * 500),
@@ -127,7 +127,7 @@ def test_block_longer_than_limit_becomes_its_own_unit() -> None:
 
 
 def test_list_items_stay_in_one_unit() -> None:
-    """Список не разрывается между запросами: модель увидела бы его без начала."""
+    """A list is not split across requests: otherwise the model would see it without context."""
     blocks = (
         make_block(order=0, text="a" * 50),
         *(
@@ -145,7 +145,7 @@ def test_list_items_stay_in_one_unit() -> None:
 
 
 def test_blocks_of_one_parent_stay_in_one_unit() -> None:
-    """Блоки одного составного целого не расходятся по разным запросам."""
+    """Blocks belonging to the same compound parent are not split across different requests."""
     parent = make_block(order=0, text="a" * 50)
     blocks = (
         parent,
@@ -164,7 +164,7 @@ def test_blocks_of_one_parent_stay_in_one_unit() -> None:
 
 
 def test_cohesive_run_longer_than_limit_splits_into_blocks() -> None:
-    """Связный кусок длиннее предела разбирается на блоки, а не тащит группу за предел."""
+    """A cohesive run longer than the limit is split into blocks rather than exceeding the limit."""
     blocks = tuple(
         make_block(order=index, text="b" * 80, type=BlockType.POEM) for index in range(4)
     )
@@ -176,7 +176,7 @@ def test_cohesive_run_longer_than_limit_splits_into_blocks() -> None:
 
 
 def test_non_textual_blocks_do_not_reach_the_model() -> None:
-    """Изображение и перенесённая как есть конструкция в группу не попадают (PRD § 10.1)."""
+    """Images and preserved opaque constructs do not enter the unit (PRD § 10.1)."""
     blocks = (
         make_block(order=0),
         make_block(order=1, text="", type=BlockType.IMAGE),
@@ -191,7 +191,7 @@ def test_non_textual_blocks_do_not_reach_the_model() -> None:
 
 
 def test_non_textual_treatment_is_skipped() -> None:
-    """Блок, которому план назначил нетекстовый режим, модели не передаётся."""
+    """A block assigned a non-textual treatment by the plan is not sent to the model."""
     blocks = make_blocks(2)
     plan = TreatmentPlan.of_treatments(
         SECTION_ID,
@@ -207,7 +207,7 @@ def test_non_textual_treatment_is_skipped() -> None:
 
 
 def test_block_missing_from_plan_is_rejected() -> None:
-    """Текстовый блок без режима в плане обработку не начинает: анализ главы неполон."""
+    """A text block without a treatment in the plan is rejected: chapter analysis is incomplete."""
     blocks = make_blocks(2)
     plan = make_plan(blocks[:1])
 
@@ -216,20 +216,20 @@ def test_block_missing_from_plan_is_rejected() -> None:
 
 
 def test_chapter_without_textual_blocks_gives_no_units() -> None:
-    """Глава из одной иллюстрации не даёт ни одного запроса к модели."""
+    """A chapter with only an illustration produces no units for the model."""
     blocks = (make_block(order=0, text="", type=BlockType.IMAGE),)
 
     assert plan_units(blocks, plan=TreatmentPlan(section_id=SECTION_ID)) == ()
 
 
 def test_non_positive_limit_is_rejected() -> None:
-    """Предел размера группы должен быть положительным."""
+    """The unit size limit must be positive."""
     with pytest.raises(TranslationUnitError, match="положительным"):
         plan_units(make_blocks(1), max_source_chars=0)
 
 
 def test_units_get_identifiers_from_factory() -> None:
-    """Идентификатор группы выдаёт сценарий, а не сам модуль."""
+    """Unit identifiers are issued by the caller factory, not the module itself."""
     blocks = make_blocks(4, text="a" * 100)
 
     units = plan_units(blocks, max_source_chars=200)

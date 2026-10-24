@@ -1,4 +1,4 @@
-"""Расчёт стоимости вызова модели по тарифу за миллион токенов."""
+"""Model call cost calculation based on per-million-tokens pricing."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Стабильность идентификаторов блоков и учебных заметок (PRD § 8, § 19.3)."""
+"""Stability of block and language note identifiers (PRD § 8, § 19.3)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ STRUCTURAL_PATH = "/body/section[1]/p[12]"
 
 
 def test_block_id_is_stable_for_same_position() -> None:
-    """Один и тот же блок документа получает один и тот же идентификатор."""
+    """The same document block receives the same identifier."""
     first = build_block_id(
         document_id=DOCUMENT_ID,
         source_resource_path=RESOURCE_PATH,
@@ -32,7 +32,7 @@ def test_block_id_is_stable_for_same_position() -> None:
 
 
 def test_block_id_does_not_depend_on_text() -> None:
-    """Правка только текста блока не меняет его идентификатор."""
+    """Editing only the block text does not change its identifier."""
     original = make_block(order=11, text="It was a bright cold day in April.")
     edited = make_block(order=11, text="Совсем другой текст блока.")
     assert original.id == edited.id
@@ -49,7 +49,7 @@ def test_block_id_does_not_depend_on_text() -> None:
 def test_block_id_changes_with_position(
     document_id: str, resource_path: str, structural_path: str
 ) -> None:
-    """Изменение любой составляющей положения блока даёт другой идентификатор."""
+    """Changing any component of a block's position produces a different identifier."""
     baseline = build_block_id(
         document_id=DOCUMENT_ID,
         source_resource_path=RESOURCE_PATH,
@@ -66,7 +66,7 @@ def test_block_id_changes_with_position(
 
 
 def test_block_id_separates_components() -> None:
-    """Разные разбиения одних и тех же символов не дают одинаковый идентификатор."""
+    """Different splits of the same characters do not produce identical identifiers."""
     first = build_block_id(
         document_id="book", source_resource_path="1chapter", structural_path="/p[1]"
     )
@@ -87,7 +87,7 @@ def test_block_id_separates_components() -> None:
 def test_block_id_rejects_empty_components(
     document_id: str, resource_path: str, structural_path: str
 ) -> None:
-    """Идентификатор нельзя построить из неполного положения блока."""
+    """An identifier cannot be built from an incomplete block position."""
     with pytest.raises(IdentifierError):
         build_block_id(
             document_id=document_id,
@@ -97,18 +97,18 @@ def test_block_id_rejects_empty_components(
 
 
 def test_block_type_parse_rejects_unknown_construct() -> None:
-    """Неизвестная конструкция не превращается в блок молча."""
+    """An unknown construct is not silently converted into a block."""
     with pytest.raises(UnknownBlockTypeError):
         BlockType.parse("Widget")
 
 
 def test_block_type_parse_accepts_supported_type() -> None:
-    """Поддержанный тип блока разбирается из внешнего представления."""
+    """A supported block type is parsed from its external representation."""
     assert BlockType.parse("PageBreak") is BlockType.PAGE_BREAK
 
 
 def test_language_note_id_uses_separate_namespace() -> None:
-    """Идентификатор заметки не пересекается с оригинальными сносками книги."""
+    """A language note identifier does not clash with the book's original footnotes."""
     assert build_language_note_id(chapter_number=3, ordinal=1) == "ln-ch03-001"
 
 
@@ -122,6 +122,6 @@ def test_language_note_id_uses_separate_namespace() -> None:
 def test_language_note_id_rejects_non_positive_numbers(
     chapter_number: int, ordinal: int
 ) -> None:
-    """Номера главы и заметки начинаются с единицы."""
+    """Chapter and note numbers are 1-based."""
     with pytest.raises(IdentifierError):
         build_language_note_id(chapter_number=chapter_number, ordinal=ordinal)

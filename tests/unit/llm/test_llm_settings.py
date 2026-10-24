@@ -1,4 +1,4 @@
-"""Локальная конфигурация: чтение файла и окружения, готовность LLM, защита ключа."""
+"""Local configuration: file and environment parsing, LLM readiness, key protection."""
 
 from __future__ import annotations
 
@@ -41,14 +41,14 @@ language_check_min_length = 120
 
 
 def write_config(tmp_path: Path, content: str) -> Path:
-    """Кладёт файл настроек во временный каталог."""
+    """Writes a settings file to a temporary directory."""
     path = tmp_path / "config.toml"
     path.write_text(content, encoding="utf-8")
     return path
 
 
 def test_defaults_are_used_without_file_and_environment(tmp_path: Path) -> None:
-    """Без заданных значений и переменных окружения берутся значения по умолчанию."""
+    """Default values are used when file and environment variables are absent."""
     settings = load_settings(environ={}, config_path=write_config(tmp_path, ""))
 
     assert settings.llm.provider == OPENAI_COMPATIBLE_PROVIDER
@@ -104,7 +104,7 @@ def test_prices_are_read_from_environment(tmp_path: Path) -> None:
 
 
 def test_missing_default_file_is_not_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Отсутствие файла настроек по умолчанию — обычное состояние первого запуска."""
+    """Absence of default settings file is the normal initial launch state."""
     monkeypatch.setenv("HOME", str(tmp_path))
 
     settings = load_settings(environ={})
@@ -113,7 +113,7 @@ def test_missing_default_file_is_not_an_error(tmp_path: Path, monkeypatch: pytes
 
 
 def test_explicitly_configured_file_must_exist(tmp_path: Path) -> None:
-    """Явно указанный файл настроек обязан существовать: подменять его нельзя."""
+    """An explicitly specified settings file must exist: it cannot be substituted."""
     with pytest.raises(SettingsError):
         load_settings(
             environ={CONFIG_PATH_VARIABLE: str(tmp_path / "нет-такого.toml")}
@@ -121,7 +121,7 @@ def test_explicitly_configured_file_must_exist(tmp_path: Path) -> None:
 
 
 def test_settings_are_read_from_file(tmp_path: Path) -> None:
-    """Значения секций файла попадают в настройки."""
+    """Values from file sections are loaded into settings."""
     settings = load_settings(
         environ={}, config_path=write_config(tmp_path, CONFIG_FILE)
     )
@@ -138,7 +138,7 @@ def test_settings_are_read_from_file(tmp_path: Path) -> None:
 
 
 def test_environment_overrides_file(tmp_path: Path) -> None:
-    """Переменные окружения имеют приоритет над файлом настроек."""
+    """Environment variables take precedence over configuration files."""
     settings = load_settings(
         environ={
             "LINGUARY_LLM_MODEL": "local/model",
@@ -157,7 +157,7 @@ def test_environment_overrides_file(tmp_path: Path) -> None:
 
 
 def test_blank_environment_variable_keeps_file_value(tmp_path: Path) -> None:
-    """Пустая переменная окружения не затирает значение из файла."""
+    """An empty environment variable does not overwrite a file value."""
     settings = load_settings(
         environ={"LINGUARY_LLM_MODEL": "   "},
         config_path=write_config(tmp_path, CONFIG_FILE),
@@ -167,7 +167,7 @@ def test_blank_environment_variable_keeps_file_value(tmp_path: Path) -> None:
 
 
 def test_api_key_is_read_from_environment(tmp_path: Path) -> None:
-    """Ключ провайдера можно задать только окружением, не храня его в файле."""
+    """Provider API key can be set via environment without storing in a file."""
     settings = load_settings(
         environ={"LINGUARY_LLM_API_KEY": "secret"},
         config_path=write_config(tmp_path, CONFIG_FILE),
@@ -189,13 +189,13 @@ def test_api_key_is_read_from_environment(tmp_path: Path) -> None:
     ],
 )
 def test_invalid_configuration_is_reported(tmp_path: Path, content: str) -> None:
-    """Непригодная конфигурация сообщается, а не игнорируется молча."""
+    """Invalid configuration is reported rather than silently ignored."""
     with pytest.raises(SettingsError):
         load_settings(environ={}, config_path=write_config(tmp_path, content))
 
 
 def test_configuration_error_does_not_expose_api_key(tmp_path: Path) -> None:
-    """Ошибка значения не выносит наружу заданный ключ провайдера."""
+    """A value error does not leak the configured provider key."""
     with pytest.raises(SettingsError) as error:
         load_settings(
             environ={"LINGUARY_LLM_MAX_ATTEMPTS": "секрет-в-переменной"},
@@ -206,7 +206,7 @@ def test_configuration_error_does_not_expose_api_key(tmp_path: Path) -> None:
 
 
 def test_api_key_is_not_shown_in_repr() -> None:
-    """Ключ провайдера не попадает в отладочное представление настроек (PRD § 24)."""
+    """Provider key is not exposed in settings debug representation (PRD § 24)."""
     settings = LLMSettings(model="test-model", api_key="secret-key")
 
     assert "secret-key" not in repr(settings)
@@ -220,7 +220,7 @@ def test_api_key_is_not_shown_in_repr() -> None:
     ],
 )
 def test_unready_llm_blocks_analysis_and_processing(overrides: dict[str, object]) -> None:
-    """Ненастроенная LLM не даёт запустить анализ и обработку (PRD § 23)."""
+    """An unconfigured LLM blocks analysis and processing (PRD § 23)."""
     values: dict[str, object] = {"model": "test-model", "api_key": "secret"}
     values.update(overrides)
     settings = LLMSettings(**values)  # type: ignore[arg-type]
@@ -232,7 +232,7 @@ def test_unready_llm_blocks_analysis_and_processing(overrides: dict[str, object]
 
 
 def test_ready_llm_passes_the_check() -> None:
-    """Настроенные модель и ключ проверку проходят."""
+    """Properly configured model and key pass the check."""
     settings = LLMSettings(model="test-model", api_key="secret")
 
     settings.ensure_ready()
@@ -250,13 +250,13 @@ def test_ready_llm_passes_the_check() -> None:
     ],
 )
 def test_invalid_check_thresholds_are_rejected(overrides: dict[str, object]) -> None:
-    """Пороги проверок вне допустимых диапазонов не принимаются (PRD § 15)."""
+    """Check thresholds outside valid ranges are rejected (PRD § 15)."""
     with pytest.raises(SettingsError):
         CheckSettings(**overrides)  # type: ignore[arg-type]
 
 
 def test_worker_and_rate_limit_are_off_by_default(tmp_path: Path) -> None:
-    """Без настроек обработка идёт одной задачей, а частота запросов не ограничена (PRD § 25)."""
+    """By default processing runs as a single worker and request rate is unlimited (PRD § 25)."""
     settings = load_settings(environ={}, config_path=write_config(tmp_path, ""))
 
     assert settings.worker.concurrency == 1
@@ -264,7 +264,7 @@ def test_worker_and_rate_limit_are_off_by_default(tmp_path: Path) -> None:
 
 
 def test_worker_concurrency_and_rate_limit_are_read_from_file(tmp_path: Path) -> None:
-    """Параллелизм обработки меняется одной настройкой, ограничение частоты — другой."""
+    """Processing concurrency is controlled by one setting, rate limit by another."""
     settings = load_settings(
         environ={},
         config_path=write_config(
@@ -277,7 +277,7 @@ def test_worker_concurrency_and_rate_limit_are_read_from_file(tmp_path: Path) ->
 
 
 def test_worker_concurrency_is_read_from_environment(tmp_path: Path) -> None:
-    """Параллелизм задаётся и переменной окружения, перекрывая файл."""
+    """Worker concurrency can be set via environment variable, overriding the file."""
     settings = load_settings(
         environ={
             "LINGUARY_WORKER_CONCURRENCY": "3",
@@ -301,27 +301,27 @@ def test_worker_concurrency_is_read_from_environment(tmp_path: Path) -> None:
     ],
 )
 def test_invalid_worker_and_rate_settings_are_reported(tmp_path: Path, content: str) -> None:
-    """Бессмысленный параллелизм или предел частоты — ошибка конфигурации."""
+    """Invalid concurrency or rate limit values cause a configuration error."""
     with pytest.raises(SettingsError):
         load_settings(environ={}, config_path=write_config(tmp_path, content))
 
 
 def test_analysis_and_processing_models_default_to_empty() -> None:
-    """По умолчанию раздельные модели не заданы."""
+    """By default, separate models are not configured."""
     settings = LLMSettings()
     assert settings.analysis_model == ""
     assert settings.processing_model == ""
 
 
 def test_effective_models_fallback_to_general_model() -> None:
-    """При отсутствии явных настроек эффективные модели совпадают с общей model."""
+    """Without explicit settings, effective models fall back to the general model."""
     settings = LLMSettings(model="base/model")
     assert settings.effective_analysis_model == "base/model"
     assert settings.effective_processing_model == "base/model"
 
 
 def test_effective_models_use_explicit_values() -> None:
-    """Явные настройки перекрывают общую model для анализа и обработки."""
+    """Explicit settings override the general model for analysis and processing."""
     settings = LLMSettings(
         model="base/model",
         analysis_model="deep/analysis",
@@ -332,7 +332,7 @@ def test_effective_models_use_explicit_values() -> None:
 
 
 def test_analysis_and_processing_models_are_read_from_toml(tmp_path: Path) -> None:
-    """Раздельные модели считываются из секции [llm] TOML-конфигурации."""
+    """Separate models are read from the [llm] section of TOML configuration."""
     content = """
     [llm]
     model = "default-model"
@@ -348,7 +348,7 @@ def test_analysis_and_processing_models_are_read_from_toml(tmp_path: Path) -> No
 
 
 def test_analysis_and_processing_models_are_read_from_environment(tmp_path: Path) -> None:
-    """Раздельные модели читаются из переменных окружения."""
+    """Separate models are read from environment variables."""
     settings = load_settings(
         environ={
             "LINGUARY_LLM_MODEL": "default-model",
@@ -365,7 +365,7 @@ def test_analysis_and_processing_models_are_read_from_environment(tmp_path: Path
 
 
 def test_loader_parses_proxy_mode_and_proxy_url(tmp_path: Path) -> None:
-    """Параметры proxy_mode и proxy_url считываются из секции [llm] TOML-конфигурации."""
+    """Parameters proxy_mode and proxy_url are read from the [llm] TOML section."""
     content = """
     [llm]
     proxy_mode = "custom"
@@ -378,7 +378,7 @@ def test_loader_parses_proxy_mode_and_proxy_url(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("mode", ["auto", "direct"])
 def test_system_settings_update_ignores_proxy_url_when_mode_not_custom(mode: str) -> None:
-    """Для режимов, отличных от custom, переданный proxy_url очищается в None."""
+    """For modes other than 'custom', the provided proxy_url is cleared to None."""
     from linguary.adapters.config.system_settings import SystemSettingsUpdate
 
     update = SystemSettingsUpdate(
@@ -395,7 +395,7 @@ def test_system_settings_update_ignores_proxy_url_when_mode_not_custom(mode: str
 
 
 def test_reading_settings_default() -> None:
-    """По умолчанию уровень читателя B2."""
+    """Default reader level is B2."""
     settings = ReadingSettings()
     assert settings.reader_level == DEFAULT_READER_LEVEL
     assert settings.normalized_level == "b2"
@@ -403,20 +403,20 @@ def test_reading_settings_default() -> None:
 
 @pytest.mark.parametrize("level", ["a2", "b1", "b2", "c1", " A2 ", "B1", "B2", "C1"])
 def test_reading_settings_valid_levels(level: str) -> None:
-    """Поддерживаемые уровни CEFR принимаются с нормализацией регистра и пробелов."""
+    """Supported CEFR levels are accepted with case and whitespace normalization."""
     settings = ReadingSettings(reader_level=level)
     assert settings.normalized_level == level.strip().lower()
 
 
 @pytest.mark.parametrize("invalid", ["", "a1", "c2", "beginner", "advanced", "xyz"])
 def test_reading_settings_invalid_level_raises(invalid: str) -> None:
-    """Недопустимый уровень читателя вызывает SettingsError."""
+    """An invalid reader level raises SettingsError."""
     with pytest.raises(SettingsError, match="недопустимый уровень читателя"):
         ReadingSettings(reader_level=invalid)
 
 
 def test_reading_settings_loaded_from_toml(tmp_path: Path) -> None:
-    """Секция [reading] в TOML считывается в AppSettings.reading."""
+    """The [reading] section in TOML is loaded into AppSettings.reading."""
     content = """
     [reading]
     reader_level = "b1"
@@ -427,7 +427,7 @@ def test_reading_settings_loaded_from_toml(tmp_path: Path) -> None:
 
 
 def test_reading_settings_loaded_from_environment(tmp_path: Path) -> None:
-    """Переменная окружения LINGUARY_READING_READER_LEVEL переопределяет уровень."""
+    """Environment variable LINGUARY_READING_READER_LEVEL overrides reader level."""
     settings = load_settings(
         environ={"LINGUARY_READING_READER_LEVEL": "a2"},
         config_path=write_config(tmp_path, ""),

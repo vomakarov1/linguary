@@ -1,4 +1,4 @@
-"""Запуск обработки книги: снимки и единственность активного run (ADR § 3)."""
+"""Book processing run: snapshots and uniqueness of active run (ADR § 3)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ SETTINGS = LLMSettingsSnapshot(provider="openai", model="gpt-test")
 def make_run(
     run_id: str, status: ProcessingRunStatus = ProcessingRunStatus.ACTIVE
 ) -> ProcessingRun:
-    """Запуск обработки книги в заданном состоянии."""
+    """A book processing run in the given status."""
     return ProcessingRun(
         id=run_id,
         book_id="book-1",
@@ -34,7 +34,7 @@ def make_run(
 
 
 def test_single_active_run_is_returned() -> None:
-    """Активный запуск книги ровно один."""
+    """There is strictly one active run for a book."""
     runs = [make_run("run-1", ProcessingRunStatus.CANCELLED), make_run("run-2")]
     current = active_run(runs)
     assert current is not None
@@ -42,21 +42,21 @@ def test_single_active_run_is_returned() -> None:
 
 
 def test_book_without_active_run() -> None:
-    """До запуска обработки активного run у книги нет."""
+    """Before processing starts, the book has no active run."""
     assert active_run([make_run("run-1", ProcessingRunStatus.COMPLETED)]) is None
 
 
 def test_two_active_runs_are_rejected() -> None:
-    """Параллельные наборы результатов не накапливаются."""
+    """Concurrent result sets are not accumulated."""
     with pytest.raises(ActiveRunConflictError):
         active_run([make_run("run-1"), make_run("run-2")])
 
 
 def test_glossary_snapshot_selects_mandatory_entries() -> None:
-    """Модели как обязательные передаются решения пользователя, подсказки модели — нет.
+    """User decisions are passed to the model as mandatory; model suggestions are not.
 
-    Принятое и исправленное решение (`approved`) — такое же решение пользователя, как
-    зафиксированное: иначе указание главы с прежним вариантом модели перекрывало его (Д-1).
+    An approved or corrected decision ('approved') is as much a user decision as a
+    locked one: otherwise chapter instructions with the model's previous variant would override it (D-1).
     """
     snapshot = GlossarySnapshot(
         entries=(
@@ -87,7 +87,7 @@ def test_glossary_snapshot_selects_mandatory_entries() -> None:
 
 
 def test_glossary_snapshot_rejects_duplicate_source_text() -> None:
-    """Снимок глоссария не содержит двух решений для одного исходного текста."""
+    """A glossary snapshot does not contain duplicate decisions for the same source text."""
     entry = GlossarySnapshotEntry(
         source_text="Winston Smith",
         translation="Уинстон Смит",
@@ -99,6 +99,6 @@ def test_glossary_snapshot_rejects_duplicate_source_text() -> None:
 
 
 def test_llm_settings_snapshot_requires_provider_and_model() -> None:
-    """Снимок настроек фиксирует, какой моделью получен результат."""
+    """A settings snapshot records which model produced the result."""
     with pytest.raises(ProcessingRunError):
         LLMSettingsSnapshot(provider="", model="gpt-test")

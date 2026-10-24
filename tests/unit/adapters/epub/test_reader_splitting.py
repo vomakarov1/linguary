@@ -1,4 +1,4 @@
-"""Тесты для интеграции деления составных абзацев в reader.py (P2.T1)."""
+"""Tests for compound paragraph splitting integration in reader.py (P2.T1)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _make_builder() -> _SectionBuilder:
 
 
 def _make_long_paragraph_html() -> tuple[etree._Element, str]:
-    # Создаём абзац > 800 символов ровно из 3 предложений
+    # Create a paragraph > 800 characters consisting of exactly 3 sentences
     s1 = "This is the first very long sentence with " + "many descriptive words " * 15 + "to fill up character counts nicely. "
     s2 = "Then comes the second equally detailed sentence with " + "extra explanations " * 15 + "showing how splitting operates cleanly. "
     s3 = "Finally the third sentence finishes the paragraph structure with " + "concluding remarks " * 15 + "and proper termination."
@@ -33,7 +33,7 @@ def _make_long_paragraph_html() -> tuple[etree._Element, str]:
 
 
 def test_reader_splits_long_paragraph_into_multiple_blocks() -> None:
-    """Длинный составной абзац при импорте делится на несколько блоков."""
+    """A long compound paragraph is split into multiple blocks during import."""
     builder = _make_builder()
     context = _BlockContext()
     p, _ = _make_long_paragraph_html()
@@ -45,7 +45,7 @@ def test_reader_splits_long_paragraph_into_multiple_blocks() -> None:
 
 
 def test_reader_generates_indexed_structural_paths() -> None:
-    """Для фрагментов формируются пути вида base_xpath/text()[k] с уникальными block_id."""
+    """Indexed paths like base_xpath/text()[k] are generated for fragments with unique block_id values."""
     builder = _make_builder()
     context = _BlockContext()
     p, _ = _make_long_paragraph_html()
@@ -60,13 +60,13 @@ def test_reader_generates_indexed_structural_paths() -> None:
         "/html[1]/body[1]/p[1]/text()[3]",
     ]
 
-    # Идентификаторы блоков должны быть уникальными и детерминированными
+    # Block identifiers must be unique and deterministic
     ids = [block.id for block in builder.blocks]
     assert len(set(ids)) == 3
 
 
 def test_reader_sets_split_attributes() -> None:
-    """Фрагменты получают атрибуты split_group, split_index, split_total."""
+    """Fragments receive split_group, split_index, and split_total attributes."""
     builder = _make_builder()
     context = _BlockContext()
     p, _ = _make_long_paragraph_html()
@@ -88,7 +88,7 @@ def test_reader_sets_split_attributes() -> None:
 
 
 def test_reader_preserves_sequential_order() -> None:
-    """Порядковый номер блоков order возрастает непрерывно."""
+    """Block sequence number 'order' increments monotonically."""
     builder = _make_builder()
     context = _BlockContext()
 
@@ -103,14 +103,14 @@ def test_reader_preserves_sequential_order() -> None:
     assert p_short is not None
     builder._emit_leaf(p_short, context)
 
-    # 1 (h1) + 3 (split p) + 1 (short p) = 5 блоков
+    # 1 (h1) + 3 (split p) + 1 (short p) = 5 blocks
     assert len(builder.blocks) == 5
     orders = [block.order for block in builder.blocks]
     assert orders == [0, 1, 2, 3, 4]
 
 
 def test_reader_preserves_short_paragraphs() -> None:
-    """Короткие абзацы не расщепляются и сохраняют базовый structural_path."""
+    """Short paragraphs are not split and preserve the base structural_path."""
     builder = _make_builder()
     context = _BlockContext()
 

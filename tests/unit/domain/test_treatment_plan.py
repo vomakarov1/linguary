@@ -1,4 +1,4 @@
-"""План обработки главы и режимы блоков (PRD § 10.1, § 14)."""
+"""Chapter treatment plan and block treatments (PRD § 10.1, § 14)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from linguary.domain import (
 def test_only_textual_treatments_reach_the_model(
     treatment: BlockTreatment, is_textual: bool
 ) -> None:
-    """`PRESERVE_ONLY` и `DROP_WITH_WARNING` в LLM не передаются."""
+    """'PRESERVE_ONLY' and 'DROP_WITH_WARNING' are not passed to the LLM."""
     assert treatment.is_textual is is_textual
 
 
@@ -47,28 +47,28 @@ def test_treatment_defines_expected_result(
     requires_hints: bool,
     allows_hints: bool,
 ) -> None:
-    """Режим задаёт состав результата: перевод и словарные подсказки."""
+    """Treatment specifies result structure: translation and glossary hints."""
     assert treatment.requires_translation is requires_translation
     assert treatment.requires_glossary_hints is requires_hints
     assert treatment.allows_glossary_hints is allows_hints
 
 
 def test_plan_returns_treatment_of_known_block() -> None:
-    """План — источник истины о режиме блока."""
+    """The plan is the source of truth for block treatment."""
     blocks = make_blocks(2)
     plan = make_plan(blocks, treatment=BlockTreatment.GLOSSARY_ONLY)
     assert plan.treatment_for(blocks[0].id) is BlockTreatment.GLOSSARY_ONLY
 
 
 def test_plan_rejects_unknown_block() -> None:
-    """Режим блока, которого нет в плане, не выдумывается."""
+    """Treatment for a block missing from the plan is not inferred."""
     plan = make_plan(make_blocks(1))
     with pytest.raises(UnknownBlockError):
         plan.treatment_for("missing-block")
 
 
 def test_plan_rejects_duplicate_block() -> None:
-    """Блок встречается в плане ровно один раз."""
+    """A block appears in the plan exactly once."""
     blocks = make_blocks(1)
     with pytest.raises(TreatmentPlanError):
         TreatmentPlan.of_treatments(
@@ -81,7 +81,7 @@ def test_plan_rejects_duplicate_block() -> None:
 
 
 def test_plan_selects_blocks_by_treatment() -> None:
-    """План отвечает, какие блоки не идут в LLM."""
+    """The plan indicates which blocks do not go to the LLM."""
     blocks = make_blocks(3)
     plan = TreatmentPlan.of_treatments(
         SECTION_ID,
@@ -105,14 +105,14 @@ def test_plan_selects_blocks_by_treatment() -> None:
     ],
 )
 def test_plan_coverage(covered: int, expected: CoverageStatus) -> None:
-    """Неполное покрытие блоков делает анализ главы неполным."""
+    """Incomplete block coverage marks chapter analysis as incomplete."""
     blocks = make_blocks(3)
     plan = make_plan(blocks[:covered])
     assert plan.coverage_for(block.id for block in blocks) is expected
 
 
 def test_incomplete_analysis_blocks_processing() -> None:
-    """Главу с неполным анализом обрабатывать нельзя."""
+    """A chapter with incomplete analysis cannot be processed."""
     blocks = make_blocks(3)
     analysis = ChapterAnalysis.create(
         id="analysis-1",
@@ -128,7 +128,7 @@ def test_incomplete_analysis_blocks_processing() -> None:
 
 
 def test_complete_analysis_allows_processing() -> None:
-    """Полное покрытие блоков открывает обработку главы."""
+    """Full block coverage enables chapter processing."""
     blocks = make_blocks(2)
     analysis = ChapterAnalysis.create(
         id="analysis-1",

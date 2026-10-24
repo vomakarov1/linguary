@@ -1,4 +1,4 @@
-"""Отдельные DTO кандидата сохраняют прежние значения по умолчанию."""
+"""Separate candidate DTOs preserve previous default values."""
 import pytest
 from linguary.application.llm_dto import ChapterAnalysisResponse, ContentPlanResponse, HelpEvidenceResponse, LLMPayloadError, TranslationResultResponse
 

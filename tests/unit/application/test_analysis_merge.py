@@ -1,4 +1,4 @@
-"""Резервный сценарий длинной главы: дробление и слияние фрагментов (P3.T4, ALG-03)."""
+"""Fallback scenario for a long chapter: chunking and merging fragments (P3.T4, ALG-03)."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ SECTION_ID = "section-1"
 
 
 def chapter_blocks(count: int) -> tuple[DocumentBlock, ...]:
-    """Текстовые блоки главы в порядке исходного документа."""
+    """Chapter text blocks in original document order."""
     return tuple(
         make_analysis_block(
             section_id=SECTION_ID, order=index, text=f"Paragraph {index}."
@@ -44,7 +44,7 @@ def chapter_blocks(count: int) -> tuple[DocumentBlock, ...]:
 
 
 def block_ids(count: int) -> tuple[str, ...]:
-    """Стабильные идентификаторы блоков главы без построения самих блоков."""
+    """Stable chapter block identifiers without constructing the blocks themselves."""
     return tuple(f"block-{index}" for index in range(1, count + 1))
 
 
@@ -56,7 +56,7 @@ def make_candidate(
     confidence: float = 0.95,
     model_flagged_review: bool = False,
 ) -> GlossaryCandidateResponse:
-    """Кандидат глоссария, предложенный одним фрагментом."""
+    """Glossary candidate proposed by a single fragment."""
     return GlossaryCandidateResponse(
         source_text=source_text,
         type=type,
@@ -76,7 +76,7 @@ def make_fragment(
     candidates: tuple[GlossaryCandidateResponse, ...] = (),
     before_you_read: tuple[BeforeYouReadEntryResponse, ...] = (),
 ) -> FragmentAnalysis:
-    """Разобранный ответ одного фрагмента главы."""
+    """Parsed response of a single chapter fragment."""
     return FragmentAnalysis(
         order=order,
         translation_instructions=translation_instructions,
@@ -93,7 +93,7 @@ def make_fragment(
 def merge(
     *fragments: FragmentAnalysis, expected: tuple[str, ...]
 ) -> ChapterAnalysis:
-    """Слияние фрагментов главы с предсказуемыми идентификаторами кандидатов."""
+    """Merge chapter fragments with predictable candidate identifiers."""
     return merge_chapter_analysis(
         fragments,
         id="analysis-1",
@@ -105,7 +105,7 @@ def merge(
 
 
 def test_long_chapter_is_split_into_equal_fragments() -> None:
-    """Глава сверх предела делится на равные последовательные фрагменты."""
+    """A chapter exceeding the limit is split into equal consecutive fragments."""
     blocks = chapter_blocks(9)
 
     fragments = plan_fragments(blocks, max_blocks=4)
@@ -118,7 +118,7 @@ def test_long_chapter_is_split_into_equal_fragments() -> None:
 
 
 def test_chapter_within_limit_stays_one_fragment() -> None:
-    """Глава, помещающаяся в один запрос, на фрагменты не делится."""
+    """A chapter fitting into a single request is not split into fragments."""
     blocks = chapter_blocks(4)
 
     fragments = plan_fragments(blocks, max_blocks=4)
@@ -128,12 +128,12 @@ def test_chapter_within_limit_stays_one_fragment() -> None:
 
 
 def test_chapter_without_text_has_no_fragments() -> None:
-    """Главе без текстовых блоков анализировать нечего."""
+    """A chapter without text blocks has nothing to analyze."""
     assert plan_fragments((), max_blocks=4) == ()
 
 
 def test_fragment_response_is_mapped_to_chapter_block_ids() -> None:
-    """План фрагмента возвращается от псевдонимов запроса к блокам главы."""
+    """Fragment plan maps request aliases back to chapter blocks."""
     payload = ChapterAnalysisResponse(
         translation_instructions="Сохранять иронию рассказчика.",
         chapter_summary="Mr. Bennet visits the new neighbour.",
@@ -160,7 +160,7 @@ def test_fragment_response_is_mapped_to_chapter_block_ids() -> None:
 
 
 def test_fragment_response_with_foreign_block_is_rejected() -> None:
-    """Фрагмент, назвавший режим для чужого блока, разобрать нельзя."""
+    """A fragment specifying treatment for a foreign block cannot be parsed."""
     payload = ChapterAnalysisResponse(
         translation_instructions="Сохранять иронию рассказчика.",
         chapter_summary="Mr. Bennet visits the new neighbour.",
@@ -179,7 +179,7 @@ def test_fragment_response_with_foreign_block_is_rejected() -> None:
 
 
 def test_complete_analysis_covers_every_block_of_the_chapter() -> None:
-    """Фрагменты, покрывшие все блоки главы, дают полный анализ."""
+    """Fragments covering all chapter blocks produce a complete analysis."""
     expected = block_ids(4)
 
     analysis = merge(
@@ -195,7 +195,7 @@ def test_complete_analysis_covers_every_block_of_the_chapter() -> None:
 
 
 def test_missing_fragment_leaves_analysis_incomplete() -> None:
-    """Невыполненный фрагмент оставляет главу непокрытой и блокирует обработку."""
+    """A missing fragment leaves the chapter incomplete and blocks processing."""
     expected = block_ids(4)
 
     analysis = merge(make_fragment(0, blocks=expected[:2]), expected=expected)
@@ -207,7 +207,7 @@ def test_missing_fragment_leaves_analysis_incomplete() -> None:
 
 
 def test_conflicting_treatments_leave_the_block_without_plan() -> None:
-    """Разные режимы одного блока решения не дают: блок выпадает из плана."""
+    """Conflicting treatments yield no decision: the block is omitted from the plan."""
     expected = block_ids(2)
 
     analysis = merge(
@@ -221,7 +221,7 @@ def test_conflicting_treatments_leave_the_block_without_plan() -> None:
 
 
 def test_repeated_treatment_of_two_fragments_is_not_a_conflict() -> None:
-    """Фрагменты, назвавшие один и тот же режим, друг другу не противоречат."""
+    """Fragments proposing the same treatment do not conflict with each other."""
     expected = block_ids(2)
 
     analysis = merge(
@@ -235,7 +235,7 @@ def test_repeated_treatment_of_two_fragments_is_not_a_conflict() -> None:
 
 
 def test_conflicting_translations_require_review() -> None:
-    """Разные варианты перевода одного термина требуют решения пользователя (PRD § 12)."""
+    """Different translation variants for a term require user review (PRD § 12)."""
     expected = block_ids(2)
 
     analysis = merge(
@@ -260,7 +260,7 @@ def test_conflicting_translations_require_review() -> None:
 
 
 def test_agreed_candidate_does_not_require_review() -> None:
-    """Совпавший у фрагментов уверенный термин внимания не требует."""
+    """A confident term agreed upon across fragments requires no review."""
     expected = block_ids(2)
 
     analysis = merge(
@@ -281,7 +281,7 @@ def test_agreed_candidate_does_not_require_review() -> None:
 
 
 def test_review_signals_of_every_fragment_are_kept() -> None:
-    """Сигналы проверки не теряются: побеждает самый уверенный вариант, но не его сигналы."""
+    """Review signals from every fragment are preserved: most confident wins, keeping all signals."""
     expected = block_ids(2)
 
     analysis = merge(
@@ -322,10 +322,10 @@ def test_review_signals_of_every_fragment_are_kept() -> None:
 
 
 def test_obvious_spellings_of_one_name_become_one_candidate() -> None:
-    """Регистр и точка после `Mr` не делают из одного имени разных кандидатов (QA-11).
+    """Casing and a trailing dot in `Mr.` do not turn one name into different candidates (QA-11).
 
-    Кандидат показывается самым частым написанием, а вариант перевода остаётся
-    за самым уверенным фрагментом.
+    The candidate is displayed with the most frequent spelling, while the translation
+    variant comes from the most confident fragment.
     """
     expected = block_ids(3)
 
@@ -383,7 +383,7 @@ def test_obvious_spellings_of_one_name_become_one_candidate() -> None:
 
 
 def test_possessive_form_stays_a_separate_candidate() -> None:
-    """Притяжательная форма очевидным вариантом не считается и не объединяется."""
+    """Possessive form is not considered an obvious variant and is not merged."""
     expected = block_ids(2)
 
     analysis = merge(
@@ -407,7 +407,7 @@ def test_possessive_form_stays_a_separate_candidate() -> None:
 
 
 def test_merged_summary_is_last_fragment_summary() -> None:
-    """Последний фрагмент возвращает сводку всей доступной главы."""
+    """The last fragment returns the summary for the entire available chapter."""
     expected = block_ids(2)
 
     analysis = merge(
@@ -420,7 +420,7 @@ def test_merged_summary_is_last_fragment_summary() -> None:
 
 
 def test_merged_instructions_keep_each_directive_once() -> None:
-    """Одинаковые указания фрагментов не повторяются в инструкциях главы."""
+    """Identical fragment instructions are not repeated in chapter instructions."""
     expected = block_ids(3)
 
     analysis = merge(
@@ -479,7 +479,7 @@ def test_fragment_blocks_without_limit_is_default() -> None:
 
 
 def test_before_you_read_keeps_each_expression_once() -> None:
-    """Выражение, встреченное несколькими фрагментами, попадает в материал один раз."""
+    """An expression encountered by multiple fragments is included in the material once."""
     expected = block_ids(2)
     entry = BeforeYouReadEntryResponse(
         expression="entailed estate", explanation="имение с ограничением наследования"
@@ -495,7 +495,7 @@ def test_before_you_read_keeps_each_expression_once() -> None:
 
 
 def test_fragments_with_repeated_order_are_rejected() -> None:
-    """Два фрагмента с одним номером собрать в главу нельзя: их порядок неизвестен."""
+    """Two fragments with the same order cannot be merged: their order is unknown."""
     expected = block_ids(2)
 
     with pytest.raises(AnalysisMergeError):
@@ -704,8 +704,8 @@ def test_byr_body_excerpt_with_outer_quotes_aligned_to_explanation():
 
 
 def test_sanitize_before_you_read_explanation():
-    """Санитайзер вырезает мета-инструкции переводчику из карточек Before You Read."""
-    # 1. Инструкция в конце предложения («Передавай как...»)
+    """Sanitizer strips meta-instructions to the translator from Before You Read cards."""
+    # 1. Instruction at the end of the sentence ("Render as...")
     text1 = (
         "Намеренно неправильная сравнительная степень (вместо more and more curious): "
         "Алиса так удивлена, что забыла грамматику. Передавай как забавное искажение."
@@ -715,33 +715,33 @@ def test_sanitize_before_you_read_explanation():
         "Алиса так удивлена, что забыла грамматику."
     )
 
-    # 2. Инструкция после точки с запятой
+    # 2. Instruction after a semicolon
     text2 = "Устойчивое выражение; переводи как «не в духе»."
     assert sanitize_before_you_read_explanation(text2) == "Устойчивое выражение."
 
-    # 3. Инструкция в отдельном предложении с «В переводе...»
+    # 3. Instruction in a separate sentence with "In the translation..."
     text3 = "Разговорный оборот. В переводе передавай как «чудом спасся»."
     assert sanitize_before_you_read_explanation(text3) == "Разговорный оборот."
 
-    # 4. Префикс «Указание переводчику:»
+    # 4. "Instruction to translator:" prefix
     text4 = "Идиома. Указание переводчику: сохраняй иронию оригинала."
     assert sanitize_before_you_read_explanation(text4) == "Идиома."
 
-    # 5. Вся фраза состоит из инструкции «Передавай как...»
+    # 5. The entire phrase consists of an instruction "Render as..."
     text5 = "Передавай как «из ряда вон выходящее»."
     assert sanitize_before_you_read_explanation(text5) == "«из ряда вон выходящее»."
 
-    # 6. Инструкция в скобках
+    # 6. Instruction in parentheses
     text6 = "Сленговое выражение (в переводе передавай разговорно). Встречается у подростков."
     assert sanitize_before_you_read_explanation(text6) == "Сленговое выражение. Встречается у подростков."
 
-    # 7. Обычный пояснительный текст без инструкций остаётся неизменным
+    # 7. Normal explanatory text without instructions remains unchanged
     text7 = "Необычный, странный; в тексте out-of-the-way things — «из ряда вон выходящие вещи»."
     assert sanitize_before_you_read_explanation(text7) == text7
 
 
 def test_before_you_read_entries_sanitizes_explanation():
-    """Функция before_you_read_entries автоматически очищает пояснения."""
+    """The before_you_read_entries function automatically cleans up explanations."""
     entries = (
         BeforeYouReadEntryResponse(
             expression="Curiouser and curiouser",

@@ -1,4 +1,4 @@
-"""Указания главы против решений глоссария пользователя (Д-1, PRD § 11, § 13)."""
+"""Chapter instructions versus user glossary decisions (D-1, PRD § 11, § 13)."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ BENNET = GlossarySnapshotEntry(
 
 
 def chapter_candidate(source_text: str, translation: str) -> GlossaryCandidate:
-    """Кандидат анализа этой главы с вариантом модели."""
+    """Chapter analysis candidate with model variant."""
     return GlossaryCandidate.create(
         id=f"candidate-{source_text}",
         analysis_id="analysis-1",
@@ -51,7 +51,7 @@ def chapter_candidate(source_text: str, translation: str) -> GlossaryCandidate:
 
 
 def kept(instructions: str, *decisions: GlossarySnapshotEntry, candidates=()) -> str:
-    """Указания после согласования с решениями."""
+    """Instructions after reconciliation with decisions."""
     return instructions_respecting_glossary(
         instructions, decisions=decisions, chapter_candidates=candidates
     )
@@ -74,7 +74,7 @@ def kept(instructions: str, *decisions: GlossarySnapshotEntry, candidates=()) ->
     ],
 )
 def test_item_contradicting_a_decision_is_dropped(item: str) -> None:
-    """Пункт с другим вариантом перевода или другим родом не доходит до модели."""
+    """An item with a conflicting translation variant or gender does not reach the model."""
     instructions = f"1. Сохранять иронию рассказчика.\n{item}"
 
     result = kept(
@@ -104,14 +104,14 @@ def test_item_contradicting_a_decision_is_dropped(item: str) -> None:
     ],
 )
 def test_item_agreeing_with_decisions_is_kept(item: str) -> None:
-    """Пункт, который упоминает понятие, но решению не противоречит, остаётся."""
+    """An item that mentions a concept without conflicting with its decision is preserved."""
     instructions = f"1. Сохранять иронию рассказчика.\n{item}"
 
     assert kept(instructions, WREN, DUSKMERE, BENNET) == instructions
 
 
 def test_gender_is_not_contradicted_when_decision_names_none() -> None:
-    """Решение без рода указанию о роде не противоречит: сравнивать не с чем."""
+    """A decision without specified gender does not conflict with a gender instruction."""
     decision = GlossarySnapshotEntry(
         source_text="Wren Calder",
         translation="Рен Колдер",
@@ -124,7 +124,7 @@ def test_gender_is_not_contradicted_when_decision_names_none() -> None:
 
 
 def test_continuation_line_goes_with_its_item() -> None:
-    """Строка без маркера списка продолжает пункт и уходит вместе с ним."""
+    """A line without a list marker continues the item and is dropped together with it."""
     instructions = (
         "1. Рен Колдер — мужской род,\n"
         "   и в прямой речи тоже.\n"
@@ -135,7 +135,7 @@ def test_continuation_line_goes_with_its_item() -> None:
 
 
 def test_plain_paragraph_is_split_into_sentences() -> None:
-    """Сплошной абзац делится на предложения: противоречие не уносит весь текст."""
+    """A continuous paragraph is split into sentences so a conflict does not discard all text."""
     instructions = (
         "Сохранять иронию рассказчика. Рен Колдер — мужской род. "
         "Диалоги держать короткими."
@@ -147,7 +147,7 @@ def test_plain_paragraph_is_split_into_sentences() -> None:
 
 
 def test_without_decisions_instructions_are_unchanged() -> None:
-    """Без решений пользователя указания главы идут модели как есть."""
+    """Without user decisions, chapter instructions are sent to the model as is."""
     instructions = "1. Рен Колдер — мужской род.\n2. Duskmere — «Даскмир»."
 
     assert kept(instructions) == instructions
@@ -168,17 +168,17 @@ MARSH_GATE = GlossarySnapshotEntry(
 def kept_note(
     entry: GlossarySnapshotEntry, *decisions: GlossarySnapshotEntry, candidates=()
 ) -> str:
-    """Указание элемента глоссария после согласования с решениями других понятий."""
+    """Glossary item note after reconciliation with other concepts' decisions."""
     return note_respecting_glossary(
         entry, decisions=decisions, chapter_candidates=candidates
     )
 
 
 def test_note_naming_rejected_variant_of_other_concept_is_dropped() -> None:
-    """Указание элемента не передаёт отвергнутый вариант другого понятия (Н-2).
+    """An item note does not propagate a rejected variant of another concept (N-2).
 
-    Живой прогон: указание `marsh gate`, принятое через «Принять все», называло
-    «Даскмир», хотя решение пользователя по Duskmere — «Даскмер».
+    Live run: the note for `marsh gate`, accepted via "Accept All", referred to
+    the rejected variant ("Daskmir"), whereas the user decision for Duskmere was "Daskmer".
     """
     note = kept_note(
         MARSH_GATE,
@@ -200,7 +200,7 @@ def test_note_naming_rejected_variant_of_other_concept_is_dropped() -> None:
     ],
 )
 def test_note_agreeing_with_other_decisions_is_kept(text: str) -> None:
-    """Указание, называющее решение или его форму, остаётся как есть."""
+    """A note mentioning the decision or its inflected form is kept as is."""
     entry = GlossarySnapshotEntry(
         source_text="marsh gate",
         translation="болотные ворота",
@@ -218,7 +218,7 @@ def test_note_agreeing_with_other_decisions_is_kept(text: str) -> None:
 
 
 def test_note_is_not_checked_against_its_own_decision() -> None:
-    """Своё указание может обсуждать решение: отвергнутый вариант в нём уместен."""
+    """An item's own note is not checked against its own decision: the rejected variant is valid in it."""
     entry = GlossarySnapshotEntry(
         source_text="Duskmere",
         translation="Даскмер",
@@ -234,7 +234,7 @@ def test_note_is_not_checked_against_its_own_decision() -> None:
 
 
 def test_note_with_other_gender_of_other_person_is_dropped() -> None:
-    """Указание, спорящее с родом, названным решением по персонажу, тоже отсеивается."""
+    """A note disputing the gender specified by a person's decision is also discarded."""
     entry = GlossarySnapshotEntry(
         source_text="gatehouse",
         translation="дом привратника",
@@ -247,10 +247,10 @@ def test_note_with_other_gender_of_other_person_is_dropped() -> None:
 
 
 def test_item_naming_rejected_variant_without_quotes_is_dropped() -> None:
-    """Пункт указаний главы, называющий отвергнутый вариант без кавычек, отсеивается (Д-5).
+    """A chapter instruction item naming a rejected variant without quotes is discarded (D-5).
 
-    Третий живой прогон: пункт «Термины из глоссария (…, Даскмир) использовать
-    единообразно» дошёл до запроса обработки, хотя решение по Duskmere — «Даскмер».
+    Third live run: the item "Use glossary terms (..., Daskmir) consistently according to decisions"
+    reached the processing prompt, even though the decision for Duskmere was "Daskmer".
     """
     instructions = (
         "1. Сохранять иронию рассказчика.\n"
@@ -277,7 +277,7 @@ def test_item_naming_rejected_variant_without_quotes_is_dropped() -> None:
     ],
 )
 def test_item_naming_decision_without_quotes_is_kept(item: str) -> None:
-    """Решение пользователя и его грамматические формы без кавычек пункт не отсеивают."""
+    """A user decision and its inflected forms without quotes do not cause an item to be discarded."""
     instructions = f"1. Сохранять иронию рассказчика.\n{item}"
 
     assert (
