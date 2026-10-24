@@ -1,4 +1,4 @@
-"""Endpoints запуска обработки и возврата к проверке глоссария (API-01)."""
+"""Endpoints for starting processing and returning to glossary review (API-01)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/books/{book_id}", tags=["processing"])
 async def start_analysis(
     request: Request, application: CurrentApplication, book_id: str
 ) -> TaskResponse | RedirectResponse | None:
-    """Проверяет LLM-настройку и ставит первую задачу анализа книги."""
+    """Verify LLM settings and enqueue the first book analysis task."""
     application.settings.llm.ensure_ready()
     task = await application.analysis.start(book_id)
     if wants_html(request):
@@ -47,7 +47,7 @@ async def start_analysis(
 async def start_processing(
     request: Request, application: CurrentApplication, book_id: str
 ) -> ProcessingStartResponse | RedirectResponse:
-    """Замораживает глоссарий и ставит задачи обработки всех глав."""
+    """Freeze the glossary and enqueue processing tasks for all chapters."""
     run = application.start_processing()(StartProcessingCommand(book_id=book_id))
     tasks = await application.processing.start(book_id)
     if wants_html(request):
@@ -64,9 +64,9 @@ def reset_processing(
     book_id: str,
     request: Annotated[ResetProcessingRequest, Form()],
 ) -> ResetProcessingResponse | RedirectResponse:
-    """Удаляет результаты только после явного подтверждения пользователя.
+    """Delete processing results only after explicit user confirmation.
 
-    Браузер возвращается на экран глоссария: ради него сброс и выполняется.
+    The browser returns to the glossary screen: this is the purpose of resetting.
     """
     result = application.reset_processing(ResetProcessingCommand(book_id=book_id))
     if wants_html(http_request):

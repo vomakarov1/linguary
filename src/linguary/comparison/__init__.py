@@ -1,1 +1,1 @@
-"""Изолированные локальные сравнения качества учебных EPUB."""
+"""Isolated local quality comparisons of educational EPUBs."""

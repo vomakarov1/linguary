@@ -1,4 +1,4 @@
-"""Endpoints проверки глоссария книги (API-01, PRD § 11-12, § 21.3)."""
+"""Book glossary review endpoints (API-01, PRD § 11-12, § 21.3)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/books/{book_id}/glossary", tags=["glossary"])
 def get_glossary(
     request: Request, application: CurrentApplication, book_id: str
 ) -> GlossaryReviewResponse | object:
-    """Глоссарий книги; после старта обработки он доступен только для чтения."""
+    """Book glossary; after processing starts, it is read-only."""
     review = application.approve_glossary.review(book_id)
     response = GlossaryReviewResponse.of_review(review)
     if wants_html(request):
@@ -46,7 +46,7 @@ def get_glossary(
 def accept_all_required_items(
     request: Request, application: CurrentApplication, book_id: str
 ) -> GlossaryReviewResponse | RedirectResponse:
-    """Принимает предложенные переводы для всех обязательных нерешённых элементов."""
+    """Accept suggested translations for all required unresolved items."""
     application.approve_glossary.accept_all_awaiting(book_id)
     if wants_html(request):
         return RedirectResponse(
@@ -63,7 +63,7 @@ def decide_glossary_item(
     concept_id: str,
     request: Annotated[GlossaryDecisionRequest, Form()],
 ) -> GlossaryItemResponse | RedirectResponse:
-    """Принимает, исправляет, фиксирует или пропускает один найденный термин."""
+    """Accept, correct, fix, or skip a single detected term."""
     review = application.approve_glossary.review(book_id)
     item = review.item_for_concept(concept_id)
     if item is None:
@@ -101,7 +101,7 @@ def set_glossary_note(
     concept_id: str,
     request: Annotated[GlossaryNoteRequest, Form()],
 ) -> GlossaryItemResponse | RedirectResponse:
-    """Меняет переводческое указание по элементу, не трогая принятый вариант перевода."""
+    """Update translation guidance for an item without changing the accepted translation."""
     application.approve_glossary.set_note(
         GlossaryNoteCommand(
             book_id=book_id, concept_id=concept_id, note=request.note

@@ -1,7 +1,7 @@
-"""Парное сравнение в изолированных копиях через существующие сценарии.
+"""Pairwise comparison in isolated copies via existing use cases.
 
-Проекция чтения документа ограничивает эксперимент выбранными главами. Полная
-сохранённая модель, исходный EPUB и ресурсы остаются неизменными.
+Document read projection limits the experiment to selected chapters. Complete
+persisted model, source EPUB, and resources remain immutable.
 """
 from __future__ import annotations
 
@@ -120,8 +120,8 @@ class _FixedContext(_ObservedContext):
         self.fixed = fixed
 
     def _chapter_input(self, **kwargs):
-        # Замещается существующее поле решений предыдущих глав; инструкции,
-        # блоки, схема и результаты предыдущих фрагментов остаются штатными.
+        # Replaces the existing previous chapter decisions field; instructions,
+        # blocks, schema, and previous fragment results remain standard.
         kwargs['accumulated_candidates'] = ()
         text = super()._chapter_input(**kwargs)
         section = kwargs['section']
@@ -255,10 +255,10 @@ async def _close(client):
 
 
 async def run_comparison(protocol, workspace, client_factory) -> ComparisonResult:
-    """Фабрика получает model/stage/settings/ledger/budget; live требует approval.
+    """Factory receives model/stage/settings/ledger/budget; live requires approval.
 
-    Для теста фабрика явно объявляет simulated=True и возвращает FakeLLMClient.
-    Настоящая фабрика вызывается только с повторно проверенным ValidatedProtocol.
+    For testing, factory explicitly declares simulated=True and returns FakeLLMClient.
+    Real factory is called only with a re-checked ValidatedProtocol.
     """
     simulated = getattr(client_factory, 'simulated', False) is True
     if isinstance(protocol, ValidatedProtocol):
@@ -272,7 +272,7 @@ async def run_comparison(protocol, workspace, client_factory) -> ComparisonResul
     continuation = load_continuation(workspace)
     result = ComparisonResult(protocol.content_hash, simulated)
     budget = BudgetGuard(Decimal(str(protocol.budget)), protocol.max_total_attempts) if protocol.budget else None
-    # Копии одинакового EPUB группируются по содержимому, не по имени файла.
+    # Copies of identical EPUBs are grouped by content, not file name.
     inputs = json.loads((workspace.root / 'inputs.json').read_text())
     source_paths = {value['sha256']: workspace.root / value['path'] for value in inputs.values()}
     sources = {key: 'book-' + key[:16] for key in source_paths}

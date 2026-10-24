@@ -1,4 +1,4 @@
-"""Восстановимый отчёт; неизвестные данные не превращаются в успех."""
+"""Recoverable report; unknown data does not turn into success."""
 from __future__ import annotations
 
 import json
@@ -141,7 +141,7 @@ def build_report(manifest, ledger, outcomes, reviews, projection) -> ComparisonR
         own = [i for i in observations if i['variant_id'] == variant]
         analysis_model = declared.get(variant, {}).get('analysis_model')
         if analysis_model is None:
-            # Происхождение квитанций связано с неизменным снимком анализа.
+            # Receipt provenance is linked to the immutable analysis snapshot.
             hashes = {r['analysis_hash'] for r in details['repeats']}
             calls = {call for a in outcome_data.get('analyses', []) if a.get('content_hash') in hashes for call in a.get('provenance', {}).get('analysis_call_ids', [])}
             analysis = [i for i in observations if i.get('call_id') in calls and _stage(i['stage']) == 'analysis']
@@ -271,7 +271,7 @@ def write_report(report, root):
 
 
 def _anonymous_metadata(data):
-    """Удалить явно добавленное происхождение, не сериализуя текст книги заново."""
+    """Remove explicitly added provenance without re-serializing book text."""
     from html import unescape
 
     fields = {'model', 'analysis_model', 'processing_model', 'provenance'}
@@ -293,7 +293,7 @@ def _anonymous_metadata(data):
 
 
 def anonymize_epubs(outcomes, root, model_labels=(LUNA, SONNET, 'luna', 'sonnet'), protocol=None):
-    """Материалы рецензента имеют случайные метки; соответствие хранится отдельно."""
+    """Reviewer materials use random labels; mapping is stored separately."""
     from uuid import uuid4
     root = Path(root)
     materials = root / 'review-materials'
@@ -321,7 +321,7 @@ def anonymize_epubs(outcomes, root, model_labels=(LUNA, SONNET, 'luna', 'sonnet'
 
 
 def aggregate_blind_reviews(mapping, sheet, protocol):
-    """Раскрытие меток выполняет оператор после независимой рецензии."""
+    """Label de-anonymization is performed by an operator after independent review."""
     result = {}
     fields = ('no_gross_errors', 'simple_help_density_appropriate', 'help_without_duplication', 'analysis_reviewed', 'execution_after_dedup_reviewed', 'independent_chapters_confirmed')
     def agreement(values):

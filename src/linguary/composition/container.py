@@ -1,26 +1,25 @@
-"""Состав зависимостей приложения: единственное место, где известны конкретные адаптеры.
+"""Application dependency composition: the single place where concrete adapters are known.
 
-Домен и прикладные сценарии знают только порты, поэтому кто-то должен один раз связать
-их с SQLite, EbookLib, EPUBCheck и провайдером LLM, а задачи очереди — с командами
-сценариев (ADR § 3). Это делает здесь `build_application`, и её результатом пользуются
-Web UI, CLI и сквозной тест: второго места сборки в приложении нет.
+Domain and application use cases know only ports, so something must connect
+them once with SQLite, EbookLib, EPUBCheck, and the LLM provider, and map queue tasks
+to use case commands (ADR § 3). This is done here by `build_application`, and its result
+is used by Web UI, CLI, and end-to-end tests: there is no second composition site in the application.
 
-Что собирается:
+What is assembled:
 
-- хранилище — движок SQLite, unit of work и очередь задач поверх одной базы;
-- воркер — параллелизм фоновых задач из секции `[worker]` (PRD § 25);
-- клиент модели — журнал вызовов и, если задан предел частоты, общий для всех воркеров
-  ограничитель запросов;
-- импорт — читатель EPUB вместе с хранилищем ресурсов книги;
-- экспорт — писатель EPUB и внешняя проверка EPUBCheck;
-- LLM-сценарии — анализ главы, обработка главы и повторная генерация блока с порогами
-  и пределами из локальной конфигурации;
-- обработчики всех пяти типов задач очереди: только здесь известно, как из идемпотентного
-  ключа задачи получить команду сценария и путь целевого файла.
+- storage — SQLite engine, unit of work, and task queue over a single database;
+- worker — background task concurrency from the `[worker]` section (PRD § 25);
+- model client — call log and, if a rate limit is specified, a rate limiter shared across all workers;
+- import — EPUB reader along with the book resource store;
+- export — EPUB writer and external EPUBCheck validator;
+- LLM use cases — chapter analysis, chapter processing, and block regeneration with thresholds
+  and limits from local configuration;
+- handlers for all five queue task types: only here is it known how to obtain a use case command
+  and target file path from an idempotent task key.
 
-Синхронные сценарии подключаются к асинхронному runner-у через `to_async_handler`:
-разбор EPUB и работа с SQLite блокируют цикл событий, и выполнять их прямо в корутине
-нельзя (PRD § 25).
+Synchronous use cases are connected to the async runner via `to_async_handler`:
+EPUB parsing and SQLite operations block the event loop and cannot run directly in a coroutine
+(PRD § 25).
 """
 
 from __future__ import annotations
@@ -101,17 +100,17 @@ from linguary.domain import (
     TaskType,
 )
 
-#: Сколько соседних блоков видит модель при повторной генерации (PRD § 13). Значение
-#: обосновано в P3.T7 и в файл настроек намеренно не выведено.
+#: How many neighboring blocks the model sees during regeneration (PRD § 13). The value
+#: was justified in P3.T7 and is intentionally not exposed to the settings file.
 DEFAULT_REGENERATION_CONTEXT_BLOCKS = 2
 
 
 @dataclass(frozen=True, slots=True)
 class Application:
-    """Собранное приложение: сценарии, очередь задач и всё, что о них нужно знать.
+    """Assembled application: use cases, task queue, and everything needed about them.
 
-    Экземпляр создаётся один раз на процесс. Web UI и CLI берут отсюда готовые сценарии
-    и ничего не конструируют сами.
+    An instance is created once per process. Web UI and CLI obtain ready use cases from here
+    and do not construct anything themselves.
     """
 
     runtime_settings: RuntimeSettings
@@ -142,11 +141,11 @@ class Application:
         return self.runtime_settings.current.settings
 
     def start_processing(self) -> StartProcessing:
-        """Сценарий запуска обработки книги.
+        """Book processing start use case.
 
-        Собирается по требованию, а не при старте приложения: он замораживает снимок
-        настроек модели, а ненастроенная LLM снимка не даёт. Отказ приходит тем же
-        `LLMConfigurationError`, что и попытка обратиться к модели (PRD § 23).
+        Assembled on demand rather than at application startup: it freezes a snapshot
+        of model settings, and an unconfigured LLM provides no snapshot. Rejection arrives as the same
+        `LLMConfigurationError` as an attempt to contact the model (PRD § 23).
         """
         settings = self.settings
         settings.llm.ensure_ready()
@@ -161,22 +160,22 @@ class Application:
         )
 
     async def start_import(self, book_id: str) -> ProcessingTask:
-        """Ставит задачу импорта загруженной книги (PRD § 18)."""
+        """Enqueues book import task for an uploaded book (PRD § 18)."""
         return await self.task_queue.enqueue(
             TaskIdentity(book_id=book_id, task_type=TaskType.IMPORT_BOOK)
         )
 
     async def start_export(self, book_id: str) -> ProcessingTask:
-        """Ставит задачу сборки итогового EPUB (PRD § 20)."""
+        """Enqueues final EPUB assembly task (PRD § 20)."""
         return await self.export_sequence.start(book_id)
 
     def begin_close(self) -> None:
-        """Запрещает новые изменения настроек и новые захваты задач."""
+        """Disallows new settings changes and new task acquisitions."""
         self.system_settings.begin_close()
         self.worker_pool.request_stop()
 
     async def aclose(self) -> None:
-        """Дожидается принятых изменений до закрытия поколений и базы."""
+        """Waits for accepted changes before closing generations and database."""
         self.begin_close()
         if self._close_task is None:
             task = asyncio.create_task(self._close())
@@ -204,10 +203,10 @@ class Application:
             task.exception()
 
     def dispose(self) -> None:
-        """Закрывает соединения с базой.
+        """Closes database connections.
 
-        Этот метод закрывает только базу. Собственные HTTP-клиенты поколений
-        освобождаются асинхронным `aclose`.
+        This method closes only the database. HTTP clients owned by generations
+        are released via asynchronous `aclose`.
         """
         self._dispose()
 
@@ -223,12 +222,12 @@ def build_application(
     on_logged: LoggedObserver | None = None,
     content_plan_profile: str = "legacy-v1",
 ) -> Application:
-    """Собирает приложение по локальной конфигурации.
+    """Assembles application from local configuration.
 
-    `llm_client` подменяется в тестах и в сквозном сценарии (`FakeLLMClient`); без него
-    берётся собственный клиент провайдера, подготовленный без сетевого обращения.
-    `worker_settings` перекрывает параллелизм фоновых задач, заданный секцией `[worker]`
-    (PRD § 25). `migrate` отключает применение схемы там, где базу готовит вызывающий код.
+    `llm_client` is substituted in tests and in the end-to-end scenario (`FakeLLMClient`); without it,
+    the provider's own client prepared without network access is used.
+    `worker_settings` overrides background task concurrency specified in the `[worker]` section
+    (PRD § 25). `migrate` disables schema application when the database is prepared by the caller.
     """
     if content_plan_profile == "legacy-v1":
         import os
@@ -404,12 +403,11 @@ def _model_client(
     on_logged: LoggedObserver | None = None,
     model_name: str | None = None,
 ) -> LLMClient:
-    """Клиент модели, которым пользуются все LLM-сценарии.
+    """Model client used by all LLM use cases.
 
-    Ограничитель частоты стоит снаружи журнала: в журнал попадает длительность самого
-    вызова провайдера, а не ожидание своей очереди, — по ней оценивается оставшееся
-    время обработки. Ограничитель один на приложение, поэтому предел общий для всех
-    воркеров.
+    The rate limiter wraps the logger: the log records the duration of the provider call itself
+    rather than queue waiting time, which is used to estimate remaining processing time.
+    The rate limiter is single per application, so the limit is shared across all workers.
     """
     model: LLMClient = LoggingLLMClient(
         inner=inner,
@@ -439,7 +437,7 @@ def _analysis_sequence(
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
 ) -> ChapterAnalysisSequence:
-    """Анализ глав с порогом глоссария и пределом фрагмента из настроек (PRD § 12, § 14)."""
+    """Chapter analysis with glossary threshold and fragment limit from settings (PRD § 12, § 14)."""
     return ChapterAnalysisSequence(
         unit_of_work=unit_of_work,
         queue=task_queue,
@@ -462,7 +460,7 @@ def _processing_sequence(
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
 ) -> ChapterProcessingSequence:
-    """Обработка глав с пределом группы блоков из настроек (PRD § 10)."""
+    """Chapter processing with block group limit from settings (PRD § 10)."""
     return ChapterProcessingSequence(
         unit_of_work=unit_of_work,
         queue=task_queue,
@@ -485,7 +483,7 @@ def _regeneration_sequence(
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
 ) -> BlockRegenerationSequence:
-    """Повторная генерация блока с соседним контекстом (PRD § 13, § 21.5)."""
+    """Block regeneration with neighboring context (PRD § 13, § 21.5)."""
     return BlockRegenerationSequence(
         unit_of_work=unit_of_work,
         queue=task_queue,
@@ -500,11 +498,11 @@ def _regeneration_sequence(
 
 
 def _llm_snapshot(settings: AppSettings) -> LLMSettingsSnapshot:
-    """Настройки модели, которыми запускается обработка книги (PRD § 22).
+    """Model settings with which book processing is launched (PRD § 22).
 
-    Снимок замораживается вместе с глоссарием: пользователь должен видеть, какой моделью
-    собран результат, даже если конфигурация приложения потом изменилась. Ключ провайдера
-    в снимок не идёт — это секрет (PRD § 23).
+    The snapshot is frozen together with the glossary: the user must see which model
+    produced the result even if the application configuration changes later. The provider key
+    is not included in the snapshot — it is a secret (PRD § 23).
     """
     return LLMSettingsSnapshot(
         provider=settings.llm.provider,
@@ -515,7 +513,7 @@ def _llm_snapshot(settings: AppSettings) -> LLMSettingsSnapshot:
 
 
 def _context_builder(settings: AppSettings, *, content_plan_profile: str = "legacy-v1") -> ContextBuilder:
-    """Политика контекста запросов к модели (PRD § 13)."""
+    """Model request context policy (PRD § 13)."""
     return ContextBuilder(
         content_plan_profile=content_plan_profile,
         max_unit_source_chars=settings.llm.max_unit_source_chars,
@@ -526,7 +524,7 @@ def _context_builder(settings: AppSettings, *, content_plan_profile: str = "lega
 
 
 def _validator(settings: AppSettings) -> TranslationResultValidator:
-    """Проверки результата обработки с порогами настроек (PRD § 15, ALG-04)."""
+    """Processing result checks with settings thresholds (PRD § 15, ALG-04)."""
     checks = settings.checks
     return TranslationResultValidator(
         target_language_min_share=checks.target_language_min_share,
@@ -546,11 +544,11 @@ def _handlers(
     processing: ChapterProcessingSequence,
     regeneration: BlockRegenerationSequence,
 ) -> dict[TaskType, TaskHandler]:
-    """Обработчики всех типов задач очереди (ALG-02).
+    """Handlers for all queue task types (ALG-02).
 
-    Задачи уровня книги команду сценария не несут: runner знает только идемпотентный
-    ключ, а путь целевого файла экспорта — вообще настройка приложения. Собрать команду
-    может только состав зависимостей, поэтому связывание живёт здесь.
+    Book-level tasks carry no use case command: the runner knows only the idempotent
+    key, and the export target file path is an application setting. Only dependency composition
+    can assemble the command, so binding lives here.
     """
     return {
         TaskType.IMPORT_BOOK: to_async_handler(
@@ -568,7 +566,7 @@ def _handlers(
 def _import_handler(
     *, unit_of_work: SqlAlchemyUnitOfWork, import_book: ImportBook
 ) -> Callable[[ProcessingTask], None]:
-    """Обработчик `IMPORT_BOOK`: команда собирается из записи загруженной книги."""
+    """`IMPORT_BOOK` handler: command is assembled from the uploaded book record."""
 
     def handle(task: ProcessingTask) -> None:
         with unit_of_work.transaction() as transaction:
@@ -590,7 +588,7 @@ def _import_handler(
 def _export_handler(
     *, export_book: ExportBook, paths: DataPaths
 ) -> Callable[[ProcessingTask], None]:
-    """Обработчик `EXPORT_BOOK`: целевой файл выбирает раскладка каталога данных."""
+    """`EXPORT_BOOK` handler: target file is chosen by the data directory layout."""
 
     def handle(task: ProcessingTask) -> None:
         target = paths.export_epub(task.book_id)
@@ -607,17 +605,15 @@ def _export_handler(
 
 
 async def run_worker(application: Application) -> None:
-    """Выполняет фоновые задачи, пока приложение работает (PRD § 18.1).
+    """Executes background tasks while the application runs (PRD § 18.1).
 
-    Перед первой задачей задачи, оставшиеся `running` после аварийного завершения,
-    помечаются прерванными: их уже никто не исполняет, и пользователь запускает их
-    повторно (ALG-02, PRD § 17). Это верно, только если рядом нет другого исполнителя
-    той же базы — Web UI и `linguary worker` могут работать одновременно, — поэтому
-    восстановление выполняет лишь исполнитель, стартовавший в одиночестве.
+    Before the first task, tasks remaining `running` after a crash are marked interrupted:
+    no one is executing them anymore, and the user reruns them (ALG-02, PRD § 17).
+    This holds only if no other executor shares the same database — Web UI and `linguary worker`
+    can run concurrently, so recovery is performed only by an executor starting alone.
 
-    Отметка берётся прямо в цикле событий, а не в потоке: ждать она может только чужого
-    восстановления, а отменённое ожидание в потоке оставило бы отметку висеть до конца
-    процесса.
+    The lock is acquired directly in the event loop rather than in a thread: it can only wait
+    for another recovery, and a cancelled wait in a thread would leave the lock dangling until process exit.
     """
     lock = ExecutorLock(application.paths.executor_lock)
     alone = lock.join()
@@ -631,11 +627,11 @@ async def run_worker(application: Application) -> None:
 
 
 async def drain_tasks(application: Application) -> tuple[ProcessingTask, ...]:
-    """Выполняет накопленные задачи и возвращается, когда очередь пуста.
+    """Executes accumulated tasks and returns when the queue is empty.
 
-    Режим разовой прогонки: им пользуются CLI и тесты, где ждать новых задач незачем.
-    Прерванные задачи он не восстанавливает, но отмечается исполнителем: Web UI,
-    запущенный во время прогонки, не должен принять её задачи за брошенные.
+    One-off execution mode: used by CLI and tests where waiting for new tasks is unnecessary.
+    It does not recover interrupted tasks, but registers as an executor: Web UI launched
+    during draining must not mistake its tasks for abandoned ones.
     """
     lock = ExecutorLock(application.paths.executor_lock)
     lock.join()

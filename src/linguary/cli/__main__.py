@@ -1,4 +1,4 @@
-"""Запуск `python -m linguary.cli`."""
+"""Run `python -m linguary.cli`."""
 
 from __future__ import annotations
 

@@ -1,12 +1,13 @@
-"""Endpoints книг: список, загрузка, карточка, план обработки и предупреждения (API-01).
+"""Book endpoints: list, upload, details, processing plan, and warnings (API-01).
 
-Routes проверяют то, что пришло снаружи, вызывают прикладные сценарии и превращают их
-результат в ответ. Ни состояний книги, ни правил прогресса здесь нет: карточку и сводку
-плана считает `linguary.application.book_overview`, а действия выполняют сценарии
-(ADR § 3).
+Routes validate incoming requests, invoke application use cases, and transform their
+results into responses. Neither book states nor progress rules belong here: the card
+and plan summary are computed by `linguary.application.book_overview`, while actions
+are executed by use cases (ADR § 3).
 
-Отказы сценариев в коды HTTP переводит единый набор обработчиков ошибок приложения
-(`linguary.web.app`), поэтому здесь нет ни одного `try` вокруг вызова сценария.
+Failures in use cases are converted to HTTP status codes by a single set of application
+error handlers (`linguary.web.app`), so there is not a single `try` wrapping a use case
+call here.
 """
 
 from __future__ import annotations
@@ -44,8 +45,8 @@ from linguary.web.views import render, wants_html
 
 router = APIRouter(tags=["books"])
 
-#: Код языка книги: коротая строка вроде `en` или `ru` (PRD § 21.2). Пара языков в MVP
-#: одна, но интерфейс её не зашивает.
+#: Book language code: a short string such as `en` or `ru` (PRD § 21.2). MVP supports
+#: a single language pair, but the interface does not hardcode it.
 _LanguageCode = Annotated[str, Form(min_length=2, max_length=32)]
 
 
@@ -55,10 +56,10 @@ def get_books(
     application: CurrentApplication,
     book_status: Annotated[
         BookStatus | None,
-        Query(alias="status", description="Показать только книги в этом состоянии"),
+        Query(alias="status", description="Show only books in this state"),
     ] = None,
 ) -> BookListResponse | object:
-    """Список книг и их состояний (PRD § 21.1)."""
+    """List of books and their states (PRD § 21.1)."""
     response = BookListResponse.of_books(
         list_books(application.unit_of_work, status=book_status)
     )
@@ -74,14 +75,14 @@ def get_books(
 )
 async def upload_book(
     application: CurrentApplication,
-    file: Annotated[UploadFile, File(description="Файл книги в формате EPUB")],
+    file: Annotated[UploadFile, File(description="Book file in EPUB format")],
     source_language: _LanguageCode,
     target_language: _LanguageCode,
 ) -> RedirectResponse:
-    """Принимает EPUB, заводит книгу и ставит задачу импорта (PRD § 18, § 21.2).
+    """Accept an EPUB, register the book, and enqueue the import task (PRD § 18, § 21.2).
 
-    Книга появляется в списке сразу, в состоянии «Импортируется»: разбор файла идёт
-    фоновой задачей, и держать пользователя в ожидании незачем.
+    The book appears in the list immediately in the "Importing" state: file parsing
+    runs as a background task, so there is no need to keep the user waiting.
     """
     ensure_epub_filename(file.filename)
     book_id = str(uuid4())
@@ -111,7 +112,7 @@ async def upload_book(
 def get_book(
     request: Request, application: CurrentApplication, book_id: str
 ) -> BookDetailResponse | object:
-    """Карточка книги: состояние, прогресс, счётчики режимов и ошибки (PRD § 21.4)."""
+    """Book details: state, progress, treatment counters, and errors (PRD § 21.4)."""
     response = BookDetailResponse.of_overview(
         book_overview(
             application.unit_of_work,
@@ -138,7 +139,7 @@ def get_book(
 def get_book_plan(
     request: Request, application: CurrentApplication, book_id: str
 ) -> ProcessingPlanResponse | object:
-    """Сводка плана обработки книги по главам (PRD § 21, UX notes)."""
+    """Summary of the book processing plan by chapters (PRD § 21, UX notes)."""
     if wants_html(request):
         try:
             response = ProcessingPlanResponse.of_plan(
@@ -169,7 +170,7 @@ def get_book_plan(
 def get_book_warnings(
     request: Request, application: CurrentApplication, book_id: str
 ) -> BookWarningsResponse | object:
-    """Предупреждения импорта и замечания к результату обработки (PRD § 21.6)."""
+    """Import warnings and processing result remarks (PRD § 21.6)."""
     response = BookWarningsResponse.of_warnings(
         book_warnings(application.unit_of_work, book_id)
     )
@@ -188,10 +189,10 @@ __all__ = ["router"]
 
 
 def _needs_refresh(response: BookDetailResponse) -> bool:
-    """Нужно ли периодически перечитывать карточку книги.
+    """Whether the book card needs periodic refreshing.
 
-    Книга, работа над которой остановлена ошибкой, сама не продвинется: страница
-    с ошибкой не перечитывается, чтобы пользователь успел её прочесть.
+    A book whose progress was stopped by an error will not advance on its own:
+    a page with an error is not refreshed so that the user has time to read it.
     """
     if _has_active_tasks(response):
         return True
@@ -201,10 +202,10 @@ def _needs_refresh(response: BookDetailResponse) -> bool:
 
 
 def _is_stalled(response: BookDetailResponse) -> bool:
-    """Остановлена ли работа над книгой: задач в работе нет, а неуспешные есть."""
+    """Whether work on the book is stalled: no active tasks, but failed tasks exist."""
     return bool(response.progress.failures) and not _has_active_tasks(response)
 
 
 def _has_active_tasks(response: BookDetailResponse) -> bool:
-    """Есть ли у книги задачи в очереди или в работе."""
+    """Whether the book has tasks in queue or in progress."""
     return response.progress.pending_tasks + response.progress.running_tasks > 0

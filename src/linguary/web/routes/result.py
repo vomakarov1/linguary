@@ -1,4 +1,4 @@
-"""Endpoints результата по блокам, перегенерации и повтора задач (API-01)."""
+"""Result blocks, regeneration, and task retry endpoints (API-01)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ router = APIRouter(tags=["result"])
 def get_book_result(
     request: Request, application: CurrentApplication, book_id: str
 ) -> BookResultResponse | object:
-    """Оригинал и сохранённая помощь модели по блокам книги."""
+    """Original text and saved model aids by book blocks."""
     response = BookResultResponse.of_result(
         book_result(application.unit_of_work, book_id)
     )
@@ -52,7 +52,7 @@ def get_book_result(
 def get_book_result_block(
     request: Request, application: CurrentApplication, book_id: str, block_id: str
 ) -> ResultBlockResponse | object:
-    """Возвращает один блок результата для опроса после перегенерации."""
+    """Return a single result block for polling after regeneration."""
     response = _result_block_response(application, book_id, block_id)
     if _wants_result_block_fragment(request):
         return render(
@@ -77,7 +77,7 @@ def get_book_result_block(
 async def regenerate_book_block(
     request: Request, application: CurrentApplication, book_id: str, block_id: str
 ) -> ResultBlockResponse | object:
-    """Ставит перегенерацию и возвращает фрагмент только выбранного блока."""
+    """Enqueue block regeneration and return the fragment for the selected block only."""
     task = await application.regeneration.start(book_id, block_id)
     response = _result_block_response(application, book_id, block_id, task=task)
     if _wants_result_block_fragment(request):
@@ -99,7 +99,7 @@ async def regenerate_book_block(
 def retry_task(
     request: Request, application: CurrentApplication, task_id: str
 ) -> TaskResponse | RedirectResponse:
-    """Возвращает восстановимую неуспешную задачу в очередь."""
+    """Re-enqueue a recoverable failed task."""
     task = application.retry_task(RetryTaskCommand(task_id=task_id))
     if wants_html(request):
         return RedirectResponse(
@@ -115,7 +115,7 @@ def _result_block_response(
     *,
     task: ProcessingTask | None = None,
 ) -> ResultBlockResponse:
-    """Собирает DTO блока вместе с текущей задачей перегенерации, если она есть."""
+    """Construct the block DTO along with its current regeneration task, if any."""
     regeneration_task = task or _regeneration_task(application, book_id, block_id)
     return ResultBlockResponse.of_block(
         result_block(application.unit_of_work, book_id, block_id),
@@ -126,7 +126,7 @@ def _result_block_response(
 def _regeneration_task(
     application: CurrentApplication, book_id: str, block_id: str
 ) -> ProcessingTask | None:
-    """Активная задача перегенерации выбранного блока для обновления UI."""
+    """Active regeneration task for the selected block to update the UI."""
     identity = TaskIdentity(
         book_id=book_id,
         task_type=TaskType.REGENERATE_BLOCK,
@@ -142,7 +142,7 @@ def _regeneration_task(
 def _export_task(
     application: CurrentApplication, book_id: str
 ) -> ProcessingTask | None:
-    """Активная задача сборки EPUB для шапки результата."""
+    """Active EPUB assembly task for the result header."""
     identity = TaskIdentity(book_id=book_id, task_type=TaskType.EXPORT_BOOK)
     with application.unit_of_work.transaction() as transaction:
         task = transaction.tasks.find_by_identity(identity)
@@ -152,17 +152,17 @@ def _export_task(
 
 
 def _wants_result_header_fragment(request: Request) -> bool:
-    """Запрос от фронтенда на HTML-фрагмент шапки результата."""
+    """Frontend request for the HTML fragment of the result header."""
     return request.headers.get("x-linguary-fragment", "").lower() == "result-header"
 
 
 def _wants_result_block_fragment(request: Request) -> bool:
-    """Запрос от фронтенда на HTML-фрагмент одного блока."""
+    """Frontend request for the HTML fragment of a single block."""
     return request.headers.get("x-linguary-fragment", "").lower() == "result-block"
 
 
 def _block_anchor(block_id: str) -> str:
-    """Якорь блока должен совпадать с `id` в `partials/result_block.html`."""
+    """Block anchor must match the `id` in `partials/result_block.html`."""
     return f"block-{block_id.replace(':', '-').replace('/', '-')}"
 
 

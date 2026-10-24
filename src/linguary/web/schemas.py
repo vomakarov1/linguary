@@ -1,12 +1,12 @@
-"""Внешние DTO Web UI: то, что уходит в браузер (API-01).
+"""External Web UI DTOs: data sent to the browser (API-01).
 
-Ответы описаны отдельно от доменных сущностей: наружу отдаётся ровно то, что нужно
-экрану, вместе с русскими названиями состояний и режимов. Так изменение домена не
-меняет молча контракт интерфейса, а секреты конфигурации не могут попасть в ответ
-случайным реэкспортом поля.
+Responses are described separately from domain entities: only what the screen needs
+is exposed externally, along with Russian labels for statuses and modes. This ensures domain changes
+do not silently break interface contracts, and configuration secrets cannot leak into responses
+via accidental field re-exports.
 
-Каждая модель собирается из прикладного результата фабрикой `of_*`: routes только
-вызывают сценарий и превращают его результат в ответ.
+Each model is assembled from application results by an `of_*` factory: routes only
+invoke use cases and transform results into responses.
 """
 
 from __future__ import annotations
@@ -55,13 +55,12 @@ from linguary.web import labels
 
 
 class GlossaryDecisionRequest(BaseModel):
-    """Form-команда решения по одному элементу глоссария.
+    """Form command for deciding on a single glossary item.
 
-    `note` — переводческое указание по элементу. Поля нет в форме — указание
-    остаётся прежним; пустое поле снимает его (PRD § 11).
+    `note` — translator note for the item. If omitted from form, the note
+    remains unchanged; an empty field clears it (PRD § 11).
 
-    `type` — исправленный тип понятия; как и текст варианта, принимается только
-    исправлением.
+    `type` — corrected concept type; like variant text, accepted only with correction.
     """
 
     action: GlossaryDecision
@@ -71,7 +70,7 @@ class GlossaryDecisionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_text_for_action(self) -> Self:
-        """Текст обязателен только для исправления варианта, тип — только с ним."""
+        """Text is required only for variant correction; type is accepted only with text."""
         has_text = bool(self.text and self.text.strip())
         if self.action is GlossaryDecision.CORRECT and not has_text:
             raise ValueError("для исправления укажите новый вариант перевода")
@@ -83,30 +82,30 @@ class GlossaryDecisionRequest(BaseModel):
 
 
 class GlossaryNoteRequest(BaseModel):
-    """Form-команда правки переводческого указания по элементу глоссария."""
+    """Form command for editing translator note on a glossary item."""
 
     note: str = ""
 
 
 class ResetProcessingRequest(BaseModel):
-    """Form-команда сброса с обязательным положительным подтверждением."""
+    """Form command for reset requiring explicit positive confirmation."""
 
     confirmed: bool
 
     @model_validator(mode="after")
     def require_confirmation(self) -> Self:
-        """Отрицательный флаг не разрешает разрушающее действие."""
+        """Negative flag disallows destructive action."""
         if not self.confirmed:
             raise ValueError("возврат к проверке глоссария нужно подтвердить")
         return self
 
 
 class GlossaryItemResponse(BaseModel):
-    """Один элемент проверки глоссария (PRD § 12, § 21.3).
+    """Single glossary review item (PRD § 12, § 21.3).
 
-    `type` — тип понятия с учётом решения пользователя. `other_spellings` — прочие
-    написания элемента в книге, объединённые с показанным. `has_decision_conflict` —
-    по разным написаниям раньше были приняты разные решения, и действует одно из них.
+    `type` — concept type reflecting user decision. `other_spellings` — other
+    item spellings in the book merged with this one. `has_decision_conflict` —
+    different decisions were previously made for different spellings, and one currently applies.
     """
 
     concept_id: str
@@ -128,7 +127,7 @@ class GlossaryItemResponse(BaseModel):
 
     @classmethod
     def of_item(cls, item: GlossaryReviewItem) -> GlossaryItemResponse:
-        """Собирает элемент вместе с текущим решением пользователя."""
+        """Assembles item together with current user decision."""
         decision = item.decision
         variant = decision.variants[0] if decision and decision.variants else None
         translation = variant.text if variant is not None else None
@@ -161,7 +160,7 @@ class GlossaryItemResponse(BaseModel):
 
 
 class GlossaryReviewResponse(BaseModel):
-    """Проверка глоссария книги и доступность редактирования."""
+    """Book glossary review state and editing availability."""
 
     book_id: str
     read_only: bool
@@ -171,7 +170,7 @@ class GlossaryReviewResponse(BaseModel):
 
     @classmethod
     def of_review(cls, review: GlossaryReview) -> GlossaryReviewResponse:
-        """Собирает ответ в прикладном порядке: ожидающие решения уже идут первыми."""
+        """Assembles response in application order: pending decisions appear first."""
         return cls(
             book_id=review.book_id,
             read_only=not review.is_editable,
@@ -182,7 +181,7 @@ class GlossaryReviewResponse(BaseModel):
 
 
 class ProcessingStartResponse(BaseModel):
-    """Открытый запуск обработки и поставленные задачи глав."""
+    """Open processing run and queued chapter tasks."""
 
     book_id: str
     run_id: str
@@ -192,7 +191,7 @@ class ProcessingStartResponse(BaseModel):
     def of_start(
         cls, run: ProcessingRun, tasks: Sequence[ProcessingTask]
     ) -> ProcessingStartResponse:
-        """Собирает подтверждение асинхронного запуска."""
+        """Assembles confirmation of asynchronous processing start."""
         return cls(
             book_id=run.book_id,
             run_id=run.id,
@@ -201,7 +200,7 @@ class ProcessingStartResponse(BaseModel):
 
 
 class ResetProcessingResponse(BaseModel):
-    """Результат подтверждённого возврата к проверке глоссария."""
+    """Result of confirmed return to glossary review."""
 
     book_id: str
     status: str
@@ -211,7 +210,7 @@ class ResetProcessingResponse(BaseModel):
 
     @classmethod
     def of_result(cls, result: ResetProcessingResult) -> ResetProcessingResponse:
-        """Собирает ответ по атомарному результату сброса."""
+        """Assembles response from atomic reset result."""
         return cls(
             book_id=result.book_id,
             status=BookStatus.GLOSSARY_REVIEW.value,
@@ -222,7 +221,7 @@ class ResetProcessingResponse(BaseModel):
 
 
 class TreatmentCount(BaseModel):
-    """Сколько блоков получило один режим обработки (PRD § 21.4)."""
+    """Count of blocks assigned a specific treatment mode (PRD § 21.4)."""
 
     treatment: BlockTreatment
     label: str
@@ -232,7 +231,7 @@ class TreatmentCount(BaseModel):
     def of_counts(
         cls, counts: Mapping[BlockTreatment, int]
     ) -> tuple[TreatmentCount, ...]:
-        """Счётчики режимов в постоянном порядке: экран не должен переставлять строки."""
+        """Mode counts in consistent order: screen should not reorder rows."""
         return tuple(
             cls(
                 treatment=treatment,
@@ -245,7 +244,7 @@ class TreatmentCount(BaseModel):
 
 
 class TaskFailureResponse(BaseModel):
-    """Неуспешная задача книги вместе с доступным действием (PRD § 16, § 21.4)."""
+    """Failed book task along with available user action (PRD § 16, § 21.4)."""
 
     task_id: str
     task_type: str
@@ -260,7 +259,7 @@ class TaskFailureResponse(BaseModel):
 
     @classmethod
     def of_failure(cls, failure: TaskFailure) -> TaskFailureResponse:
-        """Собирает ответ по прикладному описанию неуспешной задачи."""
+        """Assembles response from application failure description."""
         return cls(
             task_id=failure.task_id,
             task_type=failure.task_type.value,
@@ -276,7 +275,7 @@ class TaskFailureResponse(BaseModel):
 
 
 class TaskResponse(BaseModel):
-    """Текущее состояние фоновой задачи после команды пользователя."""
+    """Current status of background task after user command."""
 
     id: str
     book_id: str
@@ -290,7 +289,7 @@ class TaskResponse(BaseModel):
 
     @classmethod
     def of_task(cls, task: ProcessingTask) -> TaskResponse:
-        """Собирает безопасный фрагмент задачи без технической детали ошибки."""
+        """Assembles safe task fragment without technical error details."""
         return cls(
             id=task.id,
             book_id=task.book_id,
@@ -305,24 +304,24 @@ class TaskResponse(BaseModel):
 
 
 class RunningChapterResponse(BaseModel):
-    """Глава, задача которой выполняется прямо сейчас."""
+    """Chapter whose task is currently running."""
 
     chapter_number: int
     title: str
 
     @classmethod
     def of_chapter(cls, chapter: RunningChapter) -> RunningChapterResponse:
-        """Собирает ответ по выполняющейся главе."""
+        """Assembles response for currently running chapter."""
         return cls(chapter_number=chapter.chapter_number, title=chapter.title)
 
 
 class BookProgressResponse(BaseModel):
-    """Прогресс обработки книги (PRD § 21.4).
+    """Book processing progress (PRD § 21.4).
 
-    `current_chapter` и `current_chapter_title` — первая из `running_chapters`: при
-    параллельной обработке глав выполняется несколько. `remaining_seconds` — грубая
-    оценка оставшегося времени идущего этапа, `remaining_time_label` — она же словами;
-    оба пусты, когда этап не идёт.
+    `current_chapter` and `current_chapter_title` — first of `running_chapters`:
+    with parallel processing multiple chapters run at once. `remaining_seconds` —
+    rough estimate of remaining time for active stage, `remaining_time_label` — same in words;
+    both are empty when no stage is running.
     """
 
     percent_complete: int
@@ -342,7 +341,7 @@ class BookProgressResponse(BaseModel):
 
     @classmethod
     def of_progress(cls, progress: BookProgress) -> BookProgressResponse:
-        """Собирает ответ по прикладному прогрессу книги."""
+        """Assembles response from application book progress."""
         return cls(
             percent_complete=progress.percent_complete,
             total_sections=progress.total_sections,
@@ -376,7 +375,7 @@ class BookProgressResponse(BaseModel):
 
 
 class BookSummaryResponse(BaseModel):
-    """Строка списка книг: название, состояние и языки (PRD § 21.1)."""
+    """Book list row: title, status, and languages (PRD § 21.1)."""
 
     id: str
     title: str
@@ -389,7 +388,7 @@ class BookSummaryResponse(BaseModel):
 
     @classmethod
     def of_book(cls, book: BookRecord) -> BookSummaryResponse:
-        """Собирает строку списка по записи книги."""
+        """Assembles list row from book record."""
         return cls(
             id=book.id,
             title=book.metadata.title,
@@ -403,18 +402,18 @@ class BookSummaryResponse(BaseModel):
 
 
 class BookListResponse(BaseModel):
-    """Список книг (PRD § 21.1)."""
+    """Book list (PRD § 21.1)."""
 
     books: tuple[BookSummaryResponse, ...] = ()
 
     @classmethod
     def of_books(cls, books: Sequence[BookRecord]) -> BookListResponse:
-        """Собирает список книг для экрана."""
+        """Assembles book list for screen."""
         return cls(books=tuple(BookSummaryResponse.of_book(book) for book in books))
 
 
 class BookDetailResponse(BaseModel):
-    """Карточка книги: состояние, прогресс, счётчики режимов и ошибки (API-01)."""
+    """Book card: status, progress, mode counters, and errors (API-01)."""
 
     book: BookSummaryResponse
     progress: BookProgressResponse
@@ -423,7 +422,7 @@ class BookDetailResponse(BaseModel):
 
     @classmethod
     def of_overview(cls, overview: BookOverview) -> BookDetailResponse:
-        """Собирает карточку по прикладному описанию книги."""
+        """Assembles book card from application overview."""
         return cls(
             book=BookSummaryResponse.of_book(overview.book),
             progress=BookProgressResponse.of_progress(overview.progress),
@@ -437,7 +436,7 @@ class BookDetailResponse(BaseModel):
 
 
 class ChapterPlanResponse(BaseModel):
-    """Сводка плана обработки одной главы (UX notes)."""
+    """Chapter processing plan summary (UX notes)."""
 
     section_id: str
     chapter_number: int
@@ -451,7 +450,7 @@ class ChapterPlanResponse(BaseModel):
 
     @classmethod
     def of_chapter(cls, chapter: ChapterPlanSummary) -> ChapterPlanResponse:
-        """Собирает сводку главы."""
+        """Assembles chapter summary."""
         return cls(
             section_id=chapter.section_id,
             chapter_number=chapter.chapter_number,
@@ -466,7 +465,7 @@ class ChapterPlanResponse(BaseModel):
 
 
 class PlanBlockResponse(BaseModel):
-    """Блок главы с режимом, выбранным анализом."""
+    """Chapter block with treatment mode selected by analysis."""
 
     block_id: str
     block_type: str
@@ -476,7 +475,7 @@ class PlanBlockResponse(BaseModel):
 
     @classmethod
     def of_block(cls, block: PlanBlockSummary) -> PlanBlockResponse:
-        """Собирает строку плана по одному исходному блоку."""
+        """Assembles plan row from single source block."""
         return cls(
             block_id=block.block.id,
             block_type=block.block.type.value,
@@ -491,7 +490,7 @@ class PlanBlockResponse(BaseModel):
 
 
 class ProcessingPlanResponse(BaseModel):
-    """Диагностическая сводка плана обработки книги (PRD § 21, API-01)."""
+    """Diagnostic processing plan summary for book (PRD § 21, API-01)."""
 
     chapters: tuple[ChapterPlanResponse, ...] = ()
     treatment_counts: tuple[TreatmentCount, ...] = ()
@@ -501,7 +500,7 @@ class ProcessingPlanResponse(BaseModel):
 
     @classmethod
     def of_plan(cls, plan: ProcessingPlanSummary) -> ProcessingPlanResponse:
-        """Собирает сводку плана книги."""
+        """Assembles book plan summary."""
         return cls(
             chapters=tuple(
                 ChapterPlanResponse.of_chapter(chapter) for chapter in plan.chapters
@@ -514,7 +513,7 @@ class ProcessingPlanResponse(BaseModel):
 
 
 class ImportWarningResponse(BaseModel):
-    """Предупреждение импорта книги (PRD § 21.6)."""
+    """Book import warning (PRD § 21.6)."""
 
     kind: str
     kind_label: str
@@ -524,7 +523,7 @@ class ImportWarningResponse(BaseModel):
 
     @classmethod
     def of_warning(cls, warning: BookImportWarning) -> ImportWarningResponse:
-        """Собирает предупреждение импорта."""
+        """Assembles import warning."""
         return cls(
             kind=warning.kind.value,
             kind_label=labels.import_warning_label(warning.kind),
@@ -535,7 +534,7 @@ class ImportWarningResponse(BaseModel):
 
 
 class ResultWarningResponse(BaseModel):
-    """Замечание к результату обработки вместе с его местом в книге (PRD § 15)."""
+    """Processing result warning with its book location (PRD § 15)."""
 
     kind: str
     kind_label: str
@@ -546,7 +545,7 @@ class ResultWarningResponse(BaseModel):
 
     @classmethod
     def of_entry(cls, entry: ResultWarningEntry) -> ResultWarningResponse:
-        """Собирает замечание результата."""
+        """Assembles result warning."""
         return cls.of_warning(
             entry.warning,
             block_id=entry.block_id,
@@ -563,7 +562,7 @@ class ResultWarningResponse(BaseModel):
         section_id: str | None,
         chapter_number: int | None,
     ) -> ResultWarningResponse:
-        """Собирает замечание уже известного блока результата."""
+        """Assembles warning for known result block."""
         return cls(
             kind=warning.kind.value,
             kind_label=labels.result_warning_label(warning.kind),
@@ -575,7 +574,7 @@ class ResultWarningResponse(BaseModel):
 
 
 class BookWarningsResponse(BaseModel):
-    """Предупреждения импорта и результата книги (API-01)."""
+    """Book import and result warnings (API-01)."""
 
     import_warnings: tuple[ImportWarningResponse, ...] = ()
     result_warnings: tuple[ResultWarningResponse, ...] = ()
@@ -583,7 +582,7 @@ class BookWarningsResponse(BaseModel):
 
     @classmethod
     def of_warnings(cls, warnings: BookWarnings) -> BookWarningsResponse:
-        """Собирает предупреждения книги."""
+        """Assembles book warnings."""
         return cls(
             import_warnings=tuple(
                 ImportWarningResponse.of_warning(warning)
@@ -598,7 +597,7 @@ class BookWarningsResponse(BaseModel):
 
 
 class GlossaryHintResponse(BaseModel):
-    """Короткая словарная подсказка внутри блока."""
+    """Brief glossary hint within a block."""
 
     original: str
     translation: str
@@ -614,7 +613,7 @@ class GlossaryHintResponse(BaseModel):
 
 
 class LanguageNoteResponse(BaseModel):
-    """Учебная заметка, привязанная к результату блока."""
+    """Educational language note attached to block result."""
 
     id: str
     original_excerpt: str
@@ -632,7 +631,7 @@ class LanguageNoteResponse(BaseModel):
 
 
 class ResultBlockResponse(BaseModel):
-    """Оригинал и помощь модели для одного стабильного блока книги."""
+    """Original text and model assistance for a single stable book block."""
 
     block_id: str
     section_id: str
@@ -654,7 +653,7 @@ class ResultBlockResponse(BaseModel):
         *,
         regeneration_task: ProcessingTask | None = None,
     ) -> ResultBlockResponse:
-        """Собирает блок результата или целевой фрагмент перегенерации."""
+        """Assembles result block or target fragment for regeneration."""
         result = summary.result
         treatment = summary.treatment
         return cls(
@@ -704,7 +703,7 @@ class ResultBlockResponse(BaseModel):
 
 
 class ResultChapterResponse(BaseModel):
-    """Одна глава результата в порядке чтения."""
+    """Single result chapter in reading order."""
 
     section_id: str
     chapter_number: int
@@ -724,7 +723,7 @@ class ResultChapterResponse(BaseModel):
 
 
 class BookResultResponse(BaseModel):
-    """Просмотр результата по блокам с предупреждениями и итогом EPUBCheck."""
+    """Block-by-block result view with warnings and EPUBCheck outcome."""
 
     book_id: str
     status: str
@@ -760,9 +759,9 @@ class BookResultResponse(BaseModel):
 
 
 class LLMConfigResponse(BaseModel):
-    """Состояние конфигурации LLM (PRD § 21.6, § 23).
+    """LLM configuration status (PRD § 21.6, § 23).
 
-    Ключ провайдера в ответ не попадает — только признак того, что он задан.
+    Provider key is omitted from response — only a flag indicating it is set.
     """
 
     is_ready: bool
@@ -782,7 +781,7 @@ class LLMConfigResponse(BaseModel):
 
     @classmethod
     def of_settings(cls, settings: AppSettings) -> LLMConfigResponse:
-        """Собирает состояние LLM по локальной конфигурации."""
+        """Assembles LLM state from local configuration."""
         llm = settings.llm
         def public_text(value: str) -> str:
             key = (llm.api_key or "").strip()
@@ -806,7 +805,7 @@ class LLMConfigResponse(BaseModel):
 
 
 class EpubCheckConfigResponse(BaseModel):
-    """Доступность внешней проверки EPUB (PRD § 20, § 21.6)."""
+    """External EPUBCheck availability (PRD § 20, § 21.6)."""
 
     available: bool
     reason: str | None = None
@@ -818,7 +817,7 @@ class EpubCheckConfigResponse(BaseModel):
     def of_availability(
         cls, availability: EpubCheckAvailability
     ) -> EpubCheckConfigResponse:
-        """Собирает состояние внешней проверки."""
+        """Assembles external validator state."""
         return cls(
             available=availability.available,
             reason=availability.reason,
@@ -829,7 +828,7 @@ class EpubCheckConfigResponse(BaseModel):
 
 
 class StorageConfigResponse(BaseModel):
-    """Где приложение держит данные (PRD § 22, UX notes)."""
+    """Where application stores data (PRD § 22, UX notes)."""
 
     data_root: str
     database_path: str
@@ -837,7 +836,7 @@ class StorageConfigResponse(BaseModel):
 
 
 class ServerConfigResponse(BaseModel):
-    """Адрес локального Web UI (PRD § 4.1, § 21.6)."""
+    """Local Web UI server address (PRD § 4.1, § 21.6)."""
 
     base_url: str
     host: str
@@ -851,7 +850,7 @@ class WorkerConfigResponse(BaseModel):
 
 
 class ReadingConfigResponse(BaseModel):
-    """Настройки уровня читателя (PRD § 30)."""
+    """Reader level settings (PRD § 30)."""
 
     reader_level: str
     supported_levels: list[str] = Field(default_factory=lambda: ["a2", "b1", "b2", "c1"])
@@ -859,7 +858,7 @@ class ReadingConfigResponse(BaseModel):
 
 
 class SystemConfigResponse(BaseModel):
-    """Экран конфигурации и окружения целиком (API-01, PRD § 21.6)."""
+    """Full configuration and environment screen (API-01, PRD § 21.6)."""
 
     llm: LLMConfigResponse
     epubcheck: EpubCheckConfigResponse
@@ -892,7 +891,7 @@ class SettingsErrorResponse(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class SafeSettingsFormValues:
-    """Отдельная проекция формы; поле ключа отсутствует намеренно."""
+    """Dedicated form projection; key field is intentionally omitted."""
 
     provider: str = field(repr=False)
     model: str = field(repr=False)
@@ -908,7 +907,7 @@ class SafeSettingsFormValues:
 
 
 class ErrorResponse(BaseModel):
-    """Отказ приложения в виде, пригодном для показа пользователю."""
+    """Application failure formatted for display to user."""
 
     detail: str
 

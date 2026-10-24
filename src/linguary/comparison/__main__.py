@@ -1,4 +1,4 @@
-"""Явная локальная оболочка; клиент создаётся только после допуска live."""
+"""Explicit local wrapper; client is created only after live approval."""
 from __future__ import annotations
 
 import argparse
@@ -46,7 +46,7 @@ def _inputs(root):
 
 
 def prepare(root, protected, protocol):
-    # Проверка прямых источников предшествует созданию любых файлов назначения.
+    # Direct source verification precedes creation of any destination files.
     if protocol.continuation is not None:
         binding = Path(protocol.continuation.path)
         if any(path.is_symlink() for path in (binding, *binding.parents)) or file_hash(binding) != protocol.continuation.sha256:
@@ -76,7 +76,7 @@ def prepare(root, protected, protocol):
             continuation_provenance=continuation.provenance, historical_variants=[continuation.variant],
             historical_stage_wall_seconds=continuation.stage_wall_seconds)})
     (workspace.root / 'manifest.json').write_text(manifest.model_dump_json(indent=2))
-    # Хеш допуска принадлежит стадии подготовки; замена манифеста отменяет допуск.
+    # Approval hash belongs to the prepare stage; replacing the manifest revokes approval.
     (workspace.root / 'prepared.json').write_text(json.dumps({'manifest_hash': stable_hash(manifest.model_dump(mode='json')), 'protocol_hash': protocol.content_hash}))
     return workspace
 
@@ -129,7 +129,7 @@ def save_result(result, protocol, root, wall_seconds):
     document = result_document(result, protocol, root)
     document['wall_seconds'] = wall_seconds
     (root / 'result.json').write_text(json.dumps(document, ensure_ascii=False, indent=2))
-    # Квитанции на диске сохраняют расход и при остановке незавершённого прогона.
+    # Receipts on disk preserve cost even when an incomplete run stops.
     for item in result.observations:
         path = root / 'receipts' / f'{item.call_uid}.json'
         path.parent.mkdir(exist_ok=True, mode=0o700)
@@ -178,7 +178,7 @@ def local_report(root, protected, protocol):
                 stage_wall_segments={stage: [{'origin': 'imported', 'seconds': seconds}] for stage, seconds in historical_time.items()},
                 variant_models={v.id: {'analysis_model': v.analysis_model, 'processing_model': v.processing_model} for v in protocol.variants})
     observations = [_read(path) for path in sorted(root.rglob('receipts/*.json'))]
-    # Пути результатов ограничены принадлежащими сравнению материалами.
+    # Result paths are restricted to materials owned by the comparison.
     for branch in outcomes['variants']:
         for key, stored in branch.get('epubs', {}).items():
             path = (root / stored).resolve()
@@ -232,7 +232,7 @@ async def execute(args, *, http_factory=httpx.AsyncClient):
     if args.report:
         local_report(root, args.protected_root, protocol)
         return 0
-    # Допуск и неизменность подготовки проверяются до создания HTTP-клиентов.
+    # Approval and preparation immutability are checked before creating HTTP clients.
     approval = ProtocolApproval.model_validate(_read(Path(args.approval))) if args.approval else None
     validated = validate_for_live(protocol, approval)
     workspace, _ = _restore(root, args.protected_root, protocol)
@@ -247,7 +247,7 @@ async def execute(args, *, http_factory=httpx.AsyncClient):
         result = await run_comparison(validated, workspace, factory)
         save_result(result, protocol, workspace.root, time.monotonic() - started)
     except Exception:
-        # Сохранённые квитанции доступны и после остановки; продолжение запрещено.
+        # Saved receipts remain available after stopping; continuation is prohibited.
         (workspace.root / 'stop.json').write_text(json.dumps({'reason': 'run_stopped'}))
         local_report(workspace.root, args.protected_root, protocol)
         raise ProtocolError('Запуск остановлен; квитанции и частичный отчёт сохранены') from None
@@ -256,7 +256,7 @@ async def execute(args, *, http_factory=httpx.AsyncClient):
 
 
 def parser():
-    value = argparse.ArgumentParser(description='Изолированное сравнение учебных EPUB')
+    value = argparse.ArgumentParser(description='Isolated educational EPUB comparison')
     modes = value.add_mutually_exclusive_group(required=True)
     for name in ('prepare', 'report', 'live', 'cleanup'):
         modes.add_argument('--' + name, action='store_true')

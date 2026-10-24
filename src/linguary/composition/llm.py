@@ -1,15 +1,15 @@
-"""Подключение клиента LLM к сценариям, которые собираются до его настройки.
+"""Connecting LLM client to use cases assembled before its configuration.
 
-Приложение обязано подниматься без настроенной LLM: первый запуск начинается именно так,
-и пользователю нужно увидеть состояние конфигурации и действие для исправления (PRD § 23).
-Но `OpenAICompatibleLLMClient` без модели и ключа не создаётся вовсе, а сценарии анализа
-и обработки требуют клиент в конструкторе.
+The application must start up without a configured LLM: the first launch begins that way,
+and the user needs to see configuration state and an action to fix it (PRD § 23).
+However, `OpenAICompatibleLLMClient` cannot be created without a model and key, while analysis
+and processing use cases require a client in their constructor.
 
-Поэтому клиент допускает явную подготовку без сети, сохраняя возможность собрать
-ненастроенное поколение. Ненастроенная LLM при обращении даёт
-`LLMConfigurationError` — ошибка настройки: задача останавливается с диагностическим
-сообщением и автоматически не повторяется, а после исправления настроек пользователь
-повторяет её сам.
+Therefore, the client permits explicit preparation without network access, preserving the ability
+to assemble an unconfigured generation. An unconfigured LLM upon invocation produces
+`LLMConfigurationError` — configuration error: the task stops with a diagnostic
+message and is not retried automatically; once settings are fixed, the user
+retries it manually.
 """
 
 from __future__ import annotations
@@ -27,14 +27,14 @@ from linguary.application.ports.llm import (
 
 
 class ConfiguredLLMClient(LLMClient):
-    """Клиент провайдера с подготовкой без сети и безопасным первым запуском."""
+    """Provider client with network-free preparation and safe initial launch."""
 
     def __init__(self, settings: LLMSettings) -> None:
         self._settings = settings
         self._clients: dict[str, OpenAICompatibleLLMClient] = {}
 
     def prepare(self) -> None:
-        """Создаёт собственный HTTP-клиент без сети; неполные настройки допустимы."""
+        """Creates own HTTP client without network access; incomplete settings are permitted."""
         if self._settings.is_ready:
             models = {
                 self._settings.effective_analysis_model,
@@ -45,23 +45,23 @@ class ConfiguredLLMClient(LLMClient):
                     self._connected(model)
 
     def client_for(self, model: str) -> LLMClient:
-        """Возвращает клиента, привязанного к конкретной модели."""
+        """Returns client bound to a concrete model."""
         return _ModelBoundLLMClient(self, model)
 
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
-        """Выполняет запрос с базовой моделью, создав клиент провайдера при первом обращении."""
+        """Executes request with base model, creating provider client on first invocation."""
         return await self._connected().generate(request)
 
     async def generate_for[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT], *, model: str
     ) -> LLMResponse[PayloadT]:
-        """Выполняет запрос с явно заданной моделью."""
+        """Executes request with explicitly specified model."""
         return await self._connected(model).generate(request)
 
     async def aclose(self) -> None:
-        """Закрывает соединения провайдера, если они открывались."""
+        """Closes provider connections if they were opened."""
         clients = list(self._clients.values())
         self._clients.clear()
         for client in clients:
@@ -72,7 +72,7 @@ class ConfiguredLLMClient(LLMClient):
         return self._clients.get(self._settings.model)
 
     def _connected(self, model: str | None = None) -> OpenAICompatibleLLMClient:
-        """Клиент провайдера; ненастроенная LLM отвергает создание (PRD § 23)."""
+        """Provider client; unconfigured LLM rejects creation (PRD § 23)."""
         target_model = model or self._settings.model
         if target_model not in self._clients:
             settings = (
@@ -85,7 +85,7 @@ class ConfiguredLLMClient(LLMClient):
 
 
 class _ModelBoundLLMClient(LLMClient):
-    """Делегат к ConfiguredLLMClient с фиксацией конкретной модели."""
+    """Delegate to ConfiguredLLMClient binding a concrete model."""
 
     def __init__(self, parent: ConfiguredLLMClient, model: str) -> None:
         self._parent = parent

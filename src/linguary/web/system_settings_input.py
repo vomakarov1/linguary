@@ -1,4 +1,4 @@
-"""Явный разбор тела запроса и отдельная безопасная проекция для повторной формы."""
+"""Explicit request body parsing and separate safe projection for form re-rendering."""
 from __future__ import annotations
 
 import json
@@ -144,7 +144,7 @@ def safe_form_values(current_settings: AppSettings, *, update: SystemSettingsUpd
 
 
 def sanitize_form_values(values: SafeSettingsFormValues, current_settings: AppSettings) -> SafeSettingsFormValues:
-    """Перед рендером также исключает ключ, сменившийся за время ожидания операции."""
+    """Also strips key changed while waiting for the operation before rendering."""
     return _projection(asdict(values), current_settings, form=False)
 
 

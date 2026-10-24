@@ -1,9 +1,9 @@
-"""Composition root приложения: сборка зависимостей для Web UI, CLI и сквозного теста.
+"""Application composition root: dependency wiring for Web UI, CLI, and end-to-end tests.
 
-Домен и прикладные сценарии знают только порты; конкретные адаптеры — SQLite, EbookLib,
-EPUBCheck, провайдер LLM — известны единственному месту, и это оно (ADR § 3). Наружу
-пакет отдаёт собранное приложение (`build_application`), раскладку каталога данных
-(`DataPaths`) и два режима исполнения фоновых задач: постоянный (`run_worker`) и разовый
+The domain and application use cases know only ports; concrete adapters — SQLite, EbookLib,
+EPUBCheck, LLM provider — are known only to a single place, which is this one (ADR § 3). Externally,
+the package exposes the assembled application (`build_application`), data directory layout
+(`DataPaths`), and two background task execution modes: continuous (`run_worker`) and draining
 (`drain_tasks`).
 """
 

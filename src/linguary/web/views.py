@@ -1,8 +1,8 @@
-"""HTML-представления локального Web UI.
+"""HTML views of the local Web UI.
 
-JSON остаётся основным контрактом API-01, а браузерные экраны выбираются через
-`Accept: text/html`. Так маршруты используют те же прикладные сценарии и DTO, но не
-ломают существующих клиентов JSON.
+JSON remains the primary contract of API-01, while browser screens are selected via
+`Accept: text/html`. Thus routes reuse the same application use cases and DTOs without
+breaking existing JSON clients.
 """
 
 from __future__ import annotations
@@ -25,12 +25,12 @@ STATIC_DIRECTORY = PACKAGE_ROOT / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
 
-#: Предупреждение о передаче текста книги внешнему провайдеру нужно экранам, которые
-#: сами по себе ничего о конфигурации LLM не показывают (PRD § 4.1, § 21.2), поэтому оно
-#: доступно любому шаблону, а не приходит отдельным полем каждого ответа.
+#: Warning about transmitting book text to external provider is needed by screens that
+#: show nothing about LLM configuration themselves (PRD § 4.1, § 21.2), so it is
+#: available to any template rather than passed as a separate field in every response.
 templates.env.globals["external_llm_warning"] = labels.EXTERNAL_LLM_WARNING
 
-#: Типы понятий глоссария по-русски: список исправления типа на экране глоссария.
+#: Glossary concept types in Russian: type correction options on glossary screen.
 templates.env.globals["concept_types"] = tuple(
     (concept_type.value, label)
     for concept_type, label in labels.CONCEPT_TYPE_LABELS.items()
@@ -38,13 +38,13 @@ templates.env.globals["concept_types"] = tuple(
 
 
 def wants_html(request: Request) -> bool:
-    """Просит ли клиент HTML, а не JSON."""
+    """Whether the client requests HTML rather than JSON."""
     accept = request.headers.get("accept", "")
     return "text/html" in accept.lower()
 
 
 def render(request: Request, template: str, **context: Any) -> HTMLResponse:
-    """Рендерит HTML-шаблон с обязательным `request`."""
+    """Renders HTML template with required `request`."""
     return templates.TemplateResponse(
         request=request, name=template, context=context
     )
@@ -53,9 +53,9 @@ def render(request: Request, template: str, **context: Any) -> HTMLResponse:
 def render_error(
     request: Request, *, status_code: int, messages: Sequence[str]
 ) -> HTMLResponse:
-    """Страница ошибки для браузера: причина отказа и ссылка назад.
+    """Browser error page: rejection reason and back link.
 
-    Код ответа остаётся тем же, что получил бы клиент JSON: меняется только вид отказа.
+    Status code matches what a JSON client would receive: only the presentation changes.
     """
     return templates.TemplateResponse(
         request=request,
@@ -72,10 +72,10 @@ def render_error(
 
 
 def _sentence(message: str) -> str:
-    """Текст отказа как законченное предложение: с заглавной буквы и с точкой.
+    """Rejection text as a complete sentence: capitalized and ending with a period.
 
-    Сообщения сценариев написаны для журнала и JSON — со строчной буквы и без точки,
-    а на странице они читаются отдельным абзацем.
+    Use case messages are formatted for logs and JSON — lowercase without trailing periods,
+    whereas on the page they are read as standalone paragraphs.
     """
     text = message.strip()
     if not text:
@@ -84,16 +84,16 @@ def _sentence(message: str) -> str:
     return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
-#: Страница книги, к которой относится адрес запроса.
+#: Book page path regex matching request URL.
 _BOOK_PATH = re.compile(r"^/books/(?!upload(?:/|$))([^/]+)")
 
 
 def back_url(request: Request) -> str:
-    """Куда вернуть пользователя со страницы ошибки.
+    """Where to return user from error page.
 
-    Предпочтительна страница, с которой отправлена форма: браузер называет её в
-    `Referer`. Чужой адрес не принимается — ссылка ведёт только внутрь приложения.
-    Без `Referer` действие над книгой возвращает на её карточку, остальное — к списку.
+    Preferably the page where the form was submitted from: named by browser in
+    `Referer`. Foreign URLs are rejected — link leads only within the application.
+    Without `Referer`, actions on a book return to its card, others to book list.
     """
     referer = urlsplit(request.headers.get("referer", ""))
     host = request.headers.get("host", "").strip().lower()

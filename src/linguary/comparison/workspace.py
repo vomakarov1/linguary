@@ -1,4 +1,4 @@
-"""Изолированные каталоги и закрытые согласованные снимки анализа."""
+"""Isolated directories and closed consistent analysis snapshots."""
 from __future__ import annotations
 
 from contextlib import closing
@@ -22,7 +22,7 @@ from linguary.domain import ChapterAnalysis, LLMCallLog, TokenUsage
 
 
 class WorkspaceError(ValueError):
-    """Каталог или состояние данных не подходят для независимого сравнения."""
+    """Directory or data state is not suitable for independent comparison."""
 
 
 @dataclass
@@ -42,7 +42,7 @@ class ComparisonWorkspace:
         return self.root / 'data' / 'linguary.db'
 
     def build_application(self, **kwargs):
-        """Создаёт приложение только из явных настроек и проверяет их проекцию."""
+        """Creates application only from explicit settings and verifies their projection."""
         from linguary.composition import build_application
         _verify_owned(self)
         if self._frozen or not self._closed:
@@ -342,7 +342,7 @@ def _late_code_transition(recipe, previous, current, proof):
     before, after = transition['before'], transition['after']
     if (set(transition) != {'before', 'after'} or before != previous.version_hashes['code_version']
             or after != current.version_hashes['code_version'] or set(after) != set(before) | {late}
-            or after[late] != '2e3cae8dc439acf9dbcd320550eb087a73e5f63c836bb940d397d0540227ce6f'
+            or after[late] != 'e31dba9b34f4ad3788a657d70ae94cebd9854ed9e23e286d409206c85992be93'
             or set(proof['provenance_source_hashes']) != provenance_paths
             or proof['implementation_file_hashes'][str(Path('src/linguary/comparison/workspace.py'))] != '6d534d3975374d96cd1e6bffc2833427c7ed1dd97f70989410d13cd54942e490'
             or any(after[path] != before[path] for path in before if path not in mutable)):
@@ -377,7 +377,7 @@ def _late_document(binding):
 
 
 def _load_late_sonnet_continuation(workspace, recipe, *, materialize):
-    """Конкретный импорт wait Luna/LL + одного проверенного анализа Sonnet."""
+    """Concrete import of wait Luna/LL + one verified Sonnet analysis."""
     from linguary.comparison.late_metadata import verify_late_metadata
     from linguary.domain.errors import DomainError
     from sqlalchemy.exc import SQLAlchemyError
@@ -529,7 +529,7 @@ class PartialAnalysisProof:
 
 
 def inspect_partial_analysis(*, source_root, source_inventory, supplement, destination_root):
-    """Исследует полную свежую копию; не открывает исходную SQLite и не разрешает live."""
+    """Inspects a full fresh copy; does not open source SQLite and does not permit live."""
     from linguary.comparison.late_metadata import verify_late_metadata
     from linguary.domain.errors import DomainError
     from sqlalchemy.exc import SQLAlchemyError
@@ -824,7 +824,7 @@ def prepare_workspace(root, protected_roots, protocol) -> ComparisonWorkspace:
         sources.mkdir()
         hashes = {}
         for chapter in protocol.chapters:
-            if not chapter.source:  # Проект допускает неизвестные источники.
+            if not chapter.source:  # Project permits unknown sources.
                 continue
             source = Path(chapter.source).expanduser().resolve(strict=True)
             if not source.is_file() or root.is_relative_to(source) or source.is_relative_to(root):
@@ -914,7 +914,7 @@ def freeze_analysis(workspace) -> AnalysisArtifact:
                 shutil.copytree(workspace.root / name, destination / name)
             for name in ('inputs.json', 'context.json', 'settings.json'):
                 shutil.copy2(workspace.root / name, destination / name)
-            # Абсолютные пути EPUB должны ссылаться на файлы конкретной копии.
+            # Absolute EPUB paths must reference files of a concrete copy.
             with closing(sqlite3.connect(data / 'linguary.db')) as db, db:
                 _relocate_sources(db, workspace.root, destination)
                 receipts = [r[0] for r in db.execute('SELECT id FROM llm_call_logs ORDER BY id')]

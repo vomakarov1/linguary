@@ -1,1 +1,1 @@
-"""Linguary — локальная обработка художественных EPUB через LLM."""
+"""Linguary — local processing of fiction EPUBs via LLMs."""

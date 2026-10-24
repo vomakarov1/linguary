@@ -1,13 +1,13 @@
-"""Приведение базы к текущей схеме при запуске приложения.
+"""Applying current schema to database upon application startup.
 
-Схему держит Alembic (`alembic/`), и приложение обязано применять её само: локальный
-пользователь запускает Web UI или CLI, а не миграции руками. Повторный запуск ничего
-не делает — миграции идемпотентны по своей природе.
+The schema is maintained by Alembic (`alembic/`), and the application must apply it itself:
+a local user runs Web UI or CLI rather than running migrations manually. Repeated execution
+does nothing — migrations are idempotent by design.
 
-Каталог миграций живёт в репозитории рядом с пакетом, а не внутри него; путь вычисляется
-от модуля, чтобы не зависеть от текущего рабочего каталога процесса. Отсюда и ограничение
-запуска: приложение работает из исходного дерева репозитория, потому что установленный
-отдельно wheel каталога миграций не содержит (README, «Запуск»).
+The migrations directory lives in the repository next to the package rather than inside it; the path
+is computed relative to the module to avoid depending on the process working directory. Hence the
+runtime constraint: the application runs from the repository source tree because an independently
+installed wheel does not contain the migrations directory (README, 'Running').
 """
 
 from __future__ import annotations
@@ -19,21 +19,20 @@ from alembic.config import Config
 
 from linguary.adapters.db.engine import build_database_url
 
-#: Корень исходного дерева: `src/linguary/composition/migrations.py` лежит на три уровня
-#: ниже. Путь верен ровно для запуска из репозитория — того единственного, который
-#: поддержан.
+#: Source tree root: `src/linguary/composition/migrations.py` is three levels below.
+#: Path is accurate specifically for running from repository — the only mode supported.
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
-#: Каталог миграций Alembic.
+#: Alembic migrations directory.
 MIGRATIONS_DIRECTORY = REPOSITORY_ROOT / "alembic"
 
 
 class MigrationsUnavailableError(RuntimeError):
-    """Каталог миграций не найден: применить схему нечем."""
+    """Migrations directory not found: nothing to apply schema with."""
 
 
 def apply_migrations(database_path: Path | str) -> None:
-    """Приводит базу к последней ревизии схемы."""
+    """Migrates database to latest schema revision."""
     if not MIGRATIONS_DIRECTORY.is_dir():
         raise MigrationsUnavailableError(
             f"каталог миграций {MIGRATIONS_DIRECTORY} не найден: приложение работает "
@@ -43,7 +42,7 @@ def apply_migrations(database_path: Path | str) -> None:
 
 
 def _config(database_path: Path | str) -> Config:
-    """Конфигурация Alembic, направленная на базу приложения."""
+    """Alembic configuration pointing to application database."""
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIRECTORY))
     config.set_main_option("sqlalchemy.url", build_database_url(database_path))

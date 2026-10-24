@@ -1,12 +1,12 @@
-"""Раскладка каталога данных приложения (PRD § 22).
+"""Application data directory layout (PRD § 22).
 
-Всё, что приложение держит на диске, лежит под одним корнем: база, загруженные книги,
-их распакованные ресурсы и собранные EPUB. Раскладку знает единственный модуль, поэтому
-Web, CLI и сквозной тест находят один и тот же файл по одному и тому же правилу, а
-перенос приложения на другую машину сводится к переносу каталога.
+Everything the application keeps on disk resides under a single root: database, uploaded books,
+their unpacked resources, and assembled EPUBs. The layout is known to a single module, so
+Web, CLI, and end-to-end tests locate the same file according to the same rule, and migrating
+the application to another machine reduces to copying the directory.
 
-Каталог книги переживает повторный импорт: хранилище ресурсов чистит только свой
-подкаталог, а исходный файл и собранный EPUB лежат рядом с ним.
+A book's directory survives repeated imports: the resource store cleans only its own
+subdirectory, while the source file and assembled EPUB sit alongside it.
 """
 
 from __future__ import annotations
@@ -16,32 +16,32 @@ from pathlib import Path
 
 from linguary.adapters.config import DEFAULT_DATABASE_NAME, StorageSettings
 
-#: Каталог книг внутри корня данных. Он же — корень хранилища ресурсов EPUB:
-#: `FilesystemEpubResourceStore` раскладывает их как `<корень>/<book_id>/resources/...`.
+#: Books directory inside data root. It is also the root of the EPUB resource store:
+#: `FilesystemEpubResourceStore` arranges them as `<root>/<book_id>/resources/...`.
 BOOKS_DIRECTORY = "books"
 
-#: Имя исходного файла книги внутри её каталога. Имя загруженного файла в путь не идёт:
-#: оно приходит из браузера и участвовать в построении пути не должно.
+#: Source book file name inside its directory. The uploaded file name is not used in the path:
+#: it comes from the browser and must not participate in path construction.
 SOURCE_FILE_NAME = "source.epub"
 
-#: Подкаталог и имя собранного EPUB внутри каталога книги.
+#: Subdirectory and file name of the assembled EPUB inside the book directory.
 EXPORT_DIRECTORY = "export"
 EXPORT_FILE_NAME = "translated.epub"
 
-#: Суффикс файла отметки исполнителей очереди рядом с базой.
+#: Suffix for the queue executor lock file next to the database.
 EXECUTOR_LOCK_SUFFIX = ".executors.lock"
 
 
 @dataclass(frozen=True, slots=True)
 class DataPaths:
-    """Пути приложения, вычисленные из настроек хранения."""
+    """Application paths computed from storage settings."""
 
     data_root: Path
     database_path: Path
 
     @classmethod
     def of_settings(cls, settings: StorageSettings) -> DataPaths:
-        """Пути по локальной конфигурации; пустой путь базы означает каталог данных."""
+        """Paths from local configuration; empty database path defaults to data directory."""
         root = Path(settings.data_root).expanduser()
         configured = settings.database_path.strip()
         return cls(
@@ -55,38 +55,38 @@ class DataPaths:
 
     @property
     def books_root(self) -> Path:
-        """Корень каталогов книг и хранилища их ресурсов."""
+        """Root of book directories and their resource stores."""
         return self.data_root / BOOKS_DIRECTORY
 
     def book_directory(self, book_id: str) -> Path:
-        """Каталог одной книги."""
+        """Directory of a single book."""
         return self.books_root / book_id
 
     def source_epub(self, book_id: str) -> Path:
-        """Куда кладётся загруженный пользователем файл книги."""
+        """Where the user-uploaded book file is placed."""
         return self.book_directory(book_id) / SOURCE_FILE_NAME
 
     def export_epub(self, book_id: str) -> Path:
-        """Куда собирается итоговый EPUB книги (PRD § 20).
+        """Where the final book EPUB is assembled (PRD § 20).
 
-        Путь фиксирован: экспортная задача знает о книге только её идентификатор, а
-        скачивание должно находить последний собранный файл по тому же правилу.
+        The path is fixed: the export task knows only the book's identifier, and
+        downloading must locate the latest assembled file by the same rule.
         """
         return self.book_directory(book_id) / EXPORT_DIRECTORY / EXPORT_FILE_NAME
 
     @property
     def executor_lock(self) -> Path:
-        """Файл отметки исполнителей очереди.
+        """Queue executor lock file.
 
-        Лежит рядом с базой, а не в корне данных: исполнители делят очередь задач,
-        то есть базу, и путь к ней может быть задан отдельно от каталога данных.
+        Resides next to the database rather than data root: executors share the task queue,
+        i.e. the database, and its path can be specified separately from data root.
         """
         return self.database_path.with_name(
             f"{self.database_path.name}{EXECUTOR_LOCK_SUFFIX}"
         )
 
     def prepare(self) -> None:
-        """Создаёт каталоги приложения, если их ещё нет."""
+        """Creates application directories if they do not yet exist."""
         self.books_root.mkdir(parents=True, exist_ok=True)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
 

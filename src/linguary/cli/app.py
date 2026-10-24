@@ -1,9 +1,9 @@
-"""Командная строка приложения.
+"""Command-line interface.
 
-CLI поднимает локальный Web UI (`serve`) и нужен для диагностики и локального выполнения
-тех же сценариев, что использует сам Web UI: импорт книги, запуск очереди задач, повтор
-неуспешной задачи, запуск анализа и обработки, а также технический экспорт в режиме
-`structure_only`.
+The CLI serves the local Web UI (`serve`) and provides diagnostics and local execution
+of the same use cases that the Web UI itself uses: book import, task queue processing,
+retry of failed tasks, running analysis and processing, and technical export in
+`structure_only` mode.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from linguary.web.schemas import EpubCheckConfigResponse, LLMConfigResponse
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Точка входа CLI."""
+    """CLI entry point."""
     parser = _parser()
     args = parser.parse_args(argv)
     try:
@@ -47,86 +47,86 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    """Парсер командной строки."""
+    """Command-line argument parser."""
     reader_parent = argparse.ArgumentParser(add_help=False)
     reader_parent.add_argument(
         "--reader-level",
         choices=sorted(SUPPORTED_READER_LEVELS),
-        help="уровень читателя (a2, b1, b2, c1)",
+        help="reader level (a2, b1, b2, c1)",
     )
 
     parser = argparse.ArgumentParser(prog="linguary", parents=[reader_parent])
-    parser.add_argument("--config", help="путь к TOML-файлу настроек")
+    parser.add_argument("--config", help="path to TOML configuration file")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     serve = subparsers.add_parser(
-        "serve", parents=[reader_parent], help="запустить локальный Web UI"
+        "serve", parents=[reader_parent], help="run local Web UI"
     )
     serve.set_defaults(handler=_serve)
 
     doctor = subparsers.add_parser(
-        "doctor", parents=[reader_parent], help="проверить локальную конфигурацию"
+        "doctor", parents=[reader_parent], help="check local configuration"
     )
     doctor.set_defaults(handler=_doctor)
 
     import_book = subparsers.add_parser(
-        "import", parents=[reader_parent], help="загрузить EPUB и поставить импорт"
+        "import", parents=[reader_parent], help="import EPUB and enqueue import task"
     )
-    import_book.add_argument("epub", help="путь к EPUB-файлу")
-    import_book.add_argument("--book-id", help="идентификатор книги")
-    import_book.add_argument("--source-language", default="en", help="исходный язык")
-    import_book.add_argument("--target-language", default="ru", help="целевой язык")
+    import_book.add_argument("epub", help="path to EPUB file")
+    import_book.add_argument("--book-id", help="book identifier")
+    import_book.add_argument("--source-language", default="en", help="source language")
+    import_book.add_argument("--target-language", default="ru", help="target language")
     import_book.set_defaults(handler=_import)
 
     analyze = subparsers.add_parser(
-        "analyze", parents=[reader_parent], help="поставить задачи анализа книги"
+        "analyze", parents=[reader_parent], help="enqueue book analysis tasks"
     )
     analyze.add_argument("book_id")
     analyze.set_defaults(handler=_analyze)
 
     process = subparsers.add_parser(
-        "process", parents=[reader_parent], help="поставить задачи обработки книги"
+        "process", parents=[reader_parent], help="enqueue book processing tasks"
     )
     process.add_argument("book_id")
     process.set_defaults(handler=_process)
 
     worker = subparsers.add_parser(
-        "worker", parents=[reader_parent], help="выполнить локальную очередь задач"
+        "worker", parents=[reader_parent], help="execute local task queue"
     )
-    worker.add_argument("--once", action="store_true", help="выполнить очередь и выйти")
+    worker.add_argument("--once", action="store_true", help="drain queue and exit")
     worker.set_defaults(handler=_worker)
 
     retry = subparsers.add_parser(
-        "retry", parents=[reader_parent], help="повторить неуспешную задачу"
+        "retry", parents=[reader_parent], help="retry failed task"
     )
     retry.add_argument("task_id")
     retry.set_defaults(handler=_retry)
 
     export = subparsers.add_parser(
-        "export", parents=[reader_parent], help="собрать EPUB книги"
+        "export", parents=[reader_parent], help="assemble book EPUB"
     )
     export.add_argument("book_id")
-    export.add_argument("--output", required=True, help="куда записать EPUB")
+    export.add_argument("--output", required=True, help="output EPUB file path")
     export.add_argument(
         "--mode",
         choices=[mode.value for mode in ExportMode],
         default=ExportMode.FULL.value,
-        help="режим сборки EPUB: full (по умолчанию) или structure_only",
+        help="EPUB assembly mode: full (default) or structure_only",
     )
     export.set_defaults(handler=_export)
     return parser
 
 
 def _serve(args: argparse.Namespace) -> int:
-    """Поднимает локальный Web UI на адресе из настроек (PRD § 4.1, § 21.6).
+    """Run local Web UI at the address specified in settings (PRD § 4.1, § 21.6).
 
-    Адрес берётся из секции `[server]`, а не из аргументов запуска: тот же адрес
-    приложение показывает на экране конфигурации и по нему же ограничивает имена
-    в заголовке `Host`, поэтому расходиться им нельзя.
+    The address is retrieved from the `[server]` section rather than CLI flags:
+    the application displays the same address on the configuration screen and uses
+    it to enforce allowed hostnames in the `Host` header, so they must not diverge.
 
-    Приложение собирает фабрика уже внутри сервера, и аргументов командной строки она
-    не видит: явно указанный файл настроек доходит до неё переменной окружения — тем же
-    способом, каким его задают любому другому запуску.
+    The application is assembled by the factory inside the server process and cannot
+    see CLI flags: an explicitly specified config file is passed to it via an
+    environment variable — just as it is provided to any other run.
     """
     settings = load_settings(config_path=args.config)
     if args.config:
@@ -143,7 +143,7 @@ def _serve(args: argparse.Namespace) -> int:
 
 
 def _doctor(args: argparse.Namespace) -> int:
-    """Печатает состояние локального окружения без секретов."""
+    """Print local environment status without secrets."""
     application = _application(args)
     try:
         llm = LLMConfigResponse.of_settings(application.settings)
@@ -167,7 +167,7 @@ def _doctor(args: argparse.Namespace) -> int:
 
 
 def _import(args: argparse.Namespace) -> int:
-    """Копирует EPUB в каталог данных и ставит задачу импорта."""
+    """Copy EPUB to the data directory and enqueue import task."""
     source = Path(args.epub).expanduser()
     if source.suffix.lower() != ".epub":
         raise ApplicationError("импорт принимает только EPUB-файлы")
@@ -196,7 +196,7 @@ def _import(args: argparse.Namespace) -> int:
 
 
 def _analyze(args: argparse.Namespace) -> int:
-    """Проверяет LLM-настройку и ставит первую задачу анализа."""
+    """Verify LLM settings and enqueue the initial analysis task."""
     application = _application(args)
     try:
         application.settings.llm.ensure_ready()
@@ -209,7 +209,7 @@ def _analyze(args: argparse.Namespace) -> int:
 
 
 def _process(args: argparse.Namespace) -> int:
-    """Замораживает глоссарий и ставит задачи обработки."""
+    """Freeze glossary and enqueue processing tasks."""
     application = _application(args)
     try:
         run = application.start_processing()(StartProcessingCommand(book_id=args.book_id))
@@ -223,7 +223,7 @@ def _process(args: argparse.Namespace) -> int:
 
 
 def _worker(args: argparse.Namespace) -> int:
-    """Запускает локальный worker."""
+    """Run local worker."""
     application = _application(args)
     async def execute() -> int:
         try:
@@ -242,7 +242,7 @@ def _worker(args: argparse.Namespace) -> int:
 
 
 def _retry(args: argparse.Namespace) -> int:
-    """Возвращает неуспешную задачу в очередь."""
+    """Re-enqueue a failed task."""
     application = _application(args)
     try:
         task = application.retry_task(RetryTaskCommand(task_id=args.task_id))
@@ -254,7 +254,7 @@ def _retry(args: argparse.Namespace) -> int:
 
 
 def _export(args: argparse.Namespace) -> int:
-    """Собирает EPUB в выбранном режиме (по умолчанию full)."""
+    """Assemble EPUB in selected mode (full by default)."""
     application = _application(args)
     try:
         result = application.export_book(
@@ -276,7 +276,7 @@ def _export(args: argparse.Namespace) -> int:
 
 
 def _application(args: argparse.Namespace):
-    """Собирает приложение по настройкам CLI."""
+    """Assemble application based on CLI settings."""
     settings = load_settings(config_path=args.config)
     reader_level = getattr(args, "reader_level", None)
     if reader_level is not None:

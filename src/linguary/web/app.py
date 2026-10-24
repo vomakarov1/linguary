@@ -1,21 +1,19 @@
-"""Локальный Web UI: сборка FastAPI-приложения (PRD § 21, ADR § 3).
+"""Local Web UI: FastAPI application assembly (PRD § 21, ADR § 3).
 
-Приложение поднимает состав зависимостей один раз при старте, кладёт его в состояние
-FastAPI и запускает фоновый воркер очереди. Воркер живёт в том же процессе намеренно:
-MVP — локальное однопользовательское приложение, и загруженная книга должна начать
-обрабатываться сама, без второго запущенного терминала (PRD § 18.1). Отдельная команда
-CLI остаётся возможной: очередь атомарно захватывает задачи, а прерванными при старте
-считаются только задачи, которые не выполняет ни один живой исполнитель, поэтому лишний
-исполнитель ей не мешает.
+The application sets up dependency composition once at startup, stores it in FastAPI
+application state, and launches the background queue worker. The worker lives in the same process intentionally:
+the MVP is a local single-user application, and an uploaded book should start processing
+automatically without a second terminal session (PRD § 18.1). A separate CLI command
+remains possible: the queue claims tasks atomically, and tasks considered interrupted at startup
+are only those not executed by any active worker, so an extra worker does not interfere.
 
-Отказы прикладных сценариев переводятся в коды HTTP здесь, а не в каждом route: набор
-ошибок общий для всех экранов, и он же достаётся следующим пакетам endpoints.
+Application use case failures are translated to HTTP status codes here rather than in each route:
+the error set is shared across all screens and is reused by downstream endpoint packages.
 
-Сервер слушает адрес из локальной конфигурации, по умолчанию `127.0.0.1` (PRD § 4.1):
-приложение хранит ключ провайдера и полный текст книг. Аутентификации у него нет
-намеренно, поэтому единственное, чем страница самого приложения отличается от чужой
-страницы, открытой в том же браузере, — происхождение запроса: `Host`, `Origin`
-и `Sec-Fetch-Site` проверяются здесь одной middleware сразу для всех endpoints.
+The server listens on the address from local configuration, default `127.0.0.1` (PRD § 4.1):
+the application stores the provider key and full book text. It intentionally has no authentication,
+so the only distinction between the application page and a foreign page opened in the same browser
+is request origin: `Host`, `Origin`, and `Sec-Fetch-Site` are checked here by a single middleware across all endpoints.
 """
 
 from __future__ import annotations
@@ -71,23 +69,23 @@ from linguary.web.schemas import ErrorResponse
 from linguary.web.uploads import UploadRejectedError
 from linguary.web.views import STATIC_DIRECTORY, render_error, wants_html
 
-#: Название приложения в документации API.
+#: Application name in API documentation.
 TITLE = "Linguary"
 
-#: Методы, которые состояния не меняют: у них проверяется только `Host`. Межсайтовое
-#: чтение браузер и без того не отдаёт чужой странице — ответ ей не виден.
+#: Methods that do not mutate state: only `Host` is checked for them. Cross-site
+#: read is already blocked by the browser from foreign pages — response is invisible to them.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
-#: Значения `Sec-Fetch-Site`, при которых запрос пришёл со страницы самого приложения
-#: либо прямо от пользователя — переходом по закладке или из адресной строки.
+#: `Sec-Fetch-Site` values indicating the request came from the application page itself
+#: or directly from the user — via bookmark navigation or the address bar.
 _SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
 
-#: Отказы сценариев и домена в кодах HTTP (API-01).
+#: Use case and domain failures mapped to HTTP status codes (API-01).
 #:
-#: `409` — действие невозможно в текущем состоянии книги: правка глоссария после старта
-#: обработки, экспорт с незавершёнными задачами, повтор невосстановимой задачи, запуск
-#: без настроенной LLM. `404` — книги или задачи нет. `400` — не принят присланный файл.
-#: Порядок значим: наследник указывается раньше своего базового класса.
+#: `409` — action impossible in current book status: glossary edit after processing start,
+#: export with pending tasks, retry of non-recoverable task, start without configured LLM.
+#: `404` — book or task not found. `400` — uploaded file rejected.
+#: Order matters: subclasses must precede their base class.
 _ERROR_STATUSES: tuple[tuple[type[Exception], int], ...] = (
     (BookNotFoundError, status.HTTP_404_NOT_FOUND),
     (ResultBlockNotFoundError, status.HTTP_404_NOT_FOUND),
@@ -116,11 +114,11 @@ def create_app(
     application: Application | None = None,
     run_background_worker: bool = True,
 ) -> FastAPI:
-    """Собирает FastAPI-приложение локального Web UI.
+    """Assembles FastAPI application of the local Web UI.
 
-    `application` задаётся в тестах и в сквозном сценарии; без него состав зависимостей
-    собирается по локальной конфигурации при старте процесса. `run_background_worker`
-    выключает фоновый воркер там, где задачи выполняются явно.
+    `application` is provided in tests and end-to-end scenarios; without it, dependencies
+    are assembled from local configuration at process startup. `run_background_worker`
+    disables background worker when tasks are executed explicitly.
     """
     app = FastAPI(title=TITLE, lifespan=_lifespan(application, run_background_worker))
     _register_request_guard(app)
@@ -141,24 +139,24 @@ def create_app(
 
 
 def _register_request_guard(app: FastAPI) -> None:
-    """Отклоняет обращения по чужому имени и запросы чужого происхождения (PRD § 4.1).
+    """Rejects foreign host and foreign origin requests (PRD § 4.1).
 
-    Проверки две, и закрывают они разные пути к приложению.
+    Two checks protect different entry points to the application.
 
-    `Host` отвечает за перепривязку DNS: страница атакующего доходит до сервера только
-    под своим именем, а приложение отвечает лишь по тем именам, по которым его открывает
-    владелец (`ServerSettings.allowed_hosts`). Без этой проверки браузер считает страницу
-    атакующего тем же источником, и ей становятся доступны и чтение книг, и действия.
+    `Host` prevents DNS rebinding: an attacker's page reaches the server only
+    under its own host, while the application responds only to hosts approved by
+    the owner (`ServerSettings.allowed_hosts`). Without this check, the browser considers
+    the attacker's page same-origin, exposing book reading and actions.
 
-    `Origin` и `Sec-Fetch-Site` отвечают за межсайтовый запрос, меняющий состояние:
-    заголовки проставляет сам браузер, страница их не подделает, поэтому чужая страница
-    не выполнит ни загрузку книги, ни сброс обработки, ни трату ключа провайдера.
-    Запрос, у которого нет обоих заголовков, проходит: так приходит не-браузерный
-    клиент (curl, тест), а браузер межсайтовый запрос помечает всегда.
+    `Origin` and `Sec-Fetch-Site` protect against state-mutating cross-site requests:
+    headers are set by the browser itself and cannot be forged by a page, so a foreign page
+    cannot upload books, reset processing, or consume provider balance.
+    A request lacking both headers is allowed: this matches non-browser clients (curl, tests),
+    while browsers always flag cross-site requests.
 
-    Настройки берутся из собранного приложения на каждом запросе: набор middleware
-    строится раньше, чем `lifespan` собирает состав зависимостей, и на момент сборки
-    адрес сервера ещё неизвестен.
+    Settings are retrieved from the assembled application on each request:
+    middleware is constructed before `lifespan` builds dependencies, and at construction time
+    the server address is not yet known.
     """
 
     @app.middleware("http")
@@ -172,7 +170,7 @@ def _register_request_guard(app: FastAPI) -> None:
 
 
 def _request_rejection(request: Request) -> Response | None:
-    """Ответ, которым запрос отклоняется, либо `None`, если он принимается."""
+    """Response rejecting request, or `None` if accepted."""
     server = _server_settings(request)
     if not _host_allowed(request.headers.get("host", ""), server):
         return _rejection(
@@ -192,7 +190,7 @@ def _request_rejection(request: Request) -> Response | None:
 
 
 def _server_settings(request: Request) -> ServerSettings:
-    """Адрес сервера из собранного приложения; до его сборки — значения по умолчанию."""
+    """Server address from assembled application; default values before assembly."""
     application: Application | None = getattr(
         request.app.state, APPLICATION_STATE_ATTRIBUTE, None
     )
@@ -200,7 +198,7 @@ def _server_settings(request: Request) -> ServerSettings:
 
 
 def _host_allowed(header: str, server: ServerSettings) -> bool:
-    """Отвечает ли приложение по имени из заголовка `Host`."""
+    """Whether application responds to host name from `Host` header."""
     allowed = server.allowed_hosts
     if "*" in allowed:
         return True
@@ -208,7 +206,7 @@ def _host_allowed(header: str, server: ServerSettings) -> bool:
 
 
 def _header_host(header: str) -> str:
-    """Имя из заголовка `Host` без порта; адрес IPv6 — без скобок."""
+    """Host name from `Host` header without port; IPv6 address without brackets."""
     value = header.strip().lower()
     if value.startswith("["):
         return value[1:].partition("]")[0]
@@ -216,7 +214,7 @@ def _header_host(header: str) -> str:
 
 
 def _origin_allowed(request: Request) -> bool:
-    """Пришёл ли меняющий состояние запрос со страницы самого приложения."""
+    """Whether state-mutating request originated from the application page itself."""
     origin = request.headers.get("origin")
     if origin is not None and origin.strip().lower() != _request_origin(request):
         return False
@@ -225,23 +223,22 @@ def _origin_allowed(request: Request) -> bool:
 
 
 def _request_origin(request: Request) -> str:
-    """Происхождение, которым приложение открыто у пользователя прямо сейчас.
+    """Origin under which application is currently opened by user.
 
-    Имя берётся из заголовка `Host` — того самого, который уже сверен со списком имён
-    приложения. Так принимаются оба обычных адреса локального запуска, `127.0.0.1`
-    и `localhost`, и не принимается никакой третий.
+    Host name is taken from `Host` header — the one already verified against allowed hosts.
+    This accepts both common local addresses, `127.0.0.1` and `localhost`, and rejects any third.
     """
     host = request.headers.get("host", "").strip().lower()
     return f"{request.url.scheme}://{host}"
 
 
 def _rejection(request: Request, code: int, detail: str) -> Response:
-    """Отказ проверки происхождения в том же виде, что и отказы сценариев."""
+    """Origin check rejection formatted identically to use case failures."""
     return _error_response(request, code, detail)
 
 
 def _register_root_route(app: FastAPI) -> None:
-    """Открывает главный экран по корневому адресу сервера."""
+    """Opens main screen at server root address."""
 
     @app.get("/", include_in_schema=False)
     async def redirect_to_books() -> RedirectResponse:
@@ -251,7 +248,7 @@ def _register_root_route(app: FastAPI) -> None:
 def _lifespan(
     application: Application | None, run_background_worker: bool
 ) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
-    """Жизненный цикл процесса: сборка зависимостей, воркер и закрытие соединений."""
+    """Process lifecycle: dependency assembly, worker, and closing connections."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -281,16 +278,15 @@ def _lifespan(
 
 
 def _register_error_handlers(app: FastAPI) -> None:
-    """Переводит отказы сценариев и домена в ответы для пользователя.
+    """Translates use case and domain failures into responses for the user.
 
-    Обработчиков два, по одному на базовый класс: прикладные ошибки и нарушения доменных
-    инвариантов. Конкретный код выбирается по таблице, поэтому новый endpoint получает
-    её поведение, ничего не регистрируя.
+    Two handlers, one per base class: application errors and domain invariant violations.
+    The specific code is looked up in the table, so a new endpoint acquires
+    its behavior without explicit registration.
 
-    Вид ответа выбирает клиент: браузер, отправивший форму, получает страницу ошибки
-    со ссылкой назад, а клиент JSON — прежний `{"detail": ...}`. Так же обрабатываются
-    неверно заполненная форма (`422`) и неизвестный адрес (`404`) — иначе браузер
-    показал бы пользователю сырой JSON.
+    Response format is chosen by the client: a browser submitting a form receives an error page
+    with a back link, while a JSON client receives the familiar `{"detail": ...}`. Invalid forms
+    (`422`) and unknown routes (`404`) are handled similarly — otherwise the browser would show raw JSON.
     """
 
     @app.exception_handler(ApplicationError)
@@ -327,7 +323,7 @@ def _register_error_handlers(app: FastAPI) -> None:
 
 
 def _error_response(request: Request, code: int, detail: str) -> Response:
-    """Отказ с кодом и текстом для пользователя: страница для браузера, иначе JSON."""
+    """Error response with status code and detail for user: page for browser, else JSON."""
     if wants_html(request):
         return render_error(request, status_code=code, messages=(detail,))
     return JSONResponse(
@@ -336,7 +332,7 @@ def _error_response(request: Request, code: int, detail: str) -> Response:
 
 
 def _validation_messages(error: RequestValidationError) -> tuple[str, ...]:
-    """Понятные пользователю причины, по которым форма не принята."""
+    """User-friendly reasons why the form was rejected."""
     messages: list[str] = []
     for issue in error.errors():
         field = str(issue.get("loc", ("",))[-1])
@@ -349,7 +345,7 @@ def _validation_messages(error: RequestValidationError) -> tuple[str, ...]:
 
 
 def _status_for(error: Exception) -> int:
-    """Код HTTP для отказа сценария; незнакомая ошибка приложения — `500`."""
+    """HTTP status code for use case rejection; unrecognized application error is `500`."""
     for error_type, code in _ERROR_STATUSES:
         if isinstance(error, error_type):
             return code

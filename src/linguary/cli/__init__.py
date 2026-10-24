@@ -1,4 +1,4 @@
-"""Точка входа командной строки."""
+"""Command-line interface entry point."""
 
 from linguary.cli.app import main
 

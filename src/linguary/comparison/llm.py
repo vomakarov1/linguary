@@ -1,4 +1,4 @@
-"""Наблюдения на границе провайдера и ограничения локального сравнения."""
+"""Provider boundary observations and local comparison constraints."""
 from __future__ import annotations
 
 import asyncio
@@ -28,7 +28,7 @@ _METADATA_RETRY_DELAYS = (.5, 1, 2, 4, 8, 15)
 
 
 class ComparisonStopped(LLMConfigurationError):
-    """Условия сравнения больше не позволяют новые вызовы."""
+    """Comparison conditions no longer permit new calls."""
 
 
 @dataclass
@@ -75,7 +75,7 @@ class CallObservation:
 
 
 class BudgetGuard:
-    """Общий резерв учитывает уже потраченные и ещё выполняемые запросы."""
+    """Shared reserve tracks already spent and currently pending requests."""
     def __init__(self, budget: Decimal, max_total_attempts: int | None = None):
         self.budget = Decimal(budget)
         if not self.budget.is_finite() or self.budget <= 0:
@@ -158,8 +158,8 @@ class ObservationLedger:
             (request.book_id or '', request.kind.value, content_hash),
             (self.task_scopes.get(request.task_id), content_hash),
         )
-        # Идентичность группы задаётся исходными block ids, а не случайным unit id
-        # или ответами предыдущих частей. Ремонтная инструкция в ключ не входит.
+        # Group identity is defined by original block ids, not by a random unit id
+        # or responses of previous parts. Repair instruction is not part of the key.
         key = '\0'.join((self.variant_id, str(self.repeat), request.book_id or '', request.kind.value, group))
         operation = hashlib.sha256(key.encode()).hexdigest()
         item = CallObservation(
@@ -264,7 +264,7 @@ _current: ContextVar[CallObservation | None] = ContextVar('comparison_call', def
 
 
 class ReceiptHTTPClient:
-    """Получает техническую квитанцию до настоящего разбора ответа адаптером."""
+    """Retrieves a technical receipt before actual response parsing by the adapter."""
     def __init__(self, http, *, ledger, model, route, pricing=None, temperature_policy="set", cost_bounds=None, route_metadata=None):
         if temperature_policy not in ("set", "omit"):
             raise ComparisonStopped("Не согласована политика temperature")
@@ -394,7 +394,7 @@ class ReceiptHTTPClient:
         if response.status_code >= 400:
             if response.status_code < 500 and response.status_code != 429:
                 self.ledger.stop("provider_rejected_contract")
-            # Не раскрываем тело HTTP-ошибки через стандартные detail исключений.
+            # Do not expose the HTTP error body through standard exception details.
             headers = {key: value for key, value in response.headers.items()
                        if key.lower() not in {'content-encoding', 'content-length', 'transfer-encoding'}}
             return httpx.Response(response.status_code, json={'error': 'provider request failed'}, headers=headers, request=response.request)
@@ -443,7 +443,7 @@ class ReceiptHTTPClient:
 
 
 class ObservedLLMClient:
-    """Клиент одного принятого маршрута; HTTP-клиент всегда внедряется явно."""
+    """Single approved route client; HTTP client is always injected explicitly."""
     def __init__(self, *, settings: LLMSettings, route: str, http_client, ledger: ObservationLedger, budget: BudgetGuard, max_call_cost: Decimal, pricing: TokenPricing | None = None, temperature_policy="set", cost_bounds: CostBounds | None = None, route_metadata: RouteMetadata | None = None):
         self.temperature_policy = temperature_policy
         self.cost_bounds = cost_bounds
@@ -498,7 +498,7 @@ class ObservedLLMClient:
 
 
 class StageLLMClient:
-    """Никаких запасных моделей: вид запроса выбирает заранее заданный клиент."""
+    """No fallback models: request kind selects a pre-configured client."""
     def __init__(self, *, analysis: LLMClient, processing: LLMClient):
         self.clients = {LLMResponseKind.CHAPTER_ANALYSIS: analysis, LLMResponseKind.TRANSLATION_RESULT: processing}
 

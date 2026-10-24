@@ -1,4 +1,4 @@
-"""Принятые изменения настроек завершаются независимо от HTTP-наблюдателя."""
+"""Accepted settings changes complete independently of the HTTP observer."""
 from __future__ import annotations
 
 import asyncio
@@ -13,11 +13,11 @@ from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSett
 
 
 class SettingsClosingError(SettingsError):
-    """Новая операция не принята после начала завершения приложения."""
+    """New operation not accepted after application shutdown begins."""
 
 
 class SettingsNotAppliedError(SettingsError):
-    """Подготовка или запись настроек не завершилась; изменения не применены."""
+    """Preparation or persistence of settings did not complete; changes not applied."""
 
 
 class SystemSettingsService:

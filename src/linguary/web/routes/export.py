@@ -1,4 +1,4 @@
-"""Endpoints фоновой сборки и скачивания итогового EPUB (API-01)."""
+"""Background EPUB assembly and download endpoints (API-01)."""
 
 from __future__ import annotations
 
@@ -14,14 +14,13 @@ from linguary.web.views import wants_html
 
 router = APIRouter(prefix="/books/{book_id}", tags=["export"])
 
-#: Символы, недопустимые в имени файла хотя бы в одной из систем пользователя,
-#: и управляющие символы.
+#: Characters prohibited in filenames on at least one user OS, and control characters.
 _UNSAFE_FILENAME_CHARACTERS = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]+')
 
-#: Предел длины названия в имени файла: файловые системы ограничивают имя 255 байтами.
+#: Maximum title length in filename: filesystems limit filenames to 255 bytes.
 _MAX_TITLE_LENGTH = 120
 
-#: Название файла, если от названия книги ничего не осталось.
+#: Fallback filename when nothing remains of the book title.
 _FALLBACK_TITLE = "book"
 
 
@@ -33,7 +32,7 @@ _FALLBACK_TITLE = "book"
 async def start_export(
     request: Request, application: CurrentApplication, book_id: str
 ) -> TaskResponse | RedirectResponse:
-    """Проверяет готовность книги и ставит сборку EPUB в очередь."""
+    """Verify book readiness and enqueue EPUB assembly."""
     task = await application.start_export(book_id)
     if wants_html(request):
         return RedirectResponse(
@@ -44,7 +43,7 @@ async def start_export(
 
 @router.get("/download", response_class=FileResponse)
 def download_export(application: CurrentApplication, book_id: str) -> FileResponse:
-    """Отдаёт последний успешно собранный EPUB как вложение."""
+    """Serve the latest successfully assembled EPUB as a file attachment."""
     application.export_book.downloadable_task(book_id)
     path = application.paths.export_epub(book_id)
     if not path.is_file():
@@ -63,10 +62,10 @@ def download_export(application: CurrentApplication, book_id: str) -> FileRespon
 
 
 def download_filename(title: str, target_language: str) -> str:
-    """Имя скачиваемого файла: название книги и целевой язык, `Title (ru).epub`.
+    """Name of the downloaded file: book title and target language, `Title (ru).epub`.
 
-    Название приходит из метаданных недоверенного EPUB, поэтому символы, которые
-    файловая система не примет или истолкует как путь, заменяются пробелом.
+    The title comes from the metadata of an untrusted EPUB, so characters that the
+    filesystem would reject or interpret as a path are replaced with spaces.
     """
     safe = " ".join(_UNSAFE_FILENAME_CHARACTERS.sub(" ", title).split())
     safe = safe[:_MAX_TITLE_LENGTH].strip(" .") or _FALLBACK_TITLE

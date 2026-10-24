@@ -1,11 +1,11 @@
-"""Русские названия состояний, режимов и ошибок для интерфейса (PRD § 21).
+"""Russian labels for statuses, modes, and errors in the user interface (PRD § 21).
 
-Домен говорит идентификаторами (`GLOSSARY_REVIEW`, `TRANSLATE`, `ModelOutputError`),
-а пользователю нужны человеческие формулировки. Перевод живёт в одном месте, поэтому
-список книг, карточка книги и экран обработки называют одно и то же одинаково.
+The domain speaks identifiers (`GLOSSARY_REVIEW`, `TRANSLATE`, `ModelOutputError`),
+while the user needs human-readable phrasing. Translations live in a single place, so
+the book list, book card, and processing screen refer to the same things consistently.
 
-Тексты написаны как объяснение состояния дел, а не как перевод технического термина:
-в списке книг читается «ожидает проверки глоссария», а не «GLOSSARY_REVIEW».
+Texts are written as explanations of the state of affairs rather than literal translations of technical terms:
+the book list displays "waiting for glossary review" rather than "GLOSSARY_REVIEW".
 """
 
 from __future__ import annotations
@@ -26,35 +26,35 @@ from linguary.domain import (
     TermStatus,
 )
 
-#: Предупреждение о передаче текста книги внешнему провайдеру (PRD § 4.1, § 21.6).
-#: Показывается при загрузке книги и на экране конфигурации.
+#: Warning about transmitting full book text to external provider (PRD § 4.1, § 21.6).
+#: Displayed during book upload and on the configuration screen.
 EXTERNAL_LLM_WARNING = (
     "Текст книги целиком отправляется внешнему провайдеру LLM: анализ глав и перевод "
     "выполняются на его серверах. Загружайте только те книги, которые можно передавать "
     "третьей стороне."
 )
 
-#: Подсказка, когда LLM не настроена (PRD § 23).
+#: Hint when LLM is not configured (PRD § 23).
 LLM_NOT_CONFIGURED_HINT = (
     "Укажите модель и ключ провайдера в файле настроек ~/.linguary/config.toml "
     "или в переменных окружения LINGUARY_LLM_MODEL и LINGUARY_LLM_API_KEY."
 )
 
-#: Подсказка, когда внешняя проверка EPUB недоступна (PRD § 20, § 21.6).
+#: Hint when external EPUBCheck validator is unavailable (PRD § 20, § 21.6).
 EPUBCHECK_HINT = (
     "Внешняя проверка EPUBCheck необязательна: без неё книга собирается и помечается "
     "как непроверенная. Чтобы включить проверку, установите Java и распакуйте EPUBCheck "
     "в ~/.linguary/epubcheck."
 )
 
-#: Предупреждение о сервере, открытом не только этой машине (PRD § 4.1).
+#: Warning when server is exposed beyond this machine (PRD § 4.1).
 NON_LOCAL_SERVER_WARNING = (
     "Приложение доступно не только с этой машины. Оно хранит ключ провайдера и полный "
     "текст книг, поэтому открывать его в сеть стоит только осознанно."
 )
 
-#: Заголовки страницы ошибки для браузера по коду ответа (API-01). Страница показывается
-#: вместо сырого JSON, когда форма отправлена из браузера.
+#: Browser error page titles by response status code (API-01). Displayed
+#: instead of raw JSON when a form is submitted from browser.
 ERROR_PAGE_TITLES: Mapping[int, str] = {
     400: "Запрос не принят",
     403: "Действие запрещено",
@@ -64,7 +64,7 @@ ERROR_PAGE_TITLES: Mapping[int, str] = {
     422: "Форма заполнена неверно",
 }
 
-#: Заголовок страницы ошибки, код которой в таблице не описан.
+#: Error page title for status codes not described in the table.
 DEFAULT_ERROR_PAGE_TITLE = "Не удалось выполнить действие"
 
 BOOK_STATUS_LABELS: Mapping[BookStatus, str] = {
@@ -79,7 +79,7 @@ BOOK_STATUS_LABELS: Mapping[BookStatus, str] = {
     BookStatus.FAILED: "Импорт не удался",
 }
 
-#: Названия режимов обработки блоков в терминах экрана обработки (PRD § 21.4).
+#: Block treatment mode labels in terms of the processing screen (PRD § 21.4).
 TREATMENT_LABELS: Mapping[BlockTreatment, str] = {
     BlockTreatment.TRANSLATE: "Полный перевод",
     BlockTreatment.GLOSSARY_ONLY: "Словарные подсказки",
@@ -103,7 +103,7 @@ TASK_STATUS_LABELS: Mapping[TaskStatus, str] = {
     TaskStatus.FAILED: "Не удалось выполнить",
 }
 
-#: Что означает тип ошибки для пользователя: можно ли повторить и от чего это зависит
+#: What error type means to the user: whether retry is possible and what it depends on
 #: (PRD § 16).
 ERROR_TYPE_LABELS: Mapping[ErrorType, str] = {
     ErrorType.TRANSIENT: "Временный сбой — попробуйте повторить",
@@ -115,19 +115,19 @@ ERROR_TYPE_LABELS: Mapping[ErrorType, str] = {
     ErrorType.PERMANENT: "Ошибка, которую повтор не исправит",
 }
 
-#: Решение пользователя по элементу глоссария (PRD § 12). Исправление хранится тем же
-#: статусом `approved`, что и принятие, и отличается только текстом варианта, поэтому
-#: для него подпись своя.
+#: User decision on a glossary item (PRD § 12). A correction is stored under the same
+#: `approved` status as an acceptance, differing only in translation text, so
+#: it has its own label.
 GLOSSARY_DECISION_LABELS: Mapping[TermStatus, str] = {
     TermStatus.APPROVED: "принято",
     TermStatus.LOCKED: "зафиксировано",
     TermStatus.SUGGESTED: "пропущено",
 }
 
-#: Подпись исправленного пользователем варианта перевода.
+#: Label for translation variant corrected by user.
 GLOSSARY_CORRECTED_LABEL = "исправлено"
 
-#: Тип понятия глоссария (PRD § 12): в карточке элемента и в списке исправления типа.
+#: Glossary concept type (PRD § 12): in item card and type correction list.
 CONCEPT_TYPE_LABELS: Mapping[ConceptType, str] = {
     ConceptType.PERSON: "действующее лицо",
     ConceptType.PLACE: "место",
@@ -136,8 +136,8 @@ CONCEPT_TYPE_LABELS: Mapping[ConceptType, str] = {
     ConceptType.TERM: "термин",
 }
 
-#: Полнота плана обработки книги на экране плана (PRD § 14): короткая подпись
-#: и пояснение, что она означает.
+#: Book processing plan completeness on plan screen (PRD § 14): short label
+#: and explanation of what it means.
 PLAN_COMPLETE_LABEL = "План полный"
 PLAN_COMPLETE_HINT = (
     "Все главы проанализированы, и у каждого текстового блока есть режим обработки."
@@ -167,15 +167,15 @@ EXPORT_VALIDATION_STATUS_LABELS: Mapping[ExportValidationStatus, str] = {
 }
 
 
-#: Что показывает карточка книги, пока у этапа нет ни одного завершённого вызова модели.
+#: What book card displays while stage has no completed model calls.
 REMAINING_TIME_PENDING_LABEL = "Оценка оставшегося времени появится после первой главы"
 
 
 def remaining_time_label(seconds: int | None) -> str:
-    """Оставшееся время этапа словами (QA-13).
+    """Remaining stage time in words (QA-13).
 
-    Оценка грубая — медиана вызовов, повторы и длина глав её сдвигают, — поэтому она
-    называется «примерно» и округляется до минут вверх: обещать меньше, чем выйдет, хуже.
+    Rough estimate — call median, retries, and chapter length skew it, — so it
+    is designated 'about' and rounded up to minutes: promising less than it takes is worse.
     """
     if seconds is None:
         return REMAINING_TIME_PENDING_LABEL
@@ -190,61 +190,61 @@ def remaining_time_label(seconds: int | None) -> str:
 
 
 def error_page_title(status_code: int) -> str:
-    """Заголовок страницы ошибки для кода ответа."""
+    """Error page title for response status code."""
     return ERROR_PAGE_TITLES.get(status_code, DEFAULT_ERROR_PAGE_TITLE)
 
 
 def book_status_label(status: BookStatus) -> str:
-    """Название состояния книги для списка и карточки."""
+    """Book status label for list and card."""
     return BOOK_STATUS_LABELS[status]
 
 
 def treatment_label(treatment: BlockTreatment) -> str:
-    """Название режима обработки блока."""
+    """Block treatment mode label."""
     return TREATMENT_LABELS[treatment]
 
 
 def task_type_label(task_type: TaskType) -> str:
-    """Название типа фоновой задачи."""
+    """Background task type label."""
     return TASK_TYPE_LABELS[task_type]
 
 
 def task_status_label(status: TaskStatus) -> str:
-    """Название состояния фоновой задачи."""
+    """Background task status label."""
     return TASK_STATUS_LABELS[status]
 
 
 def error_type_label(error_type: ErrorType) -> str:
-    """Что тип ошибки означает для пользователя."""
+    """What error type means to the user."""
     return ERROR_TYPE_LABELS[error_type]
 
 
 def concept_type_label(concept_type: ConceptType) -> str:
-    """Название типа понятия глоссария."""
+    """Glossary concept type label."""
     return CONCEPT_TYPE_LABELS[concept_type]
 
 
 def glossary_decision_label(
     status: TermStatus, *, translation: str | None, suggested_translation: str
 ) -> str:
-    """Решение по элементу глоссария по-русски: принято, исправлено и так далее."""
+    """Glossary item decision in Russian: accepted, corrected, etc."""
     if status is TermStatus.APPROVED and translation not in (None, suggested_translation):
         return GLOSSARY_CORRECTED_LABEL
     return GLOSSARY_DECISION_LABELS[status]
 
 
 def import_warning_label(kind: ImportWarningKind) -> str:
-    """Название вида предупреждения импорта."""
+    """Import warning kind label."""
     return IMPORT_WARNING_LABELS[kind]
 
 
 def result_warning_label(kind: ResultWarningKind) -> str:
-    """Название вида замечания к результату обработки."""
+    """Processing result warning kind label."""
     return RESULT_WARNING_LABELS[kind]
 
 
 def export_validation_status_label(status: ExportValidationStatus) -> str:
-    """Пользовательский итог внешней проверки собранного EPUB."""
+    """User-facing outcome of external EPUBCheck validation."""
     return EXPORT_VALIDATION_STATUS_LABELS[status]
 
 
@@ -284,7 +284,7 @@ __all__ = [
 ]
 
 
-# Подготовленные сообщения изменения настроек; исходный ввод в них не подставляется.
+# Prepared settings update messages; raw input is never interpolated into them.
 SETTINGS_SAVED = "Настройки сохранены"
 SETTINGS_RESET = "Настройки сброшены"
 SETTINGS_INVALID = "Проверьте настройки"

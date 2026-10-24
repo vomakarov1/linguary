@@ -1,9 +1,10 @@
-"""Endpoint состояния конфигурации и окружения (API-01, PRD § 21.6).
+"""Configuration and environment state endpoint (API-01, PRD § 21.6).
 
-Экран отвечает на один вопрос: готово ли приложение работать. Настроен ли провайдер LLM
-и какая модель активна, доступна ли внешняя проверка EPUB, где лежат данные и по какому
-адресу открыт сам интерфейс. Ключ провайдера в ответ не попадает — только признак того,
-что он задан (PRD § 23).
+This screen answers a single question: is the application ready to work? Whether the
+LLM provider is configured and which model is active, whether external EPUB validation
+is available, where data is stored, and what address the web interface itself is served
+on. The provider key is not included in the response—only a flag indicating whether
+it is set (PRD § 23).
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ router = APIRouter(tags=["system"])
 async def get_system_config(
     request: Request, application: CurrentApplication
 ) -> SystemConfigResponse | object:
-    """Единый актуальный снимок настроек и редакции."""
+    """Single up-to-date snapshot of settings and revision."""
     response = _config_response(application)
     if wants_html(request):
         confirmation = {

@@ -1,4 +1,4 @@
-"""Локальное дополнение происхождения; исторические квитанции остаются неизменными."""
+"""Local provenance supplement; historical receipts remain immutable."""
 from __future__ import annotations
 
 import json
@@ -48,7 +48,7 @@ def _read_json(path):
 
 
 def verify_late_metadata(*, evidence_path, evidence_sha256, source_root, source_inventory, protocol):
-    """Проверяет сохранённую series_3, не обращаясь к API или SQLite."""
+    """Verifies saved series_3 without contacting the API or SQLite."""
     try:
         root, evidence = Path(source_root), Path(evidence_path)
         if (not root.is_absolute() or any(p.is_symlink() for p in (root, *root.parents, evidence, *evidence.parents))

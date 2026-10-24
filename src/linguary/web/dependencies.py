@@ -1,9 +1,9 @@
-"""Доступ routes к собранному приложению.
+"""Routes access to assembled application.
 
-Состав зависимостей собирается один раз при старте процесса и живёт в состоянии
-FastAPI-приложения; routes получают его отсюда и ничего не конструируют сами
-(ADR § 3). MVP доверяет одному локальному пользователю, но сценарии о нём не знают:
-здесь нет ни текущего пользователя, ни глобального состояния книги.
+Dependency composition is assembled once at process startup and lives in FastAPI
+application state; routes obtain it from here and construct nothing themselves
+(ADR § 3). The MVP trusts a single local user, but use cases know nothing about them:
+there is neither a current user nor global book state here.
 """
 
 from __future__ import annotations
@@ -14,21 +14,21 @@ from fastapi import Depends, Request
 
 from linguary.composition import Application
 
-#: Ключ приложения в состоянии FastAPI.
+#: Key for application in FastAPI state.
 APPLICATION_STATE_ATTRIBUTE = "linguary_application"
 
 
 def get_application(request: Request) -> Application:
-    """Собранное приложение текущего процесса."""
+    """Assembled application of current process."""
     application: Application | None = getattr(
         request.app.state, APPLICATION_STATE_ATTRIBUTE, None
     )
-    if application is None:  # приложение собирает `create_app`, минуя её сюда не попасть
+    if application is None:  # create_app builds the application; this cannot be reached bypassing it
         raise RuntimeError("состав зависимостей приложения не собран")
     return application
 
 
-#: Готовая аннотация для routes: `application: CurrentApplication`.
+#: Ready annotation for routes: `application: CurrentApplication`.
 CurrentApplication = Annotated[Application, Depends(get_application)]
 
 

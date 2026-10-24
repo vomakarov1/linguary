@@ -1,4 +1,4 @@
-"""Владение поколениями сценариев и их клиентами модели."""
+"""Ownership of use case generations and their model clients."""
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +30,7 @@ class _GenerationState:
 
 
 class RuntimeSettings:
-    """Публикация синхронна; занятые поколения освобождаются после последнего сценария."""
+    """Publishing is synchronous; busy generations are released after their last use case."""
 
     def __init__(
         self,
@@ -137,7 +137,7 @@ class RuntimeSettings:
 
 
 class RuntimeSequence:
-    """Устойчивая точка доступа выбирает поколение до первого ожидания."""
+    """Stable access point selects a generation before the first await."""
 
     def __init__(self, runtime: RuntimeSettings, name: str) -> None:
         self._runtime = runtime

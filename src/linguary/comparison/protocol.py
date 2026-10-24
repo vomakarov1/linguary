@@ -1,4 +1,4 @@
-"""Локальный протокол сравнения; создание проекта не разрешает генерацию."""
+"""Local comparison protocol; project creation does not permit generation."""
 from __future__ import annotations
 
 import hashlib
@@ -15,7 +15,7 @@ SONNET = 'anthropic/claude-sonnet-4.6'
 
 
 class ProtocolError(ValueError):
-    """Условия запуска не приняты или неполны."""
+    """Run conditions are not accepted or are incomplete."""
 
 
 class Contract(BaseModel):
@@ -223,7 +223,7 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
         raise ProtocolError('Пределы генерации должны быть положительными')
     if any(v < 0 or v > protocol.scale_max for v in protocol.rubric.values()):
         raise ProtocolError('Минимумы качества вне принятой шкалы')
-    # Разные пути или обозначения главы не создают независимые наблюдения.
+    # Different paths or chapter designations do not create independent observations.
     from linguary.adapters.epub import EbookLibEpubReader
     from linguary.application.ports.epub import EpubReadRequest
     physical = set()
@@ -258,7 +258,7 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
 
 
 def validate_context_envelope(bounds, routes, metadata, output_tokens):
-    """Консервативный предел по квоте точки, без оценки токенов по байтам."""
+    """Conservative bound based on endpoint quota, without estimating tokens from bytes."""
     from decimal import Decimal
     if bounds.input_price_multiplier < 2 or not set(routes) <= bounds.endpoint_snapshots.keys():
         raise ProtocolError('Не закреплены квоты точек и максимальный множитель записи кеша')
