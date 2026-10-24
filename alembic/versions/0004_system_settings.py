@@ -1,4 +1,4 @@
-"""Постоянные настройки приложения."""
+"""Persistent application settings."""
 from alembic import op
 import sqlalchemy as sa
 

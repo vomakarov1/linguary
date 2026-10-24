@@ -1,7 +1,7 @@
-"""Начальная схема MVP (SDD SQL-01).
+"""Initial MVP schema (SDD SQL-01).
 
-Книги, каноническая модель документа, глоссарий, анализ глав, план обработки, результаты,
-учебные заметки, предупреждения, локальные задачи и технический журнал вызовов LLM.
+Books, canonical document model, glossary, chapter analyses, treatment plan, results,
+learning notes, warnings, local tasks, and technical LLM call log.
 
 Revision ID: 0001
 Revises:
@@ -22,7 +22,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Применяет миграцию."""
+    """Apply the migration."""
     op.create_table('books',
     sa.Column('id', sa.String(), nullable=False),
     sa.Column('title', sa.String(), nullable=False),
@@ -258,7 +258,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Откатывает миграцию."""
+    """Roll back the migration."""
     op.drop_table('treatment_plan_items')
     with op.batch_alter_table('result_warnings', schema=None) as batch_op:
         batch_op.drop_index('ix_result_warnings_run_id_block_id')

@@ -1,4 +1,4 @@
-"""Постоянные параметры прокси LLM."""
+"""Persistent LLM proxy settings."""
 import json
 from alembic import op
 import sqlalchemy as sa

@@ -1,4 +1,4 @@
-"""Версионированные обязательства анализа и точные ссылки на учебную помощь."""
+"""Versioned analysis obligations and precise references to educational assistance."""
 
 from __future__ import annotations
 

@@ -1,8 +1,8 @@
-"""Локальные возобновляемые задачи обработки книги.
+"""Local resumable book processing tasks.
 
-Задача идентифицируется идемпотентным ключом `book_id + task_type + scope_id`, хранит
-счётчик попыток и типизированную ошибку. Успешно завершённая задача после перезапуска
-приложения повторно не выполняется (PRD § 16-18, ADR § 3).
+A task is identified by the idempotent key `book_id + task_type + scope_id`, stores
+an attempt counter, and tracks typed errors. A successfully completed task is not
+re-executed after application restart (PRD § 16-18, ADR § 3).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from linguary.domain.errors import TaskTransitionError
 
 
 class TaskType(StrEnum):
-    """Типы длительных операций, которые исполняет локальный runner."""
+    """Types of long-running operations executed by the local runner."""
 
     IMPORT_BOOK = "import_book"
     ANALYZE_CHAPTER = "analyze_chapter"
@@ -24,7 +24,7 @@ class TaskType(StrEnum):
 
 
 class TaskStatus(StrEnum):
-    """Состояния отдельной задачи (PRD § 18)."""
+    """States of an individual task (PRD § 18)."""
 
     PENDING = "pending"
     RUNNING = "running"
@@ -33,7 +33,7 @@ class TaskStatus(StrEnum):
 
 
 class ErrorType(StrEnum):
-    """Типы ошибок обработки (PRD § 16)."""
+    """Processing error types (PRD § 16)."""
 
     TRANSIENT = "TransientError"
     MODEL_OUTPUT = "ModelOutputError"
@@ -43,29 +43,28 @@ class ErrorType(StrEnum):
 
     @property
     def is_retryable(self) -> bool:
-        """Можно ли повторить задачу, упавшую с такой ошибкой.
+        """Whether a task failed with this error can be retried.
 
-        `PermanentError` (нечитаемый EPUB, неподдержанный вход) повтору не подлежит:
-        пользователю предлагается загрузить другой файл. `ConfigurationError` (ключ
-        провайдера не принят, модель не найдена) автоматически не повторяется, но
-        пользователь запускает задачу заново, исправив настройки LLM: книга при этом
-        остаётся прежней, и другой файл не нужен.
+        `PermanentError` (unreadable EPUB, unsupported input) cannot be retried:
+        the user is prompted to upload a different file. `ConfigurationError` (invalid
+        provider key, model not found) is not retried automatically, but the user
+        can rerun the task after correcting LLM settings without needing another file.
         """
         return self is not ErrorType.PERMANENT
 
     @property
     def is_retried_automatically(self) -> bool:
-        """Имеет ли смысл повторять вызов без вмешательства пользователя.
+        """Whether retrying the call without user intervention makes sense.
 
-        Ни постоянная ошибка, ни ошибка настройки от новой попытки не исчезают: первая
-        требует другого файла, вторая — исправленной конфигурации.
+        Neither permanent nor configuration errors resolve upon retry: the former
+        requires a different file, while the latter requires corrected configuration.
         """
         return self not in {ErrorType.PERMANENT, ErrorType.CONFIGURATION}
 
 
 @dataclass(frozen=True, slots=True)
 class TaskError:
-    """Типизированная ошибка задачи: тип, короткое сообщение и техническая деталь."""
+    """Typed task error: error type, short message, and technical details."""
 
     type: ErrorType
     message: str
@@ -78,10 +77,10 @@ class TaskError:
 
 @dataclass(frozen=True, slots=True)
 class TaskIdentity:
-    """Идемпотентный ключ задачи.
+    """Idempotent task key.
 
-    Для задач уровня книги (импорт, экспорт) `scope_id` — пустая строка, а не `None`:
-    иначе уникальный индекс в SQLite не различает такие задачи между собой.
+    For book-level tasks (import, export), `scope_id` is an empty string rather than `None`:
+    otherwise, the SQLite unique index cannot distinguish such tasks.
     """
 
     book_id: str
@@ -95,10 +94,10 @@ class TaskIdentity:
 
 @dataclass(frozen=True, slots=True)
 class ProcessingTask:
-    """Локальная задача обработки книги.
+    """Local book processing task.
 
-    Переходы состояния возвращают новый экземпляр: сущность неизменяема, а запись
-    в хранилище выполняет adapters через прикладной сценарий.
+    State transitions return a new instance: the entity is immutable, and persistence
+    is handled by adapters via application use cases.
     """
 
     id: str
@@ -125,14 +124,14 @@ class ProcessingTask:
 
     @property
     def identity(self) -> TaskIdentity:
-        """Идемпотентный ключ задачи."""
+        """Idempotent task key."""
         return TaskIdentity(
             book_id=self.book_id, task_type=self.task_type, scope_id=self.scope_id
         )
 
     @property
     def is_retryable(self) -> bool:
-        """Может ли пользователь запустить неуспешную задачу повторно."""
+        """Whether the user can rerun a failed task."""
         return (
             self.status is TaskStatus.FAILED
             and self.last_error is not None
@@ -140,22 +139,22 @@ class ProcessingTask:
         )
 
     def start(self) -> ProcessingTask:
-        """Захват задачи воркером: `pending -> running` с увеличением попыток."""
+        """Task claim by a worker: `pending -> running` incrementing attempts."""
         self._ensure_status(TaskStatus.PENDING, target=TaskStatus.RUNNING)
         return replace(self, status=TaskStatus.RUNNING, attempts=self.attempts + 1)
 
     def succeed(self) -> ProcessingTask:
-        """Успешное завершение: `running -> succeeded`."""
+        """Successful completion: `running -> succeeded`."""
         self._ensure_status(TaskStatus.RUNNING, target=TaskStatus.SUCCEEDED)
         return replace(self, status=TaskStatus.SUCCEEDED, last_error=None)
 
     def fail(self, error: TaskError) -> ProcessingTask:
-        """Неуспешное завершение: `running -> failed` с типизированной ошибкой."""
+        """Failed completion: `running -> failed` with a typed error."""
         self._ensure_status(TaskStatus.RUNNING, target=TaskStatus.FAILED)
         return replace(self, status=TaskStatus.FAILED, last_error=error)
 
     def retry(self) -> ProcessingTask:
-        """Повтор задачи пользователем: `failed -> pending`."""
+        """Task retry by user: `failed -> pending`."""
         self._ensure_status(TaskStatus.FAILED, target=TaskStatus.PENDING)
         if not self.is_retryable:
             raise TaskTransitionError(
@@ -164,7 +163,7 @@ class ProcessingTask:
         return replace(self, status=TaskStatus.PENDING, last_error=None)
 
     def interrupt(self) -> ProcessingTask:
-        """Прерывание при старте приложения: `running -> failed` (ALG-02)."""
+        """Interruption on application startup: `running -> failed` (ALG-02)."""
         return self.fail(
             TaskError(
                 type=ErrorType.TRANSIENT,

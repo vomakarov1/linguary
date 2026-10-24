@@ -1,7 +1,7 @@
-"""Учебные материалы: `Before You Read`, сводка главы и `Language Notes`.
+"""Educational materials: `Before You Read`, chapter summary, and `Language Notes`.
 
-`LearningMaterial` — доменное представление данных, которые физически лежат в анализе
-главы и в заметках блоков; собственной таблицы у него нет (PRD § 19, SDD SQL-01).
+`LearningMaterial` is a domain representation of data physically residing in chapter analysis
+and block notes; it has no dedicated table of its own (PRD § 19, SDD SQL-01).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from linguary.domain.errors import DomainError
 
 @dataclass(frozen=True, slots=True)
 class BeforeYouReadEntry:
-    """Выражение, для которого обычного словаря может быть недостаточно (PRD § 19.1)."""
+    """Expression for which an ordinary dictionary may be insufficient (PRD § 19.1)."""
 
     expression: str
     explanation: str
@@ -28,10 +28,10 @@ class BeforeYouReadEntry:
 
 @dataclass(frozen=True, slots=True)
 class LanguageNote:
-    """Языковой комментарий, привязанный ровно к одному блоку (PRD § 19.3).
+    """Language note bound to exactly one block (PRD § 19.3).
 
-    Групповые заметки в MVP не поддерживаются: если объяснение полезно нескольким
-    соседним блокам, оно привязывается к наиболее релевантному из них.
+    Group notes are not supported in MVP: if an explanation is relevant to multiple
+    neighboring blocks, it is attached to the most relevant one.
     """
 
     id: str
@@ -53,7 +53,7 @@ class LanguageNote:
 
 @dataclass(frozen=True, slots=True)
 class LearningMaterial:
-    """Учебные материалы одной главы в виде, нужном экспортёру и интерфейсу."""
+    """Educational materials for a single chapter in the form required by the exporter and UI."""
 
     section_id: str
     before_you_read: tuple[BeforeYouReadEntry, ...] = ()
@@ -68,7 +68,7 @@ class LearningMaterial:
             raise DomainError(f"идентификаторы заметок главы {self.section_id} повторяются")
 
     def notes_for(self, block_id: str) -> tuple[LanguageNote, ...]:
-        """Заметки, которые размещаются сразу после указанного блока."""
+        """Notes placed immediately after the specified block."""
         return tuple(note for note in self.language_notes if note.block_id == block_id)
 
     @classmethod
@@ -80,7 +80,7 @@ class LearningMaterial:
         chapter_summary: str,
         language_notes: Iterable[LanguageNote],
     ) -> LearningMaterial:
-        """Собирает материалы главы из результатов анализа и обработки блоков."""
+        """Assembles chapter materials from analysis results and block processing results."""
         return cls(
             section_id=section_id,
             before_you_read=tuple(before_you_read),

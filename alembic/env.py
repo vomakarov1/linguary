@@ -1,11 +1,11 @@
-"""Точка входа Alembic: подключение к базе и запуск миграций.
+"""Alembic entrypoint: database connection and migration runner.
 
-Путь к базе не зашит ни в конфигурацию, ни в код: он приходит переменной окружения
-`LINGUARY_DATABASE_URL`. Приложение выставляет её из локальной конфигурации, тест —
-из временной директории.
+The database URL is not hardcoded in configuration or code: it is provided via
+the `LINGUARY_DATABASE_URL` environment variable. The application sets it from
+local configuration, and tests set it from a temporary directory.
 
-`render_as_batch=True` обязателен для SQLite: он не умеет менять колонки и ограничения
-на месте, и Alembic пересоздаёт таблицу через временную копию.
+`render_as_batch=True` is required for SQLite: SQLite cannot alter columns or constraints
+in place, so Alembic recreates tables via a temporary copy.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from sqlalchemy.types import TypeDecorator
 from linguary.adapters.db.engine import configure_sqlite_connections
 from linguary.adapters.db.models import Base
 
-#: Переменная окружения с URL подключения SQLAlchemy.
+#: Environment variable containing the SQLAlchemy connection URL.
 DATABASE_URL_ENV = "LINGUARY_DATABASE_URL"
 
 config = context.config
@@ -28,10 +28,10 @@ target_metadata = Base.metadata
 
 
 def database_url() -> str:
-    """URL подключения к базе, к которой применяются миграции.
+    """Connection URL for the database targeted by migrations.
 
-    Адрес, заданный вызывающим кодом в конфигурации, имеет приоритет: так приложение
-    и тест задают собственную базу, не завися от окружения машины.
+    A URL specified by caller code in configuration takes precedence: this allows
+    the application and tests to specify their own database without relying on machine environment.
     """
     url = config.get_main_option("sqlalchemy.url") or os.environ.get(DATABASE_URL_ENV)
     if not url:
@@ -42,10 +42,10 @@ def database_url() -> str:
 
 
 def render_item(item_type: str, obj: object, autogen_context: AutogenContext) -> str | bool:
-    """Записывает собственные типы колонок их базовым типом SQLAlchemy.
+    """Renders custom column types using their underlying SQLAlchemy base type.
 
-    Иначе миграция ссылается на `linguary.adapters.db.models` и перестаёт применяться,
-    как только модуль моделей изменится: миграция обязана оставаться самодостаточной.
+    Otherwise, the migration references `linguary.adapters.db.models` and breaks
+    whenever the models module changes; migrations must remain self-contained.
     """
     if item_type == "type" and isinstance(obj, TypeDecorator):
         return f"sa.{type(obj.impl).__name__}()"
@@ -53,7 +53,7 @@ def render_item(item_type: str, obj: object, autogen_context: AutogenContext) ->
 
 
 def run_migrations_offline() -> None:
-    """Генерация SQL миграций без подключения к базе."""
+    """Generate SQL migrations without connecting to the database."""
     context.configure(
         url=database_url(),
         target_metadata=target_metadata,
@@ -67,7 +67,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Применение миграций к реальной базе."""
+    """Apply migrations to a live database."""
     section = config.get_section(config.config_ini_section, {})
     section["sqlalchemy.url"] = database_url()
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)

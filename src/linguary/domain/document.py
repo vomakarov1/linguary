@@ -1,8 +1,8 @@
-"""Каноническое представление книги: документ, разделы, блоки и ресурсы.
+"""Canonical book representation: document, sections, blocks, and resources.
 
-Модель независима от EPUB (PRD § 7): после импорта вся остальная логика приложения
-работает только с этими сущностями. `DocumentBlock` — единица отображения, результата
-обработки и повторной генерации; он не делится и не объединяется (ADR § 3).
+The model is independent of EPUB (PRD § 7): after import, all remaining application
+logic operates solely on these entities. `DocumentBlock` is the unit of display,
+processing result, and regeneration; it is never split or merged (ADR § 3).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from linguary.domain.identifiers import build_block_id
 
 
 class BlockType(StrEnum):
-    """Поддерживаемые типы структурных блоков (PRD § 7)."""
+    """Supported structural block types (PRD § 7)."""
 
     PARAGRAPH = "Paragraph"
     HEADING = "Heading"
@@ -36,10 +36,10 @@ class BlockType(StrEnum):
 
     @classmethod
     def parse(cls, value: str) -> BlockType:
-        """Разбирает тип блока из внешнего представления.
+        """Parses a block type from an external representation.
 
-        Неизвестная конструкция не превращается в блок молча: импортёр обязан либо
-        свести её к поддержанному типу, либо к `Other`.
+        An unknown construct is never turned into a block silently: the importer must either
+        map it to a supported type or to `Other`.
         """
         try:
             return cls(value)
@@ -48,7 +48,7 @@ class BlockType(StrEnum):
 
 
 class InlineAnnotationType(StrEnum):
-    """Базовая встроенная разметка внутри текста блока (PRD § 7)."""
+    """Basic inline annotations within block text (PRD § 7)."""
 
     ITALIC = "Italic"
     BOLD = "Bold"
@@ -58,12 +58,12 @@ class InlineAnnotationType(StrEnum):
 
     @property
     def requires_target(self) -> bool:
-        """Разметка, бессмысленная без адреса назначения."""
+        """Annotation meaningless without a destination target."""
         return self in (InlineAnnotationType.LINK, InlineAnnotationType.FOOTNOTE_REFERENCE)
 
 
 class SupportStatus(StrEnum):
-    """Статус поддержки исходной конструкции EPUB (PRD § 6)."""
+    """Support status of the original EPUB construct (PRD § 6)."""
 
     SUPPORTED = "SUPPORTED"
     PRESERVE_OPAQUE = "PRESERVE_OPAQUE"
@@ -73,10 +73,10 @@ class SupportStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class InlineAnnotation:
-    """Разметка фрагмента текста блока со смещениями в самом тексте.
+    """Markup of a block text span with offsets within the text itself.
 
-    `DocumentBlock.text` хранится без XHTML, поэтому оформление описывается отдельно
-    полуинтервалом `[start, end)` и восстанавливается экспортёром.
+    `DocumentBlock.text` is stored without XHTML, so formatting is described separately
+    by a half-open interval `[start, end)` and restored by the exporter.
     """
 
     type: InlineAnnotationType
@@ -95,7 +95,7 @@ class InlineAnnotation:
 
 @dataclass(frozen=True, slots=True)
 class SourceReference:
-    """Связь блока с исходным XHTML: путь к ресурсу и структурный путь внутри него."""
+    """Link between a block and source XHTML: resource path and structural path within it."""
 
     resource_path: str
     structural_path: str
@@ -110,10 +110,10 @@ class SourceReference:
 
 @dataclass(frozen=True, slots=True)
 class DocumentBlock:
-    """Стабильная единица исходного текста и результата обработки.
+    """Stable unit of source text and processing results.
 
-    `parent_id` описывает вложенность списков, сносок и составных блоков; `attributes`
-    хранит служебные признаки импорта, не влияющие на текст.
+    `parent_id` describes nesting for lists, footnotes, and compound blocks; `attributes`
+    stores technical import properties that do not affect text.
     """
 
     id: str
@@ -164,7 +164,7 @@ class DocumentBlock:
         parent_id: str | None = None,
         attributes: Mapping[str, str] | None = None,
     ) -> DocumentBlock:
-        """Создаёт блок со стабильным идентификатором (PRD § 8)."""
+        """Creates a block with a stable identifier (PRD § 8)."""
         return cls(
             id=build_block_id(
                 document_id=document_id,
@@ -183,16 +183,16 @@ class DocumentBlock:
         )
 
 
-#: Блоки, которые страницу сносок не делают главой: её заголовок и разрывы страниц.
+#: Blocks that do not turn a notes page into a chapter: its heading and page breaks.
 _NOTES_PAGE_EXTRAS = frozenset({BlockType.HEADING, BlockType.PAGE_BREAK})
 
-#: Блоки, которые несут содержимое и без текста.
+#: Blocks that carry content even without text.
 _CONTENT_WITHOUT_TEXT = frozenset({BlockType.IMAGE, BlockType.TABLE})
 
 
 @dataclass(frozen=True, slots=True)
 class DocumentSection:
-    """Глава книги: один XHTML-документ порядка чтения (PRD § 6)."""
+    """A book chapter: a single XHTML document in spine reading order (PRD § 6)."""
 
     id: str
     document_id: str
@@ -229,18 +229,18 @@ class DocumentSection:
 
     @property
     def ordered_blocks(self) -> tuple[DocumentBlock, ...]:
-        """Блоки раздела в порядке исходного документа."""
+        """Section blocks in the order of the source document."""
         return tuple(sorted(self.blocks, key=lambda block: block.order))
 
     @property
     def is_notes_only(self) -> bool:
-        """Состоит ли раздел только из сносок и примечаний книги.
+        """Whether the section consists solely of footnotes and endnotes.
 
-        Такой документ — страница сносок (`notes.xhtml`), а не глава: его текст
-        переводится, но пересказа предыдущей главы, `Before You Read` и разметки главы
-        он не получает, и сам предыдущей главой для следующего раздела не считается
-        (PRD § 19.1, § 19.2). Заголовок страницы, разрывы страниц и пустые служебные
-        блоки на решение не влияют: важно, что кроме сносок читать на странице нечего.
+        Such a document is a notes page (`notes.xhtml`) rather than a chapter: its text
+        is translated, but it receives no prior chapter summary, `Before You Read`, or
+        chapter markup, and is not treated as the prior chapter for subsequent sections
+        (PRD § 19.1, § 19.2). The page heading, page breaks, and empty technical blocks
+        do not affect this decision: what matters is that there is nothing else to read on the page.
         """
         has_notes = False
         for block in self.blocks:
@@ -255,7 +255,7 @@ class DocumentSection:
         return has_notes
 
     def block(self, block_id: str) -> DocumentBlock:
-        """Блок раздела по идентификатору."""
+        """Section block by identifier."""
         for block in self.blocks:
             if block.id == block_id:
                 return block
@@ -264,7 +264,7 @@ class DocumentSection:
 
 @dataclass(frozen=True, slots=True)
 class DocumentResource:
-    """Ресурс книги: изображение, шрифт, стиль или другой файл, нужный экспортёру."""
+    """Book resource: image, font, stylesheet, or other file required by the exporter."""
 
     id: str
     source_path: str
@@ -280,7 +280,7 @@ class DocumentResource:
 
 @dataclass(frozen=True, slots=True)
 class BookMetadata:
-    """Метаданные книги, прочитанные при импорте."""
+    """Book metadata read during import."""
 
     title: str
     authors: tuple[str, ...] = ()
@@ -294,9 +294,9 @@ class BookMetadata:
 
 @dataclass(frozen=True, slots=True)
 class CanonicalDocument:
-    """Внутренняя модель книги, независимая от EPUB.
+    """Internal book model independent of EPUB.
 
-    Идентификатор документа совпадает с идентификатором книги: одна книга — один документ.
+    The document identifier matches the book identifier: one book, one document.
     """
 
     id: str
@@ -331,23 +331,23 @@ class CanonicalDocument:
 
     @property
     def ordered_sections(self) -> tuple[DocumentSection, ...]:
-        """Разделы в порядке чтения."""
+        """Sections in reading order."""
         return tuple(sorted(self.sections, key=lambda section: section.order))
 
     def section(self, section_id: str) -> DocumentSection:
-        """Раздел по идентификатору."""
+        """Section by identifier."""
         for section in self.sections:
             if section.id == section_id:
                 return section
         raise UnknownBlockError(f"раздел {section_id} отсутствует в документе {self.id}")
 
     def blocks(self) -> Iterator[DocumentBlock]:
-        """Все блоки книги в порядке чтения."""
+        """All book blocks in reading order."""
         for section in self.ordered_sections:
             yield from section.ordered_blocks
 
     def block(self, block_id: str) -> DocumentBlock:
-        """Блок книги по идентификатору."""
+        """Book block by identifier."""
         for block in self.blocks():
             if block.id == block_id:
                 return block
@@ -355,7 +355,7 @@ class CanonicalDocument:
 
 
 class ImportWarningKind(StrEnum):
-    """Виды предупреждений импорта, которые пользователь видит в интерфейсе."""
+    """Import warning kinds presented to the user in the interface."""
 
     DROPPED_BLOCK = "dropped_block"
     UNSUPPORTED_CONSTRUCT = "unsupported_construct"
@@ -365,7 +365,7 @@ class ImportWarningKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class BookImportWarning:
-    """Непреградное замечание импорта, привязанное к книге, разделу или блоку."""
+    """Non-blocking import warning associated with a book, section, or block."""
 
     kind: ImportWarningKind
     message: str

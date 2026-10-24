@@ -1,8 +1,8 @@
-"""Глоссарий книги: понятия, языковые варианты и кандидаты из анализа глав.
+"""Book glossary: concepts, language variants, and candidates from chapter analyses.
 
-Глоссарий — единственный источник обязательных переводческих решений (PRD § 11).
-Кандидат приходит из анализа главы с собственной пометкой модели `model_flagged_review`,
-а итоговый признак `requires_review` вычисляет приложение по правилам PRD § 12.
+The glossary is the sole source of mandatory translation decisions (PRD § 11).
+A candidate originates from chapter analysis with the model's own `model_flagged_review` flag,
+while the final `requires_review` flag is computed by the application per PRD § 12 rules.
 """
 
 from __future__ import annotations
@@ -27,12 +27,12 @@ class ConceptType(StrEnum):
 
     @property
     def always_requires_review(self) -> bool:
-        """Типы, требующие решения при частом упоминании."""
+        """Types requiring review when frequently mentioned."""
         return self is not ConceptType.TERM
 
 
 class TermStatus(StrEnum):
-    """Статус переводческого решения по понятию и его варианту (PRD § 11)."""
+    """Status of a translation decision for a concept and its variant (PRD § 11)."""
 
     SUGGESTED = "suggested"
     APPROVED = "approved"
@@ -40,24 +40,24 @@ class TermStatus(StrEnum):
 
     @property
     def is_mandatory(self) -> bool:
-        """`locked` — решение зафиксировано: у понятия обязан быть зафиксированный вариант."""
+        """`locked` — decision is locked: the concept must have a locked variant."""
         return self is TermStatus.LOCKED
 
     @property
     def is_user_decision(self) -> bool:
-        """Решение пользователя, которое модель обязана соблюдать (PRD § 11-12).
+        """User decision that the model must respect (PRD § 11-12).
 
-        Принятый, исправленный и зафиксированный вариант выбрал пользователь, и модель
-        не вправе заменить его своим — ни в обработке, ни в анализе следующих глав.
-        `suggested` — вариант модели: элемент, не требовавший решения, или пропущенный
-        пользователем как неважный для единообразия. Он остаётся подсказкой.
+        Approved, corrected, and locked variants are chosen by the user, and the model
+        is not permitted to replace them with its own—neither during processing nor during subsequent
+        chapter analysis. `suggested` is a model variant: an item that required no review or was skipped
+        by the user as non-essential for consistency. It remains a suggestion.
         """
         return self is not TermStatus.SUGGESTED
 
 
 @dataclass(frozen=True, slots=True)
 class TermVariant:
-    """Языковой вариант одного понятия."""
+    """Language variant of a single concept."""
 
     concept_id: str
     language: str
@@ -75,11 +75,11 @@ class TermVariant:
 
 @dataclass(frozen=True, slots=True)
 class TermConcept:
-    """Понятие глоссария, объединяющее варианты одного смысла.
+    """Glossary concept grouping variants of the same meaning.
 
-    `note` — переводческое указание по этому понятию, которое передаётся модели вместе
-    с вариантом перевода: одного варианта мало там, где решение уровня книги влияет
-    на согласование в тексте (PRD § 11).
+    `note` is translation guidance for this concept passed to the model alongside
+    the translation variant: a single translation term is insufficient where a book-level
+    decision affects grammatical agreement in text (PRD § 11).
     """
 
     id: str
@@ -110,7 +110,7 @@ class TermConcept:
             )
 
     def variant_for(self, language: str) -> TermVariant | None:
-        """Вариант перевода на указанный язык с наиболее сильным статусом."""
+        """Translation variant for the specified language with the highest priority status."""
         candidates = [variant for variant in self.variants if variant.language == language]
         if not candidates:
             return None
@@ -120,16 +120,15 @@ class TermConcept:
 
 @dataclass(frozen=True, slots=True)
 class GlossaryCandidate:
-    """Кандидат глоссария из анализа главы.
+    """Glossary candidate from chapter analysis.
 
-    `model_flagged_review` — собственная пометка модели, входной сигнал. Итоговое
-    `requires_review` вычисляет приложение и после сохранения модель его не редактирует.
+    `model_flagged_review` is the model's own flag, serving as an input signal. The final
+    `requires_review` is computed by the application and cannot be edited by the model once persisted.
 
-    `note` — переводческое указание по этому решению, которое нельзя выразить одним
-    вариантом перевода: грамматический род персонажа, склонение названия, регистр
-    речи. Без него решение уровня книги распадается на решения отдельных глав
-    (PRD § 11): имя приходит из глоссария одинаковым, а согласуемые с ним слова
-    расходятся от главы к главе.
+    `note` is translation guidance for this decision that cannot be expressed by a single
+    translation variant: character grammatical gender, title declension, speech register.
+    Without it, a book-level decision splinters into separate chapter decisions (PRD § 11):
+    the name appears consistently from the glossary, but words agreeing with it diverge across chapters.
     """
 
     id: str
@@ -171,7 +170,7 @@ class GlossaryCandidate:
         has_translation_conflict: bool = False,
         note: str = "",
     ) -> GlossaryCandidate:
-        """Создаёт кандидата с вычисленным признаком `requires_review`."""
+        """Creates a candidate with computed `requires_review` flag."""
         return cls(
             id=id,
             analysis_id=analysis_id,
@@ -200,11 +199,11 @@ def compute_requires_review(
     has_translation_conflict: bool = False,
     is_frequent: bool = True,
 ) -> bool:
-    """Требует ли кандидат внимания пользователя (PRD § 12).
+    """Whether the candidate requires user attention (PRD § 12).
 
-    Частый тип или пометка модели требуют решения; низкая уверенность и конфликт
-    переводов требуют его независимо от частоты. По умолчанию понятие считается
-    частым, чтобы правило отдельных глав осталось прежним.
+    Frequent concept type or model flag requires review; low confidence and translation
+    conflicts require review regardless of frequency. By default, a concept is considered
+    frequent so that single-chapter behavior remains unchanged.
     """
     if not 0.0 <= confidence_threshold <= 1.0:
         raise GlossaryError(
@@ -217,7 +216,7 @@ def compute_requires_review(
     )
 
 
-#: Типографские апострофы и кавычки, которые в ключе становятся прямыми.
+#: Typographic apostrophes and quotation marks straightened in keys.
 _STRAIGHT_QUOTES = str.maketrans(
     {
         "\u2018": "'",
@@ -238,20 +237,20 @@ _STRAIGHT_QUOTES = str.maketrans(
     }
 )
 
-#: Точка после сокращённого обращения: `Mr. Wonka` и `Mr Wonka` — одно имя.
+#: Dot following abbreviated titles: `Mr. Wonka` and `Mr Wonka` represent the same name.
 _TITLE_DOT = re.compile(r"\b(mr|mrs|ms|dr|st)\.\s*")
 
 _WHITESPACE = re.compile(r"\s+")
 
 
 def glossary_key(text: str) -> str:
-    """Ключ, по которому написания одного понятия собираются в один элемент (PRD § 11).
+    """Key used to group spellings of the same concept into a single element (PRD § 11).
 
-    Объединяются только очевидные варианты: регистр, совместимые формы Unicode,
-    типографские апострофы и кавычки, лишние пробелы и точка после `Mr`, `Mrs`, `Ms`,
-    `Dr`, `St`. Притяжательная форма и части имени ключ не меняют: `Wonka's factory`
-    и `Wonka factory`, `Charlie` и `Charlie Bucket` — разные элементы, потому что
-    неоднозначное автоматически не объединяется.
+    Only unambiguous variants are merged: case, Unicode compatibility forms, typographic
+    apostrophes and quotes, extra whitespace, and dots after `Mr`, `Mrs`, `Ms`, `Dr`, `St`.
+    Possessive forms and name fragments do not merge into the same key: `Wonka's factory`
+    and `Wonka factory`, `Charlie` and `Charlie Bucket` remain distinct elements because
+    ambiguous cases are never merged automatically.
     """
     normalized = unicodedata.normalize("NFKC", text).translate(_STRAIGHT_QUOTES)
     normalized = _WHITESPACE.sub(" ", normalized).strip().casefold()
@@ -259,11 +258,11 @@ def glossary_key(text: str) -> str:
 
 
 def spellings_by_preference(mentions: Iterable[tuple[str, float]]) -> tuple[str, ...]:
-    """Различные написания одного понятия, начиная с того, которое показывается.
+    """Distinct spellings of a concept, ordered starting with the primary display form.
 
-    `mentions` — пары «написание, уверенность модели» по каждому упоминанию. Первым
-    идёт самое частое написание, при равенстве — самое уверенное, затем — встреченное
-    раньше: так на экране проверки стоит та форма, которой книга пользуется чаще всего.
+    `mentions` are (spelling, model confidence) pairs for each occurrence. The most frequent
+    spelling comes first, breaking ties by highest confidence, then by earliest occurrence:
+    this ensures the review screen displays the form most prevalent in the book.
     """
     counts: dict[str, int] = {}
     confidence: dict[str, float] = {}
@@ -281,9 +280,9 @@ def spellings_by_preference(mentions: Iterable[tuple[str, float]]) -> tuple[str,
 
 
 def translations_conflict(translations: Iterable[str]) -> bool:
-    """Дают ли фрагменты анализа разные варианты перевода одного понятия.
+    """Whether analysis chunks produce conflicting translation variants for the same concept.
 
-    Варианты сравниваются тем же ключом, что и написания исходного текста: регистр
-    и типографика перевода решением не являются.
+    Variants are compared using the same normalization key as source spellings: translation
+    case and typography alone do not constitute distinct decisions.
     """
     return len({glossary_key(translation) for translation in translations}) > 1

@@ -1,8 +1,8 @@
-"""Режимы обработки блоков и план обработки главы.
+"""Block treatment modes and chapter treatment plan.
 
-План (`TreatmentPlan`) получают при анализе главы и сохраняют до запуска основной обработки.
-Он — единственный источник истины о режиме блока: поле `treatment` в ответе модели только
-подтверждает план и не может его переопределить (PRD § 14, ADR § 3).
+The plan (`TreatmentPlan`) is obtained during chapter analysis and persisted before primary
+processing begins. It is the single source of truth for block treatment: the `treatment`
+field in the model response merely confirms the plan and cannot override it (PRD § 14, ADR § 3).
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from linguary.domain.errors import TreatmentPlanError, UnknownBlockError
 
 
 class BlockTreatment(StrEnum):
-    """Режимы обработки блока (PRD § 10.1)."""
+    """Block treatment modes (PRD § 10.1)."""
 
     TRANSLATE = "TRANSLATE"
     GLOSSARY_ONLY = "GLOSSARY_ONLY"
@@ -25,7 +25,7 @@ class BlockTreatment(StrEnum):
 
     @property
     def is_textual(self) -> bool:
-        """Блок является частью текста для чтения и передаётся модели."""
+        """Block is part of readable text and passed to the model."""
         return self in (
             BlockTreatment.TRANSLATE,
             BlockTreatment.GLOSSARY_ONLY,
@@ -34,32 +34,32 @@ class BlockTreatment(StrEnum):
 
     @property
     def requires_translation(self) -> bool:
-        """Для режима обязателен полный русский перевод блока."""
+        """The mode requires a full Russian translation of the block."""
         return self is BlockTreatment.TRANSLATE
 
     @property
     def allows_translation(self) -> bool:
-        """Полный перевод допустим только там, где он обязателен (PRD § 15)."""
+        """Full translation is permitted only where required (PRD § 15)."""
         return self.requires_translation
 
     @property
     def requires_glossary_hints(self) -> bool:
-        """Для режима обязательны словарные подсказки."""
+        """The mode requires glossary hints."""
         return self is BlockTreatment.GLOSSARY_ONLY
 
     @property
     def allows_glossary_hints(self) -> bool:
-        """Словарные подсказки запрещены только для `READ_AS_IS`."""
+        """Glossary hints are forbidden only for `READ_AS_IS`."""
         return self in (BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY)
 
     @property
     def allows_language_notes(self) -> bool:
-        """`Language Notes` возможны при любом текстовом режиме (PRD § 10.1)."""
+        """`Language Notes` are allowed for any textual mode (PRD § 10.1)."""
         return self.is_textual
 
 
 class CoverageStatus(StrEnum):
-    """Полнота покрытия текстовых блоков главы планом обработки (PRD § 14)."""
+    """Completeness of chapter textual block coverage by the treatment plan (PRD § 14)."""
 
     COMPLETE = "complete"
     INCOMPLETE = "incomplete"
@@ -67,7 +67,7 @@ class CoverageStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class TreatmentPlanItem:
-    """Режим обработки одного блока."""
+    """Treatment mode for a single block."""
 
     block_id: str
     treatment: BlockTreatment
@@ -79,10 +79,10 @@ class TreatmentPlanItem:
 
 @dataclass(frozen=True, slots=True)
 class TreatmentPlan:
-    """План обработки блоков одной главы.
+    """Treatment plan for blocks within a single chapter.
 
-    Каждый блок встречается в плане ровно один раз: при слиянии фрагментов анализа
-    приложение собирает план по `block_id`, а повтор означает конфликт фрагментов.
+    Each block occurs in the plan exactly once: when merging analysis chunks,
+    the application indexes the plan by `block_id`, and duplicates signify chunk conflicts.
     """
 
     section_id: str
@@ -103,7 +103,7 @@ class TreatmentPlan:
     def of_treatments(
         cls, section_id: str, treatments: Iterable[tuple[str, BlockTreatment]]
     ) -> TreatmentPlan:
-        """Собирает план из пар «идентификатор блока — режим»."""
+        """Constructs a plan from block id and treatment pairs."""
         return cls(
             section_id=section_id,
             items=tuple(
@@ -114,11 +114,11 @@ class TreatmentPlan:
 
     @property
     def block_ids(self) -> tuple[str, ...]:
-        """Идентификаторы всех блоков плана в порядке их добавления."""
+        """Identifiers of all planned blocks in insertion order."""
         return tuple(item.block_id for item in self.items)
 
     def treatment_for(self, block_id: str) -> BlockTreatment:
-        """Режим обработки блока по плану."""
+        """Block treatment mode according to the plan."""
         for item in self.items:
             if item.block_id == block_id:
                 return item.treatment
@@ -127,20 +127,20 @@ class TreatmentPlan:
         )
 
     def block_ids_with(self, *treatments: BlockTreatment) -> tuple[str, ...]:
-        """Блоки плана с одним из перечисленных режимов."""
+        """Plan blocks with one of the specified treatments."""
         wanted = frozenset(treatments)
         return tuple(item.block_id for item in self.items if item.treatment in wanted)
 
     @property
     def textual_block_ids(self) -> tuple[str, ...]:
-        """Блоки, которые передаются модели."""
+        """Blocks that are passed to the model."""
         return tuple(item.block_id for item in self.items if item.treatment.is_textual)
 
     def coverage_for(self, expected_block_ids: Iterable[str]) -> CoverageStatus:
-        """Полнота плана относительно ожидаемых текстовых блоков главы.
+        """Completeness of the plan relative to expected textual chapter blocks.
 
-        Анализ считается полным, только если каждый ожидаемый блок покрыт планом
-        ровно один раз; лишние блоки в плане тоже делают его неполным.
+        Analysis is considered complete only if every expected block is covered by the plan
+        exactly once; extraneous blocks in the plan also render it incomplete.
         """
         expected = tuple(expected_block_ids)
         if len(set(expected)) != len(expected):

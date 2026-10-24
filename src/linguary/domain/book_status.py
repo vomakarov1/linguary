@@ -1,8 +1,8 @@
-"""Состояния книги и таблица разрешённых переходов (ALG-06).
+"""Book states and allowed transitions table (ALG-06).
 
-Состояние книги пересчитывает прикладной слой единой функцией после завершения каждой
-задачи и каждого пользовательского действия; задачи и адаптеры состояние книги напрямую
-не пишут. Домен владеет таблицей переходов и отвечает на вопрос, разрешён ли переход.
+Book state is recomputed by the application layer using a single function after completing
+each task and each user action; tasks and adapters do not write book state directly.
+The domain owns the transition table and answers whether a transition is allowed.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from linguary.domain.tasks import ErrorType, TaskType
 
 
 class BookStatus(StrEnum):
-    """Пользовательские состояния книги (PRD § 18)."""
+    """User-facing book states (PRD § 18)."""
 
     IMPORTING = "IMPORTING"
     IMPORTED = "IMPORTED"
@@ -29,7 +29,7 @@ class BookStatus(StrEnum):
 
 
 class BookEvent(StrEnum):
-    """События, которые меняют состояние книги (ALG-06)."""
+    """Events that trigger book state transitions (ALG-06)."""
 
     FILE_UPLOADED = "file_uploaded"
     IMPORT_SUCCEEDED = "import_succeeded"
@@ -46,9 +46,9 @@ class BookEvent(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class BookStatusTransition:
-    """Одна строка таблицы переходов.
+    """A single row in the transition table.
 
-    `source is None` означает, что книги ещё нет: загрузка файла её создаёт.
+    `source is None` indicates the book does not exist yet: file upload creates it.
     """
 
     event: BookEvent
@@ -56,8 +56,8 @@ class BookStatusTransition:
     target: BookStatus
 
 
-#: Полная таблица разрешённых переходов состояния книги (ALG-06).
-#: Переходы вне этой таблицы запрещены и отклоняются ошибкой.
+#: Complete table of allowed book state transitions (ALG-06).
+#: Transitions outside this table are forbidden and rejected with an error.
 BOOK_STATUS_TRANSITIONS: tuple[BookStatusTransition, ...] = (
     BookStatusTransition(BookEvent.FILE_UPLOADED, None, BookStatus.IMPORTING),
     BookStatusTransition(
@@ -117,7 +117,7 @@ BOOK_STATUS_TRANSITIONS: tuple[BookStatusTransition, ...] = (
 
 
 def is_transition_allowed(source: BookStatus | None, target: BookStatus) -> bool:
-    """Разрешён ли переход между состояниями книги."""
+    """Whether a transition between book states is allowed."""
     return any(
         transition.source == source and transition.target is target
         for transition in BOOK_STATUS_TRANSITIONS
@@ -125,7 +125,7 @@ def is_transition_allowed(source: BookStatus | None, target: BookStatus) -> bool
 
 
 def allowed_targets(source: BookStatus | None) -> frozenset[BookStatus]:
-    """Состояния, в которые книга может перейти из текущего."""
+    """States to which the book can transition from the current state."""
     return frozenset(
         transition.target
         for transition in BOOK_STATUS_TRANSITIONS
@@ -134,10 +134,10 @@ def allowed_targets(source: BookStatus | None) -> frozenset[BookStatus]:
 
 
 def apply_book_event(source: BookStatus | None, event: BookEvent) -> BookStatus:
-    """Состояние книги после события.
+    """Book state after an event.
 
-    Событие, недопустимое в текущем состоянии, отклоняется ошибкой: прикладной слой
-    превращает её в отказ пользовательского действия (в Web UI — 409).
+    An event invalid in the current state is rejected with an error: the application layer
+    converts it into a user action rejection (HTTP 409 in Web UI).
     """
     for transition in BOOK_STATUS_TRANSITIONS:
         if transition.event is event and transition.source == source:
@@ -148,7 +148,7 @@ def apply_book_event(source: BookStatus | None, event: BookEvent) -> BookStatus:
 
 
 def ensure_transition_allowed(source: BookStatus | None, target: BookStatus) -> None:
-    """Проверяет переход и отклоняет его, если такой строки в таблице нет."""
+    """Checks a transition and rejects it if no such row exists in the table."""
     if not is_transition_allowed(source, target):
         raise BookStatusTransitionError(f"переход {source} -> {target} запрещён")
 
@@ -156,11 +156,11 @@ def ensure_transition_allowed(source: BookStatus | None, target: BookStatus) -> 
 def status_after_task_failure(
     current: BookStatus, *, task_type: TaskType, error_type: ErrorType
 ) -> BookStatus:
-    """Состояние книги после неуспешной задачи (ALG-06).
+    """Book state after a failed task (ALG-06).
 
-    Неуспех повторяемой задачи состояние книги не меняет: задача показывается как
-    `failed` с действием повтора. `FAILED` зарезервирован за постоянной ошибкой уровня
-    книги — постоянной ошибкой импорта.
+    Failure of a retryable task does not alter book state: the task is displayed as
+    `failed` with a retry action. `FAILED` is reserved for permanent book-level errors—
+    permanent import failures.
     """
     if error_type.is_retryable or task_type is not TaskType.IMPORT_BOOK:
         return current

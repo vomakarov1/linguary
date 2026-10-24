@@ -1,10 +1,10 @@
-"""Доменный слой: предметные сущности и инварианты.
+"""Domain layer: domain entities and invariants.
 
-Слой не зависит ни от чего, кроме стандартной библиотеки Python: ни от прикладного слоя,
-ни от адаптеров, ни от сторонних библиотек и файловой системы.
+The layer depends on nothing outside the Python standard library: neither application
+layer, nor adapters, third-party libraries, or the filesystem.
 
-Публичный API слоя собран здесь: прикладной слой импортирует сущности как
-`from linguary.domain import DocumentBlock`, а не из приватных модулей.
+The public API of the layer is gathered here: the application layer imports entities as
+`from linguary.domain import DocumentBlock` rather than from private submodules.
 """
 
 from linguary.domain.analysis import ChapterAnalysis

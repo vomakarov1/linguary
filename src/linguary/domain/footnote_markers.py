@@ -1,15 +1,15 @@
-"""Ссылки на сноски книги внутри перевода блока (PRD § 7, § 20).
+"""Book footnote references within block translations (PRD § 7, § 20).
 
-Перевод хранится простым текстом, без встроенной разметки. Ссылку на сноску оригинала,
-которую книга ставит посреди абзаца (`…her face.<a epub:type="noteref">1</a>`), в таком
-тексте не выразить: модель видит её номер как обычную цифру и переносит в перевод
-голой цифрой, которая никуда не ведёт.
+Translation is stored as plain text without inline markup. An original footnote reference
+placed mid-paragraph (`…her face.<a epub:type="noteref">1</a>`) cannot be directly
+represented in such text: the model sees its number as a plain digit and carries it
+over as a bare number that links nowhere.
 
-Поэтому ссылка на сноску передаётся модели меткой `[^N]`, где `N` — порядковый номер
-ссылки на сноску в исходном блоке, начиная с единицы, а модель переносит метку в перевод.
-Метка ссылается на разметку исходного блока, а не повторяет её: адрес сноски и видимый
-текст ссылки берутся из оригинала, поэтому в собранной книге ссылка из перевода ведёт
-туда же, куда и ссылка оригинала.
+Therefore, footnote references are passed to the model as `[^N]` markers, where `N` is
+the 1-based ordinal of the footnote reference in the source block, and the model preserves
+the marker in the translation. The marker references the markup of the source block
+rather than duplicating it: the footnote target and visible reference text are derived
+from the original, ensuring that the link in the exported book points to the same destination.
 """
 
 from __future__ import annotations
@@ -18,18 +18,18 @@ import re
 
 from linguary.domain.document import DocumentBlock, InlineAnnotation, InlineAnnotationType
 
-#: Метка ссылки на сноску в тексте перевода. Пробел перед меткой принадлежит ей:
-#: снятая метка не оставляет висячего пробела перед знаком препинания.
+#: Footnote reference marker in translated text. Leading space belongs to the marker:
+#: stripping the marker avoids leaving a dangling space before punctuation.
 _MARKER = re.compile(r" ?\[\^(\d+)\]")
 
 
 def footnote_marker(ordinal: int) -> str:
-    """Метка `ordinal`-й по порядку ссылки на сноску блока."""
+    """Marker for the `ordinal`-th footnote reference of a block."""
     return f"[^{ordinal}]"
 
 
 def footnote_references(block: DocumentBlock) -> tuple[InlineAnnotation, ...]:
-    """Ссылки на сноски блока в порядке текста: `[^1]` — первая из них."""
+    """Block footnote references in text order: `[^1]` is the first among them."""
     return tuple(
         sorted(
             (
@@ -45,10 +45,10 @@ def footnote_references(block: DocumentBlock) -> tuple[InlineAnnotation, ...]:
 def translation_segments(
     text: str, block: DocumentBlock
 ) -> tuple[str | InlineAnnotation, ...]:
-    """Перевод, разобранный на куски текста и ссылки на сноски исходного блока.
+    """Translation parsed into text chunks and source block footnote references.
 
-    Метка, которой у блока нет соответствующей ссылки, отбрасывается: придуманная
-    моделью ссылка вела бы в никуда.
+    A marker lacking a corresponding reference in the block is dropped: a hallucinated
+    reference would lead nowhere.
     """
     references = footnote_references(block)
     segments: list[str | InlineAnnotation] = []
@@ -66,7 +66,7 @@ def translation_segments(
 
 
 def known_markers_only(text: str, block: DocumentBlock) -> str:
-    """Перевод, в котором остались только метки существующих ссылок блока."""
+    """Translation retaining only markers of existing block references."""
     references = footnote_references(block)
     return _MARKER.sub(
         lambda match: match.group(0)
@@ -77,12 +77,12 @@ def known_markers_only(text: str, block: DocumentBlock) -> str:
 
 
 def without_footnote_markers(text: str) -> str:
-    """Текст без меток ссылок на сноски: для полей, где ссылка не нужна."""
+    """Text without footnote markers: for fields where references are not needed."""
     return _MARKER.sub("", text)
 
 
 def with_reference_labels(text: str, block: DocumentBlock) -> str:
-    """Перевод, где метки заменены видимым текстом ссылок, как в тексте оригинала блока."""
+    """Translation with markers replaced by visible reference text, matching source block text."""
     return "".join(
         segment
         if isinstance(segment, str)
@@ -94,7 +94,7 @@ def with_reference_labels(text: str, block: DocumentBlock) -> str:
 def _reference(
     references: tuple[InlineAnnotation, ...], ordinal: str
 ) -> InlineAnnotation | None:
-    """Ссылка на сноску по номеру из метки либо `None`, если такой нет."""
+    """Footnote reference by ordinal from marker or `None` if absent."""
     index = int(ordinal) - 1
     return references[index] if 0 <= index < len(references) else None
 

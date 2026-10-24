@@ -1,4 +1,4 @@
-"""Необязательные содержательный план и свидетельства учебной помощи."""
+"""Optional content plan and educational assistance evidence."""
 
 from alembic import op
 import sqlalchemy as sa
@@ -27,6 +27,6 @@ def downgrade() -> None:
             raise RuntimeError('нельзя удалить данные содержательного плана или свидетельств')
     if connection.dialect.name == 'sqlite' and connection.dialect.server_version_info < (3, 35, 0):
         raise RuntimeError('для безопасного отката содержательного плана нужен SQLite 3.35 или новее')
-    # Пересоздание chapter_analyses в batch-режиме удаляет дочерние строки по CASCADE.
+    # Recreating chapter_analyses in batch mode removes child rows via CASCADE.
     op.drop_column('block_results', 'content_evidence_json')
     op.drop_column('chapter_analyses', 'content_plan_json')

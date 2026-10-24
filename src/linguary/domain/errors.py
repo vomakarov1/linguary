@@ -1,86 +1,86 @@
-"""Базовые ошибки доменного слоя."""
+"""Base domain layer errors."""
 
 
 class DomainError(Exception):
-    """Нарушение доменного инварианта.
+    """Domain invariant violation.
 
-    Базовый класс для всех ошибок предметной модели: от него наследуются конкретные
-    ошибки сущностей, чтобы прикладной слой мог отличать нарушения инвариантов домена
-    от ошибок инфраструктуры.
+    Base class for all domain model errors: specific entity errors inherit from it,
+    allowing the application layer to distinguish domain invariant violations from
+    infrastructure errors.
     """
 
 
 class IdentifierError(DomainError):
-    """Некорректные составляющие стабильного идентификатора."""
+    """Invalid components of a stable identifier."""
 
 
 class DocumentStructureError(DomainError):
-    """Нарушение структуры канонического документа, раздела или блока."""
+    """Structural invariant violation in canonical document, section, or block."""
 
 
 class UnknownBlockTypeError(DocumentStructureError):
-    """Тип блока не входит в поддерживаемый набор."""
+    """Block type is not in the supported set."""
 
 
 class UnknownBlockError(DomainError):
-    """Обращение к `block_id`, которого нет в известном наборе блоков."""
+    """Access to a `block_id` not present in the known set of blocks."""
 
 
 class GlossaryError(DomainError):
-    """Нарушение инвариантов глоссария: понятия, варианта или кандидата."""
+    """Glossary invariant violation: concept, variant, or candidate."""
 
 
 class TreatmentPlanError(DomainError):
-    """Нарушение инвариантов плана обработки блоков главы."""
+    """Treatment plan invariant violation for chapter blocks."""
 
 
 class AnalysisIncompleteError(DomainError):
-    """Анализ главы неполон: обработку этой главы запускать нельзя."""
+    """Chapter analysis is incomplete: processing this chapter cannot be started."""
 
 
 class NonTextualBlockError(DomainError):
-    """Нетекстовый блок использован там, где допустимы только текстовые.
+    """Non-textual block used where only textual blocks are allowed.
 
-    Блоки с режимами `PRESERVE_ONLY` и `DROP_WITH_WARNING` не попадают в `TranslationUnit`,
-    не передаются модели как контекст и не имеют результата обработки.
+    Blocks with treatments `PRESERVE_ONLY` and `DROP_WITH_WARNING` do not enter
+    `TranslationUnit`, are not passed to the model as context, and have no processing result.
     """
 
 
 class BlockResultError(DomainError):
-    """Результат обработки блока не соответствует своему режиму обработки."""
+    """Block processing result does not conform to its treatment mode."""
 
 
 class TranslationUnitError(DomainError):
-    """Нарушение инвариантов вычислительной группы блоков."""
+    """Computational block group invariant violation."""
 
 
 class MissingBlockResultError(TranslationUnitError):
-    """В ответе модели нет результата для одного из блоков группы."""
+    """Model response lacks a result for one of the blocks in the group."""
 
 
 class BlockOrderError(TranslationUnitError):
-    """Порядок блоков в результате не совпадает с порядком исходных блоков."""
+    """Result block order does not match source block order."""
 
 
 class TreatmentMismatchError(TranslationUnitError):
-    """Режим обработки в результате не совпадает с сохранённым планом главы."""
+    """Result treatment mode does not match the persisted chapter plan."""
 
 
 class ProcessingRunError(DomainError):
-    """Нарушение инвариантов запуска обработки книги."""
+    """Book processing run invariant violation."""
 
 
 class ActiveRunConflictError(ProcessingRunError):
-    """У книги оказалось больше одного активного `ProcessingRun`."""
+    """The book has more than one active `ProcessingRun`."""
 
 
 class TaskTransitionError(DomainError):
-    """Переход состояния локальной задачи не разрешён."""
+    """Local task state transition is forbidden."""
 
 
 class BookStatusTransitionError(DomainError):
-    """Переход состояния книги отсутствует в таблице разрешённых переходов."""
+    """Book state transition is absent from the allowed transitions table."""
 
 
 class LLMCallLogError(DomainError):
-    """Нарушение инвариантов записи журнала вызовов LLM."""
+    """LLM call log entry invariant violation."""

@@ -1,8 +1,8 @@
-"""Обработка книги: вычислительная группа блоков, результаты и запуск обработки.
+"""Book processing: computational block unit, results, and processing runs.
 
-`TranslationUnit` — временная группа последовательных текстовых блоков для одного вызова
-LLM. Результат сохраняется отдельно для каждого входного блока, но только после успешной
-проверки всей группы (PRD § 10, § 17; ADR § 3).
+`TranslationUnit` is a transient grouping of sequential textual blocks for a single LLM call.
+Results are persisted separately for each input block, but only after successful validation
+of the entire group (PRD § 10, § 17; ADR § 3).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from linguary.domain.treatment import BlockTreatment, TreatmentPlan
 
 @dataclass(frozen=True, slots=True)
 class GlossaryHint:
-    """Перевод отдельного слова или короткого выражения внутри блока."""
+    """Translation of an individual word or short expression within a block."""
 
     original: str
     translation: str
@@ -45,7 +45,7 @@ class GlossaryHint:
 
 
 class ResultWarningKind(StrEnum):
-    """Виды непреградных замечаний к результату обработки (PRD § 15)."""
+    """Kinds of non-blocking warnings attached to processing results (PRD § 15)."""
 
     REPETITION = "repetition"
     DROPPED_BLOCK = "dropped_block"
@@ -53,7 +53,7 @@ class ResultWarningKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ResultWarning:
-    """Замечание, которое сохраняется вместе с результатом и не блокирует обработку."""
+    """Warning persisted alongside the result that does not block processing."""
 
     kind: ResultWarningKind
     message: str
@@ -65,11 +65,11 @@ class ResultWarning:
 
 @dataclass(frozen=True, slots=True)
 class BlockProcessingResult:
-    """Результат обработки одного входного блока.
+    """Processing result for a single input block.
 
-    Правила состава определяются режимом из сохранённого плана (PRD § 14, § 15):
-    полный перевод обязателен и допустим только для `TRANSLATE`; для `GLOSSARY_ONLY`
-    обязательны словарные подсказки; для `READ_AS_IS` нет ни перевода, ни подсказок.
+    Composition rules are determined by the treatment from the persisted plan (PRD § 14, § 15):
+    full translation is required and permitted only for `TRANSLATE`; for `GLOSSARY_ONLY`
+    glossary hints are mandatory; for `READ_AS_IS` there is neither translation nor hints.
     """
 
     block_id: str
@@ -112,7 +112,7 @@ class BlockProcessingResult:
 
 @dataclass(frozen=True, slots=True)
 class TranslationUnitItem:
-    """Блок группы вместе с его режимом обработки из сохранённого плана."""
+    """A unit block alongside its treatment mode from the persisted plan."""
 
     block: DocumentBlock
     treatment: BlockTreatment
@@ -126,9 +126,9 @@ class TranslationUnitItem:
 
 @dataclass(frozen=True, slots=True)
 class TranslationUnit:
-    """Группа последовательных текстовых блоков одной главы для одного вызова LLM.
+    """A group of sequential textual blocks within a chapter for a single LLM call.
 
-    Единица вычисления, а не хранения: сохраняются результаты отдельных блоков.
+    A computational unit rather than storage: results of individual blocks are persisted.
     """
 
     id: str
@@ -162,10 +162,10 @@ class TranslationUnit:
     def of_blocks(
         cls, *, id: str, blocks: Iterable[DocumentBlock], plan: TreatmentPlan
     ) -> TranslationUnit:
-        """Собирает группу из блоков главы, взяв режимы из сохранённого плана.
+        """Constructs a unit from chapter blocks, reading treatments from the persisted plan.
 
-        Блоки `PRESERVE_ONLY` и `DROP_WITH_WARNING` в группу не попадают: попытка
-        включить такой блок — нарушение инварианта, а не повод его отфильтровать.
+        `PRESERVE_ONLY` and `DROP_WITH_WARNING` blocks do not enter the unit: attempting
+        to include such a block is an invariant violation rather than a filtering trigger.
         """
         ordered = tuple(blocks)
         if not ordered:
@@ -181,27 +181,27 @@ class TranslationUnit:
 
     @property
     def blocks(self) -> tuple[DocumentBlock, ...]:
-        """Блоки группы в порядке исходного документа."""
+        """Unit blocks in source document order."""
         return tuple(item.block for item in self.items)
 
     @property
     def block_ids(self) -> tuple[str, ...]:
-        """Идентификаторы блоков группы в порядке исходного документа."""
+        """Unit block identifiers in source document order."""
         return tuple(item.block.id for item in self.items)
 
     def treatment_for(self, block_id: str) -> BlockTreatment:
-        """Режим обработки блока группы по сохранённому плану."""
+        """Block treatment mode for a unit block per the persisted plan."""
         for item in self.items:
             if item.block.id == block_id:
                 return item.treatment
         raise UnknownBlockError(f"блок {block_id} отсутствует в группе {self.id}")
 
     def validate_results(self, results: Sequence[BlockProcessingResult]) -> None:
-        """Блокирующие проверки результата всей группы (PRD § 15).
+        """Blocking validations for results of the entire unit (PRD § 15).
 
-        Проверяются наличие всех ожидаемых блоков, отсутствие неизвестных, сохранение
-        порядка и совпадение режима с планом. Любое нарушение отменяет сохранение всей
-        группы: частично сохранённого результата быть не должно.
+        Validates presence of all expected blocks, absence of unknown blocks, order
+        preservation, and treatment match with the plan. Any violation aborts persistence
+        of the entire unit: partially persisted results are disallowed.
         """
         expected = self.block_ids
         returned = tuple(result.block_id for result in results)
@@ -229,7 +229,7 @@ class TranslationUnit:
 
 
 class ProcessingRunStatus(StrEnum):
-    """Состояние запуска обработки книги."""
+    """State of a book processing run."""
 
     ACTIVE = "active"
     COMPLETED = "completed"
@@ -238,10 +238,10 @@ class ProcessingRunStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class GlossarySnapshotEntry:
-    """Утверждённое переводческое решение на момент запуска обработки.
+    """Approved translation decision at the time of launching a processing run.
 
-    `note` — переводческое указание по этому решению: то, что нельзя выразить одним
-    вариантом перевода, но обязано совпадать во всей книге (PRD § 11).
+    `note` is translation guidance for this decision: what cannot be expressed by a single
+    translation variant but must remain consistent throughout the book (PRD § 11).
     """
 
     source_text: str
@@ -259,7 +259,7 @@ class GlossarySnapshotEntry:
 
 @dataclass(frozen=True, slots=True)
 class GlossarySnapshot:
-    """Снимок глоссария, с которым выполняется запуск обработки."""
+    """Glossary snapshot with which a processing run is executed."""
 
     entries: tuple[GlossarySnapshotEntry, ...] = ()
 
@@ -270,13 +270,13 @@ class GlossarySnapshot:
 
     @property
     def mandatory_entries(self) -> tuple[GlossarySnapshotEntry, ...]:
-        """Решения пользователя, которые передаются модели как обязательные."""
+        """User decisions passed to the model as mandatory."""
         return tuple(entry for entry in self.entries if entry.status.is_user_decision)
 
 
 @dataclass(frozen=True, slots=True)
 class LLMSettingsSnapshot:
-    """Настройки LLM, зафиксированные на момент запуска обработки."""
+    """LLM settings captured at the time of launching a processing run."""
 
     provider: str
     model: str
@@ -294,10 +294,10 @@ class LLMSettingsSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ProcessingRun:
-    """Запуск обработки книги со снимком глоссария и настроек LLM.
+    """Book processing run with a snapshot of glossary and LLM settings.
 
-    У книги одновременно существует не более одного активного запуска: параллельные
-    наборы результатов не накапливаются (ADR § 3).
+    A book has at most one active run at any given time: concurrent result sets
+    never accumulate (ADR § 3).
     """
 
     id: str
@@ -314,12 +314,18 @@ class ProcessingRun:
 
     @property
     def is_active(self) -> bool:
-        """Является ли запуск текущим для книги."""
+        """Whether this run is the currently active run for the book."""
         return self.status is ProcessingRunStatus.ACTIVE
 
 
 def active_run(runs: Iterable[ProcessingRun]) -> ProcessingRun | None:
-    """Единственный активный запуск книги либо `None`, если активного нет."""
+    """The sole active run of the book or `None` if no run is active."""
+    active = [run for run in runs if run.is_active]
+    if len(active) > 1:
+        raise ActiveRunConflictError(
+            f"у книги больше одного активного запуска обработки: {[run.id for run in active]}"
+        )
+    return active[0] if active else None
     active = [run for run in runs if run.is_active]
     if len(active) > 1:
         raise ActiveRunConflictError(

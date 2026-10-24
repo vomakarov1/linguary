@@ -1,10 +1,10 @@
-"""Стабильные идентификаторы доменных сущностей.
+"""Stable identifiers for domain entities.
 
-Идентификатор блока (PRD § 8) зависит только от положения блока в исходном документе:
-`document_id`, пути к исходному ресурсу и структурного пути внутри него. Он не зависит
-от текста блока, состава `TranslationUnit`, модели и номера запуска обработки, поэтому
-повторный импорт той же книги даёт те же идентификаторы, а сохранённые результаты
-остаются привязанными к своим блокам.
+The block identifier (PRD § 8) depends solely on the block's position in the source document:
+`document_id`, source resource path, and structural path within it. It does not depend
+on the block text, `TranslationUnit` composition, model, or processing run number; therefore,
+reimporting the same book yields the same identifiers, and saved results remain bound
+to their blocks.
 """
 
 from __future__ import annotations
@@ -14,18 +14,18 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from linguary.domain.errors import IdentifierError
 
-#: Пространство имён для идентификаторов блоков. Значение зафиксировано навсегда:
-#: его изменение сделает идентификаторы всех ранее импортированных книг другими.
+#: Namespace for block identifiers. Fixed permanently:
+#: changing it would alter identifiers for all previously imported books.
 BLOCK_ID_NAMESPACE: UUID = uuid5(NAMESPACE_URL, "https://linguary.local/document-block")
 
-#: Разделитель составляющих ключа. Перевод строки не встречается ни в пути к ресурсу,
-#: ни в структурном пути, поэтому разные наборы составляющих не дают один ключ.
+#: Separator for key components. Newline appears neither in resource paths nor
+#: in structural paths, preventing distinct component tuples from producing identical keys.
 _KEY_SEPARATOR = "\n"
 
 
 @dataclass(frozen=True, slots=True)
 class BlockIdentity:
-    """Составляющие стабильного идентификатора блока."""
+    """Components of a stable block identifier."""
 
     document_id: str
     source_resource_path: str
@@ -38,21 +38,21 @@ class BlockIdentity:
 
     @property
     def key(self) -> str:
-        """Канонический ключ, из которого вычисляется идентификатор."""
+        """Canonical key from which the identifier is computed."""
         return _KEY_SEPARATOR.join(
             (self.document_id, self.source_resource_path, self.structural_path)
         )
 
     @property
     def block_id(self) -> str:
-        """Стабильный идентификатор блока."""
+        """Stable block identifier."""
         return str(uuid5(BLOCK_ID_NAMESPACE, self.key))
 
 
 def build_block_id(
     *, document_id: str, source_resource_path: str, structural_path: str
 ) -> str:
-    """Вычисляет стабильный идентификатор блока по его положению в документе."""
+    """Computes a stable block identifier from its position within the document."""
     return BlockIdentity(
         document_id=document_id,
         source_resource_path=source_resource_path,
@@ -61,10 +61,10 @@ def build_block_id(
 
 
 def build_language_note_id(*, chapter_number: int, ordinal: int) -> str:
-    """Идентификатор учебной заметки вида `ln-ch03-001` (PRD § 19.3).
+    """Learning note identifier of the form `ln-ch03-001` (PRD § 19.3).
 
-    Заметки живут в отдельном пространстве идентификаторов, чтобы не конфликтовать
-    с оригинальными `footnote` id книги и не ломать её внутренние ссылки.
+    Notes reside in a separate identifier space to avoid colliding with original
+    book `footnote` ids and breaking internal document links.
     """
     if chapter_number < 1:
         raise IdentifierError("номер главы для идентификатора заметки должен быть положительным")

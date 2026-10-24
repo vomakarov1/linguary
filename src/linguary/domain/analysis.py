@@ -1,8 +1,8 @@
-"""Результат анализа главы: один LLM-запрос до начала обработки.
+"""Chapter analysis result: a single LLM request before primary processing begins.
 
-`AnalyzeChapter` за один вызов возвращает кандидатов глоссария, инструкции перевода главы,
-план обработки блоков, `Before You Read` и краткую сводку событий главы (PRD § 14).
-Неполный анализ не допускает запуск основной обработки этой главы.
+`AnalyzeChapter` returns glossary candidates, chapter translation instructions, block
+treatment plan, `Before You Read`, and a concise chapter summary in a single call (PRD § 14).
+An incomplete analysis prevents launching primary processing for that chapter.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from linguary.domain.treatment import CoverageStatus, TreatmentPlan
 
 @dataclass(frozen=True, slots=True)
 class ChapterAnalysis:
-    """Сохранённый результат анализа одной главы."""
+    """Persisted analysis result for a single chapter."""
 
     id: str
     section_id: str
@@ -62,7 +62,7 @@ class ChapterAnalysis:
         before_you_read: Iterable[BeforeYouReadEntry] = (),
         content_plan: ContentPlan | None = None,
     ) -> ChapterAnalysis:
-        """Создаёт анализ, вычислив полноту покрытия блоков главы планом."""
+        """Creates an analysis, computing plan coverage completeness for chapter blocks."""
         return cls(
             id=id,
             section_id=section_id,
@@ -77,18 +77,18 @@ class ChapterAnalysis:
 
     @property
     def is_complete(self) -> bool:
-        """Покрыты ли планом все блоки главы."""
+        """Whether all chapter blocks are covered by the plan."""
         return self.coverage_status is CoverageStatus.COMPLETE
 
     @property
     def candidates_requiring_review(self) -> tuple[GlossaryCandidate, ...]:
-        """Кандидаты, по которым пользователь обязан принять решение (PRD § 12)."""
+        """Candidates on which the user must make a decision (PRD § 12)."""
         return tuple(
             candidate for candidate in self.glossary_candidates if candidate.requires_review
         )
 
     def ensure_ready_for_processing(self) -> None:
-        """Проверяет, что главу можно обрабатывать."""
+        """Verifies that the chapter is ready for processing."""
         if not self.is_complete:
             raise AnalysisIncompleteError(
                 f"анализ главы {self.section_id} неполон: обработку запускать нельзя"
