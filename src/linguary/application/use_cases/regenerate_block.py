@@ -1,24 +1,24 @@
-"""Повторная генерация обработки одного блока (PRD § 13, § 19.3, § 21.5, ALG-04).
+"""Regeneration of single block processing (PRD § 13, § 19.3, § 21.5, ALG-04).
 
-Пользователь запрашивает её, увидев неудачный результат конкретного блока: точечная
-ошибка исправляется здесь, а неудачное решение, влияющее на всю книгу, — возвратом
-к проверке глоссария (`reset_processing`).
+The user requests regeneration upon seeing an unsatisfactory result for a specific block:
+an isolated issue is fixed here, whereas an undesirable decision affecting the whole book
+is resolved by returning to glossary review (`reset_processing`).
 
-Исходная группа блоков не пересчитывается. Модель получает отдельный запрос: сам блок
-с его режимом из сохранённого плана, выжимку анализа главы, снимок глоссария запуска
-и несколько соседних абзацев как контекст сцены. Соседние абзацы модель видит, но не
-обрабатывает: псевдонимов у них нет, и результат по ним отвергается как чужой блок.
-Заменяется только результат выбранного блока — его перевод, словарные подсказки
-и `Language Notes`; соседние блоки остаются нетронутыми (PRD § 19.3).
+The original translation unit is not recalculated. The model receives a separate request:
+the block itself with its treatment mode from the saved plan, an excerpt of chapter analysis,
+the run's glossary snapshot, and several adjacent paragraphs as scene context. The model sees
+adjacent paragraphs but does not process them: they have no aliases, and output for them
+is rejected as an alien block. Only the selected block's result is replaced — its translation,
+vocabulary hints, and `Language Notes`; adjacent blocks remain untouched (PRD § 19.3).
 
-Порядок и проверки те же, что у обработки главы (ALG-04): контекст, вызов модели
-с повторами по политике, блокирующие проверки, короткая транзакция с проверкой активного
-запуска. Общая часть живёт в `application/block_processing.py`.
+The ordering and validations are identical to chapter processing (ALG-04): context, model call
+with policy-driven retries, blocking validations, short transaction checking that the run
+is still active. The shared logic lives in `application/block_processing.py`.
 
-Область задачи очереди — блок, а не глава: повторная генерация разных блоков идёт
-независимо, и ключ по главе склеил бы такие запросы в одну задачу. Повторный запрос по
-тому же блоку снимает свою прежнюю завершённую задачу и ставит новую — иначе идемпотентный
-ключ навсегда запомнил бы первый результат (PRD § 18.1).
+The queue task scope is the block rather than the chapter: regeneration of different blocks
+runs independently, and a chapter-scoped key would collapse such requests into a single task.
+A repeated request for the same block removes its previous completed task and enqueues a new one —
+otherwise the idempotent key would forever remember the initial result (PRD § 18.1).
 """
 
 from __future__ import annotations
@@ -62,25 +62,25 @@ from linguary.domain import (
     apply_book_event,
 )
 
-#: Задачи, после которых книга возвращается в `READY_TO_EXPORT`: обработка глав и повторная
-#: генерация блоков одинаково держат книгу в `PROCESSING` (ALG-06).
+#: Tasks after which the book returns to READY_TO_EXPORT: chapter processing and block
+#: regeneration both keep the book in PROCESSING (ALG-06).
 _COMPLETING_TASK_TYPES = (TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK)
 
-#: Состояния задачи, в которых повторный запрос новой задачи не создаёт: работа уже идёт.
+#: Task statuses where a repeated request does not create a new task: work is already in progress.
 _ACTIVE_TASK_STATUSES = (TaskStatus.PENDING, TaskStatus.RUNNING)
 
 
 class RegenerateBlockError(BlockProcessingError):
-    """Блок нельзя сгенерировать заново в текущем состоянии книги."""
+    """Block cannot be regenerated in the book's current status."""
 
 
 class RegenerateBlockNotFoundError(RegenerateBlockError):
-    """Книга или выбранный блок не найдены."""
+    """Book or selected block was not found."""
 
 
 @dataclass(frozen=True, slots=True)
 class RegenerateBlockCommand:
-    """Команда повторной генерации: какой блок какой книги обработать заново."""
+    """Regeneration command: which block of which book to regenerate."""
 
     book_id: str
     block_id: str
@@ -89,10 +89,10 @@ class RegenerateBlockCommand:
 
 @dataclass(frozen=True, slots=True)
 class RegenerateBlockResult:
-    """Итог повторной генерации вместе с ценой вызовов.
+    """Regeneration result along with call cost metrics.
 
-    `saved` равен `False`, если результат отброшен: пока вызов был в пути, пользователь
-    вернулся к проверке глоссария и запуска, с которым работа начиналась, больше нет.
+    `saved` is `False` if the result was discarded: while the call was in flight,
+    the user returned to glossary review and the run this work began with no longer exists.
     """
 
     block_id: str
@@ -104,7 +104,7 @@ class RegenerateBlockResult:
 
 @dataclass(frozen=True, slots=True)
 class _BlockWork:
-    """Всё, что нужно для повторной генерации блока, прочитанное одной транзакцией."""
+    """Everything needed for block regeneration, loaded in a single transaction."""
 
     document: CanonicalDocument
     section: DocumentSection
@@ -117,17 +117,17 @@ class _BlockWork:
 
     @property
     def target_language(self) -> str:
-        """Целевой язык книги."""
+        """Book target language."""
         return self.document.target_language
 
     @property
     def chapter_number(self) -> int:
-        """Номер главы блока в порядке чтения (PRD § 19.3)."""
+        """Chapter number of the block in reading order (PRD § 19.3)."""
         return chapter_number(self.document, self.section)
 
 
 class RegenerateBlock:
-    """Обрабатывает выбранный блок заново и заменяет только его результат (PRD § 21.5)."""
+    """Regenerates the selected block and replaces only its result (PRD § 21.5)."""
 
     def __init__(
         self,
@@ -152,7 +152,7 @@ class RegenerateBlock:
         self._id_factory = id_factory or _new_id
 
     async def __call__(self, command: RegenerateBlockCommand) -> RegenerateBlockResult:
-        """Один цикл ALG-04 по единственному блоку (PRD § 13, § 19.3)."""
+        """One ALG-04 cycle for a single block (PRD § 13, § 19.3)."""
         work = self._load(command)
         unit = TranslationUnit.of_blocks(
             id=self._id_factory(),
@@ -195,11 +195,11 @@ class RegenerateBlock:
         )
 
     def ensure_regeneratable(self, command: RegenerateBlockCommand) -> None:
-        """Проверяет запрос до постановки фоновой задачи."""
+        """Validates the request before enqueuing a background task."""
         self._load(command)
 
     def _load(self, command: RegenerateBlockCommand) -> _BlockWork:
-        """Читает книгу, блок, анализ его главы и активный запуск одной транзакцией."""
+        """Loads the book, block, chapter analysis, and active run in a single transaction."""
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(command.book_id)
             if document is None:
@@ -247,7 +247,7 @@ class RegenerateBlock:
 
 
 class BlockRegenerationSequence:
-    """Ставит задачи повторной генерации и возвращает книгу к экспорту (PRD § 18, § 21.5)."""
+    """Enqueues block regeneration tasks and returns the book to export readiness (PRD § 18, § 21.5)."""
 
     def __init__(
         self,
@@ -261,12 +261,12 @@ class BlockRegenerationSequence:
         self._regenerate_block = regenerate_block
 
     async def start(self, book_id: str, block_id: str) -> ProcessingTask:
-        """Запрос пользователя на повторную генерацию блока (ALG-02, ALG-06).
+        """User request to regenerate a block (ALG-02, ALG-06).
 
-        Пока задача этого блока запланирована или выполняется, повторный запрос новой
-        задачи не создаёт: пользователь нажал кнопку дважды. Завершённая задача снимается,
-        иначе её идемпотентный ключ навсегда запомнил бы первый результат и второй раз
-        блок сгенерировать было бы нельзя.
+        While a task for this block is pending or running, a repeated request does not create
+        a new task: the user clicked the button twice. A completed task is removed; otherwise
+        its idempotent key would forever remember the first result and the block could not
+        be regenerated a second time.
         """
         self._regenerate_block.ensure_regeneratable(
             RegenerateBlockCommand(book_id=book_id, block_id=block_id)
@@ -289,7 +289,7 @@ class BlockRegenerationSequence:
         return await self._queue.enqueue(identity)
 
     async def run_task(self, task: ProcessingTask) -> None:
-        """Обработчик задачи `REGENERATE_BLOCK` для локального runner-а (ALG-02)."""
+        """Task handler for `REGENERATE_BLOCK` for the local runner (ALG-02)."""
         if task.task_type is not TaskType.REGENERATE_BLOCK:
             raise RegenerateBlockError(
                 f"задача {task.id} типа {task.task_type} не является повторной генерацией"
@@ -310,12 +310,13 @@ class BlockRegenerationSequence:
 
 
 def _status_after_request(transaction: UnitOfWork, book: BookRecord) -> BookStatus:
-    """Состояние книги после запроса повторной генерации (ALG-06).
+    """Book status after a regeneration request (ALG-06).
 
-    Книга уже в `PROCESSING` только тогда, когда идёт другая повторная генерация: сама
-    обработка к этому моменту закончена, иначе перехода в `PROCESSING` не было бы. Такой
-    запрос состояние не меняет — менять его не на что. Повторная генерация посреди
-    обработки книги отклоняется: у блока ещё нет результата, который стоило бы заменять.
+    The book is already in `PROCESSING` only when another block regeneration is in flight:
+    chapter processing is finished by this point, otherwise it would not have transitioned
+    to `PROCESSING`. Such a request does not change the status — there is nothing to change
+    it to. Regeneration in the middle of initial chapter processing is rejected: the block
+    does not yet have a result worth replacing.
     """
     if book.status is not BookStatus.PROCESSING:
         return apply_book_event(book.status, BookEvent.BLOCK_REGENERATION_REQUESTED)
@@ -336,10 +337,10 @@ def _status_after_request(transaction: UnitOfWork, book: BookRecord) -> BookStat
 def _block_of(
     document: CanonicalDocument, command: RegenerateBlockCommand
 ) -> DocumentBlock:
-    """Блок книги, который требует команда.
+    """Book block requested by the command.
 
-    Блок, который модели не передаётся — перенесённая как есть конструкция, иллюстрация,
-    пустой блок, — результата обработки не имеет, и генерировать заново нечего (PRD § 10.1).
+    A block that is not sent to the model — verbatim markup, illustration, empty block —
+    has no processing result and nothing to regenerate (PRD § 10.1).
     """
     block = next(
         (item for item in document.blocks() if item.id == command.block_id), None
@@ -357,7 +358,7 @@ def _block_of(
 
 
 def _ensure_planned_as_text(analysis: ChapterAnalysis, block: DocumentBlock) -> None:
-    """Проверяет, что план обработки главы отдаёт этот блок модели (PRD § 14)."""
+    """Ensures the chapter treatment plan assigns this block to the model (PRD § 14)."""
     if block.id not in analysis.treatment_plan.textual_block_ids:
         raise RegenerateBlockError(
             f"блок {block.id} не входит в план обработки главы {analysis.section_id} "
@@ -366,7 +367,7 @@ def _ensure_planned_as_text(analysis: ChapterAnalysis, block: DocumentBlock) -> 
 
 
 def _new_id() -> str:
-    """Идентификатор группы из одного блока: он живёт ровно один вызов."""
+    """Identifier for a single-block unit: it lives for exactly one call."""
     return str(uuid4())
 
 

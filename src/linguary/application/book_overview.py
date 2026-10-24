@@ -1,13 +1,12 @@
-"""Чтение состояния книги для интерфейса: карточка, прогресс, план и предупреждения.
+"""Reading book status for UI: overview card, progress, plan, and warnings.
 
-Web UI и CLI показывают одно и то же (PRD § 18, § 21.1, § 21.4): сколько блоков обработано,
-как распределились режимы, какие главы идут сейчас, сколько примерно осталось ждать,
-какие задачи неуспешны и что импорт и обработка успели сказать о книге. Считается это
-по задачам, сохранённому плану обработки, результатам блоков и журналу вызовов модели —
-то есть по хранилищу, а не по ходу выполнения.
+Web UI and CLI present identical state views (PRD § 18, § 21.1, § 21.4): processed block count,
+treatment distribution, currently running chapters, remaining time estimates, failed tasks,
+and import/processing warnings. Computed from tasks, saved treatment plans, block results,
+and LLM call logs — querying persisted storage rather than runtime process memory.
 
-Модуль читает через порты и ничего не меняет. Он живёт в прикладном слое, а не в routes:
-подсчёт прогресса — прикладное правило, и повторять его в каждом представлении нельзя.
+The module queries through ports without mutating state. It resides in the application layer
+rather than routes: computing progress is an application policy that must not be repeated across views.
 """
 
 from __future__ import annotations
@@ -41,23 +40,23 @@ from linguary.domain import (
 
 
 class BookNotFoundError(ApplicationError):
-    """Книги с таким идентификатором в хранилище нет."""
+    """Book with specified ID does not exist in storage."""
 
 
 class ProcessingPlanUnavailableError(ApplicationError):
-    """План обработки ещё не готов: ни одна глава книги не проанализирована."""
+    """Processing plan is not yet available: no chapters have been analyzed."""
 
 
 class ResultBlockNotFoundError(ApplicationError):
-    """Запрошенного блока нет в каноническом документе книги."""
+    """Requested block not found in the book's canonical document."""
 
 
-#: Типы задач, чья глава показывается как текущая (PRD § 21.4). Импорт и экспорт —
-#: задачи уровня книги, отдельной главы у них нет.
+#: Task types whose chapter is displayed as active/current (PRD § 21.4).
+#: Import and export are book-level tasks without a specific chapter.
 _CHAPTER_TASK_TYPES = (TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT)
 
-#: Этап, время которого оценивается, по состоянию книги, и тип его задач. Повторная
-#: генерация блока — точечная работа, и оценка времени для неё не нужна.
+#: Stage for which time is estimated based on book status, and its associated task type.
+#: Single block regeneration is an ad-hoc action and does not need time estimation.
 _ESTIMATED_STAGES: Mapping[BookStatus, tuple[LLMCallStage, TaskType]] = {
     BookStatus.ANALYZING: (LLMCallStage.CHAPTER_ANALYSIS, TaskType.ANALYZE_CHAPTER),
     BookStatus.PROCESSING: (
@@ -66,13 +65,13 @@ _ESTIMATED_STAGES: Mapping[BookStatus, tuple[LLMCallStage, TaskType]] = {
     ),
 }
 
-#: Секунд в минуте: предел частоты запросов задаётся в запросах в минуту.
+#: Seconds per minute: request rate limit is configured in requests per minute.
 _SECONDS_PER_MINUTE = 60.0
 
 
 @dataclass(frozen=True, slots=True)
 class TaskFailure:
-    """Неуспешная задача книги вместе с действием, доступным пользователю (PRD § 16)."""
+    """Failed book task along with user-actionable retry status (PRD § 16)."""
 
     task_id: str
     task_type: TaskType
@@ -86,7 +85,7 @@ class TaskFailure:
 
 @dataclass(frozen=True, slots=True)
 class RunningChapter:
-    """Глава, задача которой выполняется прямо сейчас."""
+    """Chapter whose task is currently executing."""
 
     chapter_number: int
     title: str
@@ -94,10 +93,10 @@ class RunningChapter:
 
 @dataclass(frozen=True, slots=True)
 class RemainingTime:
-    """Грубая оценка того, сколько ещё идёт текущий этап работы над книгой.
+    """Coarse estimate of time remaining for the current book processing stage.
 
-    `seconds` пуст, пока у этапа нет ни одного завершённого вызова модели: мерить
-    ещё нечем, и честнее сказать, что оценка появится позже, чем назвать число.
+    `seconds` is empty until the stage completes at least one model call: without measurements,
+    it is cleaner to indicate that estimates will appear later rather than fabricate numbers.
     """
 
     stage: LLMCallStage
@@ -105,13 +104,13 @@ class RemainingTime:
 
     @property
     def is_known(self) -> bool:
-        """Есть ли уже данные для оценки."""
+        """Whether sufficient data exists for estimation."""
         return self.seconds is not None
 
 
 @dataclass(frozen=True, slots=True)
 class BookProgress:
-    """Прогресс обработки книги в терминах экрана обработки (PRD § 21.4)."""
+    """Book processing progress in terms of the processing screen (PRD § 21.4)."""
 
     total_sections: int = 0
     analyzed_sections: int = 0
@@ -126,20 +125,20 @@ class BookProgress:
 
     @property
     def current_chapter(self) -> int | None:
-        """Номер первой из выполняющихся глав."""
+        """Chapter number of the first active chapter."""
         return self.running_chapters[0].chapter_number if self.running_chapters else None
 
     @property
     def current_chapter_title(self) -> str | None:
-        """Название первой из выполняющихся глав."""
+        """Title of the first active chapter."""
         return self.running_chapters[0].title if self.running_chapters else None
 
     @property
     def percent_complete(self) -> int:
-        """Доля обработанных блоков плана, целыми процентами.
+        """Percentage of planned blocks processed, rounded to integer.
 
-        Книга без плана считается необработанной, а не завершённой: план появляется
-        при анализе, и до него обрабатывать нечего.
+        A book without a plan is considered unprocessed rather than complete:
+        the plan emerges during analysis, and before then there is nothing to process.
         """
         if self.planned_blocks <= 0:
             return 0
@@ -148,7 +147,7 @@ class BookProgress:
 
 @dataclass(frozen=True, slots=True)
 class BookOverview:
-    """Карточка книги: состояние, прогресс, счётчики режимов и ошибки (API-01)."""
+    """Book card: status, progress, treatment counters, and errors (API-01)."""
 
     book: BookRecord
     progress: BookProgress
@@ -157,7 +156,7 @@ class BookOverview:
 
 @dataclass(frozen=True, slots=True)
 class PlanBlockSummary:
-    """Один блок главы с выбранным режимом обработки."""
+    """A single chapter block with its assigned treatment mode."""
 
     block: DocumentBlock
     treatment: BlockTreatment | None
@@ -165,7 +164,7 @@ class PlanBlockSummary:
 
 @dataclass(frozen=True, slots=True)
 class ChapterPlanSummary:
-    """Сводка плана обработки одной главы (PRD § 21, UX notes)."""
+    """Treatment plan summary for a single chapter (PRD § 21, UX notes)."""
 
     section_id: str
     chapter_number: int
@@ -179,7 +178,7 @@ class ChapterPlanSummary:
 
 @dataclass(frozen=True, slots=True)
 class ProcessingPlanSummary:
-    """Диагностическая сводка плана обработки книги по главам."""
+    """Diagnostic summary of book processing plan broken down by chapter."""
 
     chapters: tuple[ChapterPlanSummary, ...]
     treatment_counts: Mapping[BlockTreatment, int]
@@ -188,7 +187,7 @@ class ProcessingPlanSummary:
 
     @property
     def is_complete(self) -> bool:
-        """Проанализированы ли все главы книги и полон ли план каждой из них."""
+        """Whether all chapters are analyzed and their plans are complete."""
         return self.analyzed_sections == self.total_sections and all(
             chapter.coverage_status is CoverageStatus.COMPLETE
             for chapter in self.chapters
@@ -197,7 +196,7 @@ class ProcessingPlanSummary:
 
 @dataclass(frozen=True, slots=True)
 class ResultWarningEntry:
-    """Замечание к результату обработки вместе с его местом в книге (PRD § 15)."""
+    """Processing result warning along with its location in the book (PRD § 15)."""
 
     warning: ResultWarning
     block_id: str
@@ -207,20 +206,20 @@ class ResultWarningEntry:
 
 @dataclass(frozen=True, slots=True)
 class BookWarnings:
-    """Предупреждения импорта и обработки книги (PRD § 21.6)."""
+    """Import and processing warnings for a book (PRD § 21.6)."""
 
     import_warnings: tuple[BookImportWarning, ...] = ()
     result_warnings: tuple[ResultWarningEntry, ...] = ()
 
     @property
     def total(self) -> int:
-        """Сколько всего предупреждений накопила книга."""
+        """Total number of warnings accumulated by the book."""
         return len(self.import_warnings) + len(self.result_warnings)
 
 
 @dataclass(frozen=True, slots=True)
 class ResultBlockSummary:
-    """Исходный блок, запланированный режим и сохранённый результат обработки."""
+    """Source block, planned treatment, and persisted processing result."""
 
     block: DocumentBlock
     chapter_number: int
@@ -230,7 +229,7 @@ class ResultBlockSummary:
 
 @dataclass(frozen=True, slots=True)
 class ResultChapterSummary:
-    """Глава результата с блоками в порядке чтения."""
+    """Result chapter with blocks in reading order."""
 
     section_id: str
     chapter_number: int
@@ -241,7 +240,7 @@ class ResultChapterSummary:
 
 @dataclass(frozen=True, slots=True)
 class BookResultSummary:
-    """Результат книги по главам вместе с предупреждениями и состоянием экспорта."""
+    """Book result grouped by chapter along with warnings and export status."""
 
     book: BookRecord
     chapters: tuple[ResultChapterSummary, ...] = ()
@@ -251,7 +250,7 @@ class BookResultSummary:
 def list_books(
     unit_of_work: UnitOfWork, *, status: BookStatus | None = None
 ) -> tuple[BookRecord, ...]:
-    """Книги в порядке добавления, при необходимости отфильтрованные по состоянию."""
+    """Books ordered by addition, optionally filtered by status."""
     with unit_of_work.transaction() as transaction:
         books = transaction.books.list_all()
     if status is None:
@@ -266,11 +265,10 @@ def book_overview(
     concurrency: int = 1,
     requests_per_minute: int | None = None,
 ) -> BookOverview:
-    """Карточка книги: состояние, прогресс, счётчики режимов и неуспешные задачи.
+    """Book card: status, progress, treatment counters, and failed tasks.
 
-    `concurrency` и `requests_per_minute` — параллелизм воркера и предел частоты
-    запросов к модели: без них оценка оставшегося времени обработки не знает, сколько
-    вызовов идёт одновременно.
+    `concurrency` and `requests_per_minute` — worker concurrency and rate limits:
+    without them, remaining time estimation cannot determine how many calls run in parallel.
     """
     with unit_of_work.transaction() as transaction:
         book = _book(transaction, book_id)
@@ -319,17 +317,16 @@ def estimate_remaining_seconds(
     parallelism: int = 1,
     requests_per_minute: int | None = None,
 ) -> int | None:
-    """Грубая оценка оставшегося времени этапа в секундах (QA-13).
+    """Coarse estimate of remaining stage duration in seconds (QA-13).
 
-    Медианная длительность вызова модели умножается на число оставшихся вызовов и
-    делится на число одновременно идущих вызовов. Оставшиеся вызовы считаются через
-    блоки: сколько вызовов в среднем пришлось на уже сделанный блок, столько же придётся
-    и на оставшиеся — так учитываются и группы блоков обработки, и фрагменты длинных
-    глав анализа. Предел частоты запросов не даёт параллелизму сократить шаг между
-    вызовами ниже `60 / requests_per_minute`. Медиана, а не среднее: один повтор после
-    долгого таймаута не должен растягивать оценку всей книги.
+    Median duration of model calls is multiplied by remaining calls and divided by
+    effective concurrency. Remaining calls are projected through block counts:
+    call/block ratio observed so far is extrapolated to remaining blocks, accounting for
+    multi-block groups and chapter fragment splits. Rate limits prevent parallelism from
+    compressing call intervals below `60 / requests_per_minute`. Median is used rather than
+    mean so individual timeouts do not skew the entire estimate.
 
-    `None` — мерить ещё нечем: ни одного успешного вызова этапа или ни одного готового блока.
+    Returns `None` if there is insufficient data (no successful calls or zero completed blocks).
     """
     if not durations_ms or completed_blocks <= 0:
         return None
@@ -345,11 +342,11 @@ def estimate_remaining_seconds(
 
 
 def processing_plan(unit_of_work: UnitOfWork, book_id: str) -> ProcessingPlanSummary:
-    """Сводка плана обработки по главам.
+    """Processing plan summary grouped by chapter.
 
-    План — результат анализа, поэтому до анализа его не существует: сводка отвергается,
-    а не отдаётся пустой. Пустая сводка выглядела бы как книга без единого текстового
-    блока (в Web UI это `409`).
+    The plan is produced by analysis and does not exist before it: an unanalyzed book
+    raises an error rather than returning an empty summary, which would look like a book
+    with zero textual blocks (HTTP 409 in Web UI).
     """
     with unit_of_work.transaction() as transaction:
         _book(transaction, book_id)
@@ -375,7 +372,7 @@ def processing_plan(unit_of_work: UnitOfWork, book_id: str) -> ProcessingPlanSum
 
 
 def book_warnings(unit_of_work: UnitOfWork, book_id: str) -> BookWarnings:
-    """Предупреждения импорта и замечания к результатам обработки книги."""
+    """Import warnings and block processing result warnings for a book."""
     with unit_of_work.transaction() as transaction:
         _book(transaction, book_id)
         import_warnings = transaction.documents.import_warnings(book_id)
@@ -388,10 +385,10 @@ def book_warnings(unit_of_work: UnitOfWork, book_id: str) -> BookWarnings:
 
 
 def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
-    """Результат обработки по блокам в постоянном порядке исходного документа.
+    """Processing results by block in stable original document order.
 
-    Документ, план и результаты читаются один раз в одной транзакции: предупреждения
-    книги собираются из тех же данных, а не отдельным вторым чтением.
+    Document, plan, and results are read in a single transaction: book warnings are
+    derived from the same dataset without a secondary query.
     """
     with unit_of_work.transaction() as transaction:
         book = _book(transaction, book_id)
@@ -444,10 +441,10 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
 def result_block(
     unit_of_work: UnitOfWork, book_id: str, block_id: str
 ) -> ResultBlockSummary:
-    """Один блок результата для HTMX-фрагмента или JSON-ответа перегенерации.
+    """A single result block for HTMX fragment polling or JSON regeneration responses.
 
-    Читается только запрошенный блок: фрагмент опрашивается раз в полторы-две секунды
-    до конца перегенерации, и собирать ради него результат всей книги нельзя.
+    Only the requested block is queried: this endpoint is polled every 1.5-2 seconds
+    during block regeneration, so loading whole-book results is inappropriate.
     """
     with unit_of_work.transaction() as transaction:
         _book(transaction, book_id)
@@ -473,7 +470,7 @@ def _warnings_of(
     import_warnings: Sequence[BookImportWarning],
     results: Sequence[BlockProcessingResult],
 ) -> BookWarnings:
-    """Предупреждения книги по уже прочитанным документу и результатам обработки."""
+    """Book warnings computed from already retrieved document and results."""
     sections_by_block = _sections_by_block(document)
     numbers = _chapter_numbers(document)
     return BookWarnings(
@@ -494,7 +491,7 @@ def _warnings_of(
 def _locate_block(
     document: CanonicalDocument | None, block_id: str
 ) -> tuple[int, str, DocumentBlock] | None:
-    """Блок книги вместе с номером и идентификатором его главы."""
+    """Book block along with chapter number and chapter section ID."""
     if document is None:
         return None
     for number, section in enumerate(document.ordered_sections, start=1):
@@ -507,7 +504,7 @@ def _locate_block(
 def _planned_treatment(
     analysis: ChapterAnalysis | None, block_id: str
 ) -> BlockTreatment | None:
-    """Режим обработки блока из плана его главы либо `None`, если плана ещё нет."""
+    """Block treatment mode from chapter plan or `None` if plan not yet ready."""
     if analysis is None:
         return None
     return next(
@@ -527,7 +524,7 @@ def _progress(
     tasks: Sequence[ProcessingTask],
     processed_blocks: int,
 ) -> BookProgress:
-    """Собирает прогресс книги по её плану, задачам и сохранённым результатам."""
+    """Assembles book progress from its plan, tasks, and stored results."""
     sections = document.ordered_sections if document is not None else ()
     numbers = _chapter_numbers(document)
     titles = {section.id: section.title for section in sections}
@@ -556,10 +553,10 @@ def _running_chapters(
     numbers: Mapping[str, int],
     titles: Mapping[str, str],
 ) -> tuple[RunningChapter, ...]:
-    """Все главы, задачи которых выполняются сейчас, в порядке чтения.
+    """All chapters whose tasks are executing right now, in reading order.
 
-    При параллельной обработке (PRD § 25) одновременно идут несколько глав, и показать
-    одну из них значило бы спрятать остальные.
+    With parallel execution (PRD § 25), several chapters run concurrently; showing only one
+    would conceal the others.
     """
     sections = {
         task.scope_id
@@ -584,12 +581,11 @@ def _remaining_time(
     concurrency: int,
     requests_per_minute: int | None,
 ) -> RemainingTime | None:
-    """Оценка оставшегося времени анализа или обработки, пока этап идёт.
+    """Remaining time estimation for analysis or processing while stage is active.
 
-    Этап без задач в очереди и в работе не оценивается: он либо закончен, либо
-    остановлен ошибкой и сам не продвинется. Учитываются только вызовы задач этапа,
-    которые существуют сейчас: возврат к проверке глоссария удаляет задачи отменённого
-    запуска, и его вызовы к оставшейся работе отношения не имеют.
+    Stages with no pending or running tasks are not estimated: they are either complete
+    or paused by error. Only calls from currently existing tasks are counted: returning to
+    glossary review prunes cancelled run tasks, so earlier calls do not skew remaining work.
     """
     if status not in _ESTIMATED_STAGES:
         return None
@@ -629,16 +625,16 @@ def _remaining_time(
 
 
 def _textual_block_count(document: CanonicalDocument | None) -> int:
-    """Сколько в книге блоков, которые уходят в модель."""
+    """Number of blocks in the book passed to the model."""
     if document is None:
         return 0
     return sum(len(textual_blocks(section)) for section in document.ordered_sections)
 
 
 def _failure(task: ProcessingTask) -> TaskFailure:
-    """Неуспешная задача в терминах интерфейса."""
+    """Failed task in UI representation."""
     error = task.last_error
-    if error is None:  # состояние `failed` без ошибки домен не допускает
+    if error is None:  # domain invariant forbids `failed` status without an error
         raise ApplicationError(f"у неуспешной задачи {task.id} нет ошибки")
     return TaskFailure(
         task_id=task.id,
@@ -655,7 +651,7 @@ def _failure(task: ProcessingTask) -> TaskFailure:
 def _chapter_plan(
     *, section: DocumentSection, number: int, analysis: ChapterAnalysis
 ) -> ChapterPlanSummary:
-    """Сводка плана одной главы."""
+    """Plan summary for a single chapter."""
     treatments = {
         item.block_id: item.treatment for item in analysis.treatment_plan.items
     }
@@ -677,10 +673,10 @@ def _chapter_plan(
 def _analysed_sections(
     sections: Sequence[DocumentSection], analyses: Sequence[ChapterAnalysis]
 ) -> tuple[tuple[int, DocumentSection, ChapterAnalysis], ...]:
-    """Проанализированные главы в порядке чтения вместе с их номерами.
+    """Analyzed chapters in reading order with their sequence numbers.
 
-    Анализ без главы в документе пропускается: такого состояния хранилище не создаёт,
-    но сводка не должна падать, если книгу переимпортировали.
+    Analyses without matching document chapters are skipped: storage does not produce this state,
+    but summaries should not crash if a book was re-imported.
     """
     by_section = {analysis.section_id: analysis for analysis in analyses}
     return tuple(
@@ -691,7 +687,7 @@ def _analysed_sections(
 
 
 def _treatment_counts(analysis: ChapterAnalysis) -> Mapping[BlockTreatment, int]:
-    """Сколько блоков главы получило каждый режим обработки (PRD § 10.1)."""
+    """Number of chapter blocks assigned each treatment mode (PRD § 10.1)."""
     counts: dict[BlockTreatment, int] = {}
     for item in analysis.treatment_plan.items:
         counts[item.treatment] = counts.get(item.treatment, 0) + 1
@@ -701,7 +697,7 @@ def _treatment_counts(analysis: ChapterAnalysis) -> Mapping[BlockTreatment, int]
 def _merge_counts(
     counts: Iterable[Mapping[BlockTreatment, int]],
 ) -> Mapping[BlockTreatment, int]:
-    """Складывает счётчики режимов нескольких глав в один."""
+    """Aggregates treatment counters across multiple chapters."""
     total: dict[BlockTreatment, int] = {}
     for chapter_counts in counts:
         for treatment, value in chapter_counts.items():
@@ -710,7 +706,7 @@ def _merge_counts(
 
 
 def _chapter_numbers(document: CanonicalDocument | None) -> Mapping[str, int]:
-    """Номера глав книги в порядке чтения по идентификаторам разделов."""
+    """Chapter numbers in reading order by section ID."""
     if document is None:
         return {}
     return {
@@ -720,7 +716,7 @@ def _chapter_numbers(document: CanonicalDocument | None) -> Mapping[str, int]:
 
 
 def _sections_by_block(document: CanonicalDocument | None) -> Mapping[str, str]:
-    """Глава каждого блока книги."""
+    """Section ID for each block in the book."""
     if document is None:
         return {}
     return {
@@ -731,7 +727,7 @@ def _sections_by_block(document: CanonicalDocument | None) -> Mapping[str, str]:
 
 
 def _book(transaction: UnitOfWork, book_id: str) -> BookRecord:
-    """Запись книги в открытой транзакции."""
+    """Book record within an open transaction."""
     book = transaction.books.get(book_id)
     if book is None:
         raise BookNotFoundError(f"книги {book_id} нет в хранилище")

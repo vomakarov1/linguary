@@ -1,25 +1,24 @@
-"""Глоссарий книги: сборка из кандидатов глав и отбор требующих внимания (PRD § 11-12).
+"""Book glossary: assembly from chapter candidates and selection of items requiring review (PRD § 11-12).
 
-Кандидаты приходят из анализа отдельных глав, поэтому один исходный текст встречается
-в книге столько раз, сколько глав его упомянуло, — с разным типом, уверенностью и
-предложенным переводом. Модуль собирает из этих упоминаний по одному элементу проверки
-на исходный текст, пересчитывает признак `requires_review` доменным правилом (DTO-01)
-и присоединяет к элементу уже принятое пользователем решение.
+Candidates arrive from analyses of individual chapters, so a single source text appears in the book
+as many times as chapters mentioned it — with differing types, confidences, and suggested translations.
+This module aggregates these mentions into one review item per source text, recomputes the `requires_review`
+flag using domain rules (DTO-01), and attaches any user decision already made.
 
-Исходные тексты сравниваются ключом `glossary_key`: очевидные варианты написания
-(`Mr Wonka` и `Mr. Wonka`, `WONKA'S FACTORY` и `Wonka's factory`) — один элемент,
-показанный самым частым написанием, а остальные написания видны в самом элементе.
-Решения ищутся тем же ключом. Если по разным написаниям одного элемента раньше были
-приняты разные решения, они молча не сливаются: действует зафиксированное, а элемент
-помечается конфликтом решений, пока пользователь не примет по нему решение заново.
+Source texts are compared via `glossary_key`: obvious spelling variants (`Mr Wonka` and `Mr. Wonka`,
+`WONKA'S FACTORY` and `Wonka's factory`) form a single item represented by the most frequent spelling,
+with all spellings preserved on the item. Decisions are resolved using the same key. If differing
+decisions were previously recorded for different spellings of the same item, they are not silently
+merged: the active decision takes effect, and the item is marked with a decision conflict until the user
+re-confirms a choice.
 
-Решением пользователя владеет `TermConcept`: понятие существует ровно у тех исходных
-текстов, по которым пользователь высказался. Элемент, требующий внимания и не получивший
-понятия, остаётся необработанным и не даёт запустить обработку (PRD § 12). Элемент,
-внимания не требующий, понятия не заводит и живёт в глоссарии необязательной подсказкой.
+The user decision is owned by `TermConcept`: a concept exists strictly for source texts the user has
+decided on. An item requiring review that lacks a concept remains unprocessed and blocks processing
+(PRD § 12). An item that does not require review does not establish a concept and lives in the glossary
+as an optional hint.
 
-Условия отбора здесь не решаются заново: их держит домен (`compute_requires_review`).
-Модуль отвечает за то, из чего эти условия считаются на уровне книги, и за порядок показа.
+Filtering criteria are not re-decided here: they are owned by the domain (`compute_requires_review`).
+The module is responsible for the inputs to these criteria at the book level and for display ordering.
 """
 
 from __future__ import annotations
@@ -44,9 +43,9 @@ from linguary.domain import (
     translations_conflict,
 )
 
-#: Порядок типов при показе проверки (PRD § 12, § 21.3). Действующие лица идут первыми:
-#: их переводческие решения отражаются на всей книге, и очевидные термины не должны
-#: заслонять решения, ради которых проверка и существует.
+#: Type ordering for review display (PRD § 12, § 21.3). Characters come first:
+#: their translation choices affect the entire book, and obvious terms must not
+#: obscure decisions the review was created for.
 REVIEW_TYPE_ORDER: tuple[ConceptType, ...] = (
     ConceptType.PERSON,
     ConceptType.PLACE,
@@ -57,31 +56,31 @@ REVIEW_TYPE_ORDER: tuple[ConceptType, ...] = (
 
 
 class GlossaryReviewError(ApplicationError):
-    """Глоссарий книги нельзя прочитать или изменить в текущем состоянии."""
+    """Book glossary cannot be read or modified in its current state."""
 
 
 class GlossaryReviewIncompleteError(GlossaryReviewError):
-    """Среди требующих внимания элементов остались необработанные (PRD § 12)."""
+    """Unprocessed items requiring review remain (PRD § 12)."""
 
 
 class GlossaryNotFoundError(GlossaryReviewError):
-    """Книга или элемент её глоссария не найден."""
+    """Book or glossary item was not found."""
 
 
 @dataclass(frozen=True, slots=True)
 class GlossaryReviewItem:
-    """Один исходный текст глоссария книги вместе с решением пользователя.
+    """A single source text in the book glossary alongside the user's decision.
 
-    Поля до `requires_review` описывают то, что о тексте сказали главы; `decision` —
-    то, что о нём сказал пользователь.
+    Fields before `requires_review` describe what chapters reported; `decision`
+    describes what the user chose.
 
-    `suggested_note` — переводческое указание, предложенное главами; решение
-    пользователя несёт своё указание в `decision.note`.
+    `suggested_note` is the translation directive proposed by chapters; the user decision
+    carries its own directive in `decision.note`.
 
-    `spellings` — все написания элемента в книге, первым идёт показанное
-    `source_text`. `superseded_decisions` — прежние решения по другим написаниям того
-    же элемента: действует `decision`, а они удаляются при следующем решении
-    пользователя.
+    `spellings` contains all spellings of the item across the book, with displayed
+    `source_text` first. `superseded_decisions` contains previous decisions for other spellings
+    of the same item: `decision` governs, while superseded decisions are pruned upon the user's
+    next action.
     """
 
     concept_id: str
@@ -100,24 +99,24 @@ class GlossaryReviewItem:
 
     @property
     def model_doubts(self) -> bool:
-        """Модель просила проверить необязательную подсказку."""
+        """Model asked to review an optional hint."""
         return self.model_flagged_review and not self.requires_review
 
     @property
     def other_spellings(self) -> tuple[str, ...]:
-        """Написания элемента, кроме показанного."""
+        """Item spellings other than the displayed primary spelling."""
         return tuple(
             spelling for spelling in self.spellings if spelling != self.source_text
         )
 
     @property
     def concept_type(self) -> ConceptType:
-        """Тип понятия с учётом решения: пользователь вправе исправить тип модели."""
+        """Concept type taking user decision into account: user may override model type."""
         return self.decision.type if self.decision is not None else self.type
 
     @property
     def has_decision_conflict(self) -> bool:
-        """Расходятся ли решения, принятые раньше по разным написаниям элемента."""
+        """Whether prior decisions made on differing spellings of the item conflict."""
         if self.decision is None:
             return False
         chosen = _decision_signature(self.decision)
@@ -127,10 +126,10 @@ class GlossaryReviewItem:
 
     @property
     def note(self) -> str:
-        """Переводческое указание, действующее для этого элемента.
+        """Active translation note for this item.
 
-        Решение пользователя старше предложения глав: пустое указание в решении
-        означает, что указания не нужно, а не что нужно вернуться к предложенному.
+        User decision takes precedence over chapter suggestions: an empty note in the decision
+        means no note is desired, not a fallback to the suggested note.
         """
         if self.decision is not None:
             return self.decision.note
@@ -138,18 +137,18 @@ class GlossaryReviewItem:
 
     @property
     def is_decided(self) -> bool:
-        """Высказался ли пользователь по этому элементу."""
+        """Whether the user has recorded a decision for this item."""
         return self.decision is not None
 
     @property
     def awaits_decision(self) -> bool:
-        """Требует ли элемент решения, которого пользователь ещё не принял."""
+        """Whether the item requires a review decision that has not yet been recorded."""
         return self.requires_review and self.decision is None
 
 
 @dataclass(frozen=True, slots=True)
 class GlossaryReview:
-    """Глоссарий книги в том виде, в каком его проверяет пользователь."""
+    """Book glossary structured for user review."""
 
     book_id: str
     book_status: BookStatus | None = None
@@ -158,34 +157,34 @@ class GlossaryReview:
 
     @property
     def requiring_review(self) -> tuple[GlossaryReviewItem, ...]:
-        """Элементы, по которым пользователь обязан принять решение (PRD § 12)."""
+        """Items on which the user is required to make a decision (PRD § 12)."""
         return tuple(item for item in self.items if item.requires_review)
 
     @property
     def awaiting_decision(self) -> tuple[GlossaryReviewItem, ...]:
-        """Требующие внимания элементы, решения по которым ещё нет."""
+        """Items requiring review that lack a decision."""
         return tuple(item for item in self.items if item.awaits_decision)
 
     @property
     def is_complete(self) -> bool:
-        """Завершена ли проверка глоссария."""
+        """Whether glossary review is complete."""
         return not self.awaiting_decision
 
     def item_for(self, source_text: str) -> GlossaryReviewItem | None:
-        """Элемент проверки по любому его написанию либо `None`, если такого в книге нет."""
+        """Review item for any of its spellings, or `None` if not present in the book."""
         key = glossary_key(source_text)
         return next(
             (item for item in self.items if glossary_key(item.source_text) == key), None
         )
 
     def item_for_concept(self, concept_id: str) -> GlossaryReviewItem | None:
-        """Элемент проверки по внешнему идентификатору понятия."""
+        """Review item by external concept ID."""
         return next(
             (item for item in self.items if item.concept_id == concept_id), None
         )
 
     def ensure_complete(self) -> None:
-        """Проверяет, что необработанных требующих внимания элементов не осталось."""
+        """Verifies that no unprocessed items requiring review remain."""
         pending = self.awaiting_decision
         if pending:
             raise GlossaryReviewIncompleteError(
@@ -205,10 +204,10 @@ def build_glossary_review(
     min_mentions: int = 5,
     min_chapters: int = 3,
 ) -> GlossaryReview:
-    """Собирает глоссарий книги из кандидатов всех проанализированных глав (PRD § 11-12).
+    """Assembles book glossary from candidates across all analyzed chapters (PRD § 11-12).
 
-    Решение, исходного текста которого больше нет ни в одной главе, в проверку не входит:
-    глоссарий книги — это то, что нашли в её тексте, а не архив прежних решений.
+    A decision whose source text no longer appears in any chapter is excluded: the book
+    glossary reflects what was found in its text, not an archive of stale decisions.
     """
     grouped: dict[str, list[GlossaryCandidate]] = {}
     for analysis in analyses:
@@ -232,12 +231,12 @@ def build_glossary_review(
 
 
 def glossary_snapshot(review: GlossaryReview, *, language: str) -> GlossarySnapshot:
-    """Снимок глоссария, с которым выполняется запуск обработки (PRD § 11, § 13).
+    """Glossary snapshot used for executing a processing run (PRD § 11, § 13).
 
-    Решение уходит модели своим статусом: решение пользователя — `approved` (принято
-    или исправлено) и `locked` — обязательным переводческим указанием, пропущенный
-    элемент (`suggested`) — необязательной подсказкой. Элемент без решения попадает
-    в снимок подсказкой с вариантом модели: внимания он не требовал.
+    Decisions are conveyed to the model by status: user decisions as `approved` (accepted
+    or edited) and `locked` — mandatory translation directives; skipped items (`suggested`) —
+    optional hints. Items without a decision enter the snapshot as hints with the model's
+    suggested translation: they did not require review.
     """
     return GlossarySnapshot(
         entries=tuple(
@@ -255,24 +254,23 @@ def candidates_with_decisions(
     language: str,
     decided_only: Iterable[GlossaryCandidate] = (),
 ) -> tuple[GlossaryCandidate, ...]:
-    """Кандидаты предыдущих глав, в которых решение пользователя заменило вариант модели.
+    """Candidates from prior chapters where user decisions override model suggestions.
 
-    Анализ следующей главы повторяет накопленные решения книги дословно, поэтому
-    ему нужен вариант пользователя: иначе глава получает и повторяет в своих указаниях
-    вариант модели, который пользователь уже исправил (PRD § 11). Решение сопоставляется
-    с кандидатом ключом `glossary_key` и заменяет вариант перевода, тип и указание;
-    пропущенный элемент решением не считается, и у него остаётся вариант модели.
-    Кандидаты с решением идут первыми: ограничение контекста их не отрезает.
+    Subsequent chapter analysis repeats accumulated book decisions verbatim, so user
+    choices are required: otherwise the chapter receives and repeats model suggestions
+    the user already corrected (PRD § 11). Decisions match candidates by `glossary_key`
+    and override translation, type, and note; skipped items are not user decisions and retain
+    model suggestions. Decided candidates come first so context limits do not prune them.
 
-    `decided_only` — кандидаты, которые нужны только вместе с решением пользователя:
-    при повторном анализе это кандидаты самой главы и следующих глав. Решение
-    пользователя действует на всю книгу, а вариант модели из следующей главы этой
-    главе ничего не даёт, поэтому кандидат без решения отсюда не попадает.
+    `decided_only` denotes candidates included only if accompanied by a user decision:
+    during re-analysis, these are candidates from the current and subsequent chapters. User
+    decisions govern the whole book, whereas subsequent chapter model suggestions offer
+    nothing to the current chapter.
 
-    Указание каждого кандидата очищается от фрагментов, называющих вариант модели,
-    который пользователь отверг по другому понятию: «пост при въезде в Даскмир» при
-    решении «Даскмер». Отвергнутые варианты известны из всех переданных кандидатов
-    книги — тем же правилом, что и в контексте обработки (`note_respecting_glossary`).
+    Each candidate's note is sanitized of phrases mentioning model suggestions rejected
+    by the user on other concepts: 'post at the entrance to Duskmere' when 'Duskmere' was
+    chosen over 'Duskmeer'. Rejected suggestions are detected across all provided book
+    candidates — identical to the processing context rule (`note_respecting_glossary`).
     """
     decided: dict[str, list[TermConcept]] = {}
     for concept in decisions:
@@ -334,12 +332,12 @@ def _review_item(
     min_mentions: int,
     min_chapters: int,
 ) -> GlossaryReviewItem:
-    """Элемент проверки из упоминаний одного исходного текста в разных главах.
+    """Review item constructed from mentions of a source text across chapters.
 
-    Вариант перевода берётся у самой уверенной главы, а сигналы проверки объединяются:
-    пометка модели хотя бы от одной главы, тип и расхождение вариантов перевода
-    учитываются вместе с частотой упоминаний. Здесь объединяются сохранённые
-    кандидаты разных глав.
+    The suggested translation is taken from the highest-confidence chapter, and review
+    signals are aggregated: model flag from any chapter, type, and translation conflicts
+    are evaluated alongside mention frequency. Stored candidates from multiple chapters
+    are unified here.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
     spellings = spellings_by_preference(
@@ -396,9 +394,8 @@ def _review_item(
     )
 
 
-#: Порядок, в котором выбирается действующее решение среди решений по разным
-#: написаниям одного элемента: зафиксированное пользователем сильнее принятого,
-#: принятое — пропущенного.
+#: Priority order for resolving active decisions among multiple spellings of an item:
+#: locked > approved > suggested.
 _DECISION_PRIORITY: dict[TermStatus, int] = {
     TermStatus.LOCKED: 0,
     TermStatus.APPROVED: 1,
@@ -409,13 +406,13 @@ _DECISION_PRIORITY: dict[TermStatus, int] = {
 def _chosen_decision(
     decisions: Sequence[TermConcept], *, shown: str
 ) -> tuple[TermConcept | None, tuple[TermConcept, ...]]:
-    """Действующее решение элемента и прежние решения по другим его написаниям.
+    """Active item decision and superseded decisions from other spellings.
 
-    Решение по каждому элементу одно; несколько решений у одного ключа остаются
-    от глоссария, в котором написания ещё не объединялись. Времени принятия решение
-    не хранит, поэтому «последнее» определить нельзя: побеждает самый сильный статус,
-    затем решение по показанному написанию, затем первое сохранённое. Расхождение
-    с остальными решениями не прячется — его показывает `has_decision_conflict`.
+    Each item has a single decision; multiple decisions per key linger from older
+    glossaries before spellings were unified. Decisions do not record timestamps,
+    so 'latest' cannot be determined: strongest status wins, then matching the displayed
+    spelling, then first stored. Divergence from other decisions is exposed
+    via `has_decision_conflict`.
     """
     if not decisions:
         return None, ()
@@ -432,7 +429,7 @@ def _chosen_decision(
 
 
 def _decision_signature(concept: TermConcept) -> tuple[object, ...]:
-    """То, чем решения различаются для пользователя: статус, тип, указание, перевод."""
+    """Attributes distinguishing decisions for the user: status, type, note, translation."""
     return (
         concept.status,
         concept.type,
@@ -447,10 +444,10 @@ def _decision_signature(concept: TermConcept) -> tuple[object, ...]:
 
 
 def _display_order(item: GlossaryReviewItem) -> tuple[bool, bool, bool, int, str]:
-    """Порядок показа проверки (PRD § 12).
+    """Review display order (PRD § 12).
 
-    Сначала то, что ждёт решения, затем остальные требующие внимания элементы, затем
-    необязательные подсказки; внутри группы — по типу понятия и исходному тексту.
+    Items awaiting decision come first, then remaining items requiring review, then
+    optional hints; grouped internally by concept type and source text.
     """
     return (
         not item.awaits_decision,
@@ -464,7 +461,7 @@ def _display_order(item: GlossaryReviewItem) -> tuple[bool, bool, bool, int, str
 def _snapshot_entry(
     item: GlossaryReviewItem, *, language: str
 ) -> GlossarySnapshotEntry | None:
-    """Запись снимка для одного элемента либо `None`, если навязывать модели нечего."""
+    """Snapshot entry for a single item, or `None` if there is nothing to enforce on the model."""
     if item.decision is None:
         return GlossarySnapshotEntry(
             source_text=item.source_text,

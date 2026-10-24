@@ -1,20 +1,20 @@
-"""Проверка глоссария пользователем и старт обработки книги (PRD § 11-12, § 21.3).
+"""User glossary review and book processing start (PRD § 11-12, § 21.3).
 
-`ApproveGlossary` показывает глоссарий книги и ведёт четыре действия пользователя по
-элементу: принять предложенный вариант, исправить его, зафиксировать как обязательный
-и пропустить элемент как неважный для единообразия перевода. Каждое действие сохраняет
-`TermConcept` — принятое решение; различаются они статусом понятия и его варианта.
-Пока глоссарий редактируется, решение можно принять заново — и по элементу, который
-уже решён, и по подсказке, внимания не требовавшей (PRD § 11, § 21.3).
+`ApproveGlossary` displays the book glossary and manages four user actions per
+item: accept suggested translation, correct it, lock as mandatory,
+and skip the item as not requiring translation consistency. Each action persists
+a `TermConcept` — the accepted decision; they differ in concept status and variant status.
+While the glossary is being edited, decisions can be re-applied — both to items
+already decided and to suggestions that did not require attention (PRD § 11, § 21.3).
 
-`StartProcessing` завершает проверку: он отказывает, пока среди требующих внимания
-остались необработанные элементы (PRD § 12), а иначе замораживает решения снимком
-в `ProcessingRun`. С этого момента глоссарий книги доступен только для чтения — вернуть
-его в работу можно лишь возвратом к проверке глоссария (P3.T7), который удаляет
-результаты обработки.
+`StartProcessing` completes the review: it rejects if unresolved items requiring attention
+remain (PRD § 12), and otherwise freezes decisions into a snapshot
+in `ProcessingRun`. From that point on, the book glossary is read-only — returning
+it to editable status is only possible by rewinding to glossary review (P3.T7), which deletes
+processing results.
 
-Сама обработка блоков в этот сценарий не входит: здесь открывается запуск с его снимками,
-а `TranslationUnit` обрабатывает P3.T6.
+Block processing itself is outside this use case: this opens the run with its snapshots,
+while `TranslationUnit` processes in P3.T6.
 """
 
 from __future__ import annotations
@@ -47,17 +47,17 @@ from linguary.domain import (
     apply_book_event,
 )
 
-#: Фабрика идентификаторов сохраняемых записей глоссария и запусков обработки.
+#: Factory for IDs of persisted glossary records and processing runs.
 type IdFactory = Callable[[], str]
 
-#: Состояния книги, в которых решения глоссария ещё редактируются (PRD § 11).
+#: Book statuses where glossary decisions remain editable (PRD § 11).
 EDITABLE_STATUSES: frozenset[BookStatus] = frozenset(
     {BookStatus.GLOSSARY_REVIEW, BookStatus.READY_TO_PROCESS}
 )
 
 
 class GlossaryDecision(StrEnum):
-    """Действие пользователя по элементу глоссария (PRD § 12)."""
+    """User action for a glossary item (PRD § 12)."""
 
     ACCEPT = "accept"
     CORRECT = "correct"
@@ -65,9 +65,9 @@ class GlossaryDecision(StrEnum):
     SKIP = "skip"
 
 
-#: Статус понятия и его варианта после каждого действия. `skip` оставляет элемент
-#: необязательной подсказкой: пользователь решил, что единообразия он не требует,
-#: и найденный моделью вариант остаётся в глоссарии без обязательной силы (PRD § 12).
+#: Status of the concept and its variant after each action. `skip` leaves the item
+#: as an optional hint: user decided consistency is not required,
+#: and the model-suggested variant remains in the glossary without binding force (PRD § 12).
 DECISION_STATUSES: dict[GlossaryDecision, TermStatus] = {
     GlossaryDecision.ACCEPT: TermStatus.APPROVED,
     GlossaryDecision.CORRECT: TermStatus.APPROVED,
@@ -78,22 +78,22 @@ DECISION_STATUSES: dict[GlossaryDecision, TermStatus] = {
 
 @dataclass(frozen=True, slots=True)
 class GlossaryDecisionCommand:
-    """Решение пользователя по одному элементу глоссария книги.
+    """User decision for a single book glossary item.
 
-    `translation` несёт только исправление: остальные действия работают с уже известным
-    вариантом — предложенным моделью или сохранённым прежним решением. `concept_id`
-    связывает HTTP-команду с показанным элементом и сохраняет его идентификатор при
-    первом решении; прямые вызовы сценария могут по-прежнему работать по исходному тексту.
+    `translation` is only used for corrections: other actions work with an already known
+    variant — suggested by the model or preserved from a previous decision. `concept_id`
+    links the HTTP command to the displayed item and preserves its ID upon the first decision;
+    direct use case invocations can continue working by source text.
 
-    `note` — переводческое указание по элементу. `None` означает «оставить действующее»,
-    а переданная строка заменяет его целиком, в том числе пустая: снять указание
-    пользователь вправе так же, как и задать (PRD § 11). Исключение — пропуск элемента
-    без решения: указание, предложенное моделью, пользователь не подтверждал, и
-    пропуск его не сохраняет.
+    `note` is a translation guideline for the item. `None` means "leave existing unchanged",
+    and a provided string replaces it completely, including an empty string: the user can
+    clear a guideline just as they can set one (PRD § 11). The exception is skipping an item
+    without an existing decision: the model-suggested guideline was not confirmed by the user,
+    and skipping does not save it.
 
-    `type` — тип понятия, исправленный пользователем. Как и `translation`, он
-    принимается только исправлением: ошибку модели в типе («десерт — персонаж»)
-    пользователь исправляет тем же действием, что и вариант перевода.
+    `type` is the concept type corrected by the user. Like `translation`, it is only
+    accepted during correction: a model classification mistake ("dessert — character")
+    is corrected in the same action as the translation variant.
     """
 
     book_id: str
@@ -107,7 +107,7 @@ class GlossaryDecisionCommand:
 
 @dataclass(frozen=True, slots=True)
 class GlossaryNoteCommand:
-    """Правка переводческого указания по одному элементу глоссария (PRD § 11)."""
+    """Editing translation note for a single glossary item (PRD § 11)."""
 
     book_id: str
     concept_id: str
@@ -116,13 +116,13 @@ class GlossaryNoteCommand:
 
 @dataclass(frozen=True, slots=True)
 class StartProcessingCommand:
-    """Команда старта обработки книги."""
+    """Command to start processing a book."""
 
     book_id: str
 
 
 class ApproveGlossary:
-    """Показывает глоссарий книги и сохраняет решения пользователя (PRD § 12)."""
+    """Presents book glossary and saves user decisions (PRD § 12)."""
 
     def __init__(
         self,
@@ -140,7 +140,7 @@ class ApproveGlossary:
         self._id_factory = id_factory or _new_id
 
     def review(self, book_id: str) -> GlossaryReview:
-        """Глоссарий книги вместе с уже принятыми решениями."""
+        """Book glossary along with already accepted decisions."""
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, book_id)
             return replace(
@@ -156,7 +156,7 @@ class ApproveGlossary:
             )
 
     def __call__(self, command: GlossaryDecisionCommand) -> TermConcept:
-        """Сохраняет решение пользователя по одному элементу глоссария."""
+        """Saves user decision for a single glossary item."""
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, command.book_id)
             _ensure_editable(book)
@@ -194,10 +194,10 @@ class ApproveGlossary:
         return concept
 
     def accept_all_awaiting(self, book_id: str) -> tuple[TermConcept, ...]:
-        """Принимает предложенный вариант по всем элементам, ждущим решения (PRD § 12).
+        """Accepts suggested translations for all items awaiting decision (PRD § 12).
 
-        Массовое действие идёт одной транзакцией и по одному собранному глоссарию:
-        поэлементный вызов пересобирал бы глоссарий всей книги на каждый элемент.
+        Batch action runs in a single transaction and over a single assembled glossary:
+        per-item invocation would reassemble the whole book glossary for each item.
         """
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, book_id)
@@ -234,12 +234,12 @@ class ApproveGlossary:
         return concepts
 
     def set_note(self, command: GlossaryNoteCommand) -> TermConcept:
-        """Меняет переводческое указание по элементу, не трогая само решение.
+        """Updates translation note for an item without modifying the decision itself.
 
-        Указание правится отдельно от решения, потому что живёт дольше него: род
-        персонажа виден только после нескольких глав, а перевод имени к этому моменту
-        уже принят. Через обычное решение это не сделать — повторное `accept` вернуло бы
-        вариант, предложенный моделью, и стёрло исправление пользователя.
+        Notes are edited separately from decisions because they outlive them: a character's
+        gender may become apparent only after several chapters, while their name's translation
+        has already been approved. This cannot be done via normal decision — re-applying `accept`
+        would revert to model-suggested variant and overwrite user correction.
         """
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, command.book_id)
@@ -264,11 +264,10 @@ class ApproveGlossary:
     def _with_note(
         self, item: GlossaryReviewItem, note: str, *, book: BookRecord
     ) -> TermConcept:
-        """Понятие глоссария с новым указанием.
+        """Glossary concept with new note.
 
-        Решения по элементу может ещё не быть: указание к предложенному моделью
-        варианту — это уже решение пользователя, поэтому элемент становится принятым
-        с тем же вариантом, который был предложен.
+        There may not yet be an explicit decision for the item: adding a note to a model-suggested
+        variant constitutes a user decision, so the item becomes approved with the suggested variant.
         """
         if item.decision is not None:
             return replace(item.decision, note=note)
@@ -291,7 +290,7 @@ class ApproveGlossary:
         )
 
     def complete_if_ready(self, book_id: str) -> None:
-        """Завершает проверку глоссария, если обязательных решений больше нет."""
+        """Completes glossary review if no mandatory decisions remain."""
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, book_id)
             _ensure_editable(book)
@@ -310,11 +309,11 @@ class ApproveGlossary:
         *,
         book: BookRecord,
     ) -> TermConcept:
-        """Понятие глоссария, каким его делает решение пользователя.
+        """Glossary concept resulting from user decision.
 
-        Повторное решение по тому же элементу переписывает прежнее понятие целиком:
-        идентификатор сохраняется, статус и вариант перевода заменяются. Тип понятия
-        меняет только исправление; остальные решения сохраняют тип прежнего решения.
+        A repeated decision on the same item rewrites the concept completely:
+        concept ID is preserved, while status and translation variant are replaced.
+        Concept type is only changed by correction; other decisions preserve previous type.
         """
         status = DECISION_STATUSES[command.decision]
         concept_id = item.decision.id if item.decision is not None else (
@@ -339,7 +338,7 @@ class ApproveGlossary:
 
 
 class StartProcessing:
-    """Замораживает решения глоссария и открывает запуск обработки книги (PRD § 11-12)."""
+    """Freezes glossary decisions and initiates book processing run (PRD § 11-12)."""
 
     def __init__(
         self,
@@ -359,11 +358,11 @@ class StartProcessing:
         self._id_factory = id_factory or _new_id
 
     def __call__(self, command: StartProcessingCommand) -> ProcessingRun:
-        """Создаёт активный запуск обработки со снимками глоссария и настроек LLM.
+        """Creates an active processing run with snapshots of glossary and LLM settings.
 
-        Отказ приходит из трёх мест: непринятые решения по требующим внимания элементам
-        (PRD § 12), уже идущий запуск книги (ADR § 3) и состояние книги, из которого
-        обработка не запускается (ALG-06).
+        Rejection can originate from three places: unhandled items requiring attention
+        (PRD § 12), an already active run for the book (ADR § 3), and book states from which
+        processing cannot be launched (ALG-06).
         """
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, command.book_id)
@@ -396,7 +395,7 @@ def _load_review(
     transaction: UnitOfWork, book_id: str, *, confidence_threshold: float,
     min_mentions: int = 5, min_chapters: int = 3,
 ) -> GlossaryReview:
-    """Глоссарий книги, собранный в открытой транзакции."""
+    """Book glossary assembled in open transaction."""
     return build_glossary_review(
         book_id=book_id,
         analyses=transaction.analyses.list_for_book(book_id),
@@ -409,7 +408,7 @@ def _load_review(
 
 
 def _book(transaction: UnitOfWork, book_id: str) -> BookRecord:
-    """Запись книги в открытой транзакции."""
+    """Book record in open transaction."""
     book = transaction.books.get(book_id)
     if book is None:
         raise GlossaryNotFoundError(f"книги {book_id} нет в хранилище")
@@ -424,7 +423,7 @@ def _complete_review_if_ready(
     min_mentions: int = 5,
     min_chapters: int = 3,
 ) -> None:
-    """Переводит книгу к запуску обработки после закрытия всех обязательных решений."""
+    """Transitions book to ready to process after closing all mandatory decisions."""
     if book.status is not BookStatus.GLOSSARY_REVIEW:
         return
     review = _load_review(
@@ -446,11 +445,11 @@ def _complete_review_if_ready(
 
 
 def _ensure_editable(book: BookRecord) -> None:
-    """Проверяет, что глоссарий книги ещё редактируется (PRD § 11, § 21.3).
+    """Checks that the book glossary is still editable (PRD § 11, § 21.3).
 
-    После старта обработки решения заморожены снимком запуска, и экран проверки доступен
-    только для чтения: вернуть глоссарий в работу можно возвратом к проверке глоссария,
-    который удаляет результаты обработки.
+    After processing starts, decisions are frozen in the run snapshot, and the review screen
+    is read-only: returning glossary to editable state requires rewinding to glossary review,
+    which deletes processing results.
     """
     if book.status not in EDITABLE_STATUSES:
         raise GlossaryReviewError(
@@ -460,10 +459,10 @@ def _ensure_editable(book: BookRecord) -> None:
 
 
 def _drop_superseded(transaction: UnitOfWork, item: GlossaryReviewItem) -> None:
-    """Удаляет прежние решения по другим написаниям элемента после нового решения.
+    """Removes previous decisions for other spellings of the item after a new decision.
 
-    Пока пользователь не высказался заново, расходящиеся решения видны конфликтом;
-    новое решение принято по элементу целиком, и прежние больше не действуют.
+    Until user makes a new decision, diverging decisions are shown as conflicts;
+    the new decision applies to the whole item, and previous decisions no longer apply.
     """
     for concept in item.superseded_decisions:
         transaction.glossary.delete(concept.id)
@@ -472,7 +471,7 @@ def _drop_superseded(transaction: UnitOfWork, item: GlossaryReviewItem) -> None:
 def _concept_type(
     item: GlossaryReviewItem, command: GlossaryDecisionCommand
 ) -> ConceptType:
-    """Тип понятия после решения: исправленный пользователем или прежний."""
+    """Concept type after decision: user corrected or previous."""
     if command.type is not None and command.decision is not GlossaryDecision.CORRECT:
         raise GlossaryReviewError(
             f"действие {command.decision} по элементу {item.source_text!r} типа понятия "
@@ -482,13 +481,13 @@ def _concept_type(
 
 
 def _decision_note(item: GlossaryReviewItem, command: GlossaryDecisionCommand) -> str:
-    """Переводческое указание после решения пользователя.
+    """Translation note after user decision.
 
-    Переданное указание заменяет действующее. Без него решение сохраняет указание
-    прежнего решения, а первое решение — указание, предложенное главами: принять
-    элемент вместе с показанным указанием значит согласиться и с ним. Пропуск
-    элемента без решения предложенное указание не сохраняет: пользователь его не
-    подтверждал, и в обработку оно уйти не должно.
+    An explicitly provided note replaces the current one. Without one, the decision preserves
+    the previous decision's note, or for the first decision — the note suggested by chapters:
+    approving an item with a shown note implies agreeing with it. Skipping an item
+    without a decision does not preserve the suggested note: user did not confirm it,
+    and it should not pass to processing.
     """
     if command.note is not None:
         return command.note.strip()
@@ -502,11 +501,11 @@ def _decision_note(item: GlossaryReviewItem, command: GlossaryDecisionCommand) -
 def _translation(
     item: GlossaryReviewItem, command: GlossaryDecisionCommand, *, language: str
 ) -> str:
-    """Текст варианта перевода после решения пользователя.
+    """Translation variant text after user decision.
 
-    `correct` берёт присланный текст, `accept` — предложенный моделью, а `lock` и `skip`
-    сохраняют текст прежнего решения, если оно было: фиксация и пропуск меняют статус
-    элемента, а не его перевод.
+    `correct` uses submitted text, `accept` uses model suggestion, and `lock` and `skip`
+    preserve text of previous decision if one existed: lock and skip change the item's
+    status rather than its translation.
     """
     corrected = (command.translation or "").strip()
     if command.decision is GlossaryDecision.CORRECT:
@@ -527,11 +526,11 @@ def _translation(
 
 
 def _status_after_start(status: BookStatus) -> BookStatus:
-    """Состояние книги после старта обработки (ALG-06).
+    """Book status after starting processing (ALG-06).
 
-    Завершение проверки глоссария и старт запуска — две строки таблицы переходов, а для
-    пользователя это одно действие. Книга, из состояния которой обработка не запускается,
-    получает отказ домена (в Web UI — 409).
+    Completing glossary review and starting the run are two transition table rows,
+    but a single user action. A book in a state where processing cannot start
+    is rejected by the domain (409 in Web UI).
     """
     if status is BookStatus.GLOSSARY_REVIEW:
         status = apply_book_event(status, BookEvent.GLOSSARY_REVIEW_COMPLETED)
@@ -539,7 +538,7 @@ def _status_after_start(status: BookStatus) -> BookStatus:
 
 
 def _new_id() -> str:
-    """Идентификатор нового понятия глоссария или запуска обработки."""
+    """ID for new glossary concept or processing run."""
     return str(uuid4())
 
 

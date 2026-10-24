@@ -1,21 +1,21 @@
-"""Порт внешней проверки экспортированного EPUB (PRD § 20).
+"""Port for external validation of exported EPUB (PRD § 20).
 
-Собственные технические проверки экспортёра выполняются всегда и внешних инструментов
-не требуют. Этот порт описывает дополнительную проверку сторонним валидатором — в MVP
-это EPUBCheck, которому нужна установленная Java, поэтому на машине пользователя его
-может не быть вовсе.
+The exporter's own technical checks are always executed and require no external tools.
+This port describes optional validation by a third-party validator — in MVP this is
+EPUBCheck, which requires an installed Java runtime, so on a user's machine it might
+not be available at all.
 
-Адаптер сообщает только факты: доступен ли валидатор, какие замечания он нашёл и куда
-сохранён его отчёт. Решение по этим фактам принимает прикладной сценарий экспорта:
+The adapter reports only facts: whether the validator is available, what issues it found,
+and where its report is saved. Decisions based on these facts are made by the export use case:
 
-- валидатор недоступен — экспорт успешен, книга помечается как непроверенная;
-- найдены ошибки — экспортная задача неуспешна;
-- предупреждения не блокируют экспорт, но в строгом режиме приравниваются к ошибкам;
-- техническая ошибка запуска доступного валидатора — `ExportValidationError`, и экспортная
-  задача тоже неуспешна.
+- validator unavailable — export succeeds, the book is marked as unvalidated;
+- errors found — export task fails;
+- warnings do not block export, but in strict mode they are treated as errors;
+- technical failure when launching an available validator — `ExportValidationError`,
+  and the export task fails as well.
 
-Разделение сделано ради адаптера: чтобы подключить EPUBCheck, прикладной слой менять
-не нужно, а вся политика остаётся в одном месте — в сценарии экспорта.
+The separation exists for the adapter: connecting EPUBCheck requires no application layer
+changes, while policy remains consolidated in one place — the export use case.
 """
 
 from __future__ import annotations
@@ -28,15 +28,15 @@ from linguary.application.errors import ApplicationError
 
 
 class ExportValidationError(ApplicationError):
-    """Доступный валидатор не смог выполнить проверку.
+    """An available validator failed to execute the check.
 
-    Это техническая ошибка запуска, а не отрицательный результат проверки: пользователю
-    показывается деталь и действие для повтора.
+    This is a technical launch error, not a negative validation result: details and a retry
+    action are displayed to the user.
     """
 
 
 class ExportIssueSeverity(StrEnum):
-    """Значимость замечания внешнего валидатора."""
+    """Severity of an issue reported by the external validator."""
 
     ERROR = "error"
     WARNING = "warning"
@@ -44,7 +44,7 @@ class ExportIssueSeverity(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ExportValidationIssue:
-    """Одно замечание отчёта: значимость, текст и место в книге."""
+    """A single report issue: severity, message, and location in the book."""
 
     severity: ExportIssueSeverity
     message: str
@@ -57,11 +57,11 @@ class ExportValidationIssue:
 
 @dataclass(frozen=True, slots=True)
 class ExportValidationRequest:
-    """Запрос на внешнюю проверку собранного файла.
+    """Request for external validation of an assembled file.
 
-    `report_path` — куда положить отчёт валидатора; он сохраняется рядом с экспортным
-    артефактом (PRD § 20). `strict` передаётся адаптеру, чтобы тот мог включить строгий
-    режим самого инструмента; итоговое решение всё равно принимает сценарий экспорта.
+    `report_path` — destination for the validator report; it is stored alongside the export
+    artifact (PRD § 20). `strict` is passed to the adapter so it can enable the tool's strict
+    mode; the final decision is still made by the export use case.
     """
 
     epub_path: str
@@ -75,11 +75,11 @@ class ExportValidationRequest:
 
 @dataclass(frozen=True, slots=True)
 class ExportValidationReport:
-    """Результат внешней проверки.
+    """Result of external validation.
 
-    Недоступный валидатор — обычный, ожидаемый исход: `available` равен `False`, замечаний
-    нет, а причина недоступности лежит в `unavailable_reason` и показывается пользователю
-    вместе с подсказкой, как включить проверку.
+    An unavailable validator is a normal, expected outcome: `available` is `False`,
+    there are no issues, and the reason for unavailability is stored in `unavailable_reason`
+    and displayed to the user alongside instructions on how to enable validation.
     """
 
     available: bool
@@ -95,12 +95,12 @@ class ExportValidationReport:
 
     @property
     def errors(self) -> tuple[ExportValidationIssue, ...]:
-        """Замечания, которые делают проверку неуспешной."""
+        """Issues that cause validation to fail."""
         return self._with_severity(ExportIssueSeverity.ERROR)
 
     @property
     def warnings(self) -> tuple[ExportValidationIssue, ...]:
-        """Замечания, которые сами по себе экспорт не блокируют."""
+        """Issues that do not block export by themselves."""
         return self._with_severity(ExportIssueSeverity.WARNING)
 
     def _with_severity(
@@ -110,14 +110,14 @@ class ExportValidationReport:
 
 
 class ExportValidator(Protocol):
-    """Внешняя проверка экспортированного EPUB."""
+    """External validation of exported EPUB."""
 
     def validate(self, request: ExportValidationRequest) -> ExportValidationReport:
-        """Проверяет собранный файл и отдаёт отчёт.
+        """Validates the assembled file and returns a report.
 
-        Недоступность инструмента — не ошибка: реализация возвращает отчёт с
-        `available = False`. `ExportValidationError` поднимается только тогда, когда
-        инструмент есть, но проверку выполнить не удалось.
+        Unavailability of the tool is not an error: the implementation returns a report with
+        `available = False`. `ExportValidationError` is raised only when the tool exists,
+        but the check failed to run.
         """
 
 

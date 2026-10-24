@@ -1,4 +1,4 @@
-"""Нормализация ложных признаков обрыва на конце перевода."""
+"""Normalization of false truncation signals at the end of a translation."""
 
 import re
 
@@ -8,7 +8,7 @@ _EXTRA_DOTS = re.compile(r"\.{4,}\s*$")
 
 
 def normalized_tail(text: str) -> str:
-    """Убирает завершающее тире после двоеточия и заменяет четыре точки многоточием."""
+    """Removes trailing dash after a colon and collapses four or more dots into an ellipsis."""
     text = _COLON_DASH.sub(":", text)
     return _EXTRA_DOTS.sub("…", text)
 

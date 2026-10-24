@@ -1,10 +1,11 @@
-"""Проверка состава ответа обработки: блоки группы, их порядок и чужие блоки (ALG-04).
+"""Processing response coverage validation: unit blocks, ordering, and foreign blocks (ALG-04).
 
-Проверка работает над DTO ответа, а не над доменными результатами: доменный
-`TranslationUnit.validate_results` те же правила знает, но применить их можно только к уже
-собранным `BlockProcessingResult`, а собрать результат для неизвестного блока нечем —
-режим для него взять неоткуда. Поэтому состав ответа проверяется здесь, до сборки, и здесь
-же формулируется причина, которая уйдёт модели уточняющей инструкцией повтора.
+The validator operates on the response DTO rather than domain results: domain
+`TranslationUnit.validate_results` knows the same rules, but can only be applied to
+already assembled `BlockProcessingResult` objects, and assembling a result for an unknown
+block is impossible — its treatment mode cannot be determined. Therefore response coverage
+is checked here prior to assembly, and the clarification instruction sent to the model on retry
+is formulated here as well.
 """
 
 from __future__ import annotations
@@ -16,10 +17,10 @@ from linguary.domain import TranslationUnit
 def coverage_violation(
     payload: TranslationResultResponse, *, unit: TranslationUnit
 ) -> str | None:
-    """Описание нарушения состава ответа либо `None`, если состав верен.
+    """Violation description of response coverage, or `None` if coverage is valid.
 
-    Языковые заметки проверяются вместе с блоками: заметка о блоке вне группы — тот же
-    неизвестный идентификатор, только в другом поле ответа (PRD § 19.3).
+    Language notes are verified alongside blocks: a note referencing a block outside
+    the group is the same unknown identifier, just in a different response field (PRD § 19.3).
     """
     expected = unit.block_ids
     returned = payload.block_ids

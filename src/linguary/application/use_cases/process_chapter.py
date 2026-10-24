@@ -1,27 +1,26 @@
-"""Сценарий обработки главы и последовательность задач обработки (ALG-04, PRD § 14-17).
+"""Chapter processing use case and processing task sequence (ALG-04, PRD § 14-17).
 
-`ProcessChapter` делит главу на группы блоков (`translation_units`), обрабатывает каждую
-группу отдельным вызовом модели и сохраняет её результат атомарно. Единица вычисления —
-группа, единица хранения — блок: проверки отбраковывают всю группу целиком, поэтому
-частично сохранённой группы не существует (PRD § 17).
+`ProcessChapter` splits a chapter into groups of blocks (`translation_units`), processes each
+group with a separate model call, and saves its result atomically. The compute unit is
+the group; the storage unit is the block: validators reject the entire group, so a partially
+saved group does not exist (PRD § 17).
 
-Порядок одной группы задан ALG-04: собрать контекст, вызвать модель, вернуть ответ
-с псевдонимов на идентификаторы блоков, прогнать блокирующие проверки и предупреждения
-(`validators`), затем в короткой транзакции убедиться, что запуск книги всё ещё активен
-и это тот же запуск, и заменить результаты блоков группы. Проверка запуска в транзакции
-и отбрасывает поздний результат: пользователь мог вернуться к проверке глоссария, пока
-вызов модели был в пути (P3.T7).
+The ordering for a single group is defined by ALG-04: assemble context, invoke the model,
+map block labels back to block IDs, run blocking validators and warnings (`validators`),
+then in a short transaction verify that the book's run is still active and is the same run,
+and replace block results for the group. Verifying the run inside the transaction discards
+stale results: the user may have returned to glossary review while the model call was in flight (P3.T7).
 
-Задача очереди — глава целиком, а не отдельная группа: `TranslationUnit` не хранится,
-её идентификатор живёт один вызов, и идемпотентный ключ задачи по нему не построить.
-Повтор задачи главы безопасен: уже сохранённые группы пропускаются, а сохранение
-оставшихся заменяет прежние результаты тех же блоков (PRD § 18.1).
+The queue task is the entire chapter rather than a single group: `TranslationUnit` is not
+persisted, its ID lives for one call, and an idempotent task key cannot be built from it.
+Retrying a chapter task is safe: already stored groups are skipped, and storing the remaining
+groups replaces previous results of the same blocks (PRD § 18.1).
 
-`ChapterProcessingSequence` ставит задачи глав и переводит книгу в `READY_TO_EXPORT`,
-когда обработанными оказываются все главы. Запуск обработки при этом остаётся активным:
-полный экспорт ищет результаты через `ProcessingRunRepository.active_for_book`, и закрытый
-запуск оставил бы книгу без переводов. Закрывает запуск только возврат к проверке
-глоссария, удаляя его вместе с результатами (P3.T7).
+`ChapterProcessingSequence` enqueues chapter tasks and transitions the book to `READY_TO_EXPORT`
+when all chapters have been processed. The processing run remains active: full export looks up
+results via `ProcessingRunRepository.active_for_book`, and a closed run would leave the book
+without translations. The run is closed only when returning to glossary review, which deletes it
+along with its results (P3.T7).
 """
 
 from __future__ import annotations
@@ -64,17 +63,17 @@ from linguary.domain import (
     TranslationUnit,
 )
 
-#: Фабрика идентификаторов групп блоков.
+#: Factory for translation unit IDs.
 type IdFactory = Callable[[], str]
 
 
 class ProcessChapterError(BlockProcessingError):
-    """Главу нельзя обработать в её текущем состоянии."""
+    """Chapter cannot be processed in its current state."""
 
 
 @dataclass(frozen=True, slots=True)
 class ProcessChapterCommand:
-    """Команда обработки: какую главу какой книги обрабатывать."""
+    """Processing command: which chapter of which book to process."""
 
     book_id: str
     section_id: str
@@ -83,12 +82,12 @@ class ProcessChapterCommand:
 
 @dataclass(frozen=True, slots=True)
 class ProcessChapterResult:
-    """Итог обработки главы вместе с техническими данными вызовов.
+    """Outcome of chapter processing along with technical call metrics.
 
-    `units` — на сколько групп разделилась глава, `processed_units` — сколько из них
-    обработано этим запуском задачи: повтор пропускает группы, результат которых уже
-    сохранён. `attempts` и `usage` суммируют обращения к модели по всем группам главы:
-    одна задача обработки стоит нескольких вызовов (PRD § 24).
+    `units` — how many groups the chapter was split into; `processed_units` — how many of them
+    were processed by this task execution: retries skip groups whose results are already
+    saved. `attempts` and `usage` aggregate model requests across all groups in the chapter:
+    a single processing task can cost multiple calls (PRD § 24).
     """
 
     section_id: str
@@ -103,7 +102,7 @@ class ProcessChapterResult:
 
 @dataclass(frozen=True, slots=True)
 class _ChapterWork:
-    """Всё, что нужно для обработки главы, прочитанное одной транзакцией."""
+    """Everything needed for chapter processing, loaded in a single transaction."""
 
     document: CanonicalDocument
     section: DocumentSection
@@ -116,17 +115,17 @@ class _ChapterWork:
 
     @property
     def target_language(self) -> str:
-        """Целевой язык книги."""
+        """Book target language."""
         return self.document.target_language
 
     @property
     def chapter_number(self) -> int:
-        """Номер главы в порядке чтения: он входит в идентификаторы заметок (PRD § 19.3)."""
+        """Chapter number in reading order: included in language note IDs (PRD § 19.3)."""
         return chapter_number(self.document, self.section)
 
 
 class ProcessChapter:
-    """Обрабатывает главу группами блоков и сохраняет результат каждой группы (ALG-04)."""
+    """Processes a chapter by translation units and saves results of each unit (ALG-04)."""
 
     def __init__(
         self,
@@ -153,10 +152,10 @@ class ProcessChapter:
         self._id_factory = id_factory or _new_id
 
     async def __call__(self, command: ProcessChapterCommand) -> ProcessChapterResult:
-        """Обрабатывает все группы блоков главы (PRD § 10, § 14).
+        """Processes all translation units of the chapter (PRD § 10, § 14).
 
-        Глава без текстовых блоков — обложка, страница с иллюстрацией — обрабатывается
-        без обращения к модели: групп у неё нет, сохранять нечего.
+        A chapter without textual blocks — cover, image-only page — is handled
+        without model calls: it has no units, nothing to save.
         """
         work = self._load(command)
         units = plan_translation_units(
@@ -187,7 +186,7 @@ class ProcessChapter:
         note_ids: Callable[[], str],
         result: ProcessChapterResult,
     ) -> ProcessChapterResult:
-        """Один цикл ALG-04: контекст, вызов модели, проверки, атомарное сохранение."""
+        """One ALG-04 cycle: context assembly, model call, validation, atomic save."""
         context = self._context_builder.for_translation_unit(
             document=work.document,
             section=work.section,
@@ -220,7 +219,7 @@ class ProcessChapter:
         )
 
     def _load(self, command: ProcessChapterCommand) -> _ChapterWork:
-        """Читает книгу, анализ главы и активный запуск одной транзакцией."""
+        """Loads the book, chapter analysis, and active run in a single transaction."""
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(command.book_id)
             if document is None:
@@ -268,17 +267,17 @@ class ProcessChapter:
         )
 
     def _is_processed(self, unit: TranslationUnit, *, work: _ChapterWork) -> bool:
-        """Сохранён ли результат этой группы целиком (PRD § 18.1).
+        """Whether the result of this unit has been saved in full (PRD § 18.1).
 
-        Повтор задачи не платит за уже выполненную работу. Группа считается выполненной
-        только целиком: частично сохранённой группы не бывает, а совпадение по части
-        блоков означало бы другую разбивку главы — её нужно обработать заново.
+        A task retry does not pay for already completed work. A group is considered
+        completed only as a whole: partial saved groups do not exist, and matching
+        only some blocks would imply a different chapter splitting — requiring reprocessing.
         """
         return set(unit.block_ids) <= work.processed_block_ids
 
 
 class ChapterProcessingSequence:
-    """Ставит задачи обработки глав и завершает обработку книги (PRD § 14, § 18)."""
+    """Enqueues chapter processing tasks and completes book processing (PRD § 14, § 18)."""
 
     def __init__(
         self,
@@ -292,13 +291,13 @@ class ChapterProcessingSequence:
         self._process_chapter = process_chapter
 
     async def start(self, book_id: str) -> tuple[ProcessingTask, ...]:
-        """Ставит задачи обработки всех глав книги с текстом.
+        """Enqueues processing tasks for all chapters with text.
 
-        Главы обрабатываются независимо, поэтому задачи ставятся сразу все: порядок
-        обработки на результат не влияет, а параллелизм воркера остаётся полезным
-        (PRD § 25). Глава без текстовых блоков задачи не получает — обрабатывать нечего.
-        Повторный запуск задач не удваивает: постановка идемпотентна по ключу
-        `book_id + task_type + scope_id` (ALG-02).
+        Chapters are processed independently, so all tasks are enqueued at once:
+        processing order does not affect results, and worker parallelism remains
+        effective (PRD § 25). A chapter without textual blocks receives no task —
+        there is nothing to process. Re-enqueuing does not duplicate tasks: enqueuing
+        is idempotent by `book_id + task_type + scope_id` (ALG-02).
         """
         section_ids = self._section_ids_with_text(book_id)
         tasks = [
@@ -316,7 +315,7 @@ class ChapterProcessingSequence:
         return tuple(tasks)
 
     async def run_task(self, task: ProcessingTask) -> None:
-        """Обработчик задачи `PROCESS_TRANSLATION_UNIT` для локального runner-а (ALG-02)."""
+        """Task handler for `PROCESS_TRANSLATION_UNIT` for the local runner (ALG-02)."""
         if task.task_type is not TaskType.PROCESS_TRANSLATION_UNIT:
             raise ProcessChapterError(
                 f"задача {task.id} типа {task.task_type} не является обработкой главы"
@@ -331,7 +330,7 @@ class ChapterProcessingSequence:
         self._complete_processing(task.book_id, finished_task_id=task.id)
 
     def _section_ids_with_text(self, book_id: str) -> tuple[str, ...]:
-        """Главы книги, у которых есть текстовые блоки, в порядке чтения."""
+        """Book chapters that contain textual blocks, in reading order."""
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(book_id)
             if document is None:
@@ -348,7 +347,7 @@ class ChapterProcessingSequence:
         )
 
     def _complete_processing(self, book_id: str, *, finished_task_id: str | None) -> None:
-        """Переводит книгу в `READY_TO_EXPORT`, когда обработаны все главы (ALG-06)."""
+        """Transitions the book to `READY_TO_EXPORT` when all chapters are processed (ALG-06)."""
         complete_processing(
             self._unit_of_work,
             book_id=book_id,
@@ -360,7 +359,7 @@ class ChapterProcessingSequence:
 def _section_of(
     document: CanonicalDocument, command: ProcessChapterCommand
 ) -> DocumentSection:
-    """Глава книги, которую требует команда."""
+    """Document section requested by the command."""
     for section in document.sections:
         if section.id == command.section_id:
             return section
@@ -370,7 +369,7 @@ def _section_of(
 
 
 def _new_id() -> str:
-    """Идентификатор новой группы блоков."""
+    """Identifier for a new block group."""
     return str(uuid4())
 
 

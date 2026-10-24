@@ -1,21 +1,21 @@
-"""Проверка на слова из смеси латиницы и кириллицы (PRD § 15, ALG-04).
+"""Validation against words mixing Latin and Cyrillic scripts (PRD § 15, ALG-04).
 
-Модель иногда склеивает исходное написание имени с русским окончанием — «Selenой Роу»
-вместо «Селеной Роу». Такое слово не принадлежит ни одному языку и читателю ничего
-не даёт, поэтому результат с ним отбраковывается и уходит на повтор с уточнением.
+The model occasionally glues the original name spelling to a Russian inflectional suffix —
+"Selenой Роу" instead of "Селеной Роу". Such a word belongs to neither language and offers
+no value to the reader, so a result containing it is rejected and retried with clarification.
 
-Словом здесь считается непрерывная последовательность букв: цифра, дефис, апостроф,
-пробел и знаки препинания слово разделяют. Поэтому латинские имена и термины в русском
-тексте («Wren», «Duskmere»), метки сносок `[^1]`, адреса, числа с единицами («5kg»)
-и дефисные соединения двух слов («Wonka-фабрика», «mp3-плеер») нарушением не считаются:
-в них каждое слово целиком написано одним алфавитом. Отбраковывается только слово,
-в котором буквы двух алфавитов стоят вплотную. Исключение — латинское слово, где из
-кириллицы есть только еры «ь» и «ъ»: так в научной латинице пишут праславянские формы
-(«vьlkodlakъ»), и языковая заметка о происхождении слова законно их цитирует.
+A word here is defined as a contiguous sequence of letters: digits, hyphens, apostrophes,
+whitespace, and punctuation divide words. Therefore Latin names and terms in Russian
+text ("Wren", "Duskmere"), footnote markers `[^1]`, addresses, numbers with units ("5kg"),
+and hyphenated compounds of two words ("Wonka-фабрика", "mp3-плеер") are not violations:
+in each, every individual word is written entirely in one script. Only words where letters
+of both alphabets appear adjacent are rejected. The exception is a Latin word whose only
+Cyrillic characters are yers "ь" and "ъ": scientific Latin uses them for Proto-Slavic
+reconstructions ("vьlkodlakъ"), and a language note discussing word origins legitimately quotes them.
 
-Проверяются все тексты результата, которые модель пишет на целевом языке: перевод,
-перевод и пояснение словарной подсказки, заметка и её перевод отрывка. Исходные
-отрывки (`original`, `original_excerpt`) — цитаты оригинала, их не проверяем.
+All result texts written by the model in the target language are inspected: translation,
+glossary hint translation and explanation, language note and its translated excerpt.
+Source excerpts (`original`, `original_excerpt`) are original quotes and are not checked.
 """
 
 from __future__ import annotations
@@ -25,15 +25,15 @@ from collections.abc import Iterator
 
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
 
-#: Слово: непрерывная последовательность букв без цифр и знаков.
+#: Word: a continuous sequence of letters without digits or symbols.
 _LETTERS = re.compile(r"[^\W\d_]+")
 
-#: Еры — единственные кириллические буквы научной латиницы для славянских форм.
+#: Yers — the only Cyrillic letters used in scientific Latin transliteration of Slavic forms.
 _YERS = frozenset("ьъ")
 
 
 def mixed_script_violation(payload: TranslationResultResponse) -> str | None:
-    """Описание первого слова из смеси латиницы и кириллицы либо `None`."""
+    """Violation description of the first word with mixed Latin and Cyrillic script, or `None`."""
     for block in payload.blocks:
         for text in _texts_of(payload, block=block):
             word = mixed_script_word(text)
@@ -48,7 +48,7 @@ def mixed_script_violation(payload: TranslationResultResponse) -> str | None:
 
 
 def mixed_script_word(text: str) -> str | None:
-    """Первое слово текста, в котором стоят и латинские, и кириллические буквы."""
+    """First word in the text containing both Latin and Cyrillic characters."""
     for match in _LETTERS.finditer(text):
         word = match.group()
         cyrillic = {letter for letter in word if _is_cyrillic(letter)}
@@ -58,19 +58,19 @@ def mixed_script_word(text: str) -> str | None:
 
 
 def _is_latin(letter: str) -> bool:
-    """Латинская ли буква, включая буквы с диакритикой (é, ß)."""
+    """Whether the character is Latin, including letters with diacritics (é, ß)."""
     return letter.isascii() or "À" <= letter <= "ɏ"
 
 
 def _is_cyrillic(letter: str) -> bool:
-    """Кириллическая ли буква."""
+    """Whether the character is Cyrillic."""
     return "Ѐ" <= letter <= "ӿ"
 
 
 def _texts_of(
     payload: TranslationResultResponse, *, block: BlockResultResponse
 ) -> Iterator[str]:
-    """Тексты блока результата, которые модель пишет на целевом языке."""
+    """Block result texts written by the model in the target language."""
     if block.translated_text is not None:
         yield block.translated_text
     for hint in block.glossary_hints:

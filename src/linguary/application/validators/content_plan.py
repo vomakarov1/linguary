@@ -1,4 +1,4 @@
-"""Проверка структурной полноты по конечным видимым телам помощи."""
+"""Structural completeness validation against final visible help bodies."""
 from dataclasses import dataclass
 import re
 

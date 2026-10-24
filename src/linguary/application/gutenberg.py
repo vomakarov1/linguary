@@ -1,4 +1,4 @@
-"""Сохраняет служебный текст Project Gutenberg вне обработки книги."""
+"""Preserves Project Gutenberg boilerplate outside book processing."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _MARKER = re.compile(
 def preserve_gutenberg_boilerplate(
     document: CanonicalDocument,
 ) -> tuple[CanonicalDocument, tuple[BookImportWarning, ...]]:
-    """Помечает служебные блоки, оставляя их для экспорта исходного EPUB."""
+    """Marks boilerplate blocks, preserving them for export of the original EPUB."""
     blocks = tuple(
         (section.id, block)
         for section in document.ordered_sections

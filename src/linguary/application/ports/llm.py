@@ -1,27 +1,26 @@
-"""Порт вызова LLM (PRD § 23, ADR § 3).
+"""LLM call port (PRD § 23, ADR § 3).
 
-Прикладной слой знает только `LLMClient.generate`: он собирает текст запроса и получает
-разобранный внутренний DTO. Провайдер, HTTP, формат структурированного ответа и Pydantic
-остаются за адаптером `linguary.adapters.llm`.
+The application layer only knows `LLMClient.generate`: it constructs the request text
+and receives a parsed internal DTO. Provider details, HTTP, structured response formatting,
+and Pydantic remain behind the `linguary.adapters.llm` adapter.
 
-Запрос типизирован видом ответа (`LLMRequest[ChapterAnalysisResponse]`), поэтому сценарий
-получает нужный DTO без разбора union-а на своей стороне; адаптер выбирает схему разбора
-по `kind`.
+The request is typed by response kind (`LLMRequest[ChapterAnalysisResponse]`), so the use case
+receives the expected DTO without union discrimination on its side; the adapter selects
+the parsing schema by `kind`.
 
-Метод асинхронный: вызов модели — это ожидание сети, а локальный runner задач исполняет
-обработчики в цикле событий, и его настраиваемый параллелизм (PRD § 25) рассчитан именно
-на такое ожидание.
+The method is asynchronous: calling the model is network I/O, and the local task runner
+executes handlers on the event loop, where configurable concurrency (PRD § 25) is specifically
+designed for such waiting.
 
-Ошибки порта разделены так, чтобы политика повторов (PRD § 16, ALG-05) могла принять
-решение, не разбирая текст сообщения:
+Port errors are structured so that retry policy (PRD § 16, ALG-05) can make decisions
+without inspecting message text:
 
-- `LLMConfigurationError` — вызывать нечем: ключ или модель не настроены, провайдер
-  отклонил ключ. Повтор бессмысленен, пока пользователь не исправит настройку;
-- `LLMTransportError` — временная неудача: таймаут, обрыв связи, ограничение частоты,
-  ошибка на стороне провайдера;
-- `LLMProviderError` — провайдер отверг сам запрос и повторит тот же отказ;
-- `LLMResponseFormatError` — ответ не разбирается по схеме, в том числе из-за обрыва
-  генерации по лимиту токенов.
+- `LLMConfigurationError` — nothing to call with: key or model not configured, provider rejected key.
+  Retrying is pointless until the user fixes settings;
+- `LLMTransportError` — transient failure: timeout, connection drop, rate limit, provider-side error;
+- `LLMProviderError` — provider rejected the request itself and would repeat the rejection;
+- `LLMResponseFormatError` — response cannot be parsed against schema, including generation truncation
+  due to token limits.
 """
 
 from __future__ import annotations
@@ -35,29 +34,29 @@ from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.domain import LLMCallStage, TokenUsage
 
-#: Структурированные ответы, которые умеет возвращать модель (PRD § 23).
+#: Structured responses that the model can return (PRD § 23).
 type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse
 
 
 class LLMError(ApplicationError):
-    """Вызов модели не дал пригодного результата."""
+    """Calling the model did not yield a usable result."""
 
 
 class LLMConfigurationError(LLMError):
-    """LLM не настроена или провайдер не принял настройку.
+    """LLM is not configured or the provider rejected configuration.
 
-    Анализ и обработка книги с такой ошибкой не стартуют: Web UI показывает состояние
-    конфигурации и действие для исправления, CLI — диагностическое сообщение (PRD § 23).
-    Текст ошибки не содержит ключа провайдера.
+    Book analysis and processing do not start on this error: Web UI shows configuration state
+    and corrective action, while CLI prints a diagnostic message (PRD § 23).
+    The error text does not contain provider API keys.
     """
 
 
 class LLMTransportError(LLMError):
-    """Временная неудача вызова: таймаут, обрыв связи, ограничение частоты, сбой провайдера.
+    """Transient call failure: timeout, connection drop, rate limit, provider error.
 
-    `retry_after_seconds` — сколько провайдер попросил подождать до следующего запроса
-    (заголовок `Retry-After` ответов `429` и `503`), если он это сообщил. Повтор раньше
-    срока получит тот же отказ, поэтому политика повторов не делает паузу короче.
+    `retry_after_seconds` — how long the provider requested to wait before the next request
+    (`Retry-After` header of `429` and `503` responses), if reported. Retrying earlier will
+    receive the same rejection, so retry policy does not make pauses shorter.
     """
 
     def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
@@ -66,15 +65,15 @@ class LLMTransportError(LLMError):
 
 
 class LLMProviderError(LLMError):
-    """Провайдер отверг запрос и на повтор ответит тем же."""
+    """Provider rejected the request and will return the same rejection on retry."""
 
 
 class LLMResponseFormatError(LLMError):
-    """Ответ модели не разбирается по схеме структурированного ответа.
+    """Model response cannot be parsed against structured response schema.
 
-    `truncated` означает, что провайдер сообщил об обрыве генерации по лимиту токенов:
-    ответ оборван не моделью по смыслу, а пределом вывода, и повторять его имеет смысл
-    только с другим лимитом.
+    `truncated` indicates the provider reported output truncation due to token limits:
+    the response was cut off by output limits rather than semantically by the model,
+    and retrying makes sense only with different limits.
     """
 
     def __init__(
@@ -98,7 +97,7 @@ class LLMResponseFormatError(LLMError):
 
 
 class LLMResponseKind(StrEnum):
-    """Вид структурированного ответа, который запрашивает сценарий."""
+    """Kind of structured response requested by the use case."""
 
     CHAPTER_ANALYSIS = "chapter_analysis"
     TRANSLATION_RESULT = "translation_result"
@@ -106,11 +105,11 @@ class LLMResponseKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class LLMRequest[PayloadT: LLMPayload]:
-    """Запрос к модели: постоянная инструкция и собранный контекст.
+    """Request to the model: invariant instructions and assembled context.
 
-    Текст запроса целиком собирает `ContextBuilder`: порт не знает ни о главах, ни о
-    глоссарии. `kind` определяет, какую схему структурированного ответа адаптер потребует
-    от провайдера и какой DTO вернёт сценарию.
+    Request text is assembled by `ContextBuilder`: the port knows nothing of chapters
+    or glossary. `kind` determines which structured response schema the adapter requires
+    from the provider and which DTO it returns to the use case.
     """
 
     kind: LLMResponseKind
@@ -143,7 +142,7 @@ class LLMRequest[PayloadT: LLMPayload]:
         stage: LLMCallStage,
         task_id: str | None = None,
     ) -> LLMRequest[PayloadT]:
-        """Возвращает тот же запрос с метаданными для журнала вызовов."""
+        """Returns the same request with metadata for the call log."""
         return replace(
             self, book_id=book_id, stage=stage, task_id=task_id, attempt=1
         )
@@ -152,7 +151,7 @@ class LLMRequest[PayloadT: LLMPayload]:
     def for_chapter_analysis(
         cls, *, instructions: str, input_text: str, contract_version: int = 1
     ) -> LLMRequest[ChapterAnalysisResponse]:
-        """Запрос анализа главы или её фрагмента (PRD § 11, § 14)."""
+        """Request for chapter or chapter fragment analysis (PRD § 11, § 14)."""
         return LLMRequest[ChapterAnalysisResponse](
             kind=LLMResponseKind.CHAPTER_ANALYSIS,
             instructions=instructions,
@@ -164,7 +163,7 @@ class LLMRequest[PayloadT: LLMPayload]:
     def for_translation(
         cls, *, instructions: str, input_text: str, contract_version: int = 1
     ) -> LLMRequest[TranslationResultResponse]:
-        """Запрос обработки группы блоков или одного блока (PRD § 10, § 14)."""
+        """Request for block group or single block processing (PRD § 10, § 14)."""
         return LLMRequest[TranslationResultResponse](
             kind=LLMResponseKind.TRANSLATION_RESULT,
             instructions=instructions,
@@ -175,11 +174,11 @@ class LLMRequest[PayloadT: LLMPayload]:
 
 @dataclass(frozen=True, slots=True)
 class LLMResponse[PayloadT: LLMPayload]:
-    """Разобранный ответ модели вместе с техническими данными вызова.
+    """Parsed model response along with technical call metadata.
 
-    `truncated` — признак обрыва по лимиту токенов, если провайдер его сообщает: это
-    блокирующая проверка результата (PRD § 15). `usage` заполняется, только когда
-    провайдер даёт объём токенов; журнал вызовов допускает его отсутствие (PRD § 24).
+    `truncated` — indicates output cutoff by token limits if reported by provider:
+    this is a blocking check on results (PRD § 15). `usage` is populated only when
+    the provider provides token volumes; the call log permits it to be missing (PRD § 24).
     """
 
     payload: PayloadT
@@ -193,15 +192,15 @@ class LLMResponse[PayloadT: LLMPayload]:
 
 
 class LLMClient(Protocol):
-    """Вызов модели со структурированным ответом."""
+    """Client for calling model with structured response."""
 
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
-        """Выполняет запрос и возвращает разобранный ответ.
+        """Executes request and returns parsed response.
 
-        Реализация обязана приводить любую неудачу к наследнику `LLMError`: политика
-        повторов различает их по типу, а не по тексту (PRD § 16).
+        The implementation must map any failure to a subclass of `LLMError`: retry
+        policy discriminates them by type rather than text (PRD § 16).
         """
 
 

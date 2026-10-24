@@ -1,21 +1,21 @@
-"""Локальный runner задач: захват, исполнение и фиксация итога (ALG-02).
+"""Local task runner: claim, execute, and record task outcome (ALG-02).
 
-Runner владеет машиной состояний одной задачи и ничем больше. Он берёт очередную задачу
-из очереди, находит обработчик её типа, выполняет его и записывает результат — `succeeded`
-либо `failed` с типизированной ошибкой. Планирование, параллелизм и SQLite лежат за портом
-`TaskQueue` и в `linguary.adapters.runtime`: прикладной слой о них не знает (ADR § 3).
+The runner owns the state machine of a single task and nothing more. It fetches the next
+task from the queue, looks up the handler for its task type, executes it, and records the
+outcome — `succeeded` or `failed` with a typed error. Scheduling, concurrency, and SQLite
+reside behind the `TaskQueue` port and in `linguary.adapters.runtime`: the application layer
+is agnostic of them (ADR § 3).
 
-Переходы состояния берутся из домена (`ProcessingTask.start/succeed/fail/interrupt`), а не
-переписываются здесь: атомарность захвата обеспечивает адаптер, но правило перехода остаётся
-одно на всё приложение.
+State transitions originate in the domain (`ProcessingTask.start/succeed/fail/interrupt`)
+rather than being duplicated here: the adapter guarantees atomic claim, but the transition
+rules remain unified across the application.
 
-Runner асинхронный: в фазах 3-4 его запускают FastAPI и CLI, а обработка `TranslationUnit`
-ждёт HTTP-ответов LLM, поэтому настраиваемый параллелизм (PRD § 25) — это ожидание
-ввода-вывода. Синхронные сценарии подключаются обёрткой `to_async_handler` из адаптера.
+The runner is async: in phases 3-4 it is driven by FastAPI and CLI, while `TranslationUnit`
+processing awaits LLM HTTP responses; thus configurable parallelism (PRD § 25) amounts to
+I/O waiting. Synchronous use cases are adapted via `to_async_handler` in the adapter layer.
 
-Классификация ошибок обработчика — отдельная политика (PRD § 16), и здесь она не решается:
-умолчание берётся из `linguary.application.retry_policy`, а сборка приложения может
-подменить его через `classify_error`.
+Handler error classification is a separate policy (PRD § 16) not decided here: defaults
+come from `linguary.application.retry_policy`, while app composition can substitute it via `classify_error`.
 """
 
 from __future__ import annotations
@@ -32,49 +32,49 @@ from linguary.domain import (
     TaskType,
 )
 
-#: Обработчик одного типа задач. Команду сценария он собирает сам: runner знает о задаче
-#: только её идемпотентный ключ и не умеет строить вход `ImportBook` или `ExportBook`.
+#: Handler for a single task type. It constructs the use case command itself: runner
+#: only knows its idempotent key and cannot build input for ImportBook or ExportBook.
 type TaskHandler = Callable[[ProcessingTask], Awaitable[None]]
 
-#: Классификатор неожиданной ошибки обработчика в типизированную ошибку задачи.
+#: Classifier mapping unexpected handler exceptions into typed task errors.
 type TaskErrorClassifier = Callable[[Exception], TaskError]
 
 
 class TaskQueue(Protocol):
-    """Очередь локальных задач.
+    """Local task queue.
 
-    Постановка задачи идемпотентна по ключу `book_id + task_type + scope_id`, а захват
-    атомарен: две попытки не могут взять одну задачу (ALG-02).
+    Task enqueuing is idempotent by `book_id + task_type + scope_id`, and claiming
+    is atomic: two attempts cannot claim the same task (ALG-02).
     """
 
     async def enqueue(self, identity: TaskIdentity) -> ProcessingTask:
-        """Ставит задачу в очередь.
+        """Enqueues a task.
 
-        Задача с таким ключом уже есть — возвращается она сама в своём текущем состоянии:
-        успешно завершённая задача повторно не выполняется, а неуспешную пользователь
-        перезапускает явно (PRD § 18).
+        If a task with this identity already exists, it is returned in its current status:
+        successfully completed tasks are not re-executed, while failed tasks are restarted
+        explicitly by the user (PRD § 18).
         """
 
     async def claim_next_pending(self) -> ProcessingTask | None:
-        """Захватывает очередную задачу `pending`, переводя её в `running`.
+        """Claims the next `pending` task, transitioning it to `running`.
 
-        Возвращает захваченную задачу либо `None`, если брать нечего.
+        Returns the claimed task or `None` if the queue is empty.
         """
 
     async def save(self, task: ProcessingTask) -> None:
-        """Сохраняет новое состояние задачи.
+        """Persists the new status of a task.
 
-        Задачи, удалённой из очереди, сохранение не воскрешает: возврат к проверке
-        глоссария снимает задачи отменённого запуска вместе с выполняющейся, и её итог
-        фиксировать уже некуда (PRD § 21.5).
+        Saving does not resurrect a task removed from the queue: returning to glossary
+        review removes tasks of the cancelled run along with active ones, leaving nowhere
+        to record its outcome (PRD § 21.5).
         """
 
     async def list_running(self) -> tuple[ProcessingTask, ...]:
-        """Задачи в состоянии `running` в порядке их создания."""
+        """Tasks currently in `running` status in order of creation."""
 
 
 class TaskRunner:
-    """Исполняет задачи очереди по одной, соблюдая машину состояний ALG-02."""
+    """Executes queue tasks one at a time, adhering to the ALG-02 state machine."""
 
     def __init__(
         self,
@@ -88,11 +88,11 @@ class TaskRunner:
         self._classify_error = classify_error or classify_task_error
 
     async def recover_interrupted(self) -> tuple[ProcessingTask, ...]:
-        """Переводит задачи `running` в `failed` при старте приложения (ALG-02).
+        """Transitions `running` tasks to `failed` upon application startup (ALG-02).
 
-        Приложение, завершившееся во время работы задачи, оставляет её в `running`, где
-        её уже никто не исполняет. Такая задача помечается прерванной, после чего
-        пользователь запускает её повторно (PRD § 17-18).
+        An application killed while executing a task leaves it in `running`, where
+        no worker executes it. Such a task is marked interrupted, allowing the user
+        to retry it (PRD § 17-18).
         """
         interrupted = tuple(task.interrupt() for task in await self._queue.list_running())
         for task in interrupted:
@@ -100,12 +100,12 @@ class TaskRunner:
         return interrupted
 
     async def run_next(self) -> ProcessingTask | None:
-        """Выполняет одну задачу очереди и возвращает её завершённое состояние.
+        """Executes a single queue task and returns its completed state.
 
-        `None` означает, что задач `pending` в очереди нет. Отмена корутины наружу не
-        перехватывается: задача остаётся в `running` и будет помечена прерванной при
-        следующем старте приложения — это честнее, чем объявить её неуспешной по причине,
-        которой не было.
+        `None` indicates no pending tasks in the queue. Cancellation of the outer
+        coroutine is not caught: the task remains in `running` and will be marked
+        interrupted on next application start — accurately reflecting that no final
+        result occurred.
         """
         task = await self._queue.claim_next_pending()
         if task is None:
@@ -113,27 +113,27 @@ class TaskRunner:
         return await self._finish(task)
 
     async def _finish(self, task: ProcessingTask) -> ProcessingTask:
-        """Выполняет захваченную задачу и фиксирует её итог."""
+        """Executes claimed task and records its outcome."""
         handler = self._handlers.get(task.task_type)
         if handler is None:
             return await self._save(task.fail(_unregistered_handler_error(task)))
         try:
             await handler(task)
-        except Exception as error:  # любая ошибка сценария даёт неуспешную задачу
+        except Exception as error:  # any use case exception results in a failed task
             return await self._save(task.fail(self._classify_error(error)))
         return await self._save(task.succeed())
 
     async def _save(self, task: ProcessingTask) -> ProcessingTask:
-        """Сохраняет завершённое состояние задачи."""
+        """Persists the completed state of the task."""
         await self._queue.save(task)
         return task
 
 
 def _unregistered_handler_error(task: ProcessingTask) -> TaskError:
-    """Ошибка задачи, для типа которой не зарегистрирован обработчик.
+    """Task error when no handler is registered for its task type.
 
-    Повторять такую задачу нечем: приложение собрано без обработчика этого типа, и до
-    его подключения результат не изменится.
+    Such a task cannot be retried: the application was built without a handler for this
+    type, and the result will not change until it is wired up.
     """
     return TaskError(
         type=ErrorType.PERMANENT,

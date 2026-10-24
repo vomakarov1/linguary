@@ -1,19 +1,19 @@
-"""Формирование `TranslationUnit`: что уходит модели одним вызовом (PRD § 10, ALG-04).
+"""Formation of `TranslationUnit`: grouping blocks sent to the model in a single call (PRD § 10, ALG-04).
 
-Группа — единица вычисления, а не хранения: модель видит её целиком ради контекста, но
-возвращает отдельный результат для каждого входного блока, и сохраняются результаты
-блоков (ADR § 3). Задача этого модуля — решить, где проходят границы групп.
+A unit is a compute boundary rather than a storage unit: the model receives it whole for context,
+but returns an individual result for each input block, and block results are persisted (ADR § 3).
+The responsibility of this module is to determine unit boundaries.
 
-Размер группы считается символами исходного текста, а не числом блоков. У обработки
-профиль расхода не такой, как у анализа главы: анализ отвечает режимом и короткой
-причиной, то есть примерно одинаковым числом токенов на блок любой длины, а обработка
-возвращает полный перевод, объём которого пропорционален объёму оригинала. Сорок реплик
-диалога и сорок страничных абзацев — запросы разной цены, поэтому предел
-`analysis_merge.DEFAULT_MAX_FRAGMENT_BLOCKS` сюда не переносится: здесь свой предел
-`DEFAULT_MAX_UNIT_SOURCE_CHARS`, и он настраивается (`LLMSettings.max_unit_source_chars`).
+Unit size is measured in characters of source text rather than block count. Processing exhibits
+a different cost profile than chapter analysis: analysis returns a treatment mode and concise rationale,
+meaning roughly constant token consumption per block regardless of length, whereas processing
+returns full translations proportional to original length. Forty dialogue lines and forty full-page
+paragraphs represent requests of vastly different cost; hence `analysis_merge.DEFAULT_MAX_FRAGMENT_BLOCKS`
+does not apply here. Processing defines its own limit `DEFAULT_MAX_UNIT_SOURCE_CHARS`, configured
+via `LLMSettings.max_unit_source_chars`.
 
-Блоки `PRESERVE_ONLY` и `DROP_WITH_WARNING` в группы не попадают и соседний контекст не
-разрывают: они остаются работой импортёра и экспортёра (PRD § 10.1).
+`PRESERVE_ONLY` and `DROP_WITH_WARNING` blocks do not enter units and do not fragment adjacent context:
+they remain the concern of importer and exporter (PRD § 10.1).
 """
 
 from __future__ import annotations
@@ -29,16 +29,15 @@ from linguary.domain import (
     TreatmentPlan,
 )
 
-#: Сколько символов оригинала уходит в один запрос обработки. PRD § 10 задаёт ориентир
-#: 2000-5000 токенов исходного текста; 8000 символов — это около 2000 токенов английского
-#: оригинала (примерно четыре символа на токен), то есть нижняя граница ориентира.
-#: Выход при этом остаётся в типовом пределе структурированного ответа: полный русский
-#: перевод такого объёма вместе со словарными подсказками, языковыми заметками и
-#: JSON-обвязкой занимает порядка 5000-6000 токенов.
+#: Number of source characters sent in a single processing request. PRD § 10 targets
+#: 2000-5000 source tokens; 8000 characters is ~2000 English tokens (~4 chars/token),
+#: the lower bound of that target. Output fits within typical structured response limits:
+#: a full Russian translation of that volume with vocabulary hints, language notes, and
+#: JSON wrapping consumes ~5000-6000 tokens.
 DEFAULT_MAX_UNIT_SOURCE_CHARS = 8000
 
-#: Типы блоков, идущие подряд как одно целое: список, стихотворный фрагмент, цитата.
-#: Разорванный посередине список модель видит без начала, а стихи — без строфы.
+#: Block types occurring contiguously as a cohesive whole: list item, poem stanza, quote, table.
+#: Splitting a list midway deprives the model of its start, while poetry loses its stanza context.
 _COHESIVE_BLOCK_TYPES = frozenset(
     {BlockType.LIST_ITEM, BlockType.POEM, BlockType.QUOTE, BlockType.TABLE}
 )
@@ -51,15 +50,15 @@ def plan_translation_units(
     id_factory: Callable[[], str],
     max_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS,
 ) -> tuple[TranslationUnit, ...]:
-    """Делит блоки главы на группы для вызовов модели (PRD § 10).
+    """Splits chapter blocks into groups for model calls (PRD § 10).
 
-    Принимает блоки главы в порядке исходного документа; нетекстовые отсеиваются здесь же
-    (`context_builder.is_textual`), режимы берутся из сохранённого плана. Текстовый блок,
-    которого в плане нет, — не повод молча его пропустить: обработка запускается только
-    после полного анализа главы, поэтому такой блок поднимает `UnknownBlockError`.
+    Accepts chapter blocks in document order; non-textual blocks are filtered out
+    (`context_builder.is_textual`), and treatments are retrieved from the saved plan.
+    A textual block absent from the plan is not silently skipped: processing starts
+    only after full chapter analysis, so an unlisted block raises `UnknownBlockError`.
 
-    Глава без текстовых блоков (обложка, страница с иллюстрацией) даёт пустой результат:
-    обрабатывать нечего, и вызова модели не будет.
+    A chapter with no textual blocks (cover, illustration page) yields an empty result:
+    nothing to process, no model calls.
     """
     if max_source_chars < 1:
         raise TranslationUnitError("предел размера группы блоков должен быть положительным")
@@ -79,12 +78,12 @@ def plan_translation_units(
 def _grouped(
     blocks: Sequence[DocumentBlock], *, max_source_chars: int
 ) -> tuple[tuple[DocumentBlock, ...], ...]:
-    """Границы групп: связные куски целиком, размер — ровными долями главы.
+    """Group boundaries: cohesive runs intact, sizing divided into balanced chapter portions.
 
-    Глава делится не кусками предельного размера, а `ceil(объём / предел)` долями примерно
-    одного объёма: хвост в один абзац стоил бы отдельного вызова и остался бы без контекста
-    сцены. Предел при этом остаётся жёстким — доля никогда его не превышает, кроме случая,
-    когда предела не хватает одному блоку: `DocumentBlock` не делится (ADR § 3).
+    The chapter is not partitioned into maximal-size chunks, but into `ceil(total / limit)`
+    evenly sized portions: a one-paragraph tail would cost an extra call without scene context.
+    The limit remains strict — a portion never exceeds it, unless a single block exceeds the
+    limit: `DocumentBlock` is indivisible (ADR § 3).
     """
     total = sum(len(block.text) for block in blocks)
     count = max(1, -(-total // max_source_chars))
@@ -122,11 +121,12 @@ def _closes_group(
     total: int,
     max_source_chars: int,
 ) -> bool:
-    """Закрывается ли текущая группа перед очередным связным куском.
+    """Whether the current group should close before the next cohesive run.
 
-    Два правила: жёсткий предел размера запроса и близость к границе ровной доли главы.
-    Второе правило и удерживает хвост главы от превращения в отдельный крошечный запрос —
-    кусок берётся в группу, пока он приближает её к границе доли, а не удаляет от неё.
+    Two rules: strict request size limit and proximity to the balanced chapter partition
+    boundary. The second rule prevents the chapter tail from becoming a tiny request — a chunk
+    is appended to the group as long as it brings it closer to the partition boundary rather
+    than further away.
     """
     if current_size + size > max_source_chars:
         return True
@@ -139,13 +139,13 @@ def _closes_group(
 def _cohesive_runs(
     blocks: Sequence[DocumentBlock], *, max_source_chars: int
 ) -> tuple[tuple[DocumentBlock, ...], ...]:
-    """Куски главы, которые нельзя разрывать между запросами (PRD § 10).
+    """Chapter chunks that should not be split across requests (PRD § 10).
 
-    Связными считаются соседние блоки одного составного целого — с общим родителем — и
-    идущие подряд блоки списка, стихов, цитаты или таблицы. Диалоги и логически связанные
-    абзацы структурного признака не имеют: их удерживает вместе сам порядок блоков внутри
-    группы. Кусок, который сам не помещается в запрос, разбирается на отдельные блоки:
-    иначе он утащил бы группу за предел размера.
+    Adjacent blocks sharing a parent container and contiguous blocks of lists, poetry,
+    quotes, or tables are considered cohesive. Dialogue and logically linked paragraphs
+    lack structural markers: block order within the group holds them together. A chunk
+    exceeding the request limit on its own is broken into individual blocks: otherwise
+    it would drag the group past the size limit.
     """
     runs: list[list[DocumentBlock]] = []
     for block in blocks:
@@ -161,7 +161,7 @@ def _cohesive_runs(
 
 
 def _is_cohesive_with(previous: DocumentBlock, block: DocumentBlock) -> bool:
-    """Составляют ли соседние блоки одно целое."""
+    """Whether adjacent blocks form a single cohesive unit."""
     prev_split = previous.attributes.get("split_group")
     if prev_split and prev_split == block.attributes.get("split_group"):
         return True
@@ -173,7 +173,7 @@ def _is_cohesive_with(previous: DocumentBlock, block: DocumentBlock) -> bool:
 def _split_oversized(
     run: Sequence[DocumentBlock], *, max_source_chars: int
 ) -> tuple[tuple[DocumentBlock, ...], ...]:
-    """Связный кусок целиком либо, если он длиннее предела, его отдельные блоки."""
+    """Cohesive run as a whole or, if exceeding the limit, decomposed into individual blocks."""
     if sum(len(block.text) for block in run) <= max_source_chars:
         return (tuple(run),)
     return tuple((block,) for block in run)

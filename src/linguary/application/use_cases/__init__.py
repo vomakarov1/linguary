@@ -1,4 +1,4 @@
-"""Прикладные сценарии: транзакционные границы поверх домена и портов (ADR § 3)."""
+"""Application use cases: transactional boundaries over domain and ports (ADR § 3)."""
 
 from linguary.application.use_cases.import_book import (
     ImportBook,

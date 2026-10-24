@@ -1,5 +1,5 @@
-"""Прикладной слой: сценарии использования и порты.
+"""Application layer: use cases and ports.
 
-Слой зависит только от доменного слоя и стандартной библиотеки. Доступ к БД, EPUB, LLM,
-файловой системе и HTTP описывается портами (Protocol/ABC) и реализуется адаптерами.
+The layer depends only on the domain layer and standard library. Access to DB, EPUB, LLM,
+file system, and HTTP is defined by ports (Protocol/ABC) and implemented by adapters.
 """

@@ -1,10 +1,10 @@
-"""Базовые ошибки прикладного слоя."""
+"""Base application layer errors."""
 
 
 class ApplicationError(Exception):
-    """Ошибка выполнения прикладного сценария.
+    """Application use case execution error.
 
-    Базовый класс для ошибок сценариев: некорректная команда пользователя, недопустимый
-    переход состояния, отбраковка результата внешней системы. Ошибки инфраструктуры
-    адаптеры приводят к наследникам этого класса на своей границе.
+    Base class for use case errors: invalid user commands, illegal state transitions,
+    or rejected outputs from external systems. Adapters map infrastructure failures
+    to subclasses of this class at their boundaries.
     """

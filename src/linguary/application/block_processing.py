@@ -1,14 +1,13 @@
-"""Общие шаги обработки блоков книги: вызов модели и запись результата (ALG-04).
+"""Shared steps for processing book blocks: model invocation and result storage (ALG-04).
 
-Обработка главы группами блоков (`use_cases/process_chapter.py`) и повторная генерация
-одного блока (`use_cases/regenerate_block.py`) различаются составом контекста и тем, что
-считают единицей работы. Всё остальное у них общее и живёт здесь: цикл вызова модели
-с повторами по политике, блокирующие проверки ответа, короткая транзакция сохранения
-с проверкой активного запуска, нумерация учебных заметок и завершение обработки книги.
+Chapter processing by translation units (`use_cases/process_chapter.py`) and single block
+regeneration (`use_cases/regenerate_block.py`) differ in context composition and work granularity.
+Everything else is shared and resides here: model call retry loop per policy, blocking response
+validations, short save transaction checking active run, learning note numbering, and book completion.
 
-Транзакция намеренно не охватывает вызов модели (ADR § 3): пока ответ в пути, пользователь
-успевает вернуться к проверке глоссария, поэтому сохранение сверяет активный запуск книги
-с тем, с которым работа начиналась, и при расхождении не пишет ничего.
+The transaction intentionally does not span the model call (ADR § 3): while the response is in flight,
+the user may return to glossary review; saving checks the active run against the initial run, writing
+nothing if they diverge.
 """
 
 from __future__ import annotations
@@ -40,21 +39,21 @@ from linguary.domain import (
     build_language_note_id,
 )
 
-#: Пауза между попытками вызова модели: политика повторов её вычисляет, выдерживает
-#: сценарий — прикладной слой циклом событий не владеет (ALG-05).
+#: Pause between model call attempts: calculated by retry policy, observed
+#: by use case — the application layer does not own the event loop (ALG-05).
 type Sleep = Callable[[float], Awaitable[None]]
 
 
 class BlockProcessingError(ApplicationError):
-    """Блоки книги нельзя обработать в её текущем состоянии."""
+    """Book blocks cannot be processed in its current status."""
 
 
 @dataclass(frozen=True, slots=True)
 class TranslationCallResult:
-    """Проверенный результат одного вызова вместе с его ценой.
+    """Validated result of a single call along with its cost.
 
-    `attempts` считает обращения к модели, а не запуски задачи: одна группа блоков может
-    стоить нескольких попыток, а провайдер считает расход по каждой из них (PRD § 24).
+    `attempts` counts model requests rather than task executions: a single block group
+    may cost multiple attempts, and the provider charges for each (PRD § 24).
     """
 
     results: tuple[BlockProcessingResult, ...]
@@ -63,7 +62,7 @@ class TranslationCallResult:
 
 
 class TranslationCall:
-    """Вызов модели по готовому контексту и атомарная запись результата (ALG-04)."""
+    """Executes model call with prepared context and atomically records the result (ALG-04)."""
 
     def __init__(
         self,
@@ -88,14 +87,14 @@ class TranslationCall:
         target_language: str,
         note_ids: Callable[[], str],
     ) -> TranslationCallResult:
-        """Вызывает модель и проверяет ответ, повторяя по политике (ALG-04, ALG-05).
+        """Calls the model and validates the response, retrying per policy (ALG-04, ALG-05).
 
-        Проверки идут внутри цикла: отбраковка ответа — обычный повод для повтора
-        с уточняющей инструкцией, а не отказ задачи. Исчерпав попытки, вызов поднимает
-        исходную ошибку: типизировать её и перевести задачу в `failed` — работа runner-а.
+        Validations run inside the loop: rejecting a response is standard cause for retrying
+        with clarification rather than failing the task. Once attempts are exhausted, the call
+        raises the underlying error: classifying it and failing the task is the runner's responsibility.
 
-        Из проверенного результата отсеиваются подсказки и заметки, которые повторяют
-        `Before You Read` главы (PRD § 19.3): повтор не повод отбраковывать ответ.
+        Hints and notes duplicating chapter `Before You Read` are filtered out of the validated
+        result (PRD § 19.3): duplication is not grounds for rejecting the response.
         """
         request = context.request
         explained = ExplainedExpressions(
@@ -145,11 +144,10 @@ class TranslationCall:
     def save(
         self, *, book_id: str, run_id: str, results: Sequence[BlockProcessingResult]
     ) -> bool:
-        """Атомарно заменяет результаты перечисленных блоков (ALG-04, PRD § 17).
+        """Atomically replaces results of the specified blocks (ALG-04, PRD § 17).
 
-        Возвращает `False`, если сохранять уже некуда: активного запуска у книги нет
-        или это другой запуск. Так отбрасывается поздний результат вызова, начатого
-        до возврата к проверке глоссария.
+        Returns `False` if there is no active run to write to, or if the run ID does not
+        match. This discards stale results of calls started before returning to glossary review.
         """
         with self._unit_of_work.transaction() as transaction:
             run = transaction.runs.active_for_book(book_id)
@@ -160,12 +158,12 @@ class TranslationCall:
 
 
 def note_id_factory(*, chapter_number: int, used: Collection[str]) -> Callable[[], str]:
-    """Фабрика идентификаторов учебных заметок главы вида `ln-ch03-001` (PRD § 19.3).
+    """Factory for chapter learning note IDs formatted as `ln-ch03-001` (PRD § 19.3).
 
-    Идентификаторы уникальны в пределах запуска, поэтому нумерация продолжается за уже
-    сохранёнными заметками этой главы: ни повтор частично обработанной главы, ни повторная
-    генерация отдельного блока не должны столкнуться с чужими заметками. Пропуски
-    в нумерации допустимы — идентификатор обязан быть уникальным, а не подряд идущим.
+    IDs are unique within a run, so numbering continues past already stored notes of this
+    chapter: neither re-running a partially processed chapter nor regenerating an individual
+    block will collide with existing notes. Gaps in numbering are permitted — IDs must be
+    unique, not strictly consecutive.
     """
     ordinal = 0
 
@@ -183,7 +181,7 @@ def note_id_factory(*, chapter_number: int, used: Collection[str]) -> Callable[[
 
 
 def chapter_number(document: CanonicalDocument, section: DocumentSection) -> int:
-    """Номер главы в порядке чтения: он входит в идентификаторы заметок (PRD § 19.3)."""
+    """Chapter number in reading order: included in note IDs (PRD § 19.3)."""
     sections = document.ordered_sections
     return next(
         (
@@ -202,16 +200,15 @@ def complete_processing(
     finished_task_id: str | None,
     task_types: Collection[TaskType],
 ) -> None:
-    """Переводит книгу в `READY_TO_EXPORT`, когда её работа закончена (ALG-06).
+    """Transitions the book to `READY_TO_EXPORT` when all work is finished (ALG-06).
 
-    Задача, которая выполняется прямо сейчас, ещё числится `running`: runner фиксирует
-    её итог уже после обработчика. Поэтому её успех записывается здесь же, в одной
-    транзакции с проверкой соседей: иначе при параллельной обработке (PRD § 25) две
-    главы, закончившие почти одновременно, видят друг друга ещё выполняющимися, и книга
-    навсегда остаётся в `PROCESSING`. Повторная запись того же итога runner-ом ничего
-    не меняет.
-    Книга, ушедшая из `PROCESSING`, состояние не меняет: пока вызов был в пути,
-    пользователь мог вернуться к проверке глоссария.
+    A task executing right now is still marked `running`: the runner records its final status
+    only after the handler returns. Therefore its success is recorded right here, in the same
+    transaction with its siblings: otherwise during concurrent processing (PRD § 25), two
+    chapters completing almost simultaneously see each other still running, and the book remains
+    in `PROCESSING` forever. Re-recording the same outcome by the runner is a no-op.
+    A book that left `PROCESSING` does not change status: while the call was in flight,
+    the user could have returned to glossary review.
     """
     with unit_of_work.transaction() as transaction:
         _record_success(transaction, finished_task_id)
@@ -236,9 +233,9 @@ def complete_processing(
 
 
 def _record_success(transaction: UnitOfWork, task_id: str | None) -> None:
-    """Отмечает выполняющуюся задачу успешной, если она ещё существует и выполняется.
+    """Marks running task as successful if it still exists and is running.
 
-    Задачи отменённого запуска удаляются вместе с ним, поэтому отсутствие строки — не ошибка.
+    Tasks of a cancelled run are deleted along with it, so a missing row is not an error.
     """
     if task_id is None:
         return
@@ -248,7 +245,7 @@ def _record_success(transaction: UnitOfWork, task_id: str | None) -> None:
 
 
 def book_record(transaction: UnitOfWork, book_id: str) -> BookRecord:
-    """Запись книги в открытой транзакции."""
+    """Book record within an active transaction."""
     book = transaction.books.get(book_id)
     if book is None:
         raise BlockProcessingError(f"книги {book_id} нет в хранилище")
@@ -256,10 +253,10 @@ def book_record(transaction: UnitOfWork, book_id: str) -> BookRecord:
 
 
 def total_usage(usages: Iterable[TokenUsage | None]) -> TokenUsage | None:
-    """Суммарный расход токенов: провайдер считает каждый вызов отдельно.
+    """Total token usage: provider tracks each call separately.
 
-    Провайдер, не сообщающий объём токенов, оставляет `None`: ноль означал бы бесплатный
-    вызов, а не отсутствие данных (PRD § 24).
+    A provider reporting no token counts leaves `None`: zero would signify a free call
+    rather than missing data (PRD § 24).
     """
     reported = [usage for usage in usages if usage is not None]
     if not reported:
@@ -271,18 +268,18 @@ def total_usage(usages: Iterable[TokenUsage | None]) -> TokenUsage | None:
 
 
 def _total_tokens(values: Iterable[int | None]) -> int | None:
-    """Сумма тех значений, которые провайдер сообщил."""
+    """Sum of token counts reported by the provider."""
     reported = [value for value in values if value is not None]
     return sum(reported) if reported else None
 
 
 def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exception:
-    """Та же ошибка, но названная именами блоков, которые видела модель (ALG-05).
+    """Same error rephrased using block aliases seen by the model (ALG-05).
 
-    Причина отклонения уходит в уточняющую инструкцию повтора, а проверки формулируют
-    её стабильными идентификаторами блоков. Перечень ожидаемых блоков остаётся тот,
-    который заполнил валидатор. Наружу — в журнал и в состояние задачи — уходит исходная
-    ошибка с настоящими идентификаторами.
+    The rejection reason is inserted into the retry clarification instruction, while
+    validators formulate it with stable block IDs. The expected block list remains as
+    populated by the validator. Outwardly — into logs and task state — the original error
+    with real block IDs is propagated.
     """
     if not isinstance(error, ResultValidationError):
         return error

@@ -1,39 +1,36 @@
-"""Сборка контекста запросов к модели (PRD § 13, ADR § 3).
+"""Context builder for model requests (PRD § 13, ADR § 3).
 
-`ContextBuilder` — прикладная политика, которая решает, что именно видит модель. Порт
-`LLMClient` о главах, глоссарии и блоках не знает: он получает готовый текст инструкции
-и готовый текст запроса.
+`ContextBuilder` is an application policy that determines exactly what the model sees. The
+`LLMClient` port knows nothing of chapters, glossary, or blocks: it receives ready instruction
+text and ready prompt input text.
 
-Контекст анализа главы состоит из текстовых блоков этой главы и уже принятых решений
-книги — кандидатов глоссария из предыдущих глав. Текст соседних глав в него не попадает:
-анализ главы зависит только от неё самой и от накопленных кандидатов, поэтому главы
-анализируются строго последовательно (PRD § 13, § 25). Блоки `PRESERVE_ONLY` и
-`DROP_WITH_WARNING` не попадают ни в основной контекст, ни в соседний: они остаются
-ответственностью импортёра и экспортёра (ADR § 3).
+Chapter analysis context consists of the textual blocks of that chapter and already approved
+decisions of the book — glossary candidates from previous chapters. Text of neighbouring chapters
+is not included: chapter analysis depends only on itself and accumulated candidates, so chapters
+are analyzed strictly sequentially (PRD § 13, § 25). `PRESERVE_ONLY` and `DROP_WITH_WARNING`
+blocks do not enter main or neighbouring context: they remain the responsibility of the importer
+and exporter (ADR § 3).
 
-Контекст обработки группы блоков состоит из самой группы, снимка глоссария запуска,
-инструкций перевода главы и её сводки — выжимки анализа этой главы. Результаты обработки
-других групп в него не входят: так задачи остаются независимыми, а результат
-воспроизводимым (PRD § 13). Обязательные переводческие указания стоят в контексте
-отдельно от необязательных подсказок: принятое, исправленное или зафиксированное
-решение пользователя модель обязана соблюдать, вариант модели без решения и пропущенный
-элемент — подсказка (PRD § 11-12). Решение пользователя сильнее указаний переводчику
-главы: пункт указаний, который ему противоречит, в контекст не попадает
-(`chapter_instructions`), а контекст прямо ставит решения выше указаний.
+Block group processing context consists of the group itself, the run glossary snapshot,
+chapter translation instructions, and the chapter summary — a digest of that chapter's analysis.
+Processing results of other groups are not included: this keeps tasks independent and results
+reproducible (PRD § 13). Mandatory translation decisions are separated in context from optional
+suggestions: approved, corrected, or pinned user decisions must be respected by the model, while
+model variants without user decision and skipped items are suggestions (PRD § 11-12). User decisions
+override chapter instructions: any instruction item that contradicts them is excluded from context
+(`chapter_instructions`), and the context explicitly prioritizes decisions over instructions.
 
-Контекст повторной генерации отличается от контекста группы двумя вещами: блок в нём
-один и рядом с ним стоят несколько соседних абзацев главы. Соседи нужны, чтобы понять
-сцену; псевдонимов они не получают, поэтому результат по ним модель вернуть не может
-(PRD § 13, § 21.5).
+Block regeneration context differs from group context in two ways: it contains a single block
+surrounded by several neighbouring paragraphs of the chapter. Neighbours provide scene context;
+they do not receive aliases, so the model cannot return results for them (PRD § 13, § 21.5).
 
-Блоки нумеруются в запросе короткими псевдонимами `b1..bN`, а не своими стабильными
-идентификаторами. Идентификатор блока — UUID: в главе на две сотни абзацев такие ключи
-занимают заметную часть и запроса, и ответа, а модель обязана вернуть каждый из них
-дословно. Псевдоним стоит несколько символов, переносится точнее и живёт ровно один
-запрос — обратное отображение хранится здесь же, в `ChapterAnalysisContext`.
+Blocks are aliased in prompts with short identifiers `b1..bN` instead of stable UUIDs: in a chapter
+with hundreds of paragraphs, UUID keys occupy significant portions of requests and responses, and
+the model must echo each verbatim. Aliases cost only a few characters, transfer reliably, and live
+for exactly one request — the reverse mapping is held here in `ChapterAnalysisContext`.
 
-Инструкции написаны по-русски: тем же языком написана уточняющая инструкция повтора
-(`retry_policy.build_repair_instruction`), которая дописывается к этому же тексту.
+Instructions are written in Russian: the retry repair instruction (`retry_policy.build_repair_instruction`)
+is written in the same language and is appended to this text.
 """
 
 from __future__ import annotations
@@ -79,19 +76,19 @@ from linguary.domain import (
     glossary_key,
 )
 
-#: Сколько уже принятых решений книги попадает в контекст анализа очередной главы.
-#: К концу романа кандидатов накапливаются сотни, а запросу нужны те, что действительно
-#: повторяются: список ограничивается сверху, чтобы контекст не рос вместе с книгой
-#: (PRD § 13: ограничение контекста настраивается).
+#: Maximum number of accumulated decisions from previous chapters passed into chapter analysis context.
+#: By the end of a novel, candidates can number in the hundreds, whereas requests only need those
+#: that actually recur: the list is capped to prevent context from ballooning with book size
+#: (PRD § 13: context limit is configurable).
 DEFAULT_MAX_ACCUMULATED_CANDIDATES = 200
 
-#: Сколько соседних текстовых блоков с каждой стороны видит модель при повторной генерации
-#: одного блока. PRD § 13 просит «несколько соседних абзацев»: они нужны, чтобы понять сцену,
-#: и не должны превращать запрос одного блока в запрос главы.
+#: Number of neighbouring textual blocks on each side seen by the model during single block regeneration.
+#: PRD § 13 specifies "several neighbouring paragraphs": they provide scene context without turning
+#: a single-block request into a full chapter request.
 DEFAULT_REGENERATION_CONTEXT_BLOCKS = 2
 
-#: Типы блоков, которые не являются текстом для чтения даже при полной поддержке импортёром.
-#: Изображение поддержано целиком, но читателю оно даёт не текст, а картинку.
+#: Block types that are non-textual for reading even when fully supported by the importer.
+#: An image is fully supported, but offers an image to the reader rather than text.
 _NON_TEXTUAL_BLOCK_TYPES = frozenset({BlockType.IMAGE, BlockType.PAGE_BREAK})
 
 
@@ -136,12 +133,12 @@ artifact_index с нуля в соответствующем списке (по�
 
 
 class ContextBuildError(ApplicationError):
-    """Контекст запроса собрать нельзя."""
+    """Request context cannot be assembled."""
 
 
 @dataclass(frozen=True, slots=True)
 class FragmentFindings:
-    """Найденное в уже обработанных частях главы."""
+    """Findings in previously processed parts of the chapter."""
 
     summary: str
     instructions: str
@@ -149,11 +146,11 @@ class FragmentFindings:
 
 
 def is_textual(block: DocumentBlock) -> bool:
-    """Передаётся ли блок модели как часть текста главы (PRD § 10.1).
+    """Whether the block is passed to the model as part of chapter text (PRD § 10.1).
 
-    Модели передаётся то, что читатель читает: полностью поддержанный блок с непустым
-    текстом. Всё остальное — конструкции, перенесённые как есть (`PRESERVE_OPAQUE`),
-    изображения, разрывы страниц, пустые блоки — остаётся работой импортёра и экспортёра.
+    The model receives what the reader reads: a fully supported block with non-empty
+    text. Everything else — preserved opaque structures (`PRESERVE_OPAQUE`), images,
+    page breaks, empty blocks — remains the job of the importer and exporter.
     """
     return (
         block.support_status is SupportStatus.SUPPORTED
@@ -163,12 +160,12 @@ def is_textual(block: DocumentBlock) -> bool:
 
 
 def textual_blocks(section: DocumentSection) -> tuple[DocumentBlock, ...]:
-    """Текстовые блоки главы в порядке исходного документа."""
+    """Chapter textual blocks in original document order."""
     return tuple(block for block in section.ordered_blocks if is_textual(block))
 
 
 def notes_budget(*, unit_chars: int, chapter_chars: int, per_chapter: int) -> int:
-    """Число заметок для доли главы, переданной в запросе обработки."""
+    """Number of language notes allocated to the portion of the chapter in the request."""
     if chapter_chars <= 0:
         raise ContextBuildError(
             "длина главы для расчёта заметок должна быть положительной"
@@ -177,10 +174,10 @@ def notes_budget(*, unit_chars: int, chapter_chars: int, per_chapter: int) -> in
 
 
 class AliasedBlocksContext:
-    """Общая часть контекстов, адресующих блоки псевдонимами `b1..bN`.
+    """Common base for contexts that address blocks via aliases `b1..bN`.
 
-    Отображение псевдонимов заполняет наследник: здесь только разбор ответа модели,
-    одинаковый и для анализа главы, и для обработки группы блоков.
+    The alias mapping is populated by subclasses: here we only handle parsing
+    the model response, identical for both chapter analysis and block group processing.
     """
 
     __slots__ = ()
@@ -189,11 +186,11 @@ class AliasedBlocksContext:
 
     @property
     def aliases(self) -> tuple[str, ...]:
-        """Псевдонимы переданных блоков в порядке исходного документа."""
+        """Aliases of provided blocks in original document order."""
         return tuple(self.block_ids_by_alias)
 
     def block_id_for(self, alias: str) -> str:
-        """Стабильный идентификатор блока по псевдониму из ответа модели."""
+        """Stable block identifier for an alias returned by the model."""
         block_id = self.block_ids_by_alias.get(alias)
         if block_id is None:
             raise ContextBuildError(f"блок {alias} в запрос не передавался")
@@ -202,11 +199,11 @@ class AliasedBlocksContext:
 
 @dataclass(frozen=True, slots=True)
 class ChapterAnalysisContext(AliasedBlocksContext):
-    """Готовый запрос анализа главы вместе с тем, что нужно для разбора ответа.
+    """Ready chapter analysis request along with metadata for parsing response.
 
-    `block_ids_by_alias` возвращает ответ модели к стабильным идентификаторам блоков,
-    `expectation` описывает ожидаемый результат в том виде, в каком его видит модель:
-    уточняющая инструкция повтора перечисляет псевдонимы, а не внутренние UUID.
+    `block_ids_by_alias` maps model response aliases back to stable block IDs,
+    `expectation` describes expected output as seen by the model: retry repair
+    instructions list aliases rather than internal UUIDs.
     """
 
     section_id: str
@@ -228,17 +225,16 @@ class ChapterAnalysisContext(AliasedBlocksContext):
 
 @dataclass(frozen=True, slots=True)
 class TranslationContext(AliasedBlocksContext):
-    """Готовый запрос обработки одной группы блоков (PRD § 13, ALG-04).
+    """Ready request for processing a single block group (PRD § 13, ALG-04).
 
-    `expectation` перечисляет псевдонимы вместе с режимами обработки из сохранённого
-    плана: уточняющая инструкция повтора называет блоки так, как их видела модель,
-    и повторяет требование режима (ALG-05).
+    `expectation` lists aliases along with treatments from the saved plan:
+    retry repair instructions identify blocks as the model saw them and repeat
+    the required treatment (ALG-05).
 
-    `explained_expressions` — выражения `Before You Read` этой главы: модель получает их
-    в запросе как запрет повтора, а сценарий отсеивает повтор, если модель его всё же
-    вернула (PRD § 19.3).
-    `explained_entries` сохраняет также полное объяснение для сравнения содержания
-    заметки, чтобы самостоятельный новый факт того же отрывка не терялся.
+    `explained_expressions` — `Before You Read` expressions for this chapter: passed
+    in the prompt to prevent duplication, with use case filtering out repeats if returned (PRD § 19.3).
+    `explained_entries` also retains full explanations to compare note contents so that
+    independent new linguistic facts about the same excerpt are not lost.
     """
 
     section_id: str
@@ -257,11 +253,10 @@ class TranslationContext(AliasedBlocksContext):
         )
 
     def to_aliases(self, message: str) -> str:
-        """Сообщение проверки, в котором идентификаторы блоков заменены псевдонимами.
+        """Validation message with internal block IDs replaced by prompt aliases.
 
-        Причина отбраковки уходит модели вместе с уточняющей инструкцией (ALG-05), а
-        проверки формулируют её идентификаторами блоков группы — тех имён модель
-        не видела.
+        Rejection reasons are sent to the model with repair instructions (ALG-05),
+        while validation checks format messages using internal block IDs the model never saw.
         """
         for alias, block_id in self.block_ids_by_alias.items():
             message = message.replace(block_id, alias)
@@ -270,12 +265,12 @@ class TranslationContext(AliasedBlocksContext):
     def to_block_ids(
         self, payload: TranslationResultResponse
     ) -> TranslationResultResponse:
-        """Ответ модели, переведённый с псевдонимов на идентификаторы блоков группы.
+        """Model response translated from prompt aliases back to group block IDs.
 
-        Псевдоним, которого в запросе не было, — это результат для чужого блока
-        (PRD § 15). Проверки состава работают уже с идентификаторами группы, поэтому
-        такой ответ отбраковывается здесь и с тем же ожиданием, что и остальные
-        блокирующие проверки: повтор получит перечень блоков, а не голое сообщение.
+        An alias absent from the request indicates a result for a foreign block (PRD § 15).
+        Composition checks operate on group block IDs, so such responses are rejected
+        here with the same expectation as other blocking checks: retries get block lists
+        rather than bare messages.
         """
         unknown = sorted(
             {
@@ -306,14 +301,14 @@ class TranslationContext(AliasedBlocksContext):
 
 @dataclass(frozen=True, slots=True)
 class _NeighbourBlocks:
-    """Соседний исходный текст одной стороны: абзацы до блока или после него."""
+    """Neighbouring source text on one side: paragraphs before or after the block."""
 
     title: str
     blocks: tuple[DocumentBlock, ...]
 
 
 class ContextBuilder:
-    """Собирает контекст запросов к модели по политике PRD § 13."""
+    """Assembles prompt context according to PRD § 13 policy."""
 
     def __init__(
         self,
@@ -355,10 +350,10 @@ class ContextBuilder:
         section: DocumentSection,
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
     ) -> ChapterAnalysisContext:
-        """Контекст анализа одной главы (PRD § 11, § 13, § 14, § 19).
+        """Context for analyzing a single chapter (PRD § 11, § 13, § 14, § 19).
 
-        `accumulated_candidates` — кандидаты глоссария предыдущих глав книги в порядке
-        чтения. Текст соседних глав в контекст не передаётся.
+        `accumulated_candidates` — glossary candidates from previous chapters in reading order.
+        Text of neighbouring chapters is not passed.
         """
         blocks = textual_blocks(section)
         if not blocks:
@@ -388,12 +383,12 @@ class ContextBuilder:
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
         findings: FragmentFindings | None = None,
     ) -> ChapterAnalysisContext:
-        """Контекст анализа одного фрагмента длинной главы (PRD § 14, ALG-03).
+        """Context for analyzing a single fragment of a long chapter (PRD § 14, ALG-03).
 
-        Резервный сценарий: главу, которая не помещается в один запрос, модель видит
-        по частям. Фрагмент получает только свои блоки — ни остальной главы, ни соседних
-        глав в запросе нет. Найденное в предыдущих частях помогает вернуть сводку главы
-        от начала до конца текущего фрагмента.
+        Fallback scenario: chapters that do not fit into a single prompt are seen in parts.
+        A fragment receives only its blocks — neither the rest of the chapter nor neighbouring
+        chapters are in the request. Findings from previous parts help return a cumulative
+        summary from chapter start to the end of the current fragment.
         """
         if fragment_count < 1 or fragment.order >= fragment_count:
             raise ContextBuildError(
@@ -426,13 +421,13 @@ class ContextBuilder:
         glossary: GlossarySnapshot,
         book_candidates: Iterable[GlossaryCandidate] = (),
     ) -> TranslationContext:
-        """Контекст обработки одной группы блоков (PRD § 10, § 13, § 19.3, ALG-04).
+        """Context for processing a single block group (PRD § 10, § 13, § 19.3, ALG-04).
 
-        В запрос идут сама группа с режимами из сохранённого плана, снимок глоссария
-        запуска, инструкции перевода главы и её сводка. Результатов других групп и текста
-        соседних глав в контексте нет. `book_candidates` — кандидаты анализа всех глав
-        книги: из них известны варианты модели, отвергнутые пользователем, и указания
-        с такими вариантами в запрос не попадают.
+        The request includes the group itself with treatments from the saved plan,
+        the run glossary snapshot, chapter translation instructions, and its summary.
+        Results from other groups and neighbouring chapter text are excluded. `book_candidates`
+        contains candidates from all analyzed chapters: user-rejected model variants are known
+        from them, so instructions referencing such variants are omitted.
         """
         return self._translation_context(
             document=document,
@@ -458,12 +453,12 @@ class ContextBuilder:
         glossary: GlossarySnapshot,
         book_candidates: Iterable[GlossaryCandidate] = (),
     ) -> TranslationContext:
-        """Контекст повторной генерации одного блока (PRD § 13, § 19.3, § 21.5).
+        """Context for regenerating a single block (PRD § 13, § 19.3, § 21.5).
 
-        Исходная группа блоков не пересчитывается: модель получает выбранный блок с его
-        режимом из плана, ту же выжимку анализа главы и глоссарий, что и обычная обработка,
-        и вдобавок несколько соседних абзацев — они нужны, чтобы понять сцену, псевдонимов
-        не получают и результата по ним не ждут.
+        The original block group is not recomputed: the model receives the chosen block
+        with its plan treatment, the same chapter digest and glossary snapshot as standard
+        processing, plus several neighbouring paragraphs for scene context. Neighbours do
+        not receive aliases and no results are expected for them.
         """
         if len(unit.items) != 1:
             raise ContextBuildError(
@@ -496,7 +491,7 @@ class ContextBuilder:
         instructions: str,
         neighbours: Sequence[_NeighbourBlocks],
     ) -> TranslationContext:
-        """Готовый запрос обработки переданных блоков вместе с разбором ответа."""
+        """Ready translation request for given blocks along with response parsing setup."""
         if analysis.content_plan is not None and self._content_plan_profile != "content-plan-v2":
             raise ContextBuildError("сохранённый v2-план требует явный профиль content-plan-v2")
         version = 2 if analysis.content_plan is not None else 1
@@ -552,10 +547,10 @@ class ContextBuilder:
         candidates: Sequence[GlossaryCandidate],
         neighbours: Sequence[_NeighbourBlocks],
     ) -> str:
-        """Текст запроса обработки: шапка, выжимка анализа главы, глоссарий и блоки.
+        """Processing request prompt text: header, chapter digest, glossary, and blocks.
 
-        `candidates` — кандидаты анализа глав книги: по ним указания главы и элементов
-        глоссария сверяются с отвергнутыми пользователем вариантами модели.
+        `candidates` — candidates from book chapter analyses: used to check chapter and glossary
+        instructions against user-rejected model suggestions.
         """
         budget = notes_budget(
             unit_chars=sum(len(item.block.text) for item in unit.items),
@@ -588,10 +583,10 @@ class ContextBuilder:
     def _neighbours(
         self, section: DocumentSection, unit: TranslationUnit
     ) -> tuple[_NeighbourBlocks, ...]:
-        """Соседний исходный текст вокруг блока: несколько абзацев до и после (PRD § 13).
+        """Neighbouring source text around block: several paragraphs before and after (PRD § 13).
 
-        В соседи идут только текстовые блоки той же главы: соседняя глава — уже другая
-        сцена, а перенесённые как есть конструкции и иллюстрации модели не передаются.
+        Only textual blocks of the same chapter qualify as neighbours: neighbouring chapters
+        represent different scenes, while preserved opaque elements and illustrations are not passed.
         """
         limit = self._regeneration_context_blocks
         if limit == 0:
@@ -614,10 +609,10 @@ class ContextBuilder:
     def _suggested_entries(
         self, glossary: GlossarySnapshot
     ) -> tuple[GlossarySnapshotEntry, ...]:
-        """Необязательные подсказки снимка глоссария в пределах ограничения контекста.
+        """Optional glossary snapshot suggestions within context constraints.
 
-        Обязательные указания в это ограничение не входят: они решение пользователя,
-        и урезать их приложение не вправе (PRD § 11).
+        Mandatory decisions are not subject to this limit: they represent user decisions
+        which the application has no right to truncate (PRD § 11).
         """
         mandatory = set(glossary.mandatory_entries)
         suggested = tuple(
@@ -638,7 +633,7 @@ class ContextBuilder:
         before_you_read_limit: int = 10,
         language_notes_limit: int | None = None,
     ) -> ChapterAnalysisContext:
-        """Готовый запрос по переданным блокам главы вместе с разбором ответа."""
+        """Ready request for chapter blocks along with response parsing metadata."""
         aliases = {_alias(index): block.id for index, block in enumerate(blocks, start=1)}
         candidate = self._content_plan_profile == "content-plan-v2"
         note_limit = self._language_notes_per_chapter if language_notes_limit is None else language_notes_limit
@@ -679,7 +674,7 @@ class ContextBuilder:
     def _analysis_note_groups(
         self, section: DocumentSection, blocks: Sequence[DocumentBlock],
     ) -> tuple[tuple[tuple[str, ...], int], ...]:
-        # Группировка зависит от исходных блоков, а не от текстового режима.
+        # Grouping depends on source blocks rather than textual treatment mode.
         from linguary.application.translation_units import plan_translation_units
         from linguary.domain import BlockTreatment
 
@@ -723,7 +718,7 @@ class ContextBuilder:
         fragment_label: str | None,
         findings: FragmentFindings | None = None,
     ) -> str:
-        """Текст запроса: шапка главы, принятые решения книги и блоки под псевдонимами."""
+        """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
         parts = [
             _chapter_header(
                 document=document, section=section, fragment_label=fragment_label
@@ -746,13 +741,12 @@ class ContextBuilder:
     def _selected_candidates(
         self, candidates: Iterable[GlossaryCandidate]
     ) -> tuple[GlossaryCandidate, ...]:
-        """Решения предыдущих глав, которые попадут в контекст.
+        """Decisions from previous chapters that enter context.
 
-        Повторы одного исходного текста схлопываются, в том числе его очевидные
-        варианты написания (`glossary_key`): в контексте нужен сам термин, а не то,
-        в скольких главах и какими написаниями он встретился. При переполнении остаются решения
-        ранних глав: главные имена и названия появляются в начале книги и повторяются
-        дальше, а разовый термин последней главы следующей главе ничего не даёт.
+        Duplicates of the same source text are collapsed, including obvious spelling
+        variants (`glossary_key`): context needs the term itself, not how many chapters
+        it appeared in. When overflowing, earlier chapter decisions are retained: key characters
+        and places appear early and recur, while a one-off term from the latest chapter adds little.
         """
         selected: dict[str, GlossaryCandidate] = {}
         for candidate in candidates:
@@ -765,7 +759,7 @@ class ContextBuilder:
 def chapter_analysis_instructions(
     *, source_language: str, target_language: str, reader_level: str = "b2"
 ) -> str:
-    """Постоянная инструкция анализа главы (PRD § 10.1, § 11, § 14, § 19)."""
+    """Invariant chapter analysis instructions (PRD § 10.1, § 11, § 14, § 19)."""
     return _instructions(
         source_language=source_language,
         target_language=target_language,
@@ -778,12 +772,12 @@ def chapter_analysis_instructions(
 def chapter_fragment_instructions(
     *, source_language: str, target_language: str, reader_level: str = "b2"
 ) -> str:
-    """Инструкция анализа фрагмента длинной главы (PRD § 14, ALG-03).
+    """Instructions for analyzing a fragment of a long chapter (PRD § 14, ALG-03).
 
-    От инструкции целой главы отличается ровно тем, что меняет резервный сценарий:
-    модель видит часть главы, а её `chapter_summary` охватывает события от начала главы.
-    Остальные правила — план обработки, кандидаты глоссария, инструкции перевода и
-    учебный материал — те же самые.
+    Differs from whole chapter instructions only in adapting to the fallback scenario:
+    the model sees part of the chapter, and `chapter_summary` covers events from chapter start.
+    Other rules — treatment plan, glossary candidates, translation instructions, and learning
+    materials — remain identical.
     """
     return _instructions(
         source_language=source_language,
@@ -795,7 +789,7 @@ def chapter_fragment_instructions(
 
 
 def translation_unit_instructions(*, source_language: str, target_language: str) -> str:
-    """Постоянная инструкция обработки группы блоков (PRD § 10.1, § 15, § 19.3)."""
+    """Invariant instructions for processing a block group (PRD § 10.1, § 15, § 19.3)."""
     return _TRANSLATION_INSTRUCTIONS.format(
         source_language=source_language,
         target_language=target_language,
@@ -806,11 +800,11 @@ def translation_unit_instructions(*, source_language: str, target_language: str)
 def block_regeneration_instructions(
     *, source_language: str, target_language: str
 ) -> str:
-    """Инструкция повторной генерации одного блока (PRD § 13, § 19.3, § 21.5).
+    """Instructions for regenerating a single block (PRD § 13, § 19.3, § 21.5).
 
-    От инструкции группы отличается ровно тем, что меняет повторная генерация: модель
-    обрабатывает один блок и видит соседние абзацы, которые заменять не нужно. Правила
-    режимов, перевода и заметок остаются те же.
+    Differs from group instructions only in adapting to single block regeneration: the model
+    processes one block and sees neighbouring paragraphs that must not be replaced. Rules
+    for treatment modes, translation, and notes remain the same.
     """
     return _TRANSLATION_INSTRUCTIONS.format(
         source_language=source_language,
@@ -820,7 +814,7 @@ def block_regeneration_instructions(
 
 
 def _reader_level_treatment_guidance(reader_level: str) -> str:
-    """Инструкции выбора режимов помощи под целевой уровень читателя (PRD § 30)."""
+    """Instructions for selecting treatment modes tailored to target reader level (PRD § 30)."""
     level = reader_level.strip().lower()
     if level == "a2":
         return """\
@@ -928,7 +922,7 @@ def _instructions(
     summary: str,
     reader_level: str = "b2",
 ) -> str:
-    """Инструкция анализа, собранная под целую главу или под её фрагмент."""
+    """Analysis instructions compiled for a whole chapter or a chapter fragment."""
     languages = {"source_language": source_language, "target_language": target_language}
     treatment_guidance = _reader_level_treatment_guidance(reader_level)
     return _ANALYSIS_INSTRUCTIONS.format(
@@ -939,7 +933,7 @@ def _instructions(
     )
 
 
-#: Что именно модель видит в запросе: главу целиком или её последовательный фрагмент.
+#: What the model sees in the request: the whole chapter or a sequential fragment.
 _WHOLE_CHAPTER_SCOPE = """\
 Тебе дают одну главу, разбитую на пронумерованные текстовые блоки. Анализируй только эту \
 главу: соседних глав ты не видишь и догадок о них не строишь."""
@@ -949,7 +943,7 @@ _FRAGMENT_SCOPE = """\
 пронумерованные текстовые блоки. Анализируй только этот фрагмент: ни остальной главы, \
 ни соседних глав ты не видишь и догадок о них не строишь."""
 
-#: Что описывает `chapter_summary`. У фрагмента — события от начала главы до него.
+#: What `chapter_summary` describes. For a fragment — events from chapter start up to it.
 _WHOLE_CHAPTER_SUMMARY = """\
 5. chapter_summary — что произошло в этой главе.
 
@@ -967,9 +961,9 @@ _FRAGMENT_SUMMARY = """\
 и выражения before_you_read возвращай только новые, не повторяя предыдущие части."""
 
 
-#: Инструкция анализа главы. Один запрос отвечает сразу за план обработки, кандидатов
-#: глоссария, инструкции перевода, `Before You Read` и сводку главы (PRD § 14): отдельные
-#: подготовительные запросы к модели не выполняются.
+#: Chapter analysis instructions. A single request covers treatment plan, glossary candidates,
+#: translation instructions, Before You Read, and chapter summary (PRD § 14): no separate
+#: preliminary model calls are made.
 _ANALYSIS_INSTRUCTIONS = """\
 Ты готовишь учебное издание художественной книги. Издание помогает читателю, который \
 владеет языком {target_language} и учит язык {source_language}, читать эту книгу \
@@ -1057,8 +1051,8 @@ glossary_candidates, и дублировать их здесь не нужно. 
 Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
 
 
-#: Что именно модель обрабатывает: группу идущих подряд блоков или один выбранный блок,
-#: которому повторная генерация даёт соседние абзацы как контекст сцены (PRD § 13, § 21.5).
+#: What the model processes: a group of consecutive blocks or a single selected block
+#: where regeneration provides neighbouring paragraphs as scene context (PRD § 13, § 21.5).
 _UNIT_SCOPE = """\
 Тебе дают несколько идущих подряд текстовых блоков одной главы. У каждого блока указан \
 режим обработки: он выбран заранее, и менять его нельзя. Соседних глав и результатов \
@@ -1072,9 +1066,9 @@ _REGENERATION_SCOPE = """\
 по другим блокам ты не видишь."""
 
 
-#: Инструкция обработки блоков. Один запрос отвечает и за перевод, и за словарные
-#: подсказки, и за языковые заметки (PRD § 14, § 19.3): отдельного прохода модели ради
-#: заметок не выполняется — модель уже видит оригинал, режим блока и свой результат.
+#: Block processing instructions. A single request produces translation, glossary hints,
+#: and language notes (PRD § 14, § 19.3): no separate pass is needed for notes because the model
+#: already sees the original, the block mode, and its output.
 _TRANSLATION_INSTRUCTIONS = """\
 Ты готовишь учебное издание художественной книги. Издание помогает читателю, который \
 владеет языком {target_language} и учит язык {source_language}, читать эту книгу \
@@ -1168,14 +1162,14 @@ def _chapter_digest(
     glossary: GlossarySnapshot,
     candidates: Sequence[GlossaryCandidate],
 ) -> str:
-    """Выжимка анализа главы: её сводка и указания переводчику (PRD § 13).
+    """Chapter analysis digest: summary and translation instructions (PRD § 13).
 
-    Кандидаты глоссария сюда не идут: утверждённые решения книги приходят снимком
-    запуска, а неутверждённых после старта обработки не существует. Указания написаны
-    до проверки глоссария, поэтому пункты, противоречащие решениям пользователя,
-    отбрасываются: иначе прежний вариант модели перекрывал бы исправление (PRD § 11).
-    Отвергнутые варианты берутся из кандидатов всей книги: анализ главы не возвращает
-    кандидата понятия, уже решённого в предыдущих главах.
+    Glossary candidates are omitted here: approved book decisions arrive via the run snapshot,
+    and unapproved candidates no longer exist after processing begins. Instructions were written
+    prior to glossary review, so items contradicting user decisions are pruned to prevent stale
+    model variants from overriding corrections (PRD § 11). Rejected variants are gathered from
+    the whole book's candidates: a chapter analysis does not return candidates already decided
+    in earlier chapters.
     """
     lines: list[str] = []
     if summary := analysis.chapter_summary.strip():
@@ -1201,11 +1195,11 @@ def _with_agreed_notes(
     glossary: GlossarySnapshot,
     candidates: Sequence[GlossaryCandidate],
 ) -> tuple[GlossarySnapshotEntry, ...]:
-    """Записи снимка с указаниями, не спорящими с решениями других понятий (PRD § 11).
+    """Snapshot entries with notes reconciled against decisions for other concepts (PRD § 11).
 
-    Указание элемента, принятого без правки, написала модель на анализе, и оно может
-    называть вариант другого понятия, который пользователь отверг. Отвергнутые варианты
-    известны из кандидатов анализа глав книги — тех же, что и для указаний главы.
+    The note of an unedited approved entry was generated by the model during analysis and may
+    mention variants of other concepts that the user rejected. Rejected variants are known
+    from candidates across all book chapter analyses.
     """
     return tuple(
         replace(
@@ -1221,12 +1215,12 @@ def _with_agreed_notes(
 
 
 def _explained_expressions(analysis: ChapterAnalysis, section: DocumentSection) -> str:
-    """Выражения и объяснения `Before You Read` главы (PRD § 19.1, § 19.3).
+    """Chapter `Before You Read` expressions and explanations (PRD § 19.1, § 19.3).
 
-    Материал подготовки к чтению собран на анализе главы, а подсказки и заметки
-    рождаются позже и о нём не знают. Без этого списка один и тот же оборот
-    объясняется читателю трижды — в `Before You Read`, в словарной подсказке блока
-    и в языковой заметке, — а § 19.3 прямо запрещает заметке повторять подсказку.
+    Advance organizer material was compiled during chapter analysis, whereas hints and notes
+    are generated later. Without this list, a phrase might be explained to the reader three times —
+    in `Before You Read`, in a block glossary hint, and in a language note — and § 19.3 explicitly
+    forbids notes from repeating hints.
     """
     entries = _before_you_read_entries(analysis, section)
     if not entries:
@@ -1243,7 +1237,7 @@ def _explained_expressions(analysis: ChapterAnalysis, section: DocumentSection) 
 def _before_you_read_entries(
     analysis: ChapterAnalysis, section: DocumentSection
 ) -> tuple[tuple[str, str], ...]:
-    """Полные объяснения подготовки к чтению, доступные модели и отсеву заметок."""
+    """Full advance reading explanations accessible to the model and note filtering."""
     if section.is_notes_only:
         return ()
     return tuple(
@@ -1256,10 +1250,9 @@ def _before_you_read_entries(
 def _before_you_read_expressions(
     analysis: ChapterAnalysis, section: DocumentSection
 ) -> tuple[str, ...]:
-    """Непустые выражения `Before You Read` главы в порядке анализа.
+    """Non-empty `Before You Read` expressions for the chapter in analysis order.
 
-    Страница сносок `Before You Read` в книге не получает, поэтому и повторять
-    её подсказкам и заметкам нечего.
+    A footnotes section does not receive `Before You Read`, so there are no expressions to repeat.
     """
     if section.is_notes_only:
         return ()
@@ -1273,7 +1266,7 @@ def _before_you_read_expressions(
 def _mandatory_decisions(
     entries: Sequence[GlossarySnapshotEntry], *, target_language: str
 ) -> str:
-    """Обязательные переводческие указания книги: решения пользователя (PRD § 11-12)."""
+    """Mandatory translation guidance for the book: user decisions (PRD § 11-12)."""
     if not entries:
         return "Обязательных переводческих указаний по этой книге нет."
     lines = [
@@ -1290,7 +1283,7 @@ def _mandatory_decisions(
 def _glossary_suggestions(
     entries: Sequence[GlossarySnapshotEntry], *, target_language: str
 ) -> str:
-    """Необязательные подсказки глоссария книги (PRD § 11-12)."""
+    """Optional glossary suggestions for the book (PRD § 11-12)."""
     if not entries:
         return ""
     lines = [
@@ -1303,10 +1296,10 @@ def _glossary_suggestions(
 
 
 def _notes_legend(entries: Sequence[GlossarySnapshotEntry]) -> str:
-    """Пояснение к скобкам списка, если хоть одно решение несёт указание.
+    """Legend for list brackets if at least one decision contains guidance.
 
-    Указание — решение уровня всей книги, а не подсказка для этого запроса: род
-    персонажа, названный один раз, обязан держаться во всех главах (PRD § 11).
+    Guidance is a book-wide decision, not a single-request hint: character gender,
+    once assigned, must hold across all chapters (PRD § 11).
     """
     if not any(entry.note.strip() for entry in entries):
         return ""
@@ -1317,13 +1310,13 @@ def _notes_legend(entries: Sequence[GlossarySnapshotEntry]) -> str:
 
 
 def _glossary_line(entry: GlossarySnapshotEntry) -> str:
-    """Строка записи снимка глоссария вместе с её переводческим указанием."""
+    """Glossary snapshot entry line with its translation guidance."""
     line = f"- {entry.source_text} [{entry.type}] -> {entry.translation}"
     return f"{line} ({entry.note.strip()})" if entry.note.strip() else line
 
 
 def _neighbour_context(neighbours: Sequence[_NeighbourBlocks]) -> str:
-    """Соседний исходный текст блока: контекст сцены, который не обрабатывается (PRD § 13)."""
+    """Neighbouring source text: scene context that is not processed (PRD § 13)."""
     if not neighbours:
         return ""
     lines = [
@@ -1337,22 +1330,20 @@ def _neighbour_context(neighbours: Sequence[_NeighbourBlocks]) -> str:
 
 
 def source_text_for_model(block: DocumentBlock, *, footnote_markers: bool = False) -> str:
-    """Текст блока в том виде, в каком его стоит показывать модели.
+    """Block text as presented to the model.
 
-    Отличается от `block.text` двумя вещами. Во-первых, у сноски отброшена ссылка
-    возврата к месту вызова — «↩», «back» и подобный хвост, которым книга уводит
-    читателя обратно в текст. Для книги это навигация, а не текст сноски: экспортёр
-    восстанавливает её из разметки блока сам. Модель же видит хвост как часть текста
-    и переносит его в перевод, где он становится мёртвым символом — вторым значком
-    возврата, который никуда не ведёт. Ссылку возврата опознаём по разметке, а не по
-    символам: это ссылка в конце текста сноски, ведущая на якорь внутри книги — в том же
-    ресурсе или в другом: у отдельной страницы сносок возврат всегда уходит в главу.
+    Differs from `block.text` in two ways. First, footnote back links — '↩', 'back', and similar
+    tails that return readers to caller locations — are stripped. For the book this is navigation
+    rather than footnote body text: the exporter recreates it from block markup. The model would see
+    the back link as part of the text and transfer it into translation, creating a dead symbol.
+    Back links are detected by markup rather than character matching: link at the end of footnote text
+    pointing to an anchor within the book.
 
-    Во-вторых, номер ссылки на сноску посреди абзаца модели как текст не показывается:
-    иначе он переходит в перевод голой цифрой. Блоку, который модель обрабатывает,
-    ссылка передаётся меткой `[^N]` (`footnote_markers`): модель переносит её в перевод,
-    и экспортёр ставит на её место ссылку оригинала. В остальных случаях — анализ главы,
-    соседние абзацы — ссылка просто убирается.
+    Second, footnote call numbers in the middle of paragraphs are not shown as bare numbers to the model;
+    otherwise they carry over as raw digits. For blocks being processed by the model, calls are passed
+    as `[^N]` markers (`footnote_markers`): the model reproduces them in translation, and the exporter
+    inserts original links in their place. In other cases — chapter analysis, neighbouring paragraphs —
+    the call reference is simply omitted.
     """
     text = block.text
     end = _back_link_start(block) if block.type is BlockType.FOOTNOTE else len(text)
@@ -1375,7 +1366,7 @@ def source_text_for_model(block: DocumentBlock, *, footnote_markers: bool = Fals
 
 
 def _back_link_start(block: DocumentBlock) -> int:
-    """Начало ссылки возврата в конце сноски либо длина текста, если её нет."""
+    """Start position of back link at end of footnote, or text length if none."""
     text = block.text
     tail = max(
         (
@@ -1391,17 +1382,17 @@ def _back_link_start(block: DocumentBlock) -> int:
     return len(text) if tail is None else tail
 
 
-#: Схема внешнего адреса: `http:`, `mailto:` и подобные. Импорт оставляет такие ссылки
-#: как есть, а ссылки внутри книги приводит к пути ресурса с якорем.
+#: External URI scheme: `http:`, `mailto:`, etc. Importer preserves them as-is,
+#: while internal book links are mapped to resource paths with anchors.
 _EXTERNAL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 def _points_to_book_anchor(target: str | None) -> bool:
-    """Ведёт ли ссылка на якорь внутри книги: в том же ресурсе или в другом.
+    """Whether link points to an internal book anchor within the same or another resource.
 
-    Возврат из сноски главы ведёт в тот же файл, а возврат со страницы сносок — в файл
-    главы, где стоит ссылка на сноску. Внешний адрес и ссылка на файл без якоря
-    возвратом не бывают: это текст сноски.
+    Return links from chapter footnotes point to the same file, while returns from dedicated
+    footnote pages point to the chapter file where the footnote was referenced. External URIs
+    and anchorless file links are never return links: they are footnote content.
     """
     if not target or _EXTERNAL_SCHEME.match(target):
         return False
@@ -1410,7 +1401,7 @@ def _points_to_book_anchor(target: str | None) -> bool:
 
 
 def _unit_blocks(unit: TranslationUnit) -> str:
-    """Блоки группы под псевдонимами вместе с их режимом обработки."""
+    """Group blocks with aliases along with their treatment modes."""
     lines = ["Блоки для обработки:"]
     lines.extend(
         f"[{_alias(index)}] режим {item.treatment}\n"
@@ -1421,12 +1412,12 @@ def _unit_blocks(unit: TranslationUnit) -> str:
 
 
 def _alias(index: int) -> str:
-    """Короткий псевдоним блока в запросе."""
+    """Short block alias in requests."""
     return f"b{index}"
 
 
 def _fragment_label(order: int, fragment_count: int) -> str:
-    """Строка шапки о месте фрагмента в главе."""
+    """Header label specifying fragment position within chapter."""
     return (
         f"Фрагмент главы: {order + 1}-й из {fragment_count}. "
         f"Остальные фрагменты главы тебе не показаны."
@@ -1439,7 +1430,7 @@ def _chapter_header(
     section: DocumentSection,
     fragment_label: str | None = None,
 ) -> str:
-    """Шапка запроса: книга, глава, место фрагмента и языки издания."""
+    """Prompt header: book, chapter, fragment position, and edition languages."""
     sections = document.ordered_sections
     position = next(
         (
@@ -1467,7 +1458,7 @@ def _chapter_header(
 def _known_decisions(
     candidates: Sequence[GlossaryCandidate], *, target_language: str
 ) -> str:
-    """Уже принятые решения книги: кандидаты предыдущих глав и решения пользователя."""
+    """Already accepted book decisions: candidates of prior chapters and user decisions."""
     if not candidates:
         return "Предыдущие главы переводческих решений пока не дали."
     lines = [
@@ -1479,7 +1470,7 @@ def _known_decisions(
 
 
 def _known_decision_line(candidate: GlossaryCandidate) -> str:
-    """Строка принятого решения книги вместе с его переводческим указанием."""
+    """Accepted book decision line with its translation guidance."""
     line = (
         f"- {candidate.source_text} [{candidate.type}] -> "
         f"{candidate.suggested_translation}"
@@ -1488,7 +1479,7 @@ def _known_decision_line(candidate: GlossaryCandidate) -> str:
 
 
 def _chapter_blocks(blocks: Sequence[DocumentBlock]) -> str:
-    """Текстовые блоки главы под псевдонимами."""
+    """Textual blocks of chapter under aliases."""
     lines = ["Текстовые блоки главы:"]
     lines.extend(
         f"[{_alias(index)}]\n{source_text_for_model(block)}"

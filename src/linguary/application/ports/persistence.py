@@ -1,11 +1,11 @@
-"""Порты хранения: репозитории и unit of work.
+"""Persistence ports: repositories and unit of work.
 
-Прикладной слой работает с хранилищем только через эти протоколы и ничего не знает
-ни о SQLAlchemy, ни о SQLite: конкретная реализация живёт в `linguary.adapters.db`.
+The application layer interacts with storage only through these protocols and knows
+nothing about SQLAlchemy or SQLite: concrete implementations live in `linguary.adapters.db`.
 
-Репозиторий отдаёт и принимает доменные сущности. Там, где доменной сущности нет
-(строка книги собирается из метаданных, языков, состояния и путей файловой системы),
-контракт описан обычным `dataclass` из стандартной библиотеки.
+Repositories return and accept domain entities. Where there is no domain entity
+(such as a book record assembled from metadata, languages, status, and file paths),
+the contract is defined by a standard library `dataclass`.
 """
 
 from __future__ import annotations
@@ -35,19 +35,19 @@ from linguary.domain import (
 
 
 class PersistenceError(ApplicationError):
-    """Обращение к хранилищу вне допустимого состояния.
+    """Storage access in an invalid state.
 
-    Ошибками этого класса адаптер сообщает о нарушении контракта порта — например
-    о работе с репозиторием вне открытой транзакции. Нарушения доменных инвариантов
-    остаются наследниками `DomainError`.
+    The adapter uses this error class to report violations of port contracts — for example,
+    operating on a repository outside an active transaction. Domain invariant violations
+    remain subclasses of `DomainError`.
     """
 
 
 class ExportValidationStatus(StrEnum):
-    """Результат проверки экспортированного EPUB внешним EPUBCheck (PRD § 20).
+    """Result of validating exported EPUB with external EPUBCheck (PRD § 20).
 
-    До первого экспорта у книги значения нет. `NOT_VALIDATED` означает, что EPUBCheck
-    на машине пользователя недоступен и книга экспортирована без внешней проверки.
+    Before the first export, a book has no value. `NOT_VALIDATED` means EPUBCheck
+    is unavailable on the user's machine and the book was exported without external validation.
     """
 
     NOT_VALIDATED = "not_validated"
@@ -57,10 +57,10 @@ class ExportValidationStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class BookRecord:
-    """Строка книги: то, что о книге знает хранилище помимо канонического документа.
+    """Book record: what storage tracks about a book beyond the canonical document.
 
-    Каноническая модель документа (разделы, блоки, ресурсы) хранится отдельно и живёт
-    в `DocumentRepository`; здесь — состояние книги и её связь с файловой системой.
+    The canonical document model (sections, blocks, resources) is stored separately
+    in `DocumentRepository`; here lies book status and its relationship with the file system.
     """
 
     id: str
@@ -74,23 +74,23 @@ class BookRecord:
 
 
 class BookRepository(Protocol):
-    """Книги и их пользовательское состояние."""
+    """Books and their user-facing state."""
 
     def add(self, book: BookRecord) -> None:
-        """Добавляет новую книгу."""
+        """Adds a new book."""
 
     def save(self, book: BookRecord) -> None:
-        """Перезаписывает существующую книгу целиком."""
+        """Overwrites an existing book entirely."""
 
     def get(self, book_id: str) -> BookRecord | None:
-        """Книга по идентификатору либо `None`, если её нет."""
+        """Returns book by ID or `None` if not found."""
 
     def list_all(self) -> tuple[BookRecord, ...]:
-        """Все книги в порядке добавления: список книг Web UI."""
+        """All books ordered by creation: Web UI book list."""
 
 
 class DocumentRepository(Protocol):
-    """Каноническая модель документа и предупреждения импорта."""
+    """Canonical document model and import warnings."""
 
     def save(
         self,
@@ -98,198 +98,198 @@ class DocumentRepository(Protocol):
         *,
         stored_resource_paths: Mapping[str, str] | None = None,
     ) -> None:
-        """Сохраняет документ целиком, заменяя прежние разделы, блоки и ресурсы.
+        """Saves document entirely, replacing previous sections, blocks, and resources.
 
-        `stored_resource_paths` сопоставляет исходному пути ресурса путь, по которому
-        импортёр сохранил его в файловой системе; домен этого пути не знает.
+        `stored_resource_paths` maps original resource paths to the file system path
+        where the importer stored them; domain is unaware of this path.
         """
 
     def get(self, book_id: str) -> CanonicalDocument | None:
-        """Каноническая модель книги либо `None`, если такой книги нет.
+        """Canonical model of the book or `None` if no such book exists.
 
-        До завершения импорта документ существует, но может быть без разделов.
+        Before import completes, the document exists but may have no sections.
         """
 
     def stored_resource_paths(self, book_id: str) -> Mapping[str, str]:
-        """Пути сохранённых ресурсов книги по их исходным путям."""
+        """Paths to stored book resources by their original paths."""
 
     def add_import_warnings(
         self, book_id: str, warnings: Sequence[BookImportWarning]
     ) -> None:
-        """Добавляет предупреждения импорта книги."""
+        """Adds import warnings for the book."""
 
     def import_warnings(self, book_id: str) -> tuple[BookImportWarning, ...]:
-        """Предупреждения импорта книги."""
+        """Import warnings for the book."""
 
 
 class GlossaryRepository(Protocol):
-    """Понятия глоссария книги вместе с их языковыми вариантами."""
+    """Book glossary concepts along with their language variants."""
 
     def save(self, concept: TermConcept) -> None:
-        """Сохраняет понятие вместе с вариантами, заменяя прежнюю запись."""
+        """Saves a concept with its variants, replacing the previous entry."""
 
     def get(self, concept_id: str) -> TermConcept | None:
-        """Понятие по идентификатору либо `None`."""
+        """Concept by ID or `None`."""
 
     def list_for_book(self, book_id: str) -> tuple[TermConcept, ...]:
-        """Все понятия глоссария книги."""
+        """All glossary concepts for the book."""
 
     def delete(self, concept_id: str) -> None:
-        """Удаляет понятие вместе с его вариантами."""
+        """Deletes concept along with its variants."""
 
 
 class ChapterAnalysisRepository(Protocol):
-    """Анализ главы: план обработки, кандидаты глоссария и учебные материалы главы."""
+    """Chapter analysis: treatment plan, glossary candidates, and chapter learning materials."""
 
     def save(self, book_id: str, analysis: ChapterAnalysis) -> None:
-        """Сохраняет анализ главы, заменяя прежний анализ той же главы."""
+        """Saves chapter analysis, replacing previous analysis for that section."""
 
     def get_for_section(self, book_id: str, section_id: str) -> ChapterAnalysis | None:
-        """Анализ конкретной главы либо `None`, если глава ещё не анализировалась."""
+        """Analysis for a specific section or `None` if not yet analyzed."""
 
     def list_for_book(self, book_id: str) -> tuple[ChapterAnalysis, ...]:
-        """Анализы всех проанализированных глав книги."""
+        """Analyses for all analyzed chapters of the book."""
 
 
 class ProcessingRunRepository(Protocol):
-    """Запуски обработки книги."""
+    """Processing runs for books."""
 
     def add(self, run: ProcessingRun) -> None:
-        """Добавляет новый запуск обработки."""
+        """Adds a new processing run."""
 
     def save(self, run: ProcessingRun) -> None:
-        """Перезаписывает существующий запуск: смену состояния и снимки."""
+        """Overwrites existing run: state transitions and snapshots."""
 
     def get(self, run_id: str) -> ProcessingRun | None:
-        """Запуск по идентификатору либо `None`."""
+        """Run by ID or `None`."""
 
     def active_for_book(self, book_id: str) -> ProcessingRun | None:
-        """Единственный активный запуск книги либо `None`."""
+        """The single active run for the book or `None`."""
 
     def delete(self, run_id: str) -> None:
-        """Удаляет запуск вместе с результатами блоков, заметками и замечаниями."""
+        """Deletes run along with block results, notes, and warnings."""
 
 
 class BlockResultRepository(Protocol):
-    """Результаты обработки блоков вместе с заметками и замечаниями."""
+    """Block processing results along with notes and warnings."""
 
     def replace_results(
         self, run_id: str, results: Sequence[BlockProcessingResult]
     ) -> None:
-        """Заменяет результаты перечисленных блоков одной операцией (PRD § 17).
+        """Replaces results for listed blocks in a single operation (PRD § 17).
 
-        Прежние результаты, заметки и замечания этих блоков удаляются, новые пишутся
-        целиком: частично сохранённого результата `TranslationUnit` быть не должно.
+        Previous results, notes, and warnings for these blocks are removed, and new ones
+        are written entirely: partially saved `TranslationUnit` results must not occur.
         """
 
     def get(self, run_id: str, block_id: str) -> BlockProcessingResult | None:
-        """Результат обработки одного блока в рамках запуска."""
+        """Processing result for a single block within a run."""
 
     def list_for_run(self, run_id: str) -> tuple[BlockProcessingResult, ...]:
-        """Все результаты запуска в порядке блоков исходного документа."""
+        """All results for the run in original document block order."""
 
     def count_for_run(self, run_id: str) -> int:
-        """Сколько блоков запуска уже обработано.
+        """Number of run blocks already processed.
 
-        Отдельный метод нужен прогрессу обработки: карточка книги обновляется опросом,
-        и собирать ради одного числа все результаты запуска незачем.
+        A separate method is used for processing progress: book card is updated via polling,
+        so retrieving all block results just for a count is unnecessary.
         """
 
 
 class TaskRepository(Protocol):
-    """Локальные возобновляемые задачи обработки."""
+    """Local resumable processing tasks."""
 
     def add(self, task: ProcessingTask) -> None:
-        """Добавляет задачу; повтор идемпотентного ключа отвергается хранилищем."""
+        """Adds task; duplicate idempotency key is rejected by storage."""
 
     def save(self, task: ProcessingTask) -> None:
-        """Сохраняет новое состояние задачи после перехода."""
+        """Saves updated task state after a transition."""
 
     def get(self, task_id: str) -> ProcessingTask | None:
-        """Задача по идентификатору либо `None`."""
+        """Task by ID or `None`."""
 
     def find_by_identity(self, identity: TaskIdentity) -> ProcessingTask | None:
-        """Задача по идемпотентному ключу `book_id + task_type + scope_id`."""
+        """Task by idempotency key `book_id + task_type + scope_id`."""
 
     def list_for_book(self, book_id: str) -> tuple[ProcessingTask, ...]:
-        """Задачи книги в порядке их создания."""
+        """Tasks for the book in order of creation."""
 
     def delete(self, task_id: str) -> None:
-        """Удаляет задачу вместе с её идемпотентным ключом.
+        """Deletes task along with its idempotency key.
 
-        Ключ `book_id + task_type + scope_id` живёт, пока живёт задача, и повторная
-        постановка возвращает уже существующую задачу в её текущем состоянии. Поэтому
-        работа, которую нужно выполнить заново, начинается с удаления прежней задачи:
-        возврат к проверке глоссария снимает задачи отменённого запуска, а повторная
-        генерация блока — свою прошлую задачу (PRD § 18.1, § 21.5).
+        The key `book_id + task_type + scope_id` lives as long as the task lives, and
+        resubmitting returns the existing task in its current state. Therefore work that
+        must be redone begins with deleting the previous task: returning to glossary review
+        removes cancelled run tasks, and block regeneration removes its prior task
+        (PRD § 18.1, § 21.5).
         """
 
 
 class LLMCallLogRepository(Protocol):
-    """Технический журнал вызовов LLM (PRD § 24).
+    """Technical LLM call log (PRD § 24).
 
-    Текст ответа хранится отдельно только при включённой отладке.
+    Response text is stored separately only when debugging is enabled.
     """
 
     def add(self, entry: LLMCallLog, *, response_text: str | None = None) -> None:
-        """Добавляет запись журнала."""
+        """Adds a log entry."""
 
     def mark_rejected(
         self, call_id: str, *, error: TaskError, response_text: str | None
     ) -> None:
-        """Помечает ответ, отвергнутый проверкой после успешного вызова."""
+        """Marks a response rejected by validation after a successful call."""
 
     def response_text_for(self, call_id: str) -> str | None:
-        """Сохранённый для диагностики текст ответа либо `None`."""
+        """Stored response text for diagnostic purposes or `None`."""
 
     def list_for_book(self, book_id: str) -> tuple[LLMCallLog, ...]:
-        """Записи журнала по книге в порядке выполнения вызовов."""
+        """Log entries for the book ordered by call execution."""
 
 
 class UnitOfWork(Protocol):
-    """Транзакционная граница прикладного сценария.
+    """Transactional boundary of an application use case.
 
-    Репозитории доступны только внутри `transaction()`: сценарий явно выбирает границу,
-    а адаптер гарантирует, что все изменения внутри неё зафиксируются или откатятся
-    целиком. Транзакция короткая и не охватывает HTTP-вызовы к LLM (ADR § 3).
+    Repositories are accessible only within `transaction()`: the use case explicitly
+    defines the boundary, and the adapter guarantees all changes within it commit
+    or roll back as a unit. Transactions are short and do not span HTTP calls to LLM (ADR § 3).
     """
 
     @property
     def books(self) -> BookRepository:
-        """Репозиторий книг."""
+        """Book repository."""
 
     @property
     def documents(self) -> DocumentRepository:
-        """Репозиторий канонической модели документа."""
+        """Canonical document repository."""
 
     @property
     def glossary(self) -> GlossaryRepository:
-        """Репозиторий глоссария."""
+        """Glossary repository."""
 
     @property
     def analyses(self) -> ChapterAnalysisRepository:
-        """Репозиторий анализа глав."""
+        """Chapter analysis repository."""
 
     @property
     def runs(self) -> ProcessingRunRepository:
-        """Репозиторий запусков обработки."""
+        """Processing run repository."""
 
     @property
     def results(self) -> BlockResultRepository:
-        """Репозиторий результатов обработки блоков."""
+        """Block result repository."""
 
     @property
     def tasks(self) -> TaskRepository:
-        """Репозиторий локальных задач."""
+        """Local task repository."""
 
     @property
     def llm_calls(self) -> LLMCallLogRepository:
-        """Репозиторий журнала вызовов LLM."""
+        """LLM call log repository."""
 
     def transaction(self) -> AbstractContextManager[UnitOfWork]:
-        """Открывает транзакцию и делает репозитории доступными.
+        """Opens a transaction and makes repositories accessible.
 
-        Выход из блока без исключения фиксирует изменения, исключение — откатывает.
+        Exiting the context manager without exception commits changes; an exception rolls back.
         """
 
 

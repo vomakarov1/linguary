@@ -1,22 +1,20 @@
-"""Резервный сценарий длинной главы: дробление и слияние фрагментов (ALG-03, PRD § 14).
+"""Fallback scenario for long chapters: splitting and merging fragments (ALG-03, PRD § 14).
 
-Анализ главы одним запросом — основной сценарий. Глава, которая не помещается в лимиты
-модели или технически представлена слишком крупным XHTML-документом, делится на
-последовательные фрагменты: каждый фрагмент анализируется отдельным запросом и возвращает
-кандидатов глоссария, новые инструкции и план обработки только для своего диапазона
-блоков. Сводка описывает главу от начала до конца фрагмента. Этот модуль отвечает за
-обе границы резервного сценария — как глава распадается
-на фрагменты и как ответы фрагментов снова становятся одним `ChapterAnalysis`.
+Single-request chapter analysis is the primary scenario. A chapter that exceeds model limits
+or is represented by an oversized XHTML document is split into sequential fragments: each fragment
+is analyzed in a separate request and returns glossary candidates, new instructions, and a treatment
+plan strictly for its block range. The summary describes the chapter from its beginning to the end
+of that fragment. This module owns both boundaries of the fallback scenario — how a chapter is
+partitioned into fragments, and how fragment responses are reassembled into a single `ChapterAnalysis`.
 
-Слияние ничего не решает за домен: конфликт вариантов перевода передаётся в
-`GlossaryCandidate.create` признаком `has_translation_conflict`, а итоговое
-`requires_review` вычисляет `compute_requires_review` по DTO-01. Полнота покрытия тоже
-остаётся доменным вычислением `TreatmentPlan.coverage_for`: модуль лишь собирает план
-и перечень ожидаемых блоков главы.
+Merging makes no decisions on behalf of the domain: translation choice conflicts are passed into
+`GlossaryCandidate.create` via `has_translation_conflict`, while final `requires_review` is calculated
+by `compute_requires_review` per DTO-01. Coverage completeness is also a domain calculation
+by `TreatmentPlan.coverage_for`: the module only gathers the plan and expected chapter block IDs.
 
-Неполный анализ обработку главы блокирует: `ChapterAnalysis.ensure_ready_for_processing`
-отвергает главу с покрытием `incomplete`, и потерянный фрагмент лечится повтором анализа,
-а не частичной обработкой.
+Incomplete analysis blocks chapter processing: `ChapterAnalysis.ensure_ready_for_processing`
+rejects a chapter with `incomplete` coverage; a missing fragment is resolved by re-running analysis,
+never by partial processing.
 """
 
 from __future__ import annotations
@@ -48,29 +46,29 @@ from linguary.domain import (
     translations_conflict,
 )
 
-#: Резервный предел, если провайдер не сообщает доступный объём вывода.
+#: Fallback limit if provider does not report output token capacity.
 DEFAULT_MAX_FRAGMENT_BLOCKS = 40
-#: Верхняя оценка расхода ответа на один анализируемый блок из живого прогона.
+#: Upper-bound estimate of response tokens per analyzed block from real runs.
 TOKENS_PER_ANALYSED_BLOCK = 200
 MAX_BEFORE_YOU_READ = 10
 
 
 def fragment_blocks_for(max_output_tokens: int | None) -> int:
-    """Число блоков анализа, которое допускает предел ответа модели."""
+    """Number of analysis blocks allowed by the model's output limit."""
     if max_output_tokens is None:
         return DEFAULT_MAX_FRAGMENT_BLOCKS
     return max(1, max_output_tokens // TOKENS_PER_ANALYSED_BLOCK)
 
 
 class AnalysisMergeError(ApplicationError):
-    """Фрагменты анализа главы нельзя разобрать или собрать вместе."""
+    """Chapter analysis fragments cannot be parsed or merged."""
 
 
 @dataclass(frozen=True, slots=True)
 class ChapterFragment:
-    """Последовательный фрагмент длинной главы: часть её текстовых блоков.
+    """Sequential fragment of a long chapter: a subset of its textual blocks.
 
-    `order` задаёт место фрагмента в порядке чтения главы.
+    `order` defines the fragment's position in reading order.
     """
 
     order: int
@@ -84,16 +82,16 @@ class ChapterFragment:
 
     @property
     def block_ids(self) -> tuple[str, ...]:
-        """Идентификаторы блоков фрагмента в порядке исходного документа."""
+        """Fragment block IDs in the original document order."""
         return tuple(block.id for block in self.blocks)
 
 
 @dataclass(frozen=True, slots=True)
 class FragmentAnalysis:
-    """Разобранный ответ модели по одному фрагменту главы.
+    """Parsed model response for a single chapter fragment.
 
-    Псевдонимы запроса здесь уже возвращены к стабильным идентификаторам блоков: слияние
-    работает с блоками главы, а не с нумерацией отдельного запроса.
+    Request aliases are already resolved back to stable block IDs: merge
+    operates on chapter blocks rather than per-request numbering.
     """
 
     order: int
@@ -117,11 +115,11 @@ class FragmentAnalysis:
         block_ids_by_alias: Mapping[str, str],
         texts: Mapping[str, str] | None = None,
     ) -> FragmentAnalysis:
-        """Ответ фрагмента с планом, переведённым в идентификаторы блоков главы.
+        """Fragment response with plan mapped to chapter block IDs.
 
-        План собирается в порядке исходного документа: `block_ids_by_alias` перечисляет
-        блоки фрагмента так, как их получила модель. Блок, о котором фрагмент ничего не
-        сказал, в план не попадает и проявится неполным покрытием главы при слиянии.
+        The plan is assembled in document order: `block_ids_by_alias` enumerates
+        fragment blocks as received by the model. A block omitted by the fragment
+        is excluded from the plan and will trigger incomplete chapter coverage during merge.
         """
         treatments = {
             item.source_block_id: item.treatment for item in payload.treatment_plan
@@ -151,12 +149,12 @@ def plan_fragments(
     *,
     max_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
 ) -> tuple[ChapterFragment, ...]:
-    """Делит текстовые блоки главы на последовательные фрагменты анализа (PRD § 14).
+    """Splits textual blocks of a chapter into sequential analysis fragments (PRD § 14).
 
-    Глава, помещающаяся в один запрос, остаётся единственным фрагментом: дробление —
-    резервный сценарий, а не обычный путь. Длинная глава делится на равные по числу
-    блоков части, а не отрезается кусками предельного размера: хвост в один абзац дал бы
-    модели фрагмент без контекста и лишний вызов.
+    A chapter fitting into a single request remains a single fragment: chunking is
+    a fallback path, not the default. A long chapter is divided into equal block
+    counts rather than slicing off maximum-sized chunks: a one-paragraph tail would
+    produce a contextless fragment and an extra call.
     """
     if max_blocks < 1:
         raise AnalysisMergeError("размер фрагмента главы должен быть положительным")
@@ -185,11 +183,11 @@ def merge_chapter_analysis(
     glossary_confidence_threshold: float,
     id_factory: Callable[[], str],
 ) -> ChapterAnalysis:
-    """Собирает анализ разбитой главы из ответов её фрагментов (ALG-03).
+    """Assembles full analysis of a chunked chapter from its fragment responses (ALG-03).
 
-    `expected_block_ids` — все текстовые блоки главы в порядке документа: относительно них
-    и считается покрытие. Фрагмент, который не выполнен, просто отсутствует в `fragments`,
-    и его блоки остаются непокрытыми — анализ главы получает статус `incomplete`.
+    `expected_block_ids` contains all textual blocks of the chapter in document order:
+    coverage is evaluated against them. An unexecuted fragment is simply absent from
+    `fragments`, leaving its blocks uncovered — marking the chapter analysis `incomplete`.
     """
     ordered = _ordered_fragments(fragments)
     expected = tuple(expected_block_ids)
@@ -214,7 +212,7 @@ def merge_chapter_analysis(
 def _ordered_fragments(
     fragments: Iterable[FragmentAnalysis],
 ) -> tuple[FragmentAnalysis, ...]:
-    """Выполненные фрагменты в порядке чтения главы."""
+    """Executed fragments sorted in chapter reading order."""
     ordered = tuple(sorted(fragments, key=lambda fragment: fragment.order))
     orders = [fragment.order for fragment in ordered]
     if len(set(orders)) != len(orders):
@@ -227,11 +225,11 @@ def _ordered_fragments(
 def _merged_plan(
     fragments: Sequence[FragmentAnalysis], *, section_id: str, expected: Sequence[str]
 ) -> TreatmentPlan:
-    """План обработки главы, собранный по `block_id` (ALG-03).
+    """Chapter treatment plan assembled by `block_id` (ALG-03).
 
-    Два фрагмента, назвавшие для одного блока разные режимы, решения не дают: приложение
-    не выбирает между ними, блок остаётся без режима и глава оказывается покрытой неполно.
-    Повтор одного и того же режима конфликтом не считается — фрагменты согласны.
+    Two fragments that assigned differing treatments to the same block yield no decision:
+    the application does not choose between them, the block remains unassigned, and chapter
+    coverage is incomplete. Repeating identical treatments is not a conflict — fragments agree.
     """
     decided: dict[str, BlockTreatment] = {}
     conflicting: set[str] = set()
@@ -253,11 +251,11 @@ def _merged_plan(
 
 
 def _merged_instructions(fragments: Sequence[FragmentAnalysis]) -> str:
-    """Инструкции перевода главы: локальные указания фрагментов в порядке чтения.
+    """Chapter translation instructions: fragment directives ordered by reading sequence.
 
-    Одинаковые указания разных фрагментов не повторяются: голос рассказчика и речевые
-    особенности персонажей модель замечает в каждом фрагменте, а переводчику главы этот
-    пункт нужен один раз.
+    Identical directives from different fragments are deduplicated: narrator voice and
+    character speech quirks are noticed in every fragment, but the chapter translator
+    only needs the directive once.
     """
     points: dict[str, str] = {}
     for fragment in fragments:
@@ -272,7 +270,7 @@ def _merged_instructions(fragments: Sequence[FragmentAnalysis]) -> str:
 
 
 def _instruction_points(text: str) -> tuple[str, ...]:
-    """Разбирает пункты с маркерами и обычные абзацы."""
+    """Parses bulleted items and plain paragraphs."""
     points: list[str] = []
     for paragraph in re.split(r"\n\s*\n", text.strip()):
         lines = paragraph.splitlines()
@@ -288,7 +286,7 @@ def _instruction_points(text: str) -> tuple[str, ...]:
 
 
 def _merged_summary(fragments: Sequence[FragmentAnalysis]) -> str:
-    """Последняя непустая сводка охватывает главу до конца своего фрагмента."""
+    """The latest non-empty summary covers the chapter up to the end of its fragment."""
     return next(
         (
             summary
@@ -306,11 +304,11 @@ def _merged_candidates(
     confidence_threshold: float,
     id_factory: Callable[[], str],
 ) -> tuple[GlossaryCandidate, ...]:
-    """Кандидаты глоссария главы, объединённые по исходному тексту (PRD § 11-12).
+    """Chapter glossary candidates merged by source text (PRD § 11-12).
 
-    Очевидные варианты написания одного текста — регистр, типографика, точка после
-    `Mr` — объединяются ключом `glossary_key`: иначе каждое написание имени стало бы
-    отдельным обязательным решением, а решения по ним могли бы разойтись.
+    Obvious spelling variants of the same text — case, typography, period after `Mr` —
+    are grouped via `glossary_key`: otherwise each spelling would become a separate
+    mandatory decision, and decisions could diverge.
     """
     groups: dict[str, list[GlossaryCandidateResponse]] = {}
     for fragment in fragments:
@@ -334,18 +332,18 @@ def _merged_candidate(
     analysis_id: str,
     confidence_threshold: float,
 ) -> GlossaryCandidate:
-    """Один кандидат главы из вариантов, предложенных её фрагментами.
+    """Single chapter candidate merged from variants proposed by fragments.
 
-    Вариант перевода берётся у самого уверенного фрагмента, а сигналы проверки
-    объединяются: пометка модели хотя бы от одного фрагмента, тип, требующий решения
-    всегда, и расхождение вариантов перевода делают кандидата требующим внимания.
-    Согласие фрагментов на одном варианте, наоборот, само по себе внимания не требует.
+    The suggested translation is taken from the highest-confidence fragment, and review
+    flags are combined: a model flag from any fragment, a type always requiring review,
+    or conflicting translation choices make the candidate require review. Agreement across
+    fragments does not in itself require review.
 
-    Исходный текст — самое частое написание среди фрагментов (`spellings_by_preference`).
+    Source text is the most frequent spelling among fragments (`spellings_by_preference`).
 
-    Переводческое указание берётся у самого уверенного фрагмента, который его дал:
-    пустое указание не должно вытеснять непустое, потому что фрагменты видят разные
-    части главы и признак, требующий указания, встречается не в каждой из них.
+    The translation note is taken from the highest-confidence fragment that provided one:
+    an empty note must not displace a non-empty one, as fragments see different portions
+    of the chapter and characteristics requiring notes may not appear in every fragment.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
     return GlossaryCandidate.create(
@@ -385,7 +383,10 @@ def _merged_candidate(
 def _merged_before_you_read(
     fragments: Sequence[FragmentAnalysis],
 ) -> tuple[BeforeYouReadEntry, ...]:
-    """Материал `Before You Read` главы: выражения фрагментов без повторов (PRD § 19.1)."""
+    """Chapter `Before You Read` materials: deduplicated expressions across fragments (PRD § 19.1)."""
+    return before_you_read_entries(
+        entry for fragment in fragments for entry in fragment.before_you_read
+    )
     return before_you_read_entries(
         entry for fragment in fragments for entry in fragment.before_you_read
     )
@@ -406,7 +407,7 @@ _BYR_META_PREFIX = re.compile(
 
 
 def sanitize_before_you_read_explanation(text: str) -> str:
-    """Очищает пояснение Before You Read от инструкций переводчику."""
+    """Sanitizes Before You Read explanation by stripping translator directives."""
     if not text:
         return ""
     s = text.strip()
@@ -462,7 +463,7 @@ def sanitize_before_you_read_explanation(text: str) -> str:
 def before_you_read_entries(
     entries: Iterable[BeforeYouReadEntryResponse],
 ) -> tuple[BeforeYouReadEntry, ...]:
-    """Оставляет первые десять различных выражений главы с очищенными пояснениями."""
+    """Retains up to the first ten distinct chapter expressions with sanitized explanations."""
     selected: dict[str, BeforeYouReadEntry] = {}
     for entry in entries:
         key = (
@@ -501,11 +502,11 @@ __all__ = [
 def find_quote_span(
     text: str, quote: str, *, estimated_start: int = 0
 ) -> tuple[int, int, str] | None:
-    """Находит вхождение цитаты в текст с учётом типографики и пробелов."""
+    """Locates quote occurrences in text accounting for typography and whitespace."""
     if not text or not quote:
         return None
 
-    # Поиск точных совпадений
+    # Search for exact matches
     exact_matches: list[tuple[int, int, str]] = []
     idx = 0
     quote_len = len(quote)
@@ -519,7 +520,7 @@ def find_quote_span(
     if exact_matches:
         return min(exact_matches, key=lambda m: abs(m[0] - estimated_start))
 
-    # Нестрогий поиск с учётом вариантов кавычек, апострофов и тире
+    # Lenient search accounting for variants of quotes, apostrophes, and dashes
     pattern_parts: list[str] = []
     for ch in quote:
         if ch in ("'", "’", "‘", "`"):
@@ -549,7 +550,7 @@ def find_quote_span(
     except re.error:
         pass
 
-    # Поиск без обрамляющей пунктуации
+    # Search without surrounding punctuation
     stripped = quote.strip(" \t\r\n.,;:!?\"'«»()[]")
     if stripped and stripped != quote:
         return find_quote_span(text, stripped, estimated_start=estimated_start)
@@ -562,7 +563,7 @@ def content_plan_from_response(
     aliases: Mapping[str, str],
     texts: Mapping[str, str] | None = None,
 ) -> ContentPlan | None:
-    """Заменяет локальные псевдонимы и вычисляет стабильные ссылки приложения."""
+    """Replaces local aliases and computes stable application references."""
     if payload.content_plan is None:
         return None
     difficulties = []
@@ -673,7 +674,7 @@ def validate_content_plan(
     note_limits_by_block: Mapping[str, int] | None = None,
     note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
 ) -> None:
-    """Проверяет исходные привязки и допустимость каналов до принятия ответа."""
+    """Validates source anchors and channel eligibility prior to accepting the response."""
     plan = content_plan_from_response(payload, aliases, texts=texts)
     if plan is None:
         return
@@ -704,7 +705,7 @@ def validate_content_plan(
 
 
 def _quotation_key(text: str) -> str:
-    """Убирает только внешнее оформление цитаты, не оценивая смысл текста."""
+    """Strips only outer quotation formatting without semantic evaluation."""
     start, end = 0, len(text)
     while start < end and (text[start].isspace() or unicodedata.category(text[start]).startswith("P")):
         start += 1

@@ -1,15 +1,15 @@
-"""Сценарий экспорта книги в EPUB.
+"""Book export to EPUB use case.
 
-Сценарий собирает вход экспортёра — каноническую модель, ресурсы, результаты обработки
-и учебные материалы, — вызывает порт записи и, если подключён, порт внешней проверки.
-О контейнере EPUB, XHTML, файловой системе и SQLite он не знает (ADR § 3): сборка книги
-и её встроенные технические проверки живут в адаптере, а сценарий владеет правилами
-доступности экспорта и решением по отчёту внешнего валидатора.
+The use case collects exporter inputs — canonical document, resources, processing results,
+and learning materials, — invokes the writer port, and, if configured, the external validation port.
+It is agnostic of EPUB container details, XHTML, filesystem, and SQLite (ADR § 3): book assembly
+and its built-in technical checks reside in the adapter, while the use case owns export availability
+rules and decisions based on the external validator's report.
 
-Экспорт работает в двух режимах (PRD § 20). Полный режим собирает книгу с переводами,
-словарными подсказками и учебными материалами и доступен только для книги без обязательных
-незавершённых задач. Режим `structure_only` собирает ту же книгу без результатов обработки:
-он проверяет технический цикл `import -> export` без LLM и служит диагностикой через CLI.
+Export operates in two modes (PRD § 20). Full mode builds the book with translations, vocabulary
+hints, and learning materials, and is available only for books without mandatory unfinished tasks.
+`structure_only` mode builds the same book without processing results: it verifies the technical
+`import -> export` cycle without LLM calls and serves as a CLI diagnostic.
 """
 
 from __future__ import annotations
@@ -54,38 +54,38 @@ from linguary.domain import (
 
 
 class ExportBookError(ApplicationError):
-    """Экспорт невозможен в текущем состоянии книги."""
+    """Export is not possible in the book's current status."""
 
 
 class ExportBookNotFoundError(ExportBookError):
-    """Книга для экспорта или скачивания не найдена."""
+    """Book for export or download was not found."""
 
 
 class ExportArtifactNotFoundError(ExportBookError):
-    """Успешная экспортная задача не оставила ожидаемый файл."""
+    """Successful export task did not leave the expected file."""
 
 
 class ExportValidationRejectedError(ExportBookError):
-    """Внешняя проверка нашла в собранной книге ошибки (PRD § 20).
+    """External validation found errors in the assembled book (PRD § 20).
 
-    Файл остаётся на диске вместе с отчётом валидатора: пользователю нужно видеть,
-    что именно не сошлось, а экспортная задача получает `failed`.
+    The file remains on disk alongside the validator report: the user needs to see
+    what failed, while the export task receives `failed`.
     """
 
 
 class ExportMode(StrEnum):
-    """Режимы экспорта книги (PRD § 20)."""
+    """Book export modes (PRD § 20)."""
 
     FULL = "full"
     STRUCTURE_ONLY = "structure_only"
 
 
-#: Состояния книги, из которых доступен полный экспорт. Повторный экспорт завершённой
-#: книги допустим: пользователь мог потерять файл или захотеть собрать его заново.
+#: Book statuses from which full export is allowed. Re-exporting a completed
+#: book is allowed: the user may have lost the file or wanted to rebuild it.
 _EXPORTABLE_STATUSES = frozenset({BookStatus.READY_TO_EXPORT, BookStatus.COMPLETED})
 
-#: Задачи, чей результат входит в итоговый EPUB. Незавершённая задача такого типа
-#: блокирует полный экспорт; сама экспортная задача, разумеется, не блокирует.
+#: Tasks whose results are included in the final EPUB. An unfinished task of this type
+#: blocks full export; the export task itself, of course, does not block.
 _MANDATORY_TASK_TYPES = frozenset(
     {
         TaskType.IMPORT_BOOK,
@@ -95,7 +95,7 @@ _MANDATORY_TASK_TYPES = frozenset(
     }
 )
 
-#: Состояния незавершённой задачи.
+#: Statuses of an unfinished task.
 _UNFINISHED_STATUSES = frozenset(
     {TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.FAILED}
 )
@@ -105,7 +105,7 @@ _ACTIVE_EXPORT_TASK_STATUSES = frozenset({TaskStatus.PENDING, TaskStatus.RUNNING
 
 @dataclass(frozen=True, slots=True)
 class ExportBookCommand:
-    """Команда экспорта: какую книгу, куда и в каком режиме собирать."""
+    """Export command: which book, where, and in which mode to build."""
 
     book_id: str
     target_path: str
@@ -116,7 +116,7 @@ class ExportBookCommand:
 
 @dataclass(frozen=True, slots=True)
 class ExportBookResult:
-    """Результат экспорта: собранный файл, замечания сборки и итог внешней проверки."""
+    """Export result: assembled file, build warnings, and external validation outcome."""
 
     book_id: str
     path: str
@@ -127,7 +127,7 @@ class ExportBookResult:
 
 
 class ExportBook:
-    """Собирает итоговый EPUB книги и фиксирует результат внешней проверки."""
+    """Assembles the final book EPUB and records external validation outcome."""
 
     def __init__(
         self,
@@ -141,7 +141,7 @@ class ExportBook:
         self._validator = validator
 
     def __call__(self, command: ExportBookCommand) -> ExportBookResult:
-        """Собирает книгу, проверяет её и сохраняет итог проверки."""
+        """Assembles the book, validates it, and saves the validation outcome."""
         plan = self._plan(command)
         exported = self._writer.write(
             EpubWriteRequest(
@@ -171,7 +171,7 @@ class ExportBook:
         )
 
     def ensure_ready(self, book_id: str) -> None:
-        """Проверяет полный экспорт до постановки фоновой задачи."""
+        """Checks whether full export is possible before enqueuing a background task."""
         with self._unit_of_work.transaction() as transaction:
             book = transaction.books.get(book_id)
             if book is None:
@@ -189,7 +189,7 @@ class ExportBook:
                 )
 
     def downloadable_task(self, book_id: str) -> ProcessingTask:
-        """Последняя успешная задача, чей файл разрешено скачать."""
+        """Latest successful task whose file is available for download."""
         with self._unit_of_work.transaction() as transaction:
             book = transaction.books.get(book_id)
             if book is None:
@@ -211,7 +211,7 @@ class ExportBook:
         return latest
 
     def _plan(self, command: ExportBookCommand) -> _ExportPlan:
-        """Читает всё, что нужно экспортёру, одной короткой транзакцией."""
+        """Reads everything needed by the exporter in a single short transaction."""
         with self._unit_of_work.transaction() as transaction:
             book = transaction.books.get(command.book_id)
             if book is None:
@@ -253,11 +253,11 @@ class ExportBook:
             )
 
     def _validate(self, path: str, command: ExportBookCommand) -> _ValidationOutcome:
-        """Итог внешней проверки собранного файла (PRD § 20).
+        """Outcome of external validation of the assembled file (PRD § 20).
 
-        Валидатора нет или он недоступен — книга помечается как непроверенная, и экспорт
-        остаётся успешным. Предупреждения сами по себе экспорт не блокируют; строгий режим
-        приравнивает их к ошибкам.
+        If the validator is missing or unavailable, the book is marked unvalidated and export
+        remains successful. Warnings alone do not block export; strict mode treats them
+        as errors.
         """
         if self._validator is None:
             return _ValidationOutcome(status=ExportValidationStatus.NOT_VALIDATED)
@@ -290,7 +290,7 @@ class ExportBook:
         )
 
     def _record(self, book_id: str, *, validation: _ValidationOutcome) -> None:
-        """Сохраняет итог проверки и, при успехе, завершает книгу (ALG-06)."""
+        """Saves validation outcome and, on success, completes the book (ALG-06)."""
         succeeded = validation.status is not ExportValidationStatus.FAILED
         with self._unit_of_work.transaction() as transaction:
             book = transaction.books.get(book_id)
@@ -306,7 +306,7 @@ class ExportBook:
 
 
 class ExportBookSequence:
-    """Проверяет экспорт и управляет его идемпотентной фоновой задачей."""
+    """Validates export readiness and manages its idempotent background task."""
 
     def __init__(
         self,
@@ -320,7 +320,7 @@ class ExportBookSequence:
         self._export_book = export_book
 
     async def start(self, book_id: str) -> ProcessingTask:
-        """Ставит экспорт после проверки, заменяя только завершённую старую задачу."""
+        """Enqueues export after checks, replacing only a completed old task."""
         self._export_book.ensure_ready(book_id)
         identity = TaskIdentity(book_id=book_id, task_type=TaskType.EXPORT_BOOK)
         with self._unit_of_work.transaction() as transaction:
@@ -337,7 +337,7 @@ class ExportBookSequence:
 
 @dataclass(frozen=True, slots=True)
 class _ExportPlan:
-    """Вход экспортёра, собранный из хранилища."""
+    """Exporter input assembled from persistence."""
 
     document: CanonicalDocument
     stored_resource_paths: Mapping[str, str]
@@ -348,7 +348,7 @@ class _ExportPlan:
 
 @dataclass(frozen=True, slots=True)
 class _ValidationOutcome:
-    """Итог внешней проверки в виде, нужном сценарию."""
+    """External validation outcome structured for the use case."""
 
     status: ExportValidationStatus
     errors: tuple[str, ...] = ()
@@ -356,10 +356,10 @@ class _ValidationOutcome:
 
 
 def _ensure_ready(book: BookRecord, tasks: Sequence[ProcessingTask]) -> None:
-    """Проверяет, что книгу можно экспортировать полностью (PRD § 20, ADR § 3).
+    """Ensures the book can be fully exported (PRD § 20, ADR § 3).
 
-    Частичный экспорт с необработанными обязательными блоками в MVP не поддерживается,
-    поэтому незавершённая задача, влияющая на итоговый EPUB, экспорт останавливает.
+    Partial export with unhandled mandatory blocks is not supported in MVP,
+    so an unfinished task affecting the final EPUB stops export.
     """
     if book.status not in _EXPORTABLE_STATUSES:
         raise ExportBookError(
@@ -385,11 +385,11 @@ def _learning_materials(
     analyses: Sequence[ChapterAnalysis],
     results: Sequence[BlockProcessingResult],
 ) -> Mapping[str, LearningMaterial]:
-    """Учебные материалы по главам (PRD § 19).
+    """Chapter learning materials (PRD § 19).
 
-    `Before You Read` и сводка главы лежат в её анализе, а `Language Notes` приходят
-    вместе с результатами блоков, поэтому материалы главы собираются здесь, а не
-    хранятся отдельной таблицей.
+    `Before You Read` and chapter summary are stored in its analysis, while `Language Notes`
+    arrive with block results; chapter materials are assembled here rather than stored
+    in a separate table.
     """
     sections = {block.id: block.section_id for block in document.blocks()}
     notes: dict[str, list[LanguageNote]] = {}
@@ -419,10 +419,10 @@ def _learning_materials(
 
 
 def _status_after_export(book: BookRecord, *, succeeded: bool) -> BookStatus:
-    """Состояние книги после экспорта (ALG-06).
+    """Book status after export (ALG-06).
 
-    Успешный экспорт завершает книгу; повторный экспорт уже завершённой книги оставляет
-    её состояние прежним, как и экспорт, отвергнутый внешней проверкой.
+    Successful export completes the book; re-export of an already completed book preserves
+    its status, as does an export rejected by external validation.
     """
     if not succeeded or book.status is not BookStatus.READY_TO_EXPORT:
         return book.status
@@ -443,7 +443,7 @@ __all__ = [
 
 
 def _validate_content_plans(document, analyses, results):
-    """Перепроверяет сохранённые тела текущего запуска до сборки книги."""
+    """Rechecks stored bodies of the active run before assembling the book."""
     sections = {s.id: s for s in document.sections}
     blocks = tuple(document.blocks())
     for analysis in analyses:

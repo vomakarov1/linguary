@@ -1,1 +1,1 @@
-"""Порты прикладного слоя: интерфейсы внешних систем, реализуемые адаптерами."""
+"""Application layer ports: external system interfaces implemented by adapters."""

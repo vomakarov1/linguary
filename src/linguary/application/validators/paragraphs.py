@@ -1,4 +1,4 @@
-"""Проверка, что перевод не вобрал абзацы соседних блоков."""
+"""Validation ensuring translation did not absorb paragraphs from adjacent blocks."""
 
 from linguary.application.llm_dto import TranslationResultResponse
 from linguary.domain import TranslationUnit
@@ -7,7 +7,7 @@ from linguary.domain import TranslationUnit
 def paragraph_violation(
     payload: TranslationResultResponse, *, unit: TranslationUnit
 ) -> str | None:
-    """Причина превышения числа абзацев перевода либо `None`."""
+    """Reason for exceeding translated paragraph count, or `None`."""
     sources = {item.block.id: item.block.text for item in unit.items}
     for block in payload.blocks:
         if block.translated_text is None:

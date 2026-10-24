@@ -1,9 +1,9 @@
-"""Сценарий импорта книги из EPUB.
+"""Book import from EPUB use case.
 
-Сценарий читает книгу через порт `EpubReader`, сохраняет её ресурсы через порт
-`EpubResourceStore` и одной короткой транзакцией сохраняет каноническую модель, запись
-книги и предупреждения импорта (ADR § 3: чтение файла и запись ресурсов выполняются
-вне транзакции). О формате EPUB, файловой системе и SQLite сценарий не знает.
+The use case reads the book via the `EpubReader` port, stores its resources via the
+`EpubResourceStore` port, and saves the canonical model, book record, and import warnings
+in a single short transaction (ADR § 3: file reading and resource writing run outside
+the transaction). The use case is agnostic of the EPUB container format, filesystem, and SQLite.
 """
 
 from __future__ import annotations
@@ -35,12 +35,12 @@ from linguary.domain import (
 
 
 class ImportBookError(ApplicationError):
-    """Импорт книги невозможен в её текущем состоянии."""
+    """Book import is not possible in its current state."""
 
 
 @dataclass(frozen=True, slots=True)
 class ImportBookCommand:
-    """Команда импорта: какую книгу и с какими языками читать."""
+    """Import command: which book and languages to read."""
 
     book_id: str
     source_epub_path: str
@@ -50,7 +50,7 @@ class ImportBookCommand:
 
 @dataclass(frozen=True, slots=True)
 class ImportBookResult:
-    """Результат импорта: сохранённая модель книги и замечания для пользователя."""
+    """Import result: saved book model and warnings for the user."""
 
     book: BookRecord
     document: CanonicalDocument
@@ -58,7 +58,7 @@ class ImportBookResult:
 
 
 class ImportBook:
-    """Импортирует EPUB и переводит книгу в состояние `IMPORTED`."""
+    """Imports an EPUB and transitions the book to the `IMPORTED` status."""
 
     def __init__(
         self,
@@ -74,12 +74,12 @@ class ImportBook:
         self._clock = clock or _utc_now
 
     def __call__(self, command: ImportBookCommand) -> ImportBookResult:
-        """Читает EPUB и сохраняет книгу целиком.
+        """Reads EPUB and saves the entire book.
 
-        Книга, которую импортировать нельзя (`EpubImportFatalError`), переходит в `FAILED`:
-        повтор той же задачи ничего не изменит, и карточка должна показать итог, а не
-        бесконечный импорт (ALG-06). Ошибка после этого поднимается дальше — задачу
-        неуспешной делает runner.
+        A book that cannot be imported (`EpubImportFatalError`) transitions to `FAILED`:
+        retrying the same task will not change anything, and the card should reflect
+        the outcome rather than an endless import (ALG-06). The error is re-raised
+        afterwards — the runner marks the task failed.
         """
         try:
             imported = self._reader.read(
@@ -128,7 +128,7 @@ class ImportBook:
         )
 
     def _mark_failed(self, book_id: str) -> None:
-        """Переводит импортируемую книгу в `FAILED` после постоянной ошибки импорта."""
+        """Transitions an importing book to `FAILED` after a permanent import error."""
         with self._unit_of_work.transaction() as transaction:
             book = transaction.books.get(book_id)
             if book is None or book.status is not BookStatus.IMPORTING:
@@ -147,10 +147,10 @@ class ImportBook:
     def _store_resources(
         self, command: ImportBookCommand, document: CanonicalDocument
     ) -> Mapping[str, str]:
-        """Сохраняет ресурсы книги, если хранилище подключено.
+        """Stores book resources if a resource store is configured.
 
-        Без хранилища книга импортируется одной моделью документа: диагностический разбор
-        книги и импорт без последующего экспорта копий ресурсов не требуют.
+        Without a resource store, the book is imported solely as a document model:
+        diagnostic parsing and import without subsequent export do not require resource copies.
         """
         if self._resource_store is None:
             return {}
@@ -164,11 +164,12 @@ class ImportBook:
 
 
 def _status_after_import(existing: BookRecord | None) -> BookStatus:
-    """Состояние книги после успешного импорта (ALG-06).
+    """Book status after successful import (ALG-06).
 
-    Книги ещё нет — её создаёт сам импорт: загрузка файла и успешный импорт применяются
-    подряд. Повторный запуск задачи импорта уже импортированной книги допустим и оставляет
-    состояние прежним; импортировать книгу, которая ушла дальше по процессу, нельзя.
+    If the book does not exist yet, import creates it: file upload and successful import
+    are applied sequentially. Retrying an import task on an already imported book is
+    permitted and preserves its status; importing a book that has progressed further
+    in the workflow is rejected.
     """
     if existing is None:
         return apply_book_event(
@@ -185,7 +186,8 @@ def _status_after_import(existing: BookRecord | None) -> BookStatus:
 
 
 def _utc_now() -> datetime:
-    """Текущий момент в UTC: хранилище работает только с осведомлённым временем."""
+    """Current UTC timestamp: persistence operates only with timezone-aware datetimes."""
+    return datetime.now(UTC)
     return datetime.now(UTC)
 
 

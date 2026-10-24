@@ -1,21 +1,20 @@
-"""Выражения главы, уже объяснённые в `Before You Read`, и отсев их повторов (PRD § 19.3).
+"""Chapter expressions already explained in `Before You Read`, and filtering of repeats (PRD § 19.3).
 
-Одно место книги объясняется читателю один раз. Модель получает список выражений
-`Before You Read` вместе с запретом их повторять, но запрет в промпте — только просьба:
-ответ, где выражение всё же вернулось словарной подсказкой или языковой заметкой, проходит
-все блокирующие проверки. Поэтому повтор отсеивается здесь, детерминированно, уже после
-проверки ответа.
+A single book passage is explained to the reader once. The model receives a list of
+`Before You Read` expressions accompanied by instructions not to repeat them, but prompt
+constraints are advisory: a response where an expression reappears as a glossary hint or
+language note passes all blocking validations. Therefore repetition is filtered out here,
+deterministically, after response validation.
 
-Сравнение идёт по словам, а не по строкам: регистр, пунктуация, пробелы и вид апострофа
-не различаются, а словоформы одного слова (`heave` и `heaved`, `groans` и `groaned`)
-считаются одним словом. Частичное совпадение засчитывается, только если общий фрагмент
-занимает не меньше половины более длинного выражения: заметка к целому предложению,
-в котором встретилось объяснённое выражение, объясняет уже другое и остаётся. Короткое
-служебное слово частичным совпадением не считается вовсе — иначе подсказка к `to`
-пропала бы из-за объяснённого `heave to`.
+Comparison operates on words rather than raw strings: case, punctuation, whitespace, and
+apostrophe glyphs are normalized, while inflected forms of the same word (`heave` and `heaved`,
+`groans` and `groaned`) are treated as equivalent. Partial matches qualify only if the shared
+span spans at least half of the longer expression: a note annotating a full sentence containing
+an explained expression explains something else and is preserved. A short function word does
+not qualify for partial matching — otherwise a hint for `to` would be discarded due to explained `heave to`.
 
-Заметки удаляются только при подтверждённом повторе объяснения. Неизвестные
-самостоятельные утверждения сохраняются для содержательной проверки.
+Notes are removed only upon confirmed explanation repetition. Unfamiliar independent assertions
+are preserved for substantive verification.
 """
 
 from __future__ import annotations
@@ -27,25 +26,25 @@ from dataclasses import replace
 
 from linguary.domain import BlockProcessingResult, LanguageNote
 
-#: Разновидности апострофа, которые в тексте книги и в ответе модели встречаются вперемешку.
+#: Apostrophe varieties encountered interchangeably in book text and model responses.
 _APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
 
-#: Слово выражения: буквы и цифры, возможно со внутренним апострофом (`one's`, `don't`).
+#: Expression word: letters and digits, optionally with internal apostrophe (`one's`, `don't`).
 _WORD = re.compile(r"\w+(?:'\w+)*")
 
-#: Минимальная общая основа двух словоформ одного слова и наибольшее окончание сверх неё.
+#: Minimum shared stem between two inflected forms of one word and maximum suffix delta beyond it.
 _MIN_STEM = 4
 _MAX_ENDING = 3
 
 
 def expression_words(text: str) -> tuple[str, ...]:
-    """Слова выражения в нормализованном виде: без регистра, пунктуации и лишних пробелов."""
+    """Expression words in normalized form: lowercase, stripped of punctuation and excess whitespace."""
     normalized = unicodedata.normalize("NFKC", text).translate(_APOSTROPHES).casefold()
     return tuple(_WORD.findall(normalized))
 
 
 class ExplainedExpressions:
-    """Выражения `Before You Read` одной главы, подготовленные к сравнению."""
+    """Chapter `Before You Read` expressions prepared for comparison."""
 
     __slots__ = ("_expressions", "_explanations")
 
@@ -66,17 +65,17 @@ class ExplainedExpressions:
         return bool(self._expressions)
 
     def covers(self, text: str) -> bool:
-        """Объясняет ли `Before You Read` то же выражение, что и `text`."""
+        """Whether `Before You Read` explains the same expression as `text`."""
         words = expression_words(text)
         return bool(words) and any(
             _overlaps(words, expression) for expression in self._expressions
         )
 
     def repeated_by(self, note: LanguageNote) -> bool:
-        """Повторяет ли языковая заметка выражение `Before You Read`.
+        """Whether a language note repeats a `Before You Read` expression.
 
-        Отрывок определяет кандидата, включая значимую фразу внутри длинного
-        предложения. Удаление требует покрытия всех утверждений объяснением.
+        The excerpt defines candidate scope, including significant phrases within long
+        sentences. Deletion requires covering all claims with an existing explanation.
         """
         excerpt = expression_words(note.original_excerpt)
         return any(
@@ -86,7 +85,7 @@ class ExplainedExpressions:
         )
 
     def without_repeats_v2(self, result: BlockProcessingResult) -> BlockProcessingResult:
-        """Удаляет лишь точные повторы объясняющего текста; новые аспекты остаются."""
+        """Removes only exact duplicates of explanatory text; new aspects are preserved."""
         bodies = {text.strip() for _, text in self._explanations if text.strip()}
         hints = tuple(h for h in result.glossary_hints if not h.note or h.note.strip() not in bodies)
         if not hints and result.treatment.requires_glossary_hints:
@@ -96,13 +95,13 @@ class ExplainedExpressions:
         return replace(result, glossary_hints=hints, language_notes=notes)
 
     def without_repeats(self, result: BlockProcessingResult) -> BlockProcessingResult:
-        """Результат без повторов подготовки к чтению и подсказок того же блока.
+        """Result stripped of repeats of preparatory reading and hints from the same block.
 
-        Повторная заметка отбрасывается целиком. Подсказка — тоже, кроме одного случая:
-        блоку `GLOSSARY_ONLY` подсказки обязательны, и если повторами оказались все его
-        подсказки, они остаются. Читатель, пропустивший подготовку к чтению, иначе
-        остался бы у трудного абзаца без помощи, а обработка главы из-за учебного
-        повтора не должна срываться.
+        A repeated note is dropped completely. A hint is also dropped, with one exception:
+        for a `GLOSSARY_ONLY` block hints are mandatory, and if all its hints turned out to be
+        repeats, they are kept. A reader skipping preparatory reading would otherwise
+        be left without assistance on a difficult paragraph, and chapter processing
+        must not fail over pedagogical repetition.
         """
         if not self and not result.glossary_hints:
             return result
@@ -123,7 +122,7 @@ class ExplainedExpressions:
 
 
 def _repeats_block_hint(note: LanguageNote, result: BlockProcessingResult) -> bool:
-    """Повторяет ли заметка уже данное объяснение подсказки своего блока."""
+    """Whether a note repeats an explanation already provided by a hint in its block."""
     excerpt = expression_words(note.original_excerpt)
     return any(
         (expression := expression_words(hint.original))
@@ -133,8 +132,8 @@ def _repeats_block_hint(note: LanguageNote, result: BlockProcessingResult) -> bo
     )
 
 
-# Конечные словари описывают только два повтора, подтверждённых рецензией.
-# Неизвестное слово в утверждении запрещает удаление даже рядом с известным значением.
+# Finite dictionaries describe only two confirmed review duplicates.
+# An unknown word in an assertion prohibits deletion even alongside a known sense.
 _GRAB_WORDS = "make a grab at my throat разговорн идиом значени резко порывист схват ухват попыт выпад сдела рукой сторон чего либо движение"
 _ARMOUR_WORDS = "sheath armour his and ножн оболоч брон доспех скры защит защищ отраж удар оруж враг граф скептицизм одновременно"
 _CONNECTORS = frozenset("и или это то что здесь как его с со в от на для только но также".split())
@@ -181,7 +180,7 @@ def _same_explanation(expression: Sequence[str], previous: str, current: str) ->
 
 
 def _overlaps(first: Sequence[str], second: Sequence[str]) -> bool:
-    """Совпадают ли два выражения целиком или значимой непрерывной частью."""
+    """Whether two expressions match entirely or share a significant contiguous portion."""
     if len(first) == len(second) and _same_words(first, second):
         return True
     shorter, longer = sorted((first, second), key=len)
@@ -191,7 +190,7 @@ def _overlaps(first: Sequence[str], second: Sequence[str]) -> bool:
 
 
 def _contains(text: Sequence[str], expression: Sequence[str]) -> bool:
-    """Стоит ли значимое выражение в тексте целиком, подряд, с точностью до словоформ."""
+    """Whether a significant expression appears in text in full, contiguously, matching inflected forms."""
     if not _significant(expression) or len(expression) > len(text):
         return False
     return any(
@@ -201,7 +200,7 @@ def _contains(text: Sequence[str], expression: Sequence[str]) -> bool:
 
 
 def _mentions(text: Sequence[str], expression: Sequence[str]) -> bool:
-    """Называет ли текст выражение или его непрерывную часть не меньше половины слов."""
+    """Whether text mentions the expression or a contiguous part covering at least half the words."""
     shortest = (len(expression) + 1) // 2
     return any(
         _contains(text, expression[start : start + size])
@@ -211,19 +210,19 @@ def _mentions(text: Sequence[str], expression: Sequence[str]) -> bool:
 
 
 def _significant(expression: Sequence[str]) -> bool:
-    """Годится ли выражение для частичного совпадения: не одно короткое служебное слово."""
+    """Whether an expression qualifies for partial matching: not a single short function word."""
     return bool(expression) and not (
         len(expression) == 1 and len(expression[0]) < _MIN_STEM
     )
 
 
 def _same_words(first: Sequence[str], second: Sequence[str]) -> bool:
-    """Попарно совпадают ли слова двух последовательностей одной длины."""
+    """Whether words of two sequences of equal length match pairwise."""
     return all(_same_word(left, right) for left, right in zip(first, second, strict=True))
 
 
 def _same_word(first: str, second: str) -> bool:
-    """Одно ли это слово: совпадение или словоформы с общей основой."""
+    """Whether this is the same word: exact match or inflections sharing a common stem."""
     first = {"made": "make"}.get(first, first)
     second = {"made": "make"}.get(second, second)
     if first == second:

@@ -1,13 +1,13 @@
-"""Внутренние DTO ответов LLM (DTO-02).
+"""Internal DTOs for LLM responses (DTO-02).
 
-Это форма ответа модели после того, как адаптер разобрал и проверил его по Pydantic-схеме
-на своей границе. Прикладной слой работает только с этими датаклассами и о Pydantic,
-JSON и провайдере не знает (ADR § 3).
+This is the representation of model responses after the adapter parses and validates them
+against Pydantic schemas at its boundary. The application layer operates solely with these
+dataclasses and knows nothing about Pydantic, JSON, or provider specifics (ADR § 3).
 
-DTO не повторяют доменные правила: проверки полноты группы, порядка блоков, совпадения
-режима с сохранённым планом, языка и оборванной генерации выполняются уже над этими DTO
-прикладными валидаторами (PRD § 15, ALG-04). Здесь остаётся только то, без чего DTO
-бессмысленны как носители: непустые идентификаторы и тексты, диапазон уверенности.
+DTOs do not duplicate domain rules: checks for group completeness, block ordering,
+treatment matching saved plan, language, and truncated output are performed on these DTOs
+by application validators (PRD § 15, ALG-04). Here we only enforce structural integrity:
+non-empty IDs and texts, and valid confidence intervals.
 """
 
 from __future__ import annotations
@@ -20,22 +20,23 @@ from linguary.domain.content_plan import Difficulty
 
 
 class LLMPayloadError(ApplicationError):
-    """Ответ модели нельзя представить внутренним DTO.
+    """Model response cannot be represented as an internal DTO.
 
-    Ошибка границы: адаптер уже проверил ответ по схеме, поэтому её появление означает
-    расхождение схемы адаптера с этим контрактом, а не обычный некорректный ответ модели.
+    Boundary error: the adapter has already validated the response against its schema,
+    so this error indicates a divergence between adapter schema and this contract,
+    rather than an ordinary invalid model response.
     """
 
 
 @dataclass(frozen=True, slots=True)
 class GlossaryCandidateResponse:
-    """Кандидат глоссария из анализа главы (PRD § 11).
+    """Glossary candidate from chapter analysis (PRD § 11).
 
-    `model_flagged_review` — собственная пометка модели, входной сигнал. Итоговое
-    `requires_review` вычисляет приложение по DTO-01 (`domain.compute_requires_review`).
+    `model_flagged_review` — model's own flag, input signal. Final `requires_review`
+    is calculated by the application per DTO-01 (`domain.compute_requires_review`).
 
-    `note` — переводческое указание, которое одним вариантом перевода не выражается:
-    род персонажа в целевом языке, склонение названия, регистр речи (PRD § 11).
+    `note` — translation guidance that cannot be expressed as a single translation variant:
+    character gender in target language, declension of proper names, speech register (PRD § 11).
     """
 
     source_text: str
@@ -60,10 +61,10 @@ class GlossaryCandidateResponse:
 
 @dataclass(frozen=True, slots=True)
 class TreatmentPlanItemResponse:
-    """Предложенный моделью режим обработки одного блока (PRD § 10.1).
+    """Model-suggested treatment mode for a single block (PRD § 10.1).
 
-    План становится источником истины только после сохранения: при обработке поле
-    `treatment` в ответе модели этот план подтверждает, но не переопределяет.
+    The plan becomes the source of truth only after persistence: during processing,
+    the `treatment` field in model response confirms this plan rather than overriding it.
     """
 
     source_block_id: str
@@ -81,7 +82,7 @@ class TreatmentPlanItemResponse:
 
 @dataclass(frozen=True, slots=True)
 class BeforeYouReadEntryResponse:
-    """Выражение главы, для которого обычного словаря может быть мало (PRD § 19.1)."""
+    """Chapter expression where a simple dictionary hint might be insufficient (PRD § 19.1)."""
 
     expression: str
     explanation: str
@@ -95,10 +96,10 @@ class BeforeYouReadEntryResponse:
 
 @dataclass(frozen=True, slots=True)
 class ChapterAnalysisResponse:
-    """Ответ модели на анализ одной главы или одного её фрагмента (PRD § 14).
+    """Model response for analysis of a single chapter or fragment (PRD § 14).
 
-    `chapter_summary` описывает события этой главы и пишется на языке оригинала:
-    экспортёр показывает её читателю перед следующей главой (PRD § 19.2).
+    `chapter_summary` describes events in this chapter and is written in the original language:
+    the exporter displays it to the reader before the next chapter (PRD § 19.2).
     """
 
     translation_instructions: str
@@ -117,17 +118,18 @@ class ChapterAnalysisResponse:
 
     @property
     def planned_block_ids(self) -> tuple[str, ...]:
-        """Блоки, покрытые планом, в порядке ответа модели.
+        """Blocks covered by plan in model response order.
 
-        Полнота покрытия относительно текстовых блоков главы проверяется прикладным
-        слоем при сохранении анализа: сам ответ о составе главы не знает.
+        Completeness of coverage with respect to chapter textual blocks is validated
+        by the application layer upon saving analysis: the response itself does not know
+        the chapter structure.
         """
         return tuple(item.source_block_id for item in self.treatment_plan)
 
 
 @dataclass(frozen=True, slots=True)
 class GlossaryHintResponse:
-    """Перевод отдельного слова или короткого выражения внутри блока (PRD § 10.1)."""
+    """Translation of an individual word or short phrase inside a block (PRD § 10.1)."""
 
     original: str
     translation: str
@@ -142,11 +144,11 @@ class GlossaryHintResponse:
 
 @dataclass(frozen=True, slots=True)
 class BlockResultResponse:
-    """Результат обработки одного входного текстового блока.
+    """Processing result for a single input textual block.
 
-    Состав определяется режимом: полный перевод обязателен и допустим только для
-    `TRANSLATE`, словарные подсказки обязательны для `GLOSSARY_ONLY` и запрещены
-    для `READ_AS_IS` (PRD § 15).
+    Composition depends on treatment: full translation is mandatory and allowed only for
+    `TRANSLATE`, glossary hints are mandatory for `GLOSSARY_ONLY` and forbidden
+    for `READ_AS_IS` (PRD § 15).
     """
 
     source_block_id: str
@@ -184,7 +186,7 @@ class BlockResultResponse:
 
 @dataclass(frozen=True, slots=True)
 class LanguageNoteResponse:
-    """Языковой комментарий, привязанный ровно к одному блоку (PRD § 19.3)."""
+    """Language note tied to exactly one block (PRD § 19.3)."""
 
     source_block_id: str
     original_excerpt: str
@@ -204,10 +206,10 @@ class LanguageNoteResponse:
 
 @dataclass(frozen=True, slots=True)
 class TranslationResultResponse:
-    """Ответ модели на обработку одной группы блоков (PRD § 10, § 14).
+    """Model response for processing a single block group (PRD § 10, § 14).
 
-    Соответствие состава и порядка блоков входной группе проверяется прикладным слоем:
-    ответ сам по себе не знает, какая группа его запросила.
+    Matching of block composition and order to the input group is verified by the application layer:
+    the response on its own does not know which group requested it.
     """
 
     blocks: tuple[BlockResultResponse, ...] = ()
@@ -216,11 +218,11 @@ class TranslationResultResponse:
 
     @property
     def block_ids(self) -> tuple[str, ...]:
-        """Блоки результата в порядке ответа модели."""
+        """Result blocks in model response order."""
         return tuple(block.source_block_id for block in self.blocks)
 
     def notes_for(self, block_id: str) -> tuple[LanguageNoteResponse, ...]:
-        """Заметки ответа, относящиеся к указанному блоку."""
+        """Response notes pertaining to the specified block."""
         return tuple(note for note in self.language_notes if note.source_block_id == block_id)
 
 

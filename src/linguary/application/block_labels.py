@@ -1,4 +1,4 @@
-"""Удаление служебных псевдонимов блоков из текста анализа."""
+"""Removal of internal block aliases from analysis texts."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ _BARE = re.compile(rf"\b{_LABEL}\b", re.IGNORECASE)
 
 
 def without_block_labels(text: str) -> str:
-    """Убирает временные номера блоков и лишние пробелы из текста модели."""
+    """Strips ephemeral block labels and extraneous whitespace from model text."""
     text = _PARENTHESISED.sub("", text)
     text = _WITH_WORD.sub("", text)
     text = _BARE.sub("", text)

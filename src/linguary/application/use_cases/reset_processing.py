@@ -1,19 +1,18 @@
-"""Возврат к проверке глоссария: сброс результатов обработки книги (PRD § 11, § 21.5, § 22).
+"""Reset of book processing results: return to glossary review (PRD § 11, § 21.5, § 22).
 
-Пользователь выполняет этот сброс, когда увидел неудачное переводческое решение, влияющее
-на всю книгу: точечные ошибки отдельных блоков исправляет повторная генерация. Сброс
-удаляет запуск обработки вместе с его результатами — переводами, словарными подсказками,
-`Language Notes` и замечаниями, — а импорт, стабильные `DocumentBlock` и анализ глав
-сохраняет: повторный анализ самый дорогой этап и заново из-за правки одного термина
-выполняться не должен.
+The user performs this reset when noticing an unsatisfactory translation choice affecting
+the entire book: isolated errors in individual blocks are fixed by block regeneration. The reset
+removes the processing run along with its results — translations, vocabulary hints, `Language Notes`,
+and warnings, — while preserving the import, stable `DocumentBlock` entities, and chapter analyses:
+re-analyzing chapters is the most expensive phase and should not be re-executed due to editing a single term.
 
-Всё делается одной транзакцией: запуск, его результаты, задачи обработки и повторной
-генерации и состояние книги меняются вместе. Вызов модели, начатый до сброса, транзакцией
-не охвачен, и его поздний результат отбрасывает уже проверка активного запуска в транзакции
-сохранения (ALG-04): запуска, с которым начиналась глава, больше нет.
+Everything is performed in a single transaction: the run, its results, processing and regeneration
+tasks, and book status are updated together. A model call started prior to reset is not covered
+by the transaction; its late result is discarded by the active run check in the save transaction
+(ALG-04): the run with which the chapter was started no longer exists.
 
-Отдельного «размораживания» глоссария сброс не требует: правка решений разрешена в
-`GLOSSARY_REVIEW` и `READY_TO_PROCESS`, и книга попадает в первое из них (ALG-06).
+The reset requires no separate "unfreezing" of the glossary: decision edits are allowed in
+`GLOSSARY_REVIEW` and `READY_TO_PROCESS`, and the book transitions into the former (ALG-06).
 """
 
 from __future__ import annotations
@@ -24,23 +23,23 @@ from linguary.application.errors import ApplicationError
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import BookEvent, TaskType, apply_book_event
 
-#: Задачи, которые сброс снимает: они принадлежат отменённому запуску и после сброса
-#: выполняться не должны (PRD § 21.5).
+#: Tasks removed by reset: they belong to the cancelled run and should not
+#: execute after reset (PRD § 21.5).
 RESET_TASK_TYPES: frozenset[TaskType] = frozenset(
     {TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK}
 )
 
 
 class ResetProcessingError(ApplicationError):
-    """Обработку книги нельзя сбросить."""
+    """Book processing cannot be reset."""
 
 
 @dataclass(frozen=True, slots=True)
 class ResetProcessingCommand:
-    """Команда возврата к проверке глоссария.
+    """Return to glossary review command.
 
-    Подтверждение пользователя — забота интерфейса: он показывает, что именно будет
-    удалено (PRD § 11), и вызывает сценарий только после явного согласия.
+    User confirmation is managed by the UI: it displays what will be deleted
+    (PRD § 11) and invokes the use case only after explicit consent.
     """
 
     book_id: str
@@ -48,10 +47,10 @@ class ResetProcessingCommand:
 
 @dataclass(frozen=True, slots=True)
 class ResetProcessingResult:
-    """Что сброс удалил: пользователю показывается цена подтверждённого действия.
+    """What the reset removed: displays the cost of the confirmed action to the user.
 
-    `run_id` пуст, если активного запуска у книги уже не было: сброс тогда только
-    возвращает её к проверке глоссария.
+    `run_id` is empty if the book had no active run: in that case reset only returns
+    the book to glossary review.
     """
 
     book_id: str
@@ -61,16 +60,16 @@ class ResetProcessingResult:
 
 
 class ResetProcessing:
-    """Удаляет результаты обработки книги и возвращает её в `GLOSSARY_REVIEW`."""
+    """Deletes book processing results and returns the book to `GLOSSARY_REVIEW`."""
 
     def __init__(self, *, unit_of_work: UnitOfWork) -> None:
         self._unit_of_work = unit_of_work
 
     def __call__(self, command: ResetProcessingCommand) -> ResetProcessingResult:
-        """Сбрасывает обработку книги одной транзакцией (PRD § 17, § 21.5).
+        """Resets book processing in a single transaction (PRD § 17, § 21.5).
 
-        Книга, из состояния которой возврат не выполняется, получает отказ домена
-        (в Web UI — 409): сбрасывать нечего, пока обработка не начиналась.
+        A book whose status does not permit reset receives a domain rejection
+        (HTTP 409 in Web UI): there is nothing to reset before processing has started.
         """
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, command.book_id)
@@ -92,13 +91,13 @@ class ResetProcessing:
 
 
 def _remove_tasks(transaction: UnitOfWork, book_id: str) -> int:
-    """Снимает задачи обработки и повторной генерации книги (PRD § 18.1).
+    """Cancels processing and block regeneration tasks for the book (PRD § 18.1).
 
-    Удаляются задачи в любом состоянии, а не только запланированные и выполняющиеся:
-    идемпотентный ключ задачи живёт, пока живёт сама задача, и завершённая задача
-    отменённого запуска не дала бы поставить такую же задачу следующему запуску —
-    книгу нельзя было бы обработать во второй раз. Задачи импорта, анализа глав и
-    экспорта сброс не трогает: их результаты книга сохраняет.
+    Tasks in any status are removed, not just pending or running: an idempotent task
+    key lives as long as the task itself, and a completed task from a cancelled run
+    would prevent enqueuing the same task for a new run — leaving the book unable
+    to be processed a second time. Import, chapter analysis, and export tasks are not
+    touched: their results are preserved.
     """
     removed = tuple(
         task
@@ -111,7 +110,7 @@ def _remove_tasks(transaction: UnitOfWork, book_id: str) -> int:
 
 
 def _book(transaction: UnitOfWork, book_id: str) -> BookRecord:
-    """Запись книги в открытой транзакции."""
+    """Book record within an active transaction."""
     book = transaction.books.get(book_id)
     if book is None:
         raise ResetProcessingError(f"книги {book_id} нет в хранилище")

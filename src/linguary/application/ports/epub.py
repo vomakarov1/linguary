@@ -1,10 +1,10 @@
-"""Порты чтения и записи EPUB.
+"""Ports for reading and writing EPUB.
 
-Прикладной слой не знает ни о контейнере EPUB, ни о XHTML, ни о файловой системе:
-сценарий импорта получает готовую каноническую модель документа и предупреждения импорта,
-а сценарий экспорта отдаёт модель вместе с результатами обработки и получает путь
-к собранному файлу. Конкретная реализация живёт в `linguary.adapters.epub` (ADR § 3:
-логика EPUB находится только во внешних компонентах импорта и экспорта).
+The application layer knows nothing about the EPUB container, XHTML, or the file system:
+the import use case receives a ready canonical document model and import warnings,
+while the export use case provides the model along with processing results and receives
+the path to the assembled file. The concrete implementation lives in `linguary.adapters.epub`
+(ADR § 3: EPUB logic belongs only in external import and export components).
 """
 
 from __future__ import annotations
@@ -24,22 +24,22 @@ from linguary.domain import (
 
 
 class EpubImportFatalError(DomainError):
-    """EPUB импортировать нельзя (`SupportStatus.FATAL`, PRD § 6).
+    """EPUB cannot be imported (`SupportStatus.FATAL`, PRD § 6).
 
-    Причина попадает в сообщение и показывается пользователю: нечитаемый архив,
-    отсутствующий spine или порядок чтения, XHTML, который не разбирается до блоков.
-    Ошибка доменная, потому что нарушено само условие существования книги в модели,
-    а не контракт инфраструктуры.
+    The reason is included in the message and shown to the user: unreadable archive,
+    missing spine or reading order, or XHTML that cannot be parsed into blocks.
+    The error is a domain error because the precondition for the book's existence
+    in the model is violated, not an infrastructure contract.
     """
 
 
 @dataclass(frozen=True, slots=True)
 class EpubReadRequest:
-    """Запрос на чтение EPUB.
+    """Request to read an EPUB.
 
-    `book_id` нужен читателю до разбора: идентификатор блока считается от `document_id`,
-    а он совпадает с идентификатором книги (PRD § 8). `source_language` не задан, если
-    язык книги берётся из метаданных EPUB.
+    `book_id` is required by the reader before parsing: block identity is computed
+    from `document_id`, which matches the book id (PRD § 8). `source_language` is
+    optional if the language is inferred from EPUB metadata.
     """
 
     book_id: str
@@ -50,29 +50,29 @@ class EpubReadRequest:
 
 @dataclass(frozen=True, slots=True)
 class ImportedBook:
-    """Результат чтения EPUB: каноническая модель и непреградные замечания."""
+    """Result of reading an EPUB: canonical model and non-blocking warnings."""
 
     document: CanonicalDocument
     warnings: tuple[BookImportWarning, ...] = ()
 
 
 class EpubReader(Protocol):
-    """Чтение EPUB в каноническую модель документа."""
+    """Reads EPUB into a canonical document model."""
 
     def read(self, request: EpubReadRequest) -> ImportedBook:
-        """Читает книгу и строит каноническую модель.
+        """Reads a book and builds a canonical model.
 
-        Реализация обязана поднимать `EpubImportFatalError` там, где по матрице поддержки
-        наступает `FATAL`, и складывать всё остальное в `ImportedBook.warnings`.
+        The implementation must raise `EpubImportFatalError` wherever the support matrix
+        specifies `FATAL`, and collect everything else into `ImportedBook.warnings`.
         """
 
 
 @dataclass(frozen=True, slots=True)
 class StoreResourcesRequest:
-    """Запрос на сохранение ресурсов книги в локальное хранилище.
+    """Request to store book resources in local storage.
 
-    Каноническая модель нужна целиком: по ней хранилище знает и состав ресурсов вместе
-    с их статусом поддержки, и то, какие из них обязательны для книги.
+    The canonical model is required in its entirety: from it, the storage learns
+    the resource inventory along with their support status, and which ones are mandatory.
     """
 
     book_id: str
@@ -82,39 +82,39 @@ class StoreResourcesRequest:
 
 @dataclass(frozen=True, slots=True)
 class StoredResources:
-    """Результат сохранения: копия каждого ресурса по его исходному пути в книге."""
+    """Result of storing resources: copy of each resource by its original path in the book."""
 
     paths: Mapping[str, str] = field(default_factory=dict)
 
 
 class EpubResourceStore(Protocol):
-    """Локальное хранилище ресурсов книги (PRD § 22).
+    """Local storage of book resources (PRD § 22).
 
-    Сценарий импорта знает только то, что ресурсы книги где-то сохранены и что копию
-    каждого можно найти по исходному пути ресурса; каталог хранилища, распаковка архива
-    и защита от выхода за его пределы остаются ответственностью адаптера.
+    The import use case only knows that book resources are preserved somewhere and that
+    a copy of each can be retrieved by its original resource path; storage directory,
+    archive extraction, and path traversal protection remain the adapter's responsibility.
     """
 
     def store(self, request: StoreResourcesRequest) -> StoredResources:
-        """Сохраняет ресурсы книги и отдаёт пути их копий.
+        """Stores book resources and returns paths to their copies.
 
-        Реализация обязана поднимать `EpubImportFatalError` там, где по матрице поддержки
-        наступает `FATAL`: потерян ресурс книги, путь ведёт за пределы хранилища книги,
-        архив превышает допустимые лимиты распаковки.
+        The implementation must raise `EpubImportFatalError` when the support matrix
+        specifies `FATAL`: missing mandatory resource, path traversal out of the book's
+        storage directory, or archive exceeding extraction limits.
         """
 
 
 class EpubExportFatalError(DomainError):
-    """Собрать корректный EPUB нельзя (`SupportStatus.FATAL`, PRD § 6, § 20).
+    """A valid EPUB cannot be built (`SupportStatus.FATAL`, PRD § 6, § 20).
 
-    Ошибка возникает, когда потерян обязательный ресурс книги или когда собранный файл
-    не прошёл встроенные технические проверки экспортёра. Экспортная задача в этом случае
-    получает `failed`, а недособранный артефакт не остаётся на диске.
+    Occurs when a required book resource is missing or when the assembled file fails
+    the exporter's built-in technical checks. In this case, the export task fails,
+    and incomplete artifacts are not left on disk.
     """
 
 
 class ExportWarningKind(StrEnum):
-    """Виды непреградных замечаний экспорта, которые пользователь видит в интерфейсе."""
+    """Kinds of non-blocking export warnings presented to the user in the UI."""
 
     UNRESOLVED_LINK = "unresolved_link"
     MISSING_RESOURCE = "missing_resource"
@@ -123,7 +123,7 @@ class ExportWarningKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ExportWarning:
-    """Замечание сборки: что именно в итоговой книге отличается от исходной."""
+    """Build warning: what exactly in the resulting book differs from the original."""
 
     kind: ExportWarningKind
     message: str
@@ -136,13 +136,13 @@ class ExportWarning:
 
 @dataclass(frozen=True, slots=True)
 class EpubWriteRequest:
-    """Запрос на сборку итогового EPUB.
+    """Request to build the final EPUB.
 
-    Состав главы определяется тем, что передал сценарий: без `block_results`
-    и `learning_materials` получается книга режима `structure_only` — только оригинал
-    (PRD § 20). `stored_resource_paths` сопоставляет пути ресурсов внутри книги их копиям
-    в локальном хранилище, а `source_epub_path` нужен для переноса конструкций
-    `PRESERVE_OPAQUE` исходной разметкой.
+    Section composition is determined by what the use case passes: omitting `block_results`
+    and `learning_materials` produces a `structure_only` book — original text only
+    (PRD § 20). `stored_resource_paths` maps resource paths inside the book to their copies
+    in local storage, and `source_epub_path` is needed to carry over `PRESERVE_OPAQUE`
+    markup from the source.
     """
 
     document: CanonicalDocument
@@ -159,21 +159,21 @@ class EpubWriteRequest:
 
 @dataclass(frozen=True, slots=True)
 class ExportedBook:
-    """Результат сборки: путь к готовому файлу и замечания сборки."""
+    """Result of building: path to the assembled file and build warnings."""
 
     path: str
     warnings: tuple[ExportWarning, ...] = ()
 
 
 class EpubWriter(Protocol):
-    """Сборка итогового EPUB из канонической модели и результатов обработки."""
+    """Assembles final EPUB from canonical model and processing results."""
 
     def write(self, request: EpubWriteRequest) -> ExportedBook:
-        """Собирает книгу и выполняет встроенные технические проверки (PRD § 20).
+        """Assembles the book and runs built-in technical checks (PRD § 20).
 
-        Реализация обязана поднимать `EpubExportFatalError`, если книгу нельзя собрать
-        или собранный файл не прошёл встроенные проверки; всё, что не мешает книге быть
-        корректной, складывается в `ExportedBook.warnings`.
+        The implementation must raise `EpubExportFatalError` if the book cannot be assembled
+        or fails built-in checks; anything that does not prevent the book from being valid
+        is collected in `ExportedBook.warnings`.
         """
 
 

@@ -1,23 +1,23 @@
-"""Классификация ошибок и политика повторов (PRD § 16, ALG-05).
+"""Error classification and retry policy (PRD § 16, ALG-05).
 
-Модуль отвечает на два вопроса и ни на что больше: какого типа ошибка случилась и что
-делать с очередной попыткой. Он не выполняет вызовов, не ждёт между попытками и не знает
-о задачах очереди: цикл повторов ведёт сценарий, у которого есть клиент модели и исходный
-запрос, а ожидание между попытками выполняет тот, кто владеет циклом событий.
+This module answers two questions and nothing else: what type of error occurred, and what
+action to take for the next attempt. It does not execute calls, does not sleep between attempts,
+and knows nothing about queue tasks: the retry loop is orchestrated by the use case holding
+the model client and original request, while waiting between attempts is executed by the event
+loop owner.
 
-Ошибки не образуют собственной иерархии поверх доменной: классификация отображает
-исключения в `ErrorType` домена, и решение о повторе принимает по нему же. Разбор идёт
-по типу исключения, а не по тексту сообщения — типы порта `LLMClient` для этого и
-разделены (`ports/llm.py`).
+Errors do not form a separate hierarchy on top of the domain: classification maps exceptions
+to domain `ErrorType`, and retry decisions are based on it. Discrimination is based on exception
+type rather than message text — this is why `LLMClient` port types are split (`ports/llm.py`).
 
-Нарушения блокирующих проверок результата (ALG-04) приходят сюда как `ResultValidationError`
-вместе с `ResultExpectation`: из тех же сведений — ожидаемые `block_id`, ожидаемые режимы
-обработки и целевой язык — строится уточняющая инструкция повтора. Она дописывается
-к инструкции исходного запроса и не заменяет её: контекст главы, глоссарий и текст блоков
-собирает `ContextBuilder`, и повтор их не теряет.
+Blocking result validation violations (ALG-04) arrive here as `ResultValidationError` along with
+`ResultExpectation`: from this same information — expected `block_id`s, expected treatments,
+and target language — a retry repair instruction is constructed. It is appended to the original
+request instruction rather than replacing it: chapter context, glossary, and block text are
+assembled by `ContextBuilder`, and the retry retains them.
 
-Ошибка одной задачи здесь не останавливает обработку книги: политика решает судьбу одной
-попытки одного вызова, а состояние задачи фиксирует `TaskRunner` (ALG-02).
+A single task failure does not halt book processing: the policy decides the fate of a single
+call attempt, while task state is finalized by `TaskRunner` (ALG-02).
 """
 
 from __future__ import annotations
@@ -48,31 +48,31 @@ from linguary.domain import (
     UnknownBlockError,
 )
 
-#: Задержка перед первой повторной попыткой временной ошибки. Дальше она удваивается:
-#: ограничение частоты у провайдера снимается не мгновенно, а плотный повтор его продлевает.
+#: Delay before the first retry attempt of a transient error. It doubles thereafter:
+#: provider rate limits take time to reset, and rapid retries prolong them.
 DEFAULT_BACKOFF_SECONDS = 1.0
 
-#: Предел задержки. Дальше ждать бессмысленно: пользователь видит задачу в работе, а не
-#: результат, и честнее исчерпать попытки, чем растянуть одну задачу на минуты.
+#: Maximum backoff delay. Waiting longer is unproductive: the user sees the task in progress
+#: rather than results, and it is cleaner to exhaust attempts than stretch one task for minutes.
 DEFAULT_MAX_BACKOFF_SECONDS = 30.0
 
-#: Предел паузы, которую провайдер может попросить заголовком `Retry-After`. Просьбу
-#: провайдера политика выполняет и сверх `DEFAULT_MAX_BACKOFF_SECONDS` — иначе повтор
-#: снова получит отказ, — но не бесконечно: задача не должна ждать часами.
+#: Upper bound on the pause requested by the provider via the `Retry-After` header.
+#: The policy respects provider requests beyond `DEFAULT_MAX_BACKOFF_SECONDS` — otherwise
+#: retries will simply be rejected again — but caps it to prevent waiting for hours.
 DEFAULT_MAX_RETRY_AFTER_SECONDS = 120.0
 
 
 class RetryPolicyError(ApplicationError):
-    """Политика повторов настроена или вызвана недопустимым образом."""
+    """Retry policy configured or invoked in an invalid manner."""
 
 
 class ResultValidationError(ApplicationError):
-    """Результат вызова отбракован блокирующей проверкой (PRD § 15, ALG-04).
+    """Call result rejected by blocking validation (PRD § 15, ALG-04).
 
-    Ошибка описывает не сбой вызова, а негодный ответ модели: нет ожидаемого блока, есть
-    неизвестный блок, режим обработки не совпал с планом, язык результата не целевой.
-    Такой ответ повторяют с уточняющей инструкцией, поэтому ошибка несёт `expectation` —
-    сведения, которых модели не хватило.
+    Describes an unusable model response rather than a transport failure: missing expected block,
+    unexpected block, treatment mode mismatch against plan, or non-target language.
+    Such responses are retried with repair instructions, which is why the error carries `expectation` —
+    the information the model was missing.
     """
 
     def __init__(self, message: str, *, expectation: ResultExpectation | None = None) -> None:
@@ -82,10 +82,10 @@ class ResultValidationError(ApplicationError):
 
 @dataclass(frozen=True, slots=True)
 class ExpectedBlock:
-    """Блок, результат для которого обязан вернуть повторный вызов.
+    """A block for which a retry call must return a result.
 
-    `treatment` не задан там, где режим выбирает сама модель: при анализе главы план
-    обработки — это её ответ, а не требование запроса (PRD § 14).
+    `treatment` is unset where the mode is chosen by the model: in chapter analysis, the treatment
+    plan is model output rather than a request constraint (PRD § 14).
     """
 
     block_id: str
@@ -102,10 +102,10 @@ class ExpectedBlock:
 
 @dataclass(frozen=True, slots=True)
 class ResultExpectation:
-    """Что именно должен вернуть повторный вызов (ALG-05).
+    """Exact expectations for a retry call (ALG-05).
 
-    Ровно те сведения, которые перечисляет уточняющая инструкция: ожидаемые блоки в их
-    порядке, ожидаемые режимы обработки и целевой язык результата.
+    The exact details enumerated by the repair instruction: expected blocks in order,
+    expected treatment modes, and target result language.
     """
 
     target_language: str
@@ -124,12 +124,12 @@ class ResultExpectation:
 
     @property
     def block_ids(self) -> tuple[str, ...]:
-        """Ожидаемые идентификаторы блоков в порядке исходного запроса."""
+        """Expected block IDs in original request order."""
         return tuple(block.block_id for block in self.blocks)
 
 
 class RetryAction(StrEnum):
-    """Что делать с очередной попыткой вызова (ALG-05)."""
+    """Action to take on a call attempt (ALG-05)."""
 
     GIVE_UP = "give_up"
     RETRY_AFTER_BACKOFF = "retry_after_backoff"
@@ -139,10 +139,10 @@ class RetryAction(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class RetryDecision:
-    """Решение по одной неудачной попытке: повторять ли и чем именно.
+    """Decision on a failed attempt: whether and how to retry.
 
-    `error` готов к записи в задачу: сценарий, исчерпавший попытки, отдаёт его runner-у,
-    и задача получает `failed` с типом, сообщением и технической деталью (PRD § 16).
+    `error` is ready to be recorded on the task: a use case exhausting attempts yields it
+    to the runner, transitioning the task to `failed` with type, message, and detail (PRD § 16).
     """
 
     action: RetryAction
@@ -152,16 +152,16 @@ class RetryDecision:
 
     @property
     def should_retry(self) -> bool:
-        """Имеет ли смысл ещё одна попытка."""
+        """Whether another attempt is warranted."""
         return self.action is not RetryAction.GIVE_UP
 
     def next_request[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMRequest[PayloadT]:
-        """Запрос следующей попытки.
+        """Request for the next attempt.
 
-        Уточняющая инструкция дописывается к инструкции исходного запроса: собранный
-        контекст повтор не теряет и не подменяет.
+        Repair instructions are appended to the original request instructions:
+        assembled context is neither lost nor replaced.
         """
         if not self.should_retry:
             raise RetryPolicyError(
@@ -177,10 +177,10 @@ class RetryDecision:
 
 
 class RetryPolicy:
-    """Правила повторов вызова модели (ALG-05).
+    """Model call retry rules (ALG-05).
 
-    Число попыток задаётся настройкой (`LLMSettings.max_attempts`), а не константой кода:
-    локальная модель, платный провайдер и отладка требуют разного.
+    Max attempts is specified via configuration (`LLMSettings.max_attempts`) rather than hardcoded:
+    local models, commercial providers, and debugging demand different thresholds.
     """
 
     def __init__(
@@ -202,18 +202,18 @@ class RetryPolicy:
 
     @property
     def max_attempts(self) -> int:
-        """Сколько попыток вызова допускается до перехода задачи в `failed`."""
+        """Maximum call attempts permitted before transitioning task to `failed`."""
         return self._max_attempts
 
     def decide(self, error: Exception, *, attempts: int) -> RetryDecision:
-        """Решает судьбу попытки, завершившейся ошибкой.
+        """Determines the fate of a failed attempt.
 
-        `attempts` — сколько попыток уже сделано, включая эту. Счётчик ведёт цикл вызова:
-        `ProcessingTask.attempts` считает запуски задачи, а не обращения к модели.
+        `attempts` — number of attempts made so far, including this one. Tracked by the call loop:
+        `ProcessingTask.attempts` counts task executions rather than individual model calls.
 
-        Обрыв ответа по лимиту вывода — единственная ошибка модели, которую политика
-        не повторяет: тот же запрос упирается в тот же предел (`ports/llm.py`), и каждая
-        оставшаяся попытка была бы оплаченным вызовом с заранее известным итогом.
+        Output truncation due to token limits is the sole model error that the policy never retries:
+        the exact same request will hit the same ceiling (`ports/llm.py`), and any remaining attempts
+        would be paid calls with predetermined outcomes.
         """
         if attempts < 1:
             raise RetryPolicyError("попытка вызова модели нумеруется с единицы")
@@ -241,9 +241,9 @@ class RetryPolicy:
         )
 
     def _backoff_for(self, attempts: int, error: Exception) -> float:
-        """Задержка перед повтором временной ошибки: удвоение до предела.
+        """Delay before retrying a transient error: exponential backoff up to limit.
 
-        Если провайдер сам назвал паузу (`Retry-After`), задержка не короче её.
+        If the provider explicitly supplied a delay (`Retry-After`), the pause is no shorter.
         """
         backoff = min(
             self._backoff_seconds * 2 ** (attempts - 1), self._max_backoff_seconds
@@ -256,24 +256,24 @@ class RetryPolicy:
         return max(backoff, min(retry_after, self._max_retry_after_seconds))
 
 
-#: Отображение исключений в типы ошибок задачи (ALG-05). Порядок значим: наследник
-#: указывается раньше своего базового класса.
+#: Mapping of exceptions to task error types (ALG-05). Order is significant:
+#: subclasses must precede their base classes.
 _ERROR_TYPES: tuple[tuple[type[Exception], ErrorType], ...] = (
-    # вызывать нечем или провайдер отверг сам запрос: автоматический повтор даст тот же
-    # отказ, а после исправления настроек LLM пользователь повторяет задачу сам
+    # unconfigured or provider rejected request: automatic retry yields same rejection;
+    # user retries manually after correcting settings
     (LLMConfigurationError, ErrorType.CONFIGURATION),
     (LLMProviderError, ErrorType.CONFIGURATION),
-    # книга непригодна: нужен другой файл, а не другая попытка
+    # unusable book: requires a different file rather than another attempt
     (EpubImportFatalError, ErrorType.PERMANENT),
     (EpubExportFatalError, ErrorType.PERMANENT),
-    # таймаут, обрыв связи, ограничение частоты, сбой на стороне провайдера
+    # timeout, connection drop, rate limit, provider-side glitch
     (LLMTransportError, ErrorType.TRANSIENT),
-    # неразбираемый JSON, ответ не по схеме, обрыв генерации по лимиту токенов
+    # unparseable JSON, schema mismatch, token output cutoff
     (LLMResponseFormatError, ErrorType.MODEL_OUTPUT),
     (LLMPayloadError, ErrorType.MODEL_OUTPUT),
-    # ответ разобран, но не годится: нет блока, неизвестный блок, режим, язык
+    # response parsed but invalid: missing block, unknown block, wrong treatment, wrong language
     (ResultValidationError, ErrorType.VALIDATION),
-    # фрагменты длинной главы не складываются в главу: чужие блоки, спорные номера
+    # chapter fragments do not assemble cleanly: foreign blocks, overlapping numbers
     (AnalysisMergeError, ErrorType.VALIDATION),
     (TranslationUnitError, ErrorType.VALIDATION),
     (UnknownBlockError, ErrorType.VALIDATION),
@@ -284,10 +284,10 @@ _ERROR_TYPES: tuple[tuple[type[Exception], ErrorType], ...] = (
 
 
 def classify_error(error: Exception) -> TaskError:
-    """Типизированная ошибка задачи по исключению сценария (ALG-05).
+    """Typed task error derived from use case exception (ALG-05).
 
-    Неизвестная ошибка считается временной: приложение не берётся утверждать, что повтор
-    заведомо бесполезен, и пользователь сохраняет право запустить задачу заново.
+    Unrecognized errors default to transient: the application cannot assume retrying
+    is futile, preserving the user's ability to re-run the task.
     """
     for error_type, task_error_type in _ERROR_TYPES:
         if isinstance(error, error_type):
@@ -298,11 +298,10 @@ def classify_error(error: Exception) -> TaskError:
 def build_repair_instruction(
     expectation: ResultExpectation | None, *, violation: str | None = None
 ) -> str:
-    """Уточняющая инструкция повтора (ALG-05).
+    """Refining instruction for retry (ALG-05).
 
-    Перечисляет ожидаемые `block_id`, ожидаемые режимы обработки и целевой язык — то,
-    в чём ответ модели разошёлся с запросом. Инструкция дописывается к исходному запросу
-    и без него смысла не имеет.
+    Lists expected `block_id`s, expected treatment modes, and target language — the aspects
+    in which model output diverged from request. Appended to the original prompt.
     """
     lines = ["Уточнение к предыдущему запросу: предыдущий ответ отклонён проверкой."]
     if violation and violation.strip():
@@ -320,7 +319,7 @@ def build_repair_instruction(
 
 
 def _block_lines(expectation: ResultExpectation) -> list[str]:
-    """Строки перечня ожидаемых блоков с режимами обработки."""
+    """Lines enumerating expected blocks along with treatment modes."""
     return [
         f"- {block.block_id}"
         if block.treatment is None
@@ -330,24 +329,24 @@ def _block_lines(expectation: ResultExpectation) -> list[str]:
 
 
 def _truncated_by_output_limit(error: Exception) -> bool:
-    """Оборван ли ответ пределом вывода модели, а не самой моделью по смыслу.
+    """Whether the response was truncated by model output limits rather than semantically.
 
-    Признак приходит от провайдера и попадает в `LLMResponseFormatError.truncated`.
-    Лечится он другим лимитом вывода или меньшим запросом, поэтому повтор — того же
-    запроса или с уточняющей инструкцией — здесь смысла не имеет.
+    Reported by provider in `LLMResponseFormatError.truncated`.
+    Resolved by configuring a higher output limit or submitting smaller chunks, so retries
+    with the same request or repair prompt are useless here.
     """
     return isinstance(error, LLMResponseFormatError) and error.truncated
 
 
 def _expectation_of(error: Exception) -> ResultExpectation | None:
-    """Сведения об ожидаемом результате, если ошибка их несёт."""
+    """Expected result information if carried by error."""
     if isinstance(error, ResultValidationError):
         return error.expectation
     return None
 
 
 def _task_error(error_type: ErrorType, error: Exception) -> TaskError:
-    """Ошибка задачи с коротким сообщением и технической деталью."""
+    """Task error with concise message and technical detail."""
     return TaskError(
         type=error_type,
         message=str(error).strip() or type(error).__name__,

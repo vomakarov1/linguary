@@ -1,4 +1,4 @@
-"""Отметка ответа модели, отвергнутого прикладной проверкой."""
+"""Recording model responses rejected by application validation."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from linguary.application.retry_policy import classify_error
 def record_rejection(
     unit_of_work: UnitOfWork, response: LLMResponse[Any], error: Exception
 ) -> None:
-    """Связывает ошибку проверки с уже записанным вызовом модели."""
+    """Associates a validation error with an already recorded model call."""
     if response.call_id is None:
         return
     with unit_of_work.transaction() as transaction:

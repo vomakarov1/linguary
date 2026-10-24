@@ -1,13 +1,13 @@
-"""Проверка на служебные сообщения модели в результате обработки (PRD § 15, ALG-04).
+"""Validation against model service messages in processing results (PRD § 15, ALG-04).
 
-Модель иногда возвращает вместо перевода отказ, извинение или комментарий о собственной
-работе. Формально ответ при этом корректен: блок на месте, режим совпадает, текст на
-целевом языке — и без этой проверки такой «перевод» попал бы в книгу.
+The model occasionally returns a refusal, apology, or meta-commentary about its own operation
+instead of a translation. Formally the response remains valid: block present, mode matches, text
+in target language — and without this check such "translation" would end up in the book.
 
-Перечень маркеров намеренно узкий. Художественный текст может содержать почти любую
-фразу, поэтому маркером становится только оборот, который принадлежит модели, а не
-рассказчику: разговор о себе как о языковой модели, отказ выполнить запрос, разметка
-ответа кодовым блоком.
+The list of markers is intentionally narrow. Literary text may contain almost any phrase,
+so only phrases characteristic of the model rather than the narrator are considered markers:
+referring to itself as a language model, refusing to fulfill the request, or wrapping responses
+in code fences.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from collections.abc import Iterator
 
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
 
-#: Обороты, которыми модель говорит о себе и о запросе вместо того, чтобы переводить.
+#: Markers with which the model talks about itself and the request instead of translating.
 SERVICE_MESSAGE_MARKERS: tuple[str, ...] = (
     "как языковая модель",
     "как большая языковая модель",
@@ -34,7 +34,7 @@ SERVICE_MESSAGE_MARKERS: tuple[str, ...] = (
 
 
 def service_message_violation(payload: TranslationResultResponse) -> str | None:
-    """Описание найденного служебного сообщения модели либо `None`."""
+    """Violation description of detected model service message, or `None`."""
     for block in payload.blocks:
         for text in _texts_of(payload, block=block):
             marker = _marker_in(text)
@@ -49,7 +49,7 @@ def service_message_violation(payload: TranslationResultResponse) -> str | None:
 def _texts_of(
     payload: TranslationResultResponse, *, block: BlockResultResponse
 ) -> Iterator[str]:
-    """Тексты одного блока результата, которые пишет модель."""
+    """Texts of a single result block written by the model."""
     if block.translated_text is not None:
         yield block.translated_text
     for hint in block.glossary_hints:
@@ -61,7 +61,7 @@ def _texts_of(
 
 
 def _marker_in(text: str) -> str | None:
-    """Первый маркер служебного сообщения, найденный в тексте."""
+    """First service message marker found in the text."""
     lowered = text.lower()
     return next(
         (marker for marker in SERVICE_MESSAGE_MARKERS if marker in lowered), None

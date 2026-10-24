@@ -1,28 +1,28 @@
-"""Сценарий анализа главы и последовательность задач анализа (PRD § 13-14, ADR § 3).
+"""Chapter analysis use case and analysis task sequence (PRD § 13-14, ADR § 3).
 
-`AnalyzeChapter` выполняет один запрос к модели на главу и сохраняет `ChapterAnalysis`:
-кандидатов глоссария, инструкции перевода главы, план обработки блоков, `Before You Read`
-и краткую сводку событий главы. Отдельных подготовительных запросов — на глоссарий,
-на план, на сводку — не выполняется, и отдельного прохода ради пересказа предыдущей главы
-тоже нет: раздел `Previously in Chapter ...` собирает экспортёр из сводки главы `N-1`
+`AnalyzeChapter` executes a single model request per chapter and saves `ChapterAnalysis`:
+glossary candidates, chapter translation instructions, block treatment plan, `Before You Read`,
+and a brief chapter event summary. No separate preparatory requests are made (for glossary,
+plan, or summary), and there is no separate pass for recounting previous chapter events:
+the `Previously in Chapter ...` section is assembled by the exporter from chapter `N-1`'s summary
 (PRD § 19.2).
 
-Глава, которая в один запрос не помещается, — резервный сценарий (PRD § 14): она уходит
-в модель последовательными фрагментами, и её анализ собирается из ответов фрагментов
-(`analysis_merge`, ALG-03). Порог дробления — настройка, а не свойство сценария: он зависит
-от предела вывода конкретной модели.
+A chapter that does not fit into a single request is a fallback scenario (PRD § 14): it is sent
+to the model in sequential fragments, and its analysis is assembled from the fragment responses
+(`analysis_merge`, ALG-03). The chunking threshold is a configuration setting, not a property
+of the use case: it depends on the output limit of the specific model.
 
-Вызов модели выполняется вне транзакции, а результат сохраняется одной короткой
-транзакцией (ADR § 3). Повторы ведёт `RetryPolicy` (ALG-05): цикл здесь выдерживает
-паузу перед повтором временной ошибки и дописывает уточняющую инструкцию к исходному
-запросу, не подменяя собранный контекст.
+The model call is executed outside a transaction, while the result is saved in a single short
+transaction (ADR § 3). Retries are managed by `RetryPolicy` (ALG-05): the loop here waits
+for backoff before retrying transient errors and appends clarification instructions to the
+original request without replacing the assembled context.
 
-`ChapterAnalysisSequence` отвечает за порядок: главы анализируются строго последовательно
-в порядке чтения, потому что контекст главы включает кандидатов предыдущих глав (PRD § 25).
-Порядок обеспечивается не блокировкой воркера, а очередью: у книги одновременно существует
-не более одной задачи `ANALYZE_CHAPTER`, и следующая ставится только после сохранения
-предыдущего анализа. Настройка параллелизма воркера при этом остаётся общей и на анализ
-не влияет: параллельно могут идти только задачи разных книг.
+`ChapterAnalysisSequence` manages ordering: chapters are analyzed strictly sequentially
+in reading order because chapter context includes candidates from previous chapters (PRD § 25).
+Ordering is enforced via a queue rather than worker locks: a book has at most one active
+`ANALYZE_CHAPTER` task at a time, and the next is enqueued only after saving the previous
+analysis. The worker parallelism setting remains shared and does not affect analysis ordering:
+only tasks for different books can run in parallel.
 """
 
 from __future__ import annotations
@@ -78,21 +78,21 @@ from linguary.domain import (
     apply_book_event,
 )
 
-#: Пауза между попытками вызова модели. Прикладной слой циклом событий не владеет,
-#: но выдержать паузу обязан он: политика повторов её только вычисляет (ALG-05).
+#: Sleep between model call attempts. The application layer does not own the event loop,
+#: but must execute the sleep: the retry policy only calculates the duration (ALG-05).
 type Sleep = Callable[[float], Awaitable[None]]
 
-#: Фабрика идентификаторов сохраняемых записей анализа.
+#: Factory for IDs of persisted analysis records.
 type IdFactory = Callable[[], str]
 
 
 class AnalyzeChapterError(ApplicationError):
-    """Главу нельзя проанализировать в её текущем состоянии."""
+    """The chapter cannot be analyzed in its current state."""
 
 
 @dataclass(frozen=True, slots=True)
 class AnalyzeChapterCommand:
-    """Команда анализа: какую главу какой книги анализировать."""
+    """Analysis command: which chapter of which book to analyze."""
 
     book_id: str
     section_id: str
@@ -101,11 +101,11 @@ class AnalyzeChapterCommand:
 
 @dataclass(frozen=True, slots=True)
 class AnalyzeChapterResult:
-    """Результат анализа главы вместе с техническими данными вызова.
+    """Chapter analysis result along with technical call metadata.
 
-    `attempts` и `usage` нужны для ориентиров жизнеспособности (PRD § 29.1): сколько
-    обращений к модели стоила глава и какой объём токенов провайдер за них насчитал.
-    Пустая глава анализа не требует, и вызова модели у неё нет: `attempts` равен нулю.
+    `attempts` and `usage` are used for observability metrics (PRD § 29.1): how many
+    model calls the chapter took and the token usage reported by the provider.
+    An empty chapter requires no analysis and has no model call: `attempts` is 0.
     """
 
     analysis: ChapterAnalysis
@@ -114,7 +114,7 @@ class AnalyzeChapterResult:
 
 
 class AnalyzeChapter:
-    """Анализирует одну главу и сохраняет её `ChapterAnalysis`."""
+    """Analyzes a single chapter and persists its `ChapterAnalysis`."""
 
     def __init__(
         self,
@@ -138,11 +138,11 @@ class AnalyzeChapter:
         self._sleep = sleep or asyncio.sleep
 
     async def __call__(self, command: AnalyzeChapterCommand) -> AnalyzeChapterResult:
-        """Анализирует главу и сохраняет результат.
+        """Analyzes a chapter and persists the result.
 
-        Глава, которая помещается в один запрос, им и анализируется. Более длинная
-        уходит в модель последовательными фрагментами, и её анализ собирается из их
-        ответов (PRD § 14, ALG-03).
+        A chapter fitting in a single request is analyzed directly. A longer chapter
+        is sent to the model in sequential fragments, and its analysis is assembled
+        from their responses (PRD § 14, ALG-03).
         """
         document, accumulated = self._load(command)
         section = _section_of(document, command)
@@ -181,7 +181,7 @@ class AnalyzeChapter:
         accumulated: Sequence[GlossaryCandidate],
         command: AnalyzeChapterCommand,
     ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
-        """Основной сценарий: вся глава одним запросом (PRD § 14)."""
+        """Main scenario: entire chapter in a single request (PRD § 14)."""
         context = self._context_builder.for_chapter_analysis(
             document=document, section=section, accumulated_candidates=accumulated
         )
@@ -209,12 +209,12 @@ class AnalyzeChapter:
         accumulated: Sequence[GlossaryCandidate],
         command: AnalyzeChapterCommand,
     ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
-        """Резервный сценарий: длинная глава по фрагментам (PRD § 14, ALG-03).
+        """Fallback scenario: long chapter processed by fragments (PRD § 14, ALG-03).
 
-        Фрагменты запрашиваются подряд, каждый со своими блоками и своим циклом повторов.
-        Фрагмент, не выполненный за отведённые попытки, поднимает исходную ошибку: анализ
-        главы не сохраняется вовсе, а не сохраняется неполным, иначе неполнота досталась
-        бы пользователю как готовый результат (ALG-03).
+        Fragments are requested sequentially, each with its own blocks and retry loop.
+        A fragment that fails after all attempts raises the original error: the chapter
+        analysis is not saved at all rather than saved incomplete, preventing incomplete
+        results from reaching the user (ALG-03).
         """
         analysed: list[FragmentAnalysis] = []
         attempts = 0
@@ -282,16 +282,16 @@ class AnalyzeChapter:
     def _load(
         self, command: AnalyzeChapterCommand
     ) -> tuple[CanonicalDocument, tuple[GlossaryCandidate, ...]]:
-        """Читает книгу и накопленные решения глоссария книги.
+        """Reads the book and accumulated glossary decisions for the book.
 
-        Решение пользователя по кандидату заменяет вариант модели: анализ повторяет
-        накопленные решения дословно и не должен возвращать исправленный вариант.
+        The user's decision on a candidate overrides the model's suggestion: analysis repeats
+        accumulated decisions verbatim and must not return a modified version.
 
-        Кандидаты предыдущих глав идут все, с вариантом модели там, где решения нет.
-        Кандидаты самой главы и следующих глав — только с решением пользователя:
-        решение действует на всю книгу, и повторный анализ главы после проверки
-        глоссария обязан его видеть (PRD § 11), а вариант модели следующей главы
-        этой главе ничего не даёт. Порядок чтения сохраняет сам `list_for_book`.
+        Candidates from previous chapters are all included, with the model suggestion where no decision exists.
+        Candidates from the current and subsequent chapters are included only with user decisions:
+        decisions apply book-wide, and re-analyzing a chapter after glossary review must see them (PRD § 11),
+        while model suggestions for subsequent chapters provide no value to this chapter.
+        `list_for_book` itself preserves reading order.
         """
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(command.book_id)
@@ -321,10 +321,10 @@ class AnalyzeChapter:
     async def _request_analysis(
         self, context: ChapterAnalysisContext, *, blocks: Sequence[DocumentBlock]
     ) -> tuple[ChapterAnalysisResponse, int, TokenUsage | None]:
-        """Выполняет вызов модели с повторами по политике (ALG-05).
+        """Executes model call with retries per policy (ALG-05).
 
-        Исчерпав попытки, сценарий поднимает исходную ошибку: типизировать её и перевести
-        задачу в `failed` — работа runner-а, а не этого цикла.
+        When attempts are exhausted, raises the original error: typing the error and
+        transitioning the task to `failed` is the responsibility of the runner, not this loop.
         """
         request: LLMRequest[ChapterAnalysisResponse] = context.request
         attempts = 0
@@ -365,11 +365,11 @@ class AnalyzeChapter:
         section: DocumentSection,
         blocks: Sequence[DocumentBlock],
     ) -> ChapterAnalysis:
-        """Переводит ответ модели в доменный анализ главы.
+        """Converts model response to a domain chapter analysis.
 
-        Псевдонимы запроса возвращаются к стабильным идентификаторам блоков, а план
-        собирается в порядке исходного документа: ответ модели о порядке блоков главы
-        не решает.
+        Request aliases are mapped back to stable block IDs, and the plan
+        is assembled in original document order: the model response does not decide
+        chapter block ordering.
         """
         analysis_id = self._id_factory()
         treatments = {
@@ -398,10 +398,10 @@ class AnalyzeChapter:
     def _candidates(
         self, payload: ChapterAnalysisResponse, *, analysis_id: str
     ) -> tuple[GlossaryCandidate, ...]:
-        """Кандидаты глоссария главы с вычисленным `requires_review` (DTO-01).
+        """Glossary candidates of the chapter with computed `requires_review` (DTO-01).
 
-        Пометка модели остаётся входным сигналом: требует ли кандидат внимания
-        пользователя, решает приложение по правилам PRD § 12.
+        The model's flag remains an input signal: whether a candidate requires user review
+        is decided by the application under PRD § 12 rules.
         """
         return tuple(
             GlossaryCandidate.create(
@@ -419,13 +419,13 @@ class AnalyzeChapter:
         )
 
     def _save(self, book_id: str, analysis: ChapterAnalysis) -> None:
-        """Сохраняет анализ главы одной короткой транзакцией."""
+        """Saves chapter analysis in a single short transaction."""
         with self._unit_of_work.transaction() as transaction:
             transaction.analyses.save(book_id, analysis)
 
 
 class ChapterAnalysisSequence:
-    """Ставит задачи анализа глав строго по одной, в порядке чтения (PRD § 13, § 25)."""
+    """Enqueues chapter analysis tasks strictly one at a time, in reading order (PRD § 13, § 25)."""
 
     def __init__(
         self,
@@ -439,16 +439,16 @@ class ChapterAnalysisSequence:
         self._analyze_chapter = analyze_chapter
 
     async def start(self, book_id: str) -> ProcessingTask | None:
-        """Запускает анализ книги: переводит её в `ANALYZING` и ставит первую главу.
+        """Starts book analysis: transitions book to `ANALYZING` and enqueues the first chapter.
 
-        Возвращает `None`, если анализировать больше нечего: книга без глав или уже
-        полностью проанализированная. Повторный запуск после перезапуска приложения
-        продолжает с первой непроанализированной главы.
+        Returns `None` if there is nothing left to analyze: a book without chapters or one
+        already fully analyzed. Re-running after application restart resumes from the first
+        unanalyzed chapter.
 
-        Если анализ этой главы уже падал с ошибкой, которую имеет смысл повторить
-        (например, провайдер не принял ключ, а пользователь его исправил), повторный
-        запуск возвращает её задачу в очередь: иначе книга осталась бы в `ANALYZING`
-        без единой задачи в работе. Задача с постоянной ошибкой остаётся как есть.
+        If analysis of this chapter previously failed with a retryable error
+        (e.g., provider rejected API key, and user fixed it), restarting returns its task
+        to the queue: otherwise the book would remain in `ANALYZING` without any active task.
+        A task with a permanent error is left as is.
         """
         self._begin_analysis(book_id)
         task = await self._enqueue_next(book_id)
@@ -458,10 +458,10 @@ class ChapterAnalysisSequence:
         return task
 
     async def run_task(self, task: ProcessingTask) -> None:
-        """Обработчик задачи `ANALYZE_CHAPTER` для локального runner-а (ALG-02).
+        """Handler for `ANALYZE_CHAPTER` task for the local runner (ALG-02).
 
-        Следующая глава ставится в очередь только после сохранения анализа текущей:
-        так набор накопленных кандидатов детерминирован и не зависит от параллелизма.
+        The next chapter is enqueued only after saving the current chapter's analysis:
+        this ensures the set of accumulated candidates is deterministic and independent of concurrency.
         """
         if task.task_type is not TaskType.ANALYZE_CHAPTER:
             raise AnalyzeChapterError(
@@ -477,7 +477,7 @@ class ChapterAnalysisSequence:
         await self._enqueue_next(task.book_id)
 
     async def _enqueue_next(self, book_id: str) -> ProcessingTask | None:
-        """Ставит задачу следующей непроанализированной главы либо завершает анализ."""
+        """Enqueues the next unanalyzed chapter task or completes analysis."""
         section_id = self._next_section_id(book_id)
         if section_id is None:
             self._complete_analysis(book_id)
@@ -491,7 +491,7 @@ class ChapterAnalysisSequence:
         )
 
     def _next_section_id(self, book_id: str) -> str | None:
-        """Первая глава книги в порядке чтения, для которой анализа ещё нет."""
+        """First chapter in reading order for which no analysis exists yet."""
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(book_id)
             if document is None:
@@ -510,11 +510,11 @@ class ChapterAnalysisSequence:
         )
 
     def _begin_analysis(self, book_id: str) -> None:
-        """Переводит книгу в `ANALYZING` (ALG-06).
+        """Transitions book to `ANALYZING` (ALG-06).
 
-        Продолжение уже идущего анализа состояние не меняет. Книга, которая до анализа
-        ещё не дошла или уже ушла дальше, получает отказ от домена: переходы вне таблицы
-        ALG-06 запрещены, и в Web UI такой отказ становится `409`.
+        Continuing an already running analysis does not change state. A book that
+        has not yet reached analysis or has already progressed past it is rejected by domain:
+        transitions outside table ALG-06 are prohibited, returning `409` in Web UI.
         """
         with self._unit_of_work.transaction() as transaction:
             book = self._book(transaction, book_id)
@@ -527,10 +527,10 @@ class ChapterAnalysisSequence:
             )
 
     def _complete_analysis(self, book_id: str) -> None:
-        """Переводит проанализированную книгу к проверке глоссария (ALG-06).
+        """Transitions analyzed book to glossary review (ALG-06).
 
-        Книга, которая уже прошла проверку глоссария, остаётся как есть: повторный
-        анализ отдельной главы не отматывает её назад по процессу.
+        A book that has already completed glossary review remains unchanged: re-analyzing
+        an individual chapter does not rewind it backward in the process.
         """
         with self._unit_of_work.transaction() as transaction:
             book = self._book(transaction, book_id)
@@ -543,7 +543,7 @@ class ChapterAnalysisSequence:
             )
 
     def _book(self, transaction: UnitOfWork, book_id: str) -> BookRecord:
-        """Запись книги в открытой транзакции."""
+        """Book record in open transaction."""
         book = transaction.books.get(book_id)
         if book is None:
             raise AnalyzeChapterError(f"книги {book_id} нет в хранилище")
@@ -553,7 +553,7 @@ class ChapterAnalysisSequence:
 def _section_of(
     document: CanonicalDocument, command: AnalyzeChapterCommand
 ) -> DocumentSection:
-    """Глава книги, которую требует команда."""
+    """Book chapter required by command."""
     for section in document.sections:
         if section.id == command.section_id:
             return section
@@ -565,11 +565,11 @@ def _section_of(
 def _ensure_plan_covers_chapter(
     payload: ChapterAnalysisResponse, context: ChapterAnalysisContext
 ) -> None:
-    """Блокирующая проверка плана обработки (PRD § 15).
+    """Blocking validation of treatment plan (PRD § 15).
 
-    План обязан покрыть каждый переданный блок ровно один раз и не содержать чужих.
-    Порядок ответа не проверяется: план сохраняется в порядке исходного документа,
-    и перестановка строк ответа результату не вредит.
+    The plan must cover every provided block exactly once and contain no foreign blocks.
+    Response ordering is not checked: the plan is persisted in document order,
+    and permuted response rows do not affect the result.
     """
     expected = context.expectation.block_ids
     returned = payload.planned_block_ids
@@ -599,10 +599,10 @@ def _ensure_plan_covers_chapter(
 def _ensure_candidates_single_script(
     payload: ChapterAnalysisResponse, context: ChapterAnalysisContext
 ) -> None:
-    """Вариант перевода кандидата глоссария не содержит слов из смеси алфавитов (ALG-04).
+    """Glossary candidate translation suggestion contains no mixed-script words (ALG-04).
 
-    Вариант глоссария уходит во все главы книги, поэтому слово вроде «PГЛАФ» отбраковывается
-    здесь же, до сохранения анализа, а не всплывает потом в каждом блоке с этим термином.
+    The glossary candidate is propagated to all book chapters, so a mixed-script word
+    is rejected here before analysis is saved, rather than surfacing later in every block.
     """
     for candidate in payload.glossary_candidates:
         word = mixed_script_word(candidate.suggested_translation)
@@ -616,11 +616,11 @@ def _ensure_candidates_single_script(
 
 
 def _empty_analysis(section: DocumentSection, *, id: str) -> ChapterAnalysis:
-    """Полный анализ главы без текста: обложка, вклейка, страница с иллюстрацией.
+    """Complete analysis for a textless chapter: cover, insert, illustration page.
 
-    Передавать модели нечего, а глава должна быть проанализирована: иначе книга никогда
-    не дойдёт до проверки глоссария. План такой главы пуст и покрывает все её текстовые
-    блоки — их нет.
+    There is nothing to pass to the model, but the chapter must be marked as analyzed:
+    otherwise the book would never reach glossary review. The plan for such a chapter
+    is empty and covers all its textual blocks (none exist).
     """
     return ChapterAnalysis.create(
         id=id,
@@ -635,15 +635,15 @@ def _empty_analysis(section: DocumentSection, *, id: str) -> ChapterAnalysis:
 def _before_you_read(
     payload: ChapterAnalysisResponse,
 ) -> tuple[BeforeYouReadEntry, ...]:
-    """Материал `Before You Read` главы (PRD § 19.1)."""
+    """Chapter `Before You Read` content (PRD § 19.1)."""
     return before_you_read_entries(payload.before_you_read)
 
 
 def _total_usage(usages: Sequence[TokenUsage | None]) -> TokenUsage | None:
-    """Суммарный расход токенов главы: провайдер считает каждый вызов отдельно.
+    """Total token usage for chapter: provider counts each call separately.
 
-    Провайдер, не сообщающий объём токенов, оставляет `None` — суммой это не подменяется:
-    ноль означал бы бесплатный вызов, а не отсутствие данных (PRD § 24).
+    A provider not reporting token usage leaves `None` — it is not replaced with a sum:
+    zero would mean a free call, not missing data (PRD § 24).
     """
     reported = [usage for usage in usages if usage is not None]
     if not reported:
@@ -655,18 +655,18 @@ def _total_usage(usages: Sequence[TokenUsage | None]) -> TokenUsage | None:
 
 
 def _total_tokens(values: Iterable[int | None]) -> int | None:
-    """Сумма тех значений, которые провайдер сообщил."""
+    """Sum of values reported by the provider."""
     reported = [value for value in values if value is not None]
     return sum(reported) if reported else None
 
 
 def _with_status(book: BookRecord, status: BookStatus) -> BookRecord:
-    """Запись книги с новым состоянием."""
+    """Book record with new status."""
     return replace(book, status=status)
 
 
 def _new_id() -> str:
-    """Идентификатор новой записи анализа."""
+    """ID for new analysis record."""
     return str(uuid4())
 
 

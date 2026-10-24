@@ -1,4 +1,4 @@
-"""Подсчёт упоминаний понятия в исходном тексте книги."""
+"""Counting concept occurrences in the source text of a book."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from linguary.domain import CanonicalDocument, glossary_key
 
 
 def mention_counter(document: CanonicalDocument) -> Callable[[Sequence[str]], int]:
-    """Считает вхождения написаний по границам слов без двойного счёта перекрытий."""
+    """Counts spelling occurrences on word boundaries without double-counting overlaps."""
     texts = tuple(
         glossary_key(block.text)
         for section in document.ordered_sections

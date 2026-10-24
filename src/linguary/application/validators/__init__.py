@@ -1,8 +1,8 @@
-"""Проверки результата обработки (PRD § 15, ALG-04).
+"""Processing result validators (PRD § 15, ALG-04).
 
-Каждая проверка живёт в своём модуле и отвечает на один вопрос, возвращая описание
-нарушения или `None`. Последствие нарушения — отбраковка всей группы блоков — решает
-единственный публичный вход пакета `TranslationResultValidator`.
+Each validator lives in its own module and answers a single question, returning a violation
+description or `None`. The consequence of a violation — rejecting the entire unit — is decided
+by the package's single public entry point `TranslationResultValidator`.
 """
 
 from linguary.application.validators.result import (

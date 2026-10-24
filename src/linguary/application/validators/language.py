@@ -1,20 +1,20 @@
-"""Проверка языка результата обработки (PRD § 15, ALG-04).
+"""Processing result language validation (PRD § 15, ALG-04).
 
-Соответствие языку определяется долей букв целевого алфавита среди всех букв текста.
-Проверка применяется только к полным переводам длиннее настраиваемого минимума: короткая
-строка законно состоит из имени собственного, а словарная подсказка — из слова исходного
-языка, ради которого она и написана.
+Language compliance is determined by the share of target alphabet letters among all letters
+in the text. The check applies only to full translations longer than a configurable minimum:
+a short string may legitimately consist of a proper name, and a glossary hint consists of
+the source language word it was written for.
 
-Алфавит известен только для целевого языка MVP — русского (PRD § 1). Для другого целевого
-языка доля «символов целевого алфавита» не определена, и проверка не выполняется: это
-честнее, чем считать долю чужого алфавита и отбраковывать верный перевод.
+The alphabet is defined only for the MVP target language — Russian (PRD § 1). For other
+target languages, the share of "target alphabet characters" is undefined and validation
+is skipped: this is safer than counting a foreign alphabet's share and rejecting a valid translation.
 """
 
 from __future__ import annotations
 
 from linguary.application.llm_dto import TranslationResultResponse
 
-#: Целевые языки, алфавит которых приложение знает. Ключ — код языка книги без региона.
+#: Target languages whose alphabet is known to the application. Key is the book language code without region.
 _TARGET_ALPHABETS: dict[str, tuple[str, str]] = {"ru": ("Ѐ", "ӿ")}
 
 
@@ -25,7 +25,7 @@ def language_violation(
     min_share: float,
     min_length: int,
 ) -> str | None:
-    """Описание несоответствия языка перевода целевому либо `None`."""
+    """Violation description of translation language mismatch with target language, or `None`."""
     alphabet = _TARGET_ALPHABETS.get(_language_key(target_language))
     if alphabet is None:
         return None
@@ -43,12 +43,12 @@ def language_violation(
 
 
 def _language_key(target_language: str) -> str:
-    """Код языка книги без региона и регистра: `ru-RU` и `RU` — один и тот же русский."""
+    """Book language code normalized without region or case: `ru-RU` and `RU` both represent Russian."""
     return target_language.strip().lower().split("-")[0]
 
 
 def _alphabet_share(text: str, *, alphabet: tuple[str, str]) -> float | None:
-    """Доля букв целевого алфавита среди букв текста; `None`, если букв нет."""
+    """Share of target alphabet characters among text letters; `None` if text contains no letters."""
     first, last = alphabet
     letters = [character for character in text if character.isalpha()]
     if not letters:

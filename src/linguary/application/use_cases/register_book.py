@@ -1,12 +1,12 @@
-"""Регистрация загруженной книги: строка книги появляется до её импорта.
+"""Registration of an uploaded book: the book row appears before its import.
 
-Пользователь видит книгу в списке сразу после загрузки файла, в состоянии `IMPORTING`
-(PRD § 18), а разбор EPUB выполняется фоновой задачей. Поэтому запись книги создаёт
-отдельный короткий сценарий, а не сам импорт: иначе список книг оставался бы пустым всё
-время разбора, а неуспешный импорт вообще не оставил бы следа.
+The user sees the book in the list immediately after uploading the file, in the `IMPORTING`
+status (PRD § 18), while EPUB parsing is executed by a background task. Therefore, the book
+record is created by a dedicated short use case rather than by the import itself: otherwise
+the book list would remain empty throughout parsing, and a failed import would leave no trace.
 
-Названия книги до разбора файла ещё нет — его берут из имени загруженного файла. Успешный
-импорт заменяет метаданные на настоящие, взятые из EPUB.
+The book title is not yet known before file parsing — it is taken from the uploaded file name.
+A successful import replaces metadata with the real values extracted from the EPUB.
 """
 
 from __future__ import annotations
@@ -21,12 +21,12 @@ from linguary.domain import BookEvent, BookMetadata, apply_book_event
 
 
 class RegisterBookError(ApplicationError):
-    """Загруженную книгу нельзя зарегистрировать."""
+    """An uploaded book cannot be registered."""
 
 
 @dataclass(frozen=True, slots=True)
 class RegisterBookCommand:
-    """Команда регистрации: куда сохранён файл и с какими языками его читать."""
+    """Registration command: where the file was stored and what languages to read it with."""
 
     book_id: str
     source_epub_path: str
@@ -48,7 +48,7 @@ class RegisterBookCommand:
 
 
 class RegisterBook:
-    """Заводит книгу в состоянии `IMPORTING` (ALG-06)."""
+    """Registers a book in the `IMPORTING` status (ALG-06)."""
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class RegisterBook:
         self._clock = clock or _utc_now
 
     def __call__(self, command: RegisterBookCommand) -> BookRecord:
-        """Создаёт запись книги; повторная регистрация того же идентификатора запрещена."""
+        """Creates a book record; re-registering the same identifier is forbidden."""
         record = BookRecord(
             id=command.book_id,
             metadata=BookMetadata(title=command.title),
@@ -80,7 +80,7 @@ class RegisterBook:
 
 
 def _utc_now() -> datetime:
-    """Текущий момент в UTC: хранилище работает только с осведомлённым временем."""
+    """Current UTC timestamp: persistence operates only with timezone-aware datetimes."""
     return datetime.now(UTC)
 
 

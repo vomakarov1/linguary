@@ -1,17 +1,18 @@
-"""Проверка результата обработки одной группы блоков (ALG-04, PRD § 15, § 17).
+"""Validation of single translation unit processing results (ALG-04, PRD § 15, § 17).
 
-Единственный вход пакета: сценарий обработки отдаёт сюда разобранный ответ модели и
-получает либо готовые к сохранению результаты блоков, либо `ResultValidationError`.
-Промежуточного состояния нет — блокирующая проверка отбраковывает всю группу целиком,
-и частично сохранённого `TranslationUnit` не существует (PRD § 17).
+The package's single entry point: the processing use case hands parsed model responses here
+and receives either block results ready for persistence or `ResultValidationError`.
+There is no intermediate state — a blocking validation rejects the entire unit,
+and partially saved `TranslationUnit` records do not exist (PRD § 17).
 
-Отбраковка всегда несёт `ResultExpectation`: политика повторов строит из неё уточняющую
-инструкцию с перечнем ожидаемых блоков, их режимов и целевого языка (ALG-05). Ожидание
-можно передать снаружи — сценарий адресует блоки модели так, как решил сам, и в
-уточняющей инструкции должны стоять те же имена блоков, что были в запросе.
+Rejection always carries `ResultExpectation`: the retry policy derives a clarification
+instruction from it containing the list of expected blocks, their treatments, and the target
+language (ALG-05). The expectation can be supplied from the outside — the use case addresses
+blocks to the model as it chooses, and clarification instructions must use the same block names
+as the request.
 
-Порядок проверок значим: состав ответа проверяется первым, потому что все следующие
-проверки обращаются к блокам ответа по идентификаторам группы.
+Check order is significant: response coverage is checked first, because subsequent validators
+access response blocks by group identifiers.
 """
 
 from __future__ import annotations
@@ -55,10 +56,10 @@ from linguary.domain import (
 
 
 class TranslationResultValidator:
-    """Блокирующие проверки и предупреждения результата обработки (PRD § 15).
+    """Blocking validations and warnings for processing results (PRD § 15).
 
-    Пороговые значения приходят из `CheckSettings`, где они уже проверены на допустимость,
-    поэтому здесь не перепроверяются: вторых умолчаний у проверок нет.
+    Thresholds are provided by `CheckSettings`, where validity is already guaranteed,
+    so they are not re-checked here: validations have no duplicate defaults.
     """
 
     def __init__(
@@ -84,15 +85,14 @@ class TranslationResultValidator:
         truncated: bool = False,
         expectation: ResultExpectation | None = None,
     ) -> tuple[BlockProcessingResult, ...]:
-        """Проверяет ответ модели и собирает результаты блоков группы.
+        """Validates the model response and builds block processing results.
 
-        Ответ должен быть выражен идентификаторами блоков группы: если сценарий адресовал
-        блоки модели псевдонимами, он возвращает их к идентификаторам до проверки и
-        передаёт своё `expectation` — то, которое перечисляет блоки так, как их видела
-        модель.
+        The response must be expressed in unit block IDs: if the use case addressed
+        blocks using aliases, it maps them back to IDs before validation and passes
+        its own `expectation` — the one listing blocks as seen by the model.
 
-        `note_id_factory` выдаёт идентификаторы учебных заметок (`ln-ch03-001`): их
-        нумерация зависит от главы и от уже сохранённых заметок, а это знание сценария.
+        `note_id_factory` generates learning note identifiers (`ln-ch03-001`): their
+        numbering depends on the chapter and already stored notes, which is use case knowledge.
         """
         expected = expectation or expectation_for_unit(
             unit, target_language=target_language
@@ -147,11 +147,11 @@ class TranslationResultValidator:
         notes: Sequence[LanguageNoteResponse],
         note_id_factory: Callable[[], str],
     ) -> BlockProcessingResult:
-        """Результат одного блока: режим из плана, тексты модели, предупреждения.
+        """Result for a single block: treatment from plan, model texts, warnings.
 
-        Метки ссылок на сноски (`[^1]`) остаются только в переводе и только те, которым
-        у исходного блока есть ссылка: в подсказке и заметке ссылка не нужна, а
-        выдуманная моделью метка вела бы в никуда.
+        Footnote link markers (`[^1]`) are preserved only in translations and only when
+        the source block contains that footnote link: hints and notes do not need links,
+        and hallucinated markers would lead nowhere.
         """
         source = next(
             item.block for item in unit.items if item.block.id == block.source_block_id
@@ -190,7 +190,7 @@ class TranslationResultValidator:
         )
 
     def _warnings(self, block: BlockResultResponse) -> tuple[ResultWarning, ...]:
-        """Непреградные замечания к результату блока (PRD § 15)."""
+        """Non-blocking warnings for a block result (PRD § 15)."""
         if block.translated_text is None:
             return ()
         repetition = repetition_warning(
@@ -203,7 +203,7 @@ class TranslationResultValidator:
         return (ResultWarning(kind=ResultWarningKind.REPETITION, message=repetition),)
 
     def _ensure(self, violation: str | None, expectation: ResultExpectation) -> None:
-        """Превращает найденное нарушение в отбраковку всей группы."""
+        """Converts an encountered violation into rejection of the entire unit."""
         if violation is not None:
             raise ResultValidationError(violation, expectation=expectation)
 
@@ -214,12 +214,12 @@ class TranslationResultValidator:
         unit: TranslationUnit,
         expectation: ResultExpectation,
     ) -> None:
-        """Доменная перепроверка собранной группы.
+        """Domain re-verification of the assembled unit.
 
-        Правила состава и порядка знает сам `TranslationUnit`, и последнее слово остаётся
-        за ним. Сюда управление доходит только если прикладная проверка чего-то не
-        заметила, поэтому доменная ошибка переводится в ту же отбраковку с ожиданием:
-        повтор должен получить перечень блоков, а не голое сообщение.
+        Rules of coverage and order are owned by `TranslationUnit` itself, and it has
+        the final say. Execution reaches here only if an application-level check missed
+        something; domain errors are converted into the same rejection with expectation
+        so retries receive the block list rather than a bare error message.
         """
         try:
             unit.validate_results(results)
@@ -228,7 +228,7 @@ class TranslationResultValidator:
 
 
 def _unmarked(text: str) -> str:
-    """Текст без меток ссылок на сноски; поле из одной метки остаётся как было."""
+    """Text stripped of footnote markers; a field consisting purely of a marker is preserved."""
     unmarked = without_footnote_markers(text)
     if unmarked == text:
         return text
@@ -238,10 +238,10 @@ def _unmarked(text: str) -> str:
 def expectation_for_unit(
     unit: TranslationUnit, *, target_language: str
 ) -> ResultExpectation:
-    """Что обязан вернуть повторный вызов по этой группе (ALG-05).
+    """What a retry call for this unit must return (ALG-05).
 
-    Блоки перечислены их собственными идентификаторами: подойдёт сценарию, который
-    адресует блоки модели ими же.
+    Blocks are listed by their native IDs: suitable for use cases that address
+    blocks to the model using their IDs.
     """
     return ResultExpectation(
         target_language=target_language,
