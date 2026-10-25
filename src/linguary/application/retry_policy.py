@@ -290,6 +290,10 @@ def classify_error(error: Exception) -> TaskError:
     Unrecognized errors default to transient: the application cannot assume retrying
     is futile, preserving the user's ability to re-run the task.
     """
+    from linguary.application.recovery import RecoveryError
+    if isinstance(error, RecoveryError) and error.original_error is not None:
+        original = classify_error(error.original_error)
+        return TaskError(type=original.type, message=str(error), detail=f'{type(error).__module__}.{type(error).__name__}')
     for error_type, task_error_type in _ERROR_TYPES:
         if isinstance(error, error_type):
             return _task_error(task_error_type, error)

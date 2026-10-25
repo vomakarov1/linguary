@@ -216,12 +216,16 @@ async def test_late_result_does_not_replace_accepted_attempt(tmp_path):
         task, = await app.processing.start('book-1')
         late = asyncio.create_task(app.processing.run_task(task))
         await asyncio.wait_for(entered.wait(), 3)
+        with app.unit_of_work.transaction() as transaction:
+            transaction.work.invalidate_run_coverage('book-1', run.id)
         await app.processing.run_task(task)
         entity_id = f'{run.id}:{doc.sections[0].blocks[0].id}'
         with app.unit_of_work.transaction() as transaction:
             winner = transaction.work.get_binding('result', entity_id)['attempt_id']
         release.set()
-        await late
+        from linguary.application.recovery import RecoveryError
+        with pytest.raises(RecoveryError, match='interrupted'):
+            await late
         with app.unit_of_work.transaction() as transaction:
             assert transaction.work.get_binding('result', entity_id)['attempt_id'] == winner
             calls = [call for call in transaction.llm_calls.list_for_book('book-1') if call.stage == LLMCallStage.TRANSLATION_UNIT]

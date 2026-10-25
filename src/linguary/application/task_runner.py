@@ -85,9 +85,11 @@ class TaskRunner:
         handlers: Mapping[TaskType, TaskHandler],
         classify_error: TaskErrorClassifier | None = None,
         maintenance: Callable[[], None] | None = None,
+        recover_work: Callable[[], None] | None = None,
     ) -> None:
         self._queue = queue
         self._maintenance = maintenance
+        self._recover_work = recover_work
         self._handlers = dict(handlers)
         self._classify_error = classify_error or classify_task_error
 
@@ -98,6 +100,8 @@ class TaskRunner:
         no worker executes it. Such a task is marked interrupted, allowing the user
         to retry it (PRD § 17-18).
         """
+        if self._recover_work is not None:
+            await asyncio.to_thread(self._recover_work)
         interrupted = tuple(task.interrupt() for task in await self._queue.list_running())
         for task in interrupted:
             await self._queue.save(task)

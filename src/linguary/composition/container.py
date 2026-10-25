@@ -363,8 +363,13 @@ def build_application(
     analysis = RuntimeSequence(runtime_settings, "analysis", book_runtime=book_runtime)
     processing = RuntimeSequence(runtime_settings, "processing", book_runtime=book_runtime)
     regeneration = RuntimeSequence(runtime_settings, "regeneration", book_runtime=book_runtime)
+    def recover_work():
+        with unit_of_work.transaction() as transaction:
+            transaction.work.reconcile_recovery_attempts()
+
     runner = TaskRunner(
         queue=task_queue,
+        recover_work=recover_work,
         maintenance=diagnostics.ensure_available,
         handlers=_handlers(
             unit_of_work=unit_of_work,

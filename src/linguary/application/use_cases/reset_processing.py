@@ -81,6 +81,8 @@ class ResetProcessing:
             removed_tasks = _remove_tasks(transaction, book.id)
             if run is not None:
                 _archive_run_results(transaction, book.id, run)
+                transaction.work.invalidate_run_coverage(book.id, run.id)
+                transaction.work.stale_reviews(book.id)
                 transaction.runs.delete(run.id)
             transaction.books.save(replace(book, status=status))
         return ResetProcessingResult(
@@ -161,6 +163,8 @@ class ChooseBookConditions:
                         binding['attempt_id'] if binding else None)
                 if run is not None:
                     _archive_run_results(transaction, book_id, run)
+                    transaction.work.invalidate_run_coverage(book_id, run.id)
+                    transaction.work.stale_reviews(book_id)
                     transaction.runs.delete(run.id)
                 transaction.analyses.delete_for_book(book_id)
                 for task in transaction.tasks.list_for_book(book_id):

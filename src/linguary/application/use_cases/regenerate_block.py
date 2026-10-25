@@ -222,6 +222,9 @@ class RegenerateBlock:
                 raise RegenerateBlockError(
                     f"у книги {command.book_id} нет активного запуска обработки"
                 )
+            if any(not transaction.work.root_coverage_complete(root.id)
+                   for root in transaction.work.list_roots(command.book_id, run_id=run.id)):
+                raise RegenerateBlockError('книга ещё обрабатывается: восстановление не завершено')
             stored = transaction.results.list_for_run(run.id)
             book_candidates = tuple(
                 candidate

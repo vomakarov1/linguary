@@ -108,17 +108,29 @@ class ProvenanceClient:
             conditions = self.service.require(request.book_id, transaction=transaction)
             if conditions.id != self.conditions_id:
                 raise ConditionsError('conditions_revision_conflict')
-            context = CallContext(conditions_id=conditions.id, task_id=request.task_id, run_id=request.run_id,
-                stage=request.stage.value, scope_id=request.scope_id or request.stage.value,
-                ordered_block_ids=request.ordered_block_ids, attempt_id=str(uuid4()), generation=0,
-                assigned_model=conditions.payload['models']['analysis' if request.stage.value == 'chapter_analysis' else 'processing'],
-                prompt_hash=sha256(request.instructions.encode()).hexdigest())
-            request = replace(request, call_context=context)
-            attempt = CallAttempt(context.attempt_id, request.book_id, conditions_id=conditions.id,
-                task_id=request.task_id, run_id=request.run_id, state='sent', ordinal=request.attempt,
-                context={**context.to_dict(), 'designated_models': thaw(conditions.payload['models']),
-                         'route_id': conditions.payload['route']['route_id']})
-            transaction.work.add_attempt(attempt)
+            if request.call_context is not None and request.call_context.root_id is not None:
+                context = request.call_context
+                attempt = transaction.work.get_attempt(context.attempt_id)
+                root = transaction.work.get_root(context.root_id)
+                scope = transaction.work.get_scope(context.scope_id)
+                if (attempt is None or root is None or scope is None or attempt.state != 'created'
+                        or root.generation != attempt.context['root_generation']
+                        or scope.generation != context.generation or scope.status != 'claimed'):
+                    from linguary.application.recovery import RecoveryError
+                    raise RecoveryError('interrupted', context.root_id)
+                transaction.work.transition_attempt(attempt.id, 'sent', expected_state='created')
+            else:
+                context = CallContext(conditions_id=conditions.id, task_id=request.task_id, run_id=request.run_id,
+                    stage=request.stage.value, scope_id=request.scope_id or request.stage.value,
+                    ordered_block_ids=request.ordered_block_ids, attempt_id=str(uuid4()), generation=0,
+                    assigned_model=conditions.payload['models']['analysis' if request.stage.value == 'chapter_analysis' else 'processing'],
+                    prompt_hash=sha256(request.instructions.encode()).hexdigest())
+                request = replace(request, call_context=context)
+                attempt = CallAttempt(context.attempt_id, request.book_id, conditions_id=conditions.id,
+                    task_id=request.task_id, run_id=request.run_id, state='sent', ordinal=request.attempt,
+                    context={**context.to_dict(), 'designated_models': thaw(conditions.payload['models']),
+                             'route_id': conditions.payload['route']['route_id']})
+                transaction.work.add_attempt(attempt)
         try:
             response = await self.inner.generate(request)
         except BaseException:
@@ -127,9 +139,16 @@ class ProvenanceClient:
                     transaction.work.transition_attempt(attempt.id, 'unknown', expected_state='sent')
             raise
         with self.service.uow.transaction() as transaction:
-            transaction.work.transition_attempt(attempt.id, 'validated', expected_state='sent',
-                outcome={'schema_version': 1, 'provider': response.provider, 'model': response.model,
-                         'call_id': response.call_id})
+            current_attempt = transaction.work.get_attempt(attempt.id)
+            valid = current_attempt.state == 'sent'
+            if context.root_id is not None:
+                current_root = transaction.work.get_root(context.root_id)
+                current_scope = transaction.work.get_scope(context.scope_id)
+                valid = valid and current_root.generation == current_attempt.context['root_generation'] and current_scope.generation == context.generation and current_scope.status == 'claimed'
+            if valid:
+                transaction.work.transition_attempt(attempt.id, 'validated', expected_state='sent',
+                    outcome={'schema_version': 1, 'provider': response.provider, 'model': response.model,
+                             'call_id': response.call_id})
         self._attempts.set((*self.attempts, attempt.id))
         self._responses.set((*self.responses, response))
         return response

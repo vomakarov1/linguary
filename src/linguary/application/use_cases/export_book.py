@@ -182,11 +182,13 @@ class ExportBook:
                     f"книга {book_id} не импортирована: экспортировать нечего"
                 )
             _ensure_ready(book, transaction.tasks.list_for_book(book_id))
-            if transaction.runs.active_for_book(book_id) is None:
+            run = transaction.runs.active_for_book(book_id)
+            if run is None:
                 raise ExportBookError(
                     f"у книги {book_id} нет запуска обработки: полный экспорт "
                     f"собирать не из чего"
                 )
+            _ensure_recovery_complete(transaction, book_id, run.id)
 
     def downloadable_task(self, book_id: str) -> ProcessingTask:
         """Latest successful task whose file is available for download."""
@@ -239,6 +241,7 @@ class ExportBook:
                     f"у книги {command.book_id} нет запуска обработки: полный экспорт "
                     f"собирать не из чего"
                 )
+            _ensure_recovery_complete(transaction, command.book_id, run.id)
             results = transaction.results.list_for_run(run.id)
             analyses = transaction.analyses.list_for_book(command.book_id)
             _validate_content_plans(document, analyses, results)
@@ -465,3 +468,10 @@ def _validate_content_plans(document, analyses, results):
             if result.content_evidence is None:
                 raise ResultValidationError('отсутствуют свидетельства содержательного плана')
             validate_content_coverage(plan, (result,), byr, result.content_evidence, owner_block_ids=(result.block_id,))
+
+
+
+def _ensure_recovery_complete(transaction, book_id, run_id):
+    for root in transaction.work.list_roots(book_id, run_id=run_id):
+        if not transaction.work.root_coverage_complete(root.id):
+            raise ExportBookError('восстановление книги не завершено: полный экспорт недоступен')

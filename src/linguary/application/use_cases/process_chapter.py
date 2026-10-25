@@ -43,6 +43,7 @@ from linguary.application.context_builder import ContextBuilder, textual_blocks
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.application.retry_policy import RetryPolicy
+from linguary.application.recovery import Recovery, RecoverySplit
 from linguary.application.task_runner import TaskQueue
 from linguary.application.translation_units import (
     DEFAULT_MAX_UNIT_SOURCE_CHARS,
@@ -150,6 +151,8 @@ class ProcessChapter:
         self._max_unit_source_chars = max_unit_source_chars
         self._context_builder = context_builder or ContextBuilder()
         self._id_factory = id_factory or _new_id
+        self._recovery = Recovery(unit_of_work)
+        self._validator = validator
 
     async def __call__(self, command: ProcessChapterCommand) -> ProcessChapterResult:
         """Processes all translation units of the chapter (PRD § 10, § 14).
@@ -170,6 +173,10 @@ class ProcessChapter:
         result = ProcessChapterResult(
             section_id=work.section.id, run_id=work.run.id, units=len(units)
         )
+        roots = self._recovery.prepare_roots(work, units, max_source_chars=self._max_unit_source_chars,
+                                             validator=self._validator)
+        if roots is not None:
+            return await self._process_roots(roots, work=work, note_ids=note_ids, result=result)
         for unit in units:
             if self._is_processed(unit, work=work):
                 continue
@@ -185,8 +192,15 @@ class ProcessChapter:
         work: _ChapterWork,
         note_ids: Callable[[], str],
         result: ProcessChapterResult,
+        recovery: tuple[str, str] | None = None,
     ) -> ProcessChapterResult:
         """One ALG-04 cycle: context assembly, model call, validation, atomic save."""
+        child_options = {}
+        if recovery is not None:
+            with self._unit_of_work.transaction() as transaction:
+                root = transaction.work.get_root(recovery[0])
+            if tuple(unit.block_ids) != tuple(root.manifest['ordered_blocks']):
+                child_options['recovery_child'] = True
         context = self._context_builder.for_translation_unit(
             document=work.document,
             section=work.section,
@@ -194,6 +208,7 @@ class ProcessChapter:
             analysis=work.analysis,
             glossary=work.run.glossary_snapshot,
             book_candidates=work.book_candidates,
+            **child_options,
         )
         context = replace(
             context,
@@ -203,8 +218,17 @@ class ProcessChapter:
                 task_id=work.task_id,
             ),
         )
+        if recovery is not None:
+            with self._unit_of_work.transaction() as transaction:
+                root = transaction.work.get_root(recovery[0])
+            if tuple(unit.block_ids) != tuple(root.manifest['ordered_blocks']):
+                blocks = {block.id: block for block in work.section.ordered_blocks}
+                readonly = '\n'.join(f'[read-only context] {blocks[block].text}' for block in root.manifest['ordered_blocks'])
+                context = replace(context, request=replace(context.request,
+                    input_text=context.request.input_text + '\n\nКонтекст исходной сцены; эти строки не являются дополнительными целями изменения:\n' + readonly))
         call = await self._call.request(
-            context, unit=unit, target_language=work.target_language, note_ids=note_ids
+            context, unit=unit, target_language=work.target_language, note_ids=note_ids,
+            recovery=recovery,
         )
         saved = self._call.save(
             book_id=work.document.id, run_id=work.run.id, results=call.results
@@ -217,6 +241,29 @@ class ProcessChapter:
             usage=total_usage((result.usage, call.usage)),
             discarded=not saved,
         )
+
+    async def _process_roots(self, roots, *, work, note_ids, result):
+        with self._unit_of_work.transaction() as transaction:
+            before = sum(transaction.work.get_root(root).calls_used for root in roots)
+        blocks = {block.id: block for block in work.section.ordered_blocks}
+        result = replace(result, units=len(roots))
+        for root_id in roots:
+            while scopes := self._recovery.plan_unresolved(root_id):
+                scope = scopes[0]
+                unit = TranslationUnit.of_blocks(id=scope.id,
+                    blocks=tuple(blocks[block] for block in scope.ordered_blocks), plan=work.analysis.treatment_plan)
+                try:
+                    result = await self._process_unit(unit, work=work, note_ids=note_ids,
+                        result=result, recovery=(root_id, scope.id))
+                except RecoverySplit:
+                    self._recovery.split(root_id, scope.id)
+                    continue
+                if result.discarded:
+                    return result
+            self._recovery.assert_complete(root_id)
+        with self._unit_of_work.transaction() as transaction:
+            used = sum(transaction.work.get_root(root).calls_used for root in roots) - before
+        return replace(result, attempts=used)
 
     def _load(self, command: ProcessChapterCommand) -> _ChapterWork:
         """Loads the book, chapter analysis, and active run in a single transaction."""

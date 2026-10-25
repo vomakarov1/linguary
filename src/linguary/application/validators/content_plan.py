@@ -37,6 +37,21 @@ def _substance(text):
     return ''.join(re.findall(r'\w+', without_footnote_markers(text).casefold()))
 
 
+def validate_note_sources(results, source_texts):
+    """Reject ungrounded or repeated notes before binding final v3 evidence."""
+    from linguary.application.analysis_merge import find_quote_span
+
+    for result in results:
+        seen = set()
+        for note in result.language_notes:
+            if find_quote_span(source_texts[result.block_id], note.original_excerpt) is None:
+                raise ResultValidationError('цитата языковой заметки отсутствует в исходном блоке')
+            body = _substance(note.note)
+            if body in seen:
+                raise ResultValidationError('повтор языковой заметки в исходном блоке')
+            seen.add(body)
+
+
 def validate_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids):
     owners = set(owner_block_ids)
     if evidence.version != plan.version or evidence.plan_sha256 != plan.sha256 or {r.block_id for r in results} != owners:

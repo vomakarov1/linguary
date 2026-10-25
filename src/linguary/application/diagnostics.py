@@ -122,7 +122,11 @@ class Diagnostics:
             attempt = transaction.work.get_attempt(attempt_id)
             if attempt is None:
                 raise LLMConfigurationError('происхождение вызова отсутствует')
-            target = 'accepted' if decision == 'accepted' else 'rejected'
+            if decision == 'stale':
+                transaction.work.audit_stale_attempt(attempt_id, call_id=record['call_id'])
+                target = attempt.state
+            else:
+                target = 'accepted' if decision == 'accepted' else 'rejected'
             if attempt.state != target:
                 transaction.work.transition_attempt(attempt_id, target, expected_state=attempt.state,
                     outcome={**thaw(attempt.outcome), 'decision': decision})

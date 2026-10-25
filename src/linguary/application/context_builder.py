@@ -438,6 +438,7 @@ class ContextBuilder:
         analysis: ChapterAnalysis,
         glossary: GlossarySnapshot,
         book_candidates: Iterable[GlossaryCandidate] = (),
+        recovery_child: bool = False,
     ) -> TranslationContext:
         """Context for processing a single block group (PRD § 10, § 13, § 19.3, ALG-04).
 
@@ -459,6 +460,7 @@ class ContextBuilder:
                 target_language=document.target_language,
             ),
             neighbours=(),
+            recovery_child=recovery_child,
         )
 
     def for_block_regeneration(
@@ -508,6 +510,7 @@ class ContextBuilder:
         book_candidates: Iterable[GlossaryCandidate],
         instructions: str,
         neighbours: Sequence[_NeighbourBlocks],
+        recovery_child: bool = False,
     ) -> TranslationContext:
         """Ready translation request for given blocks along with response parsing setup."""
         if analysis.content_plan is not None and self._content_plan_profile != analysis.content_plan.profile:
@@ -541,6 +544,7 @@ class ContextBuilder:
                     glossary=glossary,
                     candidates=(*analysis.glossary_candidates, *book_candidates),
                     neighbours=neighbours,
+                    recovery_child=recovery_child,
                 ),
             ),
             block_ids_by_alias=aliases,
@@ -567,6 +571,7 @@ class ContextBuilder:
         glossary: GlossarySnapshot,
         candidates: Sequence[GlossaryCandidate],
         neighbours: Sequence[_NeighbourBlocks],
+        recovery_child: bool = False,
     ) -> str:
         """Processing request prompt text: header, chapter digest, glossary, and blocks.
 
@@ -582,7 +587,11 @@ class ContextBuilder:
             budget = 0
         parts = [
             _chapter_header(document=document, section=section),
-            f"В этом запросе — не больше {budget} языковых заметок.",
+            (f"Ориентир количества языковых заметок: {budget}. "
+             "Для необходимого объяснения можно превысить этот ориентир, в том числе дать три заметки одному фрагменту. "
+             "Не теряй обязательную помощь из учебного плана ради количества. "
+             "Каждая заметка должна быть привязана к исходнику; не повторяй уже объяснённое."
+             if recovery_child else f"В этом запросе — не больше {budget} языковых заметок."),
             _chapter_digest(analysis, glossary, candidates),
             _mandatory_decisions(
                 _with_agreed_notes(glossary.mandatory_entries, glossary, candidates),

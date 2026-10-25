@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, replace, asdict
 from contextvars import ContextVar
+from hashlib import sha256
 
 from linguary.application.context_builder import TranslationContext
 from linguary.application.errors import ApplicationError
@@ -22,7 +23,9 @@ from linguary.application.explained_expressions import ExplainedExpressions
 from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
-from linguary.application.retry_policy import ResultValidationError, RetryPolicy
+from linguary.application.retry_policy import ResultValidationError, RetryPolicy, violation_of
+from linguary.application.recovery import RecoveryError, RecoverySplit
+from linguary.application.book_conditions import ConditionsError
 from linguary.application.reader_text import ReaderTextPolicy, record_reader_warnings, source_quote_fragments
 from linguary.application.validators import TranslationResultValidator
 from linguary.application.validators.content_plan import resolve_response_evidence, validate_content_coverage
@@ -90,6 +93,7 @@ class TranslationCall:
         unit: TranslationUnit,
         target_language: str,
         note_ids: Callable[[], str],
+        recovery: tuple[str, str] | None = None,
     ) -> TranslationCallResult:
         """Calls the model and validates the response, retrying per policy (ALG-04, ALG-05).
 
@@ -116,8 +120,34 @@ class TranslationCall:
         while True:
             attempts += 1
             response = None
+            physical_context = None
             try:
+                if recovery is not None:
+                    from linguary.application.diagnostics import diagnostics_for
+                    diagnostics_for(self._unit_of_work).ensure_available()
+                    try:
+                        with self._unit_of_work.transaction() as transaction:
+                            root = transaction.work.get_root(recovery[0])
+                            conditions = transaction.work.get_conditions(root.conditions_id)
+                            physical_context = transaction.work.begin_recovery_attempt(*recovery,
+                                task_id=request.task_id, run_id=request.run_id, stage=request.stage.value,
+                                assigned_model=conditions.payload['models']['processing'],
+                                prompt_hash=sha256(request.instructions.encode()).hexdigest())
+                    except RecoveryError:
+                        raise
+                    except Exception:
+                        diagnostics_for(self._unit_of_work).fail()
+                    if physical_context is None:
+                        raise RecoveryError('limit', recovery[0])
+                    request = replace(request, call_context=physical_context,
+                                      scope_id=physical_context.scope_id)
                 response = await self._llm_client.generate(request)
+                if physical_context is not None:
+                    with self._unit_of_work.transaction() as transaction:
+                        owns = transaction.work.owns_recovery_attempt(physical_context.attempt_id)
+                    if not owns:
+                        finalize_response(self._unit_of_work, response, 'stale')
+                        raise RecoveryError('interrupted', recovery[0])
                 mapped = context.to_block_ids(response.payload)
                 results = self._validator.validate(
                     mapped,
@@ -141,8 +171,19 @@ class TranslationCall:
                         notes = tuple(replace(note, original_excerpt=source.original_excerpt, translated_excerpt=source.translated_excerpt)
                             for note, source in zip(result.language_notes, mapped.notes_for(result.block_id), strict=True))
                         restored.append(replace(result, glossary_hints=hints, language_notes=notes))
-                    results = ReaderTextPolicy().prepare_results(tuple(restored),
-                        protected_quotes=source_quote_fragments(item.block.text for item in unit.items))
+                    checked_results = []
+                    for restored_result in restored:
+                        try:
+                            checked_results.extend(ReaderTextPolicy().prepare_results((restored_result,),
+                                protected_quotes=source_quote_fragments(item.block.text for item in unit.items)))
+                        except ResultValidationError as error:
+                            if error.violation is not None:
+                                raise ResultValidationError(str(error), expectation=context.expectation,
+                                    violation=replace(error.violation, scope='local', block_ids=(restored_result.block_id,))) from error
+                            raise
+                    results = tuple(checked_results)
+                    from linguary.application.validators.content_plan import validate_note_sources
+                    validate_note_sources(results, {item.block.id: item.block.text for item in unit.items})
                     record_reader_warnings(self._unit_of_work, response,
                         [('translation', result.translated_text or '') for result in results],
                         reader_level=conditions.payload['reader_level'] if conditions else 'b2')
@@ -155,12 +196,29 @@ class TranslationCall:
                 else:
                     results = tuple(explained.without_repeats(r) for r in results)
             except Exception as error:
+                if isinstance(error, RecoveryError):
+                    raise
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
+                if recovery is not None and physical_context is not None:
+                    with self._unit_of_work.transaction() as transaction:
+                        split = transaction.work.record_recovery_failure(physical_context.attempt_id,
+                            violation_of(error, context=physical_context))
+                    if split:
+                        raise RecoverySplit(*recovery) from None
                 decision = self._retry_policy.decide(
                     _worded_for_the_model(error, context), attempts=attempts
                 )
                 if not decision.should_retry:
+                    if recovery is not None:
+                        with self._unit_of_work.transaction() as transaction:
+                            root = transaction.work.get_root(recovery[0])
+                            count = transaction.work.scope_attempt_count(recovery[1])
+                            reason = ('conditions_unavailable' if isinstance(error, ConditionsError) else
+                                'limit' if (root.calls_used >= root.manifest['policy']['max_calls'] + root.extra_calls
+                                or count >= root.manifest['policy']['max_scope_calls']) else 'unsafe_partition')
+                            transaction.work.stop_root(root.id, reason)
+                        raise RecoveryError(reason, recovery[0], original_error=error) from error
                     raise
                 if decision.backoff_seconds > 0:
                     await self._sleep(decision.backoff_seconds)
@@ -194,7 +252,8 @@ class TranslationCall:
                     current = transaction.work.get_binding('result', f'{run_id}:{result.block_id}')
                     if (None if previous is None else previous['attempt_id']) != (None if current is None else current['attempt_id']):
                         pointers_match = False
-            if run is not None and run.id == run_id and pointers_match and (context is None or (conditions is not None and conditions.id == context.conditions_id)):
+            owns_scope = context is None or context.root_id is None or transaction.work.owns_recovery_attempt(context.attempt_id)
+            if run is not None and run.id == run_id and pointers_match and owns_scope and (context is None or (conditions is not None and conditions.id == context.conditions_id)):
                 if context is not None:
                     for result in results:
                         previous_result = transaction.results.get(run_id, result.block_id)
@@ -203,7 +262,13 @@ class TranslationCall:
                             transaction.work.archive_artifacts([dict(book_id=book_id, run_id=run_id,
                                 kind='block_result', scope_id=result.block_id,
                                 body={'schema_version': 1, 'result': asdict(previous_result)})])
+                text_changed = any(transaction.results.get(run_id, result.block_id) != result for result in results)
                 transaction.results.replace_results(run_id, results)
+                if context is not None and context.root_id is not None:
+                    scope = transaction.work.get_scope(context.scope_id)
+                    if tuple(result.block_id for result in results) != scope.ordered_blocks:
+                        raise RecoveryError('unsafe_partition', context.root_id)
+                    transaction.work.mark_recovery_accepted(context.attempt_id)
                 finalize_response(self._unit_of_work, response, 'accepted', transaction=transaction)
                 if context is not None:
                     for result in results:
@@ -216,6 +281,10 @@ class TranslationCall:
                             conditions_id=context.conditions_id, attempt_id=context.attempt_id,
                             artifact_revision_id=artifact_id,
                             expected_attempt_id=None if previous_binding is None else previous_binding['attempt_id'])
+                if text_changed:
+                    transaction.work.stale_reviews(book_id)
+                if context is not None and context.root_id is not None:
+                    transaction.work.root_coverage_complete(context.root_id)
                 saved = True
         if not saved:
             finalize_response(self._unit_of_work, response, 'stale')
@@ -289,6 +358,19 @@ def complete_processing(
         )
         if unfinished:
             return
+        run = transaction.runs.active_for_book(book_id)
+        roots = transaction.work.list_roots(book_id, run_id=run.id) if run is not None else ()
+        if any(not transaction.work.root_coverage_complete(root.id) for root in roots):
+            raise RecoveryError('unsafe_partition')
+        document = transaction.documents.get(book_id)
+        if run is not None and document is not None:
+            from linguary.application.context_builder import textual_blocks
+            expected = {block.id for section in document.sections for block in textual_blocks(section)}
+            actual = {result.block_id for result in transaction.results.list_for_run(run.id)}
+            if not actual <= expected:
+                raise RecoveryError('unsafe_partition')
+            if expected != actual:
+                return
         transaction.books.save(
             replace(
                 book,
