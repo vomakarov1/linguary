@@ -61,9 +61,9 @@
     {% else %}
       <p>Обработка выполняется в фоне, страница обновится автоматически.</p>
     {% endif %}
-  {% elif data.book.status == "READY_TO_EXPORT" %}
+  {% elif data.book.status == "READY_TO_EXPORT" and data.epub_ready %}
     <p>Обработка завершена. Книга готова к сборке EPUB.</p>
-  {% elif data.book.status == "COMPLETED" %}
+  {% elif data.book.status == "COMPLETED" and data.epub_ready %}
     <p>Итоговый EPUB собран.</p>
   {% elif data.book.status == "FAILED" %}
     <p>Импорт не удался: книгу из этого файла обработать нельзя. Причина указана ниже.</p>
@@ -91,7 +91,7 @@
   {% if data.progress.failures %}
     <h3>Ошибки</h3>
     {% for failure in data.progress.failures %}
-      {% if failure.is_retryable %}
+      {% if failure.is_retryable and data.recovery.reason != 'unknown' %}
         <form class="failure" method="post" action="/tasks/{{ failure.task_id }}/retry">
           <span>{{ failure.task_type_label }}: {{ failure.message }}</span>
           {% if failure.error_type == "ConfigurationError" %}
@@ -112,4 +112,5 @@
     {% endfor %}
   {% endif %}
 </section>
+{% include "partials/quality_review.html" %}
 {% endblock %}

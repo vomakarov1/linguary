@@ -369,6 +369,36 @@ class ReadingSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class DiagnosticsSettings:
+    bodies_enabled: bool = True
+    max_body_bytes: int = 64 * 1024
+    max_book_bytes: int = 10 * 1024 * 1024
+    retention_seconds: int = 7 * 24 * 60 * 60
+
+    def __post_init__(self) -> None:
+        if type(self.bodies_enabled) is not bool:
+            raise SettingsError('diagnostics.bodies_enabled должна быть логической настройкой')
+        for name in ('max_body_bytes', 'max_book_bytes', 'retention_seconds'):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise SettingsError(f'diagnostics.{name} должна быть положительным целым числом')
+
+
+@dataclass(frozen=True, slots=True)
+class RecoverySettings:
+    max_calls: int = 12
+    max_scope_calls: int = 3
+    max_depth: int = 3
+    max_leaves: int = 8
+
+    def __post_init__(self) -> None:
+        for name in ('max_calls', 'max_scope_calls', 'max_depth', 'max_leaves'):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise SettingsError(f'recovery.{name} должна быть положительным целым числом')
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     """Complete local application configuration."""
 
@@ -378,6 +408,8 @@ class AppSettings:
     server: ServerSettings = field(default_factory=ServerSettings)
     worker: WorkerPoolSettings = field(default_factory=WorkerPoolSettings)
     reading: ReadingSettings = field(default_factory=ReadingSettings)
+    diagnostics: DiagnosticsSettings = field(default_factory=DiagnosticsSettings)
+    recovery: RecoverySettings = field(default_factory=RecoverySettings)
 
 
 __all__ = [
@@ -393,6 +425,8 @@ __all__ = [
     "OPENAI_COMPATIBLE_PROVIDER",
     "SUPPORTED_READER_LEVELS",
     "AppSettings",
+    "DiagnosticsSettings",
+    "RecoverySettings",
     "CheckSettings",
     "LLMSettings",
     "ReadingSettings",

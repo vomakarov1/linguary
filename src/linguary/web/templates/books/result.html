@@ -2,6 +2,7 @@
 {% block title %}Результат - Linguary{% endblock %}
 {% block content %}
 {% include "partials/result_header.html" %}
+{% with quality_form_only=true %}{% include "partials/quality_review.html" %}{% endwith %}
 
 {% set book_id = data.book_id %}
 {% set active_tab = "result" %}

@@ -4,6 +4,8 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from linguary.web.dependencies import CurrentApplication
+from linguary.web.views import render, wants_html
+from linguary.web import labels
 
 _HEADERS = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'}
 
@@ -46,6 +48,11 @@ router = APIRouter(tags=['diagnostics'], dependencies=[Depends(require_local)])
 @router.get('/books/{book_id}/diagnostics/{call_id}')
 def get_diagnostic(request: Request, application: CurrentApplication, book_id: str, call_id: str):
     value = application.diagnostics.read(book_id, call_id)
+    if wants_html(request):
+        response = render(request, 'books/diagnostics.html', page='detail', book_id=book_id, data=value,
+            body_status_label=labels.DIAGNOSTIC_BODY_LABELS.get(value['body_status'], labels.DIAGNOSTIC_BODY_LABELS['unavailable']))
+        response.headers.update(_HEADERS)
+        return response
     if request.headers.get('accept', '').startswith('text/plain'):
         return PlainTextResponse(value['body'] or '', headers={**_HEADERS, 'X-Linguary-Body-Status': value['body_status']})
     return JSONResponse(value, headers=_HEADERS)

@@ -24,8 +24,10 @@ from typing import Any
 from linguary.adapters.config.settings import (
     AppSettings,
     CheckSettings,
+    DiagnosticsSettings,
     LLMSettings,
     ReadingSettings,
+    RecoverySettings,
     ServerSettings,
     SettingsError,
     StorageSettings,
@@ -139,6 +141,23 @@ _READING_FIELDS: Mapping[str, Callable[[object, str], object]] = {
 }
 
 
+#: Parsers for the [diagnostics] section.
+_DIAGNOSTICS_FIELDS: Mapping[str, Callable[[object, str], object]] = {
+    "bodies_enabled": _as_bool,
+    "max_body_bytes": _as_int,
+    "max_book_bytes": _as_int,
+    "retention_seconds": _as_int,
+}
+
+#: Parsers for the [recovery] section.
+_RECOVERY_FIELDS: Mapping[str, Callable[[object, str], object]] = {
+    "max_calls": _as_int,
+    "max_scope_calls": _as_int,
+    "max_depth": _as_int,
+    "max_leaves": _as_int,
+}
+
+
 def load_settings(
     *,
     environ: Mapping[str, str] | None = None,
@@ -153,6 +172,22 @@ def load_settings(
     path, is_explicit = _config_path(variables, config_path)
     document = _read_document(path, is_explicit=is_explicit)
     return AppSettings(
+        diagnostics=DiagnosticsSettings(
+            **_section(
+                document,
+                name="diagnostics",
+                fields=_DIAGNOSTICS_FIELDS,
+                variables=variables,
+            )
+        ),
+        recovery=RecoverySettings(
+            **_section(
+                document,
+                name="recovery",
+                fields=_RECOVERY_FIELDS,
+                variables=variables,
+            )
+        ),
         llm=LLMSettings(
             **_section(
                 document,

@@ -1,0 +1,115 @@
+{% set quality_book_id = data.book.id if data.book is defined else data.book_id %}
+{% if not quality_form_only|default(false) %}
+<section class="panel" aria-label="Условия и качество книги">
+  <h2>Условия обработки</h2>
+  {% if data.conditions.reader_level %}
+    <p>Редакция условий: {{ data.conditions.revision }}. Профиль обработки: {{ data.conditions.profile }}.</p>
+    <p>Модель анализа: {{ data.conditions.models.analysis }}. Модель обработки: {{ data.conditions.models.processing }}.</p>
+    <p>Сохранённый уровень новых запросов: {{ data.conditions.reader_level|upper }}.</p>
+    {% if data.reproducibility == 'legacy_partial' %}<p>Уровень прежних материалов неизвестен; условия воспроизведены частично.</p>{% endif %}
+  {% else %}
+    <p>Уровень читателя неизвестен. Сохранённые условия отсутствуют.</p>
+  {% endif %}
+  <p>{% if data.epub_ready %}Обязательная обработка завершена: EPUB готов к сборке.{% else %}Обязательная обработка не завершена: полный EPUB пока недоступен.{% endif %}</p>
+  <h2>Восстановление обработки</h2>
+  <p>Покрытие: {{ data.recovery.covered }} из {{ data.recovery.total }}. Обращения: {{ data.recovery.calls_used }} из {{ data.recovery.limit }}.</p>
+  {% if data.recovery.reason %}<p role="status">{{ quality_ui.reason_labels.get(data.recovery.reason, 'Обработка остановлена') }}.</p>{% endif %}
+  {% if data.recovery.reason == 'unknown' %}<p>Неизвестный исход нельзя снять повтором или увеличением предела. Сначала нужно подтвердить исход обращения.</p>{% endif %}
+  <h2>Добровольная вычитка</h2>
+  <p role="status">{{ quality_ui.review_labels.get(data.quality_review.state, 'Состояние вычитки неизвестно') }}.</p>
+  {% if data.quality_review.reason %}<p>{{ quality_ui.reason_labels.get(data.quality_review.reason, 'Вычитка остановлена') }}.</p>{% endif %}
+  <p>Заключение вероятностное: оно не гарантирует точность перевода или соответствие уровню CEFR. Готовность EPUB определяется отдельно.</p>
+  {% if data.quality_review.budget is not none %}
+    <p>Предел вычитки: {{ quality_ui.usd(data.quality_review.budget) }} USD.
+      Учтённый расход: {{ quality_ui.usd(data.quality_review.spent) }} USD.
+      Удержанный резерв: {{ quality_ui.usd(data.quality_review.reserved) }} USD.</p>
+    <p>Проверено артефактов: {{ data.quality_review.coverage.checked|length }}. Не проверено: {{ data.quality_review.coverage.missing|length }}.</p>
+  {% endif %}
+  {% for finding in data.quality_review.findings %}
+    <article class="notice"><h3>Замечание {{ loop.index }}</h3>
+      <p>{{ finding.issue }}</p><p>{{ finding.suggestion }}</p><p>Неопределённость: {{ finding.uncertainty }}.</p>
+      {% for anchor in finding.evidence_anchors|default([]) %}<blockquote>{{ anchor.quote }}</blockquote>{% endfor %}
+    </article>
+  {% endfor %}
+  <p>Исправление оплачивается отдельно и выполняется обычной регенерацией. Учтённый расход исправлений: {{ data.ordinary_cost.regeneration_spent_usd }} USD.
+    {% if data.ordinary_cost.regeneration_unknown_calls %}Есть исправления с неизвестным расходом.{% endif %}</p>
+</section>
+{% endif %}
+{% if not quality_read_only|default(false) %}
+<section class="panel" aria-label="Явные действия с условиями и пределами">
+  {% if quality_ui.legacy %}
+    <p>Продолжение сохранит старые материалы, а будущие запросы будут использовать выбранные сейчас условия. Условия прежних материалов останутся известны не полностью.</p>
+    <form method="post" action="/books/{{ quality_book_id }}/conditions">
+      <input type="hidden" name="action" value="continue_legacy"><input type="hidden" name="expected_revision" value="0">
+      <input type="hidden" name="settings_revision" value="{{ quality_ui.settings_revision }}">
+      <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю продолжение со старыми материалами</label>
+      <button type="submit">Продолжить со старыми материалами</button>
+    </form>
+  {% endif %}
+  <details><summary>{% if quality_ui.llm_ready %}Начать анализ заново{% else %}Повторный анализ недоступен{% endif %}</summary>
+    <p>Новый анализ заменит текущий анализ и текущие результаты обработки. Архив версий сохранится. Будут закреплены новые условия; новые запросы оплачиваются отдельно.</p>
+    {% if quality_ui.llm_ready %}
+      <form method="post" action="/books/{{ quality_book_id }}/conditions">
+        <input type="hidden" name="action" value="reanalyze">
+        <input type="hidden" name="expected_revision" value="{{ data.conditions.revision or 0 }}">
+        <input type="hidden" name="settings_revision" value="{{ quality_ui.settings_revision }}">
+        <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю новый анализ</label>
+        <button type="submit">Подготовить новый анализ</button>
+      </form>
+    {% else %}
+      <p>Для повторного анализа настройте LLM. Когда действие станет доступно, перед отправкой потребуется отметить «Подтверждаю новый анализ».</p>
+    {% endif %}
+  </details>
+  {% for root in data.recovery.roots|default([]) if root.can_extend %}
+    <details><summary>Явно увеличить предел восстановления</summary>
+      <p>Увеличение не запускает повтор автоматически и не обнуляет использованные обращения. Предел одной области сохраняется.</p>
+      <form method="post" action="/books/{{ quality_book_id }}/recovery/{{ root.root_id }}/limit">
+        <input type="hidden" name="expected_generation" value="{{ root.generation }}">
+        <label>Дополнительные обращения <input type="number" name="additional_calls" min="1" step="1" required></label>
+        <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю увеличение предела</label>
+        <button type="submit">Увеличить предел</button>
+      </form>
+    </details>
+  {% endfor %}
+  {% if data.recovery.can_retry and data.recovery.reason != 'unknown' %}
+    {% for task in quality_ui.retry_tasks %}<form method="post" action="/tasks/{{ task.id }}/retry"><button type="submit">Повторить: {{ task.label }}</button></form>{% endfor %}
+  {% endif %}
+  {% if quality_ui.forms and quality_ui.forms[0].routes %}
+    <form method="get" action="{{ request.url.path }}">
+      <label>Охват для оценки
+        <select name="review_scope" required>{% for choice in quality_ui.scope_choices %}<option value="{{ choice.value }}" {% if choice.selected %}selected{% endif %}>{{ choice.title }}</option>{% endfor %}</select>
+      </label>
+      <button type="submit">Показать охват и оценку</button>
+    </form>
+  {% endif %}
+  {% for form in quality_ui.forms %}
+    {% if form.routes %}
+    <details><summary>Запросить вычитку: {{ form.title }}</summary>
+      <p>Каждое обращение и повтор оплачиваются в согласованном пределе. При неизвестном расходе резерв удерживается. Локальный предел не гарантирует абсолютный предел внешнего счёта.</p>
+      {% for route in form.routes %}<p>Модель {{ route.model }}, маршрут {{ route.route_id }}. Оценка одного обращения:
+        {% if route.estimate_usd %}{{ route.estimate_usd }} USD{% else %}недоступна; отправка запрещена{% endif %}.</p>{% endfor %}
+      <form method="post" action="/books/{{ quality_book_id }}/quality-review">
+        <input type="hidden" name="request_key" value="{{ form.request_key }}">
+        <input type="hidden" name="expected_manifest_sha" value="{{ form.manifest_sha }}">
+        <label>Модель и зарегистрированный маршрут
+          <select name="route_selection" required><option value="">Выберите модель и маршрут</option>
+            {% for route in form.routes if route.estimate_usd %}<option value="{{ route.selection }}">{{ route.model }} — {{ route.route_id }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Предел расходов, USD <input type="text" name="budget_usd" inputmode="decimal" required placeholder="Введите сумму" aria-describedby="budget-help-{{ loop.index }}"></label>
+        <p id="budget-help-{{ loop.index }}">Положительная сумма, не более шести знаков после запятой. Денежного предела по умолчанию нет.</p>
+        <label><input type="checkbox" name="scope" value="{{ form.scope }}" required> Охват: {{ form.title }}</label>
+        <button type="submit">Запустить добровольную вычитку</button>
+      </form>
+    </details>
+    {% endif %}
+  {% endfor %}
+  {% if not quality_ui.forms or not quality_ui.forms[0].routes %}<p>Вычитка недоступна до явной локальной настройки подтверждённого маршрута и сохранения условий книги. Платных запросов при открытии страницы нет.</p>{% endif %}
+  <details><summary>Локальная диагностика</summary>
+    <p>Тела доступны только при прямом локальном соединении. В терминале приложения или внутри контейнера: <code>{{ quality_ui.diagnostic_list_command }}</code></p>
+    <ul>{% for item in quality_ui.diagnostics %}<li>{{ item.status }}.
+      {% if item.url %}<a href="{{ item.url }}">Открыть защищённый просмотр</a>{% else %}<code>{{ item.command }}</code>{% endif %}
+    </li>{% endfor %}</ul>
+  </details>
+</section>
+{% endif %}

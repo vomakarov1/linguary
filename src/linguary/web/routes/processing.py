@@ -85,6 +85,7 @@ async def choose_conditions(request: Request, application: CurrentApplication, b
     from typing import Literal
     from pydantic import BaseModel, Field, ValidationError
     from fastapi import HTTPException
+    from linguary.web.routes.quality import input_error_response
     from linguary.application.book_conditions import ConditionsError
     from linguary.application.use_cases.reset_processing import ChooseBookConditions
 
@@ -98,14 +99,18 @@ async def choose_conditions(request: Request, application: CurrentApplication, b
         raw = await request.json() if request.headers.get('content-type', '').startswith('application/json') else dict(await request.form())
         choice = Choice.model_validate(raw)
         if choice.confirmed is not True:
+            if wants_html(request):
+                return input_error_response(request, HTTPException(422, detail={'reason_code': 'invalid_request'}))
             raise HTTPException(422, detail='confirmation_required')
     except (ValidationError, ValueError):
+        if wants_html(request):
+            return input_error_response(request, HTTPException(422, detail={'reason_code': 'invalid_request'}))
         raise HTTPException(422, detail='invalid_conditions_choice') from None
     try:
         conditions = ChooseBookConditions(application.book_conditions, application.book_runtime)(book_id, **choice.model_dump())
     except ConditionsError as error:
-        raise HTTPException(404 if error.reason_code == 'book_not_found' else 409,
-                            detail={'reason_code': error.reason_code}) from None
+        return input_error_response(request, HTTPException(404 if error.reason_code == 'book_not_found' else 409,
+                            detail={'reason_code': error.reason_code}))
     if wants_html(request):
         return RedirectResponse(url=f'/books/{book_id}', status_code=status.HTTP_303_SEE_OTHER)
     return {'conditions_id': conditions.id, 'revision': conditions.revision, 'reproducibility': conditions.reproducibility}

@@ -42,6 +42,7 @@ from linguary.web.uploads import (
 )
 from linguary.web import labels
 from linguary.web.views import render, wants_html
+from linguary.web.routes.quality import quality_page_context
 
 router = APIRouter(tags=["books"])
 
@@ -127,6 +128,7 @@ def get_book(
             "books/detail.html",
             page="detail",
             data=response,
+            quality_ui=quality_page_context(request, application, book_id),
             auto_refresh=_needs_refresh(response),
             stalled=_is_stalled(response),
             llm_ready=application.settings.llm.is_ready,

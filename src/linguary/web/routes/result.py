@@ -11,6 +11,7 @@ from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus, TaskType
 from linguary.web.dependencies import CurrentApplication
 from linguary.web.schemas import BookResultResponse, ResultBlockResponse, TaskResponse
 from linguary.web.views import render, wants_html
+from linguary.web.routes.quality import quality_page_context
 
 router = APIRouter(tags=["result"])
 
@@ -33,6 +34,7 @@ def get_book_result(
             "partials/result_header.html",
             data=response,
             export_task=export_task_response,
+            quality_ui=quality_page_context(request, application, book_id),
         )
     if wants_html(request):
         return render(
@@ -41,6 +43,7 @@ def get_book_result(
             page="result",
             data=response,
             export_task=export_task_response,
+            quality_ui=quality_page_context(request, application, book_id),
         )
     return response
 

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Локальная диагностика - Linguary{% endblock %}
+{% block content %}
+<section class="panel">
+  <h1>Локальная диагностика ответа</h1>
+  <p role="status">{{ body_status_label }}.</p>
+  <p>Модель: {{ data.metadata.model }}. Начало: {{ data.metadata.started_at }}.</p>
+  {% if data.metadata.cost is not none %}<p>Записанный расход: {{ data.metadata.cost }} USD.</p>{% endif %}
+  {% set body_meta = (data.metadata.diagnostic_meta or {}).get('body_meta', {}) %}
+  {% if body_meta.get('truncated') %}<p>Ответ усечён по пределу хранения. Сохранённая часть не позволяет проверить весь ответ.</p>{% endif %}
+  {% if body_meta.get('redacted') %}<p>Секретные данные удалены из диагностической копии.</p>{% endif %}
+  {% if data.body is not none %}
+    <p>Тело показано как текст. Это диагностические данные, а не исправленный материал книги.</p>
+    <pre>{{ data.body }}</pre>
+  {% else %}
+    <p>По отсутствующему телу нельзя оценить обоснованность отказа.</p>
+  {% endif %}
+  <p><a href="/books/{{ book_id }}">Вернуться к книге</a></p>
+</section>
+{% endblock %}

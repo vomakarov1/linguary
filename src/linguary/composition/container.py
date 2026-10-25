@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from hashlib import sha256
@@ -38,7 +38,8 @@ from linguary.adapters.config.quality_routes import load_quality_routes
 from linguary.adapters.config.system_settings import overlay_settings
 from linguary.adapters.db.system_settings import SystemSettingsStore
 from linguary.adapters.llm.rate_limit import LLMRateLimiter
-from linguary.application.diagnostics import Diagnostics, diagnostics_for
+from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
+from linguary.application.recovery import RecoveryPolicy
 from linguary.application.book_conditions import BookConditionsService
 from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
@@ -351,7 +352,7 @@ def build_application(
         lambda: runtime_settings.revision,
         lambda path: sha256(Path(path).read_bytes()).hexdigest())
     book_runtime = BookRuntimeResolver(book_conditions, runtime_settings, generation_factory)
-    diagnostics = diagnostics_for(unit_of_work)
+    diagnostics = Diagnostics(unit_of_work, policy=DiagnosticsPolicy(**asdict(app_settings.diagnostics)))
     diagnostics.ensure_available()
     epubcheck = epubcheck or EpubCheckValidator(settings=EpubCheckSettings())
 
@@ -522,6 +523,7 @@ def _processing_sequence(
         unit_of_work=unit_of_work,
         queue=task_queue,
         process_chapter=ProcessChapter(
+            recovery_policy=RecoveryPolicy(**asdict(settings.recovery)),
             unit_of_work=unit_of_work,
             llm_client=model,
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),

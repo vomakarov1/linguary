@@ -7,7 +7,7 @@ import os
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from linguary.adapters.config.settings import LLMSettings, ReadingSettings, CheckSettings
+from linguary.adapters.config.settings import LLMSettings, ReadingSettings, CheckSettings, RecoverySettings
 from linguary.application.book_conditions import ConditionsError, payload_digest
 from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask
@@ -49,6 +49,7 @@ def conditions_payload(book, settings, revision, profile):
         'reader_level': settings.reading.normalized_level, 'models': {'analysis': settings.llm.effective_analysis_model,
         'processing': settings.llm.effective_processing_model}, 'route': route_snapshot(settings.llm),
         'llm_parameters': llm, 'checks': asdict(settings.checks), 'profile': profile,
+        'recovery_policy': asdict(settings.recovery),
         'versions': {'runtime': 1, 'context_builder': 3 if profile == 'content-plan-v3' else 1,
                      'validators': 3 if profile == 'content-plan-v3' else 1,
                      'schemas': {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 3}[profile],
@@ -175,7 +176,8 @@ class BookRuntimeResolver:
         llm = LLMSettings(**{**thaw(payload['llm_parameters']), 'base_url': current.llm.base_url,
                             'proxy_url': current.llm.proxy_url, 'api_key': current.llm.api_key})
         return replace(current, llm=llm, reading=ReadingSettings(reader_level=payload['reader_level']),
-                       checks=CheckSettings(**thaw(payload['checks'])))
+                       checks=CheckSettings(**thaw(payload['checks'])),
+                       recovery=RecoverySettings(**thaw(payload.get('recovery_policy', asdict(RecoverySettings())))))
 
     @asynccontextmanager
     async def lease(self, conditions_id, role):

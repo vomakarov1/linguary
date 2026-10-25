@@ -43,7 +43,7 @@ from linguary.application.context_builder import ContextBuilder, textual_blocks
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.application.retry_policy import RetryPolicy
-from linguary.application.recovery import Recovery, RecoverySplit
+from linguary.application.recovery import Recovery, RecoveryPolicy, RecoverySplit
 from linguary.application.task_runner import TaskQueue
 from linguary.application.translation_units import (
     DEFAULT_MAX_UNIT_SOURCE_CHARS,
@@ -139,6 +139,7 @@ class ProcessChapter:
         context_builder: ContextBuilder | None = None,
         id_factory: IdFactory | None = None,
         sleep: Sleep | None = None,
+        recovery_policy: RecoveryPolicy | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._call = TranslationCall(
@@ -151,7 +152,7 @@ class ProcessChapter:
         self._max_unit_source_chars = max_unit_source_chars
         self._context_builder = context_builder or ContextBuilder()
         self._id_factory = id_factory or _new_id
-        self._recovery = Recovery(unit_of_work)
+        self._recovery = Recovery(unit_of_work, policy=recovery_policy)
         self._validator = validator
 
     async def __call__(self, command: ProcessChapterCommand) -> ProcessChapterResult:
