@@ -75,9 +75,10 @@ class ResultValidationError(ApplicationError):
     the information the model was missing.
     """
 
-    def __init__(self, message: str, *, expectation: ResultExpectation | None = None) -> None:
+    def __init__(self, message: str, *, expectation: ResultExpectation | None = None, violation=None) -> None:
         super().__init__(message)
         self.expectation = expectation
+        self.violation = violation
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,3 +369,21 @@ __all__ = [
     "build_repair_instruction",
     "classify_error",
 ]
+
+
+
+def violation_of(error, *, context=None):
+    """Return explicit checked scope, or an honest unknown for legacy exceptions."""
+    from linguary.domain.llm_log import Violation
+    explicit = getattr(error, 'violation', None)
+    if isinstance(explicit, Violation):
+        return explicit.verified(context) if context is not None else explicit
+    if isinstance(error, LLMResponseFormatError):
+        rule = 'provider_truncated' if error.truncated else 'response_format'
+    elif isinstance(error, LLMTransportError):
+        rule = 'transport_unknown'
+    elif isinstance(error, ResultValidationError):
+        rule = 'domain_validation'
+    else:
+        rule = 'unknown'
+    return Violation(rule, context.stage if context else 'unknown', safe_message='Ответ не прошёл проверку')

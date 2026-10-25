@@ -32,6 +32,7 @@ from typing import Protocol
 
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
+from linguary.domain.llm_log import CallContext, Violation
 from linguary.domain import LLMCallStage, TokenUsage
 
 #: Structured responses that the model can return (PRD § 23).
@@ -86,6 +87,9 @@ class LLMResponseFormatError(LLMError):
         cost: Decimal | None = None,
         provider: str | None = None,
         model: str | None = None,
+        violation: Violation | None = None,
+        body_meta: dict | None = None,
+        call_context: CallContext | None = None,
     ) -> None:
         super().__init__(message)
         self.truncated = truncated
@@ -94,6 +98,10 @@ class LLMResponseFormatError(LLMError):
         self.cost = cost
         self.provider = provider
         self.model = model
+        self.violation = violation
+        self.body_meta = body_meta
+        self.call_context = call_context
+        self.call_id = None
 
 
 class LLMResponseKind(StrEnum):
@@ -120,6 +128,10 @@ class LLMRequest[PayloadT: LLMPayload]:
     task_id: str | None = None
     attempt: int = 1
     contract_version: int = 1
+    call_context: CallContext | None = None
+    scope_id: str | None = None
+    ordered_block_ids: tuple[str, ...] = ()
+    run_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.instructions.strip():
@@ -141,10 +153,14 @@ class LLMRequest[PayloadT: LLMPayload]:
         book_id: str,
         stage: LLMCallStage,
         task_id: str | None = None,
+        scope_id: str | None = None,
+        ordered_block_ids: tuple[str, ...] = (),
+        run_id: str | None = None,
     ) -> LLMRequest[PayloadT]:
         """Returns the same request with metadata for the call log."""
         return replace(
-            self, book_id=book_id, stage=stage, task_id=task_id, attempt=1
+            self, book_id=book_id, stage=stage, task_id=task_id, attempt=1,
+            scope_id=scope_id, ordered_block_ids=ordered_block_ids, run_id=run_id
         )
 
     @classmethod
@@ -189,6 +205,8 @@ class LLMResponse[PayloadT: LLMPayload]:
     call_id: str | None = None
     raw_content: str | None = field(default=None, repr=False)
     cost: Decimal | None = None
+    call_context: CallContext | None = None
+    body_meta: dict | None = None
 
 
 class LLMClient(Protocol):

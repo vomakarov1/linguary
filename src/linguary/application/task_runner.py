@@ -20,6 +20,8 @@ come from `linguary.application.retry_policy`, while app composition can substit
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Protocol
 
@@ -82,8 +84,10 @@ class TaskRunner:
         queue: TaskQueue,
         handlers: Mapping[TaskType, TaskHandler],
         classify_error: TaskErrorClassifier | None = None,
+        maintenance: Callable[[], None] | None = None,
     ) -> None:
         self._queue = queue
+        self._maintenance = maintenance
         self._handlers = dict(handlers)
         self._classify_error = classify_error or classify_task_error
 
@@ -107,6 +111,8 @@ class TaskRunner:
         interrupted on next application start — accurately reflecting that no final
         result occurred.
         """
+        if self._maintenance is not None:
+            await asyncio.to_thread(self._maintenance)
         task = await self._queue.claim_next_pending()
         if task is None:
             return None

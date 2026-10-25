@@ -37,6 +37,7 @@ from linguary.application.ports.llm import (
     LLMTransportError,
 )
 from linguary.domain import TokenUsage
+from linguary.application.diagnostics import bounded_body
 
 #: Path for chat completion endpoint in compatible API.
 _COMPLETIONS_PATH = "chat/completions"
@@ -96,26 +97,28 @@ class OpenAICompatibleLLMClient(LLMClient):
         model = safe_detail(
             _model(document, fallback=self._settings.model), api_key=self._settings.api_key, secrets=self._proxy_secrets
         )
+        content = None
+        truncated = False
         try:
             choice = _choice(document)
             truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
             content = _content(choice)
             payload = parse_payload(request.kind, content, contract_version=request.contract_version, truncated=truncated)
         except LLMResponseFormatError as error:
-            error.args = (safe_detail(str(error), api_key=self._settings.api_key, secrets=self._proxy_secrets),)
-            if error.raw_content is not None:
-                error.raw_content = safe_detail(
-                    error.raw_content, api_key=self._settings.api_key, secrets=self._proxy_secrets
-                )
-            error.usage = usage
-            error.cost = cost
-            error.provider = self._settings.provider
-            error.model = model
-            if error.__cause__ is not None and self._safe(str(error.__cause__)) != str(error.__cause__):
-                error.__cause__ = None
-                error.__context__ = None
-                error.__suppress_context__ = True
-            raise
+            safe_content, body_meta = bounded_body(content,
+                secrets=(*self._proxy_secrets, self._settings.api_key))
+            error.raw_content = safe_content
+            error.body_meta = body_meta
+            error.args = (self._safe(str(error))[:300],)
+            error.usage, error.cost = usage, cost
+            error.provider, error.model = self._settings.provider, model
+            error.call_context = request.call_context
+            error.__cause__ = None
+            error.__context__ = None
+            error.__suppress_context__ = True
+            raise error from None
+        safe_content, body_meta = bounded_body(content,
+            secrets=(*self._proxy_secrets, self._settings.api_key))
         return LLMResponse(
             payload=payload,  # type: ignore[arg-type]  # schema selected by request.kind
             provider=self._settings.provider,
@@ -123,7 +126,9 @@ class OpenAICompatibleLLMClient(LLMClient):
             truncated=truncated,
             usage=usage,
             cost=cost,
-            raw_content=safe_detail(content, api_key=self._settings.api_key, secrets=self._proxy_secrets),
+            raw_content=safe_content,
+            body_meta=body_meta,
+            call_context=request.call_context,
         )
 
     def _safe(self, text: str) -> str:
@@ -269,12 +274,12 @@ def _document(response: httpx.Response, *, api_key: str | None, secrets: tuple[s
     except ValueError as error:
         raise LLMResponseFormatError(
             "ответ провайдера не является JSON",
-            raw_content=safe_detail(response.text, api_key=api_key, secrets=secrets),
+            raw_content=None,
         ) from None
     if not isinstance(document, dict):
         raise LLMResponseFormatError(
             "ответ провайдера не похож на ответ генерации",
-            raw_content=safe_detail(response.text, api_key=api_key, secrets=secrets),
+            raw_content=None,
         )
     return document
 

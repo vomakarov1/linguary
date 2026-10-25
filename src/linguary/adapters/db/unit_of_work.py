@@ -51,6 +51,8 @@ class SqlAlchemyUnitOfWork:
 
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
+        self.diagnostics_policy = None
+        self.diagnostics_clock = None
         self._current: ContextVar[Session | None] = ContextVar(
             f"linguary_unit_of_work_{next(_INSTANCES)}", default=None
         )
@@ -132,7 +134,7 @@ class SqlAlchemyUnitOfWork:
     @property
     def llm_calls(self) -> SqlAlchemyLLMCallLogRepository:
         """LLM call log repository."""
-        return SqlAlchemyLLMCallLogRepository(self._active_session())
+        return SqlAlchemyLLMCallLogRepository(self._active_session(), policy=self.diagnostics_policy, clock=self.diagnostics_clock)
 
     @property
     def work(self) -> SqlAlchemyWorkRepository:

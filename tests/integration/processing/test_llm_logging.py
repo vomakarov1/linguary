@@ -113,7 +113,7 @@ async def test_format_error_text_stored_only_with_debug(
             (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
             stored = transaction.llm_calls.response_text_for(entry.id)
         assert raw not in (entry.error.message if entry.error else "")
-        assert stored == (raw if debug else None)
+        assert stored == raw
     finally:
         built.dispose()
 
@@ -148,7 +148,7 @@ async def test_success_response_carries_call_id_and_debug_content(
         ).with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT)
         response = await logger.generate(request)
         assert response.call_id is not None
-        assert response.raw_content == (raw if debug else None)
+        assert response.raw_content == raw
         with built.unit_of_work.transaction() as transaction:
             assert transaction.llm_calls.response_text_for(response.call_id) == (
                 raw if debug else None
@@ -380,7 +380,7 @@ async def test_schema_error_log_keeps_usage_and_provider_cost(application: Appli
     assert entry.provider == error.provider == "http-provider"
     assert entry.model == error.model == "gateway/actual-model"
     assert "value_error" in str(error)
-    assert stored is None
+    assert stored == error.raw_content
 
 
 async def test_invalid_json_error_log_keeps_usage_and_cost(application: Application) -> None:
@@ -391,7 +391,7 @@ async def test_invalid_json_error_log_keeps_usage_and_cost(application: Applicat
     assert entry.usage == error.usage == TokenUsage(24480, 1122)
     assert entry.cost == error.cost == Decimal("0.09027")
     assert "json_invalid" in str(error)
-    assert stored is None
+    assert stored == error.raw_content
 
 
 @pytest.mark.parametrize("provider_cost", [0.001, 0])
@@ -464,7 +464,7 @@ async def test_format_error_log_payload_and_message_obey_debug_setting(
     assert entry.usage == TokenUsage(24480, 1122)
     assert entry.cost == Decimal("0.09027")
     assert error.raw_content == raw
-    assert stored == (raw if debug else None)
+    assert stored == raw
 
 
 async def test_format_error_log_uses_configured_metadata_for_unreadable_http_document(
@@ -584,7 +584,7 @@ async def test_observer_links_success_and_format_error_call_ids(application):
     response = await logger.generate(request)
     with application.unit_of_work.transaction() as transaction:
         logs = transaction.llm_calls.list_for_book(BOOK_ID)
-        assert all(transaction.llm_calls.response_text_for(entry.id) is None for entry in logs)
+        assert tuple(transaction.llm_calls.response_text_for(entry.id) for entry in logs) == ('{', None)
     assert [event[0].id for event in events] == [entry.id for entry in logs]
     assert events[1][0].id == response.call_id
     assert isinstance(events[0][2], LLMResponseFormatError)
@@ -634,7 +634,7 @@ async def test_debug_false_never_persists_success_raw(tmp_path):
         logger = LoggingLLMClient(inner=inner, unit_of_work=built.unit_of_work, provider='fake', model='fake', on_logged=lambda *event: events.append(event))
         response = await logger.generate(request)
         assert events[0][2].raw_content == 'private accepted answer'
-        assert response.raw_content is None
+        assert response.raw_content == 'private accepted answer'
         with built.unit_of_work.transaction() as transaction:
             assert transaction.llm_calls.response_text_for(response.call_id) is None
     finally:

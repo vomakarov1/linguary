@@ -52,7 +52,7 @@ from linguary.application.context_builder import (
 from linguary.application.errors import ApplicationError
 from linguary.application.glossary_review import candidates_with_decisions
 from linguary.application.llm_dto import ChapterAnalysisResponse
-from linguary.application.llm_rejections import record_rejection
+from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import LLMClient, LLMRequest
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
@@ -191,6 +191,8 @@ class AnalyzeChapter:
                 book_id=command.book_id,
                 stage=LLMCallStage.CHAPTER_ANALYSIS,
                 task_id=command.task_id,
+                scope_id=section.id,
+                ordered_block_ids=tuple(block.id for block in blocks),
             ),
         )
         payload, attempts, usage = await self._request_analysis(context, blocks=blocks)
@@ -256,6 +258,8 @@ class AnalyzeChapter:
                     book_id=command.book_id,
                     stage=LLMCallStage.CHAPTER_ANALYSIS,
                     task_id=command.task_id,
+                    scope_id=section.id,
+                    ordered_block_ids=tuple(block.id for block in fragment.blocks),
                 ),
             )
             payload, fragment_attempts, usage = await self._request_analysis(context, blocks=fragment.blocks)
@@ -421,6 +425,15 @@ class AnalyzeChapter:
         )
 
     def _save(self, book_id: str, analysis: ChapterAnalysis, *, task_id=None) -> None:
+        from linguary.application.book_conditions import ConditionsError
+        try:
+            self._save_current(book_id, analysis, task_id=task_id)
+        except ConditionsError:
+            for response in getattr(self._llm_client, 'responses', ()):
+                finalize_response(self._unit_of_work, response, 'stale')
+            raise
+
+    def _save_current(self, book_id: str, analysis: ChapterAnalysis, *, task_id=None) -> None:
         """Saves chapter analysis in a single short transaction."""
         with self._unit_of_work.transaction() as transaction:
             conditions_id = getattr(self._llm_client, 'conditions_id', None)
@@ -436,6 +449,10 @@ class AnalyzeChapter:
                 attempts = self._llm_client.attempts
                 attempt_id = attempts[-1] if attempts else None
                 BookConditionsService.archive_analysis(transaction, book_id, analysis, conditions_id, attempt_id)
+                for response in getattr(self._llm_client, 'responses', ()):
+                    current_attempt = transaction.work.get_attempt(response.call_context.attempt_id)
+                    if current_attempt.state == 'validated':
+                        finalize_response(self._unit_of_work, response, 'accepted', transaction=transaction)
                 for accepted in attempts:
                     current = transaction.work.get_attempt(accepted)
                     if current.state == 'validated':

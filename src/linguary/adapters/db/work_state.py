@@ -304,3 +304,30 @@ class SqlAlchemyWorkRepository:
             row.response_text = None
         self._session.flush()
         return len(rows)
+
+    def replace_result_binding(self, entity_id, *, book_id, conditions_id, attempt_id,
+                               artifact_revision_id, expected_attempt_id):
+        """Move a current projection pointer while preserving immutable archived versions."""
+        conditions = self.latest_conditions(book_id)
+        if conditions is None or conditions.id != conditions_id:
+            raise WorkStateError('версия результата больше не активна')
+        attempt = self._owned(LLMAttemptRow, attempt_id, book_id)
+        artifact = self._owned(ArtifactRevisionRow, artifact_revision_id, book_id)
+        if attempt.conditions_id != conditions_id or artifact.conditions_id != conditions_id or artifact.attempt_id != attempt_id:
+            raise WorkStateError('происхождение новой версии не совпадает')
+        current = self._session.get(WorkBindingRow, ('result', entity_id))
+        if current is None:
+            if expected_attempt_id is not None:
+                raise WorkStateError('указатель результата изменился')
+            self.bind('result', entity_id, book_id=book_id, conditions_id=conditions_id,
+                      attempt_id=attempt_id, artifact_revision_id=artifact_revision_id)
+            return
+        if current.artifact_revision_id is None or self._session.get(ArtifactRevisionRow, current.artifact_revision_id) is None:
+            raise WorkStateError('предыдущая версия результата не заархивирована')
+        changed = self._session.execute(update(WorkBindingRow).where(
+            WorkBindingRow.entity_kind == 'result', WorkBindingRow.entity_id == entity_id,
+            WorkBindingRow.book_id == book_id, WorkBindingRow.conditions_id == conditions_id,
+            WorkBindingRow.attempt_id.is_(None) if expected_attempt_id is None else WorkBindingRow.attempt_id == expected_attempt_id,
+        ).values(attempt_id=attempt_id, artifact_revision_id=artifact_revision_id))
+        if changed.rowcount != 1:
+            raise WorkStateError('указатель результата изменился')

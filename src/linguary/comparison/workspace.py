@@ -849,7 +849,7 @@ def prepare_workspace(root, protected_roots, protocol) -> ComparisonWorkspace:
         raise WorkspaceError('Не удалось подготовить изолированный каталог') from None
 
 
-def _validate_analysis(db):
+def _validate_analysis(db, *, allow_rejected_diagnostics=False):
     if not db.execute('SELECT 1 FROM chapter_analyses LIMIT 1').fetchone():
         raise WorkspaceError('Нет завершённого анализа для заморозки')
     for table in ('processing_runs', 'block_results', 'language_notes'):
@@ -861,8 +861,16 @@ def _validate_analysis(db):
         raise WorkspaceError('Анализ не завершён')
     if db.execute('SELECT 1 FROM system_settings LIMIT 1').fetchone():
         raise WorkspaceError('Сохранённые настройки запрещены в снимке')
-    if db.execute('SELECT 1 FROM llm_call_logs WHERE response_text IS NOT NULL LIMIT 1').fetchone():
-        raise WorkspaceError('Сырые ответы не входят в снимок анализа')
+    for raw_metadata, in db.execute('SELECT diagnostic_meta_json FROM llm_call_logs WHERE response_text IS NOT NULL'):
+        try:
+            metadata = json.loads(raw_metadata) if raw_metadata is not None else None
+        except (TypeError, ValueError):
+            metadata = None
+        if (not allow_rejected_diagnostics or not isinstance(metadata, dict)
+                or metadata.get('schema_version') != 1 or metadata.get('decision') != 'rejected'
+                or not isinstance(metadata.get('body_meta'), dict)
+                or metadata['body_meta'].get('body_status') != 'available'):
+            raise WorkspaceError('Сырые ответы не входят в снимок анализа')
 
 
 def _hashes(root):
@@ -902,9 +910,17 @@ def freeze_analysis(workspace) -> AnalysisArtifact:
             data = destination / 'data'
             data.mkdir()
             with closing(sqlite3.connect(f'file:{workspace.database_path}?mode=ro', uri=True)) as source:
-                _validate_analysis(source)
+                _validate_analysis(source, allow_rejected_diagnostics=True)
                 with closing(sqlite3.connect(data / 'linguary.db')) as target:
                     source.backup(target)
+                    for call_id, raw_metadata in target.execute('SELECT id, diagnostic_meta_json FROM llm_call_logs WHERE response_text IS NOT NULL').fetchall():
+                        metadata = json.loads(raw_metadata)
+                        metadata['body_meta'].update(body_status='unavailable', stored_bytes=0,
+                                                     reason='excluded_from_analysis_snapshot')
+                        target.execute('UPDATE llm_call_logs SET response_text = NULL, diagnostic_meta_json = ? WHERE id = ?',
+                                       (json.dumps(metadata), call_id))
+                    target.commit()
+                    _validate_analysis(target)
             books = workspace.root / 'data' / 'books'
             if books.exists():
                 if any(p.name == 'export' for p in books.rglob('*')):

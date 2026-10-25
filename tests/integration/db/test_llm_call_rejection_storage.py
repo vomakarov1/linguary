@@ -45,6 +45,8 @@ def test_mark_rejected_keeps_tokens(unit_of_work: SqlAlchemyUnitOfWork) -> None:
 def test_mark_rejected_stores_text_only_when_given(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
+    from persistence_factories import CREATED_AT
+    unit_of_work.diagnostics_clock = lambda: CREATED_AT
     with unit_of_work.transaction() as transaction:
         transaction.books.add(make_book())
         transaction.llm_calls.add(make_llm_call(), response_text="сырой ответ")

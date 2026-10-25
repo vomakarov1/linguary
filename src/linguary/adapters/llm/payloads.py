@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ValidationError
+from linguary.domain.llm_log import Violation
 
 from linguary.adapters.llm.schemas import (
     ChapterAnalysisV2Schema,
@@ -82,16 +83,18 @@ def parse_payload(
             _format_error(kind, error=error, truncated=truncated),
             truncated=truncated,
             raw_content=content,
-        ) from error
+            violation=Violation('provider_truncated' if truncated else ('response_parse' if any(item['type'] == 'json_invalid' for item in error.errors(include_input=False, include_context=False)) else 'response_schema'), kind.value,
+                                safe_message='Ответ не соответствует формату'),
+        ) from None
     try:
         return _to_dto(validated)
     except (LLMPayloadError, DomainError) as error:
         raise LLMResponseFormatError(
-            f"ответ модели ({kind.value}) не соответствует внутреннему контракту: "
-            f"{type(error).__name__}: {error}",
+            f"ответ модели ({kind.value}) не соответствует внутреннему контракту: {type(error).__name__}",
             truncated=truncated,
             raw_content=content,
-        ) from error
+            violation=Violation('response_domain', kind.value, safe_message='Ответ не соответствует внутреннему контракту'),
+        ) from None
 
 
 def _to_dto(validated: BaseModel) -> LLMPayload:
@@ -189,7 +192,7 @@ def _format_error(
     corruption, whereas resolution requires a larger token budget rather than identical retries.
     """
     violations = ", ".join(
-        sorted({str(item["type"]) for item in error.errors(include_input=False)})
+        sorted({str(item["type"]) for item in error.errors(include_input=False, include_context=False)})
     )
     reason = "обрыв ответа по лимиту токенов" if truncated else "ответ не оборван"
     return (

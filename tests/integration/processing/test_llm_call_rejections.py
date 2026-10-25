@@ -88,7 +88,7 @@ async def test_rejected_translation_logged_unsuccessful_with_reason(
         assert calls[0].error.type is ErrorType.VALIDATION
         assert scenario.block_ids()[1] in calls[0].error.message
         assert calls[1].success is True
-        assert texts == (("сырой ответ модели", "сырой ответ модели") if debug else (None, None))
+        assert texts == (("сырой ответ модели", "сырой ответ модели") if debug else ("сырой ответ модели", None))
     finally:
         application.dispose()
 
@@ -185,6 +185,6 @@ async def test_retry_instruction_uses_alias_and_keeps_rejection_log(
         assert calls[0].error.type is ErrorType.VALIDATION
         assert scenario.block_ids()[0] in calls[0].error.message
         assert calls[1].success is True
-        assert texts == (("сырой ответ модели", "сырой ответ модели") if debug else (None, None))
+        assert texts == (("сырой ответ модели", "сырой ответ модели") if debug else ("сырой ответ модели", None))
     finally:
         application.dispose()

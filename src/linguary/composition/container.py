@@ -37,6 +37,7 @@ from linguary.adapters.config.settings import SettingsError
 from linguary.adapters.config.system_settings import overlay_settings
 from linguary.adapters.db.system_settings import SystemSettingsStore
 from linguary.adapters.llm.rate_limit import LLMRateLimiter
+from linguary.application.diagnostics import Diagnostics, diagnostics_for
 from linguary.application.book_conditions import BookConditionsService
 from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
@@ -120,6 +121,7 @@ class Application:
     runtime_settings: RuntimeSettings
     book_conditions: BookConditionsService
     book_runtime: BookRuntimeResolver
+    diagnostics: Diagnostics
     system_settings: SystemSettingsService
     settings_store: SystemSettingsStore
     rate_limiter: LLMRateLimiter
@@ -344,6 +346,8 @@ def build_application(
         lambda: runtime_settings.revision,
         lambda path: sha256(Path(path).read_bytes()).hexdigest())
     book_runtime = BookRuntimeResolver(book_conditions, runtime_settings, generation_factory)
+    diagnostics = diagnostics_for(unit_of_work)
+    diagnostics.ensure_available()
     epubcheck = epubcheck or EpubCheckValidator(settings=EpubCheckSettings())
 
     import_book = ImportBook(
@@ -361,6 +365,7 @@ def build_application(
     regeneration = RuntimeSequence(runtime_settings, "regeneration", book_runtime=book_runtime)
     runner = TaskRunner(
         queue=task_queue,
+        maintenance=diagnostics.ensure_available,
         handlers=_handlers(
             unit_of_work=unit_of_work,
             paths=paths,
@@ -383,6 +388,7 @@ def build_application(
         runtime_settings=runtime_settings,
         book_conditions=book_conditions,
         book_runtime=book_runtime,
+        diagnostics=diagnostics,
         system_settings=system_settings,
         settings_store=settings_store,
         rate_limiter=rate_limiter,

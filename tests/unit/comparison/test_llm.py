@@ -354,7 +354,7 @@ def test_invalid_and_truncated_first_response_count(truncated):
     assert ledger.first_responses == 1
 
 
-async def test_receipt_survives_log_repository_failure(tmp_path):
+async def test_metadata_failure_prevents_request_and_receipt(tmp_path):
     from contextlib import contextmanager
     import httpx
     from linguary.adapters.config import LLMSettings
@@ -379,10 +379,8 @@ async def test_receipt_survives_log_repository_failure(tmp_path):
         for _ in range(2):
             with pytest.raises(LLMConfigurationError):
                 await logger.generate(request)
-    receipt, = tmp_path.glob('*.json')
-    assert 'paid-call' in receipt.read_text()
-    assert 'secret prompt' not in receipt.read_text() and 'SECRET' not in receipt.read_text()
-    assert len(calls) == 1 and ledger.observations[0].cost == Decimal('.2')
+    assert list(tmp_path.glob('*.json')) == []
+    assert calls == [] and ledger.observations == []
 
 
 def test_diagnostic_cleanup_survives_restart(tmp_path):

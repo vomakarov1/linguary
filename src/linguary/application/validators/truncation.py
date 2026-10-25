@@ -100,3 +100,31 @@ def _balances(text: str) -> Mapping[str, int]:
 
 
 __all__ = ["truncation_violation"]
+
+
+def truncation_diagnostic(payload, *, unit, truncated):
+    """Structured provenance is formed where the punctuation check observes its block."""
+    from linguary.domain.llm_log import Violation
+    if truncated:
+        return (truncation_violation(payload, unit=unit, truncated=True),
+                Violation('provider_truncated', 'translation_unit', 'unit',
+                          tuple(item.block.id for item in unit.items), ('translated_text',),
+                          'Провайдер сообщил об обрыве ответа'))
+    sources = {item.block.id: item.block.text for item in unit.items}
+    for block in payload.blocks:
+        if block.translated_text is None:
+            continue
+        source = sources[block.source_block_id]
+        text = block.translated_text
+        if _ends_with_punctuation(source) and not _ends_with_punctuation(text):
+            code, safe_message = 'terminal_punctuation', 'Перевод не завершён терминальной пунктуацией'
+        else:
+            unbalanced = _unbalanced(text, source=source)
+            if unbalanced is None:
+                continue
+            code = 'quote_balance' if unbalanced == 'кавычки' else 'bracket_balance'
+            safe_message = 'Нарушена парность кавычек' if code == 'quote_balance' else 'Нарушена парность скобок'
+        return (_text_violation(text, source=source, block_id=block.source_block_id),
+                Violation(code, 'translation_unit', 'local', (block.source_block_id,),
+                          ('translated_text',), safe_message))
+    return None

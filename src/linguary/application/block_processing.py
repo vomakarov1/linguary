@@ -13,12 +13,13 @@ nothing if they diverge.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, asdict
+from contextvars import ContextVar
 
 from linguary.application.context_builder import TranslationContext
 from linguary.application.errors import ApplicationError
 from linguary.application.explained_expressions import ExplainedExpressions
-from linguary.application.llm_rejections import record_rejection
+from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
@@ -78,6 +79,8 @@ class TranslationCall:
         self._retry_policy = retry_policy
         self._validator = validator
         self._sleep = sleep
+        self._validated_response = ContextVar(f"validated_response_{id(self)}", default=None)
+        self._expected_bindings = ContextVar(f"expected_bindings_{id(self)}", default={})
 
     async def request(
         self,
@@ -97,6 +100,14 @@ class TranslationCall:
         result (PRD § 19.3): duplication is not grounds for rejecting the response.
         """
         request = context.request
+        if self._unit_of_work is not None and unit is not None:
+            with self._unit_of_work.transaction() as transaction:
+                run = transaction.runs.active_for_book(context.request.book_id) if context.request.book_id else None
+                self._expected_bindings.set({item.block.id: (
+                    transaction.work.get_binding('result', f'{run.id}:{item.block.id}') if run else None
+                ) for item in unit.items})
+            request = replace(context.request, scope_id=unit.id,
+                ordered_block_ids=tuple(item.block.id for item in unit.items), run_id=None if run is None else run.id)
         explained = ExplainedExpressions(
             context.explained_expressions, explanations=context.explained_entries
         )
@@ -135,6 +146,7 @@ class TranslationCall:
                     await self._sleep(decision.backoff_seconds)
                 request = decision.next_request(request)
                 continue
+            self._validated_response.set(response)
             return TranslationCallResult(
                 results=results,
                 attempts=attempts,
@@ -149,12 +161,45 @@ class TranslationCall:
         Returns `False` if there is no active run to write to, or if the run ID does not
         match. This discards stale results of calls started before returning to glossary review.
         """
+        response = self._validated_response.get()
+        context = None if response is None else response.call_context
+        saved = False
         with self._unit_of_work.transaction() as transaction:
             run = transaction.runs.active_for_book(book_id)
-            if run is None or run.id != run_id:
-                return False
-            transaction.results.replace_results(run_id, results)
-        return True
+            conditions = transaction.work.latest_conditions(book_id) if context else None
+            pointers_match = True
+            if context is not None:
+                for result in results:
+                    previous = self._expected_bindings.get().get(result.block_id)
+                    current = transaction.work.get_binding('result', f'{run_id}:{result.block_id}')
+                    if (None if previous is None else previous['attempt_id']) != (None if current is None else current['attempt_id']):
+                        pointers_match = False
+            if run is not None and run.id == run_id and pointers_match and (context is None or (conditions is not None and conditions.id == context.conditions_id)):
+                if context is not None:
+                    for result in results:
+                        previous_result = transaction.results.get(run_id, result.block_id)
+                        previous_binding = self._expected_bindings.get().get(result.block_id)
+                        if previous_result is not None and previous_binding is None:
+                            transaction.work.archive_artifacts([dict(book_id=book_id, run_id=run_id,
+                                kind='block_result', scope_id=result.block_id,
+                                body={'schema_version': 1, 'result': asdict(previous_result)})])
+                transaction.results.replace_results(run_id, results)
+                finalize_response(self._unit_of_work, response, 'accepted', transaction=transaction)
+                if context is not None:
+                    for result in results:
+                        artifact_id, = transaction.work.archive_artifacts([dict(book_id=book_id,
+                            conditions_id=context.conditions_id, attempt_id=context.attempt_id, run_id=run_id,
+                            kind='block_result', scope_id=result.block_id,
+                            body={'schema_version': 1, 'result': asdict(result)})])
+                        previous_binding = self._expected_bindings.get().get(result.block_id)
+                        transaction.work.replace_result_binding(f'{run_id}:{result.block_id}', book_id=book_id,
+                            conditions_id=context.conditions_id, attempt_id=context.attempt_id,
+                            artifact_revision_id=artifact_id,
+                            expected_attempt_id=None if previous_binding is None else previous_binding['attempt_id'])
+                saved = True
+        if not saved:
+            finalize_response(self._unit_of_work, response, 'stale')
+        return saved
 
 
 def note_id_factory(*, chapter_number: int, used: Collection[str]) -> Callable[[], str]:

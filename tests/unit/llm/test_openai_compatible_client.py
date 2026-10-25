@@ -102,8 +102,9 @@ async def test_schema_error_preserves_usage_and_provider_cost(model: str | None)
     assert error.model == (model or settings().model)
     assert error.truncated is False
     assert error.raw_content == content
-    assert isinstance(error.__cause__, ValidationError)
-    assert error.__cause__.errors(include_input=False)[0]["type"] == "value_error"
+    assert error.__cause__ is None
+    assert error.violation.rule_code == "response_schema"
+    assert "value_error" in str(error)
     assert "не соответствует схеме" in str(error)
     for private in (content, "b1", "TRANSLATE", API_KEY):
         assert private not in str(error)
@@ -118,8 +119,9 @@ async def test_invalid_json_error_preserves_usage_and_provider_cost() -> None:
     assert error.usage == TokenUsage(24480, 1122)
     assert error.cost == Decimal("0.09027")
     assert error.raw_content == content
-    assert isinstance(error.__cause__, ValidationError)
-    assert error.__cause__.errors(include_input=False)[0]["type"] == "json_invalid"
+    assert error.__cause__ is None
+    assert error.violation.rule_code == "response_parse"
+    assert "json_invalid" in str(error)
     assert "secret book text" not in str(error)
 
 
@@ -135,7 +137,7 @@ async def test_truncated_format_error_preserves_usage_cost_and_flag() -> None:
     assert error.cost == Decimal("0.09027")
     assert error.truncated is True
     assert error.raw_content == content
-    assert isinstance(error.__cause__, ValidationError)
+    assert error.__cause__ is None
     assert "обрыв ответа по лимиту токенов" in str(error)
     assert "secret book text" not in str(error)
 
@@ -543,7 +545,7 @@ async def test_format_error_diagnostic_redacts_key(outer: bool) -> None:
         await client.generate(LLMRequest.for_translation(instructions="Переводи", input_text="text"))
     error = caught.value
     assert (API_KEY not in str(error)) is True
-    assert error.raw_content == content.replace(API_KEY, "[REDACTED]")
+    assert error.raw_content == (None if outer else content.replace(API_KEY, "[REDACTED]"))
     if not outer:
         assert error.model == "gateway/[REDACTED]"
         assert error.usage == TokenUsage(12, 3)

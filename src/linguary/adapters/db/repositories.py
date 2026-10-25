@@ -509,8 +509,9 @@ class SqlAlchemyTaskRepository:
 class SqlAlchemyLLMCallLogRepository:
     """Technical log of LLM calls."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, policy=None, clock=None) -> None:
         self._session = session
+        self.policy, self.clock = policy, clock
 
     def add(self, entry: LLMCallLog, *, response_text: str | None = None) -> None:
         """Add a log entry."""
@@ -536,7 +537,11 @@ class SqlAlchemyLLMCallLogRepository:
     def response_text_for(self, call_id: str) -> str | None:
         """Retrieve stored response text if it was recorded."""
         row = self._session.get(LLMCallLogRow, call_id)
-        return None if row is None else row.response_text
+        if row is None:
+            return None
+        from linguary.application.diagnostics import DiagnosticsPolicy
+        self.enforce_diagnostics_policy(self.policy or DiagnosticsPolicy(), self._now(), book_id=row.book_id)
+        return row.response_text
 
     def list_for_book(self, book_id: str) -> tuple[LLMCallLog, ...]:
         """List log entries for a book in invocation order."""
@@ -546,6 +551,105 @@ class SqlAlchemyLLMCallLogRepository:
             .order_by(LLMCallLogRow.started_at, LLMCallLogRow.id)
         ).all()
         return tuple(mapping.to_llm_call(row) for row in rows)
+
+
+    def diagnostic_record(self, *, call_id=None, attempt_id=None):
+        query = select(LLMCallLogRow)
+        if attempt_id is not None:
+            query = query.where(LLMCallLogRow.attempt_id == attempt_id)
+        elif call_id is not None:
+            query = query.where(LLMCallLogRow.id == call_id)
+        else:
+            return None
+        row = self._session.scalar(query)
+        if row is None:
+            return None
+        return {'call_id': row.id, 'attempt_id': row.attempt_id, 'book_id': row.book_id,
+                'started_at': row.started_at, 'metadata': row.diagnostic_meta_json, 'body': row.response_text}
+
+    def update_diagnostics(self, call_id, *, metadata):
+        row = self._session.get(LLMCallLogRow, call_id)
+        if row is None:
+            raise PersistenceError('метаданные вызова отсутствуют')
+        from copy import deepcopy
+        from linguary.domain import ErrorType
+        row.diagnostic_meta_json = deepcopy(metadata)
+        decision = metadata.get('decision')
+        if decision == 'accepted':
+            row.success = True
+            row.error_type = row.error_message = row.error_detail = None
+        elif decision in {'rejected', 'stale'}:
+            row.success = False
+            row.error_type = row.error_type or ErrorType.VALIDATION.value
+            row.error_message = row.error_message or ('Ответ устарел' if decision == 'stale' else 'Ответ не прошёл проверку')
+        self._session.flush()
+
+    def store_diagnostic_body(self, call_id, body):
+        with self._session.begin_nested():
+            row = self._session.get(LLMCallLogRow, call_id)
+            if row is None:
+                raise PersistenceError('метаданные вызова отсутствуют')
+            row.response_text = body
+            self._session.flush()
+
+    def purge_diagnostic_bodies(self, book_id, *, call_id=None):
+        query = select(LLMCallLogRow).where(LLMCallLogRow.book_id == book_id, LLMCallLogRow.response_text.is_not(None))
+        if call_id is not None:
+            query = query.where(LLMCallLogRow.id == call_id)
+        rows = self._session.scalars(query).all()
+        for row in rows:
+            self._remove_body(row, 'deleted')
+        self._session.flush()
+        return len(rows)
+
+    def _remove_body(self, row, status):
+        metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+        body_meta = dict(metadata.get('body_meta') or {})
+        body_meta.update(body_status=status, stored_bytes=0)
+        metadata['body_meta'] = body_meta
+        row.diagnostic_meta_json = metadata
+        row.response_text = None
+
+    def enforce_diagnostics_policy(self, policy, now, *, book_id=None):
+        from datetime import timedelta
+        from linguary.application.diagnostics import bounded_body
+        query = select(LLMCallLogRow).where(LLMCallLogRow.response_text.is_not(None))
+        if book_id is not None:
+            query = query.where(LLMCallLogRow.book_id == book_id)
+        rows = self._session.scalars(query.order_by(LLMCallLogRow.started_at, LLMCallLogRow.id)).all()
+        by_book = {}
+        for row in rows:
+            status = ((row.diagnostic_meta_json or {}).get('body_meta') or {}).get('body_status')
+            if status in {'unavailable', 'expired', 'deleted', 'disabled'}:
+                self._remove_body(row, status)
+                continue
+            if not policy.bodies_enabled:
+                self._remove_body(row, 'disabled')
+                continue
+            expires = row.started_at + timedelta(seconds=policy.retention_seconds)
+            if now >= expires:
+                self._remove_body(row, 'expired')
+                continue
+            body, body_meta = bounded_body(row.response_text, max_bytes=policy.max_body_bytes)
+            metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+            previous = dict(metadata.get('body_meta') or {})
+            metadata['body_meta'] = {**body_meta, **previous, 'body_status': 'available',
+                'stored_bytes': len(body.encode('utf-8')), 'expires_at': expires.isoformat()}
+            metadata['body_meta']['truncated'] = previous.get('truncated', False) or body_meta['truncated']
+            metadata['body_meta']['redacted'] = previous.get('redacted', False) or body_meta['redacted']
+            row.response_text, row.diagnostic_meta_json = body, metadata
+            by_book.setdefault(row.book_id, []).append(row)
+        for items in by_book.values():
+            total = sum(len(row.response_text.encode('utf-8')) for row in items)
+            for row in items:
+                if total <= policy.max_book_bytes:
+                    break
+                total -= len(row.response_text.encode('utf-8'))
+                self._remove_body(row, 'deleted')
+        self._session.flush()
+
+    def _now(self):
+        return self.clock() if self.clock is not None else datetime.now(UTC)
 
 
 def _by_block[RowT: (LanguageNoteRow, ResultWarningRow)](

@@ -607,6 +607,8 @@ def to_llm_call_row(entry: LLMCallLog) -> LLMCallLogRow:
         prompt_tokens=None if usage is None else usage.prompt_tokens,
         completion_tokens=None if usage is None else usage.completion_tokens,
         cost=entry.cost,
+        attempt_id=entry.attempt_id,
+        diagnostic_meta_json=entry.diagnostic_meta,
     )
 
 
@@ -633,6 +635,8 @@ def to_llm_call(row: LLMCallLogRow) -> LLMCallLog:
             else None
         ),
         cost=row.cost,
+        attempt_id=row.attempt_id,
+        diagnostic_meta=row.diagnostic_meta_json,
     )
 
 

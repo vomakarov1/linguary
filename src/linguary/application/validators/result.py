@@ -41,7 +41,7 @@ from linguary.application.validators.treatment import (
     content_violation,
     treatment_violation,
 )
-from linguary.application.validators.truncation import truncation_violation
+from linguary.application.validators.truncation import truncation_violation, truncation_diagnostic
 from linguary.domain import (
     BlockProcessingResult,
     DomainError,
@@ -113,9 +113,10 @@ class TranslationResultValidator:
                 for block in payload.blocks
             ),
         )
-        self._ensure(
-            truncation_violation(normalized_payload, unit=unit, truncated=truncated), expected
-        )
+        truncation = truncation_diagnostic(normalized_payload, unit=unit, truncated=truncated)
+        if truncation is not None:
+            message, violation = truncation
+            raise ResultValidationError(message, expectation=expected, violation=violation)
         self._ensure(
             language_violation(
                 payload,

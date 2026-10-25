@@ -132,3 +132,34 @@ def test_two_processing_forks_after_gc_keep_frozen_hash(tmp_path):
     assert file_hash(artifact.root / 'data' / 'linguary.db') == digest
     right = fork_processing(artifact, 'right')
     assert right.analysis_hash == left.analysis_hash
+
+
+def test_snapshot_excludes_rejected_diagnostics_without_changing_source(tmp_path):
+    import json
+    workspace = prepared(tmp_path)
+    metadata = {'schema_version': 1, 'decision': 'rejected',
+                'body_meta': {'body_status': 'available', 'stored_bytes': 18}}
+    attempt_id = '12345678-1234-5678-1234-567812345678'
+    with sqlite3.connect(workspace.database_path) as db:
+        db.execute("INSERT INTO llm_attempts(id,book_id,generation,ordinal,state,context_json,outcome_json) VALUES (?,'book',0,1,'rejected','{\"schema_version\":1}','{\"schema_version\":1}')", (attempt_id,))
+        db.execute("INSERT INTO llm_call_logs(id,book_id,stage,provider,model,started_at,duration_ms,attempt,success,error_type,error_message,response_text,prompt_tokens,completion_tokens,cost,attempt_id,diagnostic_meta_json) VALUES ('call','book','chapter_analysis','fake','actual','2026-10-25',1,1,0,'ModelOutputError','Schema mismatch','private diagnostic',10,20,'0.007',?,?)", (attempt_id, json.dumps(metadata)))
+    before = file_hash(workspace.database_path)
+    artifact = freeze_analysis(workspace)
+    assert file_hash(workspace.database_path) == before
+    with sqlite3.connect(workspace.database_path) as source:
+        assert source.execute("SELECT response_text FROM llm_call_logs").fetchone()[0] == 'private diagnostic'
+    with sqlite3.connect(artifact.root / 'data' / 'linguary.db') as target:
+        body, raw, usage, cost, actual_attempt = target.execute('SELECT response_text,diagnostic_meta_json,prompt_tokens,cost,attempt_id FROM llm_call_logs').fetchone()
+        assert body is None
+        assert json.loads(raw)['body_meta']['body_status'] == 'unavailable'
+        assert json.loads(raw)['body_meta']['reason'] == 'excluded_from_analysis_snapshot'
+        assert usage == 10 and cost == '0.007' and actual_attempt == attempt_id
+        assert target.execute('SELECT state FROM llm_attempts').fetchone()[0] == 'rejected'
+
+
+def test_snapshot_still_rejects_unmarked_debug_body(tmp_path):
+    workspace = prepared(tmp_path)
+    with sqlite3.connect(workspace.database_path) as db:
+        db.execute("INSERT INTO llm_call_logs(id,book_id,stage,provider,model,started_at,duration_ms,attempt,success,response_text) VALUES ('call','book','chapter_analysis','fake','actual','2026-10-25',1,1,1,'private debug')")
+    with pytest.raises(WorkspaceError, match='Сырые ответы'):
+        freeze_analysis(workspace)

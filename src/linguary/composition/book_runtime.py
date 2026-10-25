@@ -13,6 +13,8 @@ from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask
 from linguary.domain.book_conditions import thaw
 from linguary.domain.recovery import CallAttempt
+from linguary.domain.llm_log import CallContext
+from linguary.application.diagnostics import diagnostics_for
 
 
 def public_url(value):
@@ -83,37 +85,51 @@ class ProvenanceClient:
     def __init__(self, inner, service, conditions_id):
         self.inner, self.service, self.conditions_id = inner, service, conditions_id
         self._attempts = ContextVar(f'book_attempts_{id(self)}', default=())
+        self._responses = ContextVar(f'book_responses_{id(self)}', default=())
 
     @property
     def attempts(self):
         return self._attempts.get()
 
+    @property
+    def responses(self):
+        return self._responses.get()
+
     def reject_last(self):
         if self.attempts:
             with self.service.uow.transaction() as transaction:
-                transaction.work.transition_attempt(self.attempts[-1], 'rejected', expected_state='validated')
+                if transaction.work.get_attempt(self.attempts[-1]).state == 'validated':
+                    transaction.work.transition_attempt(self.attempts[-1], 'rejected', expected_state='validated')
 
     async def generate(self, request):
         with self.service.uow.transaction() as transaction:
             conditions = self.service.require(request.book_id, transaction=transaction)
             if conditions.id != self.conditions_id:
                 raise ConditionsError('conditions_revision_conflict')
-            attempt = CallAttempt(str(uuid4()), request.book_id, conditions_id=conditions.id,
-                task_id=request.task_id, state='sent', ordinal=request.attempt,
-                context={'schema_version': 1, 'designated_models': thaw(conditions.payload['models']),
+            context = CallContext(conditions_id=conditions.id, task_id=request.task_id, run_id=request.run_id,
+                stage=request.stage.value, scope_id=request.scope_id or request.stage.value,
+                ordered_block_ids=request.ordered_block_ids, attempt_id=str(uuid4()), generation=0,
+                assigned_model=conditions.payload['models']['analysis' if request.stage.value == 'chapter_analysis' else 'processing'],
+                prompt_hash=sha256(request.instructions.encode()).hexdigest())
+            request = replace(request, call_context=context)
+            attempt = CallAttempt(context.attempt_id, request.book_id, conditions_id=conditions.id,
+                task_id=request.task_id, run_id=request.run_id, state='sent', ordinal=request.attempt,
+                context={**context.to_dict(), 'designated_models': thaw(conditions.payload['models']),
                          'route_id': conditions.payload['route']['route_id']})
             transaction.work.add_attempt(attempt)
         try:
             response = await self.inner.generate(request)
         except BaseException:
             with self.service.uow.transaction() as transaction:
-                transaction.work.transition_attempt(attempt.id, 'unknown', expected_state='sent')
+                if transaction.work.get_attempt(attempt.id).state == 'sent':
+                    transaction.work.transition_attempt(attempt.id, 'unknown', expected_state='sent')
             raise
         with self.service.uow.transaction() as transaction:
             transaction.work.transition_attempt(attempt.id, 'validated', expected_state='sent',
                 outcome={'schema_version': 1, 'provider': response.provider, 'model': response.model,
                          'call_id': response.call_id})
         self._attempts.set((*self.attempts, attempt.id))
+        self._responses.set((*self.responses, response))
         return response
 
 
