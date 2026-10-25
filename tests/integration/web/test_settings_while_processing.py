@@ -10,7 +10,7 @@ from threading import Event
 
 import httpx
 import pytest
-from web_scenario import BOOK_ID, SOURCE_TEXT, TRANSLATED_TEXT, start_run, store_book
+from web_scenario import bound_queue, BOOK_ID, SOURCE_TEXT, TRANSLATED_TEXT, start_run, store_book
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.runtime import ExecutorLock
@@ -120,8 +120,8 @@ def observe_tasks(app, monkeypatch):
 
 
 async def enqueue(app, scenario, index):
-    return await app.task_queue.enqueue(TaskIdentity(
-        book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+    return await bound_queue(app, scenario.book_id).enqueue(TaskIdentity(
+        book_id=scenario.book_id, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
         scope_id=scenario.section(index).id,
     ))
 
@@ -151,14 +151,16 @@ async def test_owned_generations_use_new_url_model_key_and_close_after_release(
         await wait(provider.entered[0])
         saved = await web.post("/system/config", json=payload())
         assert saved.status_code == 200
-        assert len(provider.handles) == 2
-        assert not provider.handles[0].is_closed
-        new = await enqueue(app, scenario, 1)
+        assert len(provider.handles) == 3
+        assert not provider.handles[1].is_closed
+        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),) * 2)
+        start_run(app, new_scenario)
+        new = await enqueue(app, new_scenario, 1)
         provider.release[0].set()
         await wait(completed[old.id])
         await wait(completed[new.id])
-        await wait(provider.closed[0])
-        assert not provider.handles[1].is_closed
+        await wait(provider.closed[1])
+        assert not provider.handles[2].is_closed
         assert [call[:2] for call in provider.calls] == [
             ("https://old-provider.test/v1/chat/completions", "old-model"),
             ("https://old-provider.test/v1/chat/completions", "old-model"),
@@ -167,7 +169,7 @@ async def test_owned_generations_use_new_url_model_key_and_close_after_release(
         ]
         assert all(task.status is TaskStatus.SUCCEEDED for task in outcomes.values())
         with app.unit_of_work.transaction() as uow:
-            logs = uow.llm_calls.list_for_book(BOOK_ID)
+            logs = (*uow.llm_calls.list_for_book(BOOK_ID), *uow.llm_calls.list_for_book('new-book'))
         assert [log.model for log in logs] == ["old-model", "old-model", "new-model", "new-model"]
         assert all(str(log.cost) == "0.007" for log in logs)
     assert all(handle.is_closed for handle in provider.handles)
@@ -182,10 +184,12 @@ async def test_save_during_active_task_preserves_old_and_new_models(tmp_path, mo
         old = await enqueue(app, scenario, 0)
         await wait(provider.entered[0])
         assert (await web.post("/system/config", json=payload(concurrency=2))).status_code == 200
-        new = await enqueue(app, scenario, 1)
+        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),) * 2)
+        start_run(app, new_scenario)
+        new = await enqueue(app, new_scenario, 1)
         await wait(completed[new.id])
         assert not completed[old.id].is_set()
-        assert not provider.handles[0].is_closed
+        assert not provider.handles[1].is_closed
         provider.release[0].set()
         await wait(completed[old.id])
         assert [call[1] for call in provider.calls] == ["old-model", "new-model"]
@@ -201,14 +205,14 @@ async def test_resize_during_processing_finishes_all_tasks(tmp_path, monkeypatch
     async with working_web(app, provider) as web:
         tasks = [await enqueue(app, scenario, index) for index in range(4)]
         await wait(provider.entered[1])
-        assert (await web.post("/system/config", json=payload())).status_code == 200
+        assert (await web.post("/system/config", json=payload(base_url="https://old-provider.test/v1", api_key="old-generation-secret", ))).status_code == 200
         assert len(provider.calls) == 2
         provider.release[0].set()
         await wait(completed[tasks[0].id])
         assert len(provider.calls) == 2
         provider.release[1].set()
         await wait(provider.entered[2])
-        assert (await web.post("/system/config", json=payload(concurrency=3, expected_revision=1))).status_code == 200
+        assert (await web.post("/system/config", json=payload(base_url="https://old-provider.test/v1", api_key="old-generation-secret", concurrency=3, expected_revision=1))).status_code == 200
         await wait(provider.entered[3])
         provider.release[2].set()
         provider.release[3].set()
@@ -238,7 +242,7 @@ async def test_save_does_not_rerun_recovery_or_drop_executor_lock(tmp_path, monk
         task = await enqueue(app, scenario, 0)
         await wait(provider.entered[0])
         for revision in range(2):
-            assert (await web.post("/system/config", json=payload(expected_revision=revision))).status_code == 200
+            assert (await web.post("/system/config", json=payload(base_url="https://old-provider.test/v1", api_key="old-generation-secret", expected_revision=revision))).status_code == 200
             assert stable == (app.task_queue, app.runner, app.worker_pool, app.rate_limiter)
             other = ExecutorLock(app.paths.executor_lock)
             try:
@@ -280,12 +284,14 @@ async def test_new_generation_shares_rate_limit_with_old(tmp_path, monkeypatch, 
         old = await enqueue(app, scenario, 0)
         await wait(provider.entered[0])
         assert (await web.post("/system/config", json=payload(concurrency=2, requests_per_minute=60))).status_code == 200
-        new = await enqueue(app, scenario, 1)
+        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),) * 2)
+        start_run(app, new_scenario)
+        new = await enqueue(app, new_scenario, 1)
         await wait(waiting)
         assert delays == [1.0]
         app.rate_limiter.hold(3)
         assert len(provider.calls) == 1
-        assert not provider.handles[0].is_closed
+        assert not provider.handles[1].is_closed
         now[0] = 3
         advance.set()
         await wait(completed[new.id])

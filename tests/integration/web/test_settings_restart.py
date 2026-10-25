@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from web_scenario import BOOK_ID, SOURCE_TEXT, TRANSLATED_TEXT, start_run, store_book
+from web_scenario import bound_queue, BOOK_ID, SOURCE_TEXT, TRANSLATED_TEXT, start_run, store_book
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.llm import FakeLLMClient, FakeReply
@@ -148,7 +148,7 @@ async def test_unconfigured_llm_can_be_configured_without_restart(tmp_path, monk
         assert fake.call_count == 0
         scenario = store_book(app, status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,),))
         start_run(app, scenario)
-        task = await app.task_queue.enqueue(TaskIdentity(
+        task = await bound_queue(app).enqueue(TaskIdentity(
             book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
             scope_id=scenario.section().id,
         ))

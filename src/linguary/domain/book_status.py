@@ -41,6 +41,7 @@ class BookEvent(StrEnum):
     EXPORT_SUCCEEDED = "export_succeeded"
     BLOCK_REGENERATION_REQUESTED = "block_regeneration_requested"
     PROCESSING_RESET_CONFIRMED = "processing_reset_confirmed"
+    REANALYSIS_CONFIRMED = "reanalysis_confirmed"
     IMPORT_PERMANENTLY_FAILED = "import_permanently_failed"
 
 
@@ -59,6 +60,9 @@ class BookStatusTransition:
 #: Complete table of allowed book state transitions (ALG-06).
 #: Transitions outside this table are forbidden and rejected with an error.
 BOOK_STATUS_TRANSITIONS: tuple[BookStatusTransition, ...] = (
+    *(BookStatusTransition(BookEvent.REANALYSIS_CONFIRMED, source, BookStatus.IMPORTED)
+      for source in (BookStatus.IMPORTED, BookStatus.ANALYZING, BookStatus.GLOSSARY_REVIEW,
+                     BookStatus.READY_TO_PROCESS, BookStatus.PROCESSING, BookStatus.READY_TO_EXPORT, BookStatus.COMPLETED)),
     BookStatusTransition(BookEvent.FILE_UPLOADED, None, BookStatus.IMPORTING),
     BookStatusTransition(
         BookEvent.IMPORT_SUCCEEDED, BookStatus.IMPORTING, BookStatus.IMPORTED

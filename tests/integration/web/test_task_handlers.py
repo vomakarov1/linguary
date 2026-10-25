@@ -12,7 +12,7 @@ from dataclasses import replace
 
 import pytest
 from conftest import FIXTURE_DIRECTORY
-from web_scenario import store_book
+from web_scenario import store_book, bound_queue
 
 from linguary.composition import Application, drain_tasks
 from linguary.domain import (
@@ -65,11 +65,12 @@ async def test_every_task_type_reaches_its_use_case(
 
 
 async def test_analysis_task_reports_the_missing_chapter(
-    application: Application,
+    configured_application: Application,
 ) -> None:
     """Analysis task reaches chapter use case, which provides the rejection reason."""
+    application = configured_application
     scenario = store_book(application, analysed_chapters=())
-    await application.task_queue.enqueue(
+    await bound_queue(application).enqueue(
         TaskIdentity(
             book_id=scenario.book_id,
             task_type=TaskType.ANALYZE_CHAPTER,

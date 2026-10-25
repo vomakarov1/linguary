@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 from web_scenario import (
+    continue_legacy,
     glossary_candidate,
     start_run,
     store_book,
@@ -293,6 +294,7 @@ def test_processing_start_is_rejected_while_review_is_incomplete(
         chapters=(("Mr. Bennet " * 5,),),
     )
 
+    continue_legacy(configured_application, scenario.book_id)
     response = configured_client.post(f"/books/{scenario.book_id}/process")
 
     assert response.status_code == 409
@@ -316,6 +318,7 @@ def test_processing_start_creates_run_and_chapter_tasks(
     )
     assert accepted.status_code == 200
 
+    continue_legacy(configured_application, scenario.book_id)
     response = configured_client.post(f"/books/{scenario.book_id}/process")
 
     assert response.status_code == 202

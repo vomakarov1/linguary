@@ -271,6 +271,12 @@ class SqlAlchemyChapterAnalysisRepository:
         return mapping.to_analysis(row, plan_items, candidates)
 
 
+    def delete_for_book(self, book_id: str) -> None:
+        """Remove current analysis projections, preserving work archives."""
+        self._session.execute(delete(ChapterAnalysisRow).where(ChapterAnalysisRow.book_id == book_id))
+        self._session.flush()
+
+
 class SqlAlchemyProcessingRunRepository:
     """Book processing runs."""
 

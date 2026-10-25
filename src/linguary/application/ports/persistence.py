@@ -150,6 +150,9 @@ class ChapterAnalysisRepository(Protocol):
     def list_for_book(self, book_id: str) -> tuple[ChapterAnalysis, ...]:
         """Analyses for all analyzed chapters of the book."""
 
+    def delete_for_book(self, book_id: str) -> None:
+        """Remove current analysis projections, preserving archives."""
+
 
 class ProcessingRunRepository(Protocol):
     """Processing runs for books."""

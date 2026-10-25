@@ -9,6 +9,7 @@ import pytest
 
 from fastapi.testclient import TestClient
 from web_scenario import (
+    continue_legacy,
     SOURCE_TEXT,
     failed_task,
     hinted_result,
@@ -184,6 +185,7 @@ def test_regeneration_returns_only_the_target_block(
         results=tuple(translated_result(block_id) for block_id in block_ids),
     )
 
+    continue_legacy(application, scenario.book_id)
     response = client.post(
         f"/books/{scenario.book_id}/blocks/{block_ids[0]}/regenerate"
     )
@@ -229,6 +231,7 @@ def test_regeneration_makes_the_previous_export_stale(
             replace(book, export_validation_status=ExportValidationStatus.PASSED)
         )
 
+    continue_legacy(application, scenario.book_id)
     response = client.post(
         f"/books/{scenario.book_id}/blocks/{block_ids[0]}/regenerate"
     )
@@ -253,6 +256,7 @@ def test_html_regeneration_redirects_back_to_the_result_tab(
         results=tuple(translated_result(block_id) for block_id in block_ids),
     )
 
+    continue_legacy(application, scenario.book_id)
     response = client.post(
         f"/books/{scenario.book_id}/blocks/{block_ids[0]}/regenerate",
         headers={"accept": "text/html"},
@@ -277,6 +281,7 @@ def test_fragment_regeneration_returns_the_updated_result_block(
         results=tuple(translated_result(block_id) for block_id in block_ids),
     )
 
+    continue_legacy(application, scenario.book_id)
     response = client.post(
         f"/books/{scenario.book_id}/blocks/{block_ids[0]}/regenerate",
         headers={
@@ -310,6 +315,7 @@ def test_regenerating_block_shows_progress_right_after_refresh_is_requested(
         results=tuple(translated_result(block_id) for block_id in block_ids),
     )
 
+    continue_legacy(application, scenario.book_id)
     response = client.post(
         f"/books/{scenario.book_id}/blocks/{block_ids[0]}/regenerate",
         headers={"accept": "text/html", "x-linguary-fragment": "result-block"},
@@ -356,6 +362,7 @@ def test_unknown_block_regeneration_returns_404(
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     start_run(application, scenario)
 
+    continue_legacy(application, scenario.book_id)
     response = client.post(
         f"/books/{scenario.book_id}/blocks/unknown/regenerate"
     )
@@ -572,3 +579,13 @@ def test_result_block_shows_footnote_marker_as_the_original_label() -> None:
     )
 
     assert response.translated_text == "Её лицо.[1] Жаль."
+
+
+@pytest.fixture
+def application(configured_application):
+    return configured_application
+
+
+@pytest.fixture
+def client(configured_client):
+    return configured_client

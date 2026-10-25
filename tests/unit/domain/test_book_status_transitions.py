@@ -160,7 +160,7 @@ def test_failed_is_reachable_only_from_importing() -> None:
 def test_allowed_targets_lists_reachable_statuses() -> None:
     """From the processing state, a book transitions either to export or to glossary review."""
     assert allowed_targets(BookStatus.PROCESSING) == frozenset(
-        {BookStatus.READY_TO_EXPORT, BookStatus.GLOSSARY_REVIEW}
+        {BookStatus.READY_TO_EXPORT, BookStatus.GLOSSARY_REVIEW, BookStatus.IMPORTED}
     )
 
 

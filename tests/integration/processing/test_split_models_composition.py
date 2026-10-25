@@ -73,6 +73,7 @@ async def test_analysis_logs_analysis_model(tmp_path: Path) -> None:
     app = build_application(settings=settings, llm_client=FailingClient())
     try:
         store_processing_book(app.unit_of_work, status=BookStatus.IMPORTED, analysed_sections=())
+        choose_fixture_conditions(app, tmp_path)
         await app.analysis.start(BOOK_ID)
         await drain_tasks(app)
 
@@ -99,6 +100,7 @@ async def test_processing_logs_processing_model(tmp_path: Path) -> None:
     app = build_application(settings=settings, llm_client=FailingClient())
     try:
         store_processing_book(app.unit_of_work, status=BookStatus.PROCESSING)
+        choose_fixture_conditions(app, tmp_path)
         await app.processing.start(BOOK_ID)
         await drain_tasks(app)
 
@@ -109,3 +111,16 @@ async def test_processing_logs_processing_model(tmp_path: Path) -> None:
         assert processing_logs[0].model == "fast-processing-model"
     finally:
         await app.aclose()
+
+
+def choose_fixture_conditions(application, tmp_path):
+    from dataclasses import replace
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+    source = tmp_path / 'isolated-source.epub'
+    source.write_bytes(b'synthetic isolated fixture source')
+    with application.unit_of_work.transaction() as transaction:
+        book = transaction.books.get(BOOK_ID)
+        transaction.books.save(replace(book, source_epub_path=str(source)))
+    ChooseBookConditions(application.book_conditions, application.book_runtime)(BOOK_ID,
+        action='continue_legacy', expected_revision=0,
+        settings_revision=application.runtime_settings.revision, confirmed=True)

@@ -1,6 +1,7 @@
 """LLM call log in real composition root."""
 
 from __future__ import annotations
+from test_book_conditions import choose_legacy_fixture
 
 import json
 from collections.abc import Callable, Iterator
@@ -63,6 +64,7 @@ async def test_llm_calls_are_logged_per_attempt(application: Application) -> Non
         )
     )
 
+    choose_legacy_fixture(application)
     finished = await drain_tasks(application)
 
     with application.unit_of_work.transaction() as transaction:
@@ -271,6 +273,7 @@ async def test_reference_pricing_fills_cost_without_provider_cost(tmp_path: Path
             book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
             scope_id=scenario.section().id,
         ))
+        choose_legacy_fixture(built)
         await drain_tasks(built)
         with built.unit_of_work.transaction() as transaction:
             (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
@@ -509,6 +512,7 @@ async def test_task_and_llm_log_errors_do_not_contain_key(
                 book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
                 scope_id=scenario.section().id,
             ))
+            choose_legacy_fixture(built)
             finished = await drain_tasks(built)
             assert len(finished) == 1
             error = finished[0].last_error
@@ -553,6 +557,7 @@ async def test_proxy_secret_not_in_task_llm_logs_or_http_responses(tmp_path, fai
         try:
             scenario = store_processing_book(built.unit_of_work)
             await built.task_queue.enqueue(TaskIdentity(book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT, scope_id=scenario.section().id))
+            choose_legacy_fixture(built)
             finished = await drain_tasks(built)
             with built.unit_of_work.transaction() as transaction:
                 logs = transaction.llm_calls.list_for_book(BOOK_ID)

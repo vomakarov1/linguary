@@ -1,6 +1,7 @@
 """Rejected validation reply is linked to the model call."""
 
 from __future__ import annotations
+from test_book_conditions import choose_legacy_fixture
 
 import json
 from dataclasses import replace
@@ -76,6 +77,7 @@ async def test_rejected_translation_logged_unsuccessful_with_reason(
                 scope_id=scenario.section().id,
             )
         )
+        choose_legacy_fixture(application)
         await drain_tasks(application)
         with application.unit_of_work.transaction() as transaction:
             calls = transaction.llm_calls.list_for_book(BOOK_ID)
@@ -163,6 +165,7 @@ async def test_retry_instruction_uses_alias_and_keeps_rejection_log(
                 scope_id=scenario.section().id,
             )
         )
+        choose_legacy_fixture(application)
         await drain_tasks(application)
         assert client.call_count == 2
         retry = client.requests[1].instructions

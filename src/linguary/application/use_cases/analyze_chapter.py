@@ -149,7 +149,7 @@ class AnalyzeChapter:
         blocks = textual_blocks(section)
         if not blocks:
             analysis = _empty_analysis(section, id=self._id_factory())
-            self._save(command.book_id, analysis)
+            self._save(command.book_id, analysis, task_id=command.task_id)
             return AnalyzeChapterResult(analysis=analysis)
         fragments = plan_fragments(blocks, max_blocks=self._max_fragment_blocks)
         if len(fragments) == 1:
@@ -169,7 +169,7 @@ class AnalyzeChapter:
                 accumulated=accumulated,
                 command=command,
             )
-        self._save(command.book_id, analysis)
+        self._save(command.book_id, analysis, task_id=command.task_id)
         return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
 
     async def _analyze_whole_chapter(
@@ -348,6 +348,8 @@ class AnalyzeChapter:
             except Exception as error:
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
+                    if hasattr(self._llm_client, 'reject_last'):
+                        self._llm_client.reject_last()
                 decision = self._retry_policy.decide(error, attempts=attempts)
                 if not decision.should_retry:
                     raise
@@ -418,9 +420,26 @@ class AnalyzeChapter:
             for candidate in payload.glossary_candidates
         )
 
-    def _save(self, book_id: str, analysis: ChapterAnalysis) -> None:
+    def _save(self, book_id: str, analysis: ChapterAnalysis, *, task_id=None) -> None:
         """Saves chapter analysis in a single short transaction."""
         with self._unit_of_work.transaction() as transaction:
+            conditions_id = getattr(self._llm_client, 'conditions_id', None)
+            if conditions_id is not None:
+                from linguary.application.book_conditions import BookConditionsService, ConditionsError
+                conditions = transaction.work.latest_conditions(book_id)
+                if conditions is None or conditions.id != conditions_id:
+                    raise ConditionsError('conditions_revision_conflict')
+                book = transaction.books.get(book_id)
+                self._llm_client.service.verify_source(book, conditions)
+                if task_id is not None and transaction.tasks.get(task_id) is None:
+                    raise ConditionsError('task_no_longer_active')
+                attempts = self._llm_client.attempts
+                attempt_id = attempts[-1] if attempts else None
+                BookConditionsService.archive_analysis(transaction, book_id, analysis, conditions_id, attempt_id)
+                for accepted in attempts:
+                    current = transaction.work.get_attempt(accepted)
+                    if current.state == 'validated':
+                        transaction.work.transition_attempt(accepted, 'accepted', expected_state='validated')
             transaction.analyses.save(book_id, analysis)
 
 

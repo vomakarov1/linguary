@@ -77,3 +77,35 @@ def reset_processing(
 
 
 __all__ = ["router"]
+
+
+@router.post('/conditions', status_code=status.HTTP_201_CREATED)
+async def choose_conditions(request: Request, application: CurrentApplication, book_id: str):
+    """Apply the same explicit conditions choice for JSON and HTML forms."""
+    from typing import Literal
+    from pydantic import BaseModel, Field, ValidationError
+    from fastapi import HTTPException
+    from linguary.application.book_conditions import ConditionsError
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+
+    class Choice(BaseModel):
+        action: Literal['continue_legacy', 'reanalyze']
+        expected_revision: int = Field(ge=0)
+        settings_revision: int = Field(ge=0)
+        confirmed: bool
+
+    try:
+        raw = await request.json() if request.headers.get('content-type', '').startswith('application/json') else dict(await request.form())
+        choice = Choice.model_validate(raw)
+        if choice.confirmed is not True:
+            raise HTTPException(422, detail='confirmation_required')
+    except (ValidationError, ValueError):
+        raise HTTPException(422, detail='invalid_conditions_choice') from None
+    try:
+        conditions = ChooseBookConditions(application.book_conditions, application.book_runtime)(book_id, **choice.model_dump())
+    except ConditionsError as error:
+        raise HTTPException(404 if error.reason_code == 'book_not_found' else 409,
+                            detail={'reason_code': error.reason_code}) from None
+    if wants_html(request):
+        return RedirectResponse(url=f'/books/{book_id}', status_code=status.HTTP_303_SEE_OTHER)
+    return {'conditions_id': conditions.id, 'revision': conditions.revision, 'reproducibility': conditions.reproducibility}

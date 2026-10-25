@@ -1,3 +1,4 @@
+from test_book_conditions import choose_legacy_fixture
 """Application build loads saved settings and preserves long-lived services."""
 from dataclasses import replace
 from pathlib import Path
@@ -92,10 +93,12 @@ async def test_injected_llm_client_survives_reconfiguration(tmp_path):
     app = build_application(settings=settings(tmp_path), llm_client=client)
     try:
         scenario = store_processing_book(app.unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT), (SOURCE_TEXT, SOURCE_TEXT)))
+        choose_legacy_fixture(app)
         await app.processing.start(BOOK_ID)
         previous_runner, previous_queue, previous_pool = app.runner, app.task_queue, app.worker_pool
-        new_settings = candidate_settings(app.settings, SystemSettingsUpdate(**overrides()))
+        new_settings = candidate_settings(app.settings, SystemSettingsUpdate(**{**overrides(), "base_url": app.settings.llm.base_url}))
         app.runtime_settings.publish(app.runtime_settings.prepare(new_settings), 1)
+        choose_legacy_fixture(app)
         finished = await drain_tasks(app)
         assert len(finished) == 2 and all(task.last_error is None for task in finished)
         assert client.inner.call_count == 2
@@ -157,12 +160,14 @@ async def test_generation_logging_uses_actual_model(tmp_path):
     app = build_application(settings=settings(tmp_path), llm_client=FailingClient())
     try:
         store_processing_book(app.unit_of_work)
+        choose_legacy_fixture(app)
         await app.processing.start(BOOK_ID)
-        app.runtime_settings.publish(app.runtime_settings.prepare(candidate_settings(app.settings, SystemSettingsUpdate(**overrides()))), 1)
+        app.runtime_settings.publish(app.runtime_settings.prepare(candidate_settings(app.settings, SystemSettingsUpdate(**{**overrides(), "base_url": app.settings.llm.base_url}))), 1)
+        choose_legacy_fixture(app)
         await drain_tasks(app)
         with app.unit_of_work.transaction() as transaction:
             logs = transaction.llm_calls.list_for_book(BOOK_ID)
-        assert len(logs) == 1 and logs[0].model == 'saved'
+        assert len(logs) == 1 and logs[0].model == 'baseline'
     finally:
         await app.aclose()
 

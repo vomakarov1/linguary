@@ -139,14 +139,33 @@ class RuntimeSettings:
 class RuntimeSequence:
     """Stable access point selects a generation before the first await."""
 
-    def __init__(self, runtime: RuntimeSettings, name: str) -> None:
+    def __init__(self, runtime: RuntimeSettings, name: str, *, book_runtime=None) -> None:
         self._runtime = runtime
         self._name = name
+        self._book_runtime = book_runtime
 
     async def start(self, *args: Any, **kwargs: Any) -> Any:
+        if self._book_runtime is not None:
+            book_id = args[0] if args else kwargs['book_id']
+            service = self._book_runtime.service
+            if self._name == 'analysis':
+                conditions_id = service.freeze_before_analysis(book_id, self._runtime.revision)
+            else:
+                conditions_id = service.require(book_id).id
+            async with self._book_runtime.lease(conditions_id, self._name) as generation:
+                return await getattr(generation, self._name).start(*args, **kwargs)
         with self._runtime.lease() as generation:
             return await getattr(generation, self._name).start(*args, **kwargs)
 
     async def run_task(self, task: Any) -> None:
+        if self._book_runtime is not None:
+            from linguary.application.book_conditions import ConditionsError
+            with self._book_runtime.service.uow.transaction() as transaction:
+                binding = transaction.work.get_binding('task', task.id)
+                if binding is None:
+                    raise ConditionsError('legacy_choice_required')
+            async with self._book_runtime.lease(binding['conditions_id'], self._name) as generation:
+                await getattr(generation, self._name).run_task(task)
+            return
         with self._runtime.lease() as generation:
             await getattr(generation, self._name).run_task(task)

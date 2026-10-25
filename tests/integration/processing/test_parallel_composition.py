@@ -110,6 +110,7 @@ async def test_configured_parallel_processing_finishes_the_book(
         FakeLLMClient.always(translated_reply()),
     )
     scenario = store_processing_book(application.unit_of_work, chapters=SIX_CHAPTERS)
+    choose_fixture_conditions(application, tmp_path)
     await application.processing.start(BOOK_ID)
 
     finished = await drain_tasks(application)
@@ -133,6 +134,7 @@ async def test_requests_per_minute_spaces_calls_of_all_workers(
         settings(tmp_path, concurrency=3, requests_per_minute=600), client
     )
     store_processing_book(application.unit_of_work, chapters=SIX_CHAPTERS[:3])
+    choose_fixture_conditions(application, tmp_path)
     await application.processing.start(BOOK_ID)
 
     await drain_tasks(application)
@@ -140,3 +142,16 @@ async def test_requests_per_minute_spaces_calls_of_all_workers(
     assert len(client.started) == 3
     gaps = [later - earlier for earlier, later in zip(client.started, client.started[1:])]
     assert all(gap >= 0.09 for gap in gaps), gaps
+
+
+def choose_fixture_conditions(application, tmp_path):
+    from dataclasses import replace
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+    source = tmp_path / 'isolated-source.epub'
+    source.write_bytes(b'synthetic isolated fixture source')
+    with application.unit_of_work.transaction() as transaction:
+        book = transaction.books.get(BOOK_ID)
+        transaction.books.save(replace(book, source_epub_path=str(source)))
+    ChooseBookConditions(application.book_conditions, application.book_runtime)(BOOK_ID,
+        action='continue_legacy', expected_revision=0,
+        settings_revision=application.runtime_settings.revision, confirmed=True)

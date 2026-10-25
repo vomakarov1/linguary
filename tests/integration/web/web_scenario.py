@@ -10,7 +10,7 @@ Intentionally omitted the `test_` prefix so pytest does not collect it as a test
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from linguary.application.ports.persistence import BookRecord
@@ -98,8 +98,11 @@ def store_book(
     document = _document(
         book_id=book_id, title=title, chapters=chapters, notes_chapters=notes_chapters
     )
+    source = application.paths.source_epub(book_id)
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b'isolated synthetic web fixture source')
     with application.unit_of_work.transaction() as uow:
-        uow.books.add(_book(book_id=book_id, title=title, status=status))
+        uow.books.add(replace(_book(book_id=book_id, title=title, status=status), source_epub_path=str(source)))
         uow.documents.save(document)
         for index, section in enumerate(document.ordered_sections):
             if analysed_chapters is not None and index not in analysed_chapters:
@@ -114,7 +117,7 @@ def store_book(
             )
         if import_warnings:
             uow.documents.add_import_warnings(book_id, list(import_warnings))
-    return WebScenario(document=document, book_id=book_id)
+    return WebScenario(document=document, book_id=book_id, run_id=RUN_ID if book_id == BOOK_ID else f"run-{book_id}")
 
 
 def glossary_candidate(
@@ -353,3 +356,22 @@ def _book(*, book_id: str, title: str, status: BookStatus) -> BookRecord:
         source_epub_path=f"/library/{book_id}.epub",
         created_at=CREATED_AT,
     )
+
+
+def continue_legacy(application, book_id=BOOK_ID):
+    """Explicit choice for tests that execute pre-existing historical projections."""
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+    with application.unit_of_work.transaction() as transaction:
+        previous = transaction.work.latest_conditions(book_id)
+    if previous is None:
+        return ChooseBookConditions(application.book_conditions, application.book_runtime)(book_id,
+            action='continue_legacy', expected_revision=0, settings_revision=application.runtime_settings.revision,
+            confirmed=True)
+    return previous
+
+
+def bound_queue(application, book_id=BOOK_ID):
+    from linguary.composition.book_runtime import BoundTaskQueue
+    conditions = continue_legacy(application, book_id)
+    return BoundTaskQueue(application.task_queue, application.book_conditions, conditions.id,
+                          application.task_queue._store._id_factory)

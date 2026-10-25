@@ -29,12 +29,16 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
+from pathlib import Path
+from hashlib import sha256
 
 from linguary.adapters.config import AppSettings, load_settings
 from linguary.adapters.config.settings import SettingsError
 from linguary.adapters.config.system_settings import overlay_settings
 from linguary.adapters.db.system_settings import SystemSettingsStore
 from linguary.adapters.llm.rate_limit import LLMRateLimiter
+from linguary.application.book_conditions import BookConditionsService
+from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
 from linguary.composition.system_settings import SystemSettingsService
 from linguary.adapters.db.engine import create_database_engine
@@ -114,6 +118,8 @@ class Application:
     """
 
     runtime_settings: RuntimeSettings
+    book_conditions: BookConditionsService
+    book_runtime: BookRuntimeResolver
     system_settings: SystemSettingsService
     settings_store: SystemSettingsStore
     rate_limiter: LLMRateLimiter
@@ -151,6 +157,7 @@ class Application:
         settings.llm.ensure_ready()
         return StartProcessing(
             unit_of_work=self.unit_of_work,
+            book_conditions=self.book_conditions,
             glossary_confidence_threshold=(
                 settings.checks.glossary_confidence_threshold
             ),
@@ -264,7 +271,10 @@ def build_application(
         )
     rate_limiter = LLMRateLimiter(app_settings.llm.requests_per_minute)
 
-    def generation_factory(candidate: AppSettings) -> RuntimeGeneration:
+    def generation_factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
+        profile = content_plan_profile if conditions is None else conditions.payload["profile"]
+        templates = None if conditions is None else conditions.payload["prompt_templates"]
+        queue = task_queue if conditions is None else BoundTaskQueue(task_queue, book_conditions, conditions.id, task_id_factory)
         configured_client = ConfiguredLLMClient(candidate.llm)
         analysis_model = candidate.llm.effective_analysis_model
         processing_model = candidate.llm.effective_processing_model
@@ -296,20 +306,23 @@ def build_application(
             on_logged=on_logged,
             model_name=processing_model or "not_configured",
         )
+        if conditions is not None:
+            analysis_client = ProvenanceClient(analysis_client, book_conditions, conditions.id)
+            processing_client = ProvenanceClient(processing_client, book_conditions, conditions.id)
         generation = RuntimeGeneration(
             settings=candidate,
             configured_client=configured_client,
             analysis=_analysis_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=analysis_client, content_plan_profile=content_plan_profile,
+                task_queue=queue, model=analysis_client, content_plan_profile=profile, prompt_templates=templates,
             ),
             processing=_processing_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=processing_client, content_plan_profile=content_plan_profile,
+                task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
             ),
             regeneration=_regeneration_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
-                task_queue=task_queue, model=processing_client, content_plan_profile=content_plan_profile,
+                task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
             ),
         )
         if llm_client is None:
@@ -326,6 +339,11 @@ def build_application(
         revision=0 if stored is None else stored.revision,
         generation_factory=generation_factory,
     )
+    book_conditions = BookConditionsService(unit_of_work,
+        lambda book, revision: conditions_payload(book, runtime_settings.current.settings, revision, content_plan_profile),
+        lambda: runtime_settings.revision,
+        lambda path: sha256(Path(path).read_bytes()).hexdigest())
+    book_runtime = BookRuntimeResolver(book_conditions, runtime_settings, generation_factory)
     epubcheck = epubcheck or EpubCheckValidator(settings=EpubCheckSettings())
 
     import_book = ImportBook(
@@ -338,9 +356,9 @@ def build_application(
         writer=EpubExportWriter(),
         validator=epubcheck,
     )
-    analysis = RuntimeSequence(runtime_settings, "analysis")
-    processing = RuntimeSequence(runtime_settings, "processing")
-    regeneration = RuntimeSequence(runtime_settings, "regeneration")
+    analysis = RuntimeSequence(runtime_settings, "analysis", book_runtime=book_runtime)
+    processing = RuntimeSequence(runtime_settings, "processing", book_runtime=book_runtime)
+    regeneration = RuntimeSequence(runtime_settings, "regeneration", book_runtime=book_runtime)
     runner = TaskRunner(
         queue=task_queue,
         handlers=_handlers(
@@ -363,6 +381,8 @@ def build_application(
     )
     return Application(
         runtime_settings=runtime_settings,
+        book_conditions=book_conditions,
+        book_runtime=book_runtime,
         system_settings=system_settings,
         settings_store=settings_store,
         rate_limiter=rate_limiter,
@@ -436,6 +456,7 @@ def _analysis_sequence(
     task_queue: SqliteTaskQueue,
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
+    prompt_templates=None,
 ) -> ChapterAnalysisSequence:
     """Chapter analysis with glossary threshold and fragment limit from settings (PRD § 12, § 14)."""
     return ChapterAnalysisSequence(
@@ -447,7 +468,7 @@ def _analysis_sequence(
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             glossary_confidence_threshold=settings.checks.glossary_confidence_threshold,
             max_fragment_blocks=settings.llm.effective_max_fragment_blocks,
-            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates),
         ),
     )
 
@@ -459,6 +480,7 @@ def _processing_sequence(
     task_queue: SqliteTaskQueue,
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
+    prompt_templates=None,
 ) -> ChapterProcessingSequence:
     """Chapter processing with block group limit from settings (PRD § 10)."""
     return ChapterProcessingSequence(
@@ -470,7 +492,7 @@ def _processing_sequence(
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
             max_unit_source_chars=settings.llm.max_unit_source_chars,
-            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates),
         ),
     )
 
@@ -482,6 +504,7 @@ def _regeneration_sequence(
     task_queue: SqliteTaskQueue,
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
+    prompt_templates=None,
 ) -> BlockRegenerationSequence:
     """Block regeneration with neighboring context (PRD § 13, § 21.5)."""
     return BlockRegenerationSequence(
@@ -492,7 +515,7 @@ def _regeneration_sequence(
             llm_client=model,
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
-            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates),
         ),
     )
 
@@ -512,10 +535,11 @@ def _llm_snapshot(settings: AppSettings) -> LLMSettingsSnapshot:
     )
 
 
-def _context_builder(settings: AppSettings, *, content_plan_profile: str = "legacy-v1") -> ContextBuilder:
+def _context_builder(settings: AppSettings, *, content_plan_profile: str = "legacy-v1", prompt_templates=None) -> ContextBuilder:
     """Model request context policy (PRD § 13)."""
     return ContextBuilder(
         content_plan_profile=content_plan_profile,
+        prompt_templates=prompt_templates,
         max_unit_source_chars=settings.llm.max_unit_source_chars,
         regeneration_context_blocks=DEFAULT_REGENERATION_CONTEXT_BLOCKS,
         language_notes_per_chapter=settings.checks.language_notes_per_chapter,

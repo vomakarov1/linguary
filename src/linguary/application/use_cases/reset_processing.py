@@ -80,6 +80,7 @@ class ResetProcessing:
             )
             removed_tasks = _remove_tasks(transaction, book.id)
             if run is not None:
+                _archive_run_results(transaction, book.id, run)
                 transaction.runs.delete(run.id)
             transaction.books.save(replace(book, status=status))
         return ResetProcessingResult(
@@ -124,3 +125,71 @@ __all__ = [
     "ResetProcessingError",
     "ResetProcessingResult",
 ]
+
+
+class ChooseBookConditions:
+    """Explicitly continue historical work or atomically start a new analysis revision."""
+    def __init__(self, service, resolver):
+        self.service, self.resolver = service, resolver
+
+    def __call__(self, book_id, *, action, expected_revision, settings_revision, confirmed):
+        from dataclasses import asdict
+        from linguary.application.book_conditions import ConditionsError, BookConditionsService
+        if confirmed is not True or action not in {'continue_legacy', 'reanalyze'}:
+            raise ConditionsError('invalid_conditions_choice')
+        with self.service.uow.transaction() as transaction:
+            book = transaction.books.get(book_id)
+            if book is None:
+                raise ConditionsError('book_not_found')
+            previous = transaction.work.latest_conditions(book_id)
+            if (0 if previous is None else previous.revision) != expected_revision:
+                raise ConditionsError('conditions_revision_conflict')
+            if action == 'continue_legacy' and previous is not None:
+                raise ConditionsError('conditions_already_selected')
+            if book.status.value in {'IMPORTING', 'FAILED'}:
+                raise ConditionsError('invalid_book_state')
+            conditions = self.service.create(transaction, book, settings_revision,
+                reproducibility='legacy_partial' if action == 'continue_legacy' else 'complete')
+            # Validate the complete executable route before committing any revision.
+            self.resolver.settings_for(conditions)
+            run = transaction.runs.active_for_book(book_id)
+            if action == 'reanalyze':
+                for analysis in transaction.analyses.list_for_book(book_id):
+                    binding = transaction.work.get_binding('analysis', analysis.id)
+                    BookConditionsService.archive_analysis(transaction, book_id, analysis,
+                        binding['conditions_id'] if binding else None,
+                        binding['attempt_id'] if binding else None)
+                if run is not None:
+                    _archive_run_results(transaction, book_id, run)
+                    transaction.runs.delete(run.id)
+                transaction.analyses.delete_for_book(book_id)
+                for task in transaction.tasks.list_for_book(book_id):
+                    if task.task_type in {TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK, TaskType.EXPORT_BOOK}:
+                        transaction.tasks.delete(task.id)
+                transaction.books.save(replace(book, status=apply_book_event(book.status, BookEvent.REANALYSIS_CONFIRMED)))
+            else:
+                # Bind only future execution; old analyses and results stay unknown.
+                if run is not None:
+                    transaction.work.bind('run', run.id, book_id=book_id, conditions_id=conditions.id,
+                        payload={'schema_version': 1, 'legacy_partial': True})
+                for task in transaction.tasks.list_for_book(book_id):
+                    if task.task_type in {TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK}:
+                        transaction.work.bind('task', task.id, book_id=book_id, conditions_id=conditions.id,
+                            payload={'schema_version': 1, 'legacy_partial': True})
+            return conditions
+
+
+
+def _archive_run_results(transaction, book_id, run):
+    """Historical projections retain unknown conditions after explicit continuation."""
+    from dataclasses import asdict
+    run_binding = transaction.work.get_binding('run', run.id)
+    for result in transaction.results.list_for_run(run.id):
+        binding = transaction.work.get_binding('result', f'{run.id}:{result.block_id}')
+        provenance = binding or run_binding
+        known = provenance is not None and not provenance['payload_json'].get('legacy_partial', False)
+        transaction.work.archive_artifacts([dict(book_id=book_id,
+            conditions_id=provenance['conditions_id'] if known else None,
+            attempt_id=binding['attempt_id'] if binding else None,
+            run_id=run.id, kind='block_result', scope_id=result.block_id,
+            body={'schema_version': 1, 'result': asdict(result)})])

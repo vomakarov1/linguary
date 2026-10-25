@@ -349,8 +349,10 @@ class StartProcessing:
         glossary_review_min_mentions: int = 5,
         glossary_review_min_chapters: int = 3,
         id_factory: IdFactory | None = None,
+        book_conditions=None,
     ) -> None:
         self._unit_of_work = unit_of_work
+        self._book_conditions = book_conditions
         self._glossary_confidence_threshold = glossary_confidence_threshold
         self._glossary_review_min_mentions = glossary_review_min_mentions
         self._glossary_review_min_chapters = glossary_review_min_chapters
@@ -366,14 +368,21 @@ class StartProcessing:
         """
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, command.book_id)
+            conditions = None if self._book_conditions is None else self._book_conditions.require(book.id, transaction=transaction)
+            snapshot = self._llm_settings_snapshot
+            if conditions is not None:
+                payload = conditions.payload
+                snapshot = LLMSettingsSnapshot(provider=payload['route']['provider'], model=payload['models']['processing'],
+                    temperature=payload['llm_parameters']['temperature'], max_output_tokens=payload['llm_parameters']['max_output_tokens'])
             if transaction.runs.active_for_book(book.id) is not None:
                 raise GlossaryReviewError(f"у книги {book.id} уже идёт обработка")
+            pinned_checks = conditions.payload['checks'] if conditions is not None else {}
             review = _load_review(
                 transaction,
                 book.id,
-                confidence_threshold=self._glossary_confidence_threshold,
-                min_mentions=self._glossary_review_min_mentions,
-                min_chapters=self._glossary_review_min_chapters,
+                confidence_threshold=pinned_checks.get('glossary_confidence_threshold', self._glossary_confidence_threshold),
+                min_mentions=pinned_checks.get('glossary_review_min_mentions', self._glossary_review_min_mentions),
+                min_chapters=pinned_checks.get('glossary_review_min_chapters', self._glossary_review_min_chapters),
             )
             review.ensure_complete()
             started = _status_after_start(book.status)
@@ -384,9 +393,15 @@ class StartProcessing:
                 glossary_snapshot=glossary_snapshot(
                     review, language=book.target_language
                 ),
-                llm_settings_snapshot=self._llm_settings_snapshot,
+                llm_settings_snapshot=snapshot,
             )
             transaction.runs.add(run)
+            if conditions is not None:
+                from dataclasses import asdict
+                from linguary.application.book_conditions import payload_digest
+                glossary = asdict(run.glossary_snapshot)
+                transaction.work.bind('run', run.id, book_id=book.id, conditions_id=conditions.id,
+                    payload={'schema_version': 1, 'glossary_snapshot': glossary, 'glossary_sha256': payload_digest(glossary)})
             transaction.books.save(replace(book, status=started))
         return run
 

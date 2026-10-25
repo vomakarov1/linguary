@@ -319,6 +319,7 @@ class ContextBuilder:
         content_plan_profile: str = "legacy-v1",
         max_unit_source_chars: int = 8000,
         reader_level: str = "b2",
+        prompt_templates: Mapping[str, str] | None = None,
     ) -> None:
         if content_plan_profile not in {"legacy-v1", "content-plan-v2"}:
             raise ContextBuildError("неизвестный профиль содержательного плана")
@@ -327,6 +328,7 @@ class ContextBuilder:
         self._max_unit_source_chars = max_unit_source_chars
         self._content_plan_profile = content_plan_profile
         self._reader_level = reader_level.strip().lower()
+        self._prompt_templates = MappingProxyType(dict(prompt_templates or {}))
         if max_accumulated_candidates < 0:
             raise ContextBuildError(
                 "ограничение числа накопленных кандидатов не может быть отрицательным"
@@ -365,7 +367,7 @@ class ContextBuilder:
             section=section,
             blocks=blocks,
             accumulated_candidates=accumulated_candidates,
-            instructions=chapter_analysis_instructions(
+            instructions=self._prompt_templates.get("analysis") or chapter_analysis_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
                 reader_level=self._reader_level,
@@ -400,7 +402,7 @@ class ContextBuilder:
             section=section,
             blocks=fragment.blocks,
             accumulated_candidates=accumulated_candidates,
-            instructions=chapter_fragment_instructions(
+            instructions=self._prompt_templates.get("fragment") or chapter_fragment_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
                 reader_level=self._reader_level,
@@ -436,7 +438,7 @@ class ContextBuilder:
             analysis=analysis,
             glossary=glossary,
             book_candidates=book_candidates,
-            instructions=translation_unit_instructions(
+            instructions=self._prompt_templates.get("translation") or translation_unit_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
             ),
@@ -472,7 +474,7 @@ class ContextBuilder:
             analysis=analysis,
             glossary=glossary,
             book_candidates=book_candidates,
-            instructions=block_regeneration_instructions(
+            instructions=self._prompt_templates.get("regeneration") or block_regeneration_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
             ),
@@ -496,7 +498,7 @@ class ContextBuilder:
             raise ContextBuildError("сохранённый v2-план требует явный профиль content-plan-v2")
         version = 2 if analysis.content_plan is not None else 1
         if version == 2:
-            instructions += "\n" + _CONTENT_PLAN_PROCESSING
+            instructions += "\n" + self._prompt_templates.get("content_processing", _CONTENT_PLAN_PROCESSING)
         if unit.section_id != section.id:
             raise ContextBuildError(
                 f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
@@ -641,7 +643,7 @@ class ContextBuilder:
         if candidate and section.is_notes_only:
             before_you_read_limit = 0
         if candidate:
-            instructions += "\n" + _CONTENT_PLAN_ANALYSIS
+            instructions += "\n" + self._prompt_templates.get("content_analysis", _CONTENT_PLAN_ANALYSIS)
             instructions += f"\nВ этом ответе не больше {before_you_read_limit} BYR."
             instructions += f"\nБюджет обязательных заметок этого анализа: {note_limit}."
             instructions += "\nПределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False)
@@ -1537,3 +1539,16 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
         "version": 2, "difficulties": difficulties, "before_you_read_evidence": evidence,
         "before_you_read": [dict(artifact_index=i, expression=e.expression, explanation=e.explanation) for i, e in enumerate(analysis.before_you_read)],
     }, ensure_ascii=False)
+
+
+def snapshot_prompt_templates(*, source_language, target_language, reader_level):
+    """Render immutable instruction templates without book text or secrets."""
+    languages = dict(source_language=source_language, target_language=target_language)
+    return {
+        'analysis': chapter_analysis_instructions(**languages, reader_level=reader_level),
+        'fragment': chapter_fragment_instructions(**languages, reader_level=reader_level),
+        'translation': translation_unit_instructions(**languages),
+        'regeneration': block_regeneration_instructions(**languages),
+        'content_analysis': _CONTENT_PLAN_ANALYSIS,
+        'content_processing': _CONTENT_PLAN_PROCESSING,
+    }
