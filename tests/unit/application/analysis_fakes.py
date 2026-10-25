@@ -16,6 +16,7 @@ from typing import Any
 
 from linguary.adapters.llm import FakeReply
 from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_BLOCKS
+from linguary.application.context_builder import ContextBuilder
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord
 from linguary.application.retry_policy import RetryPolicy
@@ -99,6 +100,7 @@ def make_analyze_chapter(
     *,
     max_attempts: int = 3,
     max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
+    reader_level: str = "b2",
 ) -> tuple[AnalyzeChapter, list[float]]:
     """Chapter analysis use case alongside recorded retry delays."""
     delays: list[float] = []
@@ -112,6 +114,7 @@ def make_analyze_chapter(
         retry_policy=RetryPolicy(max_attempts=max_attempts),
         glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
         max_fragment_blocks=max_fragment_blocks,
+        context_builder=ContextBuilder(reader_level=reader_level),
         id_factory=sequential_ids(),
         sleep=sleep,
     )

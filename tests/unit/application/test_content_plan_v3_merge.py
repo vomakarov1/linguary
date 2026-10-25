@@ -1,8 +1,20 @@
 from dataclasses import replace
 import pytest
-from linguary.domain.content_plan import ContextFact, SourceAnchor, ContentPlan
+from linguary.domain.content_plan import (
+    ContextFact,
+    Difficulty,
+    HelpEvidence,
+    RequiredPoint,
+    SourceAnchor,
+    ContentPlan,
+    artifact_key,
+)
 from linguary.domain import DomainError
-from linguary.application.llm_dto import ChapterAnalysisResponse, ContentPlanResponse
+from linguary.application.llm_dto import (
+    BeforeYouReadEntryResponse,
+    ChapterAnalysisResponse,
+    ContentPlanResponse,
+)
 from linguary.application.analysis_merge import content_plan_from_response, FragmentAnalysis, _merged_content_plan, AnalysisMergeError, validate_fact_glossary
 from linguary.adapters.db.mapping import _encode_content_plan, _decode_content_plan
 from linguary.application.ports.persistence import PersistenceError
@@ -40,6 +52,61 @@ def test_v1_v2_v3_persistence():
     for plan in plans:
         assert _decode_content_plan(_encode_content_plan(plan)) == plan
     assert 'context_facts' not in _encode_content_plan(ContentPlan())
+
+
+def test_fragment_merge_remaps_evidence_to_retained_duplicate_byr():
+    explanation = 'Речь звучит резко.'
+
+    def fragment(order, block_id, expression, point_id):
+        difficulty = Difficulty(
+            f'd-{order}',
+            (SourceAnchor(block_id, 0, len(expression), expression),),
+            block_id,
+            'idiom',
+            'critical',
+            'explanation',
+            (RequiredPoint(point_id, 'Объяснить значение выражения'),),
+        )
+        evidence = HelpEvidence(
+            difficulty.id,
+            point_id,
+            'before_you_read.explanation',
+            block_id,
+            artifact_key(
+                'before_you_read.explanation',
+                block_id,
+                {'expression': expression, 'explanation': explanation},
+            ),
+            explanation,
+        )
+        return FragmentAnalysis(
+            order,
+            '',
+            '',
+            before_you_read=(BeforeYouReadEntryResponse(expression, explanation),),
+            content_plan=ContentPlan(
+                version=3,
+                profile='content-plan-v3',
+                difficulties=(difficulty,),
+                before_you_read_evidence=(evidence,),
+            ),
+        )
+
+    plan = _merged_content_plan(
+        (
+            fragment(0, 'first', 'snapped', 'point-first'),
+            fragment(1, 'second', 'snapped at', 'point-second'),
+        )
+    )
+
+    assert plan is not None
+    assert len(plan.before_you_read_evidence) == 2
+    for item in plan.before_you_read_evidence:
+        assert item.artifact_key == artifact_key(
+            'before_you_read.explanation',
+            item.block_id,
+            {'expression': 'snapped', 'explanation': explanation},
+        )
 
 
 def test_unknown_plan_version_not_legacy():

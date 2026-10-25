@@ -52,7 +52,11 @@ from linguary.application.context_builder import (
     textual_blocks,
 )
 from linguary.application.errors import ApplicationError
-from linguary.application.reader_text import prepare_analysis_payload, record_reader_warnings
+from linguary.application.reader_text import (
+    prepare_analysis_payload,
+    record_reader_warnings,
+    validate_a2_summary,
+)
 from linguary.application.glossary_review import candidates_with_decisions
 from linguary.application.llm_dto import ChapterAnalysisResponse
 from linguary.application.llm_rejections import record_rejection, finalize_response
@@ -342,6 +346,9 @@ class AnalyzeChapter:
                 response = await self._llm_client.generate(request)
                 if request.contract_version == 3:
                     response = replace(response, payload=prepare_analysis_payload(response.payload))
+                if self._context_builder._reader_level == "a2":
+                    validate_a2_summary(response.payload.chapter_summary)
+                if request.contract_version == 3:
                     record_reader_warnings(self._unit_of_work, response,
                         [('summary', response.payload.chapter_summary),
                          *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],

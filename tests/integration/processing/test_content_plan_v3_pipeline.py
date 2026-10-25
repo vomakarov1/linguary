@@ -15,7 +15,7 @@ EXPLANATION = 'Здесь snapped описывает резкую манеру �
 
 
 def analysis_reply():
-    return FakeReply.of_payload(dict(translation_instructions='Сохраняй согласованные имена.', chapter_summary='Mara speaks sharply.',
+    return FakeReply.of_payload(dict(translation_instructions='Сохраняй согласованные имена.', chapter_summary='Mara speaks sharply.\n\nМара говорит резко.',
         glossary_candidates=[], treatment_plan=[dict(source_block_id='b1', treatment='TRANSLATE')],
         before_you_read=[dict(expression='snapped', explanation='[b1] ' + EXPLANATION)],
         content_plan=dict(version=3, profile='content-plan-v3',

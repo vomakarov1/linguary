@@ -42,6 +42,17 @@ def _outside_quotes(body, protected_quotes):
     return ''.join(chars)
 
 
+def validate_a2_summary(body: str) -> None:
+    """Require an A2 summary to include a separate Russian translation paragraph."""
+    paragraphs = [part.strip() for part in re.split(r'\r?\n[ \t]*\r?\n+', body.strip())]
+    if len(paragraphs) != 2 or not all(paragraphs):
+        raise ReaderTextError('a2_summary_requires_parallel_russian')
+    letters = re.findall(r'[A-Za-zА-Яа-яЁё]', paragraphs[1])
+    cyrillic = re.findall(r'[А-Яа-яЁё]', paragraphs[1])
+    if not letters or len(cyrillic) / len(letters) < 0.5:
+        raise ReaderTextError('a2_summary_requires_parallel_russian')
+
+
 class ReaderTextPolicy:
     semantic_correctness = 'not_evaluated'
 

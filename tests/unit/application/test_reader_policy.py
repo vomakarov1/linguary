@@ -1,5 +1,10 @@
 import pytest
-from linguary.application.reader_text import ReaderTextPolicy, ReaderTextError, learner_instructions
+from linguary.application.reader_text import (
+    ReaderTextPolicy,
+    ReaderTextError,
+    learner_instructions,
+    validate_a2_summary,
+)
 
 
 def test_b17_removed_from_explanation_not_quote():
@@ -39,6 +44,23 @@ def test_a2_double_negative_instructions_keep_translation_and_byr_affirmative():
     assert 'объяснение BYR формулируй утвердительно' in instructions
     assert 'не отрицаю, что заклинание блестящее' in instructions
     assert 'не превращай это в «заклинание не блестящее»' in instructions
+
+
+@pytest.mark.parametrize(
+    'summary',
+    [
+        'The story continues.',
+        'The story continues.\n\nThe story continues.',
+        'The story continues.\n\nИстория продолжается.\n\nГерои уходят.',
+    ],
+)
+def test_a2_summary_requires_two_paragraphs_with_russian_translation(summary):
+    with pytest.raises(ReaderTextError, match='a2_summary_requires_parallel_russian'):
+        validate_a2_summary(summary)
+
+
+def test_a2_summary_accepts_original_and_russian_translation_paragraphs():
+    validate_a2_summary('The story continues.\n\nИстория продолжается.')
 
 
 def test_b1_b2_calibration_kept():
