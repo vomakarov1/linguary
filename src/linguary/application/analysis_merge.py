@@ -28,6 +28,7 @@ from linguary.domain.content_plan import ContentPlan, ContextFact, HelpEvidence,
 
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
+from linguary.application.explained_expressions import _same_word, expression_words
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
     ChapterAnalysisResponse,
@@ -461,22 +462,24 @@ def sanitize_before_you_read_explanation(text: str) -> str:
 def before_you_read_entries(
     entries: Iterable[BeforeYouReadEntryResponse], *, strict: bool = False,
 ) -> tuple[BeforeYouReadEntry, ...]:
-    """Retains up to the first ten distinct chapter expressions with sanitized explanations."""
-    selected: dict[str, BeforeYouReadEntry] = {}
+    """Retains the first entry for each first-word stem, up to ten chapter expressions."""
+    selected: list[tuple[str, BeforeYouReadEntry]] = []
     for entry in entries:
-        key = (
-            re.sub(r"\s+", " ", entry.expression)
-            .casefold()
-            .strip(" \t.,;:!?\"'«»()[]")
-        )
-        if key and key not in selected:
-            selected[key] = BeforeYouReadEntry(
-                expression=entry.expression,
-                explanation=entry.explanation if strict else sanitize_before_you_read_explanation(entry.explanation),
+        words = expression_words(entry.expression)
+        if not words or any(_same_word(words[0], first_word) for first_word, _ in selected):
+            continue
+        selected.append(
+            (
+                words[0],
+                BeforeYouReadEntry(
+                    expression=entry.expression,
+                    explanation=entry.explanation if strict else sanitize_before_you_read_explanation(entry.explanation),
+                ),
             )
+        )
         if len(selected) >= MAX_BEFORE_YOU_READ:
             break
-    return tuple(selected.values())
+    return tuple(entry for _, entry in selected)
 
 
 __all__ = [

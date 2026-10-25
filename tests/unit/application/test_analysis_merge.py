@@ -460,8 +460,27 @@ def test_before_you_read_deduplicated_by_normalized_expression() -> None:
     assert before_you_read_entries(entries)[0].explanation == "первое"
 
 
+def test_before_you_read_deduplicates_stems_and_phrase_extensions_by_first_word() -> None:
+    entries = (
+        BeforeYouReadEntryResponse(expression="Snapped", explanation="первая карточка"),
+        BeforeYouReadEntryResponse(expression="snapped at", explanation="расширение"),
+        BeforeYouReadEntryResponse(expression="snapping loudly", explanation="однокоренное слово"),
+        BeforeYouReadEntryResponse(expression="Started", explanation="другая карточка"),
+    )
+
+    result = before_you_read_entries(entries)
+
+    assert [entry.expression for entry in result] == ["Snapped", "Started"]
+    assert result[0].explanation == "первая карточка"
+
+
 def test_before_you_read_capped_at_ten() -> None:
-    entries = tuple(BeforeYouReadEntryResponse(expression=f"phrase {n}", explanation="значение") for n in range(12))
+    first_words = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+                   "golf", "hotel", "india", "juliet", "kilo", "lima")
+    entries = tuple(
+        BeforeYouReadEntryResponse(expression=f"{word} phrase", explanation="значение")
+        for word in first_words
+    )
     assert len(before_you_read_entries(entries)) == 10
 
 

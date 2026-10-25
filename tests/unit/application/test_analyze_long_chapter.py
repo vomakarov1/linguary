@@ -120,7 +120,11 @@ async def test_whole_chapter_analysis_strips_block_labels() -> None:
 
 
 async def test_whole_chapter_before_you_read_capped() -> None:
-    entries = [{"expression": f"phrase {n}", "explanation": "значение"} for n in range(12)]
+    first_words = (
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+        "golf", "hotel", "india", "juliet", "kilo", "lima",
+    )
+    entries = [{"expression": f"{word} phrase", "explanation": "значение"} for word in first_words]
     client = FakeLLMClient.always(analysis_reply(
         aliases=("b1", "b2", "b3", "b4"), before_you_read=entries,
     ))
@@ -368,9 +372,14 @@ async def test_fragment_byr_budgets_preserve_all_bound_evidence():
     from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
     from linguary.application.retry_policy import RetryPolicy
     from analysis_fakes import CONFIDENCE_THRESHOLD, sequential_ids
+    first_words = iter((
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+        "golf", "hotel", "india", "juliet", "kilo", "lima",
+        "mango", "nectar", "orange", "papaya",
+    ))
     def reply(label, count):
         data = json.loads(analysis_reply(aliases=('b1', 'b2')).content)
-        data['before_you_read'] = [dict(expression=f'{label} expression {i}', explanation=f'{label} explanation for aspect {i}.') for i in range(count)]
+        data['before_you_read'] = [dict(expression=f'{next(first_words)} {label} expression {i}', explanation=f'{label} explanation for aspect {i}.') for i in range(count)]
         points = [dict(id=f'p{i}', description=f'Explain aspect {i}') for i in range(count)]
         data['content_plan'] = dict(version=2, profile='content-plan-v2', difficulties=[dict(id='d', anchors=[dict(block_id='b1', start=0, end=9, quote='Paragraph')], owner_block_id='b1', kind='semantic_relation', priority='critical', help_kind='explanation', required_points=points)], before_you_read_evidence=[dict(difficulty_id='d', point_id=f'p{i}', artifact_kind='before_you_read.explanation', source_block_id='b1', artifact_index=i, body_excerpt=f'{label} explanation for aspect {i}.') for i in range(count)])
         return FakeReply.of_payload(data)
