@@ -134,20 +134,53 @@ def test_two_processing_forks_after_gc_keep_frozen_hash(tmp_path):
     assert right.analysis_hash == left.analysis_hash
 
 
-def test_snapshot_excludes_rejected_diagnostics_without_changing_source(tmp_path):
+def test_snapshot_excludes_rejected_diagnostics_without_changing_source(tmp_path, monkeypatch):
     import json
+    import linguary.comparison.workspace as module
     workspace = prepared(tmp_path)
+    live_body = 'live-diagnostic-marker-7f8ad7f63b9a4e5a'
+    deleted_marker = 'deleted-diagnostic-marker-954b56147e9b42a5'
+    deleted_body = deleted_marker * 2000
     metadata = {'schema_version': 1, 'decision': 'rejected',
-                'body_meta': {'body_status': 'available', 'stored_bytes': 18}}
+                'body_meta': {'body_status': 'available', 'stored_bytes': len(live_body)}}
     attempt_id = '12345678-1234-5678-1234-567812345678'
     with sqlite3.connect(workspace.database_path) as db:
+        db.execute('PRAGMA secure_delete = OFF')
         db.execute("INSERT INTO llm_attempts(id,book_id,generation,ordinal,state,context_json,outcome_json) VALUES (?,'book',0,1,'rejected','{\"schema_version\":1}','{\"schema_version\":1}')", (attempt_id,))
-        db.execute("INSERT INTO llm_call_logs(id,book_id,stage,provider,model,started_at,duration_ms,attempt,success,error_type,error_message,response_text,prompt_tokens,completion_tokens,cost,attempt_id,diagnostic_meta_json) VALUES ('call','book','chapter_analysis','fake','actual','2026-10-25',1,1,0,'ModelOutputError','Schema mismatch','private diagnostic',10,20,'0.007',?,?)", (attempt_id, json.dumps(metadata)))
+        db.execute("INSERT INTO llm_call_logs(id,book_id,stage,provider,model,started_at,duration_ms,attempt,success,error_type,error_message,response_text,prompt_tokens,completion_tokens,cost,attempt_id,diagnostic_meta_json) VALUES ('call','book','chapter_analysis','fake','actual','2026-10-25',1,1,0,'ModelOutputError','Schema mismatch',?,10,20,'0.007',?,?)", (live_body, attempt_id, json.dumps(metadata)))
+        db.execute("INSERT INTO llm_call_logs(id,book_id,stage,provider,model,started_at,duration_ms,attempt,success,response_text) VALUES ('deleted','book','chapter_analysis','fake','actual','2026-10-25',1,1,0,?)", (deleted_body,))
+        db.commit()
+        db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        db.execute("DELETE FROM llm_call_logs WHERE id = 'deleted'")
+        db.commit()
+        db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
     before = file_hash(workspace.database_path)
+    assert live_body.encode() in workspace.database_path.read_bytes()
+    assert deleted_marker.encode() in workspace.database_path.read_bytes()
+    original_connect = sqlite3.connect
+
+    class UnsafeBackupConnection(sqlite3.Connection):
+        def backup(self, target, *args, **kwargs):
+            super().backup(target, *args, **kwargs)
+            target.execute('PRAGMA secure_delete = OFF')
+
+    def connect(database, *args, **kwargs):
+        if isinstance(database, str) and database.startswith('file:') and database.endswith('?mode=ro'):
+            kwargs['factory'] = UnsafeBackupConnection
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(module.sqlite3, 'connect', connect)
     artifact = freeze_analysis(workspace)
     assert file_hash(workspace.database_path) == before
     with sqlite3.connect(workspace.database_path) as source:
-        assert source.execute("SELECT response_text FROM llm_call_logs").fetchone()[0] == 'private diagnostic'
+        assert source.execute("SELECT response_text FROM llm_call_logs").fetchone()[0] == live_body
+    for database in (artifact.root / 'data' / 'linguary.db',
+                     fork_processing(artifact, 'left').database_path,
+                     fork_processing(artifact, 'right').database_path):
+        for db_file in database.parent.glob(f'{database.name}*'):
+            contents = db_file.read_bytes()
+            assert live_body.encode() not in contents
+            assert deleted_marker.encode() not in contents
     with sqlite3.connect(artifact.root / 'data' / 'linguary.db') as target:
         body, raw, usage, cost, actual_attempt = target.execute('SELECT response_text,diagnostic_meta_json,prompt_tokens,cost,attempt_id FROM llm_call_logs').fetchone()
         assert body is None

@@ -913,6 +913,9 @@ def freeze_analysis(workspace) -> AnalysisArtifact:
                 _validate_analysis(source, allow_rejected_diagnostics=True)
                 with closing(sqlite3.connect(data / 'linguary.db')) as target:
                     source.backup(target)
+                    if target.execute('PRAGMA journal_mode=DELETE').fetchone()[0] != 'delete':
+                        raise WorkspaceError('Не удалось подготовить файл снимка анализа')
+                    target.execute('PRAGMA secure_delete=ON')
                     for call_id, raw_metadata in target.execute('SELECT id, diagnostic_meta_json FROM llm_call_logs WHERE response_text IS NOT NULL').fetchall():
                         metadata = json.loads(raw_metadata)
                         metadata['body_meta'].update(body_status='unavailable', stored_bytes=0,
@@ -934,6 +937,10 @@ def freeze_analysis(workspace) -> AnalysisArtifact:
             with closing(sqlite3.connect(data / 'linguary.db')) as db, db:
                 _relocate_sources(db, workspace.root, destination)
                 receipts = [r[0] for r in db.execute('SELECT id FROM llm_call_logs ORDER BY id')]
+                db.commit()
+                # Backup carries freed pages too; rebuild after the last snapshot write.
+                db.execute('VACUUM')
+                _validate_analysis(db)
             hashes = _hashes(destination)
             provenance = {'protocol_hash': workspace.protocol.content_hash, 'analysis_call_ids': receipts, 'origin': workspace.ownership, 'input_hashes': json.loads((workspace.root / 'inputs.json').read_text())}
             digest = stable_hash({'files': hashes, 'provenance': provenance})
