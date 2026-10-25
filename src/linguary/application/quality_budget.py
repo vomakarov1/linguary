@@ -104,15 +104,20 @@ class QualityBudget:
 
     def mark_sent(self, attempt_id):
         with self.uow.transaction() as tx:
-            attempt = tx.work.get_attempt(attempt_id)
-            if attempt is None:
-                raise WorkStateError('попытка не найдена')
-            review = tx.work.get_review(attempt.review_id)
-            if review.manifest.get('manifest_sha') is not None:
-                from linguary.application.quality_context import snapshot
-                if snapshot(tx, review.book_id, tuple(review.manifest['scope']))['manifest_sha'] != review.manifest['manifest_sha']:
-                    raise WorkStateError('manifest_changed')
-            tx.work.mark_review_sent(attempt_id)
+            try:
+                attempt = tx.work.get_attempt(attempt_id)
+                if attempt is None:
+                    raise WorkStateError('попытка не найдена')
+                review = tx.work.get_review(attempt.review_id)
+                if review.manifest.get('manifest_sha') is not None:
+                    from linguary.application.quality_context import snapshot
+                    if snapshot(tx, review.book_id, tuple(review.manifest['scope']))['manifest_sha'] != review.manifest['manifest_sha']:
+                        raise WorkStateError('manifest_changed')
+                tx.work.mark_review_sent(attempt_id)
+            except WorkStateError:
+                tx.work.cancel_review_unsent(attempt_id)
+                return False
+        return True
 
     def settle(self, attempt_id, actual):
         with self.uow.transaction() as tx:

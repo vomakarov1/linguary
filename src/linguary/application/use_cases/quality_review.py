@@ -119,7 +119,13 @@ class QualityReviewService:
                 tuple(review.manifest['scope']), attempt.id, current.revision, route.model,
                 sha256(INSTRUCTIONS.encode()).hexdigest(), task_id=task.id)
             outgoing = replace(request, call_context=context, attempt=ordinal)
-            self.budget.mark_sent(attempt.id)
+            if not self.budget.mark_sent(attempt.id):
+                state = self.get(task.book_id, review.id)['state']
+                if state == 'stale':
+                    self._update(review.id, 'stale', reason='manifest_changed')
+                elif state not in ('limit', 'unknown'):
+                    raise WorkStateError('отправка вычитки отклонена')
+                return
             response = None
             try:
                 response = await client.generate(outgoing)

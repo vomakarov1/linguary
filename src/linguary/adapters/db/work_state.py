@@ -329,6 +329,31 @@ class SqlAlchemyWorkRepository:
             raise WorkStateError('вычитка остановлена')
         self.transition_attempt(attempt_id, 'sent', expected_state='reserved')
 
+    def cancel_review_unsent(self, attempt_id):
+        attempt = self.get_attempt(attempt_id)
+        reservation = self.get_reservation(attempt_id)
+        if (attempt is None or reservation is None or attempt.review_id != reservation.review_id
+                or attempt.state != 'reserved' or reservation.state != 'reserved'):
+            raise WorkStateError('попытка уже отправлена или изменена')
+        reservation.transition('released')
+        review = self.get_review(attempt.review_id)
+        with self._session.begin_nested():
+            self.transition_attempt(attempt_id, 'cancelled', expected_state='reserved')
+            changed = self._session.execute(update(QualityReservationRow).where(
+                QualityReservationRow.attempt_id == attempt_id,
+                QualityReservationRow.review_id == attempt.review_id,
+                QualityReservationRow.state == 'reserved',
+            ).values(state='released'))
+            if changed.rowcount != 1:
+                raise WorkStateError('резерв уже изменился')
+            changed = self._session.execute(update(QualityReviewRow).where(
+                QualityReviewRow.id == review.id, QualityReviewRow.revision == review.revision,
+                QualityReviewRow.reserved >= reservation.estimate,
+            ).values(reserved=QualityReviewRow.reserved - reservation.estimate,
+                     revision=QualityReviewRow.revision + 1))
+            if changed.rowcount != 1:
+                raise WorkStateError('состояние вычитки изменилось')
+
     def reconcile_quality_attempts(self):
         rows = self._session.scalars(select(LLMAttemptRow).join(QualityReservationRow,
             QualityReservationRow.attempt_id == LLMAttemptRow.id).where(

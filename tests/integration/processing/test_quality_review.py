@@ -191,6 +191,36 @@ async def test_regeneration_during_review_stales(tmp_path):
         await app.aclose()
 
 
+async def test_regeneration_after_reservation_cancels_unsent_attempt(tmp_path, monkeypatch):
+    app, fake, doc, run = await make_review_app(tmp_path)
+    try:
+        created = await app.quality_review.start(command(app))
+        reserve = app.quality_review.budget.reserve
+        attempts = []
+
+        def reserve_then_regenerate(*args, **kwargs):
+            attempt = reserve(*args, **kwargs)
+            attempts.append(attempt.id)
+            with app.unit_of_work.transaction() as tx:
+                current = tx.results.list_for_run(run.id)[0]
+                tx.results.replace_results(run.id, (replace(current, translated_text='Другой перевод.'),))
+                tx.work.stale_reviews('book-1')
+            return attempt
+
+        monkeypatch.setattr(app.quality_review.budget, 'reserve', reserve_then_regenerate)
+        finished = await drain_tasks(app)
+        assert finished[0].status == TaskStatus.SUCCEEDED, finished[0].last_error
+        result = app.quality_review.get('book-1', created['review_id'])
+        assert result['state'] == 'stale' and result['spent'] == result['reserved'] == 0
+        assert fake.review_calls == 0
+        with app.unit_of_work.transaction() as tx:
+            assert len(attempts) == 1
+            assert tx.work.get_attempt(attempts[0]).state == 'cancelled'
+            assert tx.work.get_reservation(attempts[0]).state == 'released'
+    finally:
+        await app.aclose()
+
+
 async def test_local_registry_is_used_by_build_application(tmp_path, monkeypatch):
     from linguary.adapters.config.quality_routes import PROTOCOL
     path = tmp_path / 'routes.json'
