@@ -281,7 +281,7 @@ def test_content_downgrade_refuses_all_nonnull_before_ddl(
         event.remove(Engine, 'before_cursor_execute', track_ddl)
     assert ddl == []
     with engine.connect() as connection:
-        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0006'
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0007'
         assert connection.execute(text(f'SELECT {column} FROM {table}')).scalar_one() == payload
         for target, name in CONTENT_COLUMNS:
             assert name in {item['name'] for item in inspect(connection).get_columns(target)}

@@ -23,6 +23,10 @@ from contextvars import ContextVar
 from itertools import count
 
 from sqlalchemy import Engine
+from sqlalchemy.exc import OperationalError
+from time import sleep
+
+from linguary.adapters.db.work_state import SqlAlchemyWorkRepository
 from sqlalchemy.orm import Session, sessionmaker
 
 from linguary.adapters.db.engine import create_session_factory
@@ -73,6 +77,18 @@ class SqlAlchemyUnitOfWork:
         token = self._current.set(session)
         try:
             with session.begin():
+                # Acquire SQLite's writer lock before application work: retries never
+                # replay user code or encompass a physical model request.
+                for attempt in range(3):
+                    try:
+                        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                        break
+                    except OperationalError as error:
+                        if 'locked' not in str(error).lower() and 'busy' not in str(error).lower():
+                            raise
+                        if attempt == 2:
+                            raise PersistenceError('база данных занята после ограниченного повтора') from None
+                        sleep(0.01 * (attempt + 1))
                 yield self
         finally:
             self._current.reset(token)
@@ -117,6 +133,11 @@ class SqlAlchemyUnitOfWork:
     def llm_calls(self) -> SqlAlchemyLLMCallLogRepository:
         """LLM call log repository."""
         return SqlAlchemyLLMCallLogRepository(self._active_session())
+
+    @property
+    def work(self) -> SqlAlchemyWorkRepository:
+        """Versioned work, provenance, and monetary reservations."""
+        return SqlAlchemyWorkRepository(self._active_session())
 
     def _active_session(self) -> Session:
         """Active transaction session in current execution context."""

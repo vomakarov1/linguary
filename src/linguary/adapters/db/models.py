@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Integer,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -409,6 +410,7 @@ class LLMCallLogRow(Base):
     __table_args__ = (
         Index("ix_llm_call_logs_book_id_stage", "book_id", "stage"),
         Index("ix_llm_call_logs_task_id", "task_id"),
+        Index("uq_llm_call_logs_attempt_id", "attempt_id", unique=True),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -428,6 +430,8 @@ class LLMCallLogRow(Base):
     prompt_tokens: Mapped[int | None] = mapped_column()
     completion_tokens: Mapped[int | None] = mapped_column()
     cost: Mapped[Decimal | None] = mapped_column(DecimalAsText)
+    attempt_id: Mapped[str | None] = mapped_column(String)
+    diagnostic_meta_json: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
 
 
 __all__ = [
@@ -469,3 +473,122 @@ class SystemSettingsRow(Base):
     overrides_json: Mapped[dict[str, object] | None] = mapped_column(JSON(none_as_null=True))
     api_key: Mapped[str | None] = mapped_column(Text)
     proxy_url: Mapped[str | None] = mapped_column(Text)
+
+
+class BookConditionsRow(Base):
+    """Persisted book conditions."""
+
+    __tablename__ = 'book_conditions'
+    __table_args__ = (UniqueConstraint('book_id', 'revision'), CheckConstraint("revision >= 0", name="revision_nonnegative"), CheckConstraint("schema_version >= 0", name="schema_version_nonnegative"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    reproducibility: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+class WorkBindingRow(Base):
+    """Persisted work bindings."""
+
+    __tablename__ = 'work_bindings'
+    entity_kind: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    conditions_id: Mapped[str] = mapped_column(String, ForeignKey('book_conditions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    attempt_id: Mapped[str | None] = mapped_column(String, ForeignKey('llm_attempts.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    artifact_revision_id: Mapped[str | None] = mapped_column(String, ForeignKey('artifact_revisions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+class ArtifactRevisionRow(Base):
+    """Persisted artifact revisions."""
+
+    __tablename__ = 'artifact_revisions'
+    id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    conditions_id: Mapped[str | None] = mapped_column(String, ForeignKey('book_conditions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    scope_id: Mapped[str] = mapped_column(String, nullable=False)
+    body_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    sha256: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_id: Mapped[str | None] = mapped_column(String, ForeignKey('llm_attempts.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+class RecoveryRootRow(Base):
+    """Persisted recovery roots."""
+
+    __tablename__ = 'recovery_roots'
+    __table_args__ = (CheckConstraint("generation >= 0", name="generation_nonnegative"), CheckConstraint("calls_used >= 0", name="calls_used_nonnegative"), CheckConstraint("extra_calls >= 0", name="extra_calls_nonnegative"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    conditions_id: Mapped[str] = mapped_column(String, ForeignKey('book_conditions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    root_key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    calls_used: Mapped[int] = mapped_column(Integer, nullable=False)
+    extra_calls: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+
+class RecoveryScopeRow(Base):
+    """Persisted recovery scopes."""
+
+    __tablename__ = 'recovery_scopes'
+    __table_args__ = (CheckConstraint("generation >= 0", name="generation_nonnegative"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    root_id: Mapped[str] = mapped_column(String, ForeignKey('recovery_roots.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(String, ForeignKey('recovery_scopes.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    ordered_blocks_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    accepted_attempt_id: Mapped[str | None] = mapped_column(String, ForeignKey('llm_attempts.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED", use_alter=True), nullable=True)
+
+class LLMAttemptRow(Base):
+    """Persisted llm attempts."""
+
+    __tablename__ = 'llm_attempts'
+    __table_args__ = (UniqueConstraint('root_id', 'ordinal'), UniqueConstraint('review_id', 'ordinal'), CheckConstraint("generation >= 0", name="generation_nonnegative"), CheckConstraint("ordinal >= 0", name="ordinal_nonnegative"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    conditions_id: Mapped[str | None] = mapped_column(String, ForeignKey('book_conditions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    root_id: Mapped[str | None] = mapped_column(String, ForeignKey('recovery_roots.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    scope_id: Mapped[str | None] = mapped_column(String, ForeignKey('recovery_scopes.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    review_id: Mapped[str | None] = mapped_column(String, ForeignKey('quality_reviews.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    outcome_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+class QualityReviewRow(Base):
+    """Persisted quality reviews."""
+
+    __tablename__ = 'quality_reviews'
+    __table_args__ = (UniqueConstraint('book_id', 'request_key'), CheckConstraint("revision >= 0", name="revision_nonnegative"), CheckConstraint("budget_limit >= 0", name="budget_limit_nonnegative"), CheckConstraint("spent >= 0", name="spent_nonnegative"), CheckConstraint("reserved >= 0", name="reserved_nonnegative"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    conditions_id: Mapped[str | None] = mapped_column(String, ForeignKey('book_conditions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
+    request_key: Mapped[str] = mapped_column(String, nullable=False)
+    manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    findings_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    budget_limit: Mapped[int] = mapped_column(Integer, nullable=False)
+    spent: Mapped[int] = mapped_column(Integer, nullable=False)
+    reserved: Mapped[int] = mapped_column(Integer, nullable=False)
+
+class QualityReservationRow(Base):
+    """Persisted quality reservations."""
+
+    __tablename__ = 'quality_reservations'
+    __table_args__ = (CheckConstraint("estimate >= 0", name="estimate_nonnegative"), CheckConstraint("actual >= 0", name="actual_nonnegative"),)
+    attempt_id: Mapped[str] = mapped_column(String, ForeignKey('llm_attempts.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), primary_key=True, nullable=False)
+    review_id: Mapped[str] = mapped_column(String, ForeignKey('quality_reviews.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
+    estimate: Mapped[int] = mapped_column(Integer, nullable=False)
+    actual: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    price_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)

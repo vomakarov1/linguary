@@ -753,3 +753,23 @@ def _encode_content_evidence(value: ContentEvidence | tuple[()]) -> dict[str, An
     data = _json_collections(asdict(value))
     _decode_content_evidence(data)
     return data
+
+
+def conditions_to_row(conditions):
+    """Map immutable conditions without inventing legacy metadata."""
+    from linguary.adapters.db.models import BookConditionsRow
+    from linguary.domain.book_conditions import thaw
+    return BookConditionsRow(
+        id=conditions.id, book_id=conditions.book_id, revision=conditions.revision,
+        schema_version=conditions.schema_version, payload_json=thaw(conditions.payload),
+        reproducibility=conditions.reproducibility, created_at=conditions.created_at,
+    )
+
+
+def conditions_from_row(row):
+    """Absent conditions remain absent on historical books."""
+    from linguary.domain.book_conditions import BookConditions
+    if row is None:
+        return None
+    return BookConditions(row.id, row.book_id, row.revision, row.payload_json,
+                          row.created_at, row.reproducibility, row.schema_version)
