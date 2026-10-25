@@ -53,6 +53,7 @@ def test_a2_double_negative_instructions_keep_translation_and_byr_affirmative():
         'The story continues.\n\nThe story continues.',
         'The story continues.\n\nИстория продолжается.\n\nГерои уходят.',
         'История продолжается.\n\nГерои уходят.',
+        'The story continues.\n\nИстория العربية العربية العربية.',
     ],
 )
 def test_a2_summary_requires_two_paragraphs_with_russian_translation(summary):

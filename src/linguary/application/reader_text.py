@@ -70,8 +70,8 @@ def validate_a2_summary(body: str, *, source_texts: tuple[str, ...]) -> None:
     summary_script = _dominant_script(paragraphs[0])
     if source_script is not None and summary_script != source_script:
         raise ReaderTextError('a2_summary_requires_parallel_russian')
-    letters = re.findall(r'[A-Za-zА-Яа-яЁё]', paragraphs[1])
-    cyrillic = re.findall(r'[А-Яа-яЁё]', paragraphs[1])
+    letters = [char for char in paragraphs[1] if char.isalpha()]
+    cyrillic = [char for char in letters if unicodedata.name(char, '').startswith('CYRILLIC ')]
     if not letters or len(cyrillic) / len(letters) < 0.5:
         raise ReaderTextError('a2_summary_requires_parallel_russian')
 
