@@ -29,11 +29,6 @@ _TRAILING_CLOSERS = "»\"”’'*)]}"
 #: Brackets whose imbalance indicates truncated text.
 _BRACKETS: tuple[tuple[str, str], ...] = (("(", ")"), ("[", "]"), ("{", "}"))
 
-#: Quotation marks are treated as a single pair type regardless of glyph: source
-#: and translation format direct speech per their language conventions, turning `"Go"` into «Иди».
-_QUOTE_OPENINGS = "«“„"
-_QUOTE_CLOSINGS = "»”"
-
 #: Symmetric quotation mark: pairing is determined by the parity of occurrence count.
 _SYMMETRIC_QUOTE = '"'
 
@@ -92,11 +87,15 @@ def _balances(text: str) -> Mapping[str, int]:
         f"скобки {opening}{closing}": text.count(opening) - text.count(closing)
         for opening, closing in _BRACKETS
     }
-    balances["кавычки"] = (
-        sum(text.count(mark) for mark in _QUOTE_OPENINGS)
-        - sum(text.count(mark) for mark in _QUOTE_CLOSINGS)
-        + text.count(_SYMMETRIC_QUOTE) % 2
-    )
+    # « and „ are always openings. » and ” are always closings.
+    # “ is closing when paired with „ (Russian/German „...“), and opening when paired with ” (English “...”).
+    n_low = text.count("„")
+    n_high_open = text.count("“")
+    n_high_close = text.count("”")
+    paired_low = min(n_low, n_high_open)
+    openings = text.count("«") + n_low + (n_high_open - paired_low)
+    closings = text.count("»") + n_high_close + paired_low
+    balances["кавычки"] = (openings - closings) + text.count(_SYMMETRIC_QUOTE) % 2
     return balances
 
 

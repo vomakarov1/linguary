@@ -427,6 +427,21 @@ def test_unbalanced_quote_is_rejected() -> None:
     assert "не закрыты кавычки" in str(rejection(payload, unit=unit))
 
 
+def test_nested_russian_quotes_are_accepted() -> None:
+    """Nested Russian quotation marks («... „...“») are balanced and accepted."""
+    blocks = (make_block(order=0, text='“He said, ‘Welcome!’ to everyone.”'),)
+    unit = make_unit(blocks)
+    payload = make_response(
+        (
+            make_block_result(
+                blocks[0], translated_text="«Он сказал: „Добро пожаловать!“ всем.»"
+            ),
+        )
+    )
+
+    assert validate(payload, unit=unit)
+
+
 def test_quote_left_open_in_the_source_is_accepted() -> None:
     """Multi-paragraph direct speech opens quotes on each paragraph — not a truncation."""
     blocks = (make_block(order=0, text='"Go there. And do not look back.'),)
