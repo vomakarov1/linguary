@@ -294,7 +294,11 @@ def test_analysis_instructions_adapt_to_reader_level() -> None:
     """Analysis instructions adapt guidance to the reader level (PRD § 30)."""
     a2_instructions = build_context(reader_level="a2").request.instructions
     assert "A2" in a2_instructions
-    assert "70–85%" in a2_instructions
+    assert "65–80%" in a2_instructions
+    assert "4–8 слов" in a2_instructions
+    assert "might have been" in a2_instructions
+    assert "what" in a2_instructions
+    assert "отрыв предлога" in a2_instructions
 
     b1_instructions = build_context(reader_level="b1").request.instructions
     assert "B1" in b1_instructions

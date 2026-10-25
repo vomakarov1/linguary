@@ -24,7 +24,8 @@ def test_cleanup_cannot_erase_required_help():
 
 def test_a2_policy_in_all_channels():
     instructions = learner_instructions('a2')
-    for expected in ('summary', 'before_you_read', 'glossary_hint', 'language_note', 'Shoo', 'snapped', 'went out'):
+    for expected in ('summary', 'before_you_read', 'glossary_hint', 'language_note', 'Shoo', 'snapped', 'went out',
+                     'might have been', 'what', 'отрыв предлога', 'языковой заметке'):
         assert expected in instructions
     assert ReaderTextPolicy().warnings('summary', 'One ' * 40 + '.', reader_level='a2')
 
