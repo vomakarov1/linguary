@@ -24,7 +24,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from linguary.domain.content_plan import ContentPlan, HelpEvidence, SourceAnchor, artifact_key
+from linguary.domain.content_plan import ContentPlan, ContextFact, HelpEvidence, SourceAnchor, artifact_key
 
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
@@ -132,7 +132,7 @@ class FragmentAnalysis:
         return cls(
             order=order,
             translation_instructions=without_block_labels(payload.translation_instructions),
-            chapter_summary=without_block_labels(payload.chapter_summary),
+            chapter_summary=payload.chapter_summary if payload.content_plan is not None and payload.content_plan.version == 3 else without_block_labels(payload.chapter_summary),
             treatments=tuple(
                 TreatmentPlanItem(block_id=block_id, treatment=treatments[alias])
                 for alias, block_id in block_ids_by_alias.items()
@@ -385,10 +385,8 @@ def _merged_before_you_read(
 ) -> tuple[BeforeYouReadEntry, ...]:
     """Chapter `Before You Read` materials: deduplicated expressions across fragments (PRD § 19.1)."""
     return before_you_read_entries(
-        entry for fragment in fragments for entry in fragment.before_you_read
-    )
-    return before_you_read_entries(
-        entry for fragment in fragments for entry in fragment.before_you_read
+        (entry for fragment in fragments for entry in fragment.before_you_read),
+        strict=any(fragment.content_plan is not None and fragment.content_plan.version == 3 for fragment in fragments),
     )
 
 
@@ -461,7 +459,7 @@ def sanitize_before_you_read_explanation(text: str) -> str:
 
 
 def before_you_read_entries(
-    entries: Iterable[BeforeYouReadEntryResponse],
+    entries: Iterable[BeforeYouReadEntryResponse], *, strict: bool = False,
 ) -> tuple[BeforeYouReadEntry, ...]:
     """Retains up to the first ten distinct chapter expressions with sanitized explanations."""
     selected: dict[str, BeforeYouReadEntry] = {}
@@ -474,7 +472,7 @@ def before_you_read_entries(
         if key and key not in selected:
             selected[key] = BeforeYouReadEntry(
                 expression=entry.expression,
-                explanation=sanitize_before_you_read_explanation(entry.explanation),
+                explanation=entry.explanation if strict else sanitize_before_you_read_explanation(entry.explanation),
             )
         if len(selected) >= MAX_BEFORE_YOU_READ:
             break
@@ -566,6 +564,9 @@ def content_plan_from_response(
     """Replaces local aliases and computes stable application references."""
     if payload.content_plan is None:
         return None
+    is_v3 = payload.content_plan.version == 3
+    if is_v3 and texts is None:
+        raise AnalysisMergeError('план v3 требует доступный исходный фрагмент')
     difficulties = []
     ids = {}
     for difficulty in payload.content_plan.difficulties:
@@ -573,7 +574,11 @@ def content_plan_from_response(
             mapped_anchors = []
             for a in difficulty.anchors:
                 real_block_id = aliases[a.block_id]
-                if texts is not None and real_block_id in texts:
+                if is_v3:
+                    mapped_anchor = replace(a, block_id=real_block_id)
+                    mapped_anchor.validate(texts)
+                    mapped_anchors.append(mapped_anchor)
+                elif texts is not None and real_block_id in texts:
                     span = find_quote_span(texts[real_block_id], a.quote, estimated_start=a.start)
                     if span is not None:
                         start, end, actual_quote = span
@@ -595,7 +600,7 @@ def content_plan_from_response(
         ids[difficulty.id] = mapped.id
         difficulties.append(mapped)
     evidence = []
-    selected = before_you_read_entries(payload.before_you_read)
+    selected = before_you_read_entries(payload.before_you_read, strict=is_v3)
     for item in payload.content_plan.before_you_read_evidence:
         if item.artifact_kind != "before_you_read.explanation" or item.artifact_index >= len(payload.before_you_read):
             raise AnalysisMergeError("свидетельство анализа не ссылается на существующий BYR")
@@ -617,14 +622,25 @@ def content_plan_from_response(
             evidence.append(HelpEvidence(ids[item.difficulty_id], item.point_id, item.artifact_kind, aliases[item.source_block_id], artifact_key(item.artifact_kind, aliases[item.source_block_id], {"expression": entry.expression, "explanation": entry.explanation}), body_excerpt))
         except KeyError as error:
             raise AnalysisMergeError("неизвестная трудность или владелец свидетельства") from error
-    return ContentPlan(difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence))
+    facts = []
+    for fact in payload.content_plan.context_facts:
+        try:
+            mapped = replace(fact,
+                anchors=tuple(replace(anchor, block_id=aliases[anchor.block_id]) for anchor in fact.anchors),
+                subject_anchor=replace(fact.subject_anchor, block_id=aliases[fact.subject_anchor.block_id]))
+        except KeyError:
+            raise AnalysisMergeError('контекстная атрибуция ссылается на невидимый блок') from None
+        mapped.validate(texts)
+        facts.append(replace(mapped, id=mapped.canonical_id))
+    return ContentPlan(version=payload.content_plan.version, profile=payload.content_plan.profile,
+        difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence), context_facts=tuple(facts))
 
 
 def _merged_content_plan(fragments: Sequence[FragmentAnalysis]) -> ContentPlan | None:
     plans = [f.content_plan for f in fragments if f.content_plan is not None]
     if not plans:
         return None
-    if len(plans) != len(fragments):
+    if len(plans) != len(fragments) or len({plan.version for plan in plans}) != 1:
         raise AnalysisMergeError("нельзя смешивать версии анализа")
     groups = {}
     for plan in plans:
@@ -656,7 +672,15 @@ def _merged_content_plan(fragments: Sequence[FragmentAnalysis]) -> ContentPlan |
             mapped = replace(item, difficulty_id=ids[item.difficulty_id])
             if mapped not in evidence:
                 evidence.append(mapped)
-    result = ContentPlan(difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence))
+    facts = {}
+    for plan in plans:
+        for fact in plan.context_facts:
+            previous = facts.setdefault(fact.canonical_id, fact)
+            if previous != fact:
+                raise AnalysisMergeError('конфликт канонической атрибуции')
+    result = ContentPlan(version=plans[0].version, profile=plans[0].profile,
+        difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence),
+        context_facts=tuple(facts.values()))
     selected = _merged_before_you_read(fragments)
     for item in evidence:
         if not any(artifact_key(item.artifact_kind, item.block_id, {"expression": e.expression, "explanation": e.explanation}) == item.artifact_key for e in selected):
@@ -712,3 +736,30 @@ def _quotation_key(text: str) -> str:
     while end > start and (text[end - 1].isspace() or unicodedata.category(text[end - 1]).startswith("P")):
         end -= 1
     return text[start:end]
+
+
+
+def validate_fact_glossary(plan, mandatory_facts):
+    """Reject explicit contradictions with structured mandatory glossary decisions."""
+    if plan is None or plan.version != 3:
+        return
+    for fact in plan.context_facts:
+        expected = mandatory_facts.get(fact.subject_anchor.quote, {}).get(fact.kind)
+        if expected is not None and fact.certainty != 'unknown' and fact.value != expected:
+            raise AnalysisMergeError('контекстная атрибуция противоречит обязательному решению глоссария')
+
+
+def glossary_context_constraints(concepts):
+    """Only exact supported gender notes become machine-checkable constraints."""
+    genders = {'мужской род': 'male', 'женский род': 'female', 'средний род': 'neuter',
+               'male': 'male', 'female': 'female', 'neuter': 'neuter'}
+    result = {}
+    for concept in concepts:
+        if not concept.status.is_user_decision:
+            continue
+        note = concept.note.strip().casefold().rstrip('.')
+        gender = genders.get(note)
+        if gender is not None:
+            source = getattr(concept, 'canonical_source_text', None) or concept.source_text
+            result[source] = {'gender': gender}
+    return result

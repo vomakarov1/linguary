@@ -49,6 +49,7 @@ from linguary.application.chapter_instructions import (
     note_respecting_glossary,
 )
 from linguary.application.errors import ApplicationError
+from linguary.application.reader_text import learner_instructions
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMRequest
 from linguary.domain.content_plan import ContentPlan, artifact_key
@@ -129,6 +130,21 @@ artifact_index с нуля в соответствующем списке (по�
 оригинал. Перевод и пересказ не считаются объяснением. Соседние anchors служат
 контекстом, не требуют результата. Свидетельства показывают только структуру,
 смысловая правильность отдельно не проверена.
+"""
+
+
+_CONTENT_PLAN_ANALYSIS_V3 = _CONTENT_PLAN_ANALYSIS.replace('content-plan-v2.1', 'learner-quality-v3.1').replace('content-plan-v2', 'content-plan-v3').replace('version=2', 'version=3') + """
+Верни context_facts: id, kind (speaker, gender, pronoun_referent), anchors,
+subject_anchor, value, certainty (explicit, inferred, unknown).
+Каждая привязка содержит видимый block_id, точные start/end и дословную quote.
+Не исправляй цитату и смещения; subject_anchor проверяется отдельно от anchors.
+Не распространяй факт за видимый фрагмент. При certainty=unknown значение не задано (value=null).
+Различай подтверждённый текстом факт и предположение; противоречащие атрибуции не выбирай молча.
+"""
+_CONTENT_PLAN_PROCESSING_V3 = _CONTENT_PLAN_PROCESSING.replace('content-plan-v2.1', 'learner-quality-v3.1').replace('content-plan-v2', 'content-plan-v3') + """
+Служебные context_facts применяй только к назначенным субъектам и их точным исходным привязкам.
+Не выдавай inferred/unknown за подтверждённый факт; решения глоссария имеют приоритет.
+Не превращай эти служебные сведения в обязательную заметку читателю.
 """
 
 
@@ -321,7 +337,7 @@ class ContextBuilder:
         reader_level: str = "b2",
         prompt_templates: Mapping[str, str] | None = None,
     ) -> None:
-        if content_plan_profile not in {"legacy-v1", "content-plan-v2"}:
+        if content_plan_profile not in {"legacy-v1", "content-plan-v2", "content-plan-v3"}:
             raise ContextBuildError("неизвестный профиль содержательного плана")
         if max_unit_source_chars < 1:
             raise ContextBuildError("предел размера группы должен быть положительным")
@@ -494,11 +510,14 @@ class ContextBuilder:
         neighbours: Sequence[_NeighbourBlocks],
     ) -> TranslationContext:
         """Ready translation request for given blocks along with response parsing setup."""
-        if analysis.content_plan is not None and self._content_plan_profile != "content-plan-v2":
-            raise ContextBuildError("сохранённый v2-план требует явный профиль content-plan-v2")
-        version = 2 if analysis.content_plan is not None else 1
-        if version == 2:
-            instructions += "\n" + self._prompt_templates.get("content_processing", _CONTENT_PLAN_PROCESSING)
+        if analysis.content_plan is not None and self._content_plan_profile != analysis.content_plan.profile:
+            raise ContextBuildError("сохранённый план требует соответствующий явный профиль")
+        version = analysis.content_plan.version if analysis.content_plan is not None else 1
+        if version in (2, 3):
+            default = _CONTENT_PLAN_PROCESSING_V3 if version == 3 else _CONTENT_PLAN_PROCESSING
+            instructions += "\n" + self._prompt_templates.get("content_processing", default)
+        if version == 3:
+            instructions += "\n" + self._prompt_templates.get('learner_quality', learner_instructions(self._reader_level))
         if unit.section_id != section.id:
             raise ContextBuildError(
                 f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
@@ -637,13 +656,16 @@ class ContextBuilder:
     ) -> ChapterAnalysisContext:
         """Ready request for chapter blocks along with response parsing metadata."""
         aliases = {_alias(index): block.id for index, block in enumerate(blocks, start=1)}
-        candidate = self._content_plan_profile == "content-plan-v2"
+        candidate = self._content_plan_profile in {"content-plan-v2", "content-plan-v3"}
+        version = 3 if self._content_plan_profile == "content-plan-v3" else (2 if candidate else 1)
         note_limit = self._language_notes_per_chapter if language_notes_limit is None else language_notes_limit
         note_groups = self._analysis_note_groups(section, blocks) if candidate else ()
         if candidate and section.is_notes_only:
             before_you_read_limit = 0
         if candidate:
-            instructions += "\n" + self._prompt_templates.get("content_analysis", _CONTENT_PLAN_ANALYSIS)
+            instructions += "\n" + self._prompt_templates.get("content_analysis", _CONTENT_PLAN_ANALYSIS_V3 if version == 3 else _CONTENT_PLAN_ANALYSIS)
+            if version == 3:
+                instructions += "\n" + self._prompt_templates.get("learner_quality", learner_instructions(self._reader_level))
             instructions += f"\nВ этом ответе не больше {before_you_read_limit} BYR."
             instructions += f"\nБюджет обязательных заметок этого анализа: {note_limit}."
             instructions += "\nПределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False)
@@ -655,7 +677,7 @@ class ContextBuilder:
             note_limits_by_block={b.id: notes_budget(unit_chars=len(b.text), chapter_chars=sum(len(t.text) for t in textual_blocks(section)), per_chapter=self._language_notes_per_chapter) if self._language_notes_per_chapter else 0 for b in blocks},
             section_id=section.id,
             request=LLMRequest.for_chapter_analysis(
-                contract_version=2 if candidate else 1,
+                contract_version=version,
                 instructions=instructions,
                 input_text=self._chapter_input(
                     document=document,
@@ -1535,16 +1557,28 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
                     value["artifact_index"] = index
                     break
             evidence.append(value)
+    facts = []
+    for fact in analysis.content_plan.context_facts:
+        if fact.subject_anchor.block_id not in aliases:
+            continue
+        value = fact.to_dict()
+        for anchor in (*value['anchors'], value['subject_anchor']):
+            source_id = anchor['block_id']
+            if source_id not in aliases:
+                related.setdefault(source_id, f'related-source-{len(related) + 1}')
+            anchor['block_id'] = aliases.get(source_id, related.get(source_id))
+        facts.append(value)
     return "Обязательные аспекты и точные связанные привязки:\n" + json.dumps({
-        "version": 2, "difficulties": difficulties, "before_you_read_evidence": evidence,
+        "version": analysis.content_plan.version, "difficulties": difficulties, "before_you_read_evidence": evidence,
         "before_you_read": [dict(artifact_index=i, expression=e.expression, explanation=e.explanation) for i, e in enumerate(analysis.before_you_read)],
+        **({'context_facts': facts} if analysis.content_plan.version == 3 else {}),
     }, ensure_ascii=False)
 
 
-def snapshot_prompt_templates(*, source_language, target_language, reader_level):
+def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1"):
     """Render immutable instruction templates without book text or secrets."""
     languages = dict(source_language=source_language, target_language=target_language)
-    return {
+    result = {
         'analysis': chapter_analysis_instructions(**languages, reader_level=reader_level),
         'fragment': chapter_fragment_instructions(**languages, reader_level=reader_level),
         'translation': translation_unit_instructions(**languages),
@@ -1552,3 +1586,7 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level)
         'content_analysis': _CONTENT_PLAN_ANALYSIS,
         'content_processing': _CONTENT_PLAN_PROCESSING,
     }
+    if profile == 'content-plan-v3':
+        result.update(content_analysis=_CONTENT_PLAN_ANALYSIS_V3, content_processing=_CONTENT_PLAN_PROCESSING_V3,
+                      learner_quality=learner_instructions(reader_level))
+    return result

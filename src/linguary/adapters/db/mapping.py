@@ -35,7 +35,7 @@ from linguary.adapters.db.models import (
 )
 from linguary.application.ports.persistence import BookRecord, ExportValidationStatus, PersistenceError
 from linguary.domain.content_plan import (
-    ContentPlan, ContentEvidence, Difficulty, SourceAnchor, RequiredPoint, HelpEvidence,
+    ContentPlan, ContentEvidence, ContextFact, Difficulty, SourceAnchor, RequiredPoint, HelpEvidence,
 )
 from linguary.domain.errors import DomainError
 from linguary.domain import (
@@ -702,15 +702,33 @@ def _difficulty(value: object) -> Difficulty:
     )
 
 
+def _context_fact(value):
+    fields = {'id', 'kind', 'anchors', 'subject_anchor', 'certainty'}
+    if isinstance(value, dict) and value.get('certainty') != 'unknown':
+        fields.add('value')
+    data = _object(value, fields)
+    def anchor(item):
+        item = _object(item, {'block_id', 'start', 'end', 'quote'})
+        return SourceAnchor(_string(item['block_id']), _integer(item['start']), _integer(item['end']), _string(item['quote']))
+    return ContextFact(_string(data['id']), _string(data['kind']),
+        tuple(anchor(item) for item in _array(data['anchors'])), anchor(data['subject_anchor']),
+        None if data['certainty'] == 'unknown' else _string(data['value']), _string(data['certainty']))
+
+
 def _decode_content_plan(value: object) -> ContentPlan | None:
     if value is None:
         return None
     try:
-        data = _object(value, {"version", "profile", "difficulties", "before_you_read_evidence"})
+        version = value.get('version') if isinstance(value, dict) else None
+        fields = {"version", "profile", "difficulties", "before_you_read_evidence"}
+        if version == 3:
+            fields.add('context_facts')
+        data = _object(value, fields)
         return ContentPlan(
             version=_integer(data["version"]), profile=_string(data["profile"]),
             difficulties=tuple(_difficulty(item) for item in _array(data["difficulties"])),
             before_you_read_evidence=tuple(_help_evidence(item) for item in _array(data["before_you_read_evidence"])),
+            context_facts=tuple(_context_fact(item) for item in _array(data['context_facts'])) if version == 3 else (),
         )
     except (ValueError, TypeError, DomainError):
         raise PersistenceError("повреждённый сохранённый содержательный план") from None
@@ -745,6 +763,10 @@ def _encode_content_plan(value: ContentPlan | None) -> dict[str, Any] | None:
     if type(value) is not ContentPlan:
         raise PersistenceError("некорректный содержательный план для сохранения")
     data = _json_collections(asdict(value))
+    if value.version == 2:
+        data.pop('context_facts')
+    else:
+        data['context_facts'] = _json_collections([fact.to_dict() for fact in value.context_facts])
     _decode_content_plan(data)
     return data
 

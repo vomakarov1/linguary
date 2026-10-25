@@ -39,7 +39,7 @@ def _substance(text):
 
 def validate_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids):
     owners = set(owner_block_ids)
-    if evidence.plan_sha256 != plan.sha256 or {r.block_id for r in results} != owners:
+    if evidence.version != plan.version or evidence.plan_sha256 != plan.sha256 or {r.block_id for r in results} != owners:
         raise ResultValidationError('устаревший план или неполный состав владельцев помощи')
     catalog = {(a.kind, a.block_id, a.key): a for a in artifact_catalog(results, before_you_read, owners)}
     checked = []
@@ -92,12 +92,15 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
             a = next(a for a in catalog if (a.kind, a.block_id, a.key) == (kind, owner, key))
         except (KeyError, IndexError, StopIteration) as error:
             raise ResultValidationError('ссылка на отсутствующий артефакт помощи') from error
-        excerpt = without_footnote_markers(item.body_excerpt)
-        if excerpt != item.body_excerpt:
+        excerpt = item.body_excerpt if plan.version == 3 else without_footnote_markers(item.body_excerpt)
+        if plan.version == 3:
+            from linguary.application.reader_text import ReaderTextPolicy
+            excerpt = ReaderTextPolicy().prepare(kind, excerpt, a.quotes)
+        elif excerpt != item.body_excerpt:
             excerpt = excerpt.strip()
         if not excerpt:
             raise ResultValidationError('пустое свидетельство помощи')
-        if a.body and excerpt not in a.body:
+        if a.body and excerpt not in a.body and plan.version != 3:
             from linguary.application.analysis_merge import _quotation_key, find_quote_span
             span = find_quote_span(a.body, excerpt)
             if span is not None:
@@ -107,4 +110,4 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
                 if stripped and stripped in a.body:
                     excerpt = stripped
         evidence.append(HelpEvidence(item.difficulty_id, item.point_id, kind, owner, a.key, excerpt))
-    return ContentEvidence(plan.sha256, tuple(evidence))
+    return ContentEvidence(plan.sha256, tuple(evidence), version=plan.version)

@@ -193,3 +193,32 @@ class ChapterAnalysisV2Schema(ChapterAnalysisSchema):
 
 class TranslationResultV2Schema(TranslationResultSchema):
     content_evidence: list[HelpEvidenceSchema]
+
+
+class ContextFactSchema(_ResponseModel):
+    id: str = Field(min_length=1)
+    kind: Literal['speaker', 'gender', 'pronoun_referent']
+    anchors: list[SourceAnchorSchema] = Field(min_length=1)
+    subject_anchor: SourceAnchorSchema
+    value: str | None = None
+    certainty: Literal['explicit', 'inferred', 'unknown']
+
+    @model_validator(mode='after')
+    def _check_certainty(self):
+        if (self.certainty == 'unknown') != (self.value is None):
+            raise ValueError('неопределённость и значение атрибуции не согласованы')
+        return self
+
+
+class ContentPlanV3Schema(ContentPlanSchema):
+    version: Literal[3]
+    profile: Literal['content-plan-v3']
+    context_facts: list[ContextFactSchema]
+
+
+class ChapterAnalysisV3Schema(ChapterAnalysisSchema):
+    content_plan: ContentPlanV3Schema
+
+
+class TranslationResultV3Schema(TranslationResultSchema):
+    content_evidence: list[HelpEvidenceSchema]

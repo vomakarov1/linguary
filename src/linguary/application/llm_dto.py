@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from linguary.application.errors import ApplicationError
 from linguary.domain import BlockTreatment, ConceptType
-from linguary.domain.content_plan import Difficulty
+from linguary.domain.content_plan import ContextFact, Difficulty
 
 
 class LLMPayloadError(ApplicationError):
@@ -263,11 +263,16 @@ class ContentPlanResponse:
     before_you_read_evidence: tuple[HelpEvidenceResponse, ...] = ()
     version: int = 2
     profile: str = "content-plan-v2"
+    context_facts: tuple[ContextFact, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "difficulties", tuple(self.difficulties))
         object.__setattr__(self, "before_you_read_evidence", tuple(self.before_you_read_evidence))
-        if self.version != 2 or self.profile != "content-plan-v2":
+        object.__setattr__(self, 'context_facts', tuple(self.context_facts))
+        if self.version == 2 and self.context_facts:
+            raise LLMPayloadError('контекстные факты требуют версию 3')
+        if not ((self.version == 2 and self.profile == 'content-plan-v2')
+                or (type(self.version) is int and self.version == 3 and self.profile == 'content-plan-v3')):
             raise LLMPayloadError("неизвестная версия содержательного плана")
         ids = [d.id for d in self.difficulties]
         if len(ids) != len(set(ids)):

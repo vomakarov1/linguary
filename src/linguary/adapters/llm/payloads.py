@@ -19,6 +19,8 @@ from linguary.domain.llm_log import Violation
 
 from linguary.adapters.llm.schemas import (
     ChapterAnalysisV2Schema,
+    ChapterAnalysisV3Schema,
+    TranslationResultV3Schema,
     TranslationResultV2Schema,
     BeforeYouReadEntrySchema,
     BlockResultSchema,
@@ -48,7 +50,7 @@ from linguary.application.ports.llm import (
     LLMResponseKind,
 )
 from linguary.domain import BlockTreatment
-from linguary.domain.content_plan import Difficulty, SourceAnchor, RequiredPoint
+from linguary.domain.content_plan import ContextFact, Difficulty, SourceAnchor, RequiredPoint
 from linguary.domain.errors import DomainError
 
 #: Response schema for each request kind.
@@ -59,8 +61,11 @@ SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
 
 def schema_for(kind: LLMResponseKind, *, contract_version: int = 1) -> type[BaseModel]:
     """Structured response schema for request kind."""
-    if type(contract_version) is not int or contract_version not in (1, 2):
+    if type(contract_version) is not int or contract_version not in (1, 2, 3):
         raise LLMResponseFormatError("неизвестная версия контракта ответа")
+    if contract_version == 3:
+        return {LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisV3Schema,
+                LLMResponseKind.TRANSLATION_RESULT: TranslationResultV3Schema}[kind]
     if contract_version == 2:
         return {LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisV2Schema,
                 LLMResponseKind.TRANSLATION_RESULT: TranslationResultV2Schema}[kind]
@@ -109,7 +114,7 @@ def _to_dto(validated: BaseModel) -> LLMPayload:
 def _chapter_analysis(schema: ChapterAnalysisSchema) -> ChapterAnalysisResponse:
     """Chapter analysis DTO."""
     return ChapterAnalysisResponse(
-        content_plan=_content_plan(schema.content_plan) if isinstance(schema, ChapterAnalysisV2Schema) else None,
+        content_plan=_content_plan(schema.content_plan) if isinstance(schema, (ChapterAnalysisV2Schema, ChapterAnalysisV3Schema)) else None,
         translation_instructions=schema.translation_instructions,
         chapter_summary=schema.chapter_summary,
         glossary_candidates=tuple(
@@ -150,7 +155,7 @@ def _before_you_read(schema: BeforeYouReadEntrySchema) -> BeforeYouReadEntryResp
 def _translation_result(schema: TranslationResultSchema) -> TranslationResultResponse:
     """Block group translation result DTO."""
     return TranslationResultResponse(
-        content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.content_evidence) if isinstance(schema, TranslationResultV2Schema) else (),
+        content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.content_evidence) if isinstance(schema, (TranslationResultV2Schema, TranslationResultV3Schema)) else (),
         blocks=tuple(_block_result(item) for item in schema.blocks),
         language_notes=tuple(_language_note(item) for item in schema.language_notes),
     )
@@ -210,7 +215,7 @@ def _content_plan(schema) -> ContentPlanResponse:
         anchors = []
         for a in d.anchors:
             start = a.start
-            end = a.end if a.end - a.start == len(a.quote) else a.start + len(a.quote)
+            end = a.end if schema.version == 3 or a.end - a.start == len(a.quote) else a.start + len(a.quote)
             anchors.append(SourceAnchor(block_id=a.block_id, start=start, end=end, quote=a.quote))
         difficulties.append(
             Difficulty(
@@ -228,4 +233,8 @@ def _content_plan(schema) -> ContentPlanResponse:
         profile=schema.profile,
         difficulties=tuple(difficulties),
         before_you_read_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.before_you_read_evidence),
+        context_facts=tuple(ContextFact(id=fact.id, kind=fact.kind,
+            anchors=tuple(SourceAnchor(**anchor.model_dump()) for anchor in fact.anchors),
+            subject_anchor=SourceAnchor(**fact.subject_anchor.model_dump()), value=fact.value, certainty=fact.certainty)
+            for fact in getattr(schema, 'context_facts', ())),
     )

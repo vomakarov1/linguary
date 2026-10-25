@@ -41,7 +41,7 @@ def route_snapshot(llm):
 
 def conditions_payload(book, settings, revision, profile):
     templates = snapshot_prompt_templates(source_language=book.source_language,
-        target_language=book.target_language, reader_level=settings.reading.normalized_level)
+        target_language=book.target_language, reader_level=settings.reading.normalized_level, profile=profile)
     llm = asdict(settings.llm)
     for key in ('api_key', 'proxy_url', 'base_url'):
         llm.pop(key)
@@ -49,8 +49,10 @@ def conditions_payload(book, settings, revision, profile):
         'reader_level': settings.reading.normalized_level, 'models': {'analysis': settings.llm.effective_analysis_model,
         'processing': settings.llm.effective_processing_model}, 'route': route_snapshot(settings.llm),
         'llm_parameters': llm, 'checks': asdict(settings.checks), 'profile': profile,
-        'versions': {'runtime': 1, 'context_builder': 1, 'validators': 1, 'schemas': 2 if profile == 'content-plan-v2' else 1,
-                     'prompts': 1}, 'prompt_templates': templates,
+        'versions': {'runtime': 1, 'context_builder': 3 if profile == 'content-plan-v3' else 1,
+                     'validators': 3 if profile == 'content-plan-v3' else 1,
+                     'schemas': {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 3}[profile],
+                     'prompts': 3 if profile == 'content-plan-v3' else 1}, 'prompt_templates': templates,
         'prompt_sha256': payload_digest(templates), 'settings_revision': revision}
 
 
@@ -136,11 +138,12 @@ class ProvenanceClient:
 class BookRuntimeResolver:
     def __init__(self, service, runtime, factory):
         self.service, self.runtime, self.factory = service, runtime, factory
-        self.supported = {'legacy-v1': 1, 'content-plan-v2': 2}
+        self.supported = {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 3}
 
     def settings_for(self, conditions):
         payload = conditions.payload
-        expected_versions = {'runtime': 1, 'context_builder': 1, 'validators': 1, 'schemas': self.supported.get(payload.get('profile')), 'prompts': 1}
+        implementation = 3 if payload.get('profile') == 'content-plan-v3' else 1
+        expected_versions = {'runtime': 1, 'context_builder': implementation, 'validators': implementation, 'schemas': self.supported.get(payload.get('profile')), 'prompts': implementation}
         if payload.get('profile') not in self.supported or thaw(payload.get('versions', {})) != expected_versions:
             raise ConditionsError('conditions_unavailable')
         if payload_digest(payload['prompt_templates']) != payload['prompt_sha256']:

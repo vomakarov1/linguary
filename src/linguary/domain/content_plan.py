@@ -94,17 +94,73 @@ def artifact_key(kind: str, block_id: str, content: object) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextFact:
+    """Source-bound attribution; uncertainty is retained rather than guessed."""
+    id: str
+    kind: str
+    anchors: tuple[SourceAnchor, ...]
+    subject_anchor: SourceAnchor
+    value: str | None = None
+    certainty: str = 'unknown'
+
+    def __post_init__(self):
+        object.__setattr__(self, 'anchors', tuple(sorted(self.anchors, key=lambda a: (a.block_id, a.start, a.end, a.quote))))
+        if not self.id.strip() or self.kind not in {'speaker', 'gender', 'pronoun_referent'}:
+            raise DomainError('неизвестная контекстная атрибуция')
+        if not self.anchors:
+            raise DomainError('атрибуция требует исходные свидетельства')
+        if self.certainty not in {'explicit', 'inferred', 'unknown'}:
+            raise DomainError('неизвестная степень определённости атрибуции')
+        if self.certainty == 'unknown':
+            if self.value is not None:
+                raise DomainError('неизвестная атрибуция не может иметь значение')
+        elif not isinstance(self.value, str) or not self.value.strip():
+            raise DomainError('атрибуция требует непустое значение')
+
+    def validate(self, texts):
+        for anchor in self.anchors:
+            anchor.validate(texts)
+        self.subject_anchor.validate(texts)
+
+    def to_dict(self):
+        value = asdict(self)
+        if self.certainty == 'unknown':
+            value.pop('value')
+        return value
+
+    @property
+    def canonical_id(self):
+        value = self.to_dict()
+        value.pop('id')
+        return canonical_sha({'version': 3, **value})
+
+
+@dataclass(frozen=True, slots=True)
 class ContentPlan:
     version: int = 2
     profile: str = "content-plan-v2"
     difficulties: tuple[Difficulty, ...] = ()
     before_you_read_evidence: tuple[HelpEvidence, ...] = ()
+    context_facts: tuple[ContextFact, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "difficulties", tuple(sorted(self.difficulties, key=lambda d: d.id)))
         object.__setattr__(self, "before_you_read_evidence", tuple(sorted(self.before_you_read_evidence, key=lambda e: (e.difficulty_id, e.point_id, e.artifact_key, e.body_excerpt))))
-        if self.version != 2 or self.profile != "content-plan-v2":
+        if not ((self.version == 2 and self.profile == 'content-plan-v2')
+                or (type(self.version) is int and self.version == 3 and self.profile == 'content-plan-v3')):
             raise DomainError("неизвестная версия содержательного плана")
+        object.__setattr__(self, 'context_facts', tuple(sorted(self.context_facts, key=lambda fact: fact.id)))
+        if self.version == 2 and self.context_facts:
+            raise DomainError('контекстные факты не входят в прежнюю версию плана')
+        fact_ids = [fact.id for fact in self.context_facts]
+        if len(fact_ids) != len(set(fact_ids)):
+            raise DomainError('идентификаторы контекстных фактов повторяются')
+        subjects = {}
+        for fact in self.context_facts:
+            key = (fact.kind, fact.subject_anchor)
+            value = (fact.value, fact.certainty)
+            if subjects.setdefault(key, value) != value:
+                raise DomainError('конфликт атрибуций одного субъекта')
         ids = [d.id for d in self.difficulties]
         if len(ids) != len(set(ids)):
             raise DomainError("идентификаторы трудностей повторяются")
@@ -119,6 +175,10 @@ class ContentPlan:
     @property
     def sha256(self) -> str:
         value = asdict(self)
+        if self.version == 2:
+            value.pop('context_facts')
+        else:
+            value['context_facts'] = [fact.to_dict() for fact in self.context_facts]
         value["difficulties"] = sorted(value["difficulties"], key=lambda d: d["id"])
         value["before_you_read_evidence"] = sorted(value["before_you_read_evidence"], key=lambda e: (e["difficulty_id"], e["point_id"], e["artifact_key"]))
         return canonical_sha(value)
@@ -134,7 +194,7 @@ class ContentEvidence:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence", tuple(self.evidence))
-        if self.version != 2 or len(self.plan_sha256) != 64 or any(c not in "0123456789abcdef" for c in self.plan_sha256):
+        if not (self.version == 2 or (type(self.version) is int and self.version == 3)) or len(self.plan_sha256) != 64 or any(c not in "0123456789abcdef" for c in self.plan_sha256):
             raise DomainError("неизвестная версия свидетельств или неверный SHA плана")
         if self.structural_coverage != "complete" or self.semantic_correctness != "not_evaluated":
             raise DomainError("неподдерживаемая оценка содержательной помощи")

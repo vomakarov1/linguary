@@ -23,6 +23,7 @@ from linguary.application.llm_rejections import record_rejection, finalize_respo
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
+from linguary.application.reader_text import ReaderTextPolicy, record_reader_warnings, source_quote_fragments
 from linguary.application.validators import TranslationResultValidator
 from linguary.application.validators.content_plan import resolve_response_evidence, validate_content_coverage
 from linguary.domain.content_plan import ContentEvidence
@@ -126,12 +127,31 @@ class TranslationCall:
                     truncated=response.truncated,
                     expectation=context.expectation,
                 )
+                if context.content_plan is not None and context.content_plan.version == 3:
+                    from linguary.application.analysis_merge import validate_fact_glossary, glossary_context_constraints
+                    with self._unit_of_work.transaction() as transaction:
+                        current_run = transaction.runs.active_for_book(request.book_id)
+                        conditions = transaction.work.get_conditions(response.call_context.conditions_id) if response.call_context else None
+                    if current_run is not None:
+                        validate_fact_glossary(context.content_plan, glossary_context_constraints(current_run.glossary_snapshot.mandatory_entries))
+                    restored = []
+                    for result in results:
+                        raw = next(block for block in mapped.blocks if block.source_block_id == result.block_id)
+                        hints = tuple(replace(hint, original=source.original) for hint, source in zip(result.glossary_hints, raw.glossary_hints, strict=True))
+                        notes = tuple(replace(note, original_excerpt=source.original_excerpt, translated_excerpt=source.translated_excerpt)
+                            for note, source in zip(result.language_notes, mapped.notes_for(result.block_id), strict=True))
+                        restored.append(replace(result, glossary_hints=hints, language_notes=notes))
+                    results = ReaderTextPolicy().prepare_results(tuple(restored),
+                        protected_quotes=source_quote_fragments(item.block.text for item in unit.items))
+                    record_reader_warnings(self._unit_of_work, response,
+                        [('translation', result.translated_text or '') for result in results],
+                        reader_level=conditions.payload['reader_level'] if conditions else 'b2')
                 if context.content_plan is not None:
                     owners = tuple(r.block_id for r in results)
                     evidence = resolve_response_evidence(context.content_plan, mapped, results, context.before_you_read, owner_block_ids=owners)
                     results = tuple(explained.without_repeats_v2(r) for r in results)
                     checked = validate_content_coverage(context.content_plan, results, context.before_you_read, evidence, owner_block_ids=owners)
-                    results = tuple(replace(r, content_evidence=ContentEvidence(context.content_plan.sha256, tuple(e for e in checked if e.block_id == r.block_id))) for r in results)
+                    results = tuple(replace(r, content_evidence=ContentEvidence(context.content_plan.sha256, tuple(e for e in checked if e.block_id == r.block_id), version=context.content_plan.version)) for r in results)
                 else:
                     results = tuple(explained.without_repeats(r) for r in results)
             except Exception as error:

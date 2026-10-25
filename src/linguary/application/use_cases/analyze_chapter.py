@@ -39,6 +39,8 @@ from linguary.application.analysis_merge import (
     before_you_read_entries,
     content_plan_from_response,
     validate_content_plan,
+    validate_fact_glossary,
+    glossary_context_constraints,
     merge_chapter_analysis,
     plan_fragments,
 )
@@ -50,6 +52,7 @@ from linguary.application.context_builder import (
     textual_blocks,
 )
 from linguary.application.errors import ApplicationError
+from linguary.application.reader_text import prepare_analysis_payload, record_reader_warnings
 from linguary.application.glossary_review import candidates_with_decisions
 from linguary.application.llm_dto import ChapterAnalysisResponse
 from linguary.application.llm_rejections import record_rejection, finalize_response
@@ -337,6 +340,12 @@ class AnalyzeChapter:
             response = None
             try:
                 response = await self._llm_client.generate(request)
+                if request.contract_version == 3:
+                    response = replace(response, payload=prepare_analysis_payload(response.payload))
+                    record_reader_warnings(self._unit_of_work, response,
+                        [('summary', response.payload.chapter_summary),
+                         *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],
+                        reader_level=self._context_builder._reader_level)
                 _ensure_plan_covers_chapter(response.payload, context)
                 _ensure_candidates_single_script(response.payload, context)
                 try:
@@ -347,6 +356,11 @@ class AnalyzeChapter:
                         note_limits_by_block=context.note_limits_by_block,
                         note_group_limits=context.note_group_limits,
                     )
+                    if request.contract_version == 3:
+                        plan = content_plan_from_response(response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks})
+                        with self._unit_of_work.transaction() as transaction:
+                            decisions = transaction.glossary.list_for_book(request.book_id)
+                        validate_fact_glossary(plan, glossary_context_constraints(decisions))
                 except (ApplicationError, DomainError) as error:
                     raise ResultValidationError(str(error), expectation=context.expectation) from error
             except Exception as error:
@@ -392,7 +406,7 @@ class AnalyzeChapter:
                 ),
             ),
             translation_instructions=without_block_labels(payload.translation_instructions),
-            chapter_summary=without_block_labels(payload.chapter_summary),
+            chapter_summary=payload.chapter_summary if payload.content_plan is not None and payload.content_plan.version == 3 else without_block_labels(payload.chapter_summary),
             expected_block_ids=[block.id for block in blocks],
             glossary_candidates=self._candidates(payload, analysis_id=analysis_id),
             before_you_read=_before_you_read(payload),
@@ -672,7 +686,7 @@ def _before_you_read(
     payload: ChapterAnalysisResponse,
 ) -> tuple[BeforeYouReadEntry, ...]:
     """Chapter `Before You Read` content (PRD § 19.1)."""
-    return before_you_read_entries(payload.before_you_read)
+    return before_you_read_entries(payload.before_you_read, strict=payload.content_plan is not None and payload.content_plan.version == 3)
 
 
 def _total_usage(usages: Sequence[TokenUsage | None]) -> TokenUsage | None:
