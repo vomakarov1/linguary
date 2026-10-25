@@ -12,7 +12,7 @@ import re
 from linguary.adapters.epub.inline import InlineContent
 from linguary.domain import InlineAnnotation, InlineAnnotationType
 
-SPLIT_MIN_CHARS: int = 800
+SPLIT_MIN_CHARS: int = 600
 SPLIT_MIN_SENTENCES: int = 2
 
 #: Honorific titles and salutations where a trailing period is followed by a capitalized name,

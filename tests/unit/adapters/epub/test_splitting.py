@@ -28,6 +28,25 @@ def test_split_sentences_skips_short_paragraphs() -> None:
     assert slices_monolithic == ((0, len(monolithic_text)),)
 
 
+def test_split_sentences_splits_at_600_chars_threshold() -> None:
+    """Paragraphs between 600 and 800 characters with 2+ sentences are split."""
+    s1 = (
+        "This is a very long descriptive first sentence that goes on and on with many words and clauses, "
+        "describing the beautiful garden and all the creatures living inside it in great detail so that "
+        "it has enough length to test the threshold cleanly, including flowers, trees, paths, fountains, "
+        "and singing birds in the summer afternoon sun. "
+    )
+    s2 = (
+        "This is an equally detailed second sentence that continues the narrative further, providing "
+        "additional context and concluding the whole compound paragraph structure properly with plenty "
+        "of adjectives and clauses to ensure the overall length comfortably exceeds the minimum limit."
+    )
+    text = s1 + s2
+    assert 600 <= len(text) < 800
+    slices = split_sentences(text)
+    assert len(slices) == 2
+
+
 def test_split_sentences_preserves_titles_and_abbreviations() -> None:
     """Abbreviations and titles (Mr., Dr., e.g., vol.) do not break a sentence."""
     text = (
