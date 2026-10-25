@@ -126,6 +126,12 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   font-size: 0.9em;
 }
 
+.linguary-previously .linguary-summary-translation {
+  margin-top: 0.25em;
+  padding-left: 0.9em;
+  font-style: italic;
+}
+
 .linguary-translation,
 .linguary-glossary,
 .linguary-language-note {
@@ -502,8 +508,13 @@ class _ChapterRenderer:
             return
         block = _sub(container, "section", {"class": "linguary-previously"})
         _sub(block, "h2").text = _previously_heading(previous.title)
-        for paragraph in _paragraphs(summary):
-            _append_text(_sub(block, "p"), paragraph)
+        for index, paragraph in enumerate(_paragraphs(summary)):
+            attributes = (
+                {"class": "linguary-summary-translation", "lang": "ru"}
+                if index % 2 == 1 and _is_russian_paragraph(paragraph)
+                else None
+            )
+            _append_text(_sub(block, "p", attributes), paragraph)
 
     def _append_before_you_read(
         self, container: etree._Element, section: DocumentSection
@@ -1804,6 +1815,15 @@ def _insert_text(parent: etree._Element, index: int, text: str) -> None:
 def _paragraphs(text: str) -> tuple[str, ...]:
     """Text paragraphs: empty line separates paragraphs, single newline remains inline."""
     return tuple(part.strip() for part in text.split("\n\n") if part.strip())
+
+
+def _is_russian_paragraph(text: str) -> bool:
+    """Whether a paragraph is predominantly Russian, for styling parallel summaries."""
+    letters = tuple(character for character in text if character.isalpha())
+    if not letters:
+        return False
+    cyrillic = sum("\u0400" <= character <= "\u052F" for character in letters)
+    return cyrillic / len(letters) > 0.5
 
 
 def _previously_heading(previous_title: str) -> str:

@@ -368,6 +368,30 @@ def test_instructions_require_chapter_summary_in_source_language() -> None:
     assert "glossary_candidates" in instructions
 
 
+def test_a2_summary_is_two_parallel_paragraphs_for_whole_chapter_and_fragment() -> None:
+    whole = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    fragment = chapter_fragment_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+
+    for instructions in (whole, fragment):
+        assert "ровно два абзаца" in instructions
+        assert "сначала пересказ на языке оригинала книги" in instructions
+        assert "затем полный русский перевод тех же предложений" in instructions
+
+    assert "ровно два абзаца" not in chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="b2",
+    )
+
+
 def test_chapter_without_textual_blocks_has_no_context() -> None:
     """A chapter without text has nothing to analyze: context cannot be built."""
     section = make_analysis_section(

@@ -797,7 +797,11 @@ def chapter_analysis_instructions(
         source_language=source_language,
         target_language=target_language,
         scope=_WHOLE_CHAPTER_SCOPE,
-        summary=_WHOLE_CHAPTER_SUMMARY,
+        summary=(
+            _WHOLE_CHAPTER_SUMMARY_A2
+            if reader_level.strip().lower() == "a2"
+            else _WHOLE_CHAPTER_SUMMARY
+        ),
         reader_level=reader_level,
     )
 
@@ -816,7 +820,11 @@ def chapter_fragment_instructions(
         source_language=source_language,
         target_language=target_language,
         scope=_FRAGMENT_SCOPE,
-        summary=_FRAGMENT_SUMMARY,
+        summary=(
+            _FRAGMENT_SUMMARY_A2
+            if reader_level.strip().lower() == "a2"
+            else _FRAGMENT_SUMMARY
+        ),
         reader_level=reader_level,
     )
 
@@ -1007,6 +1015,25 @@ _FRAGMENT_SUMMARY = """\
 всей главы от начала до конца своего фрагмента, включая уже найденное в предыдущих \
 частях. Не рассуждай о том, что будет после. Текст не оценивай. Указания переводчику \
 и выражения before_you_read возвращай только новые, не повторяя предыдущие части."""
+
+_WHOLE_CHAPTER_SUMMARY_A2 = """\
+5. chapter_summary — что произошло в этой главе.
+
+Пиши на языке оригинала книги ({source_language}) три-шесть коротких предложений. Только \
+события самой этой главы: что случилось, с кем, что изменилось. Предыдущие главы не \
+пересказывай, о будущих не рассуждай, текст не оценивай. Верни ровно два абзаца: сначала \
+пересказ на языке оригинала книги ({source_language}), затем полный русский перевод тех же \
+предложений. Не добавляй подписи и не смешивай языки внутри абзаца."""
+
+_FRAGMENT_SUMMARY_A2 = """\
+5. chapter_summary — что произошло в главе от начала до конца этого фрагмента.
+
+Пиши на языке оригинала книги ({source_language}) три-шесть коротких предложений. Верни \
+сводку всей главы от начала до конца своего фрагмента, включая уже найденное в предыдущих \
+частях. Не рассуждай о том, что будет после, и не оценивай текст. Верни ровно два абзаца: \
+сначала пересказ на языке оригинала книги ({source_language}), затем полный русский перевод \
+тех же предложений. Не добавляй подписи и не смешивай языки внутри абзаца. Указания \
+переводчику и выражения before_you_read возвращай только новые, не повторяя предыдущие части."""
 
 
 #: Chapter analysis instructions. A single request covers treatment plan, glossary candidates,

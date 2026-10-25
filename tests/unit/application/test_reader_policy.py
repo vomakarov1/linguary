@@ -26,7 +26,8 @@ def test_a2_policy_in_all_channels():
     instructions = learner_instructions('a2')
     for expected in ('summary', 'before_you_read', 'glossary_hint', 'language_note', 'Shoo', 'snapped', 'went out',
                      'might have been', 'what', 'отрыв предлога', 'языковой заметке',
-                     'not saying ... isn’t ...', 'утвердительный смысл'):
+                     'not saying ... isn’t ...', 'утвердительный смысл', 'переводом на русский язык',
+                     'два абзаца'):
         assert expected in instructions
     assert ReaderTextPolicy().warnings('summary', 'One ' * 40 + '.', reader_level='a2')
 
