@@ -486,11 +486,11 @@ async def test_missing_block_in_plan_is_retried_with_repair_instruction() -> Non
     assert result.analysis.coverage_status is CoverageStatus.COMPLETE
 
 
-async def test_a2_analysis_retries_when_summary_has_no_russian_translation() -> None:
+async def test_a2_analysis_retries_when_summary_does_not_match_source_and_translation_languages() -> None:
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (
-            analysis_reply(chapter_summary="The story continues."),
+            analysis_reply(chapter_summary="История продолжается.\n\nГерои уходят."),
             analysis_reply(chapter_summary="The story continues.\n\nИстория продолжается."),
         )
     )
