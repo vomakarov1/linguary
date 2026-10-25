@@ -399,6 +399,40 @@ class SqlAlchemyWorkRepository:
         return tuple(self.get_root(row.id) for row in rows
                      if run_id is None or row.manifest_json.get('active_run_id') == run_id)
 
+    def extend_recovery_limit(self, root_id, *, additional_calls, expected_generation):
+        root = self.get_root(root_id)
+        if root is None:
+            raise WorkStateError('root_not_found')
+        if root.generation != expected_generation:
+            raise WorkStateError('generation_conflict')
+        if (type(additional_calls) is not int or additional_calls <= 0
+                or root.manifest['policy']['max_calls'] + root.extra_calls + additional_calls > 9223372036854775807):
+            raise WorkStateError('invalid_limit')
+        unknown = self._session.scalar(select(LLMAttemptRow.id).where(
+            LLMAttemptRow.root_id == root_id, LLMAttemptRow.state.in_(('sent', 'unknown'))).limit(1))
+        if unknown is not None:
+            raise WorkStateError('unknown')
+        if root.status != 'stopped' or root.reason != 'limit':
+            raise WorkStateError('state_conflict')
+        latest = self.latest_conditions(root.book_id)
+        run = self._session.get(ProcessingRunRow, root.manifest.get('active_run_id'))
+        if (latest is None or latest.id != root.conditions_id or run is None
+                or run.book_id != root.book_id or run.status != 'active'):
+            raise WorkStateError('conditions_unavailable')
+        changed = self._session.execute(update(RecoveryRootRow).where(
+            RecoveryRootRow.id == root_id, RecoveryRootRow.generation == expected_generation,
+            RecoveryRootRow.status == 'stopped', RecoveryRootRow.reason == 'limit',
+        ).values(extra_calls=RecoveryRootRow.extra_calls + additional_calls,
+            generation=RecoveryRootRow.generation + 1, status='pending', reason=None))
+        if changed.rowcount != 1:
+            raise WorkStateError('generation_conflict')
+        self._session.flush()
+        return self.get_root(root_id)
+
+    def list_root_attempts(self, root_id):
+        ids = self._session.scalars(select(LLMAttemptRow.id).where(LLMAttemptRow.root_id == root_id)).all()
+        return tuple(self.get_attempt(attempt_id) for attempt_id in ids)
+
     def list_scopes(self, root_id):
         rows = self._session.scalars(select(RecoveryScopeRow).where(RecoveryScopeRow.root_id == root_id)).all()
         return tuple(self.get_scope(row.id) for row in rows)
@@ -520,7 +554,7 @@ class SqlAlchemyWorkRepository:
         if changed.rowcount != 1:
             raise WorkStateError('область изменилась до принятия')
 
-    def root_coverage_complete(self, root_id):
+    def root_coverage_complete(self, root_id, *, update_state=True):
         root = self.get_root(root_id)
         if root is None or root.status == 'stopped':
             return False
@@ -554,8 +588,9 @@ class SqlAlchemyWorkRepository:
                         return False
         if any(results.get(run_id, block) is None for block in blocks):
             return False
-        self._session.execute(update(RecoveryRootRow).where(RecoveryRootRow.id == root.id,
-            RecoveryRootRow.generation == root.generation).values(status='complete', reason=None))
+        if update_state:
+            self._session.execute(update(RecoveryRootRow).where(RecoveryRootRow.id == root.id,
+                RecoveryRootRow.generation == root.generation).values(status='complete', reason=None))
         return True
 
     def invalidate_run_coverage(self, book_id, run_id):

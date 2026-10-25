@@ -21,6 +21,7 @@ from linguary.application.ports.export_validation import (
     ExportValidationRequest,
 )
 from linguary.application.ports.persistence import ExportValidationStatus
+from linguary.application.context_builder import textual_blocks
 from linguary.application.use_cases.export_book import (
     ExportBook,
     ExportBookCommand,
@@ -31,6 +32,8 @@ from linguary.application.use_cases.export_book import (
 from linguary.application.use_cases.import_book import ImportBook, ImportBookCommand
 from linguary.domain import (
     BookStatus,
+    BlockProcessingResult,
+    BlockTreatment,
     ErrorType,
     GlossarySnapshot,
     LLMSettingsSnapshot,
@@ -116,6 +119,11 @@ def make_ready(
                     ),
                 )
             )
+            document = transaction.documents.get(BOOK_ID)
+            transaction.results.replace_results('run-1', [
+                BlockProcessingResult(block.id, BlockTreatment.READ_AS_IS)
+                for section in document.sections for block in textual_blocks(section)
+            ])
         for task in tasks:
             transaction.tasks.add(task)
 

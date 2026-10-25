@@ -39,6 +39,7 @@ from linguary.application.book_overview import (
     ResultBlockNotFoundError,
 )
 from linguary.application.errors import ApplicationError
+from linguary.application.diagnostics import DiagnosticNotFoundError
 from linguary.application.ports.llm import LLMConfigurationError
 from linguary.application.glossary_review import (
     GlossaryNotFoundError,
@@ -64,7 +65,7 @@ from linguary.domain.errors import (
     TaskTransitionError,
 )
 from linguary.web.dependencies import APPLICATION_STATE_ATTRIBUTE
-from linguary.web.routes import books, export, glossary, processing, result, system
+from linguary.web.routes import books, export, glossary, processing, result, system, quality, diagnostics
 from linguary.web.schemas import ErrorResponse
 from linguary.web.uploads import UploadRejectedError
 from linguary.web.views import STATIC_DIRECTORY, render_error, wants_html
@@ -87,6 +88,7 @@ _SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
 #: `404` — book or task not found. `400` — uploaded file rejected.
 #: Order matters: subclasses must precede their base class.
 _ERROR_STATUSES: tuple[tuple[type[Exception], int], ...] = (
+    (DiagnosticNotFoundError, status.HTTP_404_NOT_FOUND),
     (BookNotFoundError, status.HTTP_404_NOT_FOUND),
     (ResultBlockNotFoundError, status.HTTP_404_NOT_FOUND),
     (GlossaryNotFoundError, status.HTTP_404_NOT_FOUND),
@@ -134,6 +136,8 @@ def create_app(
     app.include_router(result.router)
     app.include_router(export.router)
     app.include_router(system.router)
+    app.include_router(quality.router)
+    app.include_router(diagnostics.router)
     _register_error_handlers(app)
     return app
 

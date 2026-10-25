@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from decimal import Decimal
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -152,6 +153,12 @@ class BookOverview:
     book: BookRecord
     progress: BookProgress
     warning_count: int = 0
+    conditions: Mapping = field(default_factory=dict)
+    reproducibility: str = 'unknown'
+    recovery: Mapping = field(default_factory=dict)
+    quality_review: Mapping = field(default_factory=lambda: {'state': 'not-requested'})
+    epub_ready: bool = False
+    ordinary_cost: Mapping = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +252,84 @@ class BookResultSummary:
     book: BookRecord
     chapters: tuple[ResultChapterSummary, ...] = ()
     warnings: BookWarnings = field(default_factory=BookWarnings)
+    conditions: Mapping = field(default_factory=dict)
+    reproducibility: str = 'unknown'
+    recovery: Mapping = field(default_factory=dict)
+    quality_review: Mapping = field(default_factory=lambda: {'state': 'not-requested'})
+    epub_ready: bool = False
+    ordinary_cost: Mapping = field(default_factory=dict)
+
+
+def _quality_projection(transaction, book, document, analyses, run, tasks):
+    """Current technical coverage and optional review, without accepting or scheduling work."""
+    from linguary.application.use_cases.quality_review import quality_review_state
+    from linguary.application.use_cases.export_book import _ensure_ready, _validate_content_plans, ExportBookError
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.domain.book_conditions import thaw
+    conditions = transaction.work.latest_conditions(book.id)
+    summary = dict(conditions_id=None, revision=None, reader_level=None, profile=None, models={}, state='unknown')
+    if conditions is not None:
+        summary.update(conditions_id=conditions.id, revision=conditions.revision,
+            reader_level=conditions.payload.get('reader_level'), profile=conditions.payload.get('profile'),
+            models=thaw(conditions.payload.get('models', {})), state='saved')
+    results = () if run is None else transaction.results.list_for_run(run.id)
+    textual = {block.id for section in document.sections for block in textual_blocks(section)} if document else set()
+    result_ids = {result.block_id for result in results}
+    roots = () if run is None else transaction.work.list_roots(book.id, run_id=run.id)
+    root_summaries = []
+    durable_coverage = set()
+    for root in roots:
+        scopes = transaction.work.list_scopes(root.id)
+        attempts = transaction.work.list_root_attempts(root.id)
+        unknown = any(attempt.state in ('sent', 'unknown') for attempt in attempts)
+        current = conditions is not None and root.conditions_id == conditions.id
+        scope_counts = {scope.id: sum(attempt.scope_id == scope.id for attempt in attempts) for scope in scopes}
+        retryable = any(scope.status == 'pending' and scope_counts[scope.id] < root.manifest['policy']['max_scope_calls']
+            for scope in scopes)
+        busy = any(scope.status == 'claimed' for scope in scopes)
+        covered = set(root.manifest.get('historical_coverage', ()))
+        for scope in scopes:
+            if scope.status == 'accepted':
+                covered.update(scope.ordered_blocks)
+        covered.intersection_update(result_ids)
+        covered.intersection_update(root.manifest['ordered_blocks'])
+        if not current:
+            covered.clear()
+        durable_coverage.update(covered)
+        limit = root.manifest['policy']['max_calls'] + root.extra_calls
+        complete = transaction.work.root_coverage_complete(root.id, update_state=False)
+        root_summaries.append(dict(root_id=root.id, generation=root.generation,
+            covered=len(covered), total=len(root.manifest['ordered_blocks']), calls_used=root.calls_used,
+            limit=limit, reason='conditions_unavailable' if not current else 'unknown' if unknown else root.reason,
+            can_retry=bool(current and not unknown and not busy and retryable and root.calls_used < limit
+                and root.status in ('pending', 'running')),
+            can_extend=bool(current and not unknown and not busy and retryable
+                and root.status == 'stopped' and root.reason == 'limit'), complete=complete))
+    recovery = dict(covered=len(durable_coverage) if roots else len(result_ids & textual), total=len(textual),
+        calls_used=sum(item['calls_used'] for item in root_summaries),
+        limit=sum(item['limit'] for item in root_summaries),
+        reason=next((item['reason'] for item in root_summaries if item['reason'] == 'unknown'),
+            next((item['reason'] for item in root_summaries if item['reason']), None)),
+        can_retry=any(item['can_retry'] for item in root_summaries),
+        can_extend=any(item['can_extend'] for item in root_summaries), roots=root_summaries)
+    epub_ready = bool(document and document.sections and run is not None and textual <= result_ids
+        and all(item['complete'] for item in root_summaries))
+    if epub_ready:
+        try:
+            _ensure_ready(book, tasks)
+            _validate_content_plans(document, analyses, results)
+        except (ExportBookError, ResultValidationError):
+            epub_ready = False
+    ordinary = [call for call in transaction.llm_calls.list_for_book(book.id) if call.stage != LLMCallStage.QUALITY_REVIEW]
+    known_cost = sum((call.cost for call in ordinary if call.cost is not None), Decimal('0'))
+    regeneration_cost = sum((call.cost for call in ordinary if call.cost is not None
+        and call.stage == LLMCallStage.BLOCK_REGENERATION), Decimal('0'))
+    ordinary_cost = dict(currency='USD', known_spent_usd=str(known_cost),
+        unknown_calls=sum(call.cost is None for call in ordinary), regeneration_spent_usd=str(regeneration_cost),
+        regeneration_unknown_calls=sum(call.cost is None for call in ordinary if call.stage == LLMCallStage.BLOCK_REGENERATION))
+    return dict(conditions=summary, reproducibility='unknown' if conditions is None else conditions.reproducibility,
+        recovery=recovery, quality_review=quality_review_state(transaction, book.id),
+        epub_ready=epub_ready, ordinary_cost=ordinary_cost)
 
 
 def list_books(
@@ -279,6 +364,7 @@ def book_overview(
         processed_blocks = (
             transaction.results.count_for_run(run.id) if run is not None else 0
         )
+        quality = _quality_projection(transaction, book, document, analyses, run, tasks)
         warning_count = len(transaction.documents.import_warnings(book_id))
         calls = (
             transaction.llm_calls.list_for_book(book_id)
@@ -306,6 +392,7 @@ def book_overview(
             ),
         ),
         warning_count=warning_count,
+        **quality,
     )
 
 
@@ -396,6 +483,7 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
         analyses = transaction.analyses.list_for_book(book_id)
         import_warnings = transaction.documents.import_warnings(book_id)
         run = transaction.runs.active_for_book(book_id)
+        quality = _quality_projection(transaction, book, document, analyses, run, transaction.tasks.list_for_book(book_id))
         stored_results = (
             transaction.results.list_for_run(run.id) if run is not None else ()
         )
@@ -429,6 +517,7 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
     )
     return BookResultSummary(
         book=book,
+        **quality,
         chapters=chapters,
         warnings=_warnings_of(
             document=document,

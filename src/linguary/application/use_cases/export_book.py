@@ -189,6 +189,7 @@ class ExportBook:
                     f"собирать не из чего"
                 )
             _ensure_recovery_complete(transaction, book_id, run.id)
+            _ensure_result_coverage(document, transaction.results.list_for_run(run.id))
 
     def downloadable_task(self, book_id: str) -> ProcessingTask:
         """Latest successful task whose file is available for download."""
@@ -243,6 +244,7 @@ class ExportBook:
                 )
             _ensure_recovery_complete(transaction, command.book_id, run.id)
             results = transaction.results.list_for_run(run.id)
+            _ensure_result_coverage(document, results)
             analyses = transaction.analyses.list_for_book(command.book_id)
             _validate_content_plans(document, analyses, results)
             return replace(
@@ -475,3 +477,11 @@ def _ensure_recovery_complete(transaction, book_id, run_id):
     for root in transaction.work.list_roots(book_id, run_id=run_id):
         if not transaction.work.root_coverage_complete(root.id):
             raise ExportBookError('восстановление книги не завершено: полный экспорт недоступен')
+
+
+def _ensure_result_coverage(document, results):
+    """Full export requires all existing supported textual blocks, including legacy runs."""
+    from linguary.application.context_builder import textual_blocks
+    expected = {block.id for section in document.sections for block in textual_blocks(section)}
+    if not expected <= {result.block_id for result in results}:
+        raise ExportBookError('обязательные текстовые блоки обработаны не полностью')

@@ -4,6 +4,13 @@ from datetime import UTC, datetime, timedelta
 import re
 
 from linguary.application.ports.llm import LLMConfigurationError
+from linguary.application.errors import ApplicationError
+
+
+class DiagnosticNotFoundError(ApplicationError):
+    """Absent or foreign diagnostic call; contains no information about its owner."""
+
+
 from linguary.application.retry_policy import violation_of
 
 
@@ -140,10 +147,49 @@ class Diagnostics:
         except Exception:
             self.fail()
 
+    def _require_book(self, transaction, book_id):
+        from linguary.application.book_overview import BookNotFoundError
+        if transaction.books.get(book_id) is None:
+            raise BookNotFoundError('книга не найдена')
+
+    @staticmethod
+    def _metadata(entry):
+        from dataclasses import asdict
+        return dict(call_id=entry.id, book_id=entry.book_id, attempt_id=entry.attempt_id,
+            stage=entry.stage.value, provider=entry.provider, model=entry.model,
+            started_at=entry.started_at.isoformat(), success=entry.success,
+            usage=None if entry.usage is None else asdict(entry.usage),
+            cost=None if entry.cost is None else str(entry.cost),
+            diagnostic_meta=entry.diagnostic_meta)
+
+    def list(self, book_id):
+        """Local metadata listing; diagnostic bodies never enter the list."""
+        with self.uow.transaction() as transaction:
+            self._require_book(transaction, book_id)
+            transaction.llm_calls.enforce_diagnostics_policy(self.policy, self.clock(), book_id=book_id)
+            return tuple(self._metadata(entry) for entry in transaction.llm_calls.list_for_book(book_id))
+
+    def read(self, book_id, call_id):
+        with self.uow.transaction() as transaction:
+            self._require_book(transaction, book_id)
+            record = transaction.llm_calls.diagnostic_record(call_id=call_id)
+            if record is None or record['book_id'] != book_id:
+                raise DiagnosticNotFoundError('диагностическая запись не найдена')
+            transaction.llm_calls.enforce_diagnostics_policy(self.policy, self.clock(), book_id=book_id)
+            record = transaction.llm_calls.diagnostic_record(call_id=call_id)
+            entry = next(entry for entry in transaction.llm_calls.list_for_book(book_id) if entry.id == call_id)
+            body_status = ((record['metadata'] or {}).get('body_meta') or {}).get('body_status')
+            return dict(metadata=self._metadata(entry), body=record['body'],
+                body_status=body_status or ('available' if record['body'] is not None else 'unavailable'))
+
     def purge(self, book_id, *, call_id=None):
         with self.uow.transaction() as transaction:
+            self._require_book(transaction, book_id)
+            if call_id is not None:
+                record = transaction.llm_calls.diagnostic_record(call_id=call_id)
+                if record is None or record['book_id'] != book_id:
+                    raise DiagnosticNotFoundError('диагностическая запись не найдена')
             return transaction.llm_calls.purge_diagnostic_bodies(book_id, call_id=call_id)
-
 
 
 def diagnostics_for(unit_of_work):

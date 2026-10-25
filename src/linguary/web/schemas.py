@@ -419,6 +419,12 @@ class BookDetailResponse(BaseModel):
     progress: BookProgressResponse
     export_validation_status: str | None = None
     warning_count: int = 0
+    conditions: dict = Field(default_factory=dict)
+    reproducibility: str = 'unknown'
+    recovery: dict = Field(default_factory=dict)
+    quality_review: dict = Field(default_factory=lambda: {'state': 'not-requested'})
+    epub_ready: bool = False
+    ordinary_cost: dict = Field(default_factory=dict)
 
     @classmethod
     def of_overview(cls, overview: BookOverview) -> BookDetailResponse:
@@ -432,6 +438,9 @@ class BookDetailResponse(BaseModel):
                 else None
             ),
             warning_count=overview.warning_count,
+            conditions=dict(overview.conditions), reproducibility=overview.reproducibility,
+            recovery=dict(overview.recovery), quality_review=dict(overview.quality_review),
+            epub_ready=overview.epub_ready, ordinary_cost=dict(overview.ordinary_cost),
         )
 
 
@@ -733,12 +742,21 @@ class BookResultResponse(BaseModel):
     warnings: BookWarningsResponse
     chapters: tuple[ResultChapterResponse, ...] = ()
 
+    conditions: dict = Field(default_factory=dict)
+    reproducibility: str = 'unknown'
+    recovery: dict = Field(default_factory=dict)
+    quality_review: dict = Field(default_factory=lambda: {'state': 'not-requested'})
+    epub_ready: bool = False
+    ordinary_cost: dict = Field(default_factory=dict)
+
     @classmethod
     def of_result(cls, result: BookResultSummary) -> BookResultResponse:
         validation = result.book.export_validation_status
         return cls(
             book_id=result.book.id,
-            status=result.book.status.value,
+            conditions=dict(result.conditions), reproducibility=result.reproducibility,
+            recovery=dict(result.recovery), quality_review=dict(result.quality_review),
+            epub_ready=result.epub_ready, ordinary_cost=dict(result.ordinary_cost),            status=result.book.status.value,
             export_validation_status=(validation.value if validation is not None else None),
             export_validation_status_label=(
                 labels.export_validation_status_label(validation)
@@ -980,3 +998,53 @@ __all__ = [
     "TaskResponse",
     "TreatmentCount",
 ]
+
+
+class StartQualityReviewRequest(BaseModel):
+    """Explicit consent parameters; no implicit monetary limit or scope."""
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    request_key: str = Field(min_length=1, max_length=256)
+    model: str = Field(min_length=1, max_length=256)
+    route_id: str = Field(min_length=1, max_length=256)
+    budget_microusd: int = Field(gt=0, le=9223372036854775807, strict=True)
+    currency: Literal['USD'] = 'USD'
+    scope: Literal['all'] | list[str]
+    expected_manifest_sha: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+    @model_validator(mode='after')
+    def valid_scope(self):
+        if isinstance(self.scope, list) and (not self.scope or any(not b.strip() for b in self.scope)
+                or len(set(self.scope)) != len(self.scope)):
+            raise ValueError('invalid_scope')
+        return self
+
+
+class ExtendRecoveryLimitRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    additional_calls: int = Field(gt=0, le=9223372036854775807, strict=True)
+    expected_generation: int = Field(ge=0, strict=True)
+    confirmed: bool = Field(strict=True)
+
+    @model_validator(mode='after')
+    def explicit_confirmation(self):
+        if self.confirmed is not True:
+            raise ValueError('confirmation_required')
+        return self
+
+
+class QualityReviewStateResponse(BaseModel):
+    review_id: str | None = None
+    state: Literal['not-requested', 'running', 'completed-without-findings', 'completed-with-findings',
+        'partial', 'limit', 'unknown', 'stale']
+    manifest_sha: str | None = None
+    coverage: dict = Field(default_factory=lambda: dict(checked=[], missing=[]))
+    budget: int | None = None
+    spent: int = 0
+    reserved: int = 0
+    currency: Literal['USD'] = 'USD'
+    uncertainty: str = 'probabilistic'
+    findings: list[dict] = Field(default_factory=list)
+    reason: str | None = None
+    semantic_correctness: str = 'not_evaluated'
+    available_routes: list[dict] = Field(default_factory=list)
+    current_manifest_sha: str | None = None

@@ -9,6 +9,7 @@ retry of failed tasks, running analysis and processing, and technical export in
 from __future__ import annotations
 
 import argparse
+import json
 import asyncio
 import os
 import shutil
@@ -114,6 +115,16 @@ def _parser() -> argparse.ArgumentParser:
         help="EPUB assembly mode: full (default) or structure_only",
     )
     export.set_defaults(handler=_export)
+    diagnostics = subparsers.add_parser('diagnostics', help='local diagnostic metadata and bodies')
+    actions = diagnostics.add_subparsers(dest='diagnostics_action', required=True)
+    for action in ('list', 'show', 'purge'):
+        command = actions.add_parser(action)
+        command.add_argument('book_id')
+        if action == 'show':
+            command.add_argument('call_id')
+        if action == 'purge':
+            command.add_argument('--call-id')
+        command.set_defaults(handler=_diagnostics)
     return parser
 
 
@@ -136,6 +147,7 @@ def _serve(args: argparse.Namespace) -> int:
     uvicorn.run(
         "linguary.web.app:create_app",
         factory=True,
+        proxy_headers=False,
         host=settings.server.host,
         port=settings.server.port,
     )
@@ -270,6 +282,23 @@ def _export(args: argparse.Namespace) -> int:
             "EPUBCheck: "
             f"{result.validation_status.value if result.validation_status else 'none'}"
         )
+        return 0
+    finally:
+        asyncio.run(application.aclose())
+
+
+def _diagnostics(args: argparse.Namespace) -> int:
+    """Local/container alternative to loopback-only HTTP; never invokes a model."""
+    application = _application(args)
+    try:
+        service = application.diagnostics
+        if args.diagnostics_action == 'list':
+            value = service.list(args.book_id)
+        elif args.diagnostics_action == 'show':
+            value = service.read(args.book_id, args.call_id)
+        else:
+            value = dict(purged=service.purge(args.book_id, call_id=args.call_id))
+        print(json.dumps(value, ensure_ascii=False))
         return 0
     finally:
         asyncio.run(application.aclose())
