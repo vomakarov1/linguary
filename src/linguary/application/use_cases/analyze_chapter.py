@@ -347,7 +347,10 @@ class AnalyzeChapter:
                 if request.contract_version == 3:
                     response = replace(response, payload=prepare_analysis_payload(response.payload))
                 if self._context_builder._reader_level == "a2":
-                    validate_a2_summary(response.payload.chapter_summary)
+                    validate_a2_summary(
+                        response.payload.chapter_summary,
+                        source_texts=tuple(block.text for block in blocks),
+                    )
                 if request.contract_version == 3:
                     record_reader_warnings(self._unit_of_work, response,
                         [('summary', response.payload.chapter_summary),

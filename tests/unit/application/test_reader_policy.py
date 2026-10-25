@@ -52,15 +52,19 @@ def test_a2_double_negative_instructions_keep_translation_and_byr_affirmative():
         'The story continues.',
         'The story continues.\n\nThe story continues.',
         'The story continues.\n\nИстория продолжается.\n\nГерои уходят.',
+        'История продолжается.\n\nГерои уходят.',
     ],
 )
 def test_a2_summary_requires_two_paragraphs_with_russian_translation(summary):
     with pytest.raises(ReaderTextError, match='a2_summary_requires_parallel_russian'):
-        validate_a2_summary(summary)
+        validate_a2_summary(summary, source_texts=('The story continues.',))
 
 
 def test_a2_summary_accepts_original_and_russian_translation_paragraphs():
-    validate_a2_summary('The story continues.\n\nИстория продолжается.')
+    validate_a2_summary(
+        'The story continues.\n\nИстория продолжается.',
+        source_texts=('The story continues.',),
+    )
 
 
 def test_b1_b2_calibration_kept():

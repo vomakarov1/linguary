@@ -1,6 +1,7 @@
 """A conservative policy for final learner text; it makes no semantic guarantees."""
 from dataclasses import replace
 import re
+import unicodedata
 
 from linguary.application.retry_policy import ResultValidationError
 from linguary.domain.llm_log import Violation
@@ -42,10 +43,32 @@ def _outside_quotes(body, protected_quotes):
     return ''.join(chars)
 
 
-def validate_a2_summary(body: str) -> None:
-    """Require an A2 summary to include a separate Russian translation paragraph."""
+def _dominant_script(text: str) -> str | None:
+    counts = {}
+    for char in text:
+        if not char.isalpha():
+            continue
+        name = unicodedata.name(char, '')
+        if name.startswith('CJK UNIFIED IDEOGRAPH'):
+            script = 'CJK'
+        elif name:
+            script = name.split(' ', 1)[0]
+        else:
+            continue
+        counts[script] = counts.get(script, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
+
+
+def validate_a2_summary(body: str, *, source_texts: tuple[str, ...]) -> None:
+    """Require an original-language paragraph followed by a Russian translation."""
     paragraphs = [part.strip() for part in re.split(r'\r?\n[ \t]*\r?\n+', body.strip())]
     if len(paragraphs) != 2 or not all(paragraphs):
+        raise ReaderTextError('a2_summary_requires_parallel_russian')
+    source_script = _dominant_script(' '.join(source_texts))
+    summary_script = _dominant_script(paragraphs[0])
+    if source_script is not None and summary_script != source_script:
         raise ReaderTextError('a2_summary_requires_parallel_russian')
     letters = re.findall(r'[A-Za-zА-Яа-яЁё]', paragraphs[1])
     cyrillic = re.findall(r'[А-Яа-яЁё]', paragraphs[1])
