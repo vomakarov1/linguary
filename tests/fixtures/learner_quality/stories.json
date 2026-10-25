@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "semantic_correctness": "not_evaluated",
+  "scene": {
+    "blocks": [
+      "Mara said, \"I am ready.\"",
+      "She lifted the lamp. It was not heavier than the box.",
+      "He meant well, but he did not open the door.",
+      "\"Shoo!\" she snapped. The light went out."
+    ],
+    "translations": [
+      "Мара сказала: «Я готова».",
+      "Она подняла лампу. Та была не тяжелее коробки.",
+      "Он хотел как лучше, но не открыл дверь.",
+      "«Кыш!» — резко сказала она. Свет погас."
+    ],
+    "treatments": ["TRANSLATE", "TRANSLATE", "TRANSLATE", "TRANSLATE"],
+    "byr": [],
+    "glossary": {"source": "Mara", "suggested": "Марра", "corrected": "Мара", "note": "Имя героини: Мара."},
+    "difficulties": [
+      {"owner": 0, "kind": "semantic_relation", "anchors": [{"block": 0, "quote": "Mara said"}], "points": [{"id": "speaker", "description": "Preserve speaker and gender", "body": "[b17] Здесь говорит Мара; она сообщает о своей готовности."}]},
+      {"owner": 1, "kind": "semantic_relation", "anchors": [{"block": 1, "quote": "It was not heavier than the box"}], "points": [{"id": "referent", "description": "Explain referent and negated comparison", "body": "Местоимение It обозначает лампу. Отрицание означает: лампа не тяжелее коробки."}]},
+      {"owner": 2, "kind": "idiom", "anchors": [{"block": 2, "quote": "meant well"}], "points": [{"id": "idiom", "description": "Explain good intentions without reversing negation", "body": "Выражение meant well означает добрые намерения; дверь он не открыл."}]},
+      {"owner": 3, "kind": "vocabulary", "anchors": [{"block": 3, "quote": "Shoo!"}, {"block": 3, "quote": "snapped"}, {"block": 3, "quote": "went out"}], "points": [{"id": "a2-help", "description": "Give A2 support for every opaque expression", "body": "Shoo! — «Кыш!», так прогоняют. Snapped означает резкую речь, а went out — что свет погас."}]}
+    ]
+  },
+  "edge_cases": {
+    "service_label": {"body": "[b17] Слово echo обозначает повтор звука.", "quote": "echo", "expected": "Слово echo обозначает повтор звука."},
+    "quoted_label": {"body": "Цитата «[b17]» обозначает напечатанный код.", "quote": "[b17]"},
+    "erased_help": {"body": "[b17] «echo»", "quote": "echo"},
+    "ambiguous_label": {"body": "Смысл находится в b17.", "quote": "echo"},
+    "unsupported_showcase": {"body": "Стекло витрины означает, что герои стоят у магазина.", "quote": "glass"},
+    "indivisible": {"owners": [0, 3], "expected_interval": [0, 1, 2, 3]},
+    "ambiguous_error": {"scope": "unknown", "code": "quotes"}
+  },
+  "comparison_manifest_template": {
+    "schema_version": 1,
+    "status": "awaiting_explicit_authorization",
+    "reader_level": "a2",
+    "source_sha256": null,
+    "permitted_fragment": null,
+    "models_by_role": {"analysis": null, "processing": null, "review": null},
+    "parameters": null,
+    "glossary_sha256": null,
+    "routes": null,
+    "before_versions": null,
+    "after_versions": null,
+    "changed_factor": null,
+    "budget_microusd": null,
+    "independent_reviewer": null,
+    "semantic_correctness": "not_evaluated",
+    "report_columns": ["planned", "delivered", "first_response", "retry", "rejected", "undelivered", "calls", "spent", "reserved", "unknown_cost"]
+  }
+}

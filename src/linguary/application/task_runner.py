@@ -100,6 +100,8 @@ class TaskRunner:
         no worker executes it. Such a task is marked interrupted, allowing the user
         to retry it (PRD § 17-18).
         """
+        if self._maintenance is not None:
+            await asyncio.to_thread(self._maintenance)
         if self._recover_work is not None:
             await asyncio.to_thread(self._recover_work)
         interrupted = tuple(task.interrupt() for task in await self._queue.list_running())

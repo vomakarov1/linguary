@@ -186,17 +186,19 @@ class EpubExportWriter(EpubWriter):
         )
         target = Path(request.target_path)
         draft = target.with_name(f"{target.name}.part")
-        _write_archive(draft, payloads=payloads)
-        failures = verify_exported_epub(
-            draft, expected_spine=tuple(chapter.href for chapter in chapters)
-        )
-        if failures:
-            draft.unlink(missing_ok=True)
-            raise EpubExportFatalError(
-                "собранный EPUB не прошёл встроенные технические проверки: "
-                + "; ".join(f"{failure.kind}: {failure.message}" for failure in failures)
+        try:
+            _write_archive(draft, payloads=payloads)
+            failures = verify_exported_epub(
+                draft, expected_spine=tuple(chapter.href for chapter in chapters)
             )
-        draft.replace(target)
+            if failures:
+                raise EpubExportFatalError(
+                    "собранный EPUB не прошёл встроенные технические проверки: "
+                    + "; ".join(f"{failure.kind}: {failure.message}" for failure in failures)
+                )
+            draft.replace(target)
+        finally:
+            draft.unlink(missing_ok=True)
         return ExportedBook(path=str(target), warnings=warnings.collected())
 
 
@@ -515,8 +517,10 @@ class _ChapterRenderer:
         definitions = _sub(block, "dl")
         for entry in material.before_you_read:
             _sub(definitions, "dt").text = entry.expression
-            _sub(definitions, "dd").text = sanitize_before_you_read_explanation(
+            _sub(definitions, "dd").text = (
                 entry.explanation
+                if section.id in self._request.verified_body_sections
+                else sanitize_before_you_read_explanation(entry.explanation)
             )
 
     def _append_blocks(

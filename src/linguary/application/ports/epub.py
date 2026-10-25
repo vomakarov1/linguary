@@ -143,6 +143,8 @@ class EpubWriteRequest:
     (PRD § 20). `stored_resource_paths` maps resource paths inside the book to their copies
     in local storage, and `source_epub_path` is needed to carry over `PRESERVE_OPAQUE`
     markup from the source.
+    `verified_body_sections` identifies v3 sections whose final bodies must be rendered
+    unchanged; other sections retain the historical Before You Read cleanup.
     """
 
     document: CanonicalDocument
@@ -151,6 +153,7 @@ class EpubWriteRequest:
     source_epub_path: str | None = None
     block_results: Mapping[str, BlockProcessingResult] = field(default_factory=dict)
     learning_materials: Mapping[str, LearningMaterial] = field(default_factory=dict)
+    verified_body_sections: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not self.target_path.strip():

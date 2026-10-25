@@ -43,6 +43,7 @@ from linguary.domain import (
     BookStatus,
     CanonicalDocument,
     ChapterAnalysis,
+    DomainError,
     LanguageNote,
     LearningMaterial,
     ProcessingTask,
@@ -151,6 +152,7 @@ class ExportBook:
                 source_epub_path=plan.source_epub_path,
                 block_results=plan.block_results,
                 learning_materials=plan.learning_materials,
+                verified_body_sections=plan.verified_body_sections,
             )
         )
         validation = self._validate(exported.path, command)
@@ -189,7 +191,9 @@ class ExportBook:
                     f"собирать не из чего"
                 )
             _ensure_recovery_complete(transaction, book_id, run.id)
-            _ensure_result_coverage(document, transaction.results.list_for_run(run.id))
+            results = transaction.results.list_for_run(run.id)
+            _ensure_result_coverage(document, results)
+            _ensure_content_plans(document, transaction.analyses.list_for_book(book_id), results)
 
     def downloadable_task(self, book_id: str) -> ProcessingTask:
         """Latest successful task whose file is available for download."""
@@ -246,7 +250,7 @@ class ExportBook:
             results = transaction.results.list_for_run(run.id)
             _ensure_result_coverage(document, results)
             analyses = transaction.analyses.list_for_book(command.book_id)
-            _validate_content_plans(document, analyses, results)
+            _ensure_content_plans(document, analyses, results)
             return replace(
                 plan,
                 block_results={result.block_id: result for result in results},
@@ -255,6 +259,8 @@ class ExportBook:
                     analyses=analyses,
                     results=results,
                 ),
+                verified_body_sections=frozenset(a.section_id for a in analyses
+                    if a.content_plan is not None and a.content_plan.version == 3),
             )
 
     def _validate(self, path: str, command: ExportBookCommand) -> _ValidationOutcome:
@@ -349,6 +355,7 @@ class _ExportPlan:
     source_epub_path: str
     block_results: Mapping[str, BlockProcessingResult] = field(default_factory=dict)
     learning_materials: Mapping[str, LearningMaterial] = field(default_factory=dict)
+    verified_body_sections: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,8 +454,15 @@ __all__ = [
 ]
 
 
-def _validate_content_plans(document, analyses, results):
+def _ensure_content_plans(document, analyses, results):
     """Rechecks stored bodies of the active run before assembling the book."""
+    try:
+        _validate_content_plans(document, analyses, results)
+    except (ResultValidationError, DomainError) as error:
+        raise ExportBookError(str(error)) from error
+
+
+def _validate_content_plans(document, analyses, results):
     sections = {s.id: s for s in document.sections}
     blocks = tuple(document.blocks())
     for analysis in analyses:
@@ -457,6 +471,8 @@ def _validate_content_plans(document, analyses, results):
             continue
         owners = {b.id for b in blocks if b.section_id == analysis.section_id}
         actual = tuple(r for r in results if r.block_id in owners)
+        if plan.version == 3:
+            _validate_v3_bodies(analysis, actual, {b.id: b.text for b in blocks})
         expected = {item.block_id: item.treatment for item in analysis.treatment_plan.items if item.treatment.is_textual}
         required_owners = {d.owner_block_id for d in plan.difficulties}
         if not (required_owners | expected.keys()) <= {r.block_id for r in actual}:
@@ -467,9 +483,30 @@ def _validate_content_plans(document, analyses, results):
         for result in actual:
             if result.block_id not in expected or result.treatment != expected[result.block_id]:
                 raise ResultValidationError('режим результата не соответствует плану обработки')
-            if result.content_evidence is None:
+            if not result.content_evidence:
                 raise ResultValidationError('отсутствуют свидетельства содержательного плана')
             validate_content_coverage(plan, (result,), byr, result.content_evidence, owner_block_ids=(result.block_id,))
+
+
+def _validate_v3_bodies(analysis, results, texts):
+    from linguary.application.reader_text import ReaderTextPolicy, source_quote_fragments
+    from linguary.application.validators.content_plan import validate_note_sources
+    policy = ReaderTextPolicy()
+    plan = analysis.content_plan
+    for difficulty in plan.difficulties:
+        for anchor in difficulty.anchors:
+            anchor.validate(texts)
+    for fact in plan.context_facts:
+        fact.validate(texts)
+    policy.validate_final('summary', analysis.chapter_summary, tuple(e.expression for e in analysis.before_you_read))
+    for entry in analysis.before_you_read:
+        policy.validate_final('before_you_read.explanation', entry.explanation, (entry.expression,))
+        if policy.prepare('before_you_read.explanation', entry.explanation, (entry.expression,)) != entry.explanation:
+            raise ResultValidationError('учебное тело не прошло окончательную очистку')
+    protected = source_quote_fragments(texts.values())
+    if policy.prepare_results(results, protected) != tuple(results):
+        raise ResultValidationError('учебное тело не прошло окончательную очистку')
+    validate_note_sources(results, texts)
 
 
 

@@ -234,7 +234,7 @@ def build_application(
     epubcheck: EpubCheckValidator | None = None,
     migrate: bool = True,
     on_logged: LoggedObserver | None = None,
-    content_plan_profile: str = "legacy-v1",
+    content_plan_profile: str | None = None,
     quality_routes=None,
 ) -> Application:
     """Assembles application from local configuration.
@@ -244,7 +244,7 @@ def build_application(
     `worker_settings` overrides background task concurrency specified in the `[worker]` section
     (PRD § 25). `migrate` disables schema application when the database is prepared by the caller.
     """
-    if content_plan_profile == "legacy-v1":
+    if content_plan_profile is None:
         import os
         content_plan_profile = os.environ.get("LINGUARY_CONTENT_PLAN_PROFILE", "legacy-v1")
     ContextBuilder(content_plan_profile=content_plan_profile)
