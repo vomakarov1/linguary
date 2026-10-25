@@ -313,6 +313,22 @@ def test_analysis_instructions_adapt_to_reader_level() -> None:
     assert "65–85%" in c1_instructions
 
 
+def test_a2_analysis_preserves_affirmative_meaning_of_double_negation() -> None:
+    instructions = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+
+    assert "not saying ... isn’t ..." in instructions
+    assert "сохрани его утвердительный смысл" in instructions
+    assert "признание качества персонажа или события" in instructions
+    assert "Объяснение такого выражения в Before You Read" in instructions
+    assert "формулируй утвердительно" in instructions
+    assert "не отрицаю, что заклинание блестящее" in instructions
+    assert "Говорящий признаёт, что заклинание блестящее" in instructions
+
+
 def test_before_you_read_instructions_use_advance_organizer() -> None:
     """Before You Read instructions require thematic anchors and semantic traps."""
     instructions = build_context().request.instructions

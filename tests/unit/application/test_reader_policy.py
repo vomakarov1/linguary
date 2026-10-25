@@ -25,9 +25,19 @@ def test_cleanup_cannot_erase_required_help():
 def test_a2_policy_in_all_channels():
     instructions = learner_instructions('a2')
     for expected in ('summary', 'before_you_read', 'glossary_hint', 'language_note', 'Shoo', 'snapped', 'went out',
-                     'might have been', 'what', 'отрыв предлога', 'языковой заметке'):
+                     'might have been', 'what', 'отрыв предлога', 'языковой заметке',
+                     'not saying ... isn’t ...', 'утвердительный смысл'):
         assert expected in instructions
     assert ReaderTextPolicy().warnings('summary', 'One ' * 40 + '.', reader_level='a2')
+
+
+def test_a2_double_negative_instructions_keep_translation_and_byr_affirmative():
+    instructions = ' '.join(learner_instructions('a2').split())
+
+    assert 'Не переворачивай смысл при переводе' in instructions
+    assert 'объяснение BYR формулируй утвердительно' in instructions
+    assert 'не отрицаю, что заклинание блестящее' in instructions
+    assert 'не превращай это в «заклинание не блестящее»' in instructions
 
 
 def test_b1_b2_calibration_kept():
