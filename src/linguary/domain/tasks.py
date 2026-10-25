@@ -16,6 +16,7 @@ from linguary.domain.errors import TaskTransitionError
 class TaskType(StrEnum):
     """Types of long-running operations executed by the local runner."""
 
+    QUALITY_REVIEW = "quality_review"
     IMPORT_BOOK = "import_book"
     ANALYZE_CHAPTER = "analyze_chapter"
     PROCESS_TRANSLATION_UNIT = "process_translation_unit"

@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ValidationError
+from linguary.adapters.llm.quality_payloads import QualityReviewSchema
 from linguary.domain.llm_log import Violation
 
 from linguary.adapters.llm.schemas import (
@@ -55,12 +56,17 @@ from linguary.domain.errors import DomainError
 
 #: Response schema for each request kind.
 SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
+    LLMResponseKind.QUALITY_REVIEW: QualityReviewSchema,
     LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisSchema,
     LLMResponseKind.TRANSLATION_RESULT: TranslationResultSchema,
 }
 
 def schema_for(kind: LLMResponseKind, *, contract_version: int = 1) -> type[BaseModel]:
     """Structured response schema for request kind."""
+    if kind == LLMResponseKind.QUALITY_REVIEW:
+        if contract_version != 1:
+            raise LLMResponseFormatError("неизвестная версия вычитки")
+        return QualityReviewSchema
     if type(contract_version) is not int or contract_version not in (1, 2, 3):
         raise LLMResponseFormatError("неизвестная версия контракта ответа")
     if contract_version == 3:
@@ -104,6 +110,8 @@ def parse_payload(
 
 def _to_dto(validated: BaseModel) -> LLMPayload:
     """Converts validated schema object into an application layer DTO."""
+    if isinstance(validated, QualityReviewSchema):
+        return validated.to_dto()
     if isinstance(validated, ChapterAnalysisSchema):
         return _chapter_analysis(validated)
     if isinstance(validated, TranslationResultSchema):

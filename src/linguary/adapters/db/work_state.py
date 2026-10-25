@@ -282,6 +282,10 @@ class SqlAlchemyWorkRepository:
             else:
                 values.update(reserved=QualityReviewRow.reserved - current.estimate,
                               spent=QualityReviewRow.spent + actual)
+                if actual > current.estimate or review.spent + actual > review.budget_limit:
+                    values['state'] = 'limit'
+            if review.state == 'stale':
+                values['state'] = 'stale'
             changed = self._session.execute(update(QualityReviewRow).where(
                 QualityReviewRow.id == current.review_id, QualityReviewRow.revision == review.revision,
                 QualityReviewRow.reserved >= current.estimate,
@@ -289,6 +293,60 @@ class SqlAlchemyWorkRepository:
             if changed.rowcount != 1:
                 raise WorkStateError('состояние вычитки изменилось')
         return updated
+
+    def review_attempt_count(self, review_id):
+        return len(self._session.scalars(select(LLMAttemptRow.id).where(LLMAttemptRow.review_id == review_id)).all())
+
+    def find_review(self, book_id, request_key):
+        row = self._session.scalar(select(QualityReviewRow).where(QualityReviewRow.book_id == book_id,
+            QualityReviewRow.request_key == request_key))
+        return None if row is None else self.get_review(row.id)
+
+    def list_reviews(self, book_id):
+        return tuple(self.get_review(row.id) for row in self._session.scalars(
+            select(QualityReviewRow).where(QualityReviewRow.book_id == book_id)).all())
+
+    def review_progress(self, review_id):
+        row = self._session.get(QualityReviewRow, review_id)
+        return {} if row is None else {key: row.findings_json.get(key) for key in ('checked', 'missing', 'reason', 'partial')}
+
+    def update_review(self, review_id, *, state, findings=(), checked=(), missing=(), reason=None, partial=False):
+        row = self._session.get(QualityReviewRow, review_id)
+        if row is None:
+            raise WorkStateError('вычитка не найдена')
+        if state == 'running' and row.state not in ('queued', 'running'):
+            raise WorkStateError('вычитка остановлена')
+        row.state = row.state if row.state in ('stale', 'unknown', 'limit') else state
+        row.findings_json = dict(schema_version=1, items=thaw(findings), checked=list(checked),
+            missing=list(missing), reason=reason, partial=partial)
+        row.revision += 1
+        self._session.flush()
+
+    def mark_review_sent(self, attempt_id):
+        attempt = self.get_attempt(attempt_id)
+        review = self.get_review(attempt.review_id)
+        if review.state not in ('queued', 'running'):
+            raise WorkStateError('вычитка остановлена')
+        self.transition_attempt(attempt_id, 'sent', expected_state='reserved')
+
+    def reconcile_quality_attempts(self):
+        rows = self._session.scalars(select(LLMAttemptRow).join(QualityReservationRow,
+            QualityReservationRow.attempt_id == LLMAttemptRow.id).where(
+            LLMAttemptRow.review_id.is_not(None), QualityReservationRow.state == 'reserved')).all()
+        for row in rows:
+            if row.state != 'reserved':
+                self.settle(row.id, actual=None)
+                if row.state == 'sent':
+                    self.transition_attempt(row.id, 'unknown', expected_state='sent')
+            else:
+                reservation = self.get_reservation(row.id)
+                changed = self._session.execute(update(QualityReservationRow).where(
+                    QualityReservationRow.attempt_id == row.id, QualityReservationRow.state == 'reserved').values(state='released'))
+                if changed.rowcount == 1:
+                    self._session.execute(update(QualityReviewRow).where(QualityReviewRow.id == row.review_id).values(
+                        reserved=QualityReviewRow.reserved - reservation.estimate, revision=QualityReviewRow.revision + 1))
+                    self.transition_attempt(row.id, 'cancelled', expected_state='reserved')
+        self._session.flush()
 
     def purge_diagnostics(self, book_id, *, call_id=None, before=None):
         query = update(LLMCallLogRow).where(LLMCallLogRow.book_id == book_id, LLMCallLogRow.response_text.is_not(None))

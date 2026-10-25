@@ -261,7 +261,7 @@ def test_v1_schema_unchanged():
     import json
     from linguary.adapters.llm.payloads import schema_for
     from linguary.application.ports.llm import LLMResponseKind
-    expected = {'chapter_analysis': '9c354997070f86d64b9ec7fb9ef3d741b76f7f2a08c84bf6bb8eccf9c9622b88', 'translation_result': '85cdddc508275c54c92f92cc5e39b7f9a5cbb0a0388051c093d7ad5329ba25f9'}
+    expected = {'chapter_analysis': '9c354997070f86d64b9ec7fb9ef3d741b76f7f2a08c84bf6bb8eccf9c9622b88', 'translation_result': '85cdddc508275c54c92f92cc5e39b7f9a5cbb0a0388051c093d7ad5329ba25f9', 'quality_review': '40d1d450019bdcb41ffaa1c40a723ea1607c4ffe267ca49f82785054dee46ada'}
     for kind in LLMResponseKind:
         wire = strict_json_schema(schema_for(kind))
         assert hashlib.sha256(json.dumps(wire, sort_keys=True, separators=(',', ':')).encode()).hexdigest() == expected[kind.value]

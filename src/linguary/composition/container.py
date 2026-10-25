@@ -34,6 +34,7 @@ from hashlib import sha256
 
 from linguary.adapters.config import AppSettings, load_settings
 from linguary.adapters.config.settings import SettingsError
+from linguary.adapters.config.quality_routes import load_quality_routes
 from linguary.adapters.config.system_settings import overlay_settings
 from linguary.adapters.db.system_settings import SystemSettingsStore
 from linguary.adapters.llm.rate_limit import LLMRateLimiter
@@ -60,6 +61,7 @@ from linguary.adapters.runtime import (
     to_async_handler,
 )
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
+from linguary.application.use_cases.quality_review import QualityReviewService
 from linguary.application.context_builder import ContextBuilder
 from linguary.application.ports.llm import LLMClient
 from linguary.application.retry_policy import RetryPolicy
@@ -141,6 +143,8 @@ class Application:
     analysis: RuntimeSequence
     processing: RuntimeSequence
     regeneration: RuntimeSequence
+    quality_review: QualityReviewService
+    _close_quality: Callable
     _dispose: Callable[[], None]
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -194,7 +198,7 @@ class Application:
 
     async def _close(self) -> None:
         errors = []
-        for close in (self.system_settings.aclose, self.runtime_settings.aclose):
+        for close in (self.system_settings.aclose, self.runtime_settings.aclose, self._close_quality):
             try:
                 await close()
             except Exception:
@@ -230,6 +234,7 @@ def build_application(
     migrate: bool = True,
     on_logged: LoggedObserver | None = None,
     content_plan_profile: str = "legacy-v1",
+    quality_routes=None,
 ) -> Application:
     """Assembles application from local configuration.
 
@@ -363,9 +368,25 @@ def build_application(
     analysis = RuntimeSequence(runtime_settings, "analysis", book_runtime=book_runtime)
     processing = RuntimeSequence(runtime_settings, "processing", book_runtime=book_runtime)
     regeneration = RuntimeSequence(runtime_settings, "regeneration", book_runtime=book_runtime)
+    quality_settings = replace(app_settings.llm, temperature=None, max_output_tokens=None)
+    quality_configured = ConfiguredLLMClient(quality_settings)
+    quality_clients = {}
+    def quality_client_for(route):
+        key = (route.route_id, route.model)
+        if key not in quality_clients:
+            if llm_client is None and route.base_url != app_settings.llm.base_url.rstrip('/'):
+                raise SettingsError('Маршрут вычитки недоступен')
+            inner = llm_client if llm_client is not None else quality_configured.client_for(route.model)
+            quality_clients[key] = RateLimitedLLMClient(inner=LoggingLLMClient(
+                inner=inner, unit_of_work=unit_of_work, provider=app_settings.llm.provider,
+                model=route.model, debug_payloads=app_settings.llm.debug_llm_payloads, on_logged=on_logged, pricing=route),
+                limiter=rate_limiter)
+        return quality_clients[key]
+    quality_review = QualityReviewService(unit_of_work, task_queue, quality_client_for, load_quality_routes(quality_settings) if quality_routes is None else quality_routes)
     def recover_work():
         with unit_of_work.transaction() as transaction:
             transaction.work.reconcile_recovery_attempts()
+            transaction.work.reconcile_quality_attempts()
 
     runner = TaskRunner(
         queue=task_queue,
@@ -379,6 +400,7 @@ def build_application(
             analysis=analysis,
             processing=processing,
             regeneration=regeneration,
+            quality_review=quality_review,
         ),
     )
     worker_pool = TaskWorkerPool(
@@ -424,6 +446,8 @@ def build_application(
         analysis=analysis,
         processing=processing,
         regeneration=regeneration,
+        quality_review=quality_review,
+        _close_quality=quality_configured.aclose,
         _dispose=engine.dispose,
     )
 
@@ -578,6 +602,7 @@ def _handlers(
     analysis: ChapterAnalysisSequence,
     processing: ChapterProcessingSequence,
     regeneration: BlockRegenerationSequence,
+    quality_review: QualityReviewService,
 ) -> dict[TaskType, TaskHandler]:
     """Handlers for all queue task types (ALG-02).
 
@@ -595,6 +620,7 @@ def _handlers(
         TaskType.ANALYZE_CHAPTER: analysis.run_task,
         TaskType.PROCESS_TRANSLATION_UNIT: processing.run_task,
         TaskType.REGENERATE_BLOCK: regeneration.run_task,
+        TaskType.QUALITY_REVIEW: quality_review.run_task,
     }
 
 

@@ -661,3 +661,20 @@ async def test_unknown_version_makes_zero_http_calls():
         assert calls == []
     finally:
         await client.aclose()
+
+
+async def test_quality_total_completion_cap_is_sent_without_legacy_max_tokens():
+    from linguary.application.ports.llm import LLMResponseKind
+    seen = []
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=completion(json.dumps(dict(findings=[], checked_artifacts=[], missing_artifacts=[]))))
+    client = client_over(handler, max_output_tokens=999)
+    try:
+        await client.generate(LLMRequest(kind=LLMResponseKind.QUALITY_REVIEW,
+            instructions='Review', input_text='{}', max_completion_tokens=123))
+        assert len(seen) == 1
+        assert seen[0]['max_completion_tokens'] == 123 and 'max_tokens' not in seen[0]
+        assert seen[0]['response_format']['json_schema']['strict'] is True
+    finally:
+        await client.aclose()

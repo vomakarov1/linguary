@@ -33,10 +33,11 @@ from typing import Protocol
 from linguary.application.errors import ApplicationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.domain.llm_log import CallContext, Violation
+from linguary.application.quality_context import QualityReviewResponse
 from linguary.domain import LLMCallStage, TokenUsage
 
 #: Structured responses that the model can return (PRD § 23).
-type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse
+type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse | QualityReviewResponse
 
 
 class LLMError(ApplicationError):
@@ -107,6 +108,7 @@ class LLMResponseFormatError(LLMError):
 class LLMResponseKind(StrEnum):
     """Kind of structured response requested by the use case."""
 
+    QUALITY_REVIEW = "quality_review"
     CHAPTER_ANALYSIS = "chapter_analysis"
     TRANSLATION_RESULT = "translation_result"
 
@@ -132,6 +134,7 @@ class LLMRequest[PayloadT: LLMPayload]:
     scope_id: str | None = None
     ordered_block_ids: tuple[str, ...] = ()
     run_id: str | None = None
+    max_completion_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if not self.instructions.strip():
