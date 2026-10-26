@@ -38,6 +38,7 @@ from linguary.domain.content_plan import (
     ContentPlan, ContentEvidence, ContextFact, Difficulty, SourceAnchor, RequiredPoint, HelpEvidence,
 )
 from linguary.domain.errors import DomainError
+from linguary.domain.learning import FragmentAssistance
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockProcessingResult,
@@ -477,6 +478,7 @@ def to_result_row(run_id: str, result: BlockProcessingResult) -> BlockResultRow:
         treatment=result.treatment.value,
         translated_text=result.translated_text,
         content_evidence_json=_encode_content_evidence(result.content_evidence),
+        fragment_assistance_json=_encode_fragment_assistance(result.fragment_assistances),
         glossary_hints_json=[
             {"original": hint.original, "translation": hint.translation, "note": hint.note}
             for hint in result.glossary_hints
@@ -525,6 +527,7 @@ def to_block_result(
         treatment=BlockTreatment(row.treatment),
         translated_text=row.translated_text,
         content_evidence=_decode_content_evidence(row.content_evidence_json),
+        fragment_assistances=_decode_fragment_assistance(row.fragment_assistance_json),
         glossary_hints=tuple(
             GlossaryHint(
                 original=hint["original"],
@@ -799,3 +802,43 @@ def conditions_from_row(row):
         return None
     return BookConditions(row.id, row.book_id, row.revision, row.payload_json,
                           row.created_at, row.reproducibility, row.schema_version)
+
+
+def _decode_fragment_assistance(value: object) -> tuple[FragmentAssistance, ...]:
+    if value is None:
+        return ()
+    try:
+        result = []
+        for item in _array(value):
+            data = _object(item, {'difficulty_id', 'point_ids', 'kind', 'text', 'anchors'})
+            anchors = []
+            for item in _array(data['anchors']):
+                anchor = _object(item, {'block_id', 'start', 'end', 'quote'})
+                anchors.append(SourceAnchor(
+                    _string(anchor['block_id']), _integer(anchor['start']),
+                    _integer(anchor['end']), _string(anchor['quote']),
+                ))
+            result.append(FragmentAssistance(
+                difficulty_id=_string(data['difficulty_id']),
+                point_ids=tuple(_string(point) for point in _array(data['point_ids'])),
+                kind=_string(data['kind']),
+                text=None if data['text'] is None else _string(data['text']),
+                anchors=tuple(anchors),
+            ))
+        return tuple(result)
+    except (ValueError, TypeError, DomainError):
+        raise PersistenceError('повреждённая сохранённая помощь к фрагментам') from None
+
+
+def _encode_fragment_assistance(value: tuple[FragmentAssistance, ...]) -> list[dict[str, Any]] | None:
+    if not isinstance(value, (tuple, list)) or any(type(item) is not FragmentAssistance for item in value):
+        raise PersistenceError('некорректная помощь к фрагментам для сохранения')
+    if not value:
+        return None
+    data = [dict(
+        difficulty_id=item.difficulty_id, point_ids=list(item.point_ids), kind=item.kind,
+        text=item.text, anchors=[dict(block_id=anchor.block_id, start=anchor.start,
+                                    end=anchor.end, quote=anchor.quote) for anchor in item.anchors],
+    ) for item in value]
+    _decode_fragment_assistance(data)
+    return data

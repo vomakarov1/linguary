@@ -367,3 +367,26 @@ async def test_regeneration_atomically_replaces_evidence(unit_of_work, accept):
             await regenerate(command)
         assert len(client.requests) == 2
         assert stored_results(unit_of_work) == previous
+
+
+async def test_failed_regeneration_preserves_accepted_fragment_help(unit_of_work):
+    from dataclasses import replace
+    from linguary.domain.learning import FragmentAssistance
+    from linguary.domain.content_plan import SourceAnchor
+    scenario = store_processing_book(unit_of_work)
+    await process_chapter(unit_of_work, aliases=('b1', 'b2'))
+    owner = scenario.block_ids()[0]
+    help = FragmentAssistance('d', ('p',), 'lexical_hint', 'go back',
+                              (SourceAnchor(owner, 0, 4, SOURCE_TEXT[:4]),))
+    with unit_of_work.transaction() as uow:
+        previous = uow.results.get(RUN_ID, owner)
+        uow.results.replace_results(RUN_ID, (replace(previous, fragment_assistances=(help,)),))
+    previous = stored_results(unit_of_work)
+    client = FakeLLMClient.always(translation_reply([
+        block_reply('b1', translated_text=UNTRANSLATED_TEXT),
+    ]))
+    regenerate, _ = make_regenerate_block(unit_of_work, client, max_attempts=1)
+    with pytest.raises(ResultValidationError):
+        await regenerate(RegenerateBlockCommand(book_id=BOOK_ID, block_id=owner))
+    assert stored_results(unit_of_work) == previous
+    assert previous[0].fragment_assistances == (help,)

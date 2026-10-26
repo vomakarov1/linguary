@@ -281,7 +281,7 @@ def test_content_downgrade_refuses_all_nonnull_before_ddl(
         event.remove(Engine, 'before_cursor_execute', track_ddl)
     assert ddl == []
     with engine.connect() as connection:
-        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0007'
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0008'
         assert connection.execute(text(f'SELECT {column} FROM {table}')).scalar_one() == payload
         for target, name in CONTENT_COLUMNS:
             assert name in {item['name'] for item in inspect(connection).get_columns(target)}
@@ -311,3 +311,38 @@ def test_content_downgrade_old_sqlite_fails_before_ddl(engine, content_rows, mon
         assert dropped == []
         for target, name in CONTENT_COLUMNS:
             assert name in {item['name'] for item in inspect(connection).get_columns(target)}
+
+
+def test_fragment_upgrade_preserves_0007_rows(alembic_config, engine, content_rows):
+    from sqlalchemy import text
+    command.downgrade(alembic_config, '0007')
+    with engine.connect() as connection:
+        before = connection.execute(text('SELECT * FROM block_results')).all()
+    command.upgrade(alembic_config, 'head')
+    with engine.connect() as connection:
+        columns = list(before[0]._mapping)
+        assert connection.execute(text(f"SELECT {', '.join(columns)} FROM block_results")).all() == before
+        assert connection.execute(text('SELECT fragment_assistance_json IS NULL FROM block_results')).scalar_one() == 1
+    column, = [c for c in inspect(engine).get_columns('block_results') if c['name'] == 'fragment_assistance_json']
+    assert column['nullable'] and isinstance(column['type'], JSON)
+
+
+@pytest.mark.parametrize('payload', ['[{"kind":"unresolved"}]', '[]', 'null'])
+def test_fragment_downgrade_refuses_nonnull_before_ddl(alembic_config, engine, content_rows, payload):
+    from sqlalchemy import event, text
+    with engine.begin() as connection:
+        connection.execute(text('UPDATE block_results SET fragment_assistance_json=:payload'), {'payload': payload})
+    ddl = []
+    def track_ddl(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith(('ALTER ', 'DROP ', 'CREATE ')):
+            ddl.append(statement)
+    event.listen(Engine, 'before_cursor_execute', track_ddl)
+    try:
+        with pytest.raises(RuntimeError, match='помощь к фрагментам'):
+            command.downgrade(alembic_config, '0007')
+    finally:
+        event.remove(Engine, 'before_cursor_execute', track_ddl)
+    assert ddl == []
+    with engine.connect() as connection:
+        assert connection.execute(text('SELECT fragment_assistance_json FROM block_results')).scalar_one() == payload
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0008'

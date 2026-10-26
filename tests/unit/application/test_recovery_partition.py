@@ -30,3 +30,48 @@ def test_original_group_boundary_frozen():
     assert first['root_key'] == root_manifest(**kwargs)['root_key']
     assert 'unit_id' not in first
     assert first['root_key'] != root_manifest(**{**kwargs,'max_source_chars': 101})['root_key']
+
+
+@pytest.mark.parametrize('cross_block', [False, True])
+def test_prepare_roots_splits_technical_group_only_between_plan_dependencies(cross_block):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from linguary.application.recovery import Recovery
+    from linguary.domain import BlockTreatment, BlockType
+
+    roots, scopes = [], []
+    class WorkStore:
+        def latest_conditions(self, book_id):
+            return SimpleNamespace(id='00000000-0000-0000-0000-000000000001', payload={'checks': {'language_notes_per_chapter': 2}})
+        def find_root_by_key(self, key):
+            return None
+        def add_root(self, root):
+            roots.append(root)
+        def list_scopes(self, root_id):
+            return tuple(s for s in scopes if s.root_id == root_id)
+        def add_scope(self, scope):
+            scopes.append(scope)
+    class Uow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=store)
+    store = WorkStore()
+    from linguary.domain import GlossarySnapshot
+    from linguary.domain.analysis import ChapterAnalysis
+    from linguary.domain import TreatmentPlan, TreatmentPlanItem, CoverageStatus
+    ids = ('b1', 'b2', 'b3', 'b4')
+    treatment = TreatmentPlan('section', tuple(TreatmentPlanItem(b, BlockTreatment.TRANSLATE) for b in ids))
+    analysis = ChapterAnalysis(id='analysis', section_id='section', coverage_status=CoverageStatus.COMPLETE,
+        treatment_plan=treatment, translation_instructions='Translate.', chapter_summary='Scene.',
+        content_plan=plan() if cross_block else None)
+    blocks = tuple(SimpleNamespace(id=b, text='abcd', parent_id=None,
+        type=BlockType.PARAGRAPH, attributes={'split_group': 'original-paragraph'}) for b in ids)
+    units = (SimpleNamespace(block_ids=ids, items=tuple(SimpleNamespace(block=b) for b in blocks)),)
+    work = SimpleNamespace(document=SimpleNamespace(id='book'), analysis=analysis,
+        run=SimpleNamespace(id='run', glossary_snapshot=GlossarySnapshot()), processed_block_ids=set())
+    Recovery(Uow()).prepare_roots(work, units, max_source_chars=100, validator=None)
+    assert len(roots) == 1
+    atoms = tuple(tuple(group) for group in roots[0].manifest['atomic_intervals'])
+    assert atoms == ((('b1', 'b2', 'b3'), ('b4',)) if cross_block else tuple((b,) for b in ids))
+    assert scopes[0].ordered_blocks == ids
+    assert tuple(b.attributes['split_group'] for b in blocks) == ('original-paragraph',) * 4

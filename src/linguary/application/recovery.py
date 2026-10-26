@@ -121,13 +121,10 @@ class Recovery:
         for block in blocks.values():
             if block.parent_id is not None:
                 structural.setdefault(('parent', block.parent_id), []).append(block.id)
-            if block.attributes.get('split_group'):
-                structural.setdefault(('split', block.attributes['split_group']), []).append(block.id)
         indivisible.extend(tuple(group) for group in structural.values())
         for left, right in zip(ordered, ordered[1:]):
             first, second = blocks[left], blocks[right]
             if ((first.parent_id is not None and first.parent_id == second.parent_id)
-                    or first.attributes.get('split_group') and first.attributes.get('split_group') == second.attributes.get('split_group')
                     or first.type == second.type and first.type.value in {'list_item', 'poem', 'quote', 'table'}):
                 indivisible.append((left, right))
         intervals = dependency_intervals(ordered, work.analysis.content_plan, indivisible=indivisible)

@@ -20,8 +20,14 @@ def translation_reply(count, *, bad=False):
         for index in range(1, count + 1)], language_notes=[]))
 
 
-async def prepare(app, *, blocks=2):
+async def prepare(app, *, blocks=2, split_group=False):
     doc = store_imported(app, (tuple('He returned home.' for _ in range(blocks)),))
+    if split_group:
+        doc = replace(doc, sections=tuple(replace(section, blocks=tuple(
+            replace(block, attributes={**block.attributes, 'split_group': 'long-paragraph'})
+            for block in section.blocks)) for section in doc.sections))
+        with app.unit_of_work.transaction() as transaction:
+            transaction.documents.save(doc)
     await app.analysis.start('book-1')
     completed = await drain_tasks(app)
     assert all(task.status == TaskStatus.SUCCEEDED for task in completed), [task.last_error for task in completed]
@@ -30,7 +36,8 @@ async def prepare(app, *, blocks=2):
     return doc, run, tasks[0]
 
 
-async def test_rejected_original_never_partially_accepted_and_children_union_complete(tmp_path):
+@pytest.mark.parametrize('split_group', [False, True])
+async def test_rejected_original_never_partially_accepted_and_children_union_complete(tmp_path, split_group):
     class CheckingFake(FakeLLMClient):
         async def generate(self, request):
             if request.stage == LLMCallStage.TRANSLATION_UNIT and len(request.ordered_block_ids) == 2:
@@ -40,7 +47,7 @@ async def test_rejected_original_never_partially_accepted_and_children_union_com
     fake = CheckingFake([analysis_reply(2), translation_reply(2, bad=True), translation_reply(2, bad=True), translation_reply(1), translation_reply(1)])
     app = make_app(tmp_path, fake)
     try:
-        doc, run, task = await prepare(app)
+        doc, run, task = await prepare(app, split_group=split_group)
         completed = await drain_tasks(app)
         assert completed[-1].status == TaskStatus.SUCCEEDED, completed[-1].last_error
         with app.unit_of_work.transaction() as transaction:

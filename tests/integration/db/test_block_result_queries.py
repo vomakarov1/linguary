@@ -136,3 +136,79 @@ def test_group_serialization_failure_rolls_back_all_rows(unit_of_work, stored_re
         uow.results.replace_results(RUN_ID, [changed, invalid])
     with unit_of_work.transaction() as uow:
         assert uow.results.list_for_run(RUN_ID) == stored_results
+
+
+def assistance(block_id, *, kind='lexical_hint'):
+    from linguary.domain.learning import FragmentAssistance
+    from linguary.domain.content_plan import SourceAnchor
+    return FragmentAssistance('difficulty-1', ('point-1',), kind,
+                              None if kind == 'unresolved' else 'go back',
+                              (SourceAnchor(block_id, 0, 2, 'He'),))
+
+
+@pytest.mark.parametrize('kind', ['lexical_hint', 'sentence_rephrase', 'russian_explanation', 'unresolved'])
+def test_fragment_assistance_round_trip_and_atomic_replacement(unit_of_work, stored_results, kind):
+    from dataclasses import replace
+    changed = replace(stored_results[0], fragment_assistances=(assistance(BLOCK_ID, kind=kind),))
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (changed,))
+    with unit_of_work.transaction() as uow:
+        assert uow.results.get(RUN_ID, BLOCK_ID) == changed
+        assert uow.results.list_for_run(RUN_ID) == (changed, stored_results[1])
+    with pytest.raises(RuntimeError), unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (replace(changed, fragment_assistances=()),))
+        raise RuntimeError('cancel replacement')
+    with unit_of_work.transaction() as uow:
+        assert uow.results.list_for_run(RUN_ID) == (changed, stored_results[1])
+
+
+def test_invalid_assistance_rolls_back_whole_replacement(unit_of_work, stored_results):
+    from dataclasses import replace
+    from linguary.application.ports.persistence import PersistenceError
+    invalid = replace(stored_results[1])
+    object.__setattr__(invalid, 'fragment_assistances', ({'difficulty_id': 'invalid'},))
+    changed = replace(stored_results[0], fragment_assistances=(assistance(BLOCK_ID),))
+    with pytest.raises(PersistenceError), unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (changed, invalid))
+    with unit_of_work.transaction() as uow:
+        assert uow.results.list_for_run(RUN_ID) == stored_results
+
+
+def test_legacy_archive_body_and_checksum_are_not_rewritten(unit_of_work, stored_results):
+    from dataclasses import asdict
+    import hashlib
+    import json
+    body = {'schema_version': 1, 'result': asdict(stored_results[0])}
+    body['result'].pop('fragment_assistances')
+    canonical = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    with unit_of_work.transaction() as uow:
+        artifact_id, = uow.work.archive_artifacts([dict(
+            book_id=BOOK_ID, kind='block_result', scope_id=BLOCK_ID, body=body,
+        )])
+    with unit_of_work.transaction() as uow:
+        archived = uow.work.get_artifact(artifact_id)
+        assert archived['body'] == json.loads(canonical)
+        assert archived['sha256'] == digest
+        assert archived['body']['result'].get('fragment_assistances', []) == []
+        assert uow.results.get(RUN_ID, BLOCK_ID).fragment_assistances == ()
+
+
+def test_failed_archive_and_result_replacement_preserve_accepted_help(unit_of_work, stored_results):
+    from dataclasses import asdict, replace
+    old = replace(stored_results[0], fragment_assistances=(assistance(BLOCK_ID),))
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (old,))
+        accepted_id, = uow.work.archive_artifacts([dict(book_id=BOOK_ID, kind='block_result',
+            scope_id=BLOCK_ID, body={'schema_version': 1, 'result': asdict(old)})])
+    replacement = replace(old, fragment_assistances=(assistance(BLOCK_ID, kind='unresolved'),))
+    with pytest.raises(RuntimeError), unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (replacement,))
+        rejected_id, = uow.work.archive_artifacts([dict(book_id=BOOK_ID, kind='block_result',
+            scope_id=BLOCK_ID, body={'schema_version': 1, 'result': asdict(replacement)})])
+        raise RuntimeError('failure after archive')
+    with unit_of_work.transaction() as uow:
+        assert uow.results.get(RUN_ID, BLOCK_ID) == old
+        assert uow.results.get(RUN_ID, SECOND_BLOCK_ID) == stored_results[1]
+        assert uow.work.get_artifact(rejected_id) is None
+        assert uow.work.get_artifact(accepted_id)['body']['result']['fragment_assistances'][0]['text'] == 'go back'

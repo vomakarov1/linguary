@@ -337,6 +337,7 @@ class BlockResultRow(Base):
     translated_text: Mapped[str | None] = mapped_column(Text)
     glossary_hints_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     content_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(ContentObjectJSON(), nullable=True)
+    fragment_assistance_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
 
 
 class LanguageNoteRow(Base):
