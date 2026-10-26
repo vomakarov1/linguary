@@ -12,7 +12,11 @@ from export_pipeline import documents_of, elements, package_of, run_export, spin
 
 from linguary.adapters.epub import EbookLibEpubReader, verify_exported_epub
 from linguary.application.ports.epub import EpubReadRequest, ExportWarningKind
-from linguary.domain import BlockType
+from linguary.domain import (
+    BlockType, BlockTreatment, BlockProcessingResult,
+)
+from linguary.domain.content_plan import SourceAnchor
+from linguary.domain.learning import FragmentAssistance
 
 #: Suite of test EPUBs (PRD § 28.1): every book must survive export.
 FIXTURES = (
@@ -219,3 +223,36 @@ def _resolve(name: str, href: str) -> tuple[str, str]:
     if not path:
         return name, fragment
     return f"OEBPS/{path}", fragment
+
+
+def test_fragment_footnotes_resolve_without_colliding_with_source_ids(tmp_path: Path) -> None:
+    source = build_epub(
+        tmp_path / "references.epub",
+        documents={"chapter.xhtml": xhtml_document(
+            '<h1>Chapter One</h1><p id="linguary-help">An unusual expression.</p>'
+            '<p><a href="#linguary-help">Return to the original.</a></p>'
+        )},
+        toc=[("chapter.xhtml", "Chapter One")],
+    )
+    dry = run_export(source, tmp_path=tmp_path / "dry")
+    block = next(b for b in dry.imported.document.blocks() if b.text == "An unusual expression.")
+    anchor = SourceAnchor(block.id, 3, 10, "unusual")
+    assistance = FragmentAssistance("difficulty", ("point",), "unresolved", None, (anchor,))
+    result = BlockProcessingResult(block.id, BlockTreatment.READ_AS_IS, fragment_assistances=(assistance,))
+    run = run_export(source, tmp_path=tmp_path / "full", block_results={block.id: result})
+    assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
+    root = documents_of(run.path)["OEBPS/chapter.xhtml"]
+    ids = [node.get("id") for node in root.iter() if node.get("id")]
+    assert len(ids) == len(set(ids))
+    epub_type = "{http://www.idpf.org/2007/ops}type"
+    references = [node for node in elements(root, "a") if node.get(epub_type) == "noteref"]
+    assert len(references) == 1
+    reference = references[0]
+    assert reference.get("href") != "#linguary-help"
+    assert reference.get("data-source-start") == "3"
+    assert reference.get("data-source-end") == "10"
+    target = next(node for node in root.iter() if node.get("id") == reference.get("href")[1:])
+    assert target.get(epub_type) == "footnote"
+    assert "Помощь пока не подготовлена." in "".join(target.itertext())
+    assert any(a.get("href") == f"#{reference.get('id')}" for a in elements(target, "a"))
+    assert any(a.get("href") == "#linguary-help" for a in elements(root, "a"))

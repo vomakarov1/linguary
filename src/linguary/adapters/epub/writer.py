@@ -58,6 +58,7 @@ from linguary.domain import (
     build_language_note_id,
     translation_segments,
 )
+from linguary.domain.learning import FragmentAssistance
 
 _XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 _EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
@@ -155,6 +156,19 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
 
 .linguary-anchors {
   display: none;
+}
+
+.linguary-fragment-help {
+  margin: 0.5em 0 1.5em 0.9em;
+  padding-left: 0.9em;
+  border-left: 0.2em solid;
+  font-size: 0.9em;
+}
+
+.linguary-help-reference::after {
+  content: "[?]";
+  vertical-align: super;
+  font-size: 0.75em;
 }
 
 .linguary-split-continuation {
@@ -550,6 +564,8 @@ class _ChapterRenderer:
             if block.parent_id is not None:
                 children.setdefault(block.parent_id, []).append(block)
         state = _SectionState(section=section, href=href, number=number)
+        if not is_front_matter:
+            self._prepare_fragment_help(blocks, state=state)
         roots = tuple(block for block in blocks if block.parent_id is None)
         self._append_siblings(
             container,
@@ -572,14 +588,45 @@ class _ChapterRenderer:
         """Sibling blocks at the same level; consecutive list items and blockquotes are placed under a wrapper."""
         group: etree._Element | None = None
         grouped: BlockType | None = None
-        for block in blocks:
+        index = 0
+        while index < len(blocks):
+            block = blocks[index]
+            parts = [block]
+            index += 1
+            split_group = block.attributes.get("split_group")
+            if split_group and block.type is BlockType.PARAGRAPH and not children.get(block.id):
+                while index < len(blocks):
+                    following = blocks[index]
+                    if (following.type is not BlockType.PARAGRAPH
+                            or following.attributes.get("split_group") != split_group
+                            or children.get(following.id)):
+                        break
+                    parts.append(following)
+                    index += 1
             wrapper = _GROUPING_TAGS.get(block.type)
             if wrapper is None or block.type is not grouped:
                 group, grouped = None, None
             if wrapper is not None and group is None:
                 group, grouped = _sub(parent, wrapper), block.type
+            host = group if group is not None else parent
+            if len(parts) > 1:
+                original = _sub(host, "p")
+                for part in parts:
+                    for anchor in _anchors(part):
+                        if anchor not in state.used_ids:
+                            _sub(original, "span", {"id": anchor})
+                            state.used_ids.add(anchor)
+                    fragment = _element("span")
+                    _append_inline(fragment, part.text, _nestable(part.inline_annotations), state)
+                    self._insert_help_references(fragment, part, state=state)
+                    _append_characters(original, fragment.text or "")
+                    for child in list(fragment):
+                        original.append(child)
+                if not is_front_matter:
+                    self._append_group_help(host, parts, state=state)
+                continue
             self._append_block(
-                group if group is not None else parent,
+                host,
                 block,
                 children=children,
                 state=state,
@@ -617,7 +664,7 @@ class _ChapterRenderer:
             else parent
         )
         if not is_front_matter:
-            self._append_help(help_parent, block, state=state)
+            self._append_group_help(help_parent, (block,), state=state)
 
     def _append_original(
         self,
@@ -669,7 +716,109 @@ class _ChapterRenderer:
             host = _sub(element, "p")
         if block.text and local_name(host) not in _VOID_TAGS:
             _append_inline(host, block.text, _nestable(block.inline_annotations), state)
+            self._insert_help_references(host, block, state=state)
         return element
+
+    def _prepare_fragment_help(
+        self, blocks: Sequence[DocumentBlock], *, state: _SectionState
+    ) -> None:
+        """Allocate navigation IDs before writing references to other blocks."""
+        texts = {block.id: block.text for block in blocks}
+        state.navigation_ids.update(anchor for block in blocks for anchor in _anchors(block))
+        for block in blocks:
+            result = self._request.block_results.get(block.id)
+            for assistance in result.fragment_assistances if result else ():
+                target = _unique_id("linguary-help", state.navigation_ids)
+                references = []
+                for anchor in assistance.anchors:
+                    anchor.validate(texts)
+                    reference = _unique_id("linguary-help-ref", state.navigation_ids)
+                    state.references.setdefault(anchor.block_id, []).append(
+                        (anchor.start, anchor.end, anchor.quote, reference, target)
+                    )
+                    references.append(reference)
+                state.assistances.setdefault(block.id, []).append(
+                    (assistance, target, tuple(references))
+                )
+
+    def _insert_help_references(
+        self, element: etree._Element, block: DocumentBlock, *, state: _SectionState
+    ) -> None:
+        """Insert navigation without changing original characters or nesting links.
+
+        Markers inside inline markup precede its outermost element. Explicit source offsets retain
+        the precise fragment, and generated marker text stays outside the author's text.
+        """
+        slots: list[tuple[etree._Element, bool, int, int]] = []
+        position = 0
+
+        def collect(node: etree._Element) -> None:
+            nonlocal position
+            if node.text:
+                slots.append((node, False, position, position + len(node.text)))
+                position += len(node.text)
+            for child in node:
+                if local_name(child) == "br":
+                    position += 1
+                collect(child)
+                if child.tail:
+                    slots.append((child, True, position, position + len(child.tail)))
+                    position += len(child.tail)
+
+        collect(element)
+        for start, end, quote, reference, target in sorted(
+            state.references.get(block.id, ()), key=lambda item: item[0], reverse=True
+        ):
+            marker = _element("a", {
+                "id": reference, "href": f"#{target}",
+                f"{{{_EPUB_NAMESPACE}}}type": "noteref",
+                "class": "linguary-help-reference", "aria-label": quote,
+                "data-source-block": block.id,
+                "data-source-start": str(start), "data-source-end": str(end),
+            })
+            for node, tail, lower, upper in slots:
+                if not lower <= start < upper:
+                    continue
+                host = node.getparent() if tail else node
+                inline = host
+                while inline is not None and inline.getparent() is not element:
+                    if inline is element:
+                        break
+                    inline = inline.getparent()
+                if inline is not None and inline is not element:
+                    inline.addprevious(marker)
+                else:
+                    value = (node.tail if tail else node.text) or ""
+                    offset = start - lower
+                    marker.tail = value[offset:]
+                    if tail:
+                        node.tail = value[:offset]
+                        node.addnext(marker)
+                    else:
+                        node.text = value[:offset]
+                        node.insert(0, marker)
+                break
+
+    def _append_group_help(
+        self, parent: etree._Element, blocks: Sequence[DocumentBlock], *, state: _SectionState
+    ) -> None:
+        """One group after the complete original, with one footnote per difficulty."""
+        entries = [entry for block in blocks for entry in state.assistances.get(block.id, ())]
+        if entries:
+            container = _sub(parent, "div", {"class": "linguary-fragment-help"})
+            for assistance, target, references in entries:
+                aside = _sub(container, "aside", {
+                    "id": target, f"{{{_EPUB_NAMESPACE}}}type": "footnote",
+                    "class": f"linguary-assistance linguary-{assistance.kind}",
+                })
+                _sub(aside, "p").text = (
+                    assistance.text if assistance.resolved else "Помощь пока не подготовлена."
+                )
+                for reference in references:
+                    _sub(aside, "a", {"href": f"#{reference}",
+                        f"{{{_EPUB_NAMESPACE}}}type": "backlink"}).text = "↩"
+        for block in blocks:
+            self._append_help(parent, block, state=state)
 
     def _attach_anchors(
         self,
@@ -784,6 +933,9 @@ class _SectionState:
     number: int
     used_ids: set[str] = field(default_factory=set)
     notes: int = 0
+    navigation_ids: set[str] = field(default_factory=set)
+    references: dict[str, list[tuple[int, int, str, str, str]]] = field(default_factory=dict)
+    assistances: dict[str, list[tuple[FragmentAssistance, str, tuple[str, ...]]]] = field(default_factory=dict)
 
 
 class _OpaqueSource:
@@ -1617,7 +1769,7 @@ def _serialize(root: etree._Element) -> bytes:
     """Serializes a book document along with XML declaration."""
     etree.cleanup_namespaces(root)
     return etree.tostring(
-        root, xml_declaration=True, encoding="utf-8", pretty_print=True
+        root, xml_declaration=True, encoding="utf-8", pretty_print=False
     )
 
 
@@ -1756,7 +1908,10 @@ def _href_from_target(target: str, *, base: str) -> str:
     path, separator, fragment = target.partition("#")
     if not path:
         return f"{separator}{fragment}"
-    relative = _relative_href(base, posixpath.normpath(path))
+    normalized = posixpath.normpath(path)
+    if separator and normalized == posixpath.normpath(base):
+        return f"#{fragment}"
+    relative = _relative_href(base, normalized)
     return f"{relative}{separator}{fragment}" if separator else relative
 
 

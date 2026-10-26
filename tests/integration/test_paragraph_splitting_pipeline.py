@@ -19,7 +19,12 @@ from linguary.application.ports.export_validation import (
     ExportValidationRequest,
 )
 from linguary.application.translation_units import plan_translation_units
-from linguary.domain import BlockProcessingResult, BlockTreatment, TreatmentPlan
+from linguary.domain import (
+    BlockProcessingResult,
+    BlockTreatment,
+    InlineAnnotationType,
+    TreatmentPlan,
+)
 
 
 def _create_test_epub_with_composite_paragraphs(tmp_path: Path) -> Path:
@@ -46,7 +51,7 @@ def _create_test_epub_with_composite_paragraphs(tmp_path: Path) -> Path:
     html = xhtml_document(
         f"<h1>Chapter I</h1>\n"
         f"<p>Opening short paragraph before the courtroom scene.</p>\n"
-        f"<p id=\"composite-p\">{composite_paragraph}</p>\n"
+        f"<p id=\"composite-p\"><b>{s1}</b>{s2}{s3}</p>\n"
         f"<p>Closing short paragraph after the courtroom scene.</p>\n",
         title="Chapter 1",
     )
@@ -111,13 +116,25 @@ def test_pipeline_import_process_and_export_split_paragraphs(tmp_path: Path) -> 
     continuation_elements = [
         p for p in p_elements if "linguary-split-continuation" in (p.get("class") or "")
     ]
-    assert len(continuation_elements) == len(split_blocks) - 1
+    assert continuation_elements == []
 
-    first_split_p = [
-        p for p in p_elements if split_blocks[0].text[:30] in (p.text or "")
+    original_paragraphs = [
+        p for p in p_elements
+        if split_blocks[0].text[:30] in "".join(p.itertext())
     ]
-    assert len(first_split_p) == 1
-    assert "linguary-split-continuation" not in (first_split_p[0].get("class") or "")
+    assert len(original_paragraphs) == 1
+    original = original_paragraphs[0]
+    assert "".join(original.itertext()) == "".join(block.text for block in split_blocks)
+    bold = elements(original, "b")
+    assert bold
+    expected_bold = "".join(
+        block.text[annotation.start:annotation.end]
+        for block in split_blocks
+        for annotation in block.inline_annotations
+        if annotation.type is InlineAnnotationType.BOLD
+    )
+    assert "".join("".join(node.itertext()) for node in bold) == expected_bold
+    assert expected_bold.startswith("The White Rabbit")
 
 
 def test_epubcheck_validity_for_split_paragraphs(tmp_path: Path) -> None:

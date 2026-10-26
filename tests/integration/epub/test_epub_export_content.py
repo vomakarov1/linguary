@@ -26,6 +26,8 @@ from linguary.domain import (
     LanguageNote,
     LearningMaterial,
 )
+from linguary.domain.content_plan import SourceAnchor
+from linguary.domain.learning import FragmentAssistance
 
 _SUMMARY = "Wren reaches Duskmere and learns that the marsh lights mislead travellers."
 
@@ -613,3 +615,39 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
     assert "Previously in Chapter One" in ch2_text
     assert "Alice follows the White Rabbit" in ch2_text
 
+
+
+def test_fragment_assistance_follows_the_complete_split_original(tmp_path: Path) -> None:
+    source = build_epub(
+        tmp_path / "split-source.epub",
+        documents={"chapter.xhtml": xhtml_document(
+            '<h1>Chapter One</h1><p id="original"><b>Repeated phrase.</b> '
+            + 'The traveller walked along the winding road. ' * 300
+            + '<a href="https://example.com">linked ending</a>.</p>'
+        )},
+        toc=[("chapter.xhtml", "Chapter One")],
+    )
+    dry = run_export(source, tmp_path=tmp_path / "dry")
+    parts = paragraphs_of(dry.imported.document, 0)
+    assert len(parts) > 1
+    assert len({part.attributes["split_group"] for part in parts}) == 1
+    anchors = tuple(SourceAnchor(part.id, 0, 10, part.text[:10]) for part in parts)
+    help_item = FragmentAssistance(
+        "one-difficulty", ("one-point",), "sentence_rephrase",
+        "The traveller continued along the road.", anchors,
+    )
+    result = BlockProcessingResult(
+        parts[0].id, BlockTreatment.READ_AS_IS, fragment_assistances=(help_item,),
+    )
+    run = run_export(source, tmp_path=tmp_path / "full", block_results={parts[0].id: result})
+    root = documents_of(run.path)["OEBPS/chapter.xhtml"]
+    original = next(p for p in elements(root, "p") if p.get("class") is None)
+    assert "".join(original.itertext()) == "".join(part.text for part in parts)
+    container = original.getnext()
+    assert container.get("class") == "linguary-fragment-help"
+    assert len(root.xpath('//*[@class="linguary-fragment-help"]')) == 1
+    assert len(container) == 1
+    assert next(iter(elements(original, "b"))).text == "Repeated phrase."
+    source_link = next(a for a in elements(original, "a") if a.get("href") == "https://example.com")
+    assert source_link.text == "linked ending"
+    assert len([a for a in elements(original, "a") if a.get("class") == "linguary-help-reference"]) == len(parts)
