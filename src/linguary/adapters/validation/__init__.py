@@ -1,9 +1,8 @@
-"""Data validation at application external boundaries.
+"""Data and language validation adapters.
 
-The adapter's public entry point is `EpubCheckValidator` and its configuration `EpubCheckSettings`:
-implementation of the `ExportValidator` port from `linguary.application.ports.export_validation`
-on top of external EPUBCheck. The application layer sees only the port and has no knowledge of
-Java, jar files, or process execution (ADR § 3).
+`EpubCheckValidator` implements the optional `ExportValidator` port on top of EPUBCheck.
+`Py3LangidDetector` implements the `LanguageDetector` port using a bundled local model.
+The application layer sees only these ports and no provider implementation details.
 """
 
 from linguary.adapters.validation.epubcheck import (
@@ -11,5 +10,11 @@ from linguary.adapters.validation.epubcheck import (
     EpubCheckSettings,
     EpubCheckValidator,
 )
+from linguary.adapters.validation.language_identifier import Py3LangidDetector
 
-__all__ = ["EpubCheckAvailability", "EpubCheckSettings", "EpubCheckValidator"]
+__all__ = [
+    "EpubCheckAvailability",
+    "EpubCheckSettings",
+    "EpubCheckValidator",
+    "Py3LangidDetector",
+]

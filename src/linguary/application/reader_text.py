@@ -3,12 +3,15 @@ from dataclasses import replace
 import re
 import unicodedata
 
+from linguary.application.ports.language_detection import LanguageDetector
 from linguary.application.retry_policy import ResultValidationError
 from linguary.domain.llm_log import Violation
 
 _SERVICE_TOKEN = re.compile(r'\b(?:b\d+|source_block_id|difficulty_id|artifact_index)\b', re.IGNORECASE)
 _EXPLANATION_LABEL = re.compile(r'\[b\d+\]\s*(?:[:—–-]\s*)?', re.IGNORECASE)
 _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 'language_note.note'})
+# Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
+_A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
 
 
 class ReaderTextError(ResultValidationError):
@@ -61,7 +64,13 @@ def _dominant_script(text: str) -> str | None:
     return max(counts, key=counts.get)
 
 
-def validate_a2_summary(body: str, *, source_texts: tuple[str, ...]) -> None:
+def validate_a2_summary(
+    body: str,
+    *,
+    source_texts: tuple[str, ...],
+    source_language: str,
+    language_detector: LanguageDetector,
+) -> None:
     """Require an original-language paragraph followed by a Russian translation."""
     paragraphs = [part.strip() for part in re.split(r'\r?\n[ \t]*\r?\n+', body.strip())]
     if len(paragraphs) != 2 or not all(paragraphs):
@@ -69,6 +78,14 @@ def validate_a2_summary(body: str, *, source_texts: tuple[str, ...]) -> None:
     source_script = _dominant_script(' '.join(source_texts))
     summary_script = _dominant_script(paragraphs[0])
     if source_script is not None and summary_script != source_script:
+        raise ReaderTextError('a2_summary_requires_parallel_russian')
+    source_language_probability = language_detector.probability_for_language(
+        paragraphs[0], source_language
+    )
+    if (
+        source_language_probability is not None
+        and source_language_probability < _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY
+    ):
         raise ReaderTextError('a2_summary_requires_parallel_russian')
     letters = [char for char in paragraphs[1] if char.isalpha()]
     cyrillic = [char for char in letters if unicodedata.name(char, '').startswith('CYRILLIC ')]

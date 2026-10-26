@@ -13,6 +13,7 @@ import pytest
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.llm import FakeLLMClient, FakeReply
 from linguary.adapters.llm.logging import LoggingLLMClient
+from linguary.adapters.validation import Py3LangidDetector
 from linguary.application.ports.llm import LLMRequest, LLMResponse
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.use_cases.analyze_chapter import AnalyzeChapter, AnalyzeChapterCommand
@@ -114,6 +115,7 @@ async def test_rejected_analysis_logged_unsuccessful_with_reason(tmp_path: Path)
         analyze = AnalyzeChapter(
             unit_of_work=application.unit_of_work,
             llm_client=logger,
+            language_detector=Py3LangidDetector(),
             retry_policy=RetryPolicy(max_attempts=2),
             glossary_confidence_threshold=0.5,
             sleep=_no_sleep,
