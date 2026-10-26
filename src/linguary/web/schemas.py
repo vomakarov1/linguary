@@ -29,6 +29,7 @@ from linguary.application.book_overview import (
     PlanBlockSummary,
     ProcessingPlanSummary,
     ResultBlockSummary,
+    result_groups,
     ResultChapterSummary,
     ResultWarningEntry,
     RunningChapter,
@@ -711,6 +712,28 @@ class ResultBlockResponse(BaseModel):
         )
 
 
+class ResultGroupResponse(ResultBlockResponse):
+    """One exact source paragraph with the original computational members."""
+
+    member_block_ids: tuple[str, ...]
+    member_blocks: tuple[ResultBlockResponse, ...]
+    fragment_assistance: tuple[dict[str, Any], ...] = ()
+
+    @classmethod
+    def of_group(cls, summaries: Sequence[ResultBlockSummary], *, tasks: Mapping[str, ProcessingTask] | None = None,
+                 block_id: str | None = None) -> ResultGroupResponse:
+        from dataclasses import asdict
+
+        members = tuple(ResultBlockResponse.of_block(summary,
+            regeneration_task=(tasks or {}).get(summary.block.id)) for summary in summaries)
+        selected = next((member for member in members if member.block_id == block_id), members[0])
+        data = selected.model_dump()
+        data["original_text"] = "".join(summary.block.text for summary in summaries)
+        return cls(**data, member_block_ids=tuple(member.block_id for member in members), member_blocks=members,
+                   fragment_assistance=tuple(asdict(item) for summary in summaries if summary.result is not None
+                                             for item in summary.result.fragment_assistances))
+
+
 class ResultChapterResponse(BaseModel):
     """Single result chapter in reading order."""
 
@@ -719,6 +742,7 @@ class ResultChapterResponse(BaseModel):
     title: str
     is_notes: bool = False
     blocks: tuple[ResultBlockResponse, ...] = ()
+    groups: tuple[ResultGroupResponse, ...] = ()
 
     @classmethod
     def of_chapter(cls, chapter: ResultChapterSummary) -> ResultChapterResponse:
@@ -728,6 +752,7 @@ class ResultChapterResponse(BaseModel):
             title=chapter.title,
             is_notes=chapter.is_notes,
             blocks=tuple(ResultBlockResponse.of_block(block) for block in chapter.blocks),
+            groups=tuple(ResultGroupResponse.of_group(group) for group in result_groups(chapter.blocks)),
         )
 
 

@@ -9,7 +9,7 @@ from linguary.application.book_overview import book_result, result_block
 from linguary.application.use_cases.retry_task import RetryTaskCommand
 from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus, TaskType
 from linguary.web.dependencies import CurrentApplication
-from linguary.web.schemas import BookResultResponse, ResultBlockResponse, TaskResponse
+from linguary.web.schemas import BookResultResponse, ResultGroupResponse, TaskResponse
 from linguary.web.views import render, wants_html
 from linguary.web.routes.quality import quality_page_context
 
@@ -24,6 +24,12 @@ def get_book_result(
     response = BookResultResponse.of_result(
         book_result(application.unit_of_work, book_id)
     )
+    for chapter in response.chapters:
+        for group in chapter.groups:
+            for member in group.member_blocks:
+                current = _regeneration_task(application, book_id, member.block_id)
+                if current is not None:
+                    member.regeneration_task = TaskResponse.of_task(current)
     export_task = _export_task(application, book_id)
     export_task_response = (
         TaskResponse.of_task(export_task) if export_task is not None else None
@@ -50,11 +56,11 @@ def get_book_result(
 
 @router.get(
     "/books/{book_id}/blocks/{block_id}",
-    response_model=ResultBlockResponse,
+    response_model=ResultGroupResponse,
 )
 def get_book_result_block(
     request: Request, application: CurrentApplication, book_id: str, block_id: str
-) -> ResultBlockResponse | object:
+) -> ResultGroupResponse | object:
     """Return a single result block for polling after regeneration."""
     response = _result_block_response(application, book_id, block_id)
     if _wants_result_block_fragment(request):
@@ -74,12 +80,12 @@ def get_book_result_block(
 
 @router.post(
     "/books/{book_id}/blocks/{block_id}/regenerate",
-    response_model=ResultBlockResponse,
+    response_model=ResultGroupResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def regenerate_book_block(
     request: Request, application: CurrentApplication, book_id: str, block_id: str
-) -> ResultBlockResponse | object:
+) -> ResultGroupResponse | object:
     """Enqueue block regeneration and return the fragment for the selected block only."""
     task = await application.regeneration.start(book_id, block_id)
     response = _result_block_response(application, book_id, block_id, task=task)
@@ -117,13 +123,16 @@ def _result_block_response(
     block_id: str,
     *,
     task: ProcessingTask | None = None,
-) -> ResultBlockResponse:
+) -> ResultGroupResponse:
     """Construct the block DTO along with its current regeneration task, if any."""
-    regeneration_task = task or _regeneration_task(application, book_id, block_id)
-    return ResultBlockResponse.of_block(
-        result_block(application.unit_of_work, book_id, block_id),
-        regeneration_task=regeneration_task,
-    )
+    summaries = result_block(application.unit_of_work, book_id, block_id)
+    tasks = {}
+    for summary in summaries:
+        current = task if task is not None and task.scope_id == summary.block.id else _regeneration_task(application, book_id, summary.block.id)
+        if current is not None:
+            tasks[summary.block.id] = current
+    return ResultGroupResponse.of_group(summaries, tasks=tasks, block_id=block_id)
+
 
 
 def _regeneration_task(

@@ -234,6 +234,18 @@ class ResultBlockSummary:
     result: BlockProcessingResult | None = None
 
 
+def result_groups(blocks: Sequence[ResultBlockSummary]) -> tuple[tuple[ResultBlockSummary, ...], ...]:
+    """Group adjacent source parts without joining unrelated occurrences."""
+    groups: list[list[ResultBlockSummary]] = []
+    for block in blocks:
+        key = block.block.attributes.get("split_group")
+        if groups and key and groups[-1][-1].block.attributes.get("split_group") == key:
+            groups[-1].append(block)
+        else:
+            groups.append([block])
+    return tuple(tuple(group) for group in groups)
+
+
 @dataclass(frozen=True, slots=True)
 class ResultChapterSummary:
     """Result chapter with blocks in reading order."""
@@ -529,28 +541,27 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
 
 def result_block(
     unit_of_work: UnitOfWork, book_id: str, block_id: str
-) -> ResultBlockSummary:
-    """A single result block for HTMX fragment polling or JSON regeneration responses.
-
-    Only the requested block is queried: this endpoint is polled every 1.5-2 seconds
-    during block regeneration, so loading whole-book results is inappropriate.
-    """
+) -> tuple[ResultBlockSummary, ...]:
+    """Read only the adjacent group containing the requested block."""
     with unit_of_work.transaction() as transaction:
         _book(transaction, book_id)
         document = transaction.documents.get(book_id)
         located = _locate_block(document, block_id)
         if located is None:
             raise ResultBlockNotFoundError(f"блока {block_id} нет в книге {book_id}")
-        chapter_number, section_id, block = located
+        chapter_number, section_id, _ = located
+        section = next(section for section in document.ordered_sections if section.id == section_id)
+        groups = result_groups(tuple(ResultBlockSummary(block=b, chapter_number=chapter_number)
+                                     for b in section.ordered_blocks))
+        members = next(group for group in groups if any(b.block.id == block_id for b in group))
         analysis = transaction.analyses.get_for_section(book_id, section_id)
         run = transaction.runs.active_for_book(book_id)
-        result = transaction.results.get(run.id, block_id) if run is not None else None
-    return ResultBlockSummary(
-        block=block,
-        chapter_number=chapter_number,
-        treatment=_planned_treatment(analysis, block_id),
-        result=result,
-    )
+        return tuple(ResultBlockSummary(
+            block=member.block,
+            chapter_number=chapter_number,
+            treatment=_planned_treatment(analysis, member.block.id),
+            result=transaction.results.get(run.id, member.block.id) if run is not None else None,
+        ) for member in members)
 
 
 def _warnings_of(

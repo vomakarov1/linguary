@@ -23,7 +23,7 @@
 {% for chapter in data.chapters %}
   <section class="chapter">
     <h2>{% if chapter.is_notes %}Сноски - {{ chapter.title }}{% else %}Глава {{ chapter.chapter_number }} - {{ chapter.title }}{% endif %}</h2>
-    {% for block in chapter.blocks %}
+    {% for block in chapter.groups %}
       {% set book_id = data.book_id %}
       {% include "partials/result_block.html" %}
     {% endfor %}

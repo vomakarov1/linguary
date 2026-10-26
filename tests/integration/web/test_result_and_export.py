@@ -581,6 +581,108 @@ def test_result_block_shows_footnote_marker_as_the_original_label() -> None:
     assert response.translated_text == "Её лицо.[1] Жаль."
 
 
+def _split_result_scenario(application):
+    from linguary.domain.learning import FragmentAssistance
+    from linguary.domain.content_plan import SourceAnchor
+
+    parts = ("  Hard phrase. ", "Simple sentence. Hard phrase.\n", "Separate.", "Other.")
+    scenario = store_book(application, status=BookStatus.READY_TO_EXPORT, chapters=(parts,))
+    section = scenario.section()
+    blocks = tuple(replace(block, attributes={"split_group": "paragraph"}) if index in (0, 1, 3)
+                   else block for index, block in enumerate(section.blocks))
+    document = replace(scenario.document, sections=(replace(section, blocks=blocks),))
+    with application.unit_of_work.transaction() as uow:
+        analysis = uow.analyses.get_for_section(scenario.book_id, section.id)
+        assert analysis is not None
+        uow.documents.save(document)
+        uow.analyses.save(scenario.book_id, analysis)
+    scenario = replace(scenario, document=document)
+    results = []
+    for index, block in enumerate(blocks):
+        items = ()
+        if index < 2:
+            start = block.text.index("Hard phrase")
+            items = (FragmentAssistance(difficulty_id=f"difficulty-{index}", point_ids=(f"point-{index}",),
+                      kind="lexical_hint", text=f"Help {index}",
+                      anchors=(SourceAnchor(block.id, start, start + 11, "Hard phrase"),)),)
+        results.append(replace(translated_result(block.id), fragment_assistances=items))
+    start_run(application, scenario, results=results)
+    return scenario, tuple(results), "".join(parts[:2])
+
+
+def test_result_groups_only_adjacent_parts_and_keeps_exact_occurrences(client, application):
+    scenario, results, original = _split_result_scenario(application)
+    ids = scenario.block_ids()
+    body = client.get(f"/books/{scenario.book_id}/result").json()
+    groups = body["chapters"][0]["groups"]
+    assert [group["member_block_ids"] for group in groups] == [list(ids[:2]), [ids[2]], [ids[3]]]
+    assert groups[0]["original_text"] == original
+    assert groups[0]["fragment_assistance"][0]["anchors"][0] == {
+        "block_id": ids[0], "start": 2, "end": 13, "quote": "Hard phrase"}
+    assert groups[0]["fragment_assistance"][1]["anchors"][0] == {
+        "block_id": ids[1], "start": 17, "end": 28, "quote": "Hard phrase"}
+    html = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
+    assert html.count('class="fragment-assistance"') == 1
+    assert html.index(original) < html.index('class="fragment-assistance"')
+    for block_id in ids[:2]:
+        polled = client.get(f"/books/{scenario.book_id}/blocks/{block_id}")
+        assert polled.json()["member_block_ids"] == list(ids[:2])
+        assert polled.json()["original_text"] == original
+        assert polled.json()["fragment_assistance"] == groups[0]["fragment_assistance"]
+
+
+def test_group_marks_unresolved_help_without_changing_the_source(client, application):
+    scenario, results, original = _split_result_scenario(application)
+    item = replace(results[1].fragment_assistances[0], kind="unresolved", text=None)
+    with application.unit_of_work.transaction() as uow:
+        uow.results.replace_results(scenario.run_id, [results[0], replace(results[1], fragment_assistances=(item,)), *results[2:]])
+    response = client.get(f"/books/{scenario.book_id}/blocks/{scenario.block_ids()[1]}")
+    assert response.json()["original_text"] == original
+    assert response.json()["fragment_assistance"][1]["kind"] == "unresolved"
+    assert response.json()["fragment_assistance"][1]["text"] is None
+    html = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
+    assert 'data-kind="unresolved"' in html
+    assert "Трудность пока не объяснена" in html
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["updated", "failed"])
+def test_group_polling_preserves_siblings_during_member_regeneration(client, application, failed):
+    scenario, results, original = _split_result_scenario(application)
+    ids = scenario.block_ids()
+    continue_legacy(application, scenario.book_id)
+    headers = {"accept": "text/html", "x-linguary-fragment": "result-block"}
+    pending = client.post(f"/books/{scenario.book_id}/blocks/{ids[1]}/regenerate", headers=headers)
+    assert pending.status_code == 200, pending.text
+    assert original in pending.text
+    assert pending.text.count('class="fragment-assistance"') == 1
+    assert 'data-active-task="true"' in pending.text
+    with application.unit_of_work.transaction() as uow:
+        task = next(task for task in uow.tasks.list_for_book(scenario.book_id)
+                    if task.task_type is TaskType.REGENERATE_BLOCK)
+        uow.tasks.save(replace(task, status=TaskStatus.FAILED if failed else TaskStatus.SUCCEEDED,
+                               last_error=failed_task(scenario).last_error if failed else None))
+        if not failed:
+            updated = replace(results[1], fragment_assistances=(replace(results[1].fragment_assistances[0], text="Updated help"),))
+            uow.results.replace_results(scenario.run_id, [results[0], updated, *results[2:]])
+    for block_id in ids[:2]:
+        response = client.get(f"/books/{scenario.book_id}/blocks/{block_id}", headers=headers)
+        assert response.status_code == 200
+        assert original in response.text
+        assert 'data-active-task="true"' not in response.text
+        assert response.text.count('class="fragment-assistance"') == 1
+        assert "Help 0" in response.text
+        assert ("Help 1" if failed else "Updated help") in response.text
+        assert all(f'id="block-{member}"' in response.text for member in ids[:2])
+        group = client.get(f"/books/{scenario.book_id}/blocks/{block_id}").json()
+        assert group["member_block_ids"] == list(ids[:2])
+        assert group["original_text"] == original
+        assert [item["anchors"] for item in group["fragment_assistance"]] == [
+            [{"block_id": anchor.block_id, "start": anchor.start, "end": anchor.end,
+              "quote": anchor.quote} for anchor in result.fragment_assistances[0].anchors]
+            for result in results[:2]
+        ]
+
+
 @pytest.fixture
 def application(configured_application):
     return configured_application

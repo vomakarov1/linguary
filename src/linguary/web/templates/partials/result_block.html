@@ -1,5 +1,11 @@
-{% set regenerating = block.regeneration_task and block.regeneration_task.status in ("pending", "running") %}
-<article class="result-block" id="block-{{ block.block_id|replace(':', '-')|replace('/', '-') }}" data-result-block{% if regenerating %} aria-busy="true"{% endif %}>
+{% set active = namespace(value=false) %}
+{% for member in block.member_blocks %}{% if member.regeneration_task and member.regeneration_task.status in ("pending", "running") %}{% set active.value = true %}{% endif %}{% endfor %}
+{% set regenerating = active.value %}
+<article class="result-block" id="block-{{ block.member_block_ids[0]|replace(':', '-')|replace('/', '-') }}" data-result-block{% if regenerating %} aria-busy="true"{% endif %}>
+  {% set group = block %}
+  {% for block in group.member_blocks %}
+  {% set regenerating = block.regeneration_task and block.regeneration_task.status in ("pending", "running") %}
+  {% if not loop.first %}<span id="block-{{ block.block_id|replace(':', '-')|replace('/', '-') }}"></span>{% endif %}
   <header>
     <span>{{ block.treatment_label or block.block_type }}</span>
     <form method="post" action="/books/{{ book_id }}/blocks/{{ block.block_id }}/regenerate" data-regenerate-form>
@@ -10,7 +16,7 @@
       {% endif %}
     </form>
   </header>
-  <p class="source">{{ block.original_text }}</p>
+  {% if loop.first %}<p class="source">{{ group.original_text }}</p>{% endif %}
   {% if block.translated_text %}<p class="translation">{{ block.translated_text }}</p>{% endif %}
   {% if block.glossary_hints %}
     <ul class="hints">
@@ -26,5 +32,13 @@
     <p class="task-state" role="status" data-active-task="true"><span class="spinner" aria-hidden="true"></span>{{ block.regeneration_task.task_type_label }}: {{ block.regeneration_task.status_label }}. Блок обновится автоматически.</p>
   {% elif block.regeneration_task %}
     <p class="task-state" role="status">Задача: {{ block.regeneration_task.task_type_label }} / {{ block.regeneration_task.status_label }}</p>
+  {% endif %}
+  {% endfor %}
+  {% if group.fragment_assistance %}
+  <aside class="fragment-assistance">
+    {% for item in group.fragment_assistance %}
+      <p data-difficulty-id="{{ item.difficulty_id }}" data-kind="{{ item.kind }}">{% if item.kind == "unresolved" %}Трудность пока не объяснена{% else %}{{ item.text }}{% endif %}</p>
+    {% endfor %}
+  </aside>
   {% endif %}
 </article>
