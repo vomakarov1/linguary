@@ -120,3 +120,21 @@ def test_successful_call_has_no_error() -> None:
 def test_token_usage_without_provider_data() -> None:
     """The provider may omit token counts."""
     assert TokenUsage().total_tokens is None
+
+
+@pytest.mark.parametrize('kind,text', [('lexical_hint', 'only'), ('sentence_rephrase', 'She saw only the storm.'), ('russian_explanation', 'Она видела только бурю.'), ('unresolved', None)])
+def test_fragment_assistance_preserves_exact_anchors(kind, text):
+    from linguary.domain.learning import FragmentAssistance
+    from linguary.domain.content_plan import SourceAnchor
+    anchor = SourceAnchor('block', 5, 9, 'Echo')
+    help = FragmentAssistance('d', ('p',), kind, text, (anchor,))
+    assert help.anchors == (anchor,)
+    assert help.resolved == (kind != 'unresolved')
+
+
+@pytest.mark.parametrize('kind,text', [('unknown', 'x'), ('unresolved', 'x'), ('lexical_hint', None), ('sentence_rephrase', ' ')])
+def test_fragment_assistance_rejects_invalid_body(kind, text):
+    from linguary.domain.learning import FragmentAssistance
+    from linguary.domain.content_plan import SourceAnchor
+    with pytest.raises(DomainError):
+        FragmentAssistance('d', ('p',), kind, text, (SourceAnchor('block', 0, 4, 'Echo'),))

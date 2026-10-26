@@ -22,6 +22,7 @@ from linguary.adapters.llm.schemas import (
     ChapterAnalysisV2Schema,
     ChapterAnalysisV3Schema,
     TranslationResultV3Schema,
+    TranslationResultV4Schema,
     TranslationResultV2Schema,
     BeforeYouReadEntrySchema,
     BlockResultSchema,
@@ -34,6 +35,7 @@ from linguary.adapters.llm.schemas import (
 )
 from linguary.application.llm_dto import (
     ContentPlanResponse,
+    FragmentAssistanceResponse,
     HelpEvidenceResponse,
     BeforeYouReadEntryResponse,
     BlockResultResponse,
@@ -67,8 +69,12 @@ def schema_for(kind: LLMResponseKind, *, contract_version: int = 1) -> type[Base
         if contract_version != 1:
             raise LLMResponseFormatError("неизвестная версия вычитки")
         return QualityReviewSchema
-    if type(contract_version) is not int or contract_version not in (1, 2, 3):
+    if type(contract_version) is not int or contract_version not in (1, 2, 3, 4):
         raise LLMResponseFormatError("неизвестная версия контракта ответа")
+    if contract_version == 4:
+        if kind != LLMResponseKind.TRANSLATION_RESULT:
+            raise LLMResponseFormatError('версия 4 доступна только для обработки')
+        return TranslationResultV4Schema
     if contract_version == 3:
         return {LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisV3Schema,
                 LLMResponseKind.TRANSLATION_RESULT: TranslationResultV3Schema}[kind]
@@ -164,6 +170,7 @@ def _translation_result(schema: TranslationResultSchema) -> TranslationResultRes
     """Block group translation result DTO."""
     return TranslationResultResponse(
         content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.content_evidence) if isinstance(schema, (TranslationResultV2Schema, TranslationResultV3Schema)) else (),
+        fragment_assistances=tuple(FragmentAssistanceResponse(**item.model_dump()) for item in schema.fragment_assistances) if isinstance(schema, TranslationResultV4Schema) else (),
         blocks=tuple(_block_result(item) for item in schema.blocks),
         language_notes=tuple(_language_note(item) for item in schema.language_notes),
     )

@@ -187,7 +187,17 @@ class TranslationCall:
                     record_reader_warnings(self._unit_of_work, response,
                         [('translation', result.translated_text or '') for result in results],
                         reader_level=conditions.payload['reader_level'] if conditions else 'b2')
-                if context.content_plan is not None:
+                if request.contract_version == 4:
+                    from linguary.application.validators.content_plan import resolve_fragment_assistances
+                    owners = tuple(r.block_id for r in results)
+                    with self._unit_of_work.transaction() as transaction:
+                        document = transaction.documents.get(request.book_id)
+                    source_texts = {block.id: block.text for section in document.sections for block in section.blocks}
+                    assistance = resolve_fragment_assistances(context.content_plan, mapped, results, source_texts,
+                        owner_block_ids=owners, before_you_read=context.before_you_read,
+                        glossary_entries=() if current_run is None else current_run.glossary_snapshot.mandatory_entries)
+                    results = tuple(replace(r, fragment_assistances=assistance[r.block_id]) for r in results)
+                elif context.content_plan is not None:
                     owners = tuple(r.block_id for r in results)
                     evidence = resolve_response_evidence(context.content_plan, mapped, results, context.before_you_read, owner_block_ids=owners)
                     results = tuple(explained.without_repeats_v2(r) for r in results)

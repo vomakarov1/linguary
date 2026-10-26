@@ -150,3 +150,44 @@ def test_hint_index_bound_before_removal_of_first_hint():
     assert check(p, replace(r, glossary_hints=r.glossary_hints[1:]), e)
     with pytest.raises(ResultValidationError):
         check(p, replace(r, glossary_hints=r.glossary_hints[:1]), e)
+
+
+def fragment_check(items, *, p=None, text='Echo Echo'):
+    from linguary.application.validators.content_plan import resolve_fragment_assistances
+    return resolve_fragment_assistances(p or plan(), TranslationResultResponse(fragment_assistances=items),
+        (BlockProcessingResult('block', BlockTreatment.READ_AS_IS),), {'block': text}, owner_block_ids=('block',))
+
+
+def test_fragment_assistance_keeps_repeated_quote_offsets_and_multiple_anchors():
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+    p = plan()
+    d = p.difficulties[0]
+    p = replace(p, difficulties=(replace(d, anchors=(SourceAnchor('block', 0, 4, 'Echo'), SourceAnchor('block', 5, 9, 'Echo'))),))
+    item = FragmentAssistanceResponse('d', ('p',), 'sentence_rephrase', 'A sound returns twice.')
+    assert fragment_check((item,), p=p)['block'][0].anchors == p.difficulties[0].anchors
+
+
+@pytest.mark.parametrize('case', ['missing', 'foreign', 'duplicate', 'point', 'anchor'])
+def test_fragment_assistance_rejects_incomplete_or_competing_response(case):
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+    item = FragmentAssistanceResponse('d', ('p',), 'lexical_hint', 'a returning sound')
+    items = () if case == 'missing' else (replace(item, difficulty_id='foreign'),) if case == 'foreign' else (item, item) if case == 'duplicate' else (replace(item, point_ids=('other',)),) if case == 'point' else (item,)
+    with pytest.raises(ResultValidationError):
+        fragment_check(items, text='Wrong' if case == 'anchor' else 'Echo Echo')
+
+
+def test_unresolved_is_explicit_coverage_without_success_claim():
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+    help = fragment_check((FragmentAssistanceResponse('d', ('p',), 'unresolved', None),))['block'][0]
+    assert help.kind == 'unresolved' and not help.resolved
+
+
+def test_fragment_assistance_rejects_duplicate_material_and_glossary_conflict():
+    from types import SimpleNamespace
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+    from linguary.application.validators.content_plan import resolve_fragment_assistances
+    payload = TranslationResultResponse(fragment_assistances=(FragmentAssistanceResponse('d', ('p',), 'russian_explanation', 'Чужое значение.'),))
+    with pytest.raises(ResultValidationError, match='глоссария'):
+        resolve_fragment_assistances(plan(), payload, (BlockProcessingResult('block', BlockTreatment.READ_AS_IS),), {'block': 'Echo'}, owner_block_ids=('block',), glossary_entries=(SimpleNamespace(source_text='Echo', translation='Эхо'),))
+    with pytest.raises(ResultValidationError, match='дублирует'):
+        resolve_fragment_assistances(plan(), payload, (result(),), {'block': 'Echo'}, owner_block_ids=('block',))

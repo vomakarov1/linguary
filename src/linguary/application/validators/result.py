@@ -94,6 +94,12 @@ class TranslationResultValidator:
         `note_id_factory` generates learning note identifiers (`ln-ch03-001`): their
         numbering depends on the chapter and already stored notes, which is use case knowledge.
         """
+        from linguary.domain.learning import validate_assistance_body
+        for assistance in payload.fragment_assistances:
+            try:
+                validate_assistance_body(assistance.kind, assistance.text)
+            except DomainError as error:
+                raise ResultValidationError(str(error), expectation=expectation) from error
         expected = expectation or expectation_for_unit(
             unit, target_language=target_language
         )

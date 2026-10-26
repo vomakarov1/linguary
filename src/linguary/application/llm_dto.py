@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from linguary.application.errors import ApplicationError
 from linguary.domain import BlockTreatment, ConceptType
 from linguary.domain.content_plan import ContextFact, Difficulty
+from linguary.domain.errors import DomainError
 
 
 class LLMPayloadError(ApplicationError):
@@ -215,6 +216,7 @@ class TranslationResultResponse:
     blocks: tuple[BlockResultResponse, ...] = ()
     language_notes: tuple[LanguageNoteResponse, ...] = ()
     content_evidence: tuple[HelpEvidenceResponse, ...] = ()
+    fragment_assistances: tuple[FragmentAssistanceResponse, ...] = ()
 
     @property
     def block_ids(self) -> tuple[str, ...]:
@@ -277,3 +279,21 @@ class ContentPlanResponse:
         ids = [d.id for d in self.difficulties]
         if len(ids) != len(set(ids)):
             raise LLMPayloadError("повторяющийся идентификатор трудности")
+
+
+@dataclass(frozen=True, slots=True)
+class FragmentAssistanceResponse:
+    difficulty_id: str
+    point_ids: tuple[str, ...]
+    kind: str
+    text: str | None
+
+    def __post_init__(self):
+        object.__setattr__(self, 'point_ids', tuple(self.point_ids))
+        from linguary.domain.learning import validate_assistance_body
+        try:
+            validate_assistance_body(self.kind, self.text)
+        except DomainError as error:
+            raise LLMPayloadError(str(error)) from error
+        if not self.difficulty_id.strip() or not all(p.strip() for p in self.point_ids) or len(set(self.point_ids)) != len(self.point_ids):
+            raise LLMPayloadError('неверные идентификаторы помощи')

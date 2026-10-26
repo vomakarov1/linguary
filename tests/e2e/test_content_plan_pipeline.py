@@ -310,3 +310,30 @@ def test_candidate_is_opt_in_and_network_free(tmp_path):
             assert (analysis.content_plan is not None) == candidate
         finally:
             app.dispose()
+
+
+@pytest.mark.parametrize('level', ['a2', 'b1', 'b2'])
+def test_plain_english_structural_contract_pipeline(level):
+    """Structural acceptance only; Q-2 language quality remains unevaluated."""
+    from linguary.adapters.llm.payloads import parse_payload
+    from linguary.application.ports.llm import LLMResponseKind
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.application.validators.content_plan import resolve_fragment_assistances
+    from linguary.domain import BlockProcessingResult, BlockTreatment
+    from linguary.domain.content_plan import ContentPlan, Difficulty, SourceAnchor, RequiredPoint
+
+    original = 'Echo. The cat sat. Echo.'
+    anchors = (SourceAnchor('block', 0, 4, 'Echo'), SourceAnchor('block', 19, 23, 'Echo'))
+    plan = ContentPlan(version=3, profile='content-plan-v3', difficulties=tuple(
+        Difficulty(f'd{i}', (anchor,), 'block', 'vocabulary', 'critical', 'lexical_hint', (RequiredPoint('p', 'Meaning in context'),))
+        for i, anchor in enumerate(anchors)))
+    templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=level, profile='content-plan-v3', english_help=True)
+    assert level.upper() in templates['english_help']
+    raw = dict(blocks=[dict(source_block_id='block', treatment='READ_AS_IS', translated_text=None, glossary_hints=[])], language_notes=[], content_evidence=[],
+        fragment_assistances=[dict(difficulty_id=f'd{i}', point_ids=['p'], kind='lexical_hint', text='a returning sound') for i in range(2)])
+    payload = parse_payload(LLMResponseKind.TRANSLATION_RESULT, json.dumps(raw), contract_version=4)
+    bound = resolve_fragment_assistances(plan, payload, (BlockProcessingResult('block', BlockTreatment.READ_AS_IS),), {'block': original}, owner_block_ids=('block',))
+    assert tuple(help.anchors[0] for help in bound['block']) == anchors
+    assert len(bound['block']) == 2
+    assert original[6:18] == 'The cat sat.'
+    assert not any(anchor.start < 18 and anchor.end > 6 for help in bound['block'] for anchor in help.anchors)

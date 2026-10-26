@@ -94,6 +94,8 @@ async def choose_conditions(request: Request, application: CurrentApplication, b
         expected_revision: int = Field(ge=0)
         settings_revision: int = Field(ge=0)
         confirmed: bool
+        english_help: bool = False
+        reader_level: Literal["a2", "b1", "b2"] | None = None
 
     try:
         raw = await request.json() if request.headers.get('content-type', '').startswith('application/json') else dict(await request.form())

@@ -222,3 +222,26 @@ class ChapterAnalysisV3Schema(ChapterAnalysisSchema):
 
 class TranslationResultV3Schema(TranslationResultSchema):
     content_evidence: list[HelpEvidenceSchema]
+
+
+class FragmentAssistanceSchema(_ResponseModel):
+    difficulty_id: str = Field(min_length=1)
+    point_ids: list[Annotated[str, StringConstraints(min_length=1)]]
+    kind: Literal['lexical_hint', 'sentence_rephrase', 'russian_explanation', 'unresolved']
+    text: str | None
+
+    @model_validator(mode='after')
+    def _check_body(self):
+        from linguary.domain.learning import validate_assistance_body
+        from linguary.domain.errors import DomainError
+        try:
+            validate_assistance_body(self.kind, self.text)
+        except DomainError as error:
+            raise ValueError(str(error)) from error
+        if len(set(self.point_ids)) != len(self.point_ids):
+            raise ValueError('повтор смыслового пункта помощи')
+        return self
+
+
+class TranslationResultV4Schema(TranslationResultV3Schema):
+    fragment_assistances: list[FragmentAssistanceSchema]

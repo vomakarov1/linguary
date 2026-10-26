@@ -141,3 +141,21 @@ async def test_late_old_analysis_cannot_write(tmp_path):
             assert transaction.work.latest_conditions('book-1').revision == 2
     finally:
         await app.aclose()
+
+
+@pytest.mark.parametrize('level', ['a2', 'b1', 'b2'])
+async def test_explicit_english_help_conditions_are_revision_pinned(tmp_path, level):
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        choice = ChooseBookConditions(app.book_conditions, app.book_runtime)
+        conditions = choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, english_help=True, reader_level=level)
+        assert conditions.payload['english_help'] is True
+        assert conditions.payload['reader_level'] == level
+        assert conditions.payload['versions']['schemas'] == 4
+        with pytest.raises(ConditionsError, match='conditions_revision_conflict'):
+            choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, english_help=False)
+        assert app.book_conditions.require('book-1').id == conditions.id
+    finally:
+        await app.aclose()

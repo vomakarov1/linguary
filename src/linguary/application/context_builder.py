@@ -303,6 +303,7 @@ class TranslationContext(AliasedBlocksContext):
                 expectation=self.expectation,
             )
         return TranslationResultResponse(
+            fragment_assistances=payload.fragment_assistances,
             content_evidence=tuple(replace(e, source_block_id=self.block_id_for(e.source_block_id)) for e in payload.content_evidence),
             blocks=tuple(
                 replace(block, source_block_id=self.block_id_for(block.source_block_id))
@@ -345,6 +346,7 @@ class ContextBuilder:
         self._content_plan_profile = content_plan_profile
         self._reader_level = reader_level.strip().lower()
         self._prompt_templates = MappingProxyType(dict(prompt_templates or {}))
+        self._english_help = bool(self._prompt_templates.get("english_help"))
         if max_accumulated_candidates < 0:
             raise ContextBuildError(
                 "ограничение числа накопленных кандидатов не может быть отрицательным"
@@ -521,6 +523,8 @@ class ContextBuilder:
             instructions += "\n" + self._prompt_templates.get("content_processing", default)
         if version == 3:
             instructions += "\n" + self._prompt_templates.get('learner_quality', learner_instructions(self._reader_level))
+        if self._english_help:
+            instructions += "\n" + self._prompt_templates["english_help"]
         if unit.section_id != section.id:
             raise ContextBuildError(
                 f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
@@ -534,7 +538,7 @@ class ContextBuilder:
             section_id=section.id,
             unit_id=unit.id,
             request=LLMRequest.for_translation(
-                contract_version=version,
+                contract_version=4 if self._english_help else version,
                 instructions=instructions,
                 input_text=self._translation_input(
                     document=document,
@@ -679,6 +683,8 @@ class ContextBuilder:
             instructions += f"\nБюджет обязательных заметок этого анализа: {note_limit}."
             instructions += "\nПределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False)
             instructions += "\nСначала используй существующий BYR или допустимый hint.note; READ_AS_IS требует отдельной заметки, если BYR не покрывает все аспекты."
+        if self._english_help:
+            instructions += "\n" + self._prompt_templates["english_help"] + "\nПланируй только трудные места, понятные предложения не пересказывай. Для этого режима выбирай READ_AS_IS. before_you_read и before_you_read_evidence оставь пустыми: помощь будет создана при обработке. Не создавай дубли BYR и заметок."
         return ChapterAnalysisContext(
             before_you_read_limit=before_you_read_limit,
             note_group_limits=note_groups,
@@ -1626,7 +1632,7 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     }, ensure_ascii=False)
 
 
-def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1"):
+def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False):
     """Render immutable instruction templates without book text or secrets."""
     languages = dict(source_language=source_language, target_language=target_language)
     result = {
@@ -1640,4 +1646,18 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
     if profile == 'content-plan-v3':
         result.update(content_analysis=_CONTENT_PLAN_ANALYSIS_V3, content_processing=_CONTENT_PLAN_PROCESSING_V3,
                       learner_quality=learner_instructions(reader_level))
+    if english_help:
+        result['english_help'] = (
+            f"Английская помощь для уровня {reader_level.upper()}. "
+            "Верни fragment_assistances: ровно один элемент на трудность текущего запроса; "
+            "difficulty_id и все point_ids бери только из плана. Смещения не назначай. "
+            "lexical_hint — короткое английское определение или синоним; sentence_rephrase — "
+            "английское переформулирование только трудного предложения. Для A2 используй "
+            "более простые слова и конструкции, чем для B1/B2. Сохрани участников, действия, "
+            "отрицания, условия, время, уверенность, причины и значимые детали. "
+            "Если точная английская помощь недоступна, верни russian_explanation; "
+            "если недоступна и она, unresolved с text=null. Не повторяй понятные предложения. "
+            "Принятые решения глоссария имеют приоритет. Не дублируй помощь переводом, "
+            "подсказкой, BYR или заметкой; content_evidence оставь пустым."
+        )
     return result

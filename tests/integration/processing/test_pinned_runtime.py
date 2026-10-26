@@ -74,3 +74,38 @@ async def test_auto_proxy_route_fingerprint_excludes_credentials(tmp_path, monke
     assert 'alice' not in str(first) and 'first' not in str(first)
     monkeypatch.setenv('HTTPS_PROXY', 'http://proxy.example:81')
     assert route_snapshot(LLMSettings(proxy_mode='auto')) != first
+
+
+async def test_english_help_survives_restart_and_old_snapshot_defaults_off(tmp_path):
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+    from linguary.application.context_builder import ContextBuilder
+    app = make_app(tmp_path)
+    store_imported(app)
+    saved = ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, english_help=True, reader_level='a2')
+    await app.aclose()
+    restarted = make_app(tmp_path)
+    try:
+        conditions = restarted.book_conditions.require('book-1')
+        assert conditions.id == saved.id
+        assert restarted.book_runtime.settings_for(conditions).reading.normalized_level == 'a2'
+        assert ContextBuilder(content_plan_profile='content-plan-v3', prompt_templates=conditions.payload['prompt_templates'])._english_help
+        assert not ContextBuilder()._english_help
+    finally:
+        await restarted.aclose()
+
+
+async def test_snapshot_without_english_help_retains_original_level(tmp_path):
+    from linguary.domain.book_conditions import BookConditions, thaw
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        await app.analysis.start('book-1')
+        current = app.book_conditions.require('book-1')
+        payload = thaw(current.payload)
+        payload.pop('english_help', None)
+        historical = replace(current, payload=payload)
+        assert isinstance(historical, BookConditions)
+        assert app.book_runtime.settings_for(historical).reading.normalized_level == payload['reader_level']
+        assert 'english_help' not in historical.payload['prompt_templates']
+    finally:
+        await app.aclose()

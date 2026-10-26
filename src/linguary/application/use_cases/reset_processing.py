@@ -134,7 +134,7 @@ class ChooseBookConditions:
     def __init__(self, service, resolver):
         self.service, self.resolver = service, resolver
 
-    def __call__(self, book_id, *, action, expected_revision, settings_revision, confirmed):
+    def __call__(self, book_id, *, action, expected_revision, settings_revision, confirmed, english_help=False, reader_level=None):
         from dataclasses import asdict
         from linguary.application.book_conditions import ConditionsError, BookConditionsService
         if confirmed is not True or action not in {'continue_legacy', 'reanalyze'}:
@@ -151,7 +151,8 @@ class ChooseBookConditions:
             if book.status.value in {'IMPORTING', 'FAILED'}:
                 raise ConditionsError('invalid_book_state')
             conditions = self.service.create(transaction, book, settings_revision,
-                reproducibility='legacy_partial' if action == 'continue_legacy' else 'complete')
+                reproducibility='legacy_partial' if action == 'continue_legacy' else 'complete',
+                english_help=english_help if action == 'reanalyze' else False, reader_level=reader_level)
             # Validate the complete executable route before committing any revision.
             self.resolver.settings_for(conditions)
             run = transaction.runs.active_for_book(book_id)

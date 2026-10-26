@@ -556,3 +556,13 @@ def test_analysis_checks_real_processing_group_notes_budget():
     assert context.note_group_limits[0][1] == 1
     with pytest.raises(AnalysisMergeError, match='реальную группу'):
         validate_content_plan(payload, context.block_ids_by_alias, {b.id: b.text for b in section.blocks}, language_notes_per_chapter=context.language_notes_per_chapter, note_limits_by_block=context.note_limits_by_block, note_group_limits=context.note_group_limits)
+
+
+@pytest.mark.parametrize('level', ['a2', 'b1', 'b2'])
+def test_english_help_templates_pin_level_and_exact_plan_rules(level):
+    from linguary.application.context_builder import snapshot_prompt_templates
+    templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=level, profile='content-plan-v3', english_help=True)
+    rules = templates['english_help']
+    assert level.upper() in rules
+    assert all(token in rules for token in ('difficulty_id', 'point_ids', 'lexical_hint', 'sentence_rephrase', 'russian_explanation', 'unresolved'))
+    assert 'english_help' not in snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=level)

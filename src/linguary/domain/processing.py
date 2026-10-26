@@ -25,7 +25,7 @@ from linguary.domain.errors import (
     UnknownBlockError,
 )
 from linguary.domain.glossary import ConceptType, TermStatus
-from linguary.domain.learning import LanguageNote
+from linguary.domain.learning import LanguageNote, FragmentAssistance
 from linguary.domain.treatment import BlockTreatment, TreatmentPlan
 
 
@@ -79,6 +79,7 @@ class BlockProcessingResult:
     language_notes: tuple[LanguageNote, ...] = ()
     warnings: tuple[ResultWarning, ...] = ()
     content_evidence: ContentEvidence | tuple[()] = ()
+    fragment_assistances: tuple[FragmentAssistance, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.block_id.strip():
@@ -103,6 +104,11 @@ class BlockProcessingResult:
                 f"для блока {self.block_id} с режимом {self.treatment} "
                 "словарные подсказки недопустимы"
             )
+        difficulty_ids = [help.difficulty_id for help in self.fragment_assistances]
+        if len(difficulty_ids) != len(set(difficulty_ids)):
+            raise BlockResultError('повтор помощи к трудности блока')
+        if any(self.block_id not in {a.block_id for a in help.anchors} for help in self.fragment_assistances):
+            raise BlockResultError('помощь не связана с исходным блоком')
         for note in self.language_notes:
             if note.block_id != self.block_id:
                 raise BlockResultError(

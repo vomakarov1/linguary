@@ -126,3 +126,23 @@ def test_v2_missing_fields_rejected(kind, data):
 def test_unknown_contract_version_rejected():
     with pytest.raises(LLMResponseFormatError):
         parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, '{}', contract_version=3)
+
+
+@pytest.mark.parametrize('kind,text', [('lexical_hint', 'only'), ('sentence_rephrase', 'She saw only the storm.'), ('russian_explanation', 'Она видела только бурю.'), ('unresolved', None)])
+def test_v4_maps_typed_fragment_assistance(kind, text):
+    data = translation_payload()
+    data.update(content_evidence=[], fragment_assistances=[dict(difficulty_id='d', point_ids=['p'], kind=kind, text=text)])
+    payload = parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), contract_version=4)
+    assert payload.fragment_assistances[0].point_ids == ('p',)
+    assert payload.fragment_assistances[0].text == text
+    for version in (1, 2, 3):
+        with pytest.raises(LLMResponseFormatError):
+            parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), contract_version=version)
+
+
+@pytest.mark.parametrize('item', [dict(kind='unknown', text='x', point_ids=['p']), dict(kind='unresolved', text='x', point_ids=['p']), dict(kind='lexical_hint', text='', point_ids=['p']), dict(kind='lexical_hint', text='only', point_ids=['p', 'p'])])
+def test_v4_rejects_invalid_fragment_assistance(item):
+    data = translation_payload()
+    data.update(content_evidence=[], fragment_assistances=[dict(difficulty_id='d', **item)])
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), contract_version=4)

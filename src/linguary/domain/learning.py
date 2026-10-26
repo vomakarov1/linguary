@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from linguary.domain.errors import DomainError
+from linguary.domain.content_plan import SourceAnchor
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,3 +88,30 @@ class LearningMaterial:
             chapter_summary=chapter_summary,
             language_notes=tuple(language_notes),
         )
+
+
+def validate_assistance_body(kind, text):
+    if kind not in {'lexical_hint', 'sentence_rephrase', 'russian_explanation', 'unresolved'}:
+        raise DomainError('неизвестный вид помощи')
+    if (kind == 'unresolved' and text is not None) or (kind != 'unresolved' and (not isinstance(text, str) or not text.strip())):
+        raise DomainError('вид помощи не соответствует её тексту')
+
+
+@dataclass(frozen=True, slots=True)
+class FragmentAssistance:
+    difficulty_id: str
+    point_ids: tuple[str, ...]
+    kind: str
+    text: str | None
+    anchors: tuple[SourceAnchor, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, 'point_ids', tuple(self.point_ids))
+        object.__setattr__(self, 'anchors', tuple(self.anchors))
+        validate_assistance_body(self.kind, self.text)
+        if not self.difficulty_id.strip() or not self.anchors or not self.point_ids or len(set(self.point_ids)) != len(self.point_ids):
+            raise DomainError('помощь требует трудность, точные якоря и смысловые пункты')
+
+    @property
+    def resolved(self):
+        return self.kind != 'unresolved'

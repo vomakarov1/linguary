@@ -51,6 +51,8 @@
     {% if quality_ui.llm_ready %}
       <form method="post" action="/books/{{ quality_book_id }}/conditions">
         <input type="hidden" name="action" value="reanalyze">
+      <label><input type="checkbox" name="english_help" value="true"> Пояснять сложные места простым английским</label>
+      <label>Уровень английского <select name="reader_level"><option value="a2">A2</option><option value="b1">B1</option><option value="b2" selected>B2</option></select></label>
         <input type="hidden" name="expected_revision" value="{{ data.conditions.revision or 0 }}">
         <input type="hidden" name="settings_revision" value="{{ quality_ui.settings_revision }}">
         <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю новый анализ</label>

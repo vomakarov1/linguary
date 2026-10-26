@@ -126,3 +126,48 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
                     excerpt = stripped
         evidence.append(HelpEvidence(item.difficulty_id, item.point_id, kind, owner, a.key, excerpt))
     return ContentEvidence(plan.sha256, tuple(evidence), version=plan.version)
+
+
+def resolve_fragment_assistances(plan, payload, results, source_texts, *, owner_block_ids, before_you_read=(), glossary_entries=()):
+    """Bind structural assistance to the accepted plan; this is not a language assessment."""
+    from linguary.domain.learning import FragmentAssistance
+    owners = set(owner_block_ids)
+    planned = {d.id: d for d in plan.difficulties if d.owner_block_id in owners}
+    found = {}
+    occurrences = set()
+    by_owner = {r.block_id: r for r in results}
+    if payload.content_evidence:
+        raise ResultValidationError('помощь к фрагментам не должна дублировать свидетельства')
+    for item in payload.fragment_assistances:
+        difficulty = planned.get(item.difficulty_id)
+        if difficulty is None or item.difficulty_id in found:
+            raise ResultValidationError('чужая или повторная трудность помощи')
+        if len(item.point_ids) != len(set(item.point_ids)) or set(item.point_ids) != {p.id for p in difficulty.required_points}:
+            raise ResultValidationError('неполный состав смысловых пунктов помощи')
+        for anchor in difficulty.anchors:
+            try:
+                anchor.validate(source_texts)
+            except DomainError as error:
+                raise ResultValidationError(str(error)) from error
+            occurrence = (anchor.block_id, anchor.start, anchor.end)
+            if occurrence in occurrences:
+                raise ResultValidationError('конкурирующая помощь к одному вхождению')
+            occurrences.add(occurrence)
+        result = by_owner[difficulty.owner_block_id]
+        quotes = {a.quote for a in difficulty.anchors}
+        if (result.translated_text
+                or any(hint.original in quotes for hint in result.glossary_hints)
+                or any(note.original_excerpt in quotes for note in result.language_notes)
+                or any(entry.expression in quotes for entry in before_you_read)):
+            raise ResultValidationError('помощь к фрагменту дублирует материалы того же вхождения')
+        if item.kind == 'russian_explanation':
+            for entry in glossary_entries:
+                if entry.source_text in quotes and entry.translation.casefold() not in item.text.casefold():
+                    raise ResultValidationError('русская помощь не сохраняет принятое решение глоссария')
+        try:
+            found[item.difficulty_id] = FragmentAssistance(item.difficulty_id, item.point_ids, item.kind, item.text, difficulty.anchors)
+        except DomainError as error:
+            raise ResultValidationError(str(error)) from error
+    if set(found) != set(planned):
+        raise ResultValidationError('не все трудности получили явную помощь')
+    return {owner: tuple(found[d.id] for d in plan.difficulties if d.owner_block_id == owner) for owner in owners}

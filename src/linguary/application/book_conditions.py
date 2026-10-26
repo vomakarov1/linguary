@@ -36,13 +36,28 @@ class BookConditionsService:
                 raise ConditionsError('legacy_choice_required')
             return self.create(transaction, book, expected_settings_revision).id
 
-    def create(self, transaction, book, settings_revision, *, reproducibility='complete'):
+    def create(self, transaction, book, settings_revision, *, reproducibility='complete', english_help=False, reader_level=None):
         if settings_revision != self._settings_revision():
             raise ConditionsError('settings_revision_conflict')
         previous = transaction.work.latest_conditions(book.id)
         if previous is not None:
             self.verify_source(book, previous)
         payload = self._snapshot_factory(book, settings_revision)
+        if reader_level is not None and reader_level not in {'a2', 'b1', 'b2'}:
+            raise ConditionsError('invalid_reader_level')
+        payload['reader_level'] = reader_level or payload['reader_level']
+        if english_help and payload['reader_level'] not in {'a2', 'b1', 'b2'}:
+            raise ConditionsError('invalid_reader_level')
+        payload['english_help'] = english_help
+        from linguary.application.context_builder import snapshot_prompt_templates
+        if english_help:
+            payload['profile'] = 'content-plan-v3'
+            payload['versions'] = {'runtime': 1, 'context_builder': 3, 'validators': 3, 'schemas': 4, 'prompts': 3}
+        if english_help or reader_level is not None:
+            payload['prompt_templates'] = snapshot_prompt_templates(source_language=book.source_language,
+                target_language=book.target_language, reader_level=payload['reader_level'],
+                profile=payload['profile'], english_help=english_help)
+            payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
         payload['source_sha256'] = self.source_digest(book)
         conditions = BookConditions(str(uuid4()), book.id, 1 if previous is None else previous.revision + 1,
             payload, datetime.now(UTC), reproducibility=reproducibility)
