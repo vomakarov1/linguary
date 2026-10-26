@@ -136,7 +136,7 @@ async def extend_limit(request: Request, application: CurrentApplication, book_i
         limit=root.manifest['policy']['max_calls'] + root.extra_calls)
 
 
-def quality_page_context(request, application, book_id):
+def quality_page_context(request, application, book_id, *, tasks=None):
     """Read-only form inputs and local estimates; no clients, calls, tasks, or bodies."""
     from linguary.application.ports.llm import LLMRequest, LLMResponseKind
     from linguary.application.quality_context import INSTRUCTIONS, request_text
@@ -151,7 +151,8 @@ def quality_page_context(request, application, book_id):
     with application.unit_of_work.transaction() as tx:
         document = tx.documents.get(book_id)
         calls = tx.llm_calls.list_for_book(book_id)
-        tasks = tx.tasks.list_for_book(book_id)
+        if tasks is None:
+            tasks = tx.tasks.list_for_book(book_id)
         legacy = tx.work.latest_conditions(book_id) is None and bool(tx.analyses.list_for_book(book_id) or tx.runs.active_for_book(book_id))
     try:
         require_local(request)

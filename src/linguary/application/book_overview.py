@@ -270,6 +270,7 @@ class BookResultSummary:
     quality_review: Mapping = field(default_factory=lambda: {'state': 'not-requested'})
     epub_ready: bool = False
     ordinary_cost: Mapping = field(default_factory=dict)
+    tasks: tuple[ProcessingTask, ...] = ()
 
 
 def _quality_projection(transaction, book, document, analyses, run, tasks):
@@ -495,7 +496,8 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
         analyses = transaction.analyses.list_for_book(book_id)
         import_warnings = transaction.documents.import_warnings(book_id)
         run = transaction.runs.active_for_book(book_id)
-        quality = _quality_projection(transaction, book, document, analyses, run, transaction.tasks.list_for_book(book_id))
+        tasks = transaction.tasks.list_for_book(book_id)
+        quality = _quality_projection(transaction, book, document, analyses, run, tasks)
         stored_results = (
             transaction.results.list_for_run(run.id) if run is not None else ()
         )
@@ -529,6 +531,7 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
     )
     return BookResultSummary(
         book=book,
+        tasks=tasks,
         **quality,
         chapters=chapters,
         warnings=_warnings_of(

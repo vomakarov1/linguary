@@ -783,6 +783,7 @@ def validate_content_plan(
     *,
     before_you_read_limit: int = 10,
     language_notes_per_chapter: int = 8,
+    english_help: bool = False,
     note_limits_by_block: Mapping[str, int] | None = None,
     note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
 ) -> None:
@@ -798,7 +799,13 @@ def validate_content_plan(
         for anchor in difficulty.anchors:
             anchor.validate(texts)
         covered = {e.point_id for e in plan.before_you_read_evidence if e.difficulty_id == difficulty.id}
-        if difficulty.help_kind == "lexical_hint" and treatments.get(difficulty.owner_block_id) is not BlockTreatment.GLOSSARY_ONLY and covered != {p.id for p in difficulty.required_points}:
+        fragment_help = (
+            english_help and plan.version == 3
+            and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
+        )
+        if (difficulty.help_kind == "lexical_hint" and not fragment_help
+                and treatments.get(difficulty.owner_block_id) is not BlockTreatment.GLOSSARY_ONLY
+                and covered != {p.id for p in difficulty.required_points}):
             raise AnalysisMergeError("лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR")
         if (difficulty.help_kind == "explanation"
                 and covered != {p.id for p in difficulty.required_points}

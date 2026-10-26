@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from fastapi import APIRouter, Request, status
 from fastapi.responses import RedirectResponse
 
 from linguary.application.book_overview import book_result, result_block
 from linguary.application.use_cases.retry_task import RetryTaskCommand
-from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus, TaskType
+from linguary.domain import ProcessingTask, TaskStatus, TaskType
 from linguary.web.dependencies import CurrentApplication
 from linguary.web.schemas import BookResultResponse, ResultGroupResponse, TaskResponse
 from linguary.web.views import render, wants_html
@@ -21,26 +23,30 @@ def get_book_result(
     request: Request, application: CurrentApplication, book_id: str
 ) -> BookResultResponse | object:
     """Original text and saved model aids by book blocks."""
-    response = BookResultResponse.of_result(
-        book_result(application.unit_of_work, book_id)
-    )
-    for chapter in response.chapters:
-        for group in chapter.groups:
-            for member in group.member_blocks:
-                current = _regeneration_task(application, book_id, member.block_id)
-                if current is not None:
-                    member.regeneration_task = TaskResponse.of_task(current)
-    export_task = _export_task(application, book_id)
+    summary = book_result(application.unit_of_work, book_id)
+    response = BookResultResponse.of_result(summary)
+    header_only = _wants_result_header_fragment(request)
+    if not header_only:
+        tasks = _regeneration_tasks(summary.tasks)
+        for chapter in response.chapters:
+            for group in chapter.groups:
+                for member in group.member_blocks:
+                    current = tasks.get(member.block_id)
+                    if current is not None:
+                        member.regeneration_task = TaskResponse.of_task(current)
+    export_task = next((task for task in summary.tasks
+                        if task.task_type is TaskType.EXPORT_BOOK
+                        and task.status is not TaskStatus.SUCCEEDED), None)
     export_task_response = (
         TaskResponse.of_task(export_task) if export_task is not None else None
     )
-    if _wants_result_header_fragment(request):
+    if header_only:
         return render(
             request,
             "partials/result_header.html",
             data=response,
             export_task=export_task_response,
-            quality_ui=quality_page_context(request, application, book_id),
+            quality_ui=quality_page_context(request, application, book_id, tasks=summary.tasks),
         )
     if wants_html(request):
         return render(
@@ -49,7 +55,7 @@ def get_book_result(
             page="result",
             data=response,
             export_task=export_task_response,
-            quality_ui=quality_page_context(request, application, book_id),
+            quality_ui=quality_page_context(request, application, book_id, tasks=summary.tasks),
         )
     return response
 
@@ -126,41 +132,18 @@ def _result_block_response(
 ) -> ResultGroupResponse:
     """Construct the block DTO along with its current regeneration task, if any."""
     summaries = result_block(application.unit_of_work, book_id, block_id)
-    tasks = {}
-    for summary in summaries:
-        current = task if task is not None and task.scope_id == summary.block.id else _regeneration_task(application, book_id, summary.block.id)
-        if current is not None:
-            tasks[summary.block.id] = current
+    with application.unit_of_work.transaction() as transaction:
+        tasks = _regeneration_tasks(transaction.tasks.list_for_book(book_id))
+    if task is not None and task.status is not TaskStatus.SUCCEEDED:
+        tasks[task.scope_id] = task
     return ResultGroupResponse.of_group(summaries, tasks=tasks, block_id=block_id)
 
 
-
-def _regeneration_task(
-    application: CurrentApplication, book_id: str, block_id: str
-) -> ProcessingTask | None:
-    """Active regeneration task for the selected block to update the UI."""
-    identity = TaskIdentity(
-        book_id=book_id,
-        task_type=TaskType.REGENERATE_BLOCK,
-        scope_id=block_id,
-    )
-    with application.unit_of_work.transaction() as transaction:
-        task = transaction.tasks.find_by_identity(identity)
-    if task is None or task.status is TaskStatus.SUCCEEDED:
-        return None
-    return task
-
-
-def _export_task(
-    application: CurrentApplication, book_id: str
-) -> ProcessingTask | None:
-    """Active EPUB assembly task for the result header."""
-    identity = TaskIdentity(book_id=book_id, task_type=TaskType.EXPORT_BOOK)
-    with application.unit_of_work.transaction() as transaction:
-        task = transaction.tasks.find_by_identity(identity)
-    if task is None or task.status is TaskStatus.SUCCEEDED:
-        return None
-    return task
+def _regeneration_tasks(tasks: Sequence[ProcessingTask]) -> dict[str, ProcessingTask]:
+    """Index active regeneration tasks from the book's existing batch snapshot."""
+    return {task.scope_id: task for task in tasks
+            if task.task_type is TaskType.REGENERATE_BLOCK
+            and task.status is not TaskStatus.SUCCEEDED}
 
 
 def _wants_result_header_fragment(request: Request) -> bool:

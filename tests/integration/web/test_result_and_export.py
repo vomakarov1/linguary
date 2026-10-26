@@ -691,3 +691,60 @@ def application(configured_application):
 @pytest.fixture
 def client(configured_client):
     return configured_client
+
+
+@pytest.mark.parametrize('fragment', ['book', 'html', 'block', 'result-header'])
+def test_result_tasks_are_loaded_once_without_per_member_reads(
+    client, application, monkeypatch, fragment,
+):
+    """Result and group polling share one task batch; header polling skips block states."""
+    from linguary.web.routes import result as result_route
+
+    scenario, _, _ = _split_result_scenario(application)
+    ids = scenario.block_ids()
+    for index, task_status in enumerate((TaskStatus.PENDING, TaskStatus.FAILED, TaskStatus.SUCCEEDED)):
+        store_task(application, task=ProcessingTask(
+            id=f'regeneration-{index}', book_id=scenario.book_id,
+            task_type=TaskType.REGENERATE_BLOCK, scope_id=ids[index], status=task_status,
+            last_error=failed_task(scenario).last_error if task_status is TaskStatus.FAILED else None,
+        ))
+    with application.unit_of_work.transaction() as tx:
+        repository_type = type(tx.tasks)
+    original_list = repository_type.list_for_book
+    batches = []
+
+    def list_once(repository, book_id):
+        batches.append(book_id)
+        return original_list(repository, book_id)
+
+    def no_individual_read(*args, **kwargs):
+        raise AssertionError('Result must not load task states per block')
+
+    monkeypatch.setattr(repository_type, 'list_for_book', list_once)
+    monkeypatch.setattr(repository_type, 'find_by_identity', no_individual_read)
+    headers = {}
+    endpoint = f'/books/{scenario.book_id}/result'
+    if fragment == 'result-header':
+        monkeypatch.setattr(result_route, '_regeneration_tasks', no_individual_read)
+        headers = {'accept': 'text/html', 'x-linguary-fragment': fragment}
+    elif fragment == 'block':
+        endpoint = f'/books/{scenario.book_id}/blocks/{ids[0]}'
+    elif fragment == 'html':
+        headers = {'accept': 'text/html'}
+    response = client.get(endpoint, headers=headers)
+    assert response.status_code == 200
+    assert batches == [scenario.book_id]
+    if fragment == 'result-header':
+        assert 'data-result-header' in response.text
+        assert 'data-result-block' not in response.text
+    elif fragment == 'html':
+        assert 'data-result-block' in response.text
+    else:
+        groups = [response.json()] if fragment == 'block' else response.json()['chapters'][0]['groups']
+        members = [member for group in groups for member in group['member_blocks']]
+        tasks = {member['block_id']: member['regeneration_task'] for member in members}
+        assert tasks[ids[0]]['status'] == 'pending'
+        assert tasks[ids[1]]['status'] == 'failed'
+        if fragment == 'book':
+            assert tasks[ids[2]] is None
+            assert tasks[ids[3]] is None

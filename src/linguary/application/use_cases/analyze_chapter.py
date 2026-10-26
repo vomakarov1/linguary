@@ -374,6 +374,7 @@ class AnalyzeChapter:
                 try:
                     validate_content_plan(
                         response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
+                        english_help=self._context_builder._english_help,
                         before_you_read_limit=context.before_you_read_limit,
                         language_notes_per_chapter=context.language_notes_per_chapter,
                         note_limits_by_block=context.note_limits_by_block,
