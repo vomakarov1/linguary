@@ -28,6 +28,7 @@ from linguary.domain.content_plan import ContentPlan, ContextFact, HelpEvidence,
 
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
+from linguary.application.explained_expressions import _same_word, expression_words
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
     ChapterAnalysisResponse,
@@ -461,22 +462,60 @@ def sanitize_before_you_read_explanation(text: str) -> str:
 def before_you_read_entries(
     entries: Iterable[BeforeYouReadEntryResponse], *, strict: bool = False,
 ) -> tuple[BeforeYouReadEntry, ...]:
-    """Retains up to the first ten distinct chapter expressions with sanitized explanations."""
-    selected: dict[str, BeforeYouReadEntry] = {}
+    """Retains the first entry for each first-word stem, up to ten chapter expressions."""
+    selected: list[tuple[str, BeforeYouReadEntry]] = []
     for entry in entries:
-        key = (
-            re.sub(r"\s+", " ", entry.expression)
-            .casefold()
-            .strip(" \t.,;:!?\"'«»()[]")
-        )
-        if key and key not in selected:
-            selected[key] = BeforeYouReadEntry(
-                expression=entry.expression,
-                explanation=entry.explanation if strict else sanitize_before_you_read_explanation(entry.explanation),
+        words = expression_words(entry.expression)
+        if not words or any(_same_word(words[0], first_word) for first_word, _ in selected):
+            continue
+        selected.append(
+            (
+                words[0],
+                BeforeYouReadEntry(
+                    expression=entry.expression,
+                    explanation=entry.explanation if strict else sanitize_before_you_read_explanation(entry.explanation),
+                ),
             )
+        )
         if len(selected) >= MAX_BEFORE_YOU_READ:
             break
-    return tuple(selected.values())
+    return tuple(entry for _, entry in selected)
+
+
+def _before_you_read_stem_duplicate(
+    entry: BeforeYouReadEntryResponse, selected: Sequence[BeforeYouReadEntry]
+) -> BeforeYouReadEntry | None:
+    words = expression_words(entry.expression)
+    if not words:
+        return None
+    return next(
+        (
+            candidate
+            for candidate in selected
+            if (candidate_words := expression_words(candidate.expression))
+            and _same_word(words[0], candidate_words[0])
+        ),
+        None,
+    )
+
+
+def _align_byr_evidence_excerpt(
+    entry: BeforeYouReadEntry | BeforeYouReadEntryResponse, body_excerpt: str
+) -> str | None:
+    if body_excerpt not in entry.explanation:
+        span = find_quote_span(entry.explanation, body_excerpt)
+        if span is not None:
+            body_excerpt = span[2]
+        else:
+            stripped = _quotation_key(body_excerpt)
+            if stripped and stripped in entry.explanation:
+                body_excerpt = stripped
+    if (
+        body_excerpt not in entry.explanation
+        or _quotation_key(body_excerpt) == _quotation_key(entry.expression)
+    ):
+        return None
+    return body_excerpt
 
 
 __all__ = [
@@ -606,17 +645,21 @@ def content_plan_from_response(
             raise AnalysisMergeError("свидетельство анализа не ссылается на существующий BYR")
         entry = payload.before_you_read[item.artifact_index]
         if not any(e.expression == entry.expression and e.explanation == entry.explanation for e in selected):
-            raise AnalysisMergeError("BYR удалён нормализацией или превышает бюджет")
-        body_excerpt = item.body_excerpt
-        if body_excerpt not in entry.explanation:
-            span = find_quote_span(entry.explanation, body_excerpt)
-            if span is not None:
-                body_excerpt = span[2]
-            else:
-                stripped = _quotation_key(body_excerpt)
-                if stripped and stripped in entry.explanation:
-                    body_excerpt = stripped
-        if body_excerpt not in entry.explanation or _quotation_key(body_excerpt) == _quotation_key(entry.expression):
+            if (
+                not is_v3
+                and any(candidate.expression == entry.expression for candidate in selected)
+            ):
+                raise AnalysisMergeError("BYR удалён нормализацией или превышает бюджет")
+            representative = _before_you_read_stem_duplicate(entry, selected)
+            if representative is None:
+                raise AnalysisMergeError("BYR удалён нормализацией или превышает бюджет")
+            body_excerpt = _align_byr_evidence_excerpt(representative, item.body_excerpt)
+            if body_excerpt is None:
+                continue
+            entry = representative
+        else:
+            body_excerpt = _align_byr_evidence_excerpt(entry, item.body_excerpt)
+        if body_excerpt is None:
             raise AnalysisMergeError("отрывок не принадлежит телу объяснения BYR")
         try:
             evidence.append(HelpEvidence(ids[item.difficulty_id], item.point_id, item.artifact_kind, aliases[item.source_block_id], artifact_key(item.artifact_kind, aliases[item.source_block_id], {"expression": entry.expression, "explanation": entry.explanation}), body_excerpt))
@@ -672,20 +715,65 @@ def _merged_content_plan(fragments: Sequence[FragmentAnalysis]) -> ContentPlan |
             mapped = replace(item, difficulty_id=ids[item.difficulty_id])
             if mapped not in evidence:
                 evidence.append(mapped)
+    selected = _merged_before_you_read(fragments)
+    retained_evidence: list[HelpEvidence] = []
+    for item in evidence:
+        if any(
+            artifact_key(
+                item.artifact_kind,
+                item.block_id,
+                {"expression": entry.expression, "explanation": entry.explanation},
+            )
+            == item.artifact_key
+            for entry in selected
+        ):
+            retained_evidence.append(item)
+            continue
+        source_entry = next(
+            (
+                entry
+                for fragment in fragments
+                for entry in fragment.before_you_read
+                if artifact_key(
+                    item.artifact_kind,
+                    item.block_id,
+                    {"expression": entry.expression, "explanation": entry.explanation},
+                )
+                == item.artifact_key
+            ),
+            None,
+        )
+        if source_entry is None:
+            raise AnalysisMergeError("слияние удалило BYR со свидетельством")
+        representative = _before_you_read_stem_duplicate(source_entry, selected)
+        if representative is None:
+            raise AnalysisMergeError("слияние удалило BYR со свидетельством")
+        body_excerpt = _align_byr_evidence_excerpt(representative, item.body_excerpt)
+        if body_excerpt is None:
+            continue
+        remapped = replace(
+            item,
+            artifact_key=artifact_key(
+                item.artifact_kind,
+                item.block_id,
+                {
+                    "expression": representative.expression,
+                    "explanation": representative.explanation,
+                },
+            ),
+            body_excerpt=body_excerpt,
+        )
+        if remapped not in retained_evidence:
+            retained_evidence.append(remapped)
     facts = {}
     for plan in plans:
         for fact in plan.context_facts:
             previous = facts.setdefault(fact.canonical_id, fact)
             if previous != fact:
                 raise AnalysisMergeError('конфликт канонической атрибуции')
-    result = ContentPlan(version=plans[0].version, profile=plans[0].profile,
-        difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence),
+    return ContentPlan(version=plans[0].version, profile=plans[0].profile,
+        difficulties=tuple(difficulties), before_you_read_evidence=tuple(retained_evidence),
         context_facts=tuple(facts.values()))
-    selected = _merged_before_you_read(fragments)
-    for item in evidence:
-        if not any(artifact_key(item.artifact_kind, item.block_id, {"expression": e.expression, "explanation": e.explanation}) == item.artifact_key for e in selected):
-            raise AnalysisMergeError("слияние удалило BYR со свидетельством")
-    return result
 
 
 def validate_content_plan(

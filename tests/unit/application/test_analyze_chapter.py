@@ -486,6 +486,40 @@ async def test_missing_block_in_plan_is_retried_with_repair_instruction() -> Non
     assert result.analysis.coverage_status is CoverageStatus.COMPLETE
 
 
+async def test_a2_analysis_retries_when_summary_does_not_match_source_and_translation_languages() -> None:
+    unit_of_work = two_block_book()
+    client = FakeLLMClient.replying(
+        (
+            analysis_reply(chapter_summary="История продолжается.\n\nГерои уходят."),
+            analysis_reply(chapter_summary="The story continues.\n\nИстория продолжается."),
+        )
+    )
+    scenario, _ = make_analyze_chapter(unit_of_work, client, reader_level="a2")
+
+    result = await scenario(command())
+
+    assert result.attempts == 2
+    assert client.call_count == 2
+    assert result.analysis.chapter_summary == "The story continues.\n\nИстория продолжается."
+
+
+async def test_a2_analysis_retries_when_first_summary_paragraph_is_in_another_latin_language() -> None:
+    unit_of_work = two_block_book()
+    client = FakeLLMClient.replying(
+        (
+            analysis_reply(chapter_summary="La historia continúa.\n\nИстория продолжается."),
+            analysis_reply(chapter_summary="The story continues.\n\nИстория продолжается."),
+        )
+    )
+    scenario, _ = make_analyze_chapter(unit_of_work, client, reader_level="a2")
+
+    result = await scenario(command())
+
+    assert result.attempts == 2
+    assert client.call_count == 2
+    assert result.analysis.chapter_summary == "The story continues.\n\nИстория продолжается."
+
+
 async def test_unknown_block_in_plan_is_rejected() -> None:
     """A plan with an unknown block is rejected and triggers a retry."""
     unit_of_work = two_block_book()

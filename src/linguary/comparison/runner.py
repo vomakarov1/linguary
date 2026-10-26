@@ -16,6 +16,7 @@ from pathlib import Path
 
 from linguary.adapters.epub import EpubExportWriter
 from linguary.adapters.llm import FakeLLMClient, LoggingLLMClient, RateLimitedLLMClient
+from linguary.adapters.validation import Py3LangidDetector
 from linguary.adapters.runtime import TaskWorkerPool, WorkerSettings
 from linguary.application.context_builder import ContextBuilder, textual_blocks
 from linguary.application.retry_policy import RetryPolicy
@@ -394,7 +395,7 @@ async def _run_analysis(protocol, workspace, client_factory, result, budget, sim
         seeded_section = _import_analysis_seed(seed, application, selection, fixed, ledger, analysis_model, repeat) if seed is not None else None
         _manifest(analysis_ws, result, f"analysis:{repeat}:{analysis_model}", selection, fixed)
         selected_uow = _SelectedUnitOfWork(application.unit_of_work, selection)
-        analyze = AnalyzeChapter(unit_of_work=selected_uow, llm_client=_model(application, inner, ledger), retry_policy=RetryPolicy(max_attempts=application.settings.llm.max_attempts), glossary_confidence_threshold=application.settings.checks.glossary_confidence_threshold, max_fragment_blocks=application.settings.llm.effective_max_fragment_blocks, context_builder=_FixedContext(fixed, ledger))
+        analyze = AnalyzeChapter(unit_of_work=selected_uow, llm_client=_model(application, inner, ledger), language_detector=Py3LangidDetector(), retry_policy=RetryPolicy(max_attempts=application.settings.llm.max_attempts), glossary_confidence_threshold=application.settings.checks.glossary_confidence_threshold, max_fragment_blocks=application.settings.llm.effective_max_fragment_blocks, context_builder=_FixedContext(fixed, ledger))
         async def analyze_task(task):
             await analyze(AnalyzeChapterCommand(task.book_id, task.scope_id, task.id))
         for book_id, section_ids in selection.items():

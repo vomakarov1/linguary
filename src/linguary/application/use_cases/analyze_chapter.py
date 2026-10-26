@@ -52,11 +52,16 @@ from linguary.application.context_builder import (
     textual_blocks,
 )
 from linguary.application.errors import ApplicationError
-from linguary.application.reader_text import prepare_analysis_payload, record_reader_warnings
+from linguary.application.reader_text import (
+    prepare_analysis_payload,
+    record_reader_warnings,
+    validate_a2_summary,
+)
 from linguary.application.glossary_review import candidates_with_decisions
 from linguary.application.llm_dto import ChapterAnalysisResponse
 from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import LLMClient, LLMRequest
+from linguary.application.ports.language_detection import LanguageDetector
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators.mixed_script import mixed_script_word
@@ -124,6 +129,7 @@ class AnalyzeChapter:
         *,
         unit_of_work: UnitOfWork,
         llm_client: LLMClient,
+        language_detector: LanguageDetector,
         retry_policy: RetryPolicy,
         glossary_confidence_threshold: float,
         max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
@@ -133,6 +139,7 @@ class AnalyzeChapter:
     ) -> None:
         self._unit_of_work = unit_of_work
         self._llm_client = llm_client
+        self._language_detector = language_detector
         self._retry_policy = retry_policy
         self._glossary_confidence_threshold = glossary_confidence_threshold
         self._max_fragment_blocks = max_fragment_blocks
@@ -198,7 +205,9 @@ class AnalyzeChapter:
                 ordered_block_ids=tuple(block.id for block in blocks),
             ),
         )
-        payload, attempts, usage = await self._request_analysis(context, blocks=blocks)
+        payload, attempts, usage = await self._request_analysis(
+            context, blocks=blocks, source_language=document.source_language
+        )
         analysis = self._to_analysis(
             payload, context=context, section=section, blocks=blocks
         )
@@ -265,7 +274,9 @@ class AnalyzeChapter:
                     ordered_block_ids=tuple(block.id for block in fragment.blocks),
                 ),
             )
-            payload, fragment_attempts, usage = await self._request_analysis(context, blocks=fragment.blocks)
+            payload, fragment_attempts, usage = await self._request_analysis(
+                context, blocks=fragment.blocks, source_language=document.source_language
+            )
             attempts += fragment_attempts
             usages.append(usage)
             analysed.append(
@@ -326,7 +337,11 @@ class AnalyzeChapter:
         return document, accumulated
 
     async def _request_analysis(
-        self, context: ChapterAnalysisContext, *, blocks: Sequence[DocumentBlock]
+        self,
+        context: ChapterAnalysisContext,
+        *,
+        blocks: Sequence[DocumentBlock],
+        source_language: str,
     ) -> tuple[ChapterAnalysisResponse, int, TokenUsage | None]:
         """Executes model call with retries per policy (ALG-05).
 
@@ -342,6 +357,14 @@ class AnalyzeChapter:
                 response = await self._llm_client.generate(request)
                 if request.contract_version == 3:
                     response = replace(response, payload=prepare_analysis_payload(response.payload))
+                if self._context_builder._reader_level == "a2":
+                    validate_a2_summary(
+                        response.payload.chapter_summary,
+                        source_texts=tuple(block.text for block in blocks),
+                        source_language=source_language,
+                        language_detector=self._language_detector,
+                    )
+                if request.contract_version == 3:
                     record_reader_warnings(self._unit_of_work, response,
                         [('summary', response.payload.chapter_summary),
                          *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],

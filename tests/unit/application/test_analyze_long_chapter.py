@@ -120,7 +120,11 @@ async def test_whole_chapter_analysis_strips_block_labels() -> None:
 
 
 async def test_whole_chapter_before_you_read_capped() -> None:
-    entries = [{"expression": f"phrase {n}", "explanation": "значение"} for n in range(12)]
+    first_words = (
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+        "golf", "hotel", "india", "juliet", "kilo", "lima",
+    )
+    entries = [{"expression": f"{word} phrase", "explanation": "значение"} for word in first_words]
     client = FakeLLMClient.always(analysis_reply(
         aliases=("b1", "b2", "b3", "b4"), before_you_read=entries,
     ))
@@ -340,7 +344,7 @@ async def test_candidate_note_budget_retries_before_save(max_blocks):
     from linguary.application.context_builder import ContextBuilder
     from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
     from linguary.application.retry_policy import RetryPolicy
-    from analysis_fakes import CONFIDENCE_THRESHOLD, sequential_ids
+    from analysis_fakes import CONFIDENCE_THRESHOLD, FakeLanguageDetector, sequential_ids
     data = json.loads(analysis_reply(aliases=tuple(f'b{i}' for i in range(1, max_blocks + 1))).content)
     data['before_you_read'] = []
     data['treatment_plan'] = [dict(source_block_id=f'b{i}', treatment='READ_AS_IS') for i in range(1, max_blocks + 1)]
@@ -353,7 +357,7 @@ async def test_candidate_note_budget_retries_before_save(max_blocks):
     work = four_block_book()
     async def sleep(_):
         pass
-    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=max_blocks, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2', language_notes_per_chapter=0))
+    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, language_detector=FakeLanguageDetector(), retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=max_blocks, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2', language_notes_per_chapter=0))
     result = await scenario(command())
     assert result.analysis.content_plan.difficulties == ()
     assert result.attempts == (3 if max_blocks == 2 else 2)
@@ -367,10 +371,15 @@ async def test_fragment_byr_budgets_preserve_all_bound_evidence():
     from linguary.application.context_builder import ContextBuilder
     from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
     from linguary.application.retry_policy import RetryPolicy
-    from analysis_fakes import CONFIDENCE_THRESHOLD, sequential_ids
+    from analysis_fakes import CONFIDENCE_THRESHOLD, FakeLanguageDetector, sequential_ids
+    first_words = iter((
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+        "golf", "hotel", "india", "juliet", "kilo", "lima",
+        "mango", "nectar", "orange", "papaya",
+    ))
     def reply(label, count):
         data = json.loads(analysis_reply(aliases=('b1', 'b2')).content)
-        data['before_you_read'] = [dict(expression=f'{label} expression {i}', explanation=f'{label} explanation for aspect {i}.') for i in range(count)]
+        data['before_you_read'] = [dict(expression=f'{next(first_words)} {label} expression {i}', explanation=f'{label} explanation for aspect {i}.') for i in range(count)]
         points = [dict(id=f'p{i}', description=f'Explain aspect {i}') for i in range(count)]
         data['content_plan'] = dict(version=2, profile='content-plan-v2', difficulties=[dict(id='d', anchors=[dict(block_id='b1', start=0, end=9, quote='Paragraph')], owner_block_id='b1', kind='semantic_relation', priority='critical', help_kind='explanation', required_points=points)], before_you_read_evidence=[dict(difficulty_id='d', point_id=f'p{i}', artifact_kind='before_you_read.explanation', source_block_id='b1', artifact_index=i, body_excerpt=f'{label} explanation for aspect {i}.') for i in range(count)])
         return FakeReply.of_payload(data)
@@ -378,7 +387,7 @@ async def test_fragment_byr_budgets_preserve_all_bound_evidence():
     work = four_block_book()
     async def sleep(_):
         pass
-    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=2, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2', language_notes_per_chapter=0))
+    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, language_detector=FakeLanguageDetector(), retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=2, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2', language_notes_per_chapter=0))
     result = await scenario(command())
     assert result.attempts == 3
     assert len(result.analysis.before_you_read) == 10
@@ -392,7 +401,7 @@ async def test_real_group_note_budget_retries_before_save():
     from linguary.application.context_builder import ContextBuilder
     from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
     from linguary.application.retry_policy import RetryPolicy
-    from analysis_fakes import CONFIDENCE_THRESHOLD, sequential_ids
+    from analysis_fakes import CONFIDENCE_THRESHOLD, FakeLanguageDetector, sequential_ids
     section = make_analysis_section(texts=('Echo', 'Echo', 'Echo', 'Long text. ' * 1000))
     work = FakeUnitOfWork(document=make_analysis_document((section,)))
     data = json.loads(analysis_reply(aliases=('b1', 'b2', 'b3', 'b4')).content)
@@ -404,7 +413,7 @@ async def test_real_group_note_budget_retries_before_save():
     client = FakeLLMClient.replying([bad, FakeReply.of_payload(data)])
     async def sleep(_):
         pass
-    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=4, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2'))
+    scenario = AnalyzeChapter(unit_of_work=work, llm_client=client, language_detector=FakeLanguageDetector(), retry_policy=RetryPolicy(max_attempts=2), glossary_confidence_threshold=CONFIDENCE_THRESHOLD, max_fragment_blocks=4, id_factory=sequential_ids(), sleep=sleep, context_builder=ContextBuilder(content_plan_profile='content-plan-v2'))
     result = await scenario(command())
     assert result.attempts == 2
     assert len(result.analysis.content_plan.difficulties) == 1

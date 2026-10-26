@@ -48,6 +48,7 @@ def network_forbidden(monkeypatch):
 
 def analysis_for(profile, *, indivisible=False):
     payload = analysis_payload(STORY, list(range(len(STORY['blocks']))), candidate=profile != 'legacy-v1')
+    payload['chapter_summary'] = 'Independent synthetic scene.\n\nНезависимая вымышленная сцена.'
     if profile == 'content-plan-v3':
         lamp_text = STORY['blocks'][1]
         lamp_start, it_start = lamp_text.index('lamp'), lamp_text.index('It')

@@ -61,7 +61,7 @@ from linguary.adapters.runtime import (
     WorkerSettings,
     to_async_handler,
 )
-from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
+from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator, Py3LangidDetector
 from linguary.application.use_cases.quality_review import QualityReviewService
 from linguary.application.context_builder import ContextBuilder
 from linguary.application.ports.llm import LLMClient
@@ -501,6 +501,7 @@ def _analysis_sequence(
         analyze_chapter=AnalyzeChapter(
             unit_of_work=unit_of_work,
             llm_client=model,
+            language_detector=Py3LangidDetector(),
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             glossary_confidence_threshold=settings.checks.glossary_confidence_threshold,
             max_fragment_blocks=settings.llm.effective_max_fragment_blocks,

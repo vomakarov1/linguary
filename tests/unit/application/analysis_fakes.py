@@ -8,6 +8,7 @@ the 'test_' prefix, otherwise pytest would collect it as a test file.
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from typing import Any
 
 from linguary.adapters.llm import FakeReply
 from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_BLOCKS
+from linguary.application.context_builder import ContextBuilder
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord
 from linguary.application.retry_policy import RetryPolicy
@@ -48,6 +50,25 @@ TARGET_LANGUAGE = "ru"
 
 #: Confidence threshold below which a glossary candidate requires review (PRD § 12).
 CONFIDENCE_THRESHOLD = 0.8
+
+
+class FakeLanguageDetector:
+    """Small deterministic language detector for use-case tests."""
+
+    def probability_for_language(self, text: str, language_code: str) -> float | None:
+        lowered = text.casefold()
+        if any(
+            unicodedata.name(char, '').startswith('CYRILLIC ')
+            for char in text
+            if char.isalpha()
+        ):
+            detected = 'ru'
+        elif 'historia' in lowered or 'continúa' in lowered:
+            detected = 'es'
+        else:
+            detected = 'en'
+        expected = language_code.lower().replace('_', '-').split('-', 1)[0]
+        return 1.0 if detected == expected else 0.0
 
 
 def analysis_reply(
@@ -99,6 +120,7 @@ def make_analyze_chapter(
     *,
     max_attempts: int = 3,
     max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
+    reader_level: str = "b2",
 ) -> tuple[AnalyzeChapter, list[float]]:
     """Chapter analysis use case alongside recorded retry delays."""
     delays: list[float] = []
@@ -109,9 +131,11 @@ def make_analyze_chapter(
     scenario = AnalyzeChapter(
         unit_of_work=unit_of_work,  # type: ignore[arg-type]  # storage port fake
         llm_client=client,
+        language_detector=FakeLanguageDetector(),
         retry_policy=RetryPolicy(max_attempts=max_attempts),
         glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
         max_fragment_blocks=max_fragment_blocks,
+        context_builder=ContextBuilder(reader_level=reader_level),
         id_factory=sequential_ids(),
         sleep=sleep,
     )

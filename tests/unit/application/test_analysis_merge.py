@@ -460,8 +460,113 @@ def test_before_you_read_deduplicated_by_normalized_expression() -> None:
     assert before_you_read_entries(entries)[0].explanation == "первое"
 
 
+def test_before_you_read_deduplicates_stems_and_phrase_extensions_by_first_word() -> None:
+    entries = (
+        BeforeYouReadEntryResponse(expression="Snapped", explanation="первая карточка"),
+        BeforeYouReadEntryResponse(expression="snapped at", explanation="расширение"),
+        BeforeYouReadEntryResponse(expression="snapping loudly", explanation="однокоренное слово"),
+        BeforeYouReadEntryResponse(expression="Started", explanation="другая карточка"),
+    )
+
+    result = before_you_read_entries(entries)
+
+    assert [entry.expression for entry in result] == ["Snapped", "Started"]
+    assert result[0].explanation == "первая карточка"
+
+
+def test_content_plan_evidence_moves_to_the_first_byr_when_explanation_matches() -> None:
+    from linguary.application.analysis_merge import content_plan_from_response, validate_content_plan
+    from linguary.application.llm_dto import ContentPlanResponse, HelpEvidenceResponse, TreatmentPlanItemResponse
+    from linguary.domain.content_plan import Difficulty, RequiredPoint, SourceAnchor, artifact_key
+
+    explanation = "Речь звучит резко."
+    payload = ChapterAnalysisResponse(
+        "instructions",
+        "summary",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
+        before_you_read=(
+            BeforeYouReadEntryResponse("snapped", explanation),
+            BeforeYouReadEntryResponse("snapped at", explanation),
+        ),
+        content_plan=ContentPlanResponse(
+            (Difficulty(
+                "d",
+                (SourceAnchor("b1", 4, 14, "snapped at"),),
+                "b1",
+                "idiom",
+                "critical",
+                "explanation",
+                (RequiredPoint("p", "Объяснить значение выражения"),),
+            ),),
+            (HelpEvidenceResponse(
+                "d", "p", "before_you_read.explanation", "b1", 1, explanation,
+            ),),
+        ),
+    )
+
+    plan = content_plan_from_response(
+        payload, {"b1": "stable"}, {"stable": "She snapped at him."}
+    )
+    validate_content_plan(
+        payload, {"b1": "stable"}, {"stable": "She snapped at him."}
+    )
+
+    evidence = plan.before_you_read_evidence[0]
+    assert evidence.artifact_key == artifact_key(
+        "before_you_read.explanation",
+        "stable",
+        {"expression": "snapped", "explanation": explanation},
+    )
+    assert evidence.body_excerpt == explanation
+
+
+def test_content_plan_drops_duplicate_byr_evidence_not_supported_by_first_card() -> None:
+    from linguary.application.analysis_merge import content_plan_from_response, validate_content_plan
+    from linguary.application.llm_dto import ContentPlanResponse, HelpEvidenceResponse, TreatmentPlanItemResponse
+    from linguary.domain.content_plan import Difficulty, RequiredPoint, SourceAnchor
+
+    payload = ChapterAnalysisResponse(
+        "instructions",
+        "summary",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
+        before_you_read=(
+            BeforeYouReadEntryResponse("snapped", "Он резко прервал фразу."),
+            BeforeYouReadEntryResponse("snapped at", "Он ответил собеседнику сердито."),
+        ),
+        content_plan=ContentPlanResponse(
+            (Difficulty(
+                "d",
+                (SourceAnchor("b1", 4, 14, "snapped at"),),
+                "b1",
+                "idiom",
+                "critical",
+                "explanation",
+                (RequiredPoint("p", "Объяснить значение выражения"),),
+            ),),
+            (HelpEvidenceResponse(
+                "d", "p", "before_you_read.explanation", "b1", 1,
+                "Он ответил собеседнику сердито.",
+            ),),
+        ),
+    )
+
+    plan = content_plan_from_response(
+        payload, {"b1": "stable"}, {"stable": "She snapped at him."}
+    )
+    validate_content_plan(
+        payload, {"b1": "stable"}, {"stable": "She snapped at him."}
+    )
+
+    assert plan.before_you_read_evidence == ()
+
+
 def test_before_you_read_capped_at_ten() -> None:
-    entries = tuple(BeforeYouReadEntryResponse(expression=f"phrase {n}", explanation="значение") for n in range(12))
+    first_words = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+                   "golf", "hotel", "india", "juliet", "kilo", "lima")
+    entries = tuple(
+        BeforeYouReadEntryResponse(expression=f"{word} phrase", explanation="значение")
+        for word in first_words
+    )
     assert len(before_you_read_entries(entries)) == 10
 
 

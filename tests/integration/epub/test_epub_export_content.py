@@ -68,7 +68,9 @@ def outline(root) -> list[tuple[str, str]]:
     ]
 
 
-def export_with_results(source: Path, tmp_path: Path) -> tuple[Path, CanonicalDocument]:
+def export_with_results(
+    source: Path, tmp_path: Path, *, chapter_summary: str = _SUMMARY
+) -> tuple[Path, CanonicalDocument]:
     """Builds a book with all help layers for the first chapter.
 
     Block and section IDs are derived from the book ID, so both builds run under the
@@ -115,7 +117,7 @@ def export_with_results(source: Path, tmp_path: Path) -> tuple[Path, CanonicalDo
                     explanation="идти дальше, несмотря ни на что",
                 ),
             ),
-            chapter_summary=_SUMMARY,
+            chapter_summary=chapter_summary,
             language_notes=results[first.id].language_notes,
         ),
         document.ordered_sections[1].id: LearningMaterial.for_chapter(
@@ -178,6 +180,30 @@ def test_second_chapter_opens_with_the_summary_of_the_first(
     assert outline(chapter)[0] == ("section", "linguary-previously")
     assert next(iter(elements(previously, "h2"))).text == "Previously in Chapter One"
     assert next(iter(elements(previously, "p"))).text == _SUMMARY
+
+
+def test_previously_styles_russian_parallel_summary_paragraph(
+    source: Path, tmp_path: Path
+) -> None:
+    russian_summary = "Врен добирается до Даскмера и узнаёт, что болотные огни сбивают путников с пути."
+    path, _ = export_with_results(
+        source, tmp_path, chapter_summary=f"{_SUMMARY}\n\n{russian_summary}"
+    )
+    chapter = documents_of(path)["OEBPS/chapter2.xhtml"]
+    previously = next(
+        element
+        for element in elements(chapter, "section")
+        if element.get("class") == "linguary-previously"
+    )
+    paragraphs = tuple(elements(previously, "p"))
+
+    assert [paragraph.text for paragraph in paragraphs] == [_SUMMARY, russian_summary]
+    assert paragraphs[0].get("class") is None
+    assert paragraphs[1].get("class") == "linguary-summary-translation"
+    assert paragraphs[1].get("lang") == "ru"
+    with zipfile.ZipFile(path) as archive:
+        stylesheet = archive.read("OEBPS/linguary.css").decode("utf-8")
+    assert ".linguary-summary-translation" in stylesheet
 
 
 def test_language_note_identifiers_do_not_touch_original_footnotes(

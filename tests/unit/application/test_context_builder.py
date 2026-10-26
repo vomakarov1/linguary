@@ -294,7 +294,11 @@ def test_analysis_instructions_adapt_to_reader_level() -> None:
     """Analysis instructions adapt guidance to the reader level (PRD § 30)."""
     a2_instructions = build_context(reader_level="a2").request.instructions
     assert "A2" in a2_instructions
-    assert "70–85%" in a2_instructions
+    assert "65–80%" in a2_instructions
+    assert "4–8 слов" in a2_instructions
+    assert "might have been" in a2_instructions
+    assert "what" in a2_instructions
+    assert "отрыв предлога" in a2_instructions
 
     b1_instructions = build_context(reader_level="b1").request.instructions
     assert "B1" in b1_instructions
@@ -307,6 +311,22 @@ def test_analysis_instructions_adapt_to_reader_level() -> None:
     c1_instructions = build_context(reader_level="c1").request.instructions
     assert "C1" in c1_instructions
     assert "65–85%" in c1_instructions
+
+
+def test_a2_analysis_preserves_affirmative_meaning_of_double_negation() -> None:
+    instructions = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+
+    assert "not saying ... isn’t ..." in instructions
+    assert "сохрани его утвердительный смысл" in instructions
+    assert "признание качества персонажа или события" in instructions
+    assert "Объяснение такого выражения в Before You Read" in instructions
+    assert "формулируй утвердительно" in instructions
+    assert "не отрицаю, что заклинание блестящее" in instructions
+    assert "Говорящий признаёт, что заклинание блестящее" in instructions
 
 
 def test_before_you_read_instructions_use_advance_organizer() -> None:
@@ -346,6 +366,30 @@ def test_instructions_require_chapter_summary_in_source_language() -> None:
     assert "before_you_read" in instructions
     assert "translation_instructions" in instructions
     assert "glossary_candidates" in instructions
+
+
+def test_a2_summary_is_two_parallel_paragraphs_for_whole_chapter_and_fragment() -> None:
+    whole = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    fragment = chapter_fragment_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+
+    for instructions in (whole, fragment):
+        assert "ровно два абзаца" in instructions
+        assert "сначала пересказ на языке оригинала книги" in instructions
+        assert "затем полный русский перевод тех же предложений" in instructions
+
+    assert "ровно два абзаца" not in chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="b2",
+    )
 
 
 def test_chapter_without_textual_blocks_has_no_context() -> None:
