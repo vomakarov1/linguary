@@ -330,7 +330,12 @@ def _quality_projection(transaction, book, document, analyses, run, tasks):
     if epub_ready:
         try:
             _ensure_ready(book, tasks)
-            _validate_content_plans(document, analyses, results)
+            _validate_content_plans(
+                document,
+                analyses,
+                results,
+                english_help=bool(conditions and conditions.payload.get("english_help")),
+            )
         except (ExportBookError, ResultValidationError):
             epub_ready = False
     ordinary = [call for call in transaction.llm_calls.list_for_book(book.id) if call.stage != LLMCallStage.QUALITY_REVIEW]

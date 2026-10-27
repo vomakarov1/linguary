@@ -193,7 +193,13 @@ class ExportBook:
             _ensure_recovery_complete(transaction, book_id, run.id)
             results = transaction.results.list_for_run(run.id)
             _ensure_result_coverage(document, results)
-            _ensure_content_plans(document, transaction.analyses.list_for_book(book_id), results)
+            conditions = transaction.work.latest_conditions(book_id)
+            _ensure_content_plans(
+                document,
+                transaction.analyses.list_for_book(book_id),
+                results,
+                english_help=bool(conditions and conditions.payload.get("english_help")),
+            )
 
     def downloadable_task(self, book_id: str) -> ProcessingTask:
         """Latest successful task whose file is available for download."""
@@ -250,7 +256,13 @@ class ExportBook:
             results = transaction.results.list_for_run(run.id)
             _ensure_result_coverage(document, results)
             analyses = transaction.analyses.list_for_book(command.book_id)
-            _ensure_content_plans(document, analyses, results)
+            conditions = transaction.work.latest_conditions(command.book_id)
+            _ensure_content_plans(
+                document,
+                analyses,
+                results,
+                english_help=bool(conditions and conditions.payload.get("english_help")),
+            )
             return replace(
                 plan,
                 block_results={result.block_id: result for result in results},
@@ -454,21 +466,23 @@ __all__ = [
 ]
 
 
-def _ensure_content_plans(document, analyses, results):
+def _ensure_content_plans(document, analyses, results, *, english_help=False):
     """Rechecks stored bodies of the active run before assembling the book."""
     try:
-        _validate_content_plans(document, analyses, results)
+        _validate_content_plans(document, analyses, results, english_help=english_help)
     except (ResultValidationError, DomainError) as error:
         raise ExportBookError(str(error)) from error
 
 
-def _validate_content_plans(document, analyses, results):
+def _validate_content_plans(document, analyses, results, *, english_help=False):
     sections = {s.id: s for s in document.sections}
     blocks = tuple(document.blocks())
     for analysis in analyses:
         plan = analysis.content_plan
         if plan is None:
             continue
+        if english_help and plan.version != 3:
+            raise ResultValidationError("английская помощь требует план версии 3")
         owners = {b.id for b in blocks if b.section_id == analysis.section_id}
         actual = tuple(r for r in results if r.block_id in owners)
         if plan.version == 3:
@@ -483,9 +497,37 @@ def _validate_content_plans(document, analyses, results):
         for result in actual:
             if result.block_id not in expected or result.treatment != expected[result.block_id]:
                 raise ResultValidationError('режим результата не соответствует плану обработки')
-            if not result.content_evidence:
+            if english_help:
+                if result.content_evidence:
+                    raise ResultValidationError('английская помощь не должна дублировать свидетельства старого формата')
+            elif not result.content_evidence:
                 raise ResultValidationError('отсутствуют свидетельства содержательного плана')
-            validate_content_coverage(plan, (result,), byr, result.content_evidence, owner_block_ids=(result.block_id,))
+            else:
+                validate_content_coverage(plan, (result,), byr, result.content_evidence, owner_block_ids=(result.block_id,))
+        if english_help:
+            _validate_fragment_assistance_coverage(plan, actual)
+
+
+def _validate_fragment_assistance_coverage(plan, results):
+    """Checks persisted English-help bodies against the plan's exact obligations."""
+    expected = {difficulty.id: difficulty for difficulty in plan.difficulties}
+    found = {}
+    for result in results:
+        for assistance in result.fragment_assistances:
+            difficulty = expected.get(assistance.difficulty_id)
+            if difficulty is None or difficulty.owner_block_id != result.block_id:
+                raise ResultValidationError('помощь относится к чужой трудности')
+            if assistance.difficulty_id in found:
+                raise ResultValidationError('повтор помощи к одной трудности')
+            required_points = {point.id for point in difficulty.required_points}
+            if (len(assistance.point_ids) != len(set(assistance.point_ids))
+                    or set(assistance.point_ids) != required_points):
+                raise ResultValidationError('помощь не покрывает обязательные смысловые пункты')
+            if assistance.anchors != difficulty.anchors:
+                raise ResultValidationError('помощь не совпадает с точными привязками плана')
+            found[assistance.difficulty_id] = assistance
+    if set(found) != set(expected):
+        raise ResultValidationError('не все трудности получили помощь простым английским')
 
 
 def _validate_v3_bodies(analysis, results, texts):

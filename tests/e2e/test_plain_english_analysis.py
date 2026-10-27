@@ -10,6 +10,7 @@ from linguary.adapters.llm.payloads import parse_payload
 from linguary.application.analysis_merge import AnalysisMergeError, validate_content_plan
 from linguary.application.ports.llm import LLMResponseKind
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
+from linguary.application.use_cases.export_book import ExportBookCommand
 from linguary.domain import BlockTreatment
 
 
@@ -71,6 +72,52 @@ def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, lev
         assert assistance.kind == 'lexical_hint'
         assert assistance.text == 'a sound that comes back'
         assert assistance.anchors == difficulty.anchors
+        exported = app.export_book(ExportBookCommand(
+            book_id=BOOK, target_path=str(tmp_path / f'{level}-english-help.epub')))
+        assert exported.path == str(tmp_path / f'{level}-english-help.epub')
+        assert (tmp_path / f'{level}-english-help.epub').is_file()
+    finally:
+        app.dispose()
+
+
+def test_english_help_with_no_difficulties_can_be_exported(tmp_path):
+    client = FakeLLMClient()
+    app = make_app(tmp_path / 'data', client, {})
+    try:
+        _, section, blocks, _ = import_story(app, {'blocks': ['A quiet cat slept.']})
+        with app.unit_of_work.transaction() as tx:
+            app.book_conditions.create(tx, tx.books.get(BOOK), app.runtime_settings.revision,
+                                       english_help=True, reader_level='a2')
+        client.replies = (FakeReply.of_payload(dict(
+            translation_instructions='Preserve the original text.',
+            chapter_summary='A cat sleeps quietly.\n\nКошка тихо спит.',
+            treatment_plan=[dict(source_block_id='b1', treatment='READ_AS_IS')],
+            glossary_candidates=[], before_you_read=[],
+            content_plan=dict(version=3, profile='content-plan-v3', context_facts=[],
+                              before_you_read_evidence=[], difficulties=[]),
+        )),)
+        run(app.analysis.start(BOOK))
+        finish(app)
+        with app.unit_of_work.transaction() as tx:
+            analysis = tx.analyses.get_for_section(BOOK, section.id)
+        processing_run = app.start_processing()(StartProcessingCommand(BOOK))
+        client.replies = (*client.replies, FakeReply.of_payload(dict(
+            blocks=[dict(source_block_id='b1', treatment='READ_AS_IS',
+                         translated_text=None, glossary_hints=[])],
+            language_notes=[], content_evidence=[], fragment_assistances=[],
+        )))
+        run(app.processing.start(BOOK))
+        finish(app)
+        with app.unit_of_work.transaction() as tx:
+            results = tx.results.list_for_run(processing_run.id)
+        assert analysis.content_plan.difficulties == ()
+        assert len(results) == len(blocks) == 1
+        assert results[0].content_evidence == ()
+        assert results[0].fragment_assistances == ()
+        target = tmp_path / 'empty-plan-english-help.epub'
+        exported = app.export_book(ExportBookCommand(book_id=BOOK, target_path=str(target)))
+        assert exported.path == str(target)
+        assert target.is_file()
     finally:
         app.dispose()
 
