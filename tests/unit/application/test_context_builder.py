@@ -567,6 +567,7 @@ def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     analysis = templates['analysis']
     fragment = templates['fragment']
     content_analysis = templates['content_analysis']
+    normalized_content_analysis = ' '.join(content_analysis.split())
     processing = templates['english_help_processing']
     assert 'READ_AS_IS' in analysis and 'GLOSSARY_ONLY' in analysis
     assert 'before_you_read' in analysis and 'всегда пустой список' in analysis
@@ -574,8 +575,11 @@ def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     assert '65–80% блоков главы' not in analysis
     assert 'fragment_assistances' not in analysis
     assert 'before_you_read_evidence всегда должны быть пустыми' in content_analysis
-    assert 'Последовательно просматривай каждый блок' in content_analysis
-    assert 'не прекращай поиск после нескольких трудностей' in content_analysis
+    assert 'Определи только конкретные слова, выражения или конструкции' in normalized_content_analysis
+    assert 'которые могут помешать читателю уровня' in normalized_content_analysis
+    assert 'не ограничивай их число' not in normalized_content_analysis
+    assert 'каждое нечастотное, архаичное' not in normalized_content_analysis
+    assert 'даже если общий смысл можно вывести из контекста' not in normalized_content_analysis
     assert 'GLOSSARY_ONLY или при полном покрытии в BYR' not in content_analysis
     assert 'fragment_assistances' in processing
     assert 'content_evidence верни пустыми списками' in processing
