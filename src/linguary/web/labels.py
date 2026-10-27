@@ -83,7 +83,7 @@ BOOK_STATUS_LABELS: Mapping[BookStatus, str] = {
 TREATMENT_LABELS: Mapping[BlockTreatment, str] = {
     BlockTreatment.TRANSLATE: "Полный перевод",
     BlockTreatment.GLOSSARY_ONLY: "Словарные подсказки",
-    BlockTreatment.READ_AS_IS: "Без помощи",
+    BlockTreatment.READ_AS_IS: "В оригинале",
     BlockTreatment.PRESERVE_ONLY: "Сохранено без обработки",
     BlockTreatment.DROP_WITH_WARNING: "Отброшено с предупреждением",
 }

@@ -52,7 +52,7 @@ class BookConditionsService:
         from linguary.application.context_builder import snapshot_prompt_templates
         if english_help:
             payload['profile'] = 'content-plan-v3'
-            payload['versions'] = {'runtime': 1, 'context_builder': 3, 'validators': 3, 'schemas': 4, 'prompts': 3}
+            payload['versions'] = {'runtime': 1, 'context_builder': 3, 'validators': 3, 'schemas': 4, 'prompts': 4}
         if english_help or reader_level is not None:
             payload['prompt_templates'] = snapshot_prompt_templates(source_language=book.source_language,
                 target_language=book.target_language, reader_level=payload['reader_level'],

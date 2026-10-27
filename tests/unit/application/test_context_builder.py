@@ -564,5 +564,22 @@ def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=level, profile='content-plan-v3', english_help=True)
     rules = templates['english_help']
     assert level.upper() in rules
-    assert all(token in rules for token in ('difficulty_id', 'point_ids', 'lexical_hint', 'sentence_rephrase', 'russian_explanation', 'unresolved'))
+    analysis = templates['analysis']
+    fragment = templates['fragment']
+    content_analysis = templates['content_analysis']
+    processing = templates['english_help_processing']
+    assert 'READ_AS_IS' in analysis and 'GLOSSARY_ONLY' in analysis
+    assert 'before_you_read' in analysis and 'всегда пустой список' in analysis
+    assert 'пять-десять ключевых понятий' not in analysis
+    assert '65–80% блоков главы' not in analysis
+    assert 'fragment_assistances' not in analysis
+    assert 'before_you_read_evidence всегда должны быть пустыми' in content_analysis
+    assert 'Последовательно просматривай каждый блок' in content_analysis
+    assert 'не прекращай поиск после нескольких трудностей' in content_analysis
+    assert 'GLOSSARY_ONLY или при полном покрытии в BYR' not in content_analysis
+    assert 'fragment_assistances' in processing
+    assert 'content_evidence верни пустыми списками' in processing
+    assert 'Верни content_evidence' not in processing
+    assert f'Для {level.upper()}' in processing
+    assert not any(f'Для {other.upper()}' in processing for other in {'a2', 'b1', 'b2'} - {level})
     assert 'english_help' not in snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=level)

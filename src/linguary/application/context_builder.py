@@ -147,6 +147,67 @@ _CONTENT_PLAN_PROCESSING_V3 = _CONTENT_PLAN_PROCESSING.replace('content-plan-v2.
 Не превращай эти служебные сведения в обязательную заметку читателю.
 """
 
+_ENGLISH_HELP_CONTENT_PLAN_ANALYSIS = """\
+Профиль content-plan-v3 для режима чтения на английском с помощью к трудным местам.
+Определи только конкретные слова, выражения или конструкции, которые могут помешать
+читателю уровня {reader_level} понять английский текст. Не включай обычные слова и
+понятные предложения. Для каждой трудности верни id, anchors с точными block_id,
+start, end и quote, owner_block_id, kind, priority, help_kind и required_points.
+Смещения — индексы Unicode-кодовых точек, end не включается; quote обязан точно
+совпадать с текстом. Каждый владелец должен входить в anchors.
+Последовательно просматривай каждый блок. Для уровня A2 отмечай каждое нечастотное,
+архаичное, специальное или культурно обусловленное слово, непрозрачное выражение и
+грамматическую конструкцию выше базового уровня, даже если общий смысл можно вывести
+из контекста. Перед ответом перечитай все блоки и проверь, что ни одно такое место не
+пропущено; не прекращай поиск после нескольких трудностей и не ограничивай их число.
+Используй help_kind=lexical_hint для слова или выражения, значение которого можно
+объяснить короткой подсказкой; используй help_kind=explanation для грамматики,
+игры слов и смысловой связи. Объедини аспекты одной трудности в required_points,
+не создавай дублирующие или пересекающиеся трудности для того же места.
+before_you_read и before_you_read_evidence всегда должны быть пустыми: помощь
+появляется рядом с исходным английским фрагментом при чтении. Не добавляй русские
+объяснения, BYR, языковые заметки или словарные подсказки в анализ.
+Верни context_facts в формате content-plan-v3. Сохраняй точные привязки и степень
+уверенности; неизвестные факты не додумывай. Пустой список трудностей допустим.
+"""
+
+_ENGLISH_HELP_CONTENT_PLAN_PROCESSING = """\
+Режим чтения на английском с помощью к трудным местам. Все блоки обрабатываются
+как READ_AS_IS: translated_text оставь пустым, glossary_hints, language_notes и
+content_evidence верни пустыми списками.
+Верни fragment_assistances с полями difficulty_id, point_ids, kind и text: по одному
+элементу на каждую трудность плана, владелец
+которой входит в текущий запрос. difficulty_id и полный набор point_ids копируй из
+плана. Смещения не возвращай: приложение привяжет помощь к точному исходному месту.
+Выбери kind по трудности: lexical_hint — короткое определение или простой синоним
+на английском; sentence_rephrase — одна понятная английская переформулировка только
+трудного предложения; russian_explanation — краткое объяснение по-русски, если
+английскую помощь дать нельзя; unresolved с text=null — только если нельзя дать и
+английское, и русское объяснение. Не добавляй помощь к понятным предложениям.
+{reader_level_guidance} Сохраняй участников, действия, отрицания,
+условия, время, уверенность, причины и важные детали. Не противоречь принятым
+решениям глоссария и применяй context_facts только к указанным в них местам.
+Не дублируй исходную фразу в объяснении. Если трудностей нет, верни пустой список.
+"""
+
+_ENGLISH_HELP_READER_LEVEL_GUIDANCE = {
+    'a2': 'Для A2 используй частотные слова и короткие простые конструкции.',
+    'b1': 'Для B1 используй знакомую лексику и короткие понятные предложения.',
+    'b2': 'Для B2 используй естественный английский и точную, но не излишне редкую лексику.',
+}
+
+_ENGLISH_HELP_BEFORE_YOU_READ = """\
+4. before_you_read — всегда пустой список. Не создавай предварительные русские
+объяснения: читатель получает помощь рядом с трудным английским фрагментом при чтении.
+"""
+
+_ENGLISH_HELP_TREATMENT_GUIDANCE = """\
+Режим — чтение английского оригинала с точечной помощью. Для каждого переданного
+текстового блока выбирай READ_AS_IS: не переводи блок целиком и не выбирай
+GLOSSARY_ONLY. Отмечай трудные слова, выражения и конструкции в content_plan,
+чтобы отдельная помощь появилась рядом с ними. Понятные места оставляй без помощи.
+"""
+
 
 class ContextBuildError(ApplicationError):
     """Request context cannot be assembled."""
@@ -518,13 +579,13 @@ class ContextBuilder:
         if analysis.content_plan is not None and self._content_plan_profile != analysis.content_plan.profile:
             raise ContextBuildError("сохранённый план требует соответствующий явный профиль")
         version = analysis.content_plan.version if analysis.content_plan is not None else 1
-        if version in (2, 3):
+        if version in (2, 3) and not self._english_help:
             default = _CONTENT_PLAN_PROCESSING_V3 if version == 3 else _CONTENT_PLAN_PROCESSING
             instructions += "\n" + self._prompt_templates.get("content_processing", default)
-        if version == 3:
+        if version == 3 and not self._english_help:
             instructions += "\n" + self._prompt_templates.get('learner_quality', learner_instructions(self._reader_level))
         if self._english_help:
-            instructions += "\n" + self._prompt_templates["english_help"]
+            instructions += "\n" + self._prompt_templates["english_help_processing"]
         if unit.section_id != section.id:
             raise ContextBuildError(
                 f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
@@ -587,6 +648,8 @@ class ContextBuilder:
             chapter_chars=sum(len(block.text) for block in textual_blocks(section)),
             per_chapter=self._language_notes_per_chapter,
         )
+        if self._english_help:
+            budget = 0
         if analysis.content_plan is not None and self._language_notes_per_chapter == 0:
             budget = 0
         parts = [
@@ -673,23 +736,26 @@ class ContextBuilder:
         version = 3 if self._content_plan_profile == "content-plan-v3" else (2 if candidate else 1)
         note_limit = self._language_notes_per_chapter if language_notes_limit is None else language_notes_limit
         note_groups = self._analysis_note_groups(section, blocks) if candidate else ()
+        if self._english_help:
+            before_you_read_limit = 0
+            note_limit = 0
+            note_groups = ()
         if candidate and section.is_notes_only:
             before_you_read_limit = 0
         if candidate:
             instructions += "\n" + self._prompt_templates.get("content_analysis", _CONTENT_PLAN_ANALYSIS_V3 if version == 3 else _CONTENT_PLAN_ANALYSIS)
-            if version == 3:
+            if version == 3 and not self._english_help:
                 instructions += "\n" + self._prompt_templates.get("learner_quality", learner_instructions(self._reader_level))
-            instructions += f"\nВ этом ответе не больше {before_you_read_limit} BYR."
-            instructions += f"\nБюджет обязательных заметок этого анализа: {note_limit}."
-            instructions += "\nПределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False)
-            instructions += "\nСначала используй существующий BYR или допустимый hint.note; READ_AS_IS требует отдельной заметки, если BYR не покрывает все аспекты."
-        if self._english_help:
-            instructions += "\n" + self._prompt_templates["english_help"] + "\nПланируй только трудные места, понятные предложения не пересказывай. Для этого режима выбирай READ_AS_IS. before_you_read и before_you_read_evidence оставь пустыми: помощь будет создана при обработке. Не создавай дубли BYR и заметок."
+            if not self._english_help:
+                instructions += f"\nВ этом ответе не больше {before_you_read_limit} BYR."
+                instructions += f"\nБюджет обязательных заметок этого анализа: {note_limit}."
+                instructions += "\nПределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False)
+                instructions += "\nСначала используй существующий BYR или допустимый hint.note; READ_AS_IS требует отдельной заметки, если BYR не покрывает все аспекты."
         return ChapterAnalysisContext(
             before_you_read_limit=before_you_read_limit,
             note_group_limits=note_groups,
             language_notes_per_chapter=note_limit,
-            note_limits_by_block={b.id: notes_budget(unit_chars=len(b.text), chapter_chars=sum(len(t.text) for t in textual_blocks(section)), per_chapter=self._language_notes_per_chapter) if self._language_notes_per_chapter else 0 for b in blocks},
+            note_limits_by_block={b.id: 0 if self._english_help else (notes_budget(unit_chars=len(b.text), chapter_chars=sum(len(t.text) for t in textual_blocks(section)), per_chapter=self._language_notes_per_chapter) if self._language_notes_per_chapter else 0) for b in blocks},
             section_id=section.id,
             request=LLMRequest.for_chapter_analysis(
                 contract_version=version,
@@ -796,7 +862,8 @@ class ContextBuilder:
 
 
 def chapter_analysis_instructions(
-    *, source_language: str, target_language: str, reader_level: str = "b2"
+    *, source_language: str, target_language: str, reader_level: str = "b2",
+    english_help: bool = False,
 ) -> str:
     """Invariant chapter analysis instructions (PRD § 10.1, § 11, § 14, § 19)."""
     return _instructions(
@@ -809,11 +876,13 @@ def chapter_analysis_instructions(
             else _WHOLE_CHAPTER_SUMMARY
         ),
         reader_level=reader_level,
+        english_help=english_help,
     )
 
 
 def chapter_fragment_instructions(
-    *, source_language: str, target_language: str, reader_level: str = "b2"
+    *, source_language: str, target_language: str, reader_level: str = "b2",
+    english_help: bool = False,
 ) -> str:
     """Instructions for analyzing a fragment of a long chapter (PRD § 14, ALG-03).
 
@@ -832,6 +901,7 @@ def chapter_fragment_instructions(
             else _FRAGMENT_SUMMARY
         ),
         reader_level=reader_level,
+        english_help=english_help,
     )
 
 
@@ -983,14 +1053,24 @@ def _instructions(
     scope: str,
     summary: str,
     reader_level: str = "b2",
+    english_help: bool = False,
 ) -> str:
     """Analysis instructions compiled for a whole chapter or a chapter fragment."""
     languages = {"source_language": source_language, "target_language": target_language}
-    treatment_guidance = _reader_level_treatment_guidance(reader_level)
+    treatment_guidance = (
+        _ENGLISH_HELP_TREATMENT_GUIDANCE
+        if english_help
+        else _reader_level_treatment_guidance(reader_level)
+    )
     return _ANALYSIS_INSTRUCTIONS.format(
         scope=scope.format(**languages),
         summary=summary.format(**languages),
         treatment_guidance=treatment_guidance,
+        before_you_read_guidance=(
+            _ENGLISH_HELP_BEFORE_YOU_READ
+            if english_help
+            else _BEFORE_YOU_READ_GUIDANCE.format(**languages)
+        ),
         **languages,
     )
 
@@ -1045,6 +1125,24 @@ _FRAGMENT_SUMMARY_A2 = """\
 #: Chapter analysis instructions. A single request covers treatment plan, glossary candidates,
 #: translation instructions, Before You Read, and chapter summary (PRD § 14): no separate
 #: preliminary model calls are made.
+_BEFORE_YOU_READ_GUIDANCE = """\
+4. before_you_read — пять-десять ключевых понятий и выражений главы, которые критически
+важны для понимания происходящего перед началом чтения главы (advance organizer):
+- Тематические и смысловые опоры главы (thematic / setting anchors) — специфическая терминология, ключевые предметные
+понятия или историко-бытовые реалии, которые задают сцену, действие или конфликт и
+повторяются в главе.
+- Семантические ловушки и непрозрачные смыслы (semantic traps) — идиомы, непрозрачные фразовые глаголы, устойчивые сочетания,
+необычные контекстуальные или архаичные значения знакомых слов, где буквальный перевод
+вводит читателя в заблуждение.
+
+Имена персонажей и уникальные географические названия сюда не попадают: их место —
+glossary_candidates. Банальные общеупотребительные слова не включай.
+Поле expression — слово или выражение так, как оно стоит в тексте главы; explanation —
+короткое и ёмкое объяснение на языке {target_language}. Это предварительная опора перед
+чтением, а не пересказ. Сюжет и спойлеры здесь не раскрывай. Меньше пяти выражений —
+нормально, если больше в главе нет; добирать список ради количества не нужно.
+"""
+
 _ANALYSIS_INSTRUCTIONS = """\
 Ты готовишь учебное издание художественной книги. Издание помогает читателю, который \
 владеет языком {target_language} и учит язык {source_language}, читать эту книгу \
@@ -1110,22 +1208,7 @@ _ANALYSIS_INSTRUCTIONS = """\
 
 В указаниях и сводке не ссылайся на блоки по идентификаторам (например, b1).
 
-4. before_you_read — пять-десять ключевых понятий и выражений главы, которые критически \
-важны для понимания происходящего перед началом чтения главы (advance organizer):
-- Тематические и смысловые опоры главы (thematic / setting anchors) — специфическая \
-терминология, ключевые предметные понятия главы или историко-бытовые реалии, которые задают \
-сцену, действие или конфликт и повторяются в главе.
-- Семантические ловушки и непрозрачные смыслы (semantic traps) — идиомы, непрозрачные \
-фразовые глаголы, устойчивые сочетания, необычные контекстуальные или архаичные значения \
-внешне знакомых слов, где буквальный перевод вводит читателя в заблуждение.
-
-Имена персонажей и уникальные географические названия сюда не попадают: их место — \
-glossary_candidates, и дублировать их здесь не нужно. Банальные общеупотребительные слова не включай.
-
-Поле expression — слово или выражение так, как оно стоит в тексте главы; explanation — \
-короткое, понятное и ёмкое объяснение на языке {target_language}. Это предварительная опора \
-перед чтением, а не пересказ: сюжет и спойлеры здесь не раскрывают. Меньше пяти выражений — \
-нормально, если больше в главе нет; добирать список ради количества не нужно.
+{before_you_read_guidance}
 
 {summary}
 
@@ -1636,8 +1719,8 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
     """Render immutable instruction templates without book text or secrets."""
     languages = dict(source_language=source_language, target_language=target_language)
     result = {
-        'analysis': chapter_analysis_instructions(**languages, reader_level=reader_level),
-        'fragment': chapter_fragment_instructions(**languages, reader_level=reader_level),
+        'analysis': chapter_analysis_instructions(**languages, reader_level=reader_level, english_help=english_help),
+        'fragment': chapter_fragment_instructions(**languages, reader_level=reader_level, english_help=english_help),
         'translation': translation_unit_instructions(**languages),
         'regeneration': block_regeneration_instructions(**languages),
         'content_analysis': _CONTENT_PLAN_ANALYSIS,
@@ -1647,17 +1730,13 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
         result.update(content_analysis=_CONTENT_PLAN_ANALYSIS_V3, content_processing=_CONTENT_PLAN_PROCESSING_V3,
                       learner_quality=learner_instructions(reader_level))
     if english_help:
-        result['english_help'] = (
-            f"Английская помощь для уровня {reader_level.upper()}. "
-            "Верни fragment_assistances: ровно один элемент на трудность текущего запроса; "
-            "difficulty_id и все point_ids бери только из плана. Смещения не назначай. "
-            "lexical_hint — короткое английское определение или синоним; sentence_rephrase — "
-            "английское переформулирование только трудного предложения. Для A2 используй "
-            "более простые слова и конструкции, чем для B1/B2. Сохрани участников, действия, "
-            "отрицания, условия, время, уверенность, причины и значимые детали. "
-            "Если точная английская помощь недоступна, верни russian_explanation; "
-            "если недоступна и она, unresolved с text=null. Не повторяй понятные предложения. "
-            "Принятые решения глоссария имеют приоритет. Не дублируй помощь переводом, "
-            "подсказкой, BYR или заметкой; content_evidence оставь пустым."
+        processing = _ENGLISH_HELP_CONTENT_PLAN_PROCESSING.format(
+            reader_level_guidance=_ENGLISH_HELP_READER_LEVEL_GUIDANCE[reader_level.strip().lower()]
+        )
+        result.update(
+            english_help=f"enabled for {reader_level.upper()}",
+            content_analysis=_ENGLISH_HELP_CONTENT_PLAN_ANALYSIS.format(reader_level=reader_level.upper()),
+            content_processing=processing,
+            english_help_processing=processing,
         )
     return result

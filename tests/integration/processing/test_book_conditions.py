@@ -154,6 +154,7 @@ async def test_explicit_english_help_conditions_are_revision_pinned(tmp_path, le
         assert conditions.payload['english_help'] is True
         assert conditions.payload['reader_level'] == level
         assert conditions.payload['versions']['schemas'] == 4
+        assert conditions.payload['versions']['prompts'] == 4
         with pytest.raises(ConditionsError, match='conditions_revision_conflict'):
             choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, english_help=False)
         assert app.book_conditions.require('book-1').id == conditions.id

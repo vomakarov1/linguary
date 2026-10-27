@@ -790,14 +790,28 @@ def validate_content_plan(
     """Validates source anchors and channel eligibility prior to accepting the response."""
     plan = content_plan_from_response(payload, aliases, texts=texts)
     if plan is None:
+        if english_help:
+            raise AnalysisMergeError("режиму английской помощи нужен содержательный план")
         return
+    if english_help:
+        if plan.version != 3:
+            raise AnalysisMergeError("режим английской помощи требует план версии 3")
+        if payload.before_you_read or plan.before_you_read_evidence:
+            raise AnalysisMergeError("режим английской помощи не использует материалы BYR")
     if len(payload.before_you_read) > before_you_read_limit:
         raise AnalysisMergeError("BYR превышает согласованный бюджет фрагмента")
     treatments = {aliases[i.source_block_id]: i.treatment for i in payload.treatment_plan}
+    if english_help and any(treatment is not BlockTreatment.READ_AS_IS for treatment in treatments.values()):
+        raise AnalysisMergeError("режим английской помощи требует чтение блоков в оригинале")
     note_owners = set()
+    english_help_anchors = set()
     for difficulty in plan.difficulties:
         for anchor in difficulty.anchors:
             anchor.validate(texts)
+            occurrence = (anchor.block_id, anchor.start, anchor.end)
+            if english_help and occurrence in english_help_anchors:
+                raise AnalysisMergeError("несколько трудностей английской помощи ссылаются на одно место")
+            english_help_anchors.add(occurrence)
         covered = {e.point_id for e in plan.before_you_read_evidence if e.difficulty_id == difficulty.id}
         fragment_help = (
             english_help and plan.version == 3
@@ -809,6 +823,7 @@ def validate_content_plan(
             raise AnalysisMergeError("лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR")
         if (difficulty.help_kind == "explanation"
                 and covered != {p.id for p in difficulty.required_points}
+                and not fragment_help
                 and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS):
             note_owners.add(difficulty.owner_block_id)
         for item in plan.before_you_read_evidence:

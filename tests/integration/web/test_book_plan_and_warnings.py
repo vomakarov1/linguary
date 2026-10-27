@@ -50,7 +50,7 @@ def test_plan_summarises_chapters_and_treatments(
             "label": "Словарные подсказки",
             "count": 1,
         },
-        {"treatment": BlockTreatment.READ_AS_IS.value, "label": "Без помощи", "count": 1},
+        {"treatment": BlockTreatment.READ_AS_IS.value, "label": "В оригинале", "count": 1},
     ]
 
 

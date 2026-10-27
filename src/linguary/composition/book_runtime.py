@@ -166,6 +166,7 @@ class BookRuntimeResolver:
         expected_versions = {'runtime': 1, 'context_builder': implementation, 'validators': implementation, 'schemas': self.supported.get(payload.get('profile')), 'prompts': implementation}
         if payload.get('english_help', False):
             expected_versions['schemas'] = 4
+            expected_versions['prompts'] = 4
         if payload.get('profile') not in self.supported or thaw(payload.get('versions', {})) != expected_versions:
             raise ConditionsError('conditions_unavailable')
         if payload_digest(payload['prompt_templates']) != payload['prompt_sha256']:

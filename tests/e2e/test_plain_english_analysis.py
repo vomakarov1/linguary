@@ -12,6 +12,7 @@ from linguary.application.ports.llm import LLMResponseKind
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.export_book import ExportBookCommand
 from linguary.domain import BlockTreatment
+from linguary.web.labels import treatment_label
 
 
 def lexical_analysis():
@@ -29,6 +30,10 @@ def lexical_analysis():
     )
 
 
+def test_read_as_is_label_describes_original_instead_of_claiming_no_help():
+    assert treatment_label(BlockTreatment.READ_AS_IS) == 'В оригинале'
+
+
 @pytest.mark.parametrize('level', ['a2', 'b1', 'b2'])
 def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, level):
     client = FakeLLMClient()
@@ -41,6 +46,10 @@ def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, lev
         client.replies = (FakeReply.of_payload(lexical_analysis()),)
         run(app.analysis.start(BOOK))
         finish(app)
+        analysis_instructions = client.requests[0].instructions
+        assert 'пять-десять ключевых понятий' not in analysis_instructions
+        assert '65–80% блоков главы' not in analysis_instructions
+        assert 'before_you_read' in analysis_instructions and 'всегда пустой список' in analysis_instructions
         with app.unit_of_work.transaction() as tx:
             analysis = tx.analyses.get_for_section(BOOK, section.id)
         assert analysis.before_you_read == ()
@@ -60,6 +69,15 @@ def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, lev
         )))
         run(app.processing.start(BOOK))
         finish(app)
+        processing_instructions = client.requests[1].instructions
+        assert 'fragment_assistances' in processing_instructions
+        assert 'content_evidence верни пустыми списками' in processing_instructions
+        assert {
+            'a2': 'Для A2 используй частотные слова',
+            'b1': 'Для B1 используй знакомую лексику',
+            'b2': 'Для B2 используй естественный английский',
+        }[level] in processing_instructions
+        assert 'Служебные context_facts применяй' not in processing_instructions
         assert [request.contract_version for request in client.requests] == [3, 4]
         with app.unit_of_work.transaction() as tx:
             results = tx.results.list_for_run(processing_run.id)
@@ -122,11 +140,13 @@ def test_english_help_with_no_difficulties_can_be_exported(tmp_path):
         app.dispose()
 
 
-@pytest.mark.parametrize('english_help,version,treatment', [
-    (False, 3, 'READ_AS_IS'), (True, 2, 'READ_AS_IS'), (True, 3, 'TRANSLATE'),
+@pytest.mark.parametrize('english_help,version,treatment,message', [
+    (False, 3, 'READ_AS_IS', 'лексическая помощь требует'),
+    (True, 2, 'READ_AS_IS', 'план версии 3'),
+    (True, 3, 'TRANSLATE', 'чтение блоков в оригинале'),
 ])
 def test_lexical_fragment_exception_is_limited_to_enabled_v3_original(
-    english_help, version, treatment,
+    english_help, version, treatment, message,
 ):
     raw = lexical_analysis()
     raw['content_plan'].update(version=version, profile=f'content-plan-v{version}')
@@ -134,6 +154,37 @@ def test_lexical_fragment_exception_is_limited_to_enabled_v3_original(
         raw['content_plan'].pop('context_facts')
     raw['treatment_plan'][0]['treatment'] = treatment
     payload = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, json.dumps(raw), contract_version=version)
-    with pytest.raises(AnalysisMergeError, match='лексическая помощь требует'):
+    with pytest.raises(AnalysisMergeError, match=message):
         validate_content_plan(payload, {'b1': 'block'}, {'block': 'Echo. The cat sat.'},
                               english_help=english_help)
+
+
+def test_english_help_analysis_rejects_before_you_read_materials():
+    raw = lexical_analysis()
+    raw['before_you_read'] = [dict(expression='Echo', explanation='A returning sound.')]
+    payload = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, json.dumps(raw), contract_version=3)
+    with pytest.raises(AnalysisMergeError, match='не использует материалы BYR'):
+        validate_content_plan(payload, {'b1': 'block'}, {'block': 'Echo. The cat sat.'},
+                              english_help=True)
+
+
+def test_english_help_allows_explanation_difficulties_for_fragment_help():
+    raw = lexical_analysis()
+    raw['content_plan']['difficulties'][0]['help_kind'] = 'explanation'
+    payload = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, json.dumps(raw), contract_version=3)
+    validate_content_plan(payload, {'b1': 'block'}, {'block': 'Echo. The cat sat.'},
+                          english_help=True)
+
+
+def test_english_help_analysis_rejects_two_difficulties_for_same_occurrence():
+    raw = lexical_analysis()
+    duplicate = dict(raw['content_plan']['difficulties'][0])
+    duplicate.update(
+        id='echo-idiom', kind='idiom',
+        required_points=[dict(id='idiomatic-meaning', description='Meaning of the expression')],
+    )
+    raw['content_plan']['difficulties'].append(duplicate)
+    payload = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, json.dumps(raw), contract_version=3)
+    with pytest.raises(AnalysisMergeError, match='одно место'):
+        validate_content_plan(payload, {'b1': 'block'}, {'block': 'Echo. The cat sat.'},
+                              english_help=True)
