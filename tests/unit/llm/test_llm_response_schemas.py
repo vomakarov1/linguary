@@ -29,6 +29,8 @@ def test_name_analysis_extension_for_versions_1_2_3(version: int) -> None:
     candidate = next(node for node in _walk(strict_json_schema(model)) if isinstance(node, dict) and "name_translation_assessment" in node.get("properties", {}))
     assert "name_translation_assessment" in candidate["required"]
     assert candidate["properties"]["name_translation_assessment"]
+    assessment = next(node for node in _walk(strict_json_schema(model)) if isinstance(node, dict) and "opaque_name" in node.get("properties", {}))
+    assert "opaque_name" in assessment["required"]
     with pytest.raises(LLMResponseFormatError):
         schema_for(LLMResponseKind.CHAPTER_ANALYSIS, contract_version=version, name_translation_policy_version=2)
 

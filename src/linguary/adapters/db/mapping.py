@@ -699,14 +699,19 @@ def _decode_name_translation_evidence(value: object) -> NameTranslationEvidence 
             assessment_data = observation["assessment"]
             assessment = None
             if assessment_data is not None:
-                assessment_data = _object(assessment_data, {"applied_method", "eligible_without_review", "review_reasons", "rationale"})
-                if type(assessment_data["eligible_without_review"]) is not bool:
+                if type(assessment_data) is not dict or set(assessment_data) not in (
+                    {"applied_method", "eligible_without_review", "review_reasons", "rationale"},
+                    {"applied_method", "eligible_without_review", "review_reasons", "rationale", "opaque_name"},
+                ):
+                    raise ValueError("неверные поля оценки имени")
+                if type(assessment_data["eligible_without_review"]) is not bool or type(assessment_data.get("opaque_name", False)) is not bool:
                     raise ValueError("неверный признак пригодности")
                 assessment = NameTranslationAssessment(
                     applied_method=_string(assessment_data["applied_method"]),
                     eligible_without_review=assessment_data["eligible_without_review"],
                     review_reasons=tuple(_string(reason) for reason in _array(assessment_data["review_reasons"])),
                     rationale=_string(assessment_data["rationale"]),
+                    opaque_name=assessment_data.get("opaque_name", False),
                 )
             if type(observation["confidence"]) not in (int, float) or type(observation["model_flagged_review"]) is not bool:
                 raise ValueError("неверные поля наблюдения")

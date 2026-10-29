@@ -37,6 +37,16 @@ def test_inconsistent_assessment_cannot_exempt() -> None:
     assert not evidence.supports(NameTranslationPolicy(1, NameTranslationStrategy.SOUND), "conditions-1")
 
 
+def test_meaning_sound_requires_explicit_opaque_name() -> None:
+    implicit = NameTranslationAssessment("sound", True, (), "Имя непрозрачно")
+    explicit = NameTranslationAssessment("sound", True, (), "Имя непрозрачно", opaque_name=True)
+    assert not implicit.supports(NameTranslationStrategy.MEANING)
+    assert explicit.supports(NameTranslationStrategy.MEANING)
+    assert implicit.supports(NameTranslationStrategy.SOUND)
+    with pytest.raises(ValueError):
+        NameTranslationAssessment("sound", True, (), "Имя непрозрачно", opaque_name="true")
+
+
 def test_unknown_or_foreign_evidence_cannot_exempt() -> None:
     observation = NameTranslationObservation(
         "Ровенкло", 0.99, False, NameTranslationAssessment("sound", True, (), "Передано по звучанию")

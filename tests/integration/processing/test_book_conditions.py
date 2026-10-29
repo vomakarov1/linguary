@@ -249,6 +249,22 @@ async def test_unknown_policy_version_refused(tmp_path):
         await app.aclose()
 
 
+@pytest.mark.parametrize('invalid_policy', [None, [], 'sound', {'version': 1}, {'version': 1, 'strategy': 'sound', 'extra': True}])
+async def test_explicit_null_policy_refused(tmp_path, invalid_policy):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        await app.analysis.start('book-1')
+        conditions = app.book_conditions.require('book-1')
+        changed = replace(conditions, payload={**conditions.payload, 'name_translation_policy': invalid_policy})
+        with pytest.raises(ConditionsError, match='conditions_unavailable'):
+            app.book_runtime.settings_for(changed)
+        with pytest.raises(ConditionsError, match='conditions_unavailable'):
+            app.book_runtime.factory(app.book_runtime.settings_for(conditions), conditions=changed)
+    finally:
+        await app.aclose()
+
+
 @pytest.mark.parametrize('level', ['a2', 'b1', 'b2'])
 async def test_english_help_and_reader_level_keep_policy(tmp_path, level):
     app = make_app(tmp_path)

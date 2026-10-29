@@ -184,6 +184,7 @@ def _glossary_candidate(schema: GlossaryCandidateSchema) -> GlossaryCandidateRes
                 eligible_without_review=schema.name_translation_assessment.eligible_without_review,
                 review_reasons=tuple(schema.name_translation_assessment.review_reasons),
                 rationale=schema.name_translation_assessment.rationale,
+                opaque_name=schema.name_translation_assessment.opaque_name,
             )
             if isinstance(schema, GlossaryCandidateWithNameAssessmentSchema)
             and schema.name_translation_assessment is not None else None

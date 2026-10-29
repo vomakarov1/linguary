@@ -23,7 +23,7 @@ def analysis_reply(*, treatment="READ_AS_IS", assessment=True):
     if assessment:
         candidate["name_translation_assessment"] = {"applied_method": "sound",
             "eligible_without_review": True, "review_reasons": [],
-            "rationale": "Однозначное имя."}
+            "rationale": "Однозначное имя.", "opaque_name": True}
     return FakeReply.of_payload({
         "treatment_plan": [{"source_block_id": "b1", "treatment": treatment}],
         "glossary_candidates": [candidate],

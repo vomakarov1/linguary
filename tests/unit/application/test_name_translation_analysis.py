@@ -15,7 +15,7 @@ async def test_whole_chapter_retains_observation() -> None:
         "source_text": "Alice", "type": "person", "suggested_translation": "Элис",
         "confidence": 0.9, "model_flagged_review": False, "note": None,
         "name_translation_assessment": {"applied_method": "sound", "eligible_without_review": True,
-            "review_reasons": [], "rationale": "Однозначное имя."},
+            "review_reasons": [], "rationale": "Однозначное имя.", "opaque_name": True},
     }])
     scenario, _ = make_analyze_chapter(unit_of_work, FakeLLMClient.always(reply))
     scenario._context_builder = ContextBuilder(name_translation_policy=NameTranslationPolicy(1, NameTranslationStrategy.SOUND))

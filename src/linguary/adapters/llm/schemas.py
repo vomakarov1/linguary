@@ -253,6 +253,7 @@ class NameTranslationAssessmentSchema(_ResponseModel):
     eligible_without_review: bool = Field(strict=True)
     review_reasons: list[NameTranslationReviewReason]
     rationale: str = Field(min_length=1)
+    opaque_name: bool = Field(strict=True)
 
     @model_validator(mode="after")
     def _check_negative_reason(self) -> NameTranslationAssessmentSchema:

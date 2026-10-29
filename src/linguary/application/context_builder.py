@@ -1692,7 +1692,9 @@ def _with_name_policy(instructions: str, policy: NameTranslationPolicy | None, *
               'игру слов и анаграммы отмечай для проверки, не разрешай автоматически.')
     if analysis:
         common += (' Для каждого кандидата имени верни name_translation_assessment: применённый способ, '
-                   'eligible_without_review, review_reasons и краткое rationale на языке перевода. '
+                   'eligible_without_review, review_reasons, opaque_name и краткое rationale на языке перевода. '
+                   'Ставь opaque_name=true только если всё имя явно непрозрачно и в контексте нет ясных смысловых частей; '
+                   'в режиме «По смыслу» передача только по звучанию пригодна без проверки лишь для такого имени. '
                    'Если способ сомнителен, укажи причину проверки; отсутствие оценки не означает пригодность без проверки.')
     return f'{instructions}\n\n{rule}\n{common}'
 

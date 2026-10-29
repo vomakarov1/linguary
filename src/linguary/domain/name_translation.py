@@ -47,11 +47,14 @@ class NameTranslationAssessment:
     eligible_without_review: bool
     review_reasons: tuple[NameTranslationReviewReason, ...]
     rationale: str
+    opaque_name: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "applied_method", NameTranslationMethod(self.applied_method))
         if type(self.eligible_without_review) is not bool:
             raise ValueError("eligibility must be a boolean")
+        if type(self.opaque_name) is not bool:
+            raise ValueError("opaque name flag must be a boolean")
         if not isinstance(self.review_reasons, (tuple, list)):
             raise ValueError("review reasons must be a sequence")
         object.__setattr__(self, "review_reasons", tuple(NameTranslationReviewReason(reason) for reason in self.review_reasons))
@@ -65,10 +68,8 @@ class NameTranslationAssessment:
             return False
         if strategy == NameTranslationStrategy.SOUND:
             return self.applied_method == NameTranslationMethod.SOUND
-        return self.applied_method in (
-            NameTranslationMethod.SOUND,
-            NameTranslationMethod.MEANING,
-            NameTranslationMethod.MIXED,
+        return self.applied_method in (NameTranslationMethod.MEANING, NameTranslationMethod.MIXED) or (
+            self.applied_method == NameTranslationMethod.SOUND and self.opaque_name
         )
 
 

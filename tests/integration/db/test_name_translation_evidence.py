@@ -33,7 +33,7 @@ def _evidence() -> NameTranslationEvidence:
         1, "conditions-1", 1, NameTranslationStrategy.SOUND,
         (
             NameTranslationObservation("Уинстон Смит", 0.93, False,
-                NameTranslationAssessment("sound", True, (), "Звучание имени")),
+                NameTranslationAssessment("sound", True, (), "Звучание имени", opaque_name=True)),
             NameTranslationObservation("Уинстон Смит", 0.68, True,
                 NameTranslationAssessment("uncertain", False, ("ambiguous",), "Есть сомнение")),
         ),
@@ -61,6 +61,17 @@ def test_evidence_round_trip(unit_of_work) -> None:
     assert not loaded.glossary_candidates[0].name_translation_evidence.supports(
         NameTranslationPolicy(1, NameTranslationStrategy.SOUND), "conditions-1"
     )
+
+
+def test_old_assessment_without_opaque_name_defaults_false(unit_of_work, engine) -> None:
+    _seed(unit_of_work, evidence=_evidence())
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE glossary_candidates SET name_translation_evidence_json = "
+                                "json_remove(name_translation_evidence_json, '$.observations[0].assessment.opaque_name')"))
+    with unit_of_work.transaction() as uow:
+        loaded = uow.analyses.get_for_section("book-1", make_analysis().section_id)
+    assessment = loaded.glossary_candidates[0].name_translation_evidence.observations[0].assessment
+    assert assessment.opaque_name is False
 
 
 def test_null_is_legacy(unit_of_work) -> None:

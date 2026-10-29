@@ -40,7 +40,7 @@ from linguary.adapters.db.system_settings import SystemSettingsStore
 from linguary.adapters.llm.rate_limit import LLMRateLimiter
 from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
 from linguary.application.recovery import RecoveryPolicy
-from linguary.application.book_conditions import BookConditionsService
+from linguary.application.book_conditions import BookConditionsService, ConditionsError
 from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
 from linguary.composition.system_settings import SystemSettingsService
@@ -283,7 +283,13 @@ def build_application(
     def generation_factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
         profile = content_plan_profile if conditions is None else conditions.payload["profile"]
         templates = None if conditions is None else conditions.payload["prompt_templates"]
-        policy = None if conditions is None or "name_translation_policy" not in conditions.payload else NameTranslationPolicy(**conditions.payload["name_translation_policy"])
+        if conditions is None or "name_translation_policy" not in conditions.payload:
+            policy = None
+        else:
+            try:
+                policy = NameTranslationPolicy(**conditions.payload["name_translation_policy"])
+            except (TypeError, ValueError):
+                raise ConditionsError("conditions_unavailable") from None
         conditions_id = None if conditions is None else conditions.id
         queue = task_queue if conditions is None else BoundTaskQueue(task_queue, book_conditions, conditions.id, task_id_factory)
         configured_client = ConfiguredLLMClient(candidate.llm)

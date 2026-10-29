@@ -35,10 +35,11 @@ def _review(case, *, legacy=False):
             reason = case.get('reason')
             missing = case.get('assessment') == 'missing' or case.get('chapter_assessments', ['present'] * case['chapters'])[number] == 'missing'
             assessment = None if missing else NameTranslationAssessment(
-                'sound' if mode is NameTranslationStrategy.SOUND or case['id'] in ('alice-meaning', 'bennet-meaning', 'opaque-meaning') else 'meaning',
+                'sound' if mode is NameTranslationStrategy.SOUND or case.get('opaque_name') else 'mixed' if case['id'] == 'bennet-meaning' else 'meaning',
                 reason is None,
                 (reason,) if reason else (),
                 'Оценка для фиксированного сценария.',
+                opaque_name=case.get('opaque_name', False),
             )
             observations.append(NameTranslationObservation(
                 item.get('form', chapter_form), item.get('confidence', 0.9), case.get('flagged', False), assessment,

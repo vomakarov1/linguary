@@ -165,10 +165,9 @@ class BookRuntimeResolver:
 
     def settings_for(self, conditions):
         payload = conditions.payload
-        policy_data = payload.get('name_translation_policy')
-        if policy_data is not None:
+        if 'name_translation_policy' in payload:
             try:
-                policy = NameTranslationPolicy(**thaw(policy_data))
+                policy = NameTranslationPolicy(**thaw(payload['name_translation_policy']))
             except (TypeError, ValueError):
                 raise ConditionsError('conditions_unavailable') from None
         else:
