@@ -19,8 +19,10 @@ from linguary.application.context_builder import (
     chapter_analysis_instructions,
     chapter_fragment_instructions,
     textual_blocks,
+    snapshot_prompt_templates,
 )
 from linguary.domain import BlockTreatment, BlockType, ConceptType, SupportStatus
+from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
 
 NEIGHBOUR_TEXT = "The neighbouring chapter must never reach the model."
 
@@ -31,6 +33,52 @@ FRAGMENTED_TEXTS = (
     "Paragraph three.",
     "Paragraph four.",
 )
+
+
+def _policy(strategy):
+    return NameTranslationPolicy(version=1, strategy=NameTranslationStrategy(strategy))
+
+
+def test_sound_does_not_translate_components():
+    templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level='b2', name_translation_policy=_policy('sound'))
+    assert 'произношение' in templates['analysis']
+    assert 'не переводи' in templates['analysis']
+    assert 'смысловые части' in templates['analysis']
+
+
+def test_meaning_keeps_opaque_parts():
+    templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level='b2', name_translation_policy=_policy('meaning'))
+    assert 'ясные смысловые части' in templates['analysis']
+    assert 'непрозрачные части' in templates['analysis']
+    assert 'этимологию' in templates['analysis']
+
+
+@pytest.mark.parametrize('profile', ['legacy-v1', 'content-plan-v2', 'content-plan-v3'])
+@pytest.mark.parametrize('english_help', [False, True])
+def test_all_profiles_and_english_help(profile, english_help):
+    templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level='b2', profile=profile, english_help=english_help, name_translation_policy=_policy('meaning'))
+    assert all('непрозрачные части' in templates[key] for key in ('analysis', 'fragment', 'translation', 'regeneration'))
+    assert templates['name_translation_policy'] == {'version': 1, 'strategy': 'meaning'}
+
+
+def test_legacy_prompt_and_input_text_unchanged():
+    section = make_analysis_section(texts=('Alice stood still.',))
+    document = make_analysis_document((section,))
+    baseline = ContextBuilder().for_chapter_analysis(document=document, section=section)
+    explicit = ContextBuilder(name_translation_policy=None).for_chapter_analysis(document=document, section=section)
+    assert explicit.request.instructions == baseline.request.instructions
+    assert explicit.request.input_text == baseline.request.input_text
+    assert explicit.request.name_translation_policy_version is None
+
+
+def test_fragment_receives_pinned_strategy():
+    section = make_analysis_section(texts=FRAGMENTED_TEXTS)
+    document = make_analysis_document((section,))
+    fragment = plan_fragments(textual_blocks(section), max_blocks=2)[0]
+    context = ContextBuilder(name_translation_policy=_policy('meaning')).for_chapter_fragment(
+        document=document, section=section, fragment=fragment, fragment_count=2)
+    assert 'непрозрачные части' in context.request.instructions
+    assert context.request.name_translation_policy_version == 1
 
 
 def build_context(

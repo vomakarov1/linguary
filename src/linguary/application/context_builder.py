@@ -75,7 +75,9 @@ from linguary.domain import (
     footnote_marker,
     footnote_references,
     glossary_key,
+    TermConcept,
 )
+from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
 
 #: Maximum number of accumulated decisions from previous chapters passed into chapter analysis context.
 #: By the end of a novel, candidates can number in the hundreds, whereas requests only need those
@@ -393,6 +395,9 @@ class ContextBuilder:
         max_unit_source_chars: int = 8000,
         reader_level: str = "b2",
         prompt_templates: Mapping[str, str] | None = None,
+        user_decisions: Iterable[TermConcept] = (),
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] = (),
+        name_translation_policy: NameTranslationPolicy | Mapping[str, object] | None = None,
     ) -> None:
         if content_plan_profile not in {"legacy-v1", "content-plan-v2", "content-plan-v3"}:
             raise ContextBuildError("неизвестный профиль содержательного плана")
@@ -402,6 +407,10 @@ class ContextBuilder:
         self._content_plan_profile = content_plan_profile
         self._reader_level = reader_level.strip().lower()
         self._prompt_templates = MappingProxyType(dict(prompt_templates or {}))
+        saved_policy = self._prompt_templates.get('name_translation_policy')
+        self._name_translation_policy = _name_policy(name_translation_policy if name_translation_policy is not None else saved_policy)
+        self._user_decisions = tuple(user_decisions)
+        self._nonbinding_suggestions = tuple(nonbinding_suggestions)
         self._english_help = bool(self._prompt_templates.get("english_help"))
         if max_accumulated_candidates < 0:
             raise ContextBuildError(
@@ -419,12 +428,18 @@ class ContextBuilder:
         self._regeneration_context_blocks = regeneration_context_blocks
         self._language_notes_per_chapter = language_notes_per_chapter
 
+    @property
+    def name_translation_policy(self) -> NameTranslationPolicy | None:
+        return self._name_translation_policy
+
     def for_chapter_analysis(
         self,
         *,
         document: CanonicalDocument,
         section: DocumentSection,
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
+        user_decisions: Iterable[TermConcept] | None = None,
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None = None,
     ) -> ChapterAnalysisContext:
         """Context for analyzing a single chapter (PRD § 11, § 13, § 14, § 19).
 
@@ -441,11 +456,13 @@ class ContextBuilder:
             section=section,
             blocks=blocks,
             accumulated_candidates=accumulated_candidates,
-            instructions=self._prompt_templates.get("analysis") or chapter_analysis_instructions(
+            instructions=self._prompt_templates.get("analysis") or _with_name_policy(chapter_analysis_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
                 reader_level=self._reader_level,
-            ),
+            ), self._name_translation_policy, analysis=True),
+            user_decisions=user_decisions,
+            nonbinding_suggestions=nonbinding_suggestions,
             fragment_label=None,
         )
 
@@ -458,6 +475,8 @@ class ContextBuilder:
         fragment_count: int,
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
         findings: FragmentFindings | None = None,
+        user_decisions: Iterable[TermConcept] | None = None,
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None = None,
     ) -> ChapterAnalysisContext:
         """Context for analyzing a single fragment of a long chapter (PRD § 14, ALG-03).
 
@@ -476,11 +495,13 @@ class ContextBuilder:
             section=section,
             blocks=fragment.blocks,
             accumulated_candidates=accumulated_candidates,
-            instructions=self._prompt_templates.get("fragment") or chapter_fragment_instructions(
+            instructions=self._prompt_templates.get("fragment") or _with_name_policy(chapter_fragment_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
                 reader_level=self._reader_level,
-            ),
+            ), self._name_translation_policy, analysis=True),
+            user_decisions=user_decisions,
+            nonbinding_suggestions=nonbinding_suggestions,
             before_you_read_limit=10 // fragment_count + (fragment.order < 10 % fragment_count),
             language_notes_limit=self._language_notes_per_chapter // fragment_count + (fragment.order < self._language_notes_per_chapter % fragment_count),
             fragment_label=_fragment_label(fragment.order, fragment_count),
@@ -513,10 +534,10 @@ class ContextBuilder:
             analysis=analysis,
             glossary=glossary,
             book_candidates=book_candidates,
-            instructions=self._prompt_templates.get("translation") or translation_unit_instructions(
+            instructions=self._prompt_templates.get("translation") or _with_name_policy(translation_unit_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
-            ),
+            ), self._name_translation_policy),
             neighbours=(),
             recovery_child=recovery_child,
         )
@@ -550,10 +571,10 @@ class ContextBuilder:
             analysis=analysis,
             glossary=glossary,
             book_candidates=book_candidates,
-            instructions=self._prompt_templates.get("regeneration") or block_regeneration_instructions(
+            instructions=self._prompt_templates.get("regeneration") or _with_name_policy(block_regeneration_instructions(
                 source_language=document.source_language,
                 target_language=document.target_language,
-            ),
+            ), self._name_translation_policy),
             neighbours=self._neighbours(section, unit),
         )
 
@@ -595,6 +616,7 @@ class ContextBuilder:
             unit_id=unit.id,
             request=LLMRequest.for_translation(
                 contract_version=4 if self._english_help else version,
+                name_translation_policy_version=self._name_translation_policy.version if self._name_translation_policy else None,
                 instructions=instructions,
                 input_text=self._translation_input(
                     document=document,
@@ -720,6 +742,8 @@ class ContextBuilder:
         blocks: Sequence[DocumentBlock],
         accumulated_candidates: Iterable[GlossaryCandidate],
         instructions: str,
+        user_decisions: Iterable[TermConcept] | None,
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None,
         fragment_label: str | None,
         findings: FragmentFindings | None = None,
         before_you_read_limit: int = 10,
@@ -754,12 +778,15 @@ class ContextBuilder:
             section_id=section.id,
             request=LLMRequest.for_chapter_analysis(
                 contract_version=version,
+                name_translation_policy_version=self._name_translation_policy.version if self._name_translation_policy else None,
                 instructions=instructions,
                 input_text=self._chapter_input(
                     document=document,
                     section=section,
                     blocks=blocks,
                     accumulated_candidates=accumulated_candidates,
+                    user_decisions=user_decisions,
+                    nonbinding_suggestions=nonbinding_suggestions,
                     fragment_label=fragment_label,
                     findings=findings,
                 ),
@@ -815,19 +842,19 @@ class ContextBuilder:
         section: DocumentSection,
         blocks: Sequence[DocumentBlock],
         accumulated_candidates: Iterable[GlossaryCandidate],
+        user_decisions: Iterable[TermConcept] | None,
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None,
         fragment_label: str | None,
         findings: FragmentFindings | None = None,
     ) -> str:
         """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
-        parts = [
-            _chapter_header(
-                document=document, section=section, fragment_label=fragment_label
-            ),
-            _known_decisions(
-                self._selected_candidates(accumulated_candidates),
-                target_language=document.target_language,
-            ),
-        ]
+        parts = [_chapter_header(document=document, section=section, fragment_label=fragment_label)]
+        if self._name_translation_policy is None:
+            parts.append(_known_decisions(self._selected_candidates(accumulated_candidates), target_language=document.target_language))
+        else:
+            decisions = tuple(self._user_decisions if user_decisions is None else user_decisions)
+            suggestions = tuple(self._nonbinding_suggestions if nonbinding_suggestions is None else nonbinding_suggestions)
+            parts.extend(_name_context(decisions, (*suggestions, *self._selected_candidates(accumulated_candidates)), document.target_language))
         if findings is not None:
             parts.append(
                 "Уже найдено в предыдущих частях главы:\n"
@@ -1637,6 +1664,75 @@ def _known_decision_line(candidate: GlossaryCandidate) -> str:
     return f"{line} ({candidate.note.strip()})" if candidate.note.strip() else line
 
 
+def _name_policy(value: NameTranslationPolicy | Mapping[str, object] | None) -> NameTranslationPolicy | None:
+    if value is None:
+        return None
+    if isinstance(value, NameTranslationPolicy):
+        return value
+    if not isinstance(value, Mapping):
+        raise ContextBuildError('недопустимая политика передачи имён')
+    try:
+        return NameTranslationPolicy(**value)
+    except (TypeError, ValueError):
+        raise ContextBuildError('недопустимая политика передачи имён') from None
+
+
+def _with_name_policy(instructions: str, policy: NameTranslationPolicy | None, *, analysis: bool = False) -> str:
+    if policy is None:
+        return instructions
+    if policy.strategy == NameTranslationStrategy.SOUND:
+        rule = ('Передавай имена и названия по звучанию: сохраняй произношение средствами языка перевода; '
+                'не переводи смысловые части имени и не подменяй произношение побуквенной транслитерацией.')
+    else:
+        rule = ('Передавай имена и названия по смыслу: переводи только ясные смысловые части, '
+                'а непрозрачные части передавай по звучанию средствами языка перевода.')
+    common = ('Подтверждённые решения пользователя approved и locked сохраняй дословно: они сильнее режима. '
+              'Предложения модели и suggested — необязательные подсказки, а не принятые решения. '
+              'Не угадывай этимологию, не заменяй личное имя творческим вариантом; '
+              'игру слов и анаграммы отмечай для проверки, не разрешай автоматически.')
+    if analysis:
+        common += (' Для каждого кандидата имени верни name_translation_assessment: применённый способ, '
+                   'eligible_without_review, review_reasons и краткое rationale на языке перевода. '
+                   'Если способ сомнителен, укажи причину проверки; отсутствие оценки не означает пригодность без проверки.')
+    return f'{instructions}\n\n{rule}\n{common}'
+
+
+def _name_context(
+    decisions: Sequence[TermConcept],
+    suggestions: Sequence[TermConcept | GlossaryCandidate],
+    language: str,
+) -> tuple[str, str]:
+    accepted: list[str] = []
+    accepted_keys: set[str] = set()
+    for concept in decisions:
+        variant = concept.variant_for(language)
+        if variant is None or not concept.status.is_user_decision or not variant.status.is_user_decision:
+            continue
+        accepted_keys.add(glossary_key(concept.canonical_source_text))
+        line = f'- {concept.canonical_source_text} [{concept.type}] -> {variant.text}'
+        accepted.append(f'{line} ({concept.note.strip()})' if concept.note.strip() else line)
+    optional: list[str] = []
+    seen = set(accepted_keys)
+    for item in suggestions:
+        if isinstance(item, GlossaryCandidate):
+            source, kind, translation, note = item.source_text, item.type, item.suggested_translation, item.note
+        else:
+            variant = item.variant_for(language)
+            if variant is None:
+                continue
+            source, kind, translation, note = item.canonical_source_text, item.type, variant.text, item.note
+        key = glossary_key(source)
+        if key in seen:
+            continue
+        seen.add(key)
+        line = f'- {source} [{kind}] -> {translation}'
+        optional.append(f'{line} ({note.strip()})' if note.strip() else line)
+    return (
+        f'Принятые решения пользователя ({language}); сохраняй форму дословно:\n' + ('\n'.join(accepted) if accepted else 'Нет.'),
+        f'Необязательные подсказки ({language}); это не принятые решения:\n' + ('\n'.join(optional) if optional else 'Нет.'),
+    )
+
+
 def _chapter_blocks(blocks: Sequence[DocumentBlock]) -> str:
     """Textual blocks of chapter under aliases."""
     lines = ["Текстовые блоки главы:"]
@@ -1710,7 +1806,7 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     }, ensure_ascii=False)
 
 
-def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False):
+def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None):
     """Render immutable instruction templates without book text or secrets."""
     languages = dict(source_language=source_language, target_language=target_language)
     result = {
@@ -1734,4 +1830,9 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
             content_processing=processing,
             english_help_processing=processing,
         )
+    policy = _name_policy(name_translation_policy)
+    if policy is not None:
+        result['name_translation_policy'] = {'version': policy.version, 'strategy': policy.strategy.value}
+        for key in ('analysis', 'fragment', 'translation', 'regeneration'):
+            result[key] = _with_name_policy(result[key], policy, analysis=key in ('analysis', 'fragment'))
     return result

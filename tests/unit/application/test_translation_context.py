@@ -20,6 +20,7 @@ from linguary.application.context_builder import (
     ContextBuildError,
     notes_budget,
 )
+from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
 from linguary.application.llm_dto import (
     BlockResultResponse,
     LanguageNoteResponse,
@@ -141,6 +142,20 @@ def build_context(
         analysis=make_analysis(unit),
         glossary=snapshot if snapshot is not None else make_snapshot(),
     ), unit
+
+
+def test_fragment_translation_regeneration_receive_pinned_strategy():
+    policy = NameTranslationPolicy(version=1, strategy=NameTranslationStrategy.MEANING)
+    builder = ContextBuilder(name_translation_policy=policy)
+    context, unit = build_context(builder=builder)
+    assert 'непрозрачные части' in context.request.instructions
+    assert context.request.name_translation_policy_version == 1
+    section = make_section(make_blocks(2))
+    one = make_unit(section.blocks[:1], treatments=(BlockTreatment.TRANSLATE,))
+    regenerated = builder.for_block_regeneration(document=make_document(section), section=section,
+        unit=one, analysis=make_analysis(one), glossary=make_snapshot())
+    assert 'непрозрачные части' in regenerated.request.instructions
+    assert regenerated.request.name_translation_policy_version == 1
 
 
 def test_request_asks_for_translation_result() -> None:

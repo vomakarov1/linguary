@@ -83,6 +83,7 @@ from linguary.domain import (
     TokenUsage,
     LLMCallStage,
     TreatmentPlan,
+    TermConcept,
     apply_book_event,
 )
 
@@ -154,7 +155,7 @@ class AnalyzeChapter:
         is sent to the model in sequential fragments, and its analysis is assembled
         from their responses (PRD § 14, ALG-03).
         """
-        document, accumulated = self._load(command)
+        document, accumulated, user_decisions, nonbinding_suggestions = self._load(command)
         section = _section_of(document, command)
         blocks = textual_blocks(section)
         if not blocks:
@@ -168,6 +169,8 @@ class AnalyzeChapter:
                 section=section,
                 blocks=blocks,
                 accumulated=accumulated,
+                user_decisions=user_decisions,
+                nonbinding_suggestions=nonbinding_suggestions,
                 command=command,
             )
         else:
@@ -177,6 +180,8 @@ class AnalyzeChapter:
                 blocks=blocks,
                 fragments=fragments,
                 accumulated=accumulated,
+                user_decisions=user_decisions,
+                nonbinding_suggestions=nonbinding_suggestions,
                 command=command,
             )
         self._save(command.book_id, analysis, task_id=command.task_id)
@@ -189,11 +194,14 @@ class AnalyzeChapter:
         section: DocumentSection,
         blocks: Sequence[DocumentBlock],
         accumulated: Sequence[GlossaryCandidate],
+        user_decisions: Sequence[TermConcept],
+        nonbinding_suggestions: Sequence[TermConcept],
         command: AnalyzeChapterCommand,
     ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
         """Main scenario: entire chapter in a single request (PRD § 14)."""
         context = self._context_builder.for_chapter_analysis(
-            document=document, section=section, accumulated_candidates=accumulated
+            document=document, section=section, accumulated_candidates=accumulated,
+            user_decisions=user_decisions, nonbinding_suggestions=nonbinding_suggestions,
         )
         context = replace(
             context,
@@ -221,6 +229,8 @@ class AnalyzeChapter:
         blocks: Sequence[DocumentBlock],
         fragments: Sequence[ChapterFragment],
         accumulated: Sequence[GlossaryCandidate],
+        user_decisions: Sequence[TermConcept],
+        nonbinding_suggestions: Sequence[TermConcept],
         command: AnalyzeChapterCommand,
     ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
         """Fallback scenario: long chapter processed by fragments (PRD § 14, ALG-03).
@@ -262,6 +272,8 @@ class AnalyzeChapter:
                 fragment=fragment,
                 fragment_count=len(fragments),
                 accumulated_candidates=accumulated,
+                user_decisions=user_decisions,
+                nonbinding_suggestions=nonbinding_suggestions,
                 findings=previous,
             )
             context = replace(
@@ -299,7 +311,7 @@ class AnalyzeChapter:
 
     def _load(
         self, command: AnalyzeChapterCommand
-    ) -> tuple[CanonicalDocument, tuple[GlossaryCandidate, ...]]:
+    ) -> tuple[CanonicalDocument, tuple[GlossaryCandidate, ...], tuple[TermConcept, ...], tuple[TermConcept, ...]]:
         """Reads the book and accumulated glossary decisions for the book.
 
         The user's decision on a candidate overrides the model's suggestion: analysis repeats
@@ -318,6 +330,14 @@ class AnalyzeChapter:
             current_order = _section_of(document, command).order
             orders = {section.id: section.order for section in document.sections}
             analyses = transaction.analyses.list_for_book(command.book_id)
+            concepts = transaction.glossary.list_for_book(command.book_id)
+            if self._context_builder.name_translation_policy is not None:
+                accumulated = tuple(candidate for analysis in analyses
+                    if orders.get(analysis.section_id, current_order) < current_order
+                    for candidate in analysis.glossary_candidates)
+                decisions = tuple(concept for concept in concepts if concept.status.is_user_decision)
+                suggestions = tuple(concept for concept in concepts if not concept.status.is_user_decision)
+                return document, accumulated, decisions, suggestions
             accumulated = candidates_with_decisions(
                 (
                     candidate
@@ -325,7 +345,7 @@ class AnalyzeChapter:
                     if orders.get(analysis.section_id, current_order) < current_order
                     for candidate in analysis.glossary_candidates
                 ),
-                transaction.glossary.list_for_book(command.book_id),
+                concepts,
                 language=document.target_language,
                 decided_only=(
                     candidate
@@ -334,7 +354,7 @@ class AnalyzeChapter:
                     for candidate in analysis.glossary_candidates
                 ),
             )
-        return document, accumulated
+        return document, accumulated, (), ()
 
     async def _request_analysis(
         self,

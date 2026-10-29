@@ -18,6 +18,7 @@ from analysis_fakes import (
 )
 
 from linguary.adapters.llm import FakeLLMClient
+from linguary.application.context_builder import ContextBuilder
 from linguary.application.ports.llm import LLMTransportError
 from linguary.application.use_cases.analyze_chapter import (
     AnalyzeChapterCommand,
@@ -33,6 +34,7 @@ from linguary.domain import (
     TermVariant,
     TokenUsage,
 )
+from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
 
 
 def two_block_book() -> FakeUnitOfWork:
@@ -304,6 +306,50 @@ def _decision(
             ),
         ),
     )
+
+
+async def test_first_request_after_reanalysis_contains_saved_decisions() -> None:
+    unit_of_work = two_block_book()
+    unit_of_work.glossary.save(_decision('approved-1', 'Duskmere', 'Даскмер', TermStatus.APPROVED))
+    unit_of_work.glossary.save(_decision('suggested-1', 'Ravenwood', 'Рейвенвуд', TermStatus.SUGGESTED))
+    client = FakeLLMClient.always(analysis_reply())
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+    scenario._context_builder = ContextBuilder(name_translation_policy=NameTranslationPolicy(1, NameTranslationStrategy.MEANING))
+
+    await scenario(command())
+
+    request = client.requests[0]
+    assert request.name_translation_policy_version == 1
+    assert 'name_translation_assessment' in request.instructions
+    assert 'Даскмер' in request.input_text
+    assert 'Принятые решения пользователя' in request.input_text
+    assert 'Рейвенвуд' in request.input_text
+    assert 'Необязательные подсказки' in request.input_text
+    assert request.input_text.index('Даскмер') < request.input_text.index('Рейвенвуд')
+
+
+async def test_suggested_and_model_candidates_are_not_accepted() -> None:
+    sections = (
+        make_analysis_section(section_id='section-1', order=0, texts=('First chapter.',)),
+        make_analysis_section(section_id='section-2', order=1, texts=('Second chapter.',)),
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    unit_of_work.analyses.save(BOOK_ID, make_chapter_analysis(section_id='section-1', candidates=(
+        make_analysis_candidate(source_text='Ravenwood', suggested_translation='Рейвенвуд'),
+    )))
+    unit_of_work.glossary.save(_decision('approved-1', 'Ravenwood', 'Воронолесье', TermStatus.APPROVED))
+    unit_of_work.glossary.save(_decision('suggested-1', 'Stonebridge', 'Стоунбридж', TermStatus.SUGGESTED))
+    client = FakeLLMClient.always(analysis_reply(aliases=('b1',)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+    scenario._context_builder = ContextBuilder(name_translation_policy=NameTranslationPolicy(1, NameTranslationStrategy.MEANING))
+
+    await scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id='section-2'))
+
+    request = client.requests[0].input_text
+    accepted, optional = request.split('Необязательные подсказки', 1)
+    assert 'Воронолесье' in accepted
+    assert 'Рейвенвуд' not in request
+    assert 'Стоунбридж' in optional
 
 
 async def test_repeated_analysis_sees_user_decisions_of_whole_book() -> None:
