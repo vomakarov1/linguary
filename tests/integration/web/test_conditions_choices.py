@@ -72,6 +72,41 @@ def test_legacy_read_without_choice(configured_client, configured_application):
         assert transaction.work.latest_conditions(scenario.book_id) is None
 
 
+def test_conditions_not_saved_is_distinct_from_legacy(configured_client, configured_application):
+    scenario = legacy_book(configured_application)
+    response = configured_client.get(f'/books/{scenario.book_id}', headers={'Accept': 'text/html'})
+    assert 'Условия ещё не сохранены' in response.text
+    assert configured_client.get(f'/books/{scenario.book_id}').json()['conditions']['name_translation_state'] == 'not_saved'
+    assert choice(configured_client, scenario).status_code == 201
+    response = configured_client.get(f'/books/{scenario.book_id}', headers={'Accept': 'text/html'})
+    assert 'Сохранённые условия без способа передачи имён' in response.text
+    assert 'Сохранённый способ передачи имён: По звучанию' not in response.text
+    legacy = configured_client.get(f'/books/{scenario.book_id}').json()['conditions']
+    assert legacy['name_translation_state'] == 'legacy' and legacy['name_translation_policy'] is None
+
+
+def test_continue_legacy_says_name_strategy_is_unchanged(configured_client, configured_application):
+    scenario = legacy_book(configured_application)
+    text = configured_client.get(f'/books/{scenario.book_id}', headers={'Accept': 'text/html'}).text
+    assert 'текущая общая стратегия имён не применяется' in text
+
+
+def test_saved_book_mode_differs_from_global(configured_client, configured_application):
+    scenario = legacy_book(configured_application)
+    assert choice(configured_client, scenario, 'reanalyze').status_code == 201
+    config = configured_client.post('/system/config', json=dict(
+        provider='openai_compatible', model='fake-model', base_url=configured_application.settings.llm.base_url,
+        requests_per_minute=None, concurrency=configured_application.settings.worker.concurrency,
+        expected_revision=0, name_translation_strategy='meaning',
+    ))
+    assert config.status_code == 200, config.text
+    assert config.json()['reading']['name_translation_strategy'] == 'meaning'
+    detail = configured_client.get(f'/books/{scenario.book_id}')
+    assert detail.json()['conditions']['name_translation_state'] == 'configured'
+    assert detail.json()['conditions']['name_translation_policy'] == {'version': 1, 'strategy': 'sound'}
+    assert 'По звучанию' in configured_client.get(f'/books/{scenario.book_id}', headers={'Accept': 'text/html'}).text
+
+
 def test_legacy_choice_does_not_invent_historical_provenance(configured_client, configured_application):
     scenario = legacy_book(configured_application, results=True)
     assert choice(configured_client, scenario).status_code == 201

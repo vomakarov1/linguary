@@ -16,7 +16,7 @@
   {% if settings_error or not can_submit %}
   <p><a href="{{ config_url }}">{% if is_conflict or not can_submit %}Загрузить актуальные настройки{% else %}Вернуться к конфигурации{% endif %}</a></p>
   {% endif %}
-  {% for field, error in field_errors.items() if field not in ('provider', 'base_url', 'api_key', 'model', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'proxy_mode', 'proxy_url', 'requests_per_minute', 'concurrency', 'reader_level') %}
+  {% for field, error in field_errors.items() if field not in ('provider', 'base_url', 'api_key', 'model', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'proxy_mode', 'proxy_url', 'requests_per_minute', 'concurrency', 'reader_level', 'name_translation_strategy') %}
   <p class="notice" role="alert">{{ error }}</p>
   {% endfor %}
   <form class="settings-form" action="{{ config_url }}" method="post">
@@ -146,6 +146,21 @@
         </select>
         {% if 'reader_level' in field_errors %}<span id="settings-error-reader_level" class="settings-field-error" role="alert">{{ field_errors['reader_level'] }}</span>{% endif %}
         <p>Определяет долю переводимых блоков (TRANSLATE), подсказок (GLOSSARY_ONLY) и текста в оригинале (READ_AS_IS) при подготовке билингвы.</p>
+      </div>
+    </fieldset>
+
+    <fieldset class="settings-group">
+      <legend>Передача имён и названий</legend>
+      <div class="settings-field" id="settings-field-name_translation_strategy">
+        <label for="settings-name_translation_strategy">Способ передачи имён и названий</label>
+        <select id="settings-name_translation_strategy" name="name_translation_strategy" {% if 'name_translation_strategy' in field_errors %}aria-invalid="true" aria-describedby="settings-error-name_translation_strategy"{% endif %}>
+          <option value="sound" {% if form_values.name_translation_strategy == 'sound' %}selected{% endif %}>По звучанию</option>
+          <option value="meaning" {% if form_values.name_translation_strategy == 'meaning' %}selected{% endif %}>По смыслу</option>
+        </select>
+        {% if 'name_translation_strategy' in field_errors %}<span id="settings-error-name_translation_strategy" class="settings-field-error" role="alert">{{ field_errors['name_translation_strategy'] }}</span>{% endif %}
+        <p>По звучанию: передаём произношение средствами целевого языка, не переводя составные части имени. Это не строгая побуквенная транслитерация.</p>
+        <p>По смыслу: переводим ясные значимые части имени или названия; непрозрачные части передаём по звучанию. Не подменяем личные имена и не угадываем этимологию.</p>
+        <p>Изменение общей настройки действует для новых условий книги. Для уже сохранённых условий нужен явный повторный анализ.</p>
       </div>
     </fieldset>
 

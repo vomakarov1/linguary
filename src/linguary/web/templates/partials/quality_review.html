@@ -10,6 +10,13 @@
   {% else %}
     <p>Уровень читателя неизвестен. Сохранённые условия отсутствуют.</p>
   {% endif %}
+  {% if data.conditions.name_translation_state == 'not_saved' %}
+    <p>Условия ещё не сохранены. Способ передачи имён будет закреплён при новом анализе.</p>
+  {% elif data.conditions.name_translation_state == 'legacy' %}
+    <p>Сохранённые условия без способа передачи имён используют прежние правила.</p>
+  {% elif data.conditions.name_translation_state == 'configured' %}
+    <p>Сохранённый способ передачи имён: {% if data.conditions.name_translation_policy.strategy == 'sound' %}По звучанию{% else %}По смыслу{% endif %}.</p>
+  {% endif %}
   <p>{% if data.epub_ready %}Обязательная обработка завершена: EPUB готов к сборке.{% else %}Обязательная обработка не завершена: полный EPUB пока недоступен.{% endif %}</p>
   <h2>Восстановление обработки</h2>
   <p>Покрытие: {{ data.recovery.covered }} из {{ data.recovery.total }}. Обращения: {{ data.recovery.calls_used }} из {{ data.recovery.limit }}.</p>
@@ -38,7 +45,7 @@
 {% if not quality_read_only|default(false) %}
 <section class="panel" aria-label="Явные действия с условиями и пределами">
   {% if quality_ui.legacy %}
-    <p>Продолжение сохранит старые материалы, а будущие запросы будут использовать выбранные сейчас условия. Условия прежних материалов останутся известны не полностью.</p>
+    <p>Продолжение сохранит старые материалы и прежние правила для будущих запросов: текущая общая стратегия имён не применяется. Условия прежних материалов останутся известны не полностью.</p>
     <form method="post" action="/books/{{ quality_book_id }}/conditions">
       <input type="hidden" name="action" value="continue_legacy"><input type="hidden" name="expected_revision" value="0">
       <input type="hidden" name="settings_revision" value="{{ quality_ui.settings_revision }}">

@@ -220,6 +220,7 @@ def test_saved_conditions_visible_on_detail_result_and_poll(configured_client, c
         assert 'Профиль обработки: legacy-v1' in response.text
         assert 'Модель анализа: fake-model' in response.text
         assert 'Модель обработки: fake-model' in response.text
+        assert 'Сохранённые условия без способа передачи имён' in response.text
 
 
 def test_html_uploaded_budget_is_rejected_without_queue(configured_client, configured_application):

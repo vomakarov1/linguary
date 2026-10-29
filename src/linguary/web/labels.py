@@ -298,6 +298,7 @@ SETTINGS_STRING_FIELD = "Ожидается строка"
 SETTINGS_INTEGER_FIELD = "Ожидается целое число"
 SETTINGS_REVISION_FIELD = "Ожидается целая редакция не меньше нуля"
 SETTINGS_SAFE_FIELD = "Укажите значение без ключа и учётных данных"
+SETTINGS_NAME_TRANSLATION_STRATEGY_FIELD = "Выберите способ передачи имён: по звучанию или по смыслу"
 
 QUALITY_REVIEW_LABELS = {
     'not-requested': 'Добровольная вычитка выключена', 'running': 'Вычитка выполняется',

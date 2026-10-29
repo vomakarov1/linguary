@@ -67,6 +67,29 @@ def test_config_form_displays_current_nonsecret_values(configured_client):
     assert int(form['inputs']['concurrency']['value']) > 0
 
 
+def test_only_two_strategy_options(configured_client):
+    text = page(configured_client).text
+    form = FormPage(text).forms['/system/config']
+    assert form['selects']['name_translation_strategy']['value'] == 'sound'
+    assert text.count('<option value="sound"') == 1
+    assert text.count('<option value="meaning"') == 1
+    assert 'По звучанию' in text and 'По смыслу' in text
+
+
+def test_sound_label_describes_pronunciation(configured_client):
+    text = page(configured_client).text
+    assert 'произношение' in text
+    assert 'побуквенная' in text
+    assert 'новых условий' in text
+
+
+def test_strategy_error_is_attached_to_field(configured_client):
+    response = post(configured_client, name_translation_strategy='unknown')
+    assert response.status_code == 422
+    assert 'aria-describedby="settings-error-name_translation_strategy"' in response.text
+    assert 'aria-invalid="true"' in response.text
+
+
 def test_key_input_is_empty_and_password(configured_client):
     field = FormPage(page(configured_client).text).forms['/system/config']['inputs']['api_key']
     assert field['type'] == 'password' and 'value' not in field
