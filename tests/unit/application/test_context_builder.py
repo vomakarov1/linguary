@@ -26,6 +26,19 @@ from linguary.domain.name_translation import NameTranslationPolicy, NameTranslat
 
 NEIGHBOUR_TEXT = "The neighbouring chapter must never reach the model."
 
+
+def test_pronunciation_prompt_uses_context_without_new_level_setting():
+    templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=None,
+                                         pronunciation_help_enabled=True)
+    assert templates['pronunciation_candidates_version'] == 1
+    assert 'не задан' in templates['pronunciation_processing']
+    assert 'READ_AS_IS' in templates['pronunciation_processing']
+    assert 'длина и редкость' in templates['pronunciation_processing']
+    assert 'pronunciation_candidates_version' not in snapshot_prompt_templates(
+        source_language='en', target_language='ru', reader_level='b2')
+    with pytest.raises(ContextBuildError):
+        ContextBuilder(prompt_templates=templates | {'pronunciation_candidates_version': True})
+
 #: A chapter with four paragraphs: with a two-block limit it splits into two fragments.
 FRAGMENTED_TEXTS = (
     "Paragraph one.",

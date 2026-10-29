@@ -157,6 +157,24 @@ class SourceAnchorSchema(_ResponseModel):
     quote: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
 
 
+class PronunciationContextSchema(_ResponseModel):
+    meaning_in_context: Annotated[str, StringConstraints(min_length=1)] | None
+    part_of_speech: Annotated[str, StringConstraints(min_length=1)] | None
+    grammatical_form: Annotated[str, StringConstraints(min_length=1)] | None
+    is_proper_name: bool = Field(strict=True)
+
+
+class PronunciationCandidateSchema(_ResponseModel):
+    anchor: SourceAnchorSchema
+    form: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
+    context: PronunciationContextSchema
+    selection_reason: Literal['unpredictable_spelling', 'unpredictable_stress', 'context_dependent']
+
+
+class _PronunciationCandidatesSchema(_ResponseModel):
+    pronunciation_candidates: list[PronunciationCandidateSchema]
+
+
 class RequiredPointSchema(_ResponseModel):
     id: str = Field(min_length=1)
     description: str = Field(min_length=1)
@@ -276,3 +294,19 @@ class ChapterAnalysisV2WithNameAssessmentSchema(ChapterAnalysisV2Schema):
 
 class ChapterAnalysisV3WithNameAssessmentSchema(ChapterAnalysisV3Schema):
     glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+
+
+class TranslationWithPronunciationSchema(_PronunciationCandidatesSchema, TranslationResultSchema):
+    pass
+
+
+class TranslationV2WithPronunciationSchema(_PronunciationCandidatesSchema, TranslationResultV2Schema):
+    pass
+
+
+class TranslationV3WithPronunciationSchema(_PronunciationCandidatesSchema, TranslationResultV3Schema):
+    pass
+
+
+class TranslationV4WithPronunciationSchema(_PronunciationCandidatesSchema, TranslationResultV4Schema):
+    pass

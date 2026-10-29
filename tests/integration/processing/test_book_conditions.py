@@ -289,6 +289,9 @@ async def test_pronunciation_conditions_uk_us(tmp_path, variant):
         assert conditions.pronunciation_variant == variant
         assert conditions.payload['english_help'] is False
         assert conditions.payload['reader_level'] == 'b2'
+        assert conditions.payload['prompt_templates']['pronunciation_candidates_version'] == 1
+        assert 'pronunciation_processing' in conditions.payload['prompt_templates']
+        assert conditions.payload['prompt_sha256'] == payload_digest(conditions.payload['prompt_templates'])
         assert conditions.payload['pronunciation_versions'] == {
             'selection_policy': 1, 'form_rules': 1, 'source': 'disabled'}
         assert app.book_conditions.require('book-1') == conditions

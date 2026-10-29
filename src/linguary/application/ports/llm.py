@@ -136,8 +136,15 @@ class LLMRequest[PayloadT: LLMPayload]:
     run_id: str | None = None
     max_completion_tokens: int | None = None
     name_translation_policy_version: int | None = None
+    pronunciation_candidates_version: int | None = None
 
     def __post_init__(self) -> None:
+        if self.pronunciation_candidates_version is not None and (
+            type(self.pronunciation_candidates_version) is not int
+            or self.pronunciation_candidates_version != 1
+            or self.kind != LLMResponseKind.TRANSLATION_RESULT
+        ):
+            raise LLMError('неизвестный режим кандидатов произношения')
         if not self.instructions.strip():
             raise LLMError("инструкция запроса к модели пуста")
         if not self.input_text.strip():
@@ -185,9 +192,11 @@ class LLMRequest[PayloadT: LLMPayload]:
     def for_translation(
         cls, *, instructions: str, input_text: str, contract_version: int = 1,
         name_translation_policy_version: int | None = None,
+        pronunciation_candidates_version: int | None = None,
     ) -> LLMRequest[TranslationResultResponse]:
         """Request for block group or single block processing (PRD § 10, § 14)."""
         return LLMRequest[TranslationResultResponse](
+            pronunciation_candidates_version=pronunciation_candidates_version,
             kind=LLMResponseKind.TRANSLATION_RESULT,
             instructions=instructions,
             input_text=input_text,

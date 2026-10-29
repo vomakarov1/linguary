@@ -39,6 +39,7 @@ from linguary.application.block_processing import (
 )
 from linguary.application.context_builder import ContextBuilder, is_textual
 from linguary.application.ports.llm import LLMClient
+from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.task_runner import TaskQueue
@@ -137,6 +138,9 @@ class RegenerateBlock:
         retry_policy: RetryPolicy,
         validator: TranslationResultValidator,
         context_builder: ContextBuilder | None = None,
+        pronunciation_source: PronunciationSource | None = None,
+        pronunciation_help_enabled: bool = False,
+        pronunciation_variant: PronunciationVariant | None = None,
         id_factory: Callable[[], str] | None = None,
         sleep: Sleep | None = None,
     ) -> None:
@@ -147,6 +151,9 @@ class RegenerateBlock:
             retry_policy=retry_policy,
             validator=validator,
             sleep=sleep or asyncio.sleep,
+            pronunciation_source=pronunciation_source,
+            pronunciation_help_enabled=pronunciation_help_enabled,
+            pronunciation_variant=pronunciation_variant,
         )
         self._context_builder = context_builder or ContextBuilder()
         self._id_factory = id_factory or _new_id

@@ -41,6 +41,8 @@ from linguary.adapters.llm.rate_limit import LLMRateLimiter
 from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
 from linguary.application.recovery import RecoveryPolicy
 from linguary.application.book_conditions import BookConditionsService, ConditionsError
+from linguary.adapters.pronunciation.source import DisabledPronunciationSource
+from linguary.application.ports.pronunciation import PronunciationSource
 from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
 from linguary.composition.system_settings import SystemSettingsService
@@ -237,6 +239,7 @@ def build_application(
     on_logged: LoggedObserver | None = None,
     content_plan_profile: str | None = None,
     quality_routes=None,
+    pronunciation_source: PronunciationSource | None = None,
 ) -> Application:
     """Assembles application from local configuration.
 
@@ -290,6 +293,10 @@ def build_application(
                 policy = NameTranslationPolicy(**conditions.payload["name_translation_policy"])
             except (TypeError, ValueError):
                 raise ConditionsError("conditions_unavailable") from None
+        pronunciation = dict(pronunciation_source=pronunciation_source or DisabledPronunciationSource(),
+            pronunciation_help_enabled=bool(conditions and conditions.payload.get('pronunciation_help_enabled')
+                and conditions.payload.get('source_language') == 'en'),
+            pronunciation_variant=None if conditions is None else conditions.payload.get('pronunciation_variant'))
         conditions_id = None if conditions is None else conditions.id
         queue = task_queue if conditions is None else BoundTaskQueue(task_queue, book_conditions, conditions.id, task_id_factory)
         configured_client = ConfiguredLLMClient(candidate.llm)
@@ -335,11 +342,13 @@ def build_application(
                 name_translation_policy=policy, conditions_id=conditions_id,
             ),
             processing=_processing_sequence(
+                **pronunciation,
                 settings=candidate, unit_of_work=unit_of_work,
                 task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
                 name_translation_policy=policy,
             ),
             regeneration=_regeneration_sequence(
+                **pronunciation,
                 settings=candidate, unit_of_work=unit_of_work,
                 task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
                 name_translation_policy=policy,
@@ -534,6 +543,9 @@ def _processing_sequence(
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
     prompt_templates=None,
+    pronunciation_source: PronunciationSource | None = None,
+    pronunciation_help_enabled: bool = False,
+    pronunciation_variant=None,
     name_translation_policy: NameTranslationPolicy | None = None,
 ) -> ChapterProcessingSequence:
     """Chapter processing with block group limit from settings (PRD § 10)."""
@@ -544,6 +556,9 @@ def _processing_sequence(
             recovery_policy=RecoveryPolicy(**asdict(settings.recovery)),
             unit_of_work=unit_of_work,
             llm_client=model,
+            pronunciation_source=pronunciation_source,
+            pronunciation_help_enabled=pronunciation_help_enabled,
+            pronunciation_variant=pronunciation_variant,
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
             max_unit_source_chars=settings.llm.max_unit_source_chars,
@@ -560,6 +575,9 @@ def _regeneration_sequence(
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
     prompt_templates=None,
+    pronunciation_source: PronunciationSource | None = None,
+    pronunciation_help_enabled: bool = False,
+    pronunciation_variant=None,
     name_translation_policy: NameTranslationPolicy | None = None,
 ) -> BlockRegenerationSequence:
     """Block regeneration with neighboring context (PRD § 13, § 21.5)."""
@@ -569,6 +587,9 @@ def _regeneration_sequence(
         regenerate_block=RegenerateBlock(
             unit_of_work=unit_of_work,
             llm_client=model,
+            pronunciation_source=pronunciation_source,
+            pronunciation_help_enabled=pronunciation_help_enabled,
+            pronunciation_variant=pronunciation_variant,
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
             context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates, name_translation_policy=name_translation_policy),

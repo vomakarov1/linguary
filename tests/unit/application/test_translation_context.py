@@ -165,6 +165,24 @@ def test_request_asks_for_translation_result() -> None:
     assert context.request.kind is LLMResponseKind.TRANSLATION_RESULT
 
 
+def test_pronunciation_candidate_alias_and_exact_form():
+    from linguary.application.llm_dto import PronunciationAnchorResponse, PronunciationCandidateResponse, PronunciationContextResponse
+    from linguary.application.context_builder import snapshot_prompt_templates
+    templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level='b2',
+                                         pronunciation_help_enabled=True)
+    context, unit = build_context(builder=ContextBuilder(prompt_templates=templates))
+    assert context.request.pronunciation_candidates_version == 1
+    exact = PronunciationCandidateResponse(PronunciationAnchorResponse('b1', 0, 6, ' zorp '), ' zorp ',
+        PronunciationContextResponse(None, None, None, False), 'unpredictable_spelling')
+    raw = TranslationResultResponse(pronunciation_candidates=(exact,
+        replace(exact, anchor=replace(exact.anchor, block_id='b999')),
+        replace(exact, anchor=replace(exact.anchor, block_id=unit.items[0].block.id))))
+    mapped = context.to_block_ids(raw)
+    assert mapped.pronunciation_candidates[0].anchor.block_id == unit.items[0].block.id
+    assert mapped.pronunciation_candidates[0].form == mapped.pronunciation_candidates[0].anchor.quote == ' zorp '
+    assert all(not candidate.anchor.block_id for candidate in mapped.pronunciation_candidates[1:])
+
+
 def test_notes_budget_proportional_to_unit_share() -> None:
     assert notes_budget(unit_chars=250, chapter_chars=1000, per_chapter=8) == 2
 

@@ -29,6 +29,29 @@ from linguary.application.ports.llm import (
 )
 from linguary.domain import TokenUsage
 
+
+async def test_pronunciation_candidate_clients_use_same_contract():
+    from linguary.adapters.llm import FakeLLMClient, FakeReply
+    candidate = dict(anchor=dict(block_id='b1', start=0, end=4, quote='zorp'), form='zorp',
+        context=dict(meaning_in_context='invented action', part_of_speech='verb', grammatical_form='present', is_proper_name=False),
+        selection_reason='unpredictable_spelling')
+    data = translation_payload(pronunciation_candidates=[candidate])
+    bodies = []
+    def handle(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=completion(as_content(data)))
+    real = client_over(handle)
+    fake = FakeLLMClient([FakeReply.of_payload(data)])
+    request = LLMRequest.for_translation(instructions='Предложи кандидатов.', input_text='b1: zorp',
+                                         pronunciation_candidates_version=1)
+    try:
+        assert (await real.generate(request)).payload == (await fake.generate(request)).payload
+        schema = bodies[0]['response_format']['json_schema']['schema']
+        assert 'pronunciation_candidates' in schema['required']
+        assert 'pronunciation_candidates' in schema['properties']
+    finally:
+        await real.aclose()
+
 API_KEY = "test-key-must-not-leak"
 
 

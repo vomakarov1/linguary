@@ -41,6 +41,7 @@ from linguary.application.block_processing import (
 )
 from linguary.application.context_builder import ContextBuilder, textual_blocks
 from linguary.application.ports.llm import LLMClient
+from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.recovery import Recovery, RecoveryPolicy, RecoverySplit
@@ -137,6 +138,9 @@ class ProcessChapter:
         validator: TranslationResultValidator,
         max_unit_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS,
         context_builder: ContextBuilder | None = None,
+        pronunciation_source: PronunciationSource | None = None,
+        pronunciation_help_enabled: bool = False,
+        pronunciation_variant: PronunciationVariant | None = None,
         id_factory: IdFactory | None = None,
         sleep: Sleep | None = None,
         recovery_policy: RecoveryPolicy | None = None,
@@ -148,6 +152,9 @@ class ProcessChapter:
             retry_policy=retry_policy,
             validator=validator,
             sleep=sleep or asyncio.sleep,
+            pronunciation_source=pronunciation_source,
+            pronunciation_help_enabled=pronunciation_help_enabled,
+            pronunciation_variant=pronunciation_variant,
         )
         self._max_unit_source_chars = max_unit_source_chars
         self._context_builder = context_builder or ContextBuilder()

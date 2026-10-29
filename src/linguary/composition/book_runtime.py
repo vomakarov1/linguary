@@ -166,6 +166,11 @@ class BookRuntimeResolver:
 
     def settings_for(self, conditions):
         payload = conditions.payload
+        marker = payload['prompt_templates'].get('pronunciation_candidates_version')
+        if marker is not None and (type(marker) is not int or marker != 1
+                or not payload.get('pronunciation_help_enabled') or payload.get('source_language') != 'en'
+                or not payload['prompt_templates'].get('pronunciation_processing')):
+            raise ConditionsError('conditions_unavailable')
         if 'name_translation_policy' in payload:
             try:
                 policy = NameTranslationPolicy(**thaw(payload['name_translation_policy']))

@@ -12,6 +12,82 @@ from linguary.domain import BlockTreatment, ConceptType
 from linguary.domain.name_translation import NameTranslationMethod
 
 
+def pronunciation_candidate():
+    return dict(anchor=dict(block_id='b1', start=0, end=6, quote=' zorp '), form=' zorp ',
+        context=dict(meaning_in_context=None, part_of_speech='verb', grammatical_form='present', is_proper_name=False),
+        selection_reason='unpredictable_spelling')
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+def test_pronunciation_candidate_schema_and_dto_roundtrip(version):
+    data = dict(blocks=[dict(source_block_id='b1', treatment='READ_AS_IS', translated_text=None, glossary_hints=[])], language_notes=[], pronunciation_candidates=[pronunciation_candidate()])
+    if version in (2, 3, 4):
+        data['content_evidence'] = []
+    if version == 4:
+        data['fragment_assistances'] = []
+    result = parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data),
+                           contract_version=version, pronunciation_candidates_version=1)
+    candidate, = result.pronunciation_candidates
+    assert candidate.form == candidate.anchor.quote == ' zorp '
+    assert candidate.context.meaning_in_context is None
+    assert candidate.context.part_of_speech == 'verb'
+    assert candidate.selection_reason == 'unpredictable_spelling'
+
+
+@pytest.mark.parametrize('field', ['ipa', 'source', 'url', 'hint_id', 'variant'])
+def test_pronunciation_candidate_schema_rejects_ipa_source_and_url(field):
+    candidate = pronunciation_candidate() | {field: 'must not be accepted'}
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT,
+            as_content(dict(blocks=[dict(source_block_id='b1', treatment='READ_AS_IS', translated_text=None, glossary_hints=[])], language_notes=[], pronunciation_candidates=[candidate])),
+            pronunciation_candidates_version=1)
+
+
+def test_pronunciation_disabled_contract_unchanged():
+    data = dict(blocks=[dict(source_block_id='b1', treatment='READ_AS_IS', translated_text=None, glossary_hints=[])], language_notes=[])
+    assert parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data)).pronunciation_candidates == ()
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), pronunciation_candidates_version=1)
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data | {'pronunciation_candidates': []}))
+
+
+@pytest.mark.parametrize('version', [True, False, 0, 2, '1'])
+def test_pronunciation_candidate_mode_rejects_unknown_version(version):
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT, '{}', pronunciation_candidates_version=version)
+
+
+@pytest.mark.parametrize('kind', [LLMResponseKind.CHAPTER_ANALYSIS, LLMResponseKind.QUALITY_REVIEW])
+def test_pronunciation_candidate_mode_rejects_other_stages(kind):
+    from linguary.application.ports.llm import LLMRequest, LLMError
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(kind, '{}', pronunciation_candidates_version=1)
+    with pytest.raises(LLMError):
+        LLMRequest(kind=kind, instructions='instruction', input_text='input', pronunciation_candidates_version=1)
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+def test_pronunciation_candidate_schema_for_each_base_version(version):
+    from linguary.adapters.llm.payloads import schema_for
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    original = strict_json_schema(schema_for(LLMResponseKind.TRANSLATION_RESULT, contract_version=version))
+    extended = strict_json_schema(schema_for(LLMResponseKind.TRANSLATION_RESULT, contract_version=version,
+                                             pronunciation_candidates_version=1))
+    assert set(extended['properties']) == set(original['properties']) | {'pronunciation_candidates'}
+    assert set(extended['required']) == set(original['required']) | {'pronunciation_candidates'}
+    assert extended['additionalProperties'] is False
+
+
+def test_pronunciation_empty_candidates_and_nullable_context():
+    data = dict(blocks=[dict(source_block_id='b1', treatment='READ_AS_IS', translated_text=None, glossary_hints=[])],
+                language_notes=[], pronunciation_candidates=[])
+    assert parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), pronunciation_candidates_version=1).pronunciation_candidates == ()
+    data['pronunciation_candidates'] = [pronunciation_candidate() | {'context': dict(
+        meaning_in_context=None, part_of_speech=None, grammatical_form=None, is_proper_name=False)}]
+    assert parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), pronunciation_candidates_version=1).pronunciation_candidates[0].context.grammatical_form is None
+
+
 def test_missing_or_null_assessment_falls_back() -> None:
     data = analysis_payload()
     for value in ("missing", None):

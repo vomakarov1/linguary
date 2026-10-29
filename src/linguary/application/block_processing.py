@@ -23,6 +23,10 @@ from linguary.application.explained_expressions import ExplainedExpressions
 from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
+from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
+from linguary.application.validators.pronunciation import (
+    PronunciationSelection, PronunciationSkip, preserve_unavailable, verify_candidates,
+)
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy, violation_of
 from linguary.application.recovery import RecoveryError, RecoverySplit
 from linguary.application.book_conditions import ConditionsError
@@ -64,6 +68,8 @@ class TranslationCallResult:
     results: tuple[BlockProcessingResult, ...]
     attempts: int = 0
     usage: TokenUsage | None = None
+    pronunciation_skips: tuple[PronunciationSkip, ...] = ()
+    pronunciation_unavailable_reason: str | None = None
 
 
 class TranslationCall:
@@ -77,12 +83,18 @@ class TranslationCall:
         retry_policy: RetryPolicy,
         validator: TranslationResultValidator,
         sleep: Sleep,
+        pronunciation_source: PronunciationSource | None = None,
+        pronunciation_help_enabled: bool = False,
+        pronunciation_variant: PronunciationVariant | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._llm_client = llm_client
         self._retry_policy = retry_policy
         self._validator = validator
         self._sleep = sleep
+        self._pronunciation_source = pronunciation_source
+        self._pronunciation_enabled = pronunciation_help_enabled
+        self._pronunciation_variant = pronunciation_variant
         self._validated_response = ContextVar(f"validated_response_{id(self)}", default=None)
         self._expected_bindings = ContextVar(f"expected_bindings_{id(self)}", default={})
 
@@ -235,11 +247,39 @@ class TranslationCall:
                 request = decision.next_request(request)
                 continue
             self._validated_response.set(response)
+            results, pronunciation_skips, pronunciation_unavailable_reason = await self._with_pronunciations(
+                context, mapped, results, unit=unit, run_id=request.run_id)
             return TranslationCallResult(
                 results=results,
                 attempts=attempts,
                 usage=response.usage,
+                pronunciation_skips=pronunciation_skips,
+                pronunciation_unavailable_reason=pronunciation_unavailable_reason,
             )
+
+    async def _with_pronunciations(self, context, mapped, results, *, unit, run_id):
+        """Source access follows successful semantic validation, outside model repair."""
+        if not self._pronunciation_enabled:
+            return results, (), None
+        texts = {item.block.id: item.block.text for item in unit.items}
+        with self._unit_of_work.transaction() as transaction:
+            previous = tuple(assistance for result in results
+                if (stored := transaction.results.get(run_id, result.block_id)) is not None
+                for assistance in stored.pronunciation_assistances)
+        reason = None
+        if context.request.pronunciation_candidates_version is None:
+            reason = 'candidate_contract_unavailable'
+        elif self._pronunciation_source is None or not self._pronunciation_source.configured:
+            reason = 'source_disabled'
+        if reason is not None:
+            selection = PronunciationSelection(unavailable=True)
+        else:
+            selection = await verify_candidates(mapped.pronunciation_candidates,
+                source=self._pronunciation_source, texts=texts, variant=self._pronunciation_variant,
+                scope_id=run_id)
+        assistances = preserve_unavailable(selection, previous, texts=texts, variant=self._pronunciation_variant)
+        return (tuple(replace(result, pronunciation_assistances=tuple(item for item in assistances
+                    if item.anchor.block_id == result.block_id)) for result in results), selection.skipped, reason)
 
     def save(
         self, *, book_id: str, run_id: str, results: Sequence[BlockProcessingResult],

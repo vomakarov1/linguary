@@ -361,6 +361,9 @@ class TranslationContext(AliasedBlocksContext):
                 expectation=self.expectation,
             )
         return TranslationResultResponse(
+            pronunciation_candidates=tuple(replace(candidate, anchor=replace(candidate.anchor,
+                block_id=self.block_ids_by_alias.get(candidate.anchor.block_id, '')))
+                for candidate in payload.pronunciation_candidates),
             fragment_assistances=payload.fragment_assistances,
             content_evidence=tuple(replace(e, source_block_id=self.block_id_for(e.source_block_id)) for e in payload.content_evidence),
             blocks=tuple(
@@ -412,6 +415,11 @@ class ContextBuilder:
         self._user_decisions = tuple(user_decisions)
         self._nonbinding_suggestions = tuple(nonbinding_suggestions)
         self._english_help = bool(self._prompt_templates.get("english_help"))
+        self._pronunciation_version = self._prompt_templates.get('pronunciation_candidates_version')
+        if self._pronunciation_version is not None and (
+                type(self._pronunciation_version) is not int or self._pronunciation_version != 1
+                or not self._prompt_templates.get('pronunciation_processing')):
+            raise ContextBuildError('неизвестный режим кандидатов произношения')
         if max_accumulated_candidates < 0:
             raise ContextBuildError(
                 "ограничение числа накопленных кандидатов не может быть отрицательным"
@@ -602,6 +610,9 @@ class ContextBuilder:
             instructions += "\n" + self._prompt_templates.get('learner_quality', learner_instructions(self._reader_level))
         if self._english_help:
             instructions += "\n" + self._prompt_templates["english_help_processing"]
+        pronunciation_version = self._pronunciation_version if document.source_language == 'en' else None
+        if pronunciation_version is not None:
+            instructions += '\n' + self._prompt_templates['pronunciation_processing']
         if unit.section_id != section.id:
             raise ContextBuildError(
                 f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
@@ -615,6 +626,7 @@ class ContextBuilder:
             section_id=section.id,
             unit_id=unit.id,
             request=LLMRequest.for_translation(
+                pronunciation_candidates_version=pronunciation_version,
                 contract_version=4 if self._english_help else version,
                 name_translation_policy_version=self._name_translation_policy.version if self._name_translation_policy else None,
                 instructions=instructions,
@@ -1808,8 +1820,10 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     }, ensure_ascii=False)
 
 
-def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None):
+def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None, pronunciation_help_enabled=False):
     """Render immutable instruction templates without book text or secrets."""
+    pronunciation_level = reader_level
+    reader_level = reader_level or 'b2'
     languages = dict(source_language=source_language, target_language=target_language)
     result = {
         'analysis': chapter_analysis_instructions(**languages, reader_level=reader_level, english_help=english_help),
@@ -1832,6 +1846,26 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
             content_processing=processing,
             english_help_processing=processing,
         )
+    if pronunciation_help_enabled:
+        if source_language != 'en':
+            raise ContextBuildError('произношение требует английского оригинала')
+        result.update(pronunciation_candidates_version=1, pronunciation_processing=f'''\
+Независимый канал произношения pronunciation-candidates-v1. Уровень читателя: {pronunciation_level or 'не задан'}.
+Верни pronunciation_candidates, допустим пустой список. Выбирай слова с риском
+ошибочного чтения, учитывая уровень и контекст оригинала; длина и редкость сами
+по себе не служат причиной. Кандидаты допустимы в TRANSLATE, GLOSSARY_ONLY и READ_AS_IS,
+даже если смысл понятен и перевод или смысловая помощь не нужны.
+Каждый кандидат: anchor {{block_id, start, end, quote}}, form, context
+{{meaning_in_context, part_of_speech, grammatical_form, is_proper_name}}, selection_reason.
+anchor.block_id — псевдоним целевого блока b1..bN, смещения в символах Python [start,end).
+quote и form копируй дословно, form=quote; не выбирай соседние блоки.
+meaning_in_context — значение на языке оригинала; grammatical_form включает время/число.
+Неизвестные текстовые признаки — null; is_proper_name — логическое значение.
+selection_reason: unpredictable_spelling, unpredictable_stress или context_dependent.
+Предлагай только признаки из оригинала. Не создавай IPA, транскрипцию, фонетическое
+ударение или окончания. Не добавляй словарные записи, идентификаторы источника,
+атрибуцию, URL, hint_id или вариант UK/US: всё подтверждается локально.
+''')
     policy = _name_policy(name_translation_policy)
     if policy is not None:
         result['name_translation_policy'] = {'version': policy.version, 'strategy': policy.strategy.value}

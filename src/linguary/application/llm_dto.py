@@ -209,6 +209,30 @@ class LanguageNoteResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class PronunciationAnchorResponse:
+    block_id: str
+    start: int
+    end: int
+    quote: str
+
+
+@dataclass(frozen=True, slots=True)
+class PronunciationContextResponse:
+    meaning_in_context: str | None
+    part_of_speech: str | None
+    grammatical_form: str | None
+    is_proper_name: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PronunciationCandidateResponse:
+    anchor: PronunciationAnchorResponse
+    form: str
+    context: PronunciationContextResponse
+    selection_reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class TranslationResultResponse:
     """Model response for processing a single block group (PRD § 10, § 14).
 
@@ -220,6 +244,7 @@ class TranslationResultResponse:
     language_notes: tuple[LanguageNoteResponse, ...] = ()
     content_evidence: tuple[HelpEvidenceResponse, ...] = ()
     fragment_assistances: tuple[FragmentAssistanceResponse, ...] = ()
+    pronunciation_candidates: tuple[PronunciationCandidateResponse, ...] = ()
 
     @property
     def block_ids(self) -> tuple[str, ...]:

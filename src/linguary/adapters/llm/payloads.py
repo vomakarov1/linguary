@@ -20,6 +20,10 @@ from linguary.adapters.llm.quality_payloads import QualityReviewSchema
 from linguary.domain.llm_log import Violation
 
 from linguary.adapters.llm.schemas import (
+    TranslationWithPronunciationSchema,
+    TranslationV2WithPronunciationSchema,
+    TranslationV3WithPronunciationSchema,
+    TranslationV4WithPronunciationSchema,
     ChapterAnalysisV2Schema,
     ChapterAnalysisV3Schema,
     ChapterAnalysisWithNameAssessmentSchema,
@@ -39,6 +43,9 @@ from linguary.adapters.llm.schemas import (
     TreatmentPlanItemSchema,
 )
 from linguary.application.llm_dto import (
+    PronunciationAnchorResponse,
+    PronunciationCandidateResponse,
+    PronunciationContextResponse,
     ContentPlanResponse,
     FragmentAssistanceResponse,
     HelpEvidenceResponse,
@@ -72,8 +79,17 @@ SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
 def schema_for(
     kind: LLMResponseKind, *, contract_version: int = 1,
     name_translation_policy_version: int | None = None,
+    pronunciation_candidates_version: int | None = None,
 ) -> type[BaseModel]:
     """Structured response schema for request kind."""
+    if pronunciation_candidates_version is not None:
+        if (type(pronunciation_candidates_version) is not int or pronunciation_candidates_version != 1
+                or kind != LLMResponseKind.TRANSLATION_RESULT):
+            raise LLMResponseFormatError('неизвестный режим кандидатов произношения')
+        schema_for(kind, contract_version=contract_version,
+                   name_translation_policy_version=name_translation_policy_version)
+        return {1: TranslationWithPronunciationSchema, 2: TranslationV2WithPronunciationSchema,
+                3: TranslationV3WithPronunciationSchema, 4: TranslationV4WithPronunciationSchema}[contract_version]
     if name_translation_policy_version is not None and (
         type(name_translation_policy_version) is not int or name_translation_policy_version != 1
     ):
@@ -105,14 +121,16 @@ def schema_for(
 
 def parse_payload(
     kind: LLMResponseKind, content: str, *, contract_version: int = 1,
-    name_translation_policy_version: int | None = None, truncated: bool = False
+    name_translation_policy_version: int | None = None, truncated: bool = False,
+    pronunciation_candidates_version: int | None = None,
 ) -> LLMPayload:
     """Parses model response text and returns application layer DTO.
 
     `truncated` indicates provider token limit truncation; included in the parsing
     error when a truncated response cannot be validated.
     """
-    schema = schema_for(kind, contract_version=contract_version, name_translation_policy_version=name_translation_policy_version)
+    schema = schema_for(kind, contract_version=contract_version, name_translation_policy_version=name_translation_policy_version,
+                        pronunciation_candidates_version=pronunciation_candidates_version)
     if kind == LLMResponseKind.CHAPTER_ANALYSIS and name_translation_policy_version == 1:
         try:
             document = json.loads(content)
@@ -210,6 +228,10 @@ def _before_you_read(schema: BeforeYouReadEntrySchema) -> BeforeYouReadEntryResp
 def _translation_result(schema: TranslationResultSchema) -> TranslationResultResponse:
     """Block group translation result DTO."""
     return TranslationResultResponse(
+        pronunciation_candidates=tuple(PronunciationCandidateResponse(
+            anchor=PronunciationAnchorResponse(**item.anchor.model_dump()), form=item.form,
+            context=PronunciationContextResponse(**item.context.model_dump()), selection_reason=item.selection_reason)
+            for item in getattr(schema, 'pronunciation_candidates', ())),
         content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.content_evidence) if isinstance(schema, (TranslationResultV2Schema, TranslationResultV3Schema)) else (),
         fragment_assistances=tuple(FragmentAssistanceResponse(**item.model_dump()) for item in schema.fragment_assistances) if isinstance(schema, TranslationResultV4Schema) else (),
         blocks=tuple(_block_result(item) for item in schema.blocks),
