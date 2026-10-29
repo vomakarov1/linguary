@@ -297,6 +297,9 @@ class GlossaryCandidateRow(Base):
     model_flagged_review: Mapped[bool] = mapped_column()
     requires_review: Mapped[bool] = mapped_column(index=True)
     note: Mapped[str] = mapped_column(Text, default="", server_default="")
+    name_translation_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(
+        ContentObjectJSON(), nullable=True
+    )
 
 
 class ProcessingRunRow(Base):

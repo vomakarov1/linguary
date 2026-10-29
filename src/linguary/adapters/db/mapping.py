@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from dataclasses import asdict
+from enum import StrEnum
 from typing import Any
 
 from linguary.adapters.db.models import (
@@ -39,6 +40,12 @@ from linguary.domain.content_plan import (
 )
 from linguary.domain.errors import DomainError
 from linguary.domain.learning import FragmentAssistance
+from linguary.domain.name_translation import (
+    NameTranslationAssessment,
+    NameTranslationEvidence,
+    NameTranslationObservation,
+    NameTranslationStrategy,
+)
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockProcessingResult,
@@ -370,6 +377,7 @@ def to_candidate_row(candidate: GlossaryCandidate) -> GlossaryCandidateRow:
         model_flagged_review=candidate.model_flagged_review,
         requires_review=candidate.requires_review,
         note=candidate.note,
+        name_translation_evidence_json=_encode_name_translation_evidence(candidate.name_translation_evidence),
     )
 
 
@@ -405,6 +413,7 @@ def to_analysis(
                 model_flagged_review=candidate.model_flagged_review,
                 requires_review=candidate.requires_review,
                 note=candidate.note or "",
+                name_translation_evidence=_decode_name_translation_evidence(candidate.name_translation_evidence_json),
             )
             for candidate in candidates
         ),
@@ -679,6 +688,55 @@ def _array(value: object) -> list[Any]:
     return value
 
 
+def _decode_name_translation_evidence(value: object) -> NameTranslationEvidence | None:
+    if value is None:
+        return None
+    try:
+        data = _object(value, {"version", "conditions_id", "policy_version", "strategy", "observations"})
+        observations = []
+        for item in _array(data["observations"]):
+            observation = _object(item, {"suggested_translation", "confidence", "model_flagged_review", "assessment"})
+            assessment_data = observation["assessment"]
+            assessment = None
+            if assessment_data is not None:
+                assessment_data = _object(assessment_data, {"applied_method", "eligible_without_review", "review_reasons", "rationale"})
+                if type(assessment_data["eligible_without_review"]) is not bool:
+                    raise ValueError("неверный признак пригодности")
+                assessment = NameTranslationAssessment(
+                    applied_method=_string(assessment_data["applied_method"]),
+                    eligible_without_review=assessment_data["eligible_without_review"],
+                    review_reasons=tuple(_string(reason) for reason in _array(assessment_data["review_reasons"])),
+                    rationale=_string(assessment_data["rationale"]),
+                )
+            if type(observation["confidence"]) not in (int, float) or type(observation["model_flagged_review"]) is not bool:
+                raise ValueError("неверные поля наблюдения")
+            observations.append(NameTranslationObservation(
+                suggested_translation=_string(observation["suggested_translation"]),
+                confidence=observation["confidence"],
+                model_flagged_review=observation["model_flagged_review"],
+                assessment=assessment,
+            ))
+        return NameTranslationEvidence(
+            version=_integer(data["version"]),
+            conditions_id=_string(data["conditions_id"]),
+            policy_version=_integer(data["policy_version"]),
+            strategy=NameTranslationStrategy(_string(data["strategy"])),
+            observations=tuple(observations),
+        )
+    except (ValueError, TypeError):
+        raise PersistenceError("повреждённые сохранённые свидетельства передачи имён") from None
+
+
+def _encode_name_translation_evidence(value: NameTranslationEvidence | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if type(value) is not NameTranslationEvidence:
+        raise PersistenceError("некорректные свидетельства передачи имён для сохранения")
+    data = _json_collections(asdict(value))
+    _decode_name_translation_evidence(data)
+    return data
+
+
 def _help_evidence(value: object) -> HelpEvidence:
     fields = {"difficulty_id", "point_id", "artifact_kind", "block_id", "artifact_key", "body_excerpt"}
     data = _object(value, fields)
@@ -753,6 +811,8 @@ def _decode_content_evidence(value: object) -> ContentEvidence | tuple[()]:
 
 
 def _json_collections(value: Any) -> Any:
+    if isinstance(value, StrEnum):
+        return value.value
     if isinstance(value, dict):
         return {key: _json_collections(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):

@@ -281,7 +281,7 @@ def test_content_downgrade_refuses_all_nonnull_before_ddl(
         event.remove(Engine, 'before_cursor_execute', track_ddl)
     assert ddl == []
     with engine.connect() as connection:
-        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0008'
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0009'
         assert connection.execute(text(f'SELECT {column} FROM {table}')).scalar_one() == payload
         for target, name in CONTENT_COLUMNS:
             assert name in {item['name'] for item in inspect(connection).get_columns(target)}
@@ -291,6 +291,7 @@ def test_content_null_downgrade_keeps_analysis_children(alembic_config, engine, 
     from persistence_factories import make_analysis
     command.downgrade(alembic_config, '0005')
     command.upgrade(alembic_config, '0006')
+    command.upgrade(alembic_config, 'head')
     with unit_of_work.transaction() as uow:
         assert uow.analyses.get_for_section('book-1', 'section-1') == make_analysis()
 
@@ -345,4 +346,4 @@ def test_fragment_downgrade_refuses_nonnull_before_ddl(alembic_config, engine, c
     assert ddl == []
     with engine.connect() as connection:
         assert connection.execute(text('SELECT fragment_assistance_json FROM block_results')).scalar_one() == payload
-        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0008'
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0009'
