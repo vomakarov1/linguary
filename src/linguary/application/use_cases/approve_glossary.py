@@ -424,9 +424,9 @@ def _load_review(
         confidence_threshold = checks.get("glossary_confidence_threshold", confidence_threshold)
         min_mentions = checks.get("glossary_review_min_mentions", min_mentions)
         min_chapters = checks.get("glossary_review_min_chapters", min_chapters)
-        if (saved_policy := payload.get("name_translation_policy")) is not None:
+        if "name_translation_policy" in payload:
             try:
-                policy = NameTranslationPolicy(**thaw(saved_policy))
+                policy = NameTranslationPolicy(**thaw(payload["name_translation_policy"]))
             except (TypeError, ValueError):
                 raise ConditionsError("conditions_unavailable") from None
     return build_glossary_review(

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 from web_scenario import (
@@ -299,6 +302,33 @@ def test_processing_start_is_rejected_while_review_is_incomplete(
 
     assert response.status_code == 409
     assert "не завершена" in response.json()["detail"]
+    with configured_application.unit_of_work.transaction() as uow:
+        assert uow.runs.active_for_book(scenario.book_id) is None
+        assert uow.books.get(scenario.book_id).status is BookStatus.GLOSSARY_REVIEW
+
+
+def test_processing_start_rejects_explicit_null_name_strategy(
+    configured_client: TestClient, configured_application: Application
+) -> None:
+    """A corrupt explicit null policy is not treated as a legacy snapshot."""
+    candidate = glossary_candidate()
+    scenario = store_book(
+        configured_application, glossary_candidates={0: (candidate,)},
+        chapters=(("Mr. Bennet " * 5,),),
+    )
+    conditions = continue_legacy(configured_application, scenario.book_id)
+    with configured_application.unit_of_work.transaction() as uow:
+        uow.work.add_conditions(replace(
+            conditions,
+            id=str(uuid4()),
+            revision=conditions.revision + 1,
+            payload={**conditions.payload, "name_translation_policy": None},
+        ))
+
+    response = configured_client.post(f"/books/{scenario.book_id}/process")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "conditions_unavailable"
     with configured_application.unit_of_work.transaction() as uow:
         assert uow.runs.active_for_book(scenario.book_id) is None
         assert uow.books.get(scenario.book_id).status is BookStatus.GLOSSARY_REVIEW
