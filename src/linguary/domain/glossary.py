@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from math import isfinite
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
 from linguary.domain.errors import GlossaryError
+from linguary.domain.name_translation import NameTranslationEvidence
 
 
 class ConceptType(StrEnum):
@@ -90,6 +92,7 @@ class TermConcept:
     variants: tuple[TermVariant, ...] = ()
     note: str = ""
 
+
     def __post_init__(self) -> None:
         if not self.id.strip():
             raise GlossaryError("идентификатор понятия глоссария пуст")
@@ -140,6 +143,7 @@ class GlossaryCandidate:
     model_flagged_review: bool
     requires_review: bool
     note: str = ""
+    name_translation_evidence: NameTranslationEvidence | None = None
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -150,7 +154,7 @@ class GlossaryCandidate:
             raise GlossaryError("исходный текст кандидата глоссария пуст")
         if not self.suggested_translation.strip():
             raise GlossaryError(f"предложенный перевод кандидата {self.source_text!r} пуст")
-        if not 0.0 <= self.confidence <= 1.0:
+        if not isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0:
             raise GlossaryError(
                 f"уверенность модели вне диапазона 0..1: {self.confidence}"
             )
@@ -205,7 +209,7 @@ def compute_requires_review(
     conflicts require review regardless of frequency. By default, a concept is considered
     frequent so that single-chapter behavior remains unchanged.
     """
-    if not 0.0 <= confidence_threshold <= 1.0:
+    if not isfinite(confidence_threshold) or not 0.0 <= confidence_threshold <= 1.0:
         raise GlossaryError(
             f"порог уверенности вне диапазона 0..1: {confidence_threshold}"
         )

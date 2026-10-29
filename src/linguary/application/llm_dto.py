@@ -13,11 +13,13 @@ non-empty IDs and texts, and valid confidence intervals.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 from linguary.application.errors import ApplicationError
 from linguary.domain import BlockTreatment, ConceptType
 from linguary.domain.content_plan import ContextFact, Difficulty
 from linguary.domain.errors import DomainError
+from linguary.domain.name_translation import NameTranslationAssessment
 
 
 class LLMPayloadError(ApplicationError):
@@ -46,6 +48,7 @@ class GlossaryCandidateResponse:
     confidence: float
     model_flagged_review: bool
     note: str = ""
+    name_translation_assessment: NameTranslationAssessment | None = None
 
     def __post_init__(self) -> None:
         if not self.source_text.strip():
@@ -54,7 +57,7 @@ class GlossaryCandidateResponse:
             raise LLMPayloadError(
                 f"предложенный перевод кандидата {self.source_text!r} пуст"
             )
-        if not 0.0 <= self.confidence <= 1.0:
+        if not isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0:
             raise LLMPayloadError(
                 f"уверенность модели вне диапазона 0..1: {self.confidence}"
             )
