@@ -13,6 +13,7 @@ the format error: otherwise the cause would appear as random syntax corruption.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 
 from pydantic import BaseModel, ValidationError
 from linguary.adapters.llm.quality_payloads import QualityReviewSchema
@@ -21,6 +22,10 @@ from linguary.domain.llm_log import Violation
 from linguary.adapters.llm.schemas import (
     ChapterAnalysisV2Schema,
     ChapterAnalysisV3Schema,
+    ChapterAnalysisWithNameAssessmentSchema,
+    ChapterAnalysisV2WithNameAssessmentSchema,
+    ChapterAnalysisV3WithNameAssessmentSchema,
+    GlossaryCandidateWithNameAssessmentSchema,
     TranslationResultV3Schema,
     TranslationResultV4Schema,
     TranslationResultV2Schema,
@@ -55,6 +60,7 @@ from linguary.application.ports.llm import (
 from linguary.domain import BlockTreatment
 from linguary.domain.content_plan import ContextFact, Difficulty, SourceAnchor, RequiredPoint
 from linguary.domain.errors import DomainError
+from linguary.domain.name_translation import NameTranslationAssessment
 
 #: Response schema for each request kind.
 SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
@@ -63,10 +69,17 @@ SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
     LLMResponseKind.TRANSLATION_RESULT: TranslationResultSchema,
 }
 
-def schema_for(kind: LLMResponseKind, *, contract_version: int = 1) -> type[BaseModel]:
+def schema_for(
+    kind: LLMResponseKind, *, contract_version: int = 1,
+    name_translation_policy_version: int | None = None,
+) -> type[BaseModel]:
     """Structured response schema for request kind."""
+    if name_translation_policy_version is not None and (
+        type(name_translation_policy_version) is not int or name_translation_policy_version != 1
+    ):
+        raise LLMResponseFormatError("неизвестная версия политики передачи имён")
     if kind == LLMResponseKind.QUALITY_REVIEW:
-        if contract_version != 1:
+        if contract_version != 1 or name_translation_policy_version is not None:
             raise LLMResponseFormatError("неизвестная версия вычитки")
         return QualityReviewSchema
     if type(contract_version) is not int or contract_version not in (1, 2, 3, 4):
@@ -76,23 +89,40 @@ def schema_for(kind: LLMResponseKind, *, contract_version: int = 1) -> type[Base
             raise LLMResponseFormatError('версия 4 доступна только для обработки')
         return TranslationResultV4Schema
     if contract_version == 3:
+        if kind == LLMResponseKind.CHAPTER_ANALYSIS and name_translation_policy_version == 1:
+            return ChapterAnalysisV3WithNameAssessmentSchema
         return {LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisV3Schema,
                 LLMResponseKind.TRANSLATION_RESULT: TranslationResultV3Schema}[kind]
     if contract_version == 2:
+        if kind == LLMResponseKind.CHAPTER_ANALYSIS and name_translation_policy_version == 1:
+            return ChapterAnalysisV2WithNameAssessmentSchema
         return {LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisV2Schema,
                 LLMResponseKind.TRANSLATION_RESULT: TranslationResultV2Schema}[kind]
+    if kind == LLMResponseKind.CHAPTER_ANALYSIS and name_translation_policy_version == 1:
+        return ChapterAnalysisWithNameAssessmentSchema
     return SCHEMAS[kind]
 
 
 def parse_payload(
-    kind: LLMResponseKind, content: str, *, contract_version: int = 1, truncated: bool = False
+    kind: LLMResponseKind, content: str, *, contract_version: int = 1,
+    name_translation_policy_version: int | None = None, truncated: bool = False
 ) -> LLMPayload:
     """Parses model response text and returns application layer DTO.
 
     `truncated` indicates provider token limit truncation; included in the parsing
     error when a truncated response cannot be validated.
     """
-    schema = schema_for(kind, contract_version=contract_version)
+    schema = schema_for(kind, contract_version=contract_version, name_translation_policy_version=name_translation_policy_version)
+    if kind == LLMResponseKind.CHAPTER_ANALYSIS and name_translation_policy_version == 1:
+        try:
+            document = json.loads(content)
+        except (ValueError, TypeError):
+            document = None
+        if isinstance(document, dict) and isinstance(document.get("glossary_candidates"), list):
+            for candidate in document["glossary_candidates"]:
+                if isinstance(candidate, dict):
+                    candidate.setdefault("name_translation_assessment", None)
+            content = json.dumps(document, ensure_ascii=False)
     try:
         validated = schema.model_validate_json(content)
     except ValidationError as error:
@@ -105,7 +135,7 @@ def parse_payload(
         ) from None
     try:
         return _to_dto(validated)
-    except (LLMPayloadError, DomainError) as error:
+    except (LLMPayloadError, DomainError, ValueError) as error:
         raise LLMResponseFormatError(
             f"ответ модели ({kind.value}) не соответствует внутреннему контракту: {type(error).__name__}",
             truncated=truncated,
@@ -148,6 +178,16 @@ def _glossary_candidate(schema: GlossaryCandidateSchema) -> GlossaryCandidateRes
         confidence=schema.confidence,
         model_flagged_review=schema.model_flagged_review,
         note=(schema.note or "").strip(),
+        name_translation_assessment=(
+            NameTranslationAssessment(
+                applied_method=schema.name_translation_assessment.applied_method,
+                eligible_without_review=schema.name_translation_assessment.eligible_without_review,
+                review_reasons=tuple(schema.name_translation_assessment.review_reasons),
+                rationale=schema.name_translation_assessment.rationale,
+            )
+            if isinstance(schema, GlossaryCandidateWithNameAssessmentSchema)
+            and schema.name_translation_assessment is not None else None
+        ),
     )
 
 

@@ -20,6 +20,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from linguary.domain import BlockTreatment, ConceptType
+from linguary.domain.name_translation import NameTranslationMethod, NameTranslationReviewReason
 
 #: Processing modes that the model selects and confirms. Non-textual modes
 #: (`PRESERVE_ONLY`, `DROP_WITH_WARNING`) are assigned by the importer based on the support
@@ -245,3 +246,32 @@ class FragmentAssistanceSchema(_ResponseModel):
 
 class TranslationResultV4Schema(TranslationResultV3Schema):
     fragment_assistances: list[FragmentAssistanceSchema]
+
+
+class NameTranslationAssessmentSchema(_ResponseModel):
+    applied_method: NameTranslationMethod
+    eligible_without_review: bool = Field(strict=True)
+    review_reasons: list[NameTranslationReviewReason]
+    rationale: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _check_negative_reason(self) -> NameTranslationAssessmentSchema:
+        if not self.eligible_without_review and not self.review_reasons:
+            raise ValueError("negative assessment requires a reason")
+        return self
+
+
+class GlossaryCandidateWithNameAssessmentSchema(GlossaryCandidateSchema):
+    name_translation_assessment: NameTranslationAssessmentSchema | None
+
+
+class ChapterAnalysisWithNameAssessmentSchema(ChapterAnalysisSchema):
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+
+
+class ChapterAnalysisV2WithNameAssessmentSchema(ChapterAnalysisV2Schema):
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+
+
+class ChapterAnalysisV3WithNameAssessmentSchema(ChapterAnalysisV3Schema):
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]

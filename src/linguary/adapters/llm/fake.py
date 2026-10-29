@@ -118,7 +118,7 @@ class FakeLLMClient(LLMClient):
         self.requests.append(request)
         if isinstance(step, Exception):
             raise step
-        payload = parse_payload(request.kind, step.content, contract_version=request.contract_version, truncated=step.truncated)
+        payload = parse_payload(request.kind, step.content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, truncated=step.truncated)
         return LLMResponse(
             payload=payload,  # type: ignore[arg-type]  # schema selected by request.kind
             provider=self.provider,

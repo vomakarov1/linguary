@@ -9,6 +9,32 @@ from linguary.adapters.llm.payloads import parse_payload
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMResponseFormatError, LLMResponseKind
 from linguary.domain import BlockTreatment, ConceptType
+from linguary.domain.name_translation import NameTranslationMethod
+
+
+def test_missing_or_null_assessment_falls_back() -> None:
+    data = analysis_payload()
+    for value in ("missing", None):
+        if value is not None:
+            data["glossary_candidates"][0]["name_translation_assessment"] = value
+        else:
+            data["glossary_candidates"][0]["name_translation_assessment"] = None
+        if value == "missing":
+            data["glossary_candidates"][0].pop("name_translation_assessment", None)
+        result = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, as_content(data), name_translation_policy_version=1)
+        assert result.glossary_candidates[0].name_translation_assessment is None
+
+
+def test_malformed_assessment_rejected() -> None:
+    data = analysis_payload()
+    data["glossary_candidates"][0]["name_translation_assessment"] = {
+        "applied_method": "sound", "eligible_without_review": "true", "review_reasons": [], "rationale": "Звучание"
+    }
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, as_content(data), name_translation_policy_version=1)
+    data["glossary_candidates"][0]["name_translation_assessment"]["eligible_without_review"] = True
+    result = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, as_content(data), name_translation_policy_version=1)
+    assert result.glossary_candidates[0].name_translation_assessment.applied_method is NameTranslationMethod.SOUND
 
 
 def test_chapter_analysis_is_mapped_to_dto() -> None:

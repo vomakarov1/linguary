@@ -135,6 +135,7 @@ class LLMRequest[PayloadT: LLMPayload]:
     ordered_block_ids: tuple[str, ...] = ()
     run_id: str | None = None
     max_completion_tokens: int | None = None
+    name_translation_policy_version: int | None = None
 
     def __post_init__(self) -> None:
         if not self.instructions.strip():
@@ -168,7 +169,8 @@ class LLMRequest[PayloadT: LLMPayload]:
 
     @classmethod
     def for_chapter_analysis(
-        cls, *, instructions: str, input_text: str, contract_version: int = 1
+        cls, *, instructions: str, input_text: str, contract_version: int = 1,
+        name_translation_policy_version: int | None = None,
     ) -> LLMRequest[ChapterAnalysisResponse]:
         """Request for chapter or chapter fragment analysis (PRD § 11, § 14)."""
         return LLMRequest[ChapterAnalysisResponse](
@@ -176,11 +178,13 @@ class LLMRequest[PayloadT: LLMPayload]:
             instructions=instructions,
             input_text=input_text,
             contract_version=contract_version,
+            name_translation_policy_version=name_translation_policy_version,
         )
 
     @classmethod
     def for_translation(
-        cls, *, instructions: str, input_text: str, contract_version: int = 1
+        cls, *, instructions: str, input_text: str, contract_version: int = 1,
+        name_translation_policy_version: int | None = None,
     ) -> LLMRequest[TranslationResultResponse]:
         """Request for block group or single block processing (PRD § 10, § 14)."""
         return LLMRequest[TranslationResultResponse](
@@ -188,6 +192,7 @@ class LLMRequest[PayloadT: LLMPayload]:
             instructions=instructions,
             input_text=input_text,
             contract_version=contract_version,
+            name_translation_policy_version=name_translation_policy_version,
         )
 
 

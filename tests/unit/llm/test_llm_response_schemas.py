@@ -7,12 +7,34 @@ from llm_payload_factories import analysis_payload, as_content, block_payload, t
 from pydantic import ValidationError
 
 from linguary.adapters.llm.json_schema import strict_json_schema
+from linguary.adapters.llm.payloads import schema_for
+from linguary.application.ports.llm import LLMResponseKind, LLMResponseFormatError
 from linguary.adapters.llm.schemas import (
     BlockResultSchema,
     ChapterAnalysisSchema,
     TranslationResultSchema,
 )
 from linguary.domain import BlockTreatment
+
+
+def test_old_analysis_schema_unchanged() -> None:
+    old = schema_for(LLMResponseKind.CHAPTER_ANALYSIS)
+    assert old is ChapterAnalysisSchema
+    assert "name_translation_assessment" not in old.model_json_schema()["$defs"]["GlossaryCandidateSchema"]["properties"]
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_name_analysis_extension_for_versions_1_2_3(version: int) -> None:
+    model = schema_for(LLMResponseKind.CHAPTER_ANALYSIS, contract_version=version, name_translation_policy_version=1)
+    candidate = next(node for node in _walk(strict_json_schema(model)) if isinstance(node, dict) and "name_translation_assessment" in node.get("properties", {}))
+    assert "name_translation_assessment" in candidate["required"]
+    assert candidate["properties"]["name_translation_assessment"]
+    with pytest.raises(LLMResponseFormatError):
+        schema_for(LLMResponseKind.CHAPTER_ANALYSIS, contract_version=version, name_translation_policy_version=2)
+
+
+def test_english_help_v4_unchanged() -> None:
+    assert schema_for(LLMResponseKind.TRANSLATION_RESULT, contract_version=4, name_translation_policy_version=1) is schema_for(LLMResponseKind.TRANSLATION_RESULT, contract_version=4)
 
 
 def test_correct_analysis_response_passes_schema() -> None:
