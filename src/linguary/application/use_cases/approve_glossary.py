@@ -46,6 +46,7 @@ from linguary.domain import (
     TermVariant,
     apply_book_event,
 )
+from linguary.domain.name_translation import NameTranslationPolicy
 
 #: Factory for IDs of persisted glossary records and processing runs.
 type IdFactory = Callable[[], str]
@@ -376,13 +377,13 @@ class StartProcessing:
                     temperature=payload['llm_parameters']['temperature'], max_output_tokens=payload['llm_parameters']['max_output_tokens'])
             if transaction.runs.active_for_book(book.id) is not None:
                 raise GlossaryReviewError(f"у книги {book.id} уже идёт обработка")
-            pinned_checks = conditions.payload['checks'] if conditions is not None else {}
             review = _load_review(
                 transaction,
                 book.id,
-                confidence_threshold=pinned_checks.get('glossary_confidence_threshold', self._glossary_confidence_threshold),
-                min_mentions=pinned_checks.get('glossary_review_min_mentions', self._glossary_review_min_mentions),
-                min_chapters=pinned_checks.get('glossary_review_min_chapters', self._glossary_review_min_chapters),
+                confidence_threshold=self._glossary_confidence_threshold,
+                min_mentions=self._glossary_review_min_mentions,
+                min_chapters=self._glossary_review_min_chapters,
+                conditions=conditions,
             )
             review.ensure_complete()
             started = _status_after_start(book.status)
@@ -409,8 +410,25 @@ class StartProcessing:
 def _load_review(
     transaction: UnitOfWork, book_id: str, *, confidence_threshold: float,
     min_mentions: int = 5, min_chapters: int = 3,
+    conditions=None,
 ) -> GlossaryReview:
     """Book glossary assembled in open transaction."""
+    if conditions is None and (work := getattr(transaction, "work", None)) is not None:
+        conditions = work.latest_conditions(book_id)
+    policy = None
+    if conditions is not None:
+        from linguary.application.book_conditions import ConditionsError
+        from linguary.domain.book_conditions import thaw
+        payload = conditions.payload
+        checks = payload.get("checks", {})
+        confidence_threshold = checks.get("glossary_confidence_threshold", confidence_threshold)
+        min_mentions = checks.get("glossary_review_min_mentions", min_mentions)
+        min_chapters = checks.get("glossary_review_min_chapters", min_chapters)
+        if (saved_policy := payload.get("name_translation_policy")) is not None:
+            try:
+                policy = NameTranslationPolicy(**thaw(saved_policy))
+            except (TypeError, ValueError):
+                raise ConditionsError("conditions_unavailable") from None
     return build_glossary_review(
         book_id=book_id,
         analyses=transaction.analyses.list_for_book(book_id),
@@ -419,6 +437,8 @@ def _load_review(
         count_mentions=mention_counter(document) if (document := transaction.documents.get(book_id)) else None,
         min_mentions=min_mentions,
         min_chapters=min_chapters,
+        name_translation_policy=policy,
+        conditions_id=conditions.id if conditions is not None else None,
     )
 
 

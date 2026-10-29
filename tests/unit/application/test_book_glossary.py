@@ -1,6 +1,7 @@
 """Book glossary: assembly from chapter candidates and selection of items requiring review (P3.T5, PRD § 11-12)."""
 
 from __future__ import annotations
+from dataclasses import replace
 
 from collections.abc import Sequence
 
@@ -26,8 +27,87 @@ from linguary.domain import (
     TermStatus,
     TermVariant,
 )
+from linguary.domain.name_translation import (
+    NameTranslationAssessment, NameTranslationEvidence, NameTranslationObservation,
+    NameTranslationPolicy, NameTranslationStrategy,
+)
 
 TARGET_LANGUAGE = "ru"
+POLICY = NameTranslationPolicy(1, NameTranslationStrategy.SOUND)
+
+
+def observed_candidate(*, analysis_id="analysis-1", confidence=0.9,
+                       translation="Элис", flagged=False, assessment=True,
+                       conditions_id="conditions-1", observations=None):
+    candidate = make_analysis_candidate(source_text="Alice", suggested_translation=translation,
+        analysis_id=analysis_id, confidence=confidence, model_flagged_review=flagged)
+    if observations is None:
+        observations = (NameTranslationObservation(translation, confidence, flagged,
+            NameTranslationAssessment("sound", True, (), "Однозначное имя.") if assessment else None),)
+    evidence = NameTranslationEvidence(1, conditions_id, 1, NameTranslationStrategy.SOUND,
+        tuple(observations))
+    return replace(candidate, name_translation_evidence=evidence)
+
+
+def policy_review(*candidates, mentions=5):
+    analyses = tuple(make_chapter_analysis(id=f"analysis-{index}",
+        section_id=f"section-{index}", candidates=(candidate,))
+        for index, candidate in enumerate(candidates, 1))
+    return build_glossary_review(book_id=BOOK_ID, analyses=analyses,
+        confidence_threshold=CONFIDENCE_THRESHOLD, count_mentions=lambda _: mentions,
+        name_translation_policy=POLICY, conditions_id="conditions-1").items[0]
+
+
+def test_all_chapters_at_threshold_can_exempt_type() -> None:
+    item = policy_review(observed_candidate(confidence=CONFIDENCE_THRESHOLD),
+        observed_candidate(analysis_id="analysis-2"))
+    assert not item.requires_review
+
+
+def test_one_low_chapter_requires_review() -> None:
+    item = policy_review(observed_candidate(), observed_candidate(
+        analysis_id="analysis-2", confidence=CONFIDENCE_THRESHOLD - 0.01))
+    assert item.requires_review
+    assert item.confidence == CONFIDENCE_THRESHOLD - 0.01
+
+
+def test_one_flag_reason_missing_old_or_wrong_policy_blocks_exemption() -> None:
+    assert policy_review(observed_candidate(flagged=True)).requires_review
+    assert policy_review(observed_candidate(assessment=False)).requires_review
+    assert policy_review(observed_candidate(conditions_id="old")).requires_review
+    wrong_method = NameTranslationObservation("Элис", 0.9, False,
+        NameTranslationAssessment("meaning", True, (), "Смысловой перевод."))
+    assert policy_review(observed_candidate(observations=(wrong_method,))).requires_review
+    reason = NameTranslationObservation("Элис", 0.9, False,
+        NameTranslationAssessment("sound", True, ("wordplay",), "Обнаружена игра слов."))
+    assert policy_review(observed_candidate(observations=(reason,))).requires_review
+
+
+def test_fragment_conflict_survives_book_merge() -> None:
+    observations = (NameTranslationObservation("Элис", 0.9, False,
+        NameTranslationAssessment("sound", True, (), "Имя.")),
+        NameTranslationObservation("Алис", 0.9, False,
+        NameTranslationAssessment("sound", True, (), "Имя.")))
+    item = policy_review(observed_candidate(observations=observations))
+    assert item.has_translation_conflict
+    assert item.requires_review
+
+
+def test_rare_model_doubt_stays_optional() -> None:
+    item = policy_review(observed_candidate(flagged=True), mentions=1)
+    assert not item.requires_review
+
+
+@pytest.mark.parametrize("status", [TermStatus.APPROVED, TermStatus.LOCKED])
+def test_approved_locked_override_strategy(status: TermStatus) -> None:
+    candidate = observed_candidate(assessment=False)
+    book = build_glossary_review(book_id=BOOK_ID, analyses=(chapter_one(candidate),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        decisions=(decision("Alice", text="Алиса", status=status),),
+        name_translation_policy=POLICY, conditions_id="conditions-1")
+    entry = glossary_snapshot(book, language=TARGET_LANGUAGE).entries[0]
+    assert entry.translation == "Алиса"
+    assert entry.status is status
 
 
 def chapter_one(*candidates: GlossaryCandidate) -> ChapterAnalysis:

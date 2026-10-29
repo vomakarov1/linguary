@@ -202,6 +202,7 @@ def compute_requires_review(
     confidence_threshold: float,
     has_translation_conflict: bool = False,
     is_frequent: bool = True,
+    exempt_type_review: bool = False,
 ) -> bool:
     """Whether the candidate requires user attention (PRD § 12).
 
@@ -214,7 +215,7 @@ def compute_requires_review(
             f"порог уверенности вне диапазона 0..1: {confidence_threshold}"
         )
     return (
-        (is_frequent and (type.always_requires_review or model_flagged_review))
+        (is_frequent and ((type.always_requires_review and not exempt_type_review) or model_flagged_review))
         or confidence < confidence_threshold
         or has_translation_conflict
     )

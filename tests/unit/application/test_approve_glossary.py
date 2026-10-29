@@ -1,6 +1,8 @@
 """User glossary decisions and processing start (P3.T5, PRD § 11-12, § 21.3)."""
 
 from __future__ import annotations
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from analysis_fakes import (
@@ -38,6 +40,10 @@ from linguary.domain import (
     TermConcept,
     TermStatus,
     TermVariant,
+)
+from linguary.domain.name_translation import (
+    NameTranslationAssessment, NameTranslationEvidence, NameTranslationObservation,
+    NameTranslationStrategy,
 )
 
 LLM_SETTINGS = LLMSettingsSnapshot(provider="openai_compatible", model="gpt-test")
@@ -119,6 +125,24 @@ def test_start_allowed_when_only_rare_names_undecided() -> None:
     unit_of_work.documents.save(make_analysis_document((
         make_analysis_section(texts=("Mr. Bennet appeared once.",)),
     )))
+    assert start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
+
+
+def test_display_and_start_share_policy() -> None:
+    candidate = make_analysis_candidate(source_text="Alice", suggested_translation="Элис")
+    candidate = replace(candidate, name_translation_evidence=NameTranslationEvidence(
+        1, "conditions-1", 1, NameTranslationStrategy.SOUND,
+        (NameTranslationObservation("Элис", 0.9, False,
+            NameTranslationAssessment("sound", True, (), "Однозначное имя.")),)))
+    unit_of_work = glossary_book(candidate)
+    conditions = SimpleNamespace(id="conditions-1", payload={
+        "name_translation_policy": {"version": 1, "strategy": "sound"},
+        "checks": {"glossary_confidence_threshold": CONFIDENCE_THRESHOLD,
+                   "glossary_review_min_mentions": 5, "glossary_review_min_chapters": 3},
+    })
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)
+
+    assert not approve(unit_of_work).review(BOOK_ID).items[0].requires_review
     assert start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
 
 

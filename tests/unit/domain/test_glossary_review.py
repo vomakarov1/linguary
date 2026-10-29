@@ -37,6 +37,18 @@ def test_named_entity_always_requires_review(concept_type: ConceptType) -> None:
     )
 
 
+def test_type_exemption_only_removes_type_reason() -> None:
+    assert not compute_requires_review(type=ConceptType.PERSON, confidence=THRESHOLD,
+        model_flagged_review=False, confidence_threshold=THRESHOLD,
+        exempt_type_review=True)
+    assert compute_requires_review(type=ConceptType.PERSON, confidence=THRESHOLD - 0.01,
+        model_flagged_review=False, confidence_threshold=THRESHOLD,
+        exempt_type_review=True)
+    assert compute_requires_review(type=ConceptType.PERSON, confidence=THRESHOLD,
+        model_flagged_review=True, confidence_threshold=THRESHOLD,
+        exempt_type_review=True)
+
+
 def test_confident_term_does_not_require_review() -> None:
     """A standard term with high confidence remains an optional hint."""
     assert not compute_requires_review(

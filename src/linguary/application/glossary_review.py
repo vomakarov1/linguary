@@ -42,6 +42,7 @@ from linguary.domain import (
     spellings_by_preference,
     translations_conflict,
 )
+from linguary.domain.name_translation import NameTranslationPolicy
 
 #: Type ordering for review display (PRD § 12, § 21.3). Characters come first:
 #: their translation choices affect the entire book, and obvious terms must not
@@ -203,6 +204,8 @@ def build_glossary_review(
     count_mentions: Callable[[Sequence[str]], int] | None = None,
     min_mentions: int = 5,
     min_chapters: int = 3,
+    name_translation_policy: NameTranslationPolicy | None = None,
+    conditions_id: str | None = None,
 ) -> GlossaryReview:
     """Assembles book glossary from candidates across all analyzed chapters (PRD § 11-12).
 
@@ -224,6 +227,8 @@ def build_glossary_review(
             count_mentions=count_mentions,
             min_mentions=min_mentions,
             min_chapters=min_chapters,
+            name_translation_policy=name_translation_policy,
+            conditions_id=conditions_id,
         )
         for key, group in grouped.items()
     )
@@ -331,6 +336,8 @@ def _review_item(
     count_mentions: Callable[[Sequence[str]], int] | None,
     min_mentions: int,
     min_chapters: int,
+    name_translation_policy: NameTranslationPolicy | None = None,
+    conditions_id: str | None = None,
 ) -> GlossaryReviewItem:
     """Review item constructed from mentions of a source text across chapters.
 
@@ -357,9 +364,43 @@ def _review_item(
         leading.type,
     )
     model_flagged = any(candidate.model_flagged_review for candidate in group)
-    conflict = translations_conflict(
-        candidate.suggested_translation for candidate in group
+    observations = tuple(
+        observation
+        for candidate in group
+        if candidate.name_translation_evidence is not None
+        for observation in candidate.name_translation_evidence.observations
     )
+    if name_translation_policy is None:
+        confidence = leading.confidence
+        conflict = translations_conflict(
+            candidate.suggested_translation for candidate in group
+        )
+        eligible = False
+    else:
+        confidence = min(candidate.confidence for candidate in group)
+        if observations:
+            confidence = min(confidence, *(item.confidence for item in observations))
+        proposals = [candidate.suggested_translation for candidate in group]
+        proposals.extend(observation.suggested_translation for observation in observations)
+        conflict = translations_conflict(proposals)
+        model_flagged = model_flagged or any(
+            item.model_flagged_review
+            or (item.assessment is not None and bool(item.assessment.review_reasons))
+            for item in observations
+        )
+        eligible = (
+            conditions_id is not None
+            and all(
+                candidate.name_translation_evidence is not None
+                and candidate.name_translation_evidence.supports(
+                    name_translation_policy, conditions_id
+                )
+                for candidate in group
+            )
+            and not conflict
+            and not model_flagged
+            and confidence >= confidence_threshold
+        )
     suggested_note = next(
         (
             candidate.note
@@ -375,17 +416,18 @@ def _review_item(
         source_text=spellings[0],
         type=concept_type,
         suggested_translation=leading.suggested_translation,
-        confidence=leading.confidence,
+        confidence=confidence,
         model_flagged_review=model_flagged,
         has_translation_conflict=conflict,
         is_frequent=is_frequent,
         requires_review=compute_requires_review(
             type=concept_type,
-            confidence=leading.confidence,
+            confidence=confidence,
             model_flagged_review=model_flagged,
             confidence_threshold=confidence_threshold,
             has_translation_conflict=conflict,
             is_frequent=is_frequent,
+            exempt_type_review=eligible,
         ),
         decision=decision,
         suggested_note=suggested_note,
