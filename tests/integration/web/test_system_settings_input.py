@@ -38,6 +38,25 @@ async def test_form_and_json_have_same_semantics():
     assert json_update == form_update and json_revision == form_revision == 0
 
 
+async def test_save_strategy_html_json():
+    for content_type in ('application/json', 'application/x-www-form-urlencoded'):
+        rate = '' if content_type != 'application/json' else None
+        update, _ = await read_settings_update(request(payload(name_translation_strategy='meaning', requests_per_minute=rate), content_type), current_settings=CURRENT)
+        assert update.name_translation_strategy == 'meaning'
+
+
+@pytest.mark.parametrize('body', [payload(name_translation_strategy=None), payload(name_translation_strategy='other'), json.dumps(payload())[:-1] + ',"name_translation_strategy":"sound","name_translation_strategy":"meaning"}'])
+async def test_strategy_invalid_null_duplicate_rejected(body):
+    with pytest.raises(SettingsInputError) as caught:
+        await read_settings_update(request(body), current_settings=CURRENT)
+    assert caught.value.status_code == 422
+
+
+async def test_omitted_strategy_preserved():
+    update, _ = await read_settings_update(request(payload()), current_settings=CURRENT)
+    assert update.name_translation_strategy is None
+
+
 async def test_blank_form_rate_maps_to_none():
     update, _ = await read_settings_update(request(payload(requests_per_minute=''), 'application/x-www-form-urlencoded'), current_settings=CURRENT)
     assert update.requests_per_minute is None

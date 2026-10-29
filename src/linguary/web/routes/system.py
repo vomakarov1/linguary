@@ -92,6 +92,7 @@ def _config_response(application) -> SystemConfigResponse:
         ),
         reading=ReadingConfigResponse(
             reader_level=settings.reading.normalized_level,
+            name_translation_strategy=settings.reading.name_translation_strategy,
         ),
     )
     return response

@@ -20,8 +20,9 @@ _SAVE_FIELDS = frozenset({
     'concurrency', 'expected_revision', 'proxy_mode', 'proxy_url',
     'analysis_model', 'processing_model', 'temperature', 'timeout_seconds',
     'reader_level',
+    'name_translation_strategy',
 })
-_OPTIONAL_FIELDS = {'api_key', 'proxy_mode', 'proxy_url', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'reader_level'}
+_OPTIONAL_FIELDS = {'api_key', 'proxy_mode', 'proxy_url', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'reader_level', 'name_translation_strategy'}
 _REQUIRED_FIELDS = _SAVE_FIELDS - _OPTIONAL_FIELDS
 _INTEGER = re.compile(r'[+-]?[0-9]+\Z')
 _FLOAT = re.compile(r'[+-]?[0-9]+(?:\.[0-9]+)?\Z')
@@ -128,6 +129,11 @@ def _projection(values: Mapping[str, object], current_settings: AppSettings, *, 
         proxy_mode=fields.get('proxy_mode') if fields.get('proxy_mode') in ('auto', 'direct', 'custom') else current_settings.llm.proxy_mode,
         expected_revision=revision if revision is not None and revision >= 0 else None,
         reader_level=reader_level,
+        name_translation_strategy=(
+            fields.get('name_translation_strategy')
+            if fields.get('name_translation_strategy') in ('sound', 'meaning')
+            else current_settings.reading.name_translation_strategy
+        ),
     )
 
 
@@ -148,6 +154,7 @@ def safe_form_values(current_settings: AppSettings, *, update: SystemSettingsUpd
         api_key=None if update is None else update.api_key,
         expected_revision=expected_revision,
         reader_level=current_settings.reading.reader_level if update is None or update.reader_level is None else update.reader_level,
+        name_translation_strategy=current_settings.reading.name_translation_strategy if update is None or update.name_translation_strategy is None else update.name_translation_strategy,
     )
     return _projection(values, current_settings, form=False)
 
@@ -263,6 +270,13 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
                 errors['reader_level'] = f"Недопустимый уровень читателя. Поддерживаются: {', '.join(sorted(SUPPORTED_READER_LEVELS))}"
             else:
                 reader_level = cleaned_level
+    name_translation_strategy = None
+    if 'name_translation_strategy' in values:
+        raw_strategy = values['name_translation_strategy']
+        if type(raw_strategy) is not str or raw_strategy not in ('sound', 'meaning'):
+            errors['name_translation_strategy'] = labels.SETTINGS_NAME_TRANSLATION_STRATEGY_FIELD
+        else:
+            name_translation_strategy = raw_strategy
     if not errors:
         try:
             update = SystemSettingsUpdate(
@@ -275,6 +289,7 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
                 temperature=temp,
                 timeout_seconds=timeout,
                 reader_level=reader_level,
+                name_translation_strategy=name_translation_strategy,
             )
         except SystemSettingsValidationError as error:
             errors[error.field] = error.message

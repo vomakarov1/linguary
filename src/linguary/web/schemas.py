@@ -898,6 +898,7 @@ class ReadingConfigResponse(BaseModel):
     reader_level: str
     supported_levels: list[str] = Field(default_factory=lambda: ["a2", "b1", "b2", "c1"])
     default_level: str = "b2"
+    name_translation_strategy: Literal['sound', 'meaning'] = 'sound'
 
 
 class SystemConfigResponse(BaseModel):
@@ -920,6 +921,7 @@ type SettingsField = Literal[
     "concurrency", "expected_revision", "form", "proxy_mode", "proxy_url",
     "analysis_model", "processing_model", "temperature", "timeout_seconds",
     "reader_level",
+    "name_translation_strategy",
 ]
 
 
@@ -949,6 +951,7 @@ class SafeSettingsFormValues:
     temperature: float | None = None
     timeout_seconds: float | None = None
     reader_level: str = "b2"
+    name_translation_strategy: str = 'sound'
 
 
 class ErrorResponse(BaseModel):

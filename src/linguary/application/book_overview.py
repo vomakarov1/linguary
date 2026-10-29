@@ -280,11 +280,14 @@ def _quality_projection(transaction, book, document, analyses, run, tasks):
     from linguary.application.retry_policy import ResultValidationError
     from linguary.domain.book_conditions import thaw
     conditions = transaction.work.latest_conditions(book.id)
-    summary = dict(conditions_id=None, revision=None, reader_level=None, profile=None, models={}, state='unknown')
+    summary = dict(conditions_id=None, revision=None, reader_level=None, profile=None, models={}, state='unknown', name_translation_state='not_saved', name_translation_policy=None)
     if conditions is not None:
+        policy = conditions.payload.get('name_translation_policy')
         summary.update(conditions_id=conditions.id, revision=conditions.revision,
             reader_level=conditions.payload.get('reader_level'), profile=conditions.payload.get('profile'),
-            models=thaw(conditions.payload.get('models', {})), state='saved')
+            models=thaw(conditions.payload.get('models', {})), state='saved',
+            name_translation_state='configured' if policy is not None else 'legacy',
+            name_translation_policy=thaw(policy) if policy is not None else None)
     results = () if run is None else transaction.results.list_for_run(run.id)
     textual = {block.id for section in document.sections for block in textual_blocks(section)} if document else set()
     result_ids = {result.block_id for result in results}

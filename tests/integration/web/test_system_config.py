@@ -122,4 +122,23 @@ def test_config_reports_reading_settings(client: TestClient) -> None:
     assert reading["reader_level"] == "b2"
     assert reading["default_level"] == "b2"
     assert reading["supported_levels"] == ["a2", "b1", "b2", "c1"]
+    assert reading["name_translation_strategy"] == "sound"
+
+
+def test_strategy_save_omission_conflict_and_reset(configured_client: TestClient) -> None:
+    current = configured_client.get('/system/config').json()
+    body = dict(
+        provider='openai_compatible', model='gpt-5-mini', base_url=current['llm']['base_url'],
+        requests_per_minute=None, concurrency=current['worker']['concurrency'], expected_revision=0,
+        name_translation_strategy='meaning',
+    )
+    saved = configured_client.post('/system/config', json=body)
+    assert saved.status_code == 200
+    assert saved.json()['reading']['name_translation_strategy'] == 'meaning'
+    body.pop('name_translation_strategy')
+    assert configured_client.post('/system/config', json=body).status_code == 409
+    assert configured_client.get('/system/config').json()['reading']['name_translation_strategy'] == 'meaning'
+    body['expected_revision'] = 1
+    assert configured_client.post('/system/config', json=body).json()['reading']['name_translation_strategy'] == 'meaning'
+    assert configured_client.post('/system/config/reset', json={'expected_revision': 2}).json()['reading']['name_translation_strategy'] == 'sound'
 
