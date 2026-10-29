@@ -1,6 +1,7 @@
 """Fallback scenario for a long chapter: chunking and merging fragments (P3.T4, ALG-03)."""
 
 from __future__ import annotations
+from dataclasses import replace
 
 import pytest
 from analysis_fakes import CONFIDENCE_THRESHOLD, make_analysis_block, sequential_ids
@@ -29,6 +30,7 @@ from linguary.domain import (
     DocumentBlock,
     TreatmentPlanItem,
 )
+from linguary.domain.name_translation import NameTranslationAssessment, NameTranslationPolicy, NameTranslationStrategy
 
 SECTION_ID = "section-1"
 
@@ -102,6 +104,33 @@ def merge(
         glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
         id_factory=sequential_ids(),
     )
+
+
+def test_fragment_low_confidence_survives() -> None:
+    policy = NameTranslationPolicy(1, NameTranslationStrategy.SOUND)
+    assessment = NameTranslationAssessment("sound", True, (), "Однозначное имя.")
+    fragments = (
+        make_fragment(0, blocks=("block-1",), candidates=(
+            make_candidate(confidence=0.95, type=ConceptType.PERSON),)),
+        make_fragment(1, blocks=("block-2",), candidates=(
+            make_candidate(confidence=0.3, type=ConceptType.PERSON),)),
+    )
+    fragments = tuple(replace(fragment, glossary_candidates=tuple(
+        replace(candidate, name_translation_assessment=assessment)
+        for candidate in fragment.glossary_candidates)) for fragment in fragments)
+    result = merge_chapter_analysis(fragments, id="analysis-1", section_id=SECTION_ID,
+        expected_block_ids=("block-1", "block-2"),
+        glossary_confidence_threshold=CONFIDENCE_THRESHOLD, id_factory=sequential_ids(),
+        name_translation_policy=policy, conditions_id="conditions-1")
+    evidence = result.glossary_candidates[0].name_translation_evidence
+    assert evidence is not None
+    assert [item.confidence for item in evidence.observations] == [0.95, 0.3]
+
+
+def test_old_merge_unchanged() -> None:
+    result = merge(make_fragment(0, blocks=("block-1",), candidates=(make_candidate(),)),
+                   expected=("block-1",))
+    assert result.glossary_candidates[0].name_translation_evidence is None
 
 
 def test_long_chapter_is_split_into_equal_fragments() -> None:

@@ -46,6 +46,9 @@ from linguary.domain import (
     spellings_by_preference,
     translations_conflict,
 )
+from linguary.domain.name_translation import (
+    NameTranslationEvidence, NameTranslationObservation, NameTranslationPolicy,
+)
 
 #: Fallback limit if provider does not report output token capacity.
 DEFAULT_MAX_FRAGMENT_BLOCKS = 40
@@ -183,6 +186,8 @@ def merge_chapter_analysis(
     expected_block_ids: Iterable[str],
     glossary_confidence_threshold: float,
     id_factory: Callable[[], str],
+    name_translation_policy: NameTranslationPolicy | None = None,
+    conditions_id: str | None = None,
 ) -> ChapterAnalysis:
     """Assembles full analysis of a chunked chapter from its fragment responses (ALG-03).
 
@@ -204,6 +209,8 @@ def merge_chapter_analysis(
             analysis_id=id,
             confidence_threshold=glossary_confidence_threshold,
             id_factory=id_factory,
+            name_translation_policy=name_translation_policy,
+            conditions_id=conditions_id,
         ),
         before_you_read=_merged_before_you_read(ordered),
         content_plan=_merged_content_plan(ordered),
@@ -304,6 +311,8 @@ def _merged_candidates(
     analysis_id: str,
     confidence_threshold: float,
     id_factory: Callable[[], str],
+    name_translation_policy: NameTranslationPolicy | None = None,
+    conditions_id: str | None = None,
 ) -> tuple[GlossaryCandidate, ...]:
     """Chapter glossary candidates merged by source text (PRD § 11-12).
 
@@ -321,6 +330,8 @@ def _merged_candidates(
             id=id_factory(),
             analysis_id=analysis_id,
             confidence_threshold=confidence_threshold,
+            name_translation_policy=name_translation_policy,
+            conditions_id=conditions_id,
         )
         for group in groups.values()
     )
@@ -332,6 +343,8 @@ def _merged_candidate(
     id: str,
     analysis_id: str,
     confidence_threshold: float,
+    name_translation_policy: NameTranslationPolicy | None = None,
+    conditions_id: str | None = None,
 ) -> GlossaryCandidate:
     """Single chapter candidate merged from variants proposed by fragments.
 
@@ -347,7 +360,7 @@ def _merged_candidate(
     of the chapter and characteristics requiring notes may not appear in every fragment.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
-    return GlossaryCandidate.create(
+    candidate = GlossaryCandidate.create(
         id=id,
         analysis_id=analysis_id,
         source_text=spellings_by_preference(
@@ -377,6 +390,34 @@ def _merged_candidate(
                 if candidate.note.strip()
             ),
             "",
+        ),
+    )
+    evidence = name_translation_evidence(
+        group, policy=name_translation_policy, conditions_id=conditions_id
+    )
+    return replace(candidate, name_translation_evidence=evidence) if evidence else candidate
+
+
+def name_translation_evidence(
+    responses: Sequence[GlossaryCandidateResponse],
+    *,
+    policy: NameTranslationPolicy | None,
+    conditions_id: str | None,
+) -> NameTranslationEvidence | None:
+    """Server provenance and every raw model observation for a candidate."""
+    if policy is None or conditions_id is None:
+        return None
+    return NameTranslationEvidence(
+        version=1, conditions_id=conditions_id, policy_version=policy.version,
+        strategy=policy.strategy,
+        observations=tuple(
+            NameTranslationObservation(
+                suggested_translation=response.suggested_translation,
+                confidence=response.confidence,
+                model_flagged_review=response.model_flagged_review,
+                assessment=response.name_translation_assessment,
+            )
+            for response in responses
         ),
     )
 

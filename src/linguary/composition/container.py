@@ -54,6 +54,7 @@ from linguary.adapters.epub import (
 from linguary.adapters.llm import LoggingLLMClient, RateLimitedLLMClient
 from linguary.adapters.llm.logging import LoggedObserver
 from linguary.domain.llm_log import TokenPricing
+from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.adapters.runtime import (
     ExecutorLock,
     SqliteTaskQueue,
@@ -282,6 +283,8 @@ def build_application(
     def generation_factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
         profile = content_plan_profile if conditions is None else conditions.payload["profile"]
         templates = None if conditions is None else conditions.payload["prompt_templates"]
+        policy = None if conditions is None or "name_translation_policy" not in conditions.payload else NameTranslationPolicy(**conditions.payload["name_translation_policy"])
+        conditions_id = None if conditions is None else conditions.id
         queue = task_queue if conditions is None else BoundTaskQueue(task_queue, book_conditions, conditions.id, task_id_factory)
         configured_client = ConfiguredLLMClient(candidate.llm)
         analysis_model = candidate.llm.effective_analysis_model
@@ -323,14 +326,17 @@ def build_application(
             analysis=_analysis_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
                 task_queue=queue, model=analysis_client, content_plan_profile=profile, prompt_templates=templates,
+                name_translation_policy=policy, conditions_id=conditions_id,
             ),
             processing=_processing_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
                 task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
+                name_translation_policy=policy,
             ),
             regeneration=_regeneration_sequence(
                 settings=candidate, unit_of_work=unit_of_work,
                 task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
+                name_translation_policy=policy,
             ),
         )
         if llm_client is None:
@@ -493,6 +499,8 @@ def _analysis_sequence(
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
     prompt_templates=None,
+    name_translation_policy: NameTranslationPolicy | None = None,
+    conditions_id: str | None = None,
 ) -> ChapterAnalysisSequence:
     """Chapter analysis with glossary threshold and fragment limit from settings (PRD § 12, § 14)."""
     return ChapterAnalysisSequence(
@@ -505,7 +513,9 @@ def _analysis_sequence(
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             glossary_confidence_threshold=settings.checks.glossary_confidence_threshold,
             max_fragment_blocks=settings.llm.effective_max_fragment_blocks,
-            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates, name_translation_policy=name_translation_policy),
+            name_translation_policy=name_translation_policy,
+            conditions_id=conditions_id,
         ),
     )
 
@@ -518,6 +528,7 @@ def _processing_sequence(
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
     prompt_templates=None,
+    name_translation_policy: NameTranslationPolicy | None = None,
 ) -> ChapterProcessingSequence:
     """Chapter processing with block group limit from settings (PRD § 10)."""
     return ChapterProcessingSequence(
@@ -530,7 +541,7 @@ def _processing_sequence(
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
             max_unit_source_chars=settings.llm.max_unit_source_chars,
-            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates, name_translation_policy=name_translation_policy),
         ),
     )
 
@@ -543,6 +554,7 @@ def _regeneration_sequence(
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
     prompt_templates=None,
+    name_translation_policy: NameTranslationPolicy | None = None,
 ) -> BlockRegenerationSequence:
     """Block regeneration with neighboring context (PRD § 13, § 21.5)."""
     return BlockRegenerationSequence(
@@ -553,7 +565,7 @@ def _regeneration_sequence(
             llm_client=model,
             retry_policy=RetryPolicy(max_attempts=settings.llm.max_attempts),
             validator=_validator(settings),
-            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates),
+            context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates, name_translation_policy=name_translation_policy),
         ),
     )
 
@@ -573,11 +585,13 @@ def _llm_snapshot(settings: AppSettings) -> LLMSettingsSnapshot:
     )
 
 
-def _context_builder(settings: AppSettings, *, content_plan_profile: str = "legacy-v1", prompt_templates=None) -> ContextBuilder:
+def _context_builder(settings: AppSettings, *, content_plan_profile: str = "legacy-v1", prompt_templates=None,
+                     name_translation_policy: NameTranslationPolicy | None = None) -> ContextBuilder:
     """Model request context policy (PRD § 13)."""
     return ContextBuilder(
         content_plan_profile=content_plan_profile,
         prompt_templates=prompt_templates,
+        name_translation_policy=name_translation_policy,
         max_unit_source_chars=settings.llm.max_unit_source_chars,
         regeneration_context_blocks=DEFAULT_REGENERATION_CONTEXT_BLOCKS,
         language_notes_per_chapter=settings.checks.language_notes_per_chapter,

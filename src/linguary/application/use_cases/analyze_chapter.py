@@ -42,6 +42,7 @@ from linguary.application.analysis_merge import (
     validate_fact_glossary,
     glossary_context_constraints,
     merge_chapter_analysis,
+    name_translation_evidence,
     plan_fragments,
 )
 from linguary.application.block_labels import without_block_labels
@@ -67,6 +68,7 @@ from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators.mixed_script import mixed_script_word
 from linguary.application.task_runner import TaskQueue
 from linguary.domain.errors import DomainError
+from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.domain import (
     BeforeYouReadEntry,
     BookEvent,
@@ -137,6 +139,8 @@ class AnalyzeChapter:
         context_builder: ContextBuilder | None = None,
         id_factory: IdFactory | None = None,
         sleep: Sleep | None = None,
+        name_translation_policy: NameTranslationPolicy | None = None,
+        conditions_id: str | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._llm_client = llm_client
@@ -145,6 +149,8 @@ class AnalyzeChapter:
         self._glossary_confidence_threshold = glossary_confidence_threshold
         self._max_fragment_blocks = max_fragment_blocks
         self._context_builder = context_builder or ContextBuilder()
+        self._name_translation_policy = name_translation_policy or self._context_builder.name_translation_policy
+        self._conditions_id = conditions_id
         self._id_factory = id_factory or _new_id
         self._sleep = sleep or asyncio.sleep
 
@@ -306,6 +312,8 @@ class AnalyzeChapter:
             expected_block_ids=[block.id for block in blocks],
             glossary_confidence_threshold=self._glossary_confidence_threshold,
             id_factory=self._id_factory,
+            name_translation_policy=self._name_translation_policy,
+            conditions_id=self._conditions_id,
         )
         return analysis, attempts, _total_usage(usages)
 
@@ -468,7 +476,7 @@ class AnalyzeChapter:
         is decided by the application under PRD § 12 rules.
         """
         return tuple(
-            GlossaryCandidate.create(
+            replace(GlossaryCandidate.create(
                 id=self._id_factory(),
                 analysis_id=analysis_id,
                 source_text=candidate.source_text,
@@ -478,7 +486,10 @@ class AnalyzeChapter:
                 model_flagged_review=candidate.model_flagged_review,
                 confidence_threshold=self._glossary_confidence_threshold,
                 note=candidate.note,
-            )
+            ), name_translation_evidence=name_translation_evidence(
+                (candidate,), policy=self._name_translation_policy,
+                conditions_id=self._conditions_id,
+            ))
             for candidate in payload.glossary_candidates
         )
 
