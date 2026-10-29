@@ -47,6 +47,21 @@ def test_meaning_sound_requires_explicit_opaque_name() -> None:
         NameTranslationAssessment("sound", True, (), "Имя непрозрачно", opaque_name="true")
 
 
+@pytest.mark.parametrize(
+    ("method", "opaque_name", "expected"),
+    [
+        ("sound", False, False), ("sound", True, True),
+        ("meaning", False, True), ("meaning", True, False),
+        ("mixed", False, True), ("mixed", True, False),
+        ("creative", False, False), ("creative", True, False),
+        ("uncertain", False, False), ("uncertain", True, False),
+    ],
+)
+def test_meaning_method_and_opacity_matrix(method: str, opaque_name: bool, expected: bool) -> None:
+    assessment = NameTranslationAssessment(method, True, (), "Оценка способа", opaque_name=opaque_name)
+    assert assessment.supports(NameTranslationStrategy.MEANING) is expected
+
+
 def test_unknown_or_foreign_evidence_cannot_exempt() -> None:
     observation = NameTranslationObservation(
         "Ровенкло", 0.99, False, NameTranslationAssessment("sound", True, (), "Передано по звучанию")

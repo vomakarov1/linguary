@@ -37,6 +37,6 @@
     {"id":"stale-assessment","source":"Alice","context":"A previous conditions revision supplied the assessment.","languages":["en","ru"],"mode":"sound","mentions":5,"chapters":1,"expected_forms":["Элис"],"conditions_id":"old","expected_requires_review":true},
     {"id":"one-stale-assessment","source":"Alice","context":"Two chapters mention Alice; the second assessment belongs to an older conditions revision.","languages":["en","ru"],"mode":"sound","mentions":5,"chapters":2,"expected_forms":["Элис"],"chapter_conditions_ids":["current","old"],"expected_requires_review":true},
     {"id":"one-missing-assessment","source":"Alice","context":"Two chapters mention Alice; the second analysis omitted the assessment.","languages":["en","ru"],"mode":"sound","mentions":5,"chapters":2,"expected_forms":["Элис"],"chapter_assessments":["present","missing"],"expected_requires_review":true},
-    {"id":"user-decision","source":"Alice","context":"The user approved Алиса, although the selected strategy suggests Элис.","languages":["en","ru"],"mode":"sound","mentions":5,"chapters":1,"expected_forms":["Алиса"],"proposed_form":"Элис","approved_form":"Алиса","expected_requires_review":false}
+    {"id":"user-decision","source":"Alice","context":"The user approved Алиса, although the selected strategy suggests Элис.","languages":["en","ru"],"mode":"sound","mentions":5,"chapters":1,"expected_forms":["Алиса"],"expected_model_forms":["Алиса"],"proposed_form":"Элис","approved_form":"Алиса","expected_requires_review":false}
   ]
 }

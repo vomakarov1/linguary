@@ -68,9 +68,9 @@ class NameTranslationAssessment:
             return False
         if strategy == NameTranslationStrategy.SOUND:
             return self.applied_method == NameTranslationMethod.SOUND
-        return self.applied_method in (NameTranslationMethod.MEANING, NameTranslationMethod.MIXED) or (
-            self.applied_method == NameTranslationMethod.SOUND and self.opaque_name
-        )
+        if self.opaque_name:
+            return self.applied_method == NameTranslationMethod.SOUND
+        return self.applied_method in (NameTranslationMethod.MEANING, NameTranslationMethod.MIXED)
 
 
 @dataclass(frozen=True, slots=True)

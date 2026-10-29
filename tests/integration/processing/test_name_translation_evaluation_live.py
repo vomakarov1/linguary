@@ -28,7 +28,7 @@ FIXTURE = Path(__file__).parents[2] / 'fixtures/llm/name-translation-strategy-v1
 CONDITIONS_ID = 'current'
 
 
-def _review(case, payloads, fixed):
+def _review(case, payloads, fixed, *, fixture_overlays=True):
     mode = NameTranslationStrategy(case['mode'])
     analyses = []
     for number, payload in enumerate(payloads):
@@ -36,23 +36,26 @@ def _review(case, payloads, fixed):
                        if glossary_key(item.source_text) == glossary_key(case['source'])), None)
         if source is None:
             raise AssertionError(f"model omitted evaluated name in chapter {number + 1}")
-        form = case.get('chapter_forms', [source.suggested_translation] * case['chapters'])[number]
-        missing = case.get('assessment') == 'missing' or case.get(
-            'chapter_assessments', ['present'] * case['chapters'])[number] == 'missing'
+        form = (case.get('chapter_forms', [source.suggested_translation] * case['chapters'])[number]
+                if fixture_overlays else source.suggested_translation)
+        missing = fixture_overlays and (case.get('assessment') == 'missing' or case.get(
+            'chapter_assessments', ['present'] * case['chapters'])[number] == 'missing')
+        configured_observations = case.get('observations', [{}]) if fixture_overlays else ({},)
         observations = tuple(NameTranslationObservation(
             item.get('form', form), item.get('confidence', source.confidence),
-            case.get('flagged', False) or source.model_flagged_review,
+            (case.get('flagged', False) if fixture_overlays else False) or source.model_flagged_review,
             None if missing else source.name_translation_assessment,
-        ) for item in case.get('observations', [{}]))
+        ) for item in configured_observations)
         analysis_id = f"analysis-{number}"
         candidate = GlossaryCandidate.create(
-            id=f"candidate-{number}", analysis_id=analysis_id, source_text=case['source'],
+            id=f"candidate-{number}", analysis_id=analysis_id, source_text=source.source_text,
             type=source.type, suggested_translation=form, confidence=source.confidence,
-            model_flagged_review=case.get('flagged', False) or source.model_flagged_review,
+            model_flagged_review=(case.get('flagged', False) if fixture_overlays else False) or source.model_flagged_review,
             confidence_threshold=fixed['confidence_threshold'], note=source.note,
         )
         candidate = replace(candidate, name_translation_evidence=NameTranslationEvidence(
-            1, case.get('chapter_conditions_ids', [case.get('conditions_id', CONDITIONS_ID)] * case['chapters'])[number],
+            1, (case.get('chapter_conditions_ids', [case.get('conditions_id', CONDITIONS_ID)] * case['chapters'])[number]
+                if fixture_overlays else CONDITIONS_ID),
             1, mode, observations,
         ))
         analyses.append(ChapterAnalysis.create(
@@ -87,6 +90,13 @@ def _report_text(report, settings, secrets):
     return safe_detail(json.dumps(report, ensure_ascii=False, indent=2), api_key=settings.api_key, secrets=secrets)
 
 
+def _passes_expectations(case, item, chapter_forms, decision_variant):
+    actual_form = decision_variant.text if decision_variant else item.suggested_translation
+    return (actual_form in case['expected_forms']
+            and all(form in case.get('expected_model_forms', case['expected_forms']) for form in chapter_forms)
+            and item.requires_review is case['expected_requires_review'])
+
+
 @pytest.mark.parametrize('case_id', [
     'contradictory-chapters', 'low-fragment', 'fragment-conflict',
     'one-stale-assessment', 'one-missing-assessment', 'user-decision',
@@ -105,6 +115,39 @@ def test_live_review_uses_all_fixture_observations(case_id):
     assert item.requires_review is case['expected_requires_review']
     if case_id == 'user-decision':
         assert item.decision.variant_for('ru').text == case['approved_form']
+
+
+@pytest.mark.parametrize('case_id', ['contradictory-chapters', 'low-fragment', 'one-missing-assessment'])
+def test_live_review_keeps_model_evidence_separate_from_fixture_overlays(case_id):
+    fixed = json.loads(FIXTURE.read_text())
+    case = next(item for item in fixed['cases'] if item['id'] == case_id)
+    response = SimpleNamespace(
+        source_text=case['source'], suggested_translation='Элис', type=ConceptType.PERSON,
+        confidence=0.9, model_flagged_review=False, note='',
+        name_translation_assessment=NameTranslationAssessment('sound', True, (), 'Однозначное имя.'),
+    )
+    payloads = [SimpleNamespace(glossary_candidates=(response,)) for _ in range(case['chapters'])]
+    assert _review(case, payloads, fixed, fixture_overlays=False).requires_review is False
+    assert _review(case, payloads, fixed, fixture_overlays=True).requires_review is True
+
+
+def test_live_form_gate_checks_every_chapter():
+    fixed = json.loads(FIXTURE.read_text())
+    case = next(item for item in fixed['cases'] if item['id'] == 'alice-sound')
+    response = SimpleNamespace(
+        source_text='Alice', suggested_translation='Элис', type=ConceptType.PERSON,
+        confidence=0.9, model_flagged_review=False, note='',
+        name_translation_assessment=NameTranslationAssessment('sound', True, (), 'Однозначное имя.'),
+    )
+    item = _review(case, [SimpleNamespace(glossary_candidates=(response,))], fixed, fixture_overlays=False)
+    assert _passes_expectations(case, item, ['Элис'], None)
+    assert not _passes_expectations(case, item, ['Элис', 'Алиса'], None)
+    decision_case = next(entry for entry in fixed['cases'] if entry['id'] == 'user-decision')
+    decision_item = _review(decision_case, [SimpleNamespace(glossary_candidates=(response,))], fixed,
+                            fixture_overlays=False)
+    decision_variant = decision_item.decision.variant_for('ru')
+    assert _passes_expectations(decision_case, decision_item, ['Алиса'], decision_variant)
+    assert not _passes_expectations(decision_case, decision_item, ['Элис'], decision_variant)
 
 
 def test_live_report_redacts_key_and_proxy_credentials():
@@ -150,6 +193,7 @@ async def test_live_fixed_name_strategy_set(tmp_path):
                     )
                     row = {'repetition': repetition, 'id': case['id'], 'strategy': mode.value,
                            'policy_version': 1, 'expected_forms': case['expected_forms'],
+                           'expected_model_forms': case.get('expected_model_forms', case['expected_forms']),
                            'expected_requires_review': case['expected_requires_review'], 'chapters': []}
                     payloads = []
                     try:
@@ -186,18 +230,30 @@ async def test_live_fixed_name_strategy_set(tmp_path):
                             payloads.append(payload)
                             model_candidate = next((item for item in payload.glossary_candidates
                                                     if glossary_key(item.source_text) == glossary_key(case['source'])), None)
-                            chapter['model_form'] = None if model_candidate is None else model_candidate.suggested_translation
-                            chapter['model_assessment'] = None if model_candidate is None or model_candidate.name_translation_assessment is None else asdict(model_candidate.name_translation_assessment)
-                        item = _review(case, payloads, fixed)
+                            chapter['model_candidate'] = None if model_candidate is None else {
+                                'source_text': model_candidate.source_text,
+                                'type': model_candidate.type.value,
+                                'form': model_candidate.suggested_translation,
+                                'confidence': model_candidate.confidence,
+                                'model_flagged_review': model_candidate.model_flagged_review,
+                                'assessment': None if model_candidate.name_translation_assessment is None
+                                else asdict(model_candidate.name_translation_assessment),
+                            }
+                        item = _review(case, payloads, fixed, fixture_overlays=False)
                         decision_variant = item.decision.variant_for(case['languages'][1]) if item.decision else None
                         actual_form = decision_variant.text if decision_variant else item.suggested_translation
+                        chapter_forms = [chapter['model_candidate']['form'] for chapter in row['chapters']]
+                        chapter_forms_allowed = all(
+                            form in case.get('expected_model_forms', case['expected_forms']) for form in chapter_forms
+                        )
                         row['actual'] = {'form': actual_form, 'model_suggested_form': item.suggested_translation,
+                                         'chapter_forms': chapter_forms,
+                                         'chapter_forms_allowed': chapter_forms_allowed,
                                          'requires_review': item.requires_review,
                                          'has_translation_conflict': item.has_translation_conflict,
                                          'confidence': item.confidence,
                                          'decision': None if decision_variant is None else decision_variant.text}
-                        row['passed'] = (actual_form in case['expected_forms']
-                                         and item.requires_review is case['expected_requires_review'])
+                        row['passed'] = _passes_expectations(case, item, chapter_forms, decision_variant)
                     except (httpx.HTTPError, ValueError, KeyError, IndexError, AssertionError) as error:
                         row['error'] = safe_detail(f'{type(error).__name__}: {error}', api_key=settings.api_key, secrets=secrets)
                         row['passed'] = False
