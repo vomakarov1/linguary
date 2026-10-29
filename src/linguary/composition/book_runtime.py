@@ -14,6 +14,7 @@ from linguary.domain import ProcessingTask
 from linguary.domain.book_conditions import thaw
 from linguary.domain.recovery import CallAttempt
 from linguary.domain.llm_log import CallContext
+from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.application.diagnostics import diagnostics_for
 
 
@@ -41,11 +42,13 @@ def route_snapshot(llm):
 
 def conditions_payload(book, settings, revision, profile):
     templates = snapshot_prompt_templates(source_language=book.source_language,
-        target_language=book.target_language, reader_level=settings.reading.normalized_level, profile=profile)
+        target_language=book.target_language, reader_level=settings.reading.normalized_level, profile=profile,
+        name_translation_policy={'version': 1, 'strategy': settings.reading.name_translation_strategy})
     llm = asdict(settings.llm)
     for key in ('api_key', 'proxy_url', 'base_url'):
         llm.pop(key)
-    return {'schema_version': 1, 'source_language': book.source_language, 'target_language': book.target_language,
+    return {'schema_version': 1, 'name_translation_policy': {'version': 1, 'strategy': settings.reading.name_translation_strategy},
+        'source_language': book.source_language, 'target_language': book.target_language,
         'reader_level': settings.reading.normalized_level, 'models': {'analysis': settings.llm.effective_analysis_model,
         'processing': settings.llm.effective_processing_model}, 'route': route_snapshot(settings.llm),
         'llm_parameters': llm, 'checks': asdict(settings.checks), 'profile': profile,
@@ -162,6 +165,14 @@ class BookRuntimeResolver:
 
     def settings_for(self, conditions):
         payload = conditions.payload
+        policy_data = payload.get('name_translation_policy')
+        if policy_data is not None:
+            try:
+                policy = NameTranslationPolicy(**thaw(policy_data))
+            except (TypeError, ValueError):
+                raise ConditionsError('conditions_unavailable') from None
+        else:
+            policy = None
         implementation = 3 if payload.get('profile') == 'content-plan-v3' else 1
         expected_versions = {'runtime': 1, 'context_builder': implementation, 'validators': implementation, 'schemas': self.supported.get(payload.get('profile')), 'prompts': implementation}
         if payload.get('english_help', False):
@@ -178,7 +189,8 @@ class BookRuntimeResolver:
             raise ConditionsError('route_unavailable')
         llm = LLMSettings(**{**thaw(payload['llm_parameters']), 'base_url': current.llm.base_url,
                             'proxy_url': current.llm.proxy_url, 'api_key': current.llm.api_key})
-        return replace(current, llm=llm, reading=ReadingSettings(reader_level=payload['reader_level']),
+        return replace(current, llm=llm, reading=ReadingSettings(reader_level=payload['reader_level'],
+                       name_translation_strategy=policy.strategy.value if policy is not None else 'sound'),
                        checks=CheckSettings(**thaw(payload['checks'])),
                        recovery=RecoverySettings(**thaw(payload.get('recovery_policy', asdict(RecoverySettings())))))
 

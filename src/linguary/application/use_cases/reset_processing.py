@@ -152,7 +152,8 @@ class ChooseBookConditions:
                 raise ConditionsError('invalid_book_state')
             conditions = self.service.create(transaction, book, settings_revision,
                 reproducibility='legacy_partial' if action == 'continue_legacy' else 'complete',
-                english_help=english_help if action == 'reanalyze' else False, reader_level=reader_level)
+                english_help=english_help if action == 'reanalyze' else False, reader_level=reader_level,
+                continue_legacy=action == 'continue_legacy')
             # Validate the complete executable route before committing any revision.
             self.resolver.settings_for(conditions)
             run = transaction.runs.active_for_book(book_id)

@@ -5,8 +5,12 @@ import json
 
 import pytest
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
+from linguary.adapters.config.system_settings import SystemSettingsUpdate
 from linguary.adapters.llm import FakeLLMClient, FakeReply
 from linguary.application.book_conditions import ConditionsError
+from linguary.application.book_conditions import payload_digest
+from linguary.application.context_builder import snapshot_prompt_templates
+from linguary.application.use_cases.reset_processing import ChooseBookConditions
 from linguary.application.ports.persistence import BookRecord
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.composition import build_application, drain_tasks
@@ -158,5 +162,100 @@ async def test_explicit_english_help_conditions_are_revision_pinned(tmp_path, le
         with pytest.raises(ConditionsError, match='conditions_revision_conflict'):
             choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, english_help=False)
         assert app.book_conditions.require('book-1').id == conditions.id
+    finally:
+        await app.aclose()
+
+
+async def test_new_conditions_capture_sound(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        await app.analysis.start('book-1')
+        conditions = app.book_conditions.require('book-1')
+        assert conditions.payload['name_translation_policy'] == {'version': 1, 'strategy': 'sound'}
+        assert app.book_runtime.settings_for(conditions).reading.name_translation_strategy == 'sound'
+    finally:
+        await app.aclose()
+
+
+async def test_global_change_does_not_mutate_book(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        await app.analysis.start('book-1')
+        old = app.book_conditions.require('book-1')
+        await app.system_settings.save(SystemSettingsUpdate(
+            provider='openai_compatible', model='pinned-model', base_url='https://api.openai.com/v1',
+            requests_per_minute=None, concurrency=1, name_translation_strategy='meaning',
+        ), expected_revision=0)
+        assert app.runtime_settings.current.settings.reading.name_translation_strategy == 'meaning'
+        assert app.book_conditions.require('book-1').id == old.id
+        assert app.book_runtime.settings_for(old).reading.name_translation_strategy == 'sound'
+        fresh = ChooseBookConditions(app.book_conditions, app.book_runtime)(
+            'book-1', action='reanalyze', expected_revision=1, settings_revision=1, confirmed=True)
+        assert fresh.payload['name_translation_policy'] == {'version': 1, 'strategy': 'meaning'}
+        assert old.payload['name_translation_policy'] == {'version': 1, 'strategy': 'sound'}
+    finally:
+        await app.aclose()
+
+
+async def test_reanalysis_captures_new_policy(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        previous = ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='continue_legacy', expected_revision=0, settings_revision=0, confirmed=True)
+        assert 'name_translation_policy' not in previous.payload
+        current = ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='reanalyze', expected_revision=1, settings_revision=0, confirmed=True)
+        assert current.revision == 2
+        assert current.payload['name_translation_policy']['strategy'] == 'sound'
+        assert previous.payload['prompt_sha256'] == payload_digest(previous.payload['prompt_templates'])
+    finally:
+        await app.aclose()
+
+
+async def test_continue_legacy_has_no_policy(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        conditions = ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='continue_legacy', expected_revision=0, settings_revision=0, confirmed=True)
+        assert 'name_translation_policy' not in conditions.payload
+    finally:
+        await app.aclose()
+
+
+async def test_old_snapshots_keep_exact_prompts(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        conditions = ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='continue_legacy', expected_revision=0, settings_revision=0, confirmed=True)
+        assert conditions.payload['prompt_templates'] == snapshot_prompt_templates(source_language='en', target_language='ru', reader_level='b2', profile=conditions.payload['profile'])
+    finally:
+        await app.aclose()
+
+
+async def test_unknown_policy_version_refused(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        await app.analysis.start('book-1')
+        conditions = app.book_conditions.require('book-1')
+        from dataclasses import replace as dataclass_replace
+        payload = dict(conditions.payload)
+        payload['name_translation_policy'] = {'version': 2, 'strategy': 'sound'}
+        changed = dataclass_replace(conditions, payload=payload)
+        with pytest.raises(ConditionsError, match='conditions_unavailable'):
+            app.book_runtime.settings_for(changed)
+    finally:
+        await app.aclose()
+
+
+@pytest.mark.parametrize('level', ['a2', 'b1', 'b2'])
+async def test_english_help_and_reader_level_keep_policy(tmp_path, level):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        conditions = ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, english_help=True, reader_level=level)
+        assert conditions.payload['name_translation_policy'] == {'version': 1, 'strategy': 'sound'}
+        assert conditions.payload['prompt_sha256'] == payload_digest(conditions.payload['prompt_templates'])
     finally:
         await app.aclose()
