@@ -1,6 +1,6 @@
 import pytest
 
-from linguary.adapters.config.settings import AppSettings, LLMSettings
+from linguary.adapters.config.settings import AppSettings, LLMSettings, ReadingSettings, SettingsError
 from linguary.adapters.config.system_settings import SystemSettingsUpdate, SystemSettingsValidationError, candidate_settings, overlay_settings
 from linguary.adapters.db.system_settings import StoredSystemSettings
 
@@ -137,3 +137,37 @@ def test_candidate_settings_temperature_reset_and_preserve():
     assert candidate_settings(current, update()).llm.temperature == 0.7
     assert candidate_settings(current, update(temperature=None)).llm.temperature is None
     assert candidate_settings(current, update(temperature=0.3)).llm.temperature == 0.3
+
+
+def test_default_sound():
+    assert ReadingSettings().name_translation_strategy == 'sound'
+
+
+def test_toml_env_override(tmp_path):
+    from linguary.adapters.config.loader import load_settings
+
+    config = tmp_path / 'config.toml'
+    config.write_text('[reading]\nname_translation_strategy = "meaning"\n')
+    assert load_settings(config_path=config, environ={}).reading.name_translation_strategy == 'meaning'
+    assert load_settings(config_path=config, environ={'LINGUARY_READING_NAME_TRANSLATION_STRATEGY': 'sound'}).reading.name_translation_strategy == 'sound'
+
+
+@pytest.mark.parametrize('strategy', ['mixed', '', 'SOUND', 1, None])
+def test_invalid_strategy_rejected(strategy):
+    with pytest.raises(SettingsError):
+        ReadingSettings(name_translation_strategy=strategy)
+    if strategy is not None:
+        with pytest.raises(SystemSettingsValidationError) as caught:
+            update(name_translation_strategy=strategy)
+        assert caught.value.field == 'name_translation_strategy'
+
+
+def test_old_overrides_supported():
+    initial = AppSettings(reading=ReadingSettings(name_translation_strategy='meaning'))
+    stored = StoredSystemSettings(1, dict(provider='openai_compatible', model='new', base_url='http://localhost', requests_per_minute=4, concurrency=3), None)
+    assert overlay_settings(initial, stored).reading.name_translation_strategy == 'meaning'
+
+
+def test_omitted_update_preserves_strategy():
+    current = AppSettings(reading=ReadingSettings(name_translation_strategy='meaning'))
+    assert candidate_settings(current, update()).reading.name_translation_strategy == 'meaning'

@@ -138,6 +138,7 @@ _WORKER_FIELDS: Mapping[str, Callable[[object, str], object]] = {
 #: Parsers for the [reading] section.
 _READING_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "reader_level": _as_str,
+    "name_translation_strategy": _as_str,
 }
 
 

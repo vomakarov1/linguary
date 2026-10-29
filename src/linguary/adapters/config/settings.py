@@ -21,6 +21,7 @@ from linguary.application.analysis_merge import fragment_blocks_for
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.llm import LLMConfigurationError
 from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
+from linguary.domain.name_translation import NameTranslationStrategy
 
 #: Provider of the initial implementation: HTTP API compatible with OpenAI chat completions
 #: and structured outputs (ADR § 3). The same adapter serves compatible gateways and local
@@ -354,8 +355,11 @@ class ReadingSettings:
     """
 
     reader_level: str = DEFAULT_READER_LEVEL
+    name_translation_strategy: str = NameTranslationStrategy.SOUND.value
 
     def __post_init__(self) -> None:
+        if type(self.name_translation_strategy) is not str or self.name_translation_strategy not in NameTranslationStrategy._value2member_map_:
+            raise SettingsError("недопустимый способ передачи имён")
         normalized = self.reader_level.strip().lower()
         if normalized not in SUPPORTED_READER_LEVELS:
             raise SettingsError(

@@ -12,6 +12,7 @@ from linguary.adapters.config.settings import (
     SettingsError,
     validate_proxy,
 )
+from linguary.domain.name_translation import NameTranslationStrategy
 
 if TYPE_CHECKING:
     from linguary.adapters.db.system_settings import StoredSystemSettings
@@ -36,7 +37,7 @@ def _positive_integer(value: object, name: str) -> None:
 
 
 BASE_OVERRIDE_FIELDS = frozenset({'provider', 'model', 'base_url', 'requests_per_minute', 'concurrency'})
-OPTIONAL_OVERRIDE_FIELDS = frozenset({'proxy_mode', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'reader_level'})
+OPTIONAL_OVERRIDE_FIELDS = frozenset({'proxy_mode', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'reader_level', 'name_translation_strategy'})
 ALLOWED_OVERRIDE_FIELDS = BASE_OVERRIDE_FIELDS | OPTIONAL_OVERRIDE_FIELDS
 
 
@@ -68,8 +69,14 @@ class SystemSettingsUpdate:
     temperature: float | None | object = UNSET
     timeout_seconds: float | None = None
     reader_level: str | None = None
+    name_translation_strategy: str | None = None
 
     def __post_init__(self) -> None:
+        if self.name_translation_strategy is not None and (
+            type(self.name_translation_strategy) is not str
+            or self.name_translation_strategy not in NameTranslationStrategy._value2member_map_
+        ):
+            raise SystemSettingsValidationError('name_translation_strategy', 'Недопустимый способ передачи имён')
         mode = self.proxy_mode
         if mode is None and self.proxy_url is not None:
             raise SystemSettingsValidationError('proxy_url', 'Укажите режим соединения для адреса прокси')
@@ -167,9 +174,13 @@ def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> Ap
         current.llm.timeout_seconds if update.timeout_seconds is None
         else update.timeout_seconds
     )
-    reading = (
-        current.reading if update.reader_level is None
-        else replace(current.reading, reader_level=update.reader_level)
+    reading = replace(
+        current.reading,
+        reader_level=current.reading.reader_level if update.reader_level is None else update.reader_level,
+        name_translation_strategy=(
+            current.reading.name_translation_strategy if update.name_translation_strategy is None
+            else update.name_translation_strategy
+        ),
     )
 
     return replace(

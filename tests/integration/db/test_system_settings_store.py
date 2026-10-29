@@ -191,6 +191,18 @@ def test_overlay_settings_accepts_legacy_and_extended_records():
     assert result_extended.llm.timeout_seconds == 120.0
 
 
+def test_strategy_persists_and_resets(engine):
+    from linguary.adapters.config.settings import AppSettings, ReadingSettings
+    from linguary.adapters.config.system_settings import overlay_settings
+
+    initial = AppSettings(reading=ReadingSettings(name_translation_strategy='sound'))
+    store = SystemSettingsStore(engine)
+    store.save({**OVERRIDES, 'name_translation_strategy': 'meaning'}, None, expected_revision=0)
+    assert overlay_settings(initial, store.load()).reading.name_translation_strategy == 'meaning'
+    store.reset(expected_revision=1)
+    assert overlay_settings(initial, store.load()).reading.name_translation_strategy == 'sound'
+
+
 def test_candidate_settings_propagates_split_models_and_inference_params():
     from linguary.adapters.config import AppSettings, LLMSettings
     from linguary.adapters.config.system_settings import SystemSettingsUpdate, candidate_settings
