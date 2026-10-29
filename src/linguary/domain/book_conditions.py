@@ -72,7 +72,30 @@ class BookConditions:
         if self.reproducibility not in {'complete', 'legacy_partial', 'unknown'}:
             raise WorkStateError('неизвестная воспроизводимость')
         version(self.payload.get('schema_version'))
+        enabled = self.payload.get('pronunciation_help_enabled', False)
+        variant = self.payload.get('pronunciation_variant')
+        if type(enabled) is not bool or variant not in {None, 'uk', 'us'}:
+            raise WorkStateError('некорректные условия произношения')
+        if enabled and (variant is None or self.payload.get('source_language') != 'en'):
+            raise WorkStateError('произношение требует английского оригинала и варианта UK/US')
+        if not enabled and variant is not None:
+            raise WorkStateError('отключённая помощь не должна иметь вариант произношения')
+        if enabled:
+            versions = self.payload.get('pronunciation_versions')
+            if (not isinstance(versions, Mapping) or set(versions) != {'selection_policy', 'form_rules', 'source'}
+                    or any(type(versions[key]) is not int or versions[key] < 1
+                           for key in ('selection_policy', 'form_rules'))
+                    or not isinstance(versions['source'], str) or not versions['source'].strip()):
+                raise WorkStateError('не заданы версии оснований произношения')
         object.__setattr__(self, 'payload', freeze(self.payload))
+
+    @property
+    def pronunciation_help_enabled(self) -> bool:
+        return self.payload.get('pronunciation_help_enabled', False)
+
+    @property
+    def pronunciation_variant(self) -> str | None:
+        return self.payload.get('pronunciation_variant')
 
     def to_dict(self):
         return {'id': self.id, 'book_id': self.book_id, 'revision': self.revision,

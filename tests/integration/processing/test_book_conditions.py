@@ -275,3 +275,142 @@ async def test_english_help_and_reader_level_keep_policy(tmp_path, level):
         assert conditions.payload['prompt_sha256'] == payload_digest(conditions.payload['prompt_templates'])
     finally:
         await app.aclose()
+
+
+@pytest.mark.parametrize('variant', ['uk', 'us'])
+async def test_pronunciation_conditions_uk_us(tmp_path, variant):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        conditions = ChooseBookConditions(app.book_conditions, app.book_runtime)(
+            'book-1', action='reanalyze', expected_revision=0, settings_revision=0,
+            confirmed=True, pronunciation_help_enabled=True, pronunciation_variant=variant)
+        assert conditions.pronunciation_help_enabled is True
+        assert conditions.pronunciation_variant == variant
+        assert conditions.payload['english_help'] is False
+        assert conditions.payload['reader_level'] == 'b2'
+        assert conditions.payload['pronunciation_versions'] == {
+            'selection_policy': 1, 'form_rules': 1, 'source': 'disabled'}
+        assert app.book_conditions.require('book-1') == conditions
+        app.book_runtime.settings_for(conditions)
+    finally:
+        await app.aclose()
+
+
+async def test_legacy_conditions_disable_pronunciation(tmp_path):
+    from linguary.domain.book_conditions import BookConditions
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        await app.analysis.start('book-1')
+        original = app.book_conditions.require('book-1').to_dict()
+        for key in ('pronunciation_help_enabled', 'pronunciation_variant', 'pronunciation_versions'):
+            original['payload'].pop(key, None)
+        legacy = BookConditions.from_dict(original)
+        assert legacy.pronunciation_help_enabled is False
+        assert legacy.pronunciation_variant is None
+        assert legacy.to_dict() == original
+        app.book_runtime.settings_for(legacy)
+    finally:
+        await app.aclose()
+
+
+async def test_pronunciation_rejects_non_english(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        with app.unit_of_work.transaction() as transaction:
+            book = transaction.books.get('book-1')
+            transaction.books.save(replace(book, source_language='fr'))
+        with pytest.raises(ConditionsError, match='pronunciation_requires_english'):
+            ChooseBookConditions(app.book_conditions, app.book_runtime)(
+                'book-1', action='reanalyze', expected_revision=0, settings_revision=0,
+                confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='uk')
+        with app.unit_of_work.transaction() as transaction:
+            assert transaction.work.latest_conditions('book-1') is None
+    finally:
+        await app.aclose()
+
+
+@pytest.mark.parametrize('variant', [None, 'au', 'UK'])
+async def test_pronunciation_rejects_invalid_variant(tmp_path, variant):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        with pytest.raises(ConditionsError, match='invalid_pronunciation_variant'):
+            ChooseBookConditions(app.book_conditions, app.book_runtime)(
+                'book-1', action='reanalyze', expected_revision=0, settings_revision=0,
+                confirmed=True, pronunciation_help_enabled=True, pronunciation_variant=variant)
+    finally:
+        await app.aclose()
+
+
+async def test_pronunciation_conditions_revision_conflict(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        choice = ChooseBookConditions(app.book_conditions, app.book_runtime)
+        old = choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0,
+            confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='uk')
+        with pytest.raises(ConditionsError, match='conditions_revision_conflict'):
+            choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0,
+                confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='us')
+        new = choice('book-1', action='reanalyze', expected_revision=1, settings_revision=0,
+            confirmed=True, pronunciation_help_enabled=False, pronunciation_variant='us')
+        assert new.revision == 2 and new.pronunciation_variant is None
+        assert old.pronunciation_variant == 'uk'
+    finally:
+        await app.aclose()
+
+
+async def test_pronunciation_version_change_creates_revision(tmp_path, monkeypatch):
+    import linguary.application.book_conditions as module
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        choice = ChooseBookConditions(app.book_conditions, app.book_runtime)
+        old = choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0,
+            confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='uk')
+        monkeypatch.setattr(module, 'PRONUNCIATION_VERSIONS', {
+            'selection_policy': 2, 'form_rules': 1, 'source': 'disabled'})
+        new = choice('book-1', action='reanalyze', expected_revision=1, settings_revision=0,
+            confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='uk')
+        assert old.revision == 1 and new.revision == 2
+        assert old.payload['pronunciation_versions']['selection_policy'] == 1
+        assert new.payload['pronunciation_versions']['selection_policy'] == 2
+    finally:
+        await app.aclose()
+
+
+@pytest.mark.parametrize('encoding', ['json', 'form'])
+async def test_pronunciation_conditions_http_contract(tmp_path, encoding):
+    from httpx import ASGITransport, AsyncClient
+    from linguary.web import create_app
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        web = create_app(application=app, run_background_worker=False)
+        web.state.linguary_application = app
+        choice = dict(action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True,
+                      pronunciation_help_enabled=True, pronunciation_variant='uk')
+        async with AsyncClient(transport=ASGITransport(app=web), base_url='http://127.0.0.1') as client:
+            async def submit(book_id='book-1', **changes):
+                data = {**choice, **changes}
+                return await client.post(f'/books/{book_id}/conditions',
+                    **({'json': data} if encoding == 'json' else {'data': data}),
+                    headers={'accept': 'application/json' if encoding == 'json' else 'text/html'})
+            assert (await submit(pronunciation_variant='au')).status_code == 422
+            assert (await submit(pronunciation_variant=None)).status_code == 422
+            assert (await submit(confirmed=False)).status_code == 422
+            assert (await submit(book_id='missing')).status_code == 404
+            response = await submit()
+            assert response.status_code == (201 if encoding == 'json' else 303)
+            if encoding == 'json':
+                assert response.json()['revision'] == 1
+            assert (await submit()).status_code == 409
+            with app.unit_of_work.transaction() as transaction:
+                book = transaction.books.get('book-1')
+                transaction.books.save(replace(book, source_language='fr'))
+            assert (await submit(expected_revision=1)).status_code == 422
+    finally:
+        await app.aclose()

@@ -96,6 +96,8 @@ async def choose_conditions(request: Request, application: CurrentApplication, b
         confirmed: bool
         english_help: bool = False
         reader_level: Literal["a2", "b1", "b2"] | None = None
+        pronunciation_help_enabled: bool = False
+        pronunciation_variant: Literal['uk', 'us'] | None = None
 
     try:
         raw = await request.json() if request.headers.get('content-type', '').startswith('application/json') else dict(await request.form())
@@ -111,7 +113,9 @@ async def choose_conditions(request: Request, application: CurrentApplication, b
     try:
         conditions = ChooseBookConditions(application.book_conditions, application.book_runtime)(book_id, **choice.model_dump())
     except ConditionsError as error:
-        return input_error_response(request, HTTPException(404 if error.reason_code == 'book_not_found' else 409,
+        return input_error_response(request, HTTPException(404 if error.reason_code == 'book_not_found' else
+                            422 if error.reason_code in {'invalid_pronunciation_choice', 'invalid_pronunciation_variant',
+                                                        'pronunciation_requires_english', 'invalid_reader_level'} else 409,
                             detail={'reason_code': error.reason_code}))
     if wants_html(request):
         return RedirectResponse(url=f'/books/{book_id}', status_code=status.HTTP_303_SEE_OTHER)

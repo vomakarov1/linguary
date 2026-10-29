@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from dataclasses import asdict
+from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
 from enum import StrEnum
 from typing import Any
 
@@ -488,6 +489,7 @@ def to_result_row(run_id: str, result: BlockProcessingResult) -> BlockResultRow:
         translated_text=result.translated_text,
         content_evidence_json=_encode_content_evidence(result.content_evidence),
         fragment_assistance_json=_encode_fragment_assistance(result.fragment_assistances),
+        pronunciation_assistances_json=_encode_pronunciation(result.pronunciation_assistances),
         glossary_hints_json=[
             {"original": hint.original, "translation": hint.translation, "note": hint.note}
             for hint in result.glossary_hints
@@ -537,6 +539,7 @@ def to_block_result(
         translated_text=row.translated_text,
         content_evidence=_decode_content_evidence(row.content_evidence_json),
         fragment_assistances=_decode_fragment_assistance(row.fragment_assistance_json),
+        pronunciation_assistances=_decode_pronunciation(row.pronunciation_assistances_json),
         glossary_hints=tuple(
             GlossaryHint(
                 original=hint["original"],
@@ -906,4 +909,35 @@ def _encode_fragment_assistance(value: tuple[FragmentAssistance, ...]) -> list[d
                                     end=anchor.end, quote=anchor.quote) for anchor in item.anchors],
     ) for item in value]
     _decode_fragment_assistance(data)
+    return data
+
+
+
+def _decode_pronunciation(value: object) -> tuple[PronunciationAssistance, ...]:
+    if value is None:
+        return ()
+    try:
+        result = []
+        for item in _array(value):
+            data = _object(item, {'anchor', 'form', 'ipa', 'variant', 'hint_id', 'evidence'})
+            anchor = _object(data['anchor'], {'block_id', 'start', 'end', 'quote'})
+            evidence = _object(data['evidence'], set(PronunciationEvidence.__dataclass_fields__))
+            result.append(PronunciationAssistance(
+                anchor=SourceAnchor(_string(anchor['block_id']), _integer(anchor['start']),
+                                    _integer(anchor['end']), _string(anchor['quote'])),
+                form=_string(data['form']), ipa=_string(data['ipa']), variant=_string(data['variant']),
+                hint_id=_string(data['hint_id']), evidence=PronunciationEvidence(**evidence),
+            ))
+        return tuple(result)
+    except (ValueError, TypeError, DomainError):
+        raise PersistenceError('повреждённая сохранённая помощь произношения') from None
+
+
+def _encode_pronunciation(value: tuple[PronunciationAssistance, ...]) -> list[dict[str, Any]] | None:
+    if not isinstance(value, tuple) or any(type(item) is not PronunciationAssistance for item in value):
+        raise PersistenceError('некорректная помощь произношения для сохранения')
+    if not value:
+        return None
+    data = [asdict(item) for item in value]
+    _decode_pronunciation(data)
     return data

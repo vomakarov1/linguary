@@ -212,3 +212,101 @@ def test_failed_archive_and_result_replacement_preserve_accepted_help(unit_of_wo
         assert uow.results.get(RUN_ID, SECOND_BLOCK_ID) == stored_results[1]
         assert uow.work.get_artifact(rejected_id) is None
         assert uow.work.get_artifact(accepted_id)['body']['result']['fragment_assistances'][0]['text'] == 'go back'
+
+
+def pronunciation(block_id=BLOCK_ID):
+    from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
+    from linguary.domain.content_plan import SourceAnchor
+    return PronunciationAssistance(
+        anchor=SourceAnchor(block_id, 0, 2, 'It'), form='It', ipa='ɪt', variant='uk',
+        hint_id='synthetic-hint-1', evidence=PronunciationEvidence(
+            source_id='synthetic', source_version='invented-v1', entry_id='invented-entry',
+            sense_id='invented-sense', part_of_speech='pronoun',
+            dictionary_form='It', dictionary_ipa='ɪt', attribution='Invented test data'))
+
+
+@pytest.mark.parametrize('derived', [False, True])
+def test_pronunciation_result_roundtrip(unit_of_work, stored_results, derived):
+    from dataclasses import replace
+    help = pronunciation()
+    if derived:
+        from linguary.domain.content_plan import SourceAnchor
+        help = replace(help, anchor=SourceAnchor(BLOCK_ID, 3, 6, 'was'), form='was', ipa='wɒz',
+                       evidence=replace(help.evidence, dictionary_form='be', dictionary_ipa='biː',
+                                        rule_id='invented-rule', rule_version='invented-v1'))
+    changed = replace(stored_results[0], pronunciation_assistances=(help,))
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (changed,))
+    with unit_of_work.transaction() as uow:
+        assert uow.results.get(RUN_ID, BLOCK_ID) == changed
+        assert uow.results.list_for_run(RUN_ID) == (changed, stored_results[1])
+
+
+def test_pronunciation_legacy_null(unit_of_work, stored_results):
+    with unit_of_work.transaction() as uow:
+        assert uow.results.get(RUN_ID, BLOCK_ID).pronunciation_assistances == ()
+
+
+def test_pronunciation_archive_preserves_evidence(unit_of_work, stored_results, engine):
+    from dataclasses import asdict, replace
+    from linguary.application.use_cases.reset_processing import _archive_run_results
+    old = replace(stored_results[0], pronunciation_assistances=(pronunciation(),))
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (old,))
+        _archive_run_results(uow, BOOK_ID, make_run())
+        uow.runs.delete(RUN_ID)
+    with unit_of_work.transaction() as uow:
+        from sqlalchemy import select
+        from linguary.adapters.db.models import ArtifactRevisionRow
+        with engine.connect() as connection:
+            artifact_id = connection.scalar(select(ArtifactRevisionRow.id).where(ArtifactRevisionRow.scope_id == BLOCK_ID))
+        artifact = uow.work.get_artifact(artifact_id)
+        assert artifact['body']['result']['pronunciation_assistances'] == [asdict(pronunciation())]
+
+
+def test_pronunciation_atomic_replace(unit_of_work, stored_results):
+    from dataclasses import replace
+    old = replace(stored_results[0], pronunciation_assistances=(pronunciation(),))
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (old,))
+    with pytest.raises(RuntimeError), unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (replace(old, pronunciation_assistances=()),))
+        raise RuntimeError('cancel pronunciation replacement')
+    with unit_of_work.transaction() as uow:
+        assert uow.results.list_for_run(RUN_ID) == (old, stored_results[1])
+
+
+def test_pronunciation_rejects_duplicate_anchor(stored_results):
+    from dataclasses import replace
+    from linguary.domain.errors import BlockResultError
+    with pytest.raises(BlockResultError):
+        replace(stored_results[0], pronunciation_assistances=(pronunciation(), pronunciation()))
+
+
+def test_pronunciation_rechecks_original_before_storage(unit_of_work, stored_results):
+    from dataclasses import replace
+    from linguary.domain.content_plan import SourceAnchor
+    from linguary.domain.errors import DomainError
+    invalid = replace(pronunciation(), anchor=SourceAnchor(BLOCK_ID, 0, 2, 'XX'), form='XX',
+                      evidence=replace(pronunciation().evidence, dictionary_form='XX'))
+    with pytest.raises(DomainError), unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (replace(stored_results[0], pronunciation_assistances=(invalid,)),))
+    with unit_of_work.transaction() as uow:
+        assert uow.results.list_for_run(RUN_ID) == stored_results
+
+
+def test_pronunciation_unavailable_preserves_accepted_help(unit_of_work, stored_results):
+    from dataclasses import replace
+    from linguary.application.block_processing import TranslationCall
+    old = replace(stored_results[0], pronunciation_assistances=(pronunciation(),))
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (old,))
+    call = TranslationCall(unit_of_work=unit_of_work, llm_client=None, retry_policy=None,
+                           validator=None, sleep=None)
+    changed = replace(old, translated_text='Новый перевод.', pronunciation_assistances=())
+    assert call.save(book_id=BOOK_ID, run_id=RUN_ID, results=(changed,), pronunciation_unavailable=True)
+    with unit_of_work.transaction() as uow:
+        assert uow.results.get(RUN_ID, BLOCK_ID) == replace(changed, pronunciation_assistances=old.pronunciation_assistances)
+    assert call.save(book_id=BOOK_ID, run_id=RUN_ID, results=(changed,))
+    with unit_of_work.transaction() as uow:
+        assert uow.results.get(RUN_ID, BLOCK_ID) == changed

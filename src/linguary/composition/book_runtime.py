@@ -48,6 +48,7 @@ def conditions_payload(book, settings, revision, profile):
     for key in ('api_key', 'proxy_url', 'base_url'):
         llm.pop(key)
     return {'schema_version': 1, 'name_translation_policy': {'version': 1, 'strategy': settings.reading.name_translation_strategy},
+        'pronunciation_help_enabled': False, 'pronunciation_variant': None,
         'source_language': book.source_language, 'target_language': book.target_language,
         'reader_level': settings.reading.normalized_level, 'models': {'analysis': settings.llm.effective_analysis_model,
         'processing': settings.llm.effective_processing_model}, 'route': route_snapshot(settings.llm),

@@ -10,6 +10,9 @@ from linguary.domain.book_conditions import BookConditions, thaw
 from linguary.domain import BookStatus
 
 
+PRONUNCIATION_VERSIONS = {'selection_policy': 1, 'form_rules': 1, 'source': 'disabled'}
+
+
 class ConditionsError(LLMConfigurationError):
     def __init__(self, reason_code):
         self.reason_code = reason_code
@@ -36,7 +39,7 @@ class BookConditionsService:
                 raise ConditionsError('legacy_choice_required')
             return self.create(transaction, book, expected_settings_revision).id
 
-    def create(self, transaction, book, settings_revision, *, reproducibility='complete', english_help=False, reader_level=None, continue_legacy=False):
+    def create(self, transaction, book, settings_revision, *, reproducibility='complete', english_help=False, reader_level=None, continue_legacy=False, pronunciation_help_enabled=False, pronunciation_variant=None):
         if settings_revision != self._settings_revision():
             raise ConditionsError('settings_revision_conflict')
         previous = transaction.work.latest_conditions(book.id)
@@ -56,6 +59,15 @@ class BookConditionsService:
         payload['reader_level'] = reader_level or payload['reader_level']
         if english_help and payload['reader_level'] not in {'a2', 'b1', 'b2'}:
             raise ConditionsError('invalid_reader_level')
+        if type(pronunciation_help_enabled) is not bool:
+            raise ConditionsError('invalid_pronunciation_choice')
+        if pronunciation_variant not in {None, 'uk', 'us'} or (pronunciation_help_enabled and pronunciation_variant is None):
+            raise ConditionsError('invalid_pronunciation_variant')
+        if pronunciation_help_enabled and book.source_language != 'en':
+            raise ConditionsError('pronunciation_requires_english')
+        payload['pronunciation_help_enabled'] = pronunciation_help_enabled
+        payload['pronunciation_variant'] = pronunciation_variant if pronunciation_help_enabled else None
+        payload['pronunciation_versions'] = dict(PRONUNCIATION_VERSIONS)
         payload['english_help'] = english_help
         if english_help:
             payload['profile'] = 'content-plan-v3'

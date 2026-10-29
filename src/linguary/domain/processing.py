@@ -27,6 +27,7 @@ from linguary.domain.errors import (
 from linguary.domain.glossary import ConceptType, TermStatus
 from linguary.domain.learning import LanguageNote, FragmentAssistance
 from linguary.domain.treatment import BlockTreatment, TreatmentPlan
+from linguary.domain.pronunciation import PronunciationAssistance
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,7 @@ class BlockProcessingResult:
     warnings: tuple[ResultWarning, ...] = ()
     content_evidence: ContentEvidence | tuple[()] = ()
     fragment_assistances: tuple[FragmentAssistance, ...] = ()
+    pronunciation_assistances: tuple[PronunciationAssistance, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.block_id.strip():
@@ -104,6 +106,14 @@ class BlockProcessingResult:
                 f"для блока {self.block_id} с режимом {self.treatment} "
                 "словарные подсказки недопустимы"
             )
+        if not isinstance(self.pronunciation_assistances, tuple) or any(
+                not isinstance(item, PronunciationAssistance) for item in self.pronunciation_assistances):
+            raise BlockResultError('некорректная помощь произношения')
+        anchors = [(item.anchor.start, item.anchor.end) for item in self.pronunciation_assistances]
+        if len(anchors) != len(set(anchors)):
+            raise BlockResultError('повтор произношения для одного вхождения')
+        if any(item.anchor.block_id != self.block_id for item in self.pronunciation_assistances):
+            raise BlockResultError('произношение связано с другим блоком')
         difficulty_ids = [help.difficulty_id for help in self.fragment_assistances]
         if len(difficulty_ids) != len(set(difficulty_ids)):
             raise BlockResultError('повтор помощи к трудности блока')

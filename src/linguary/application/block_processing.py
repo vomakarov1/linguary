@@ -242,12 +242,14 @@ class TranslationCall:
             )
 
     def save(
-        self, *, book_id: str, run_id: str, results: Sequence[BlockProcessingResult]
+        self, *, book_id: str, run_id: str, results: Sequence[BlockProcessingResult],
+        pronunciation_unavailable: bool = False,
     ) -> bool:
         """Atomically replaces results of the specified blocks (ALG-04, PRD § 17).
 
         Returns `False` if there is no active run to write to, or if the run ID does not
         match. This discards stale results of calls started before returning to glossary review.
+        A temporary pronunciation failure preserves accepted help; a checked empty result clears it.
         """
         response = self._validated_response.get()
         context = None if response is None else response.call_context
@@ -272,6 +274,13 @@ class TranslationCall:
                             transaction.work.archive_artifacts([dict(book_id=book_id, run_id=run_id,
                                 kind='block_result', scope_id=result.block_id,
                                 body={'schema_version': 1, 'result': asdict(previous_result)})])
+                if pronunciation_unavailable:
+                    preserved = []
+                    for result in results:
+                        previous = transaction.results.get(run_id, result.block_id)
+                        preserved.append(replace(result, pronunciation_assistances=previous.pronunciation_assistances)
+                                         if previous is not None else result)
+                    results = tuple(preserved)
                 text_changed = any(transaction.results.get(run_id, result.block_id) != result for result in results)
                 transaction.results.replace_results(run_id, results)
                 if context is not None and context.root_id is not None:

@@ -183,6 +183,7 @@ class BlockResultRepository(Protocol):
 
         Previous results, notes, and warnings for these blocks are removed, and new ones
         are written entirely: partially saved `TranslationUnit` results must not occur.
+        Pronunciation anchors must match the original blocks of this run's book.
         """
 
     def get(self, run_id: str, block_id: str) -> BlockProcessingResult | None:

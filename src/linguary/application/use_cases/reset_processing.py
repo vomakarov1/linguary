@@ -134,7 +134,7 @@ class ChooseBookConditions:
     def __init__(self, service, resolver):
         self.service, self.resolver = service, resolver
 
-    def __call__(self, book_id, *, action, expected_revision, settings_revision, confirmed, english_help=False, reader_level=None):
+    def __call__(self, book_id, *, action, expected_revision, settings_revision, confirmed, english_help=False, reader_level=None, pronunciation_help_enabled=False, pronunciation_variant=None):
         from dataclasses import asdict
         from linguary.application.book_conditions import ConditionsError, BookConditionsService
         if confirmed is not True or action not in {'continue_legacy', 'reanalyze'}:
@@ -153,7 +153,9 @@ class ChooseBookConditions:
             conditions = self.service.create(transaction, book, settings_revision,
                 reproducibility='legacy_partial' if action == 'continue_legacy' else 'complete',
                 english_help=english_help if action == 'reanalyze' else False, reader_level=reader_level,
-                continue_legacy=action == 'continue_legacy')
+                continue_legacy=action == 'continue_legacy',
+                pronunciation_help_enabled=pronunciation_help_enabled if action == 'reanalyze' else False,
+                pronunciation_variant=pronunciation_variant if action == 'reanalyze' else None)
             # Validate the complete executable route before committing any revision.
             self.resolver.settings_for(conditions)
             run = transaction.runs.active_for_book(book_id)

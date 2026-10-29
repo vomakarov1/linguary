@@ -343,6 +343,16 @@ class SqlAlchemyBlockResultRepository:
         block_ids = [result.block_id for result in results]
         if not block_ids:
             return
+        pronunciation_results = [result for result in results if result.pronunciation_assistances]
+        if pronunciation_results:
+            blocks = self._session.scalars(select(DocumentBlockRow).where(
+                DocumentBlockRow.id.in_([result.block_id for result in pronunciation_results])
+            )).all()
+            run = self._session.get(ProcessingRunRow, run_id)
+            texts = {block.id: block.text for block in blocks if run is not None and block.book_id == run.book_id}
+            for result in pronunciation_results:
+                for assistance in result.pronunciation_assistances:
+                    assistance.anchor.validate(texts)
         for table in (BlockResultRow, LanguageNoteRow, ResultWarningRow):
             self._session.execute(
                 delete(table).where(
