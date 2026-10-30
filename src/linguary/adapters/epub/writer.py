@@ -36,6 +36,7 @@ from lxml import etree
 
 from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.resources import package_path
+from linguary.application.pronunciation_projection import project_pronunciations
 from linguary.application.analysis_merge import sanitize_before_you_read_explanation
 from linguary.application.ports.epub import (
     EpubExportFatalError,
@@ -465,6 +466,36 @@ class _ChapterRenderer:
         self._opaque = opaque
         self._warnings = warnings
         self._document = request.document
+        sections = request.document.ordered_sections
+        self._pronunciations = project_pronunciations(
+            tuple(block for section in sections for block in section.ordered_blocks),
+            request.block_results,
+        )
+        self._pronunciation_ids = {}
+        self._pronunciation_targets = {}
+        self._pronunciation_references = {}
+        self._pronunciation_backlinks = {}
+        self._pronunciation_by_block = {}
+        hrefs = {}
+        for section in sections:
+            href = _contained_name(section.source_resource_path)
+            used = self._pronunciation_ids.setdefault(href, set())
+            for block in section.ordered_blocks:
+                hrefs[block.id] = href
+                used.update(_anchors(block))
+                if block.support_status is SupportStatus.PRESERVE_OPAQUE:
+                    copied = self._opaque.element(block)
+                    if copied is not None:
+                        used.update(node.get("id") for node in copied.iter() if node.get("id"))
+        for item in self._pronunciations:
+            href = hrefs[item.block_id]
+            if item.is_primary:
+                target = _unique_id("linguary-pronunciation", self._pronunciation_ids[href])
+                self._pronunciation_targets[item.hint_id] = (href, target)
+            reference = _unique_id("linguary-pronunciation-ref", self._pronunciation_ids[href])
+            self._pronunciation_references[reference] = item
+            self._pronunciation_backlinks.setdefault(item.hint_id, []).append((href, reference, item))
+            self._pronunciation_by_block.setdefault(item.block_id, []).append((item, reference))
 
     def render(
         self,
@@ -564,8 +595,16 @@ class _ChapterRenderer:
             if block.parent_id is not None:
                 children.setdefault(block.parent_id, []).append(block)
         state = _SectionState(section=section, href=href, number=number)
+        state.navigation_ids.update(self._pronunciation_ids.get(href, ()))
         if not is_front_matter:
             self._prepare_fragment_help(blocks, state=state)
+        for block in blocks:
+            for item, reference in self._pronunciation_by_block.get(block.id, ()):
+                target_href, target = self._pronunciation_targets[item.hint_id]
+                state.references.setdefault(block.id, []).append((
+                    item.start, item.end, item.quote, reference,
+                    _href_from_target(f"{target_href}#{target}", base=href),
+                ))
         roots = tuple(block for block in blocks if block.parent_id is None)
         self._append_siblings(
             container,
@@ -624,6 +663,7 @@ class _ChapterRenderer:
                         original.append(child)
                 if not is_front_matter:
                     self._append_group_help(host, parts, state=state)
+                self._append_pronunciation_notes(host, parts, state=state)
                 continue
             self._append_block(
                 host,
@@ -665,6 +705,7 @@ class _ChapterRenderer:
         )
         if not is_front_matter:
             self._append_group_help(help_parent, (block,), state=state)
+        self._append_pronunciation_notes(help_parent, (block,), state=state)
 
     def _append_original(
         self,
@@ -679,6 +720,7 @@ class _ChapterRenderer:
         if block.support_status is SupportStatus.PRESERVE_OPAQUE and not nested:
             copied = self._opaque.element(block)
             if copied is not None:
+                self._insert_help_references(copied, block, state=state)
                 parent.append(copied)
                 self._attach_anchors(parent, copied, block, state=state, inside=False)
                 return copied
@@ -734,7 +776,7 @@ class _ChapterRenderer:
                     anchor.validate(texts)
                     reference = _unique_id("linguary-help-ref", state.navigation_ids)
                     state.references.setdefault(anchor.block_id, []).append(
-                        (anchor.start, anchor.end, anchor.quote, reference, target)
+                        (anchor.start, anchor.end, anchor.quote, reference, f"#{target}")
                     )
                     references.append(reference)
                 state.assistances.setdefault(block.id, []).append(
@@ -770,12 +812,17 @@ class _ChapterRenderer:
             state.references.get(block.id, ()), key=lambda item: item[0], reverse=True
         ):
             marker = _element("a", {
-                "id": reference, "href": f"#{target}",
+                "id": reference, "href": target,
                 f"{{{_EPUB_NAMESPACE}}}type": "noteref",
                 "class": "linguary-help-reference", "aria-label": quote,
                 "data-source-block": block.id,
                 "data-source-start": str(start), "data-source-end": str(end),
             })
+            pronunciation = self._pronunciation_references.get(reference)
+            if pronunciation is not None:
+                marker.set("class", "linguary-help-reference linguary-pronunciation-reference")
+                marker.set("aria-label", f"Произношение «{quote}», {pronunciation.variant.upper()}")
+                marker.set("data-hint-id", pronunciation.hint_id)
             for node, tail, lower, upper in slots:
                 if not lower <= start < upper:
                     continue
@@ -798,6 +845,40 @@ class _ChapterRenderer:
                         node.text = value[:offset]
                         node.insert(0, marker)
                 break
+
+    def _append_pronunciation_notes(
+        self, parent: etree._Element, blocks: Sequence[DocumentBlock], *, state: _SectionState
+    ) -> None:
+        """One standalone note per reading, with return links for every occurrence."""
+        for block in blocks:
+            for item, _ in self._pronunciation_by_block.get(block.id, ()):
+                if not item.is_primary:
+                    continue
+                _, target = self._pronunciation_targets[item.hint_id]
+                note = _sub(parent, "aside", {
+                    "id": target, "class": "linguary-pronunciation",
+                    "data-hint-id": item.hint_id,
+                    f"{{{_EPUB_NAMESPACE}}}type": "footnote",
+                })
+                _sub(note, "p").text = f"{item.quote} /{item.ipa.strip('/')}/ — {item.variant.upper()}"
+                attribution = item.source_label
+                if item.source_ref:
+                    attribution += f" ({item.source_ref})"
+                _sub(note, "p").text = attribution
+                _sub(note, "p", {"class": "linguary-ipa-guide"}).text = (
+                    "IPA — международная фонетическая транскрипция. "
+                    "ˈ — основное ударение, ˌ — вторичное ударение перед слогом; "
+                    "ː обозначает долготу звука."
+                )
+                for href, reference, occurrence in self._pronunciation_backlinks[item.hint_id]:
+                    _sub(note, "a", {
+                        "href": _href_from_target(f"{href}#{reference}", base=state.href),
+                        f"{{{_EPUB_NAMESPACE}}}type": "backlink",
+                        "aria-label": f"Вернуться к «{occurrence.quote}»",
+                        "data-source-block": occurrence.block_id,
+                        "data-source-start": str(occurrence.start),
+                        "data-source-end": str(occurrence.end),
+                    }).text = "↩"
 
     def _append_group_help(
         self, parent: etree._Element, blocks: Sequence[DocumentBlock], *, state: _SectionState

@@ -256,3 +256,13 @@ def test_fragment_footnotes_resolve_without_colliding_with_source_ids(tmp_path: 
     assert "Помощь пока не подготовлена." in "".join(target.itertext())
     assert any(a.get("href") == f"#{reference.get('id')}" for a in elements(target, "a"))
     assert any(a.get("href") == "#linguary-help" for a in elements(root, "a"))
+
+
+def test_pronunciation_epub_generated_ids_preserve_author_anchors(tmp_path):
+    from test_epub_export_content import pronunciation_export
+    run, _, _ = pronunciation_export(tmp_path)
+    assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
+    first = next(root for name, root in documents_of(run.path).items() if name.endswith('chapter1.xhtml'))
+    original = next(node for node in elements(first, 'p') if node.get('id') == 'linguary-pronunciation')
+    assert ''.join(original.itertext()) == 'An existing anchor.'
+    assert len([node for node in first.iter() if node.get('id') == 'linguary-pronunciation']) == 1

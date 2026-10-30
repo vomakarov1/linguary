@@ -651,3 +651,114 @@ def test_fragment_assistance_follows_the_complete_split_original(tmp_path: Path)
     source_link = next(a for a in elements(original, "a") if a.get("href") == "https://example.com")
     assert source_link.text == "linked ending"
     assert len([a for a in elements(original, "a") if a.get("class") == "linguary-help-reference"]) == len(parts)
+
+
+def pronunciation_book(tmp_path):
+    """Two sections, repeated invented form, second reading and unconfirmed name."""
+    from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
+    source = build_epub(tmp_path / 'pronunciation.epub', documents={
+        'chapter1.xhtml': xhtml_document('<h1>Chapter One</h1><p>A <em>zorp</em>.</p>'
+            '<p id="linguary-pronunciation">An existing anchor.</p>'),
+        'chapter2.xhtml': xhtml_document('<h1>Chapter Two</h1><p>zorp again.</p>'
+            '<p>Yesterday zorp.</p><p>Unconfirmed Xyzzy.</p>'),
+    }, toc=[('chapter1.xhtml', 'Chapter One'), ('chapter2.xhtml', 'Chapter Two')])
+    document = run_export(source, tmp_path=tmp_path / 'dry').imported.document
+    results = {}
+    for section in document.ordered_sections:
+        for block in section.ordered_blocks:
+            if 'zorp' not in block.text:
+                continue
+            ipa = 'zɛp' if block.text.startswith('Yesterday') else 'zɔːp'
+            start = block.text.index('zorp')
+            item = PronunciationAssistance(SourceAnchor(block.id, start, start + 4, 'zorp'),
+                'zorp', ipa, 'uk', 'ph-past' if ipa == 'zɛp' else 'ph-present',
+                PronunciationEvidence('synthetic-private', 'test-1', 'entry-' + ipa, 'private-sense',
+                    'verb', 'zorp', ipa, 'Invented test data'))
+            results[block.id] = BlockProcessingResult(block_id=block.id, treatment=BlockTreatment.READ_AS_IS,
+                                                     pronunciation_assistances=(item,))
+    return source, document, results
+
+
+def pronunciation_export(tmp_path):
+    source, document, results = pronunciation_book(tmp_path)
+    run = run_export(source, tmp_path=tmp_path / 'result', block_results=dict(reversed(list(results.items()))))
+    return run, document, results
+
+
+def pronunciation_nodes(path, tag, css_class):
+    return [(name, node) for name, root in documents_of(path).items() for node in elements(root, tag)
+            if css_class in node.get('class', '').split()]
+
+
+def test_pronunciation_epub_primary_and_repeat_links(tmp_path):
+    run, _, _ = pronunciation_export(tmp_path)
+    notes = pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation')
+    references = pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-reference')
+    assert len(notes) == 2 and len(references) == 3
+    assert references[0][1].get('href').split('#')[1] == references[1][1].get('href').split('#')[1]
+    assert references[1][0] != references[0][0]
+    assert references[1][1].get('href').startswith('chapter1.xhtml#')
+    assert references[2][1].get('href').split('#')[1] != references[0][1].get('href').split('#')[1]
+
+
+def test_pronunciation_epub_matches_web_projection(tmp_path):
+    from linguary.application.pronunciation_projection import project_pronunciations
+    run, document, results = pronunciation_export(tmp_path)
+    projected = project_pronunciations(tuple(b for s in document.ordered_sections for b in s.ordered_blocks), results)
+    references = pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-reference')
+    assert [(n.get('data-source-block'), int(n.get('data-source-start')), int(n.get('data-source-end')))
+            for _, n in references] == [(p.block_id, p.start, p.end) for p in projected]
+    notes = dict((node.get('data-hint-id'), node) for _, node in pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation'))
+    for item in projected:
+        text = ''.join(notes[item.hint_id].itertext())
+        assert item.ipa in text and item.variant.upper() in text
+        assert item.source_label in text and item.source_ref in text
+    assert all('private' not in ''.join(root.itertext()) for root in documents_of(run.path).values())
+
+
+def test_pronunciation_epub_backlinks(tmp_path):
+    import posixpath
+    run, _, _ = pronunciation_export(tmp_path)
+    references = pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-reference')
+    assert len(references) == 3
+    expected = {(name, node.get('id')) for name, node in references}
+    actual = set()
+    for name, note in pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation'):
+        for link in elements(note, 'a'):
+            path, _, fragment = link.get('href').partition('#')
+            actual.add((posixpath.normpath(posixpath.join(posixpath.dirname(name), path)) if path else name, fragment))
+    assert actual == expected
+
+
+def test_pronunciation_epub_original_markup_unchanged(tmp_path):
+    from lxml import etree
+    run, _, _ = pronunciation_export(tmp_path)
+    first = next(root for name, root in documents_of(run.path).items() if name.endswith('chapter1.xhtml'))
+    original = next(p for p in elements(first, 'p') if ''.join(p.itertext()) == 'A zorp.')
+    assert len(list(elements(original, 'em'))) == 1
+    assert ''.join(elements(original, 'em')[0].itertext()) == 'zorp'
+    for marker in list(elements(original, 'a')):
+        previous = marker.getprevious()
+        if marker.tail:
+            if previous is None:
+                marker.getparent().text = (marker.getparent().text or '') + marker.tail
+            else:
+                previous.tail = (previous.tail or '') + marker.tail
+        marker.getparent().remove(marker)
+    assert ''.join(original.itertext()) == 'A zorp.'
+    assert [etree.QName(node).localname for node in original.iter()] == ['p', 'em']
+
+
+def test_pronunciation_epub_guide_and_offline_reading(tmp_path, monkeypatch):
+    import socket
+    def no_network(*args, **kwargs):
+        raise AssertionError('EPUB generation must not use the network')
+    monkeypatch.setattr(socket, 'create_connection', no_network)
+    run, _, _ = pronunciation_export(tmp_path)
+    notes = pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation')
+    assert len(notes) == 2
+    for _, note in notes:
+        text = ''.join(note.itertext())
+        assert all(symbol in text for symbol in ('IPA', 'ˈ', 'ˌ', 'ː', 'UK'))
+        assert 'основное' in text and 'вторичное' in text and 'долгот' in text
+        assert all(not a.get('href', '').startswith(('http:', 'https:')) for a in elements(note, 'a'))

@@ -7,7 +7,8 @@ from collections.abc import Sequence
 from fastapi import APIRouter, Request, status
 from fastapi.responses import RedirectResponse
 
-from linguary.application.book_overview import book_result, result_block
+from linguary.application.book_overview import book_result, result_groups, ResultBlockNotFoundError
+from linguary.application.pronunciation_projection import project_pronunciations
 from linguary.application.use_cases.retry_task import RetryTaskCommand
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
 from linguary.web.dependencies import CurrentApplication
@@ -131,12 +132,21 @@ def _result_block_response(
     task: ProcessingTask | None = None,
 ) -> ResultGroupResponse:
     """Construct the block DTO along with its current regeneration task, if any."""
-    summaries = result_block(application.unit_of_work, book_id, block_id)
-    with application.unit_of_work.transaction() as transaction:
-        tasks = _regeneration_tasks(transaction.tasks.list_for_book(book_id))
+    snapshot = book_result(application.unit_of_work, book_id)
+    summaries = tuple(block for chapter in snapshot.chapters for block in chapter.blocks)
+    group = next((group for chapter in snapshot.chapters for group in result_groups(chapter.blocks)
+                  if any(member.block.id == block_id for member in group)), None)
+    if group is None:
+        raise ResultBlockNotFoundError(f"блока {block_id} нет в книге {book_id}")
+    pronunciations = project_pronunciations(
+        tuple(summary.block for summary in summaries),
+        {summary.block.id: summary.result for summary in summaries if summary.result is not None},
+    )
+    tasks = _regeneration_tasks(snapshot.tasks)
     if task is not None and task.status is not TaskStatus.SUCCEEDED:
         tasks[task.scope_id] = task
-    return ResultGroupResponse.of_group(summaries, tasks=tasks, block_id=block_id)
+    return ResultGroupResponse.of_group(group, tasks=tasks, block_id=block_id,
+                                        pronunciations=pronunciations)
 
 
 def _regeneration_tasks(tasks: Sequence[ProcessingTask]) -> dict[str, ProcessingTask]:

@@ -748,3 +748,73 @@ def test_result_tasks_are_loaded_once_without_per_member_reads(
         if fragment == 'book':
             assert tasks[ids[2]] is None
             assert tasks[ids[3]] is None
+
+
+def _pronunciation_results(application):
+    from linguary.domain.content_plan import SourceAnchor
+    from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
+
+    scenario = store_book(application, status=BookStatus.COMPLETED, chapters=(('zorp',), ('zorp',)))
+    results = []
+    for section in scenario.document.ordered_sections:
+        block, = section.ordered_blocks
+        item = PronunciationAssistance(SourceAnchor(block.id, 0, 4, 'zorp'), 'zorp', 'zɔːp', 'uk', 'ph-synthetic',
+            PronunciationEvidence('private-source', 'private-version', 'entry-1', 'private-sense', 'verb',
+                                  'zorp', 'zɔːp', 'Invented test data'))
+        results.append(BlockProcessingResult(block_id=block.id, treatment=BlockTreatment.READ_AS_IS,
+                                             pronunciation_assistances=(item,)))
+    start_run(application, scenario, results=tuple(reversed(results)))
+    return scenario
+
+
+def test_pronunciation_result_and_fragment_contract(client, application, monkeypatch):
+    from linguary.web.routes import result as route
+    captured = []
+    original_render = route.render
+
+    def render(*args, **kwargs):
+        captured.append(kwargs.get('block') or kwargs.get('data'))
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(route, 'render', render)
+    scenario = _pronunciation_results(application)
+    full = client.get(f'/books/{scenario.book_id}/result').json()
+    primary = full['chapters'][0]['blocks'][0]['pronunciation_assistances'][0]
+    repeated = full['chapters'][1]['blocks'][0]['pronunciation_assistances'][0]
+    assert primary['is_primary'] is True and repeated['is_primary'] is False
+    assert primary['hint_id'] == repeated['hint_id']
+    assert primary['source_ref'] == 'entry-1' and primary['source_label'] == 'Invented test data'
+    assert 'private-' not in str(full)
+    identifier = scenario.block_ids(1)[0]
+    fragment = client.get(f'/books/{scenario.book_id}/blocks/{identifier}').json()
+    assert fragment['pronunciation_assistances'] == [repeated]
+    assert fragment['member_blocks'][0]['pronunciation_assistances'] == [repeated]
+    response = client.get(f'/books/{scenario.book_id}/blocks/{identifier}',
+                          headers={'accept': 'text/html', 'x-linguary-fragment': 'result-block'})
+    assert response.status_code == 200
+    assert captured[-1].model_dump(mode='json')['pronunciation_assistances'] == [repeated]
+    assert fragment['original_text'] == 'zorp'
+
+
+def test_pronunciation_fragment_uses_book_snapshot(client, application, monkeypatch):
+    from linguary.web.routes import result as route
+    scenario = _pronunciation_results(application)
+    identifier = scenario.block_ids(1)[0]
+    store_task(application, task=ProcessingTask(id='pronunciation-regeneration', book_id=scenario.book_id,
+        task_type=TaskType.REGENERATE_BLOCK, scope_id=identifier))
+    original = route.book_result
+    snapshots = []
+
+    def snapshot(*args):
+        summary = original(*args)
+        snapshots.append(summary)
+        with application.unit_of_work.transaction() as tx:
+            tx.results.replace_results(scenario.run_id, [BlockProcessingResult(
+                block_id=scenario.block_ids()[0], treatment=BlockTreatment.READ_AS_IS)])
+        return summary
+
+    monkeypatch.setattr(route, 'book_result', snapshot)
+    response = client.get(f'/books/{scenario.book_id}/blocks/{identifier}')
+    assert response.status_code == 200 and len(snapshots) == 1
+    assert response.json()['pronunciation_assistances'][0]['is_primary'] is False
+    assert response.json()['regeneration_task']['id'] == 'pronunciation-regeneration'

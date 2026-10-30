@@ -1,0 +1,21 @@
+{
+  "provenance": "Original invented words and pronunciations; no dictionary data or language accuracy claim.",
+  "source_id": "synthetic",
+  "source_version": "test-1",
+  "release_ready": false,
+  "quality_threshold": null,
+  "independent_review": null,
+  "cases": [
+    {"id": "uk-present", "text": "zorp", "form": "zorp", "variant": "uk", "context": "invented action", "grammar": "present", "expected": true, "ipa": "zɔːp", "entry_id": "entry-1"},
+    {"id": "us-present", "text": "zorp", "form": "zorp", "variant": "us", "context": "invented action", "grammar": "present", "expected": true, "ipa": "zɔp", "entry_id": "entry-1"},
+    {"id": "contextual-past", "text": "zorp", "form": "zorp", "variant": "uk", "context": "invented action", "grammar": "past", "expected": true, "ipa": "zɛp", "entry_id": "entry-1"},
+    {"id": "invented-stress", "text": "zorple", "form": "zorple", "variant": "uk", "context": "invented action", "grammar": "present", "expected": true, "ipa": "ˈzɔːpəl", "entry_id": "entry-1"},
+    {"id": "derived-form", "text": "zorps", "form": "zorps", "variant": "uk", "context": "invented action", "grammar": "plural", "expected": true, "ipa": "zɔːps", "entry_id": "entry-1", "rule_id": "synthetic-plural", "rule_version": "1"},
+    {"id": "rarity-alone", "text": "zorp", "form": "zorp", "variant": "uk", "context": "invented action", "grammar": "present", "reason": "rare", "expected": false},
+    {"id": "unknown-name", "text": "Xyzzy", "form": "Xyzzy", "variant": "uk", "context": "invented action", "grammar": "present", "proper": true, "expected": false},
+    {"id": "ambiguous", "text": "zorp", "form": "zorp", "variant": "uk", "context": "invented action", "grammar": "present", "ambiguous": true, "expected": false},
+    {"id": "missing-source", "text": "bip", "form": "bip", "variant": "uk", "context": "invented action", "grammar": "present", "expected": false},
+    {"id": "wrong-context", "text": "zorp", "form": "zorp", "variant": "uk", "context": "unknown invented meaning", "grammar": "present", "expected": false},
+    {"id": "wrong-variant", "text": "zorple", "form": "zorple", "variant": "us", "context": "invented action", "grammar": "present", "expected": false}
+  ]
+}

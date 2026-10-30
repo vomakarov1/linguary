@@ -35,6 +35,7 @@ from linguary.application.book_overview import (
     RunningChapter,
     TaskFailure,
 )
+from linguary.application.pronunciation_projection import PronunciationOccurrence, project_pronunciations
 from linguary.application.glossary_review import GlossaryReview, GlossaryReviewItem
 from linguary.application.ports.persistence import BookRecord
 from linguary.application.use_cases.approve_glossary import GlossaryDecision
@@ -640,6 +641,26 @@ class LanguageNoteResponse(BaseModel):
         )
 
 
+class PronunciationOccurrenceResponse(BaseModel):
+    """Public attribution and verified coordinates; private evidence stays stored."""
+
+    hint_id: str
+    block_id: str
+    start: int
+    end: int
+    quote: str
+    ipa: str
+    variant: Literal['uk', 'us']
+    source_label: str
+    source_ref: str | None
+    is_primary: bool
+
+    @classmethod
+    def of_occurrence(cls, item: PronunciationOccurrence) -> PronunciationOccurrenceResponse:
+        from dataclasses import asdict
+        return cls(**asdict(item))
+
+
 class ResultBlockResponse(BaseModel):
     """Original text and model assistance for a single stable book block."""
 
@@ -655,6 +676,7 @@ class ResultBlockResponse(BaseModel):
     language_notes: tuple[LanguageNoteResponse, ...] = ()
     warnings: tuple[ResultWarningResponse, ...] = ()
     regeneration_task: TaskResponse | None = None
+    pronunciation_assistances: tuple[PronunciationOccurrenceResponse, ...] = ()
 
     @classmethod
     def of_block(
@@ -662,11 +684,14 @@ class ResultBlockResponse(BaseModel):
         summary: ResultBlockSummary,
         *,
         regeneration_task: ProcessingTask | None = None,
+        pronunciations: Sequence[PronunciationOccurrence] = (),
     ) -> ResultBlockResponse:
         """Assembles result block or target fragment for regeneration."""
         result = summary.result
         treatment = summary.treatment
         return cls(
+            pronunciation_assistances=tuple(PronunciationOccurrenceResponse.of_occurrence(item)
+                for item in pronunciations if item.block_id == summary.block.id),
             block_id=summary.block.id,
             section_id=summary.block.section_id,
             chapter_number=summary.chapter_number,
@@ -721,13 +746,15 @@ class ResultGroupResponse(ResultBlockResponse):
 
     @classmethod
     def of_group(cls, summaries: Sequence[ResultBlockSummary], *, tasks: Mapping[str, ProcessingTask] | None = None,
-                 block_id: str | None = None) -> ResultGroupResponse:
+                 block_id: str | None = None,
+                 pronunciations: Sequence[PronunciationOccurrence] = ()) -> ResultGroupResponse:
         from dataclasses import asdict
 
         members = tuple(ResultBlockResponse.of_block(summary,
-            regeneration_task=(tasks or {}).get(summary.block.id)) for summary in summaries)
+            regeneration_task=(tasks or {}).get(summary.block.id), pronunciations=pronunciations) for summary in summaries)
         selected = next((member for member in members if member.block_id == block_id), members[0])
         data = selected.model_dump()
+        data["pronunciation_assistances"] = tuple(item for member in members for item in member.pronunciation_assistances)
         data["original_text"] = "".join(summary.block.text for summary in summaries)
         return cls(**data, member_block_ids=tuple(member.block_id for member in members), member_blocks=members,
                    fragment_assistance=tuple(asdict(item) for summary in summaries if summary.result is not None
@@ -745,14 +772,15 @@ class ResultChapterResponse(BaseModel):
     groups: tuple[ResultGroupResponse, ...] = ()
 
     @classmethod
-    def of_chapter(cls, chapter: ResultChapterSummary) -> ResultChapterResponse:
+    def of_chapter(cls, chapter: ResultChapterSummary, *,
+                   pronunciations: Sequence[PronunciationOccurrence] = ()) -> ResultChapterResponse:
         return cls(
             section_id=chapter.section_id,
             chapter_number=chapter.chapter_number,
             title=chapter.title,
             is_notes=chapter.is_notes,
-            blocks=tuple(ResultBlockResponse.of_block(block) for block in chapter.blocks),
-            groups=tuple(ResultGroupResponse.of_group(group) for group in result_groups(chapter.blocks)),
+            blocks=tuple(ResultBlockResponse.of_block(block, pronunciations=pronunciations) for block in chapter.blocks),
+            groups=tuple(ResultGroupResponse.of_group(group, pronunciations=pronunciations) for group in result_groups(chapter.blocks)),
         )
 
 
@@ -777,6 +805,11 @@ class BookResultResponse(BaseModel):
     @classmethod
     def of_result(cls, result: BookResultSummary) -> BookResultResponse:
         validation = result.book.export_validation_status
+        summaries = tuple(block for chapter in result.chapters for block in chapter.blocks)
+        pronunciations = project_pronunciations(
+            tuple(summary.block for summary in summaries),
+            {summary.block.id: summary.result for summary in summaries if summary.result is not None},
+        )
         return cls(
             book_id=result.book.id,
             conditions=dict(result.conditions), reproducibility=result.reproducibility,
@@ -795,7 +828,7 @@ class BookResultResponse(BaseModel):
             ),
             warnings=BookWarningsResponse.of_warnings(result.warnings),
             chapters=tuple(
-                ResultChapterResponse.of_chapter(chapter)
+                ResultChapterResponse.of_chapter(chapter, pronunciations=pronunciations)
                 for chapter in result.chapters
             ),
         )
