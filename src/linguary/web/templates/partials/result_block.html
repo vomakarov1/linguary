@@ -1,3 +1,10 @@
+{% macro pronunciation(item, show_quote=true) -%}
+  {% if item.is_primary %}
+    <span class="pronunciation" id="{{ item.hint_id }}" tabindex="-1">{% if show_quote %}{{ item.quote }} {% endif %}<span class="ipa">/{{ item.ipa }}/</span> <span class="pronunciation-variant">({{ item.variant|upper }})</span><small class="pronunciation-source">Источник: {{ item.source_label }}{% if item.source_ref %} · {{ item.source_ref }}{% endif %}</small></span>
+  {% else %}
+    <a class="pronunciation-repeat" href="#{{ item.hint_id }}">Произношение «{{ item.quote }}» ({{ item.variant|upper }})</a>
+  {% endif %}
+{%- endmacro %}
 {% set active = namespace(value=false) %}
 {% for member in block.member_blocks %}{% if member.regeneration_task and member.regeneration_task.status in ("pending", "running") %}{% set active.value = true %}{% endif %}{% endfor %}
 {% set regenerating = active.value %}
@@ -18,10 +25,19 @@
   </header>
   {% if loop.first %}<p class="source">{{ group.original_text }}</p>{% endif %}
   {% if block.translated_text %}<p class="translation">{{ block.translated_text }}</p>{% endif %}
+  {% set combined = namespace(items=[]) %}
   {% if block.glossary_hints %}
     <ul class="hints">
       {% for hint in block.glossary_hints %}
-        <li>{{ hint.original }} -> {{ hint.translation }}{% if hint.note %}: {{ hint.note }}{% endif %}</li>
+        {% set matches = block.pronunciation_assistances|selectattr('quote', 'equalto', hint.original)|list %}
+        <li>{{ hint.original }}{% if matches|length == 1 and block.original_text.count(hint.original) == 1 and matches[0] not in combined.items %} {{ pronunciation(matches[0], show_quote=false) }}{% set combined.items = combined.items + matches %}{% endif %} -> {{ hint.translation }}{% if hint.note %}: {{ hint.note }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+  {% if block.pronunciation_assistances|length > combined.items|length %}
+    <ul class="hints pronunciation-hints">
+      {% for item in block.pronunciation_assistances if item not in combined.items %}
+        <li>{{ pronunciation(item) }}</li>
       {% endfor %}
     </ul>
   {% endif %}
@@ -34,6 +50,14 @@
     <p class="task-state" role="status">Задача: {{ block.regeneration_task.task_type_label }} / {{ block.regeneration_task.status_label }}</p>
   {% endif %}
   {% endfor %}
+  {% if group.pronunciation_assistances %}
+  <details class="ipa-guide">
+    <summary>Как читать IPA</summary>
+    <p>IPA — Международный фонетический алфавит. Знаки между косыми чертами /…/ передают звуки слова.</p>
+    <p><span class="ipa">ˈ</span> отмечает основное ударение перед ударным слогом, <span class="ipa">ˌ</span> — вторичное ударение. Знак <span class="ipa">ː</span> после звука обозначает долготу.</p>
+    <p>UK — британский вариант английского, US — американский.</p>
+  </details>
+  {% endif %}
   {% if group.fragment_assistance %}
   <aside class="fragment-assistance">
     {% for item in group.fragment_assistance %}

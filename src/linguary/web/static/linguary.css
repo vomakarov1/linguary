@@ -513,6 +513,45 @@ pre code {
   font-size: 1.05rem;
 }
 
+.ipa {
+  font-family: "Noto Sans", "DejaVu Sans", "Segoe UI", "Arial Unicode MS", sans-serif;
+  font-size: 1.05em;
+}
+
+.pronunciation,
+.pronunciation-repeat {
+  overflow-wrap: anywhere;
+}
+
+.pronunciation {
+  scroll-margin-top: 1rem;
+}
+
+.pronunciation-source {
+  color: var(--muted);
+  margin-left: 0.5em;
+}
+
+.ipa-guide {
+  max-width: 72ch;
+  margin-top: 0.7rem;
+}
+
+.ipa-guide summary {
+  cursor: pointer;
+}
+
+.ipa-guide p {
+  margin: 0.5rem 0;
+}
+
+.pronunciation:focus,
+.pronunciation-repeat:focus-visible,
+.ipa-guide summary:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 3px;
+}
+
 .note {
   border-left: 3px solid var(--accent-2);
   margin-top: 0.7rem;

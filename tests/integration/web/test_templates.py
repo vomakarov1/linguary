@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import replace
+from typing import Literal
 
 import pytest
 from fastapi.testclient import TestClient
+from lxml import html
 from web_scenario import (
+    WebScenario,
     glossary_candidate,
     hinted_result,
     start_run,
@@ -24,13 +27,216 @@ from linguary.application.use_cases.approve_glossary import (
     GlossaryDecisionCommand,
 )
 from linguary.composition import Application, build_application
-from linguary.domain import BlockTreatment, BookStatus, ConceptType
+from linguary.domain import (
+    BlockProcessingResult,
+    BlockTreatment,
+    BookStatus,
+    ConceptType,
+    GlossaryHint,
+)
+from linguary.domain.content_plan import SourceAnchor
+from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
 from linguary.web import create_app
 
 HTML_HEADERS = {"accept": "text/html"}
+RESULT_FRAGMENT_HEADERS = {**HTML_HEADERS, "x-linguary-fragment": "result-block"}
 
 #: Name guaranteed not to exist in `PATH`: simulates a machine without Java.
 MISSING_JAVA = "linguary-java-that-does-not-exist"
+
+
+def _pronunciation_book(
+    application: Application,
+    *,
+    texts: tuple[str, ...] = ("zorp", "zorp"),
+    variant: Literal["uk", "us"] = "uk",
+    meaning: bool = False,
+    source_label: str = "Invented test data",
+) -> WebScenario:
+    """Persist invented pronunciations without contacting a dictionary."""
+    treatment = BlockTreatment.GLOSSARY_ONLY if meaning else BlockTreatment.READ_AS_IS
+    scenario = store_book(
+        application,
+        status=BookStatus.COMPLETED,
+        chapters=tuple((text,) for text in texts),
+        treatments={index: (treatment,) for index in range(len(texts))},
+    )
+    results = []
+    for section in scenario.document.ordered_sections:
+        block, = section.ordered_blocks
+        positions = [
+            index for index in range(len(block.text))
+            if block.text.startswith("zorp", index)
+        ]
+        pronunciations = tuple(
+            PronunciationAssistance(
+                anchor=SourceAnchor(block.id, index, index + 4, "zorp"),
+                form="zorp", ipa="ˈzɔːp", variant=variant, hint_id="ph-invented",
+                evidence=PronunciationEvidence(
+                    "private-source", "private-version", "entry-invented", "private-sense",
+                    "noun", "zorp", "ˈzɔːp", source_label,
+                ),
+            )
+            for index in positions
+        )
+        results.append(BlockProcessingResult(
+            block_id=block.id, treatment=treatment,
+            glossary_hints=(GlossaryHint("zorp", "выдуманное значение", "тестовая помета"),) if meaning else (),
+            pronunciation_assistances=pronunciations,
+        ))
+    start_run(application, scenario, results=tuple(reversed(results)))
+    return scenario
+
+
+@pytest.mark.parametrize("variant", ["uk", "us"])
+def test_pronunciation_template_primary_and_repeat(
+    client: TestClient, application: Application, variant: Literal["uk", "us"]
+) -> None:
+    scenario = _pronunciation_book(application, variant=variant)
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+    tree = html.fromstring(response.text)
+    primary, = tree.xpath('//*[@class="pronunciation"]')
+    repeated, = tree.xpath('//a[@class="pronunciation-repeat"]')
+
+    assert primary.get("id")
+    assert "zorp" in primary.text_content() and "/ˈzɔːp/" in primary.text_content()
+    assert variant.upper() in primary.text_content()
+    assert "Invented test data" in primary.text_content()
+    assert "entry-invented" in primary.text_content()
+    assert repeated.get("href") == f'#{primary.get("id")}'
+    assert "zorp" in repeated.text_content() and variant.upper() in repeated.text_content()
+    assert response.text.count("/ˈzɔːp/") == 1
+    assert "private-" not in response.text
+
+
+def test_pronunciation_template_without_translation(
+    client: TestClient, application: Application
+) -> None:
+    scenario = _pronunciation_book(application, texts=("zorp",))
+    tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
+
+    assert tree.xpath('//*[@class="pronunciation"]')
+    assert not tree.xpath('//*[@class="translation"]')
+    assert "В оригинале" in tree.text_content()
+
+
+def test_pronunciation_template_combines_dictionary_meaning(
+    client: TestClient, application: Application
+) -> None:
+    scenario = _pronunciation_book(application, texts=("A zorp.",), meaning=True)
+    tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
+    primary, = tree.xpath('//*[@class="pronunciation"]')
+    item = primary.getparent()
+
+    assert item.tag == "li"
+    assert "выдуманное значение" in item.text_content()
+    assert "тестовая помета" in item.text_content()
+    assert len(tree.xpath('//article//li')) == 1
+    assert tree.text_content().count("выдуманное значение") == 1
+
+
+def test_pronunciation_template_ambiguous_dictionary_occurrences_stay_separate(
+    client: TestClient, application: Application
+) -> None:
+    scenario = _pronunciation_book(application, texts=("zorp and zorp",), meaning=True)
+    tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
+    primary, = tree.xpath('//*[@class="pronunciation"]')
+
+    assert "выдуманное значение" not in primary.getparent().text_content()
+    assert len(tree.xpath('//a[@class="pronunciation-repeat"]')) == 1
+    assert tree.text_content().count("выдуманное значение") == 1
+
+
+def test_pronunciation_template_original_unchanged(
+    client: TestClient, application: Application
+) -> None:
+    original = '“zorp” <em> & zorp…'
+    scenario = _pronunciation_book(application, texts=(original,))
+    tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
+    source, = tree.xpath('//p[@class="source"]')
+
+    assert source.text_content() == original
+    assert len(source) == 0
+
+
+def test_pronunciation_template_fragment_refresh(
+    client: TestClient, application: Application
+) -> None:
+    scenario = _pronunciation_book(application)
+    primary_response = client.get(
+        f"/books/{scenario.book_id}/blocks/{scenario.block_ids()[0]}", headers=RESULT_FRAGMENT_HEADERS,
+    )
+    primary, = html.fromstring(primary_response.text).xpath('//*[@class="pronunciation"]')
+    for _ in range(2):
+        response = client.get(
+            f"/books/{scenario.book_id}/blocks/{scenario.block_ids(1)[0]}", headers=RESULT_FRAGMENT_HEADERS,
+        )
+        tree = html.fromstring(response.text)
+        repeated, = tree.xpath('//a[@class="pronunciation-repeat"]')
+        assert repeated.get("href") == f'#{primary.get("id")}'
+        assert not tree.xpath('//*[@class="pronunciation"]')
+        assert tree.xpath('//details[@class="ipa-guide"]/summary')
+        assert tree.xpath('//p[@class="source"]')[0].text_content() == "zorp"
+
+    identifier = scenario.block_ids(1)[0]
+    with application.unit_of_work.transaction() as uow:
+        result = next(item for item in uow.results.list_for_run(scenario.run_id) if item.block_id == identifier)
+        previous, = result.pronunciation_assistances
+        updated = replace(
+            previous, ipa="ˈzɛp", hint_id="ph-refreshed",
+            evidence=replace(previous.evidence, dictionary_ipa="ˈzɛp"),
+        )
+        uow.results.replace_results(scenario.run_id, [replace(result, pronunciation_assistances=(updated,))])
+    response = client.get(
+        f"/books/{scenario.book_id}/blocks/{identifier}", headers=RESULT_FRAGMENT_HEADERS,
+    )
+    tree = html.fromstring(response.text)
+    refreshed, = tree.xpath('//*[@class="pronunciation"]')
+    assert "/ˈzɛp/" in refreshed.text_content()
+    assert refreshed.get("id") != primary.get("id")
+    assert not tree.xpath('//a[@class="pronunciation-repeat"]')
+    assert tree.xpath('//details[@class="ipa-guide"]/summary')
+    assert tree.xpath('//p[@class="source"]')[0].text_content() == "zorp"
+
+
+def test_pronunciation_ipa_guide_visible_and_keyboard_accessible(
+    client: TestClient, application: Application
+) -> None:
+    scenario = _pronunciation_book(application, texts=("zorp",))
+    response = client.get(
+        f"/books/{scenario.book_id}/blocks/{scenario.block_ids()[0]}", headers=RESULT_FRAGMENT_HEADERS,
+    )
+    tree = html.fromstring(response.text)
+    guide, = tree.xpath('//details[@class="ipa-guide"]')
+    summary = guide[0]
+
+    assert summary.tag == "summary" and summary.text_content().strip() == "Как читать IPA"
+    assert summary.get("tabindex") is None and summary.get("role") is None
+    assert not guide.xpath('.//script | .//iframe | .//a | .//*[@hidden] | .//*[@aria-hidden="true"]')
+    for text in ("Международный фонетический алфавит", "ˈ", "ˌ", "ː", "основное", "вторичное", "долг"):
+        assert text in guide.text_content()
+
+
+def test_pronunciation_template_escapes_attribution(
+    client: TestClient, application: Application
+) -> None:
+    label = '<script>alert("source")</script>'
+    scenario = _pronunciation_book(application, texts=("zorp",), source_label=label)
+    tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
+    primary, = tree.xpath('//*[@class="pronunciation"]')
+
+    assert label in primary.text_content()
+    assert not primary.xpath('.//script | .//a')
+
+
+def test_pronunciation_template_without_confirmed_assistance(
+    client: TestClient, application: Application
+) -> None:
+    scenario = store_book(application, status=BookStatus.COMPLETED)
+    start_run(application, scenario)
+    tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
+
+    assert not tree.xpath('//*[@class="pronunciation"] | //a[@class="pronunciation-repeat"] | //details[@class="ipa-guide"]')
 
 
 @pytest.fixture
