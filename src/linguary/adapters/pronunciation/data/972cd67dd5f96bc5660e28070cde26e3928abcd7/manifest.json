@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/open-dict-data/ipa-dict",
+  "commit": "972cd67dd5f96bc5660e28070cde26e3928abcd7",
+  "parser_version": 1,
+  "source_version": "ipa-dict@972cd67dd5f96bc5660e28070cde26e3928abcd7:parser-1",
+  "files": {
+    "en_UK.txt": {
+      "variant": "uk",
+      "bytes": 1684124,
+      "lines": 65119,
+      "sha256": "221394caef0cf723b4f2df81a98ac33191293257b88aed5b1fb89466d3a0dc77",
+      "license_id": "GPL-3.0",
+      "upstream_path": "data/en_UK.txt",
+      "source_uri": "https://raw.githubusercontent.com/open-dict-data/ipa-dict/972cd67dd5f96bc5660e28070cde26e3928abcd7/data/en_UK.txt"
+    },
+    "en_US.txt": {
+      "variant": "us",
+      "bytes": 3180267,
+      "lines": 125927,
+      "sha256": "2af6f154a5c363275f052d1f85acedef38ed185ca9745aa4314be77f6b70de67",
+      "license_id": "MIT",
+      "upstream_path": "data/en_US.txt",
+      "source_uri": "https://raw.githubusercontent.com/open-dict-data/ipa-dict/972cd67dd5f96bc5660e28070cde26e3928abcd7/data/en_US.txt"
+    }
+  }
+}
