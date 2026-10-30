@@ -60,6 +60,17 @@
         <input type="hidden" name="action" value="reanalyze">
       <label><input type="checkbox" name="english_help" value="true"> Пояснять сложные места простым английским</label>
       <label>Уровень английского <select name="reader_level"><option value="a2">A2</option><option value="b1">B1</option><option value="b2" selected>B2</option></select></label>
+        {% if data.conditions.source_language == 'en' %}
+          <label><input type="checkbox" name="pronunciation_help_enabled" value="true" {% if data.conditions.pronunciation_help_enabled %}checked{% endif %}
+            onchange="const variant = this.form.querySelector('[data-pronunciation-variant]'); variant.closest('label').hidden = !this.checked; variant.required = this.checked; if (this.checked) { variant.name = 'pronunciation_variant'; } else { variant.removeAttribute('name'); }"> Помогать с произношением</label>
+          <label {% if not data.conditions.pronunciation_help_enabled %}hidden{% endif %}>Вариант английского
+            <select data-pronunciation-variant {% if data.conditions.pronunciation_help_enabled %}name="pronunciation_variant" required{% endif %}>
+              <option value="" {% if not data.conditions.pronunciation_variant %}selected{% endif %}>Выберите вариант</option>
+              <option value="uk" {% if data.conditions.pronunciation_variant == 'uk' %}selected{% endif %}>Британский (UK)</option>
+              <option value="us" {% if data.conditions.pronunciation_variant == 'us' %}selected{% endif %}>Американский (US)</option>
+            </select>
+          </label>
+        {% endif %}
         <input type="hidden" name="expected_revision" value="{{ data.conditions.revision or 0 }}">
         <input type="hidden" name="settings_revision" value="{{ quality_ui.settings_revision }}">
         <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю новый анализ</label>
