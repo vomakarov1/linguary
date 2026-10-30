@@ -883,3 +883,34 @@ def test_notes_page_is_not_shown_as_an_ordinary_chapter(
         assert "Глава 1 - Chapter 1" in page.text
         assert "Сноски - Chapter 2" in page.text
         assert "Глава 2" not in page.text
+
+
+def test_result_groups_wrapper_and_refresh_url(client, application):
+    scenario = _pronunciation_book(application)
+    endpoint = f'/books/{scenario.book_id}/result'
+    for headers in (HTML_HEADERS, {**HTML_HEADERS, 'x-linguary-fragment': 'result-groups'}):
+        tree = html.fromstring(client.get(endpoint, headers=headers).text)
+        root, = tree.xpath('//*[@data-result-groups]')
+        assert root.get('data-result-url') == endpoint
+        assert len(root.xpath('.//*[@data-result-block]')) == 2
+        assert not root.xpath('.//*[@data-result-header] | .//form[contains(@action, "/reset")]')
+
+
+def test_result_groups_template_keeps_pronunciation_guide_and_original(client, application):
+    original = '  A zorp.\n'
+    scenario = _pronunciation_book(application, texts=(original, 'zorp'))
+    tree = html.fromstring(client.get(f'/books/{scenario.book_id}/result', headers={
+        **HTML_HEADERS, 'x-linguary-fragment': 'result-groups'}).text)
+    root, = tree.xpath('//*[@data-result-groups]')
+    assert root.xpath('.//p[@class="source"]/text()') == [original, 'zorp']
+    assert len(root.xpath('.//details[@class="ipa-guide"]/summary')) == 2
+    assert len(root.xpath('.//*[@class="pronunciation"]')) == 1
+    link, = root.xpath('.//a[@class="pronunciation-repeat"]')
+    assert len(root.xpath('.//*[@id=$target]', target=link.get('href')[1:])) == 1
+
+
+def test_result_page_versions_updated_script(client, application):
+    scenario = _pronunciation_book(application)
+    tree = html.fromstring(client.get(f'/books/{scenario.book_id}/result', headers=HTML_HEADERS).text)
+    assert tree.xpath('//script/@src')[0].endswith('/static/linguary.js?v=3')
+    assert tree.xpath('//link[@rel="stylesheet"]/@href')[0].endswith('/static/linguary.css?v=3')

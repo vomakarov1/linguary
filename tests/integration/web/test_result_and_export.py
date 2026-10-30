@@ -758,7 +758,7 @@ def _pronunciation_results(application):
     results = []
     for section in scenario.document.ordered_sections:
         block, = section.ordered_blocks
-        item = PronunciationAssistance(SourceAnchor(block.id, 0, 4, 'zorp'), 'zorp', 'zɔːp', 'uk', 'ph-synthetic',
+        item = PronunciationAssistance(SourceAnchor(block.id, 0, 4, 'zorp'), 'zorp', 'zɔːp', 'uk', f'ph-synthetic-{block.id}',
             PronunciationEvidence('private-source', 'private-version', 'entry-1', 'private-sense', 'verb',
                                   'zorp', 'zɔːp', 'Invented test data'))
         results.append(BlockProcessingResult(block_id=block.id, treatment=BlockTreatment.READ_AS_IS,
@@ -818,3 +818,138 @@ def test_pronunciation_fragment_uses_book_snapshot(client, application, monkeypa
     assert response.status_code == 200 and len(snapshots) == 1
     assert response.json()['pronunciation_assistances'][0]['is_primary'] is False
     assert response.json()['regeneration_task']['id'] == 'pronunciation-regeneration'
+
+
+GROUPS_HEADERS = {'accept': 'text/html', 'x-linguary-fragment': 'result-groups'}
+
+
+def _groups_tree(client, scenario):
+    from lxml import html
+    response = client.get(f'/books/{scenario.book_id}/result', headers=GROUPS_HEADERS)
+    assert response.status_code == 200
+    tree = html.fromstring(response.text)
+    assert tree.get('data-result-groups') is not None
+    assert tree.get('data-result-url') == f'/books/{scenario.book_id}/result'
+    for link in tree.xpath('.//a[@class="pronunciation-repeat"]'):
+        assert len(tree.xpath('//*[@id=$target]', target=link.get('href')[1:])) == 1
+    return tree
+
+
+def test_result_groups_fragment_matches_full_book_snapshot(client, application, monkeypatch):
+    from lxml import html
+    from linguary.web.routes import result as route
+    from linguary.web import schemas
+
+    scenario = _pronunciation_results(application)
+    endpoint = f'/books/{scenario.book_id}/result'
+    full = html.fromstring(client.get(endpoint, headers={'accept': 'text/html'}).text)
+    expected, = full.xpath('//*[@data-result-groups]')
+    original = route.book_result
+    original_projection = schemas.project_pronunciations
+    snapshots, projections = [], []
+
+    def snapshot(*args):
+        summary = original(*args)
+        snapshots.append(summary)
+        with application.unit_of_work.transaction() as tx:
+            results = tx.results.list_for_run(scenario.run_id)
+            tx.results.replace_results(scenario.run_id, [
+                replace(result, pronunciation_assistances=()) if result.block_id == scenario.block_ids()[0]
+                else result for result in results])
+        return summary
+
+    def project(*args, **kwargs):
+        projections.append(1)
+        return original_projection(*args, **kwargs)
+
+    monkeypatch.setattr(route, 'book_result', snapshot)
+    monkeypatch.setattr(schemas, 'project_pronunciations', project)
+    actual = _groups_tree(client, scenario)
+    assert len(snapshots) == len(projections) == 1
+    assert html.tostring(actual, with_tail=False) == html.tostring(expected, with_tail=False)
+    refreshed = _groups_tree(client, scenario)
+    assert not refreshed.xpath('.//a[@class="pronunciation-repeat"]')
+    assert len(refreshed.xpath('.//*[@class="pronunciation"]')) == 1
+
+
+def test_pronunciation_groups_refresh_promotes_later_primary(client, application):
+    scenario = _pronunciation_results(application)
+    before = _groups_tree(client, scenario)
+    old_id = before.xpath('.//*[@class="pronunciation"]')[0].get('id')
+    with application.unit_of_work.transaction() as tx:
+        results = tx.results.list_for_run(scenario.run_id)
+        tx.results.replace_results(scenario.run_id, [
+            replace(result, pronunciation_assistances=()) if result.block_id == scenario.block_ids()[0]
+            else result for result in results])
+    after = _groups_tree(client, scenario)
+    primary, = after.xpath('.//*[@class="pronunciation"]')
+    assert primary.get('id') != old_id
+    assert primary.xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids(1)[0]}'
+    assert not after.xpath('.//a[@class="pronunciation-repeat"]')
+
+
+def test_pronunciation_groups_refresh_demotes_old_primary(client, application):
+    scenario = _pronunciation_results(application)
+    with application.unit_of_work.transaction() as tx:
+        results = tx.results.list_for_run(scenario.run_id)
+        tx.results.replace_results(scenario.run_id, [
+            replace(result, pronunciation_assistances=()) if result.block_id == scenario.block_ids()[0]
+            else result for result in results])
+    before = _groups_tree(client, scenario)
+    assert before.xpath('.//*[@class="pronunciation"]')[0].xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids(1)[0]}'
+    with application.unit_of_work.transaction() as tx:
+        tx.results.replace_results(scenario.run_id, list(results))
+    after = _groups_tree(client, scenario)
+    primary, = after.xpath('.//*[@class="pronunciation"]')
+    repeated, = after.xpath('.//a[@class="pronunciation-repeat"]')
+    assert primary.xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids()[0]}'
+    assert repeated.get('href') == f'#{primary.get("id")}'
+
+
+def test_pronunciation_groups_refresh_splits_changed_ipa(client, application):
+    scenario = _pronunciation_results(application)
+    with application.unit_of_work.transaction() as tx:
+        results = tx.results.list_for_run(scenario.run_id)
+        updated = []
+        for result in results:
+            if result.block_id == scenario.block_ids()[0]:
+                item, = result.pronunciation_assistances
+                result = replace(result, pronunciation_assistances=(replace(
+                    item, ipa='zɒp', hint_id='ph-changed-synthetic', evidence=replace(item.evidence, dictionary_ipa='zɒp')),))
+            updated.append(result)
+        tx.results.replace_results(scenario.run_id, updated)
+    after = _groups_tree(client, scenario)
+    assert len(after.xpath('.//*[@class="pronunciation"]')) == 2
+    assert len(set(after.xpath('//*[@class="pronunciation"]/@id'))) == 2
+    assert not after.xpath('.//a[@class="pronunciation-repeat"]')
+    assert '/zɒp/' in after.text_content() and '/zɔːp/' in after.text_content()
+
+
+def test_result_groups_fragment_keeps_group_members_and_tasks(client, application):
+    scenario, _, original = _split_result_scenario(application)
+    ids = scenario.block_ids()
+    for index, state in enumerate((TaskStatus.FAILED, TaskStatus.RUNNING, TaskStatus.SUCCEEDED, TaskStatus.PENDING)):
+        store_task(application, task=ProcessingTask(
+            id=f'group-task-{index}', book_id=scenario.book_id, scope_id=ids[index],
+            task_type=TaskType.REGENERATE_BLOCK, status=state,
+            last_error=failed_task(scenario).last_error if state is TaskStatus.FAILED else None))
+    tree = _groups_tree(client, scenario)
+    assert len(tree.xpath('.//*[@data-result-block]')) == 3
+    assert len(tree.xpath('.//*[@data-active-task="true"]')) == 2
+    assert tree.xpath('.//*[@class="source"]')[0].text == original
+    assert tree.xpath('//form[@data-regenerate-form]/@action') == [
+        f'/books/{scenario.book_id}/blocks/{identifier}/regenerate' for identifier in ids]
+    assert len(tree.xpath('.//*[@class="task-state"]')) == 3
+    assert 'Задача: Повторная генерация блока /' in tree.text_content()
+
+
+@pytest.mark.parametrize('empty', [False, True], ids=['legacy', 'empty'])
+def test_result_groups_fragment_empty_and_legacy(client, application, empty):
+    scenario = store_book(application, status=BookStatus.COMPLETED, chapters=() if empty else (('Legacy text.',),))
+    if not empty:
+        start_run(application, scenario, results=(translated_result(scenario.block_ids()[0]),))
+    tree = _groups_tree(client, scenario)
+    assert len(tree.xpath('.//*[@data-result-block]')) == (0 if empty else 1)
+    assert not tree.xpath('.//*[@class="pronunciation"]')
+    assert not tree.xpath('.//*[@data-result-header] | .//*[@class="book-tabs"]')
+    assert '<!doctype' not in client.get(f'/books/{scenario.book_id}/result', headers=GROUPS_HEADERS).text

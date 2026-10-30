@@ -49,6 +49,11 @@ def get_book_result(
             export_task=export_task_response,
             quality_ui=quality_page_context(request, application, book_id, tasks=summary.tasks),
         )
+    if (
+        wants_html(request)
+        and request.headers.get("x-linguary-fragment", "").lower() == "result-groups"
+    ):
+        return render(request, "partials/result_groups.html", data=response)
     if wants_html(request):
         return render(
             request,
