@@ -297,3 +297,15 @@ def test_v2_preserves_exact_source_substrings():
     assert anchor.quote == 'Echo '
     evidence = HelpEvidenceSchema(difficulty_id='d', point_id='p', source_block_id='b1', artifact_kind='language_note.note', artifact_index=0, body_excerpt=' two meanings ')
     assert evidence.body_excerpt == ' two meanings '
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+def test_pronunciation_provider_schema_stays_strict(version):
+    schema = strict_json_schema(schema_for(LLMResponseKind.TRANSLATION_RESULT,
+        contract_version=version, pronunciation_candidates_version=1))
+    objects = [node for node in _walk(schema) if isinstance(node, dict) and node.get('type') == 'object']
+    assert objects and all(node['additionalProperties'] is False for node in objects)
+    assert all(set(node['required']) == set(node['properties']) for node in objects)
+    candidate = schema['$defs']['PronunciationCandidateSchema']
+    assert set(candidate['properties']) == {'anchor', 'form', 'context', 'selection_reason'}
+    assert schema['properties']['pronunciation_candidates']['items'] == {'$ref': '#/$defs/PronunciationCandidateSchema'}

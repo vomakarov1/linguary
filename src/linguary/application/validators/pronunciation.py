@@ -23,6 +23,37 @@ class PronunciationSelection:
     unavailable: bool = False
 
 
+_WORD_JOINERS = frozenset("'’ʼ-‐‑")
+
+
+def is_complete_pronunciation_form(text: str, start: int, end: int) -> bool:
+    """Match a whole Unicode word without normalizing text or its offsets."""
+    if not 0 <= start < end <= len(text):
+        return False
+
+    def is_letter(char):
+        return char not in _WORD_JOINERS and unicodedata.category(char).startswith('L')
+
+    index = 0
+    while index <= start:
+        if not is_letter(text[index]):
+            index += 1
+            continue
+        word_start = index
+        index += 1
+        while index < len(text):
+            char = text[index]
+            if is_letter(char) or unicodedata.category(char).startswith('M'):
+                index += 1
+            elif char in _WORD_JOINERS and index + 1 < len(text) and is_letter(text[index + 1]):
+                index += 2
+            else:
+                break
+        if index > start:
+            return word_start == start and index == end
+    return False
+
+
 def _normalized(text):
     return ' '.join(unicodedata.normalize('NFC', text).split()).casefold()
 
@@ -68,7 +99,13 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
         except DomainError:
             skipped.append(PronunciationSkip(candidate, 'invalid_anchor'))
             continue
-        if candidate.form != anchor.quote or not valid_lookup_form(candidate.form):
+        if candidate.form != anchor.quote:
+            skipped.append(PronunciationSkip(candidate, 'invalid_form'))
+            continue
+        if not is_complete_pronunciation_form(texts[anchor.block_id], anchor.start, anchor.end):
+            skipped.append(PronunciationSkip(candidate, 'partial_word'))
+            continue
+        if not valid_lookup_form(candidate.form):
             skipped.append(PronunciationSkip(candidate, 'invalid_form'))
             continue
         if candidate.selection_reason not in {'unpredictable_spelling', 'unpredictable_stress', 'context_dependent'}:
@@ -121,6 +158,8 @@ def preserve_unavailable(selection, previous, *, texts, variant):
         try:
             item.anchor.validate(texts)
         except DomainError:
+            continue
+        if not is_complete_pronunciation_form(texts[item.anchor.block_id], item.anchor.start, item.anchor.end):
             continue
         merged.setdefault(item.anchor, item)
     return tuple(sorted(merged.values(), key=lambda item: (item.anchor.block_id, item.anchor.start, item.anchor.end)))

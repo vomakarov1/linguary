@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 from llm_payload_factories import analysis_payload, as_content, block_payload, translation_payload
 
-from linguary.adapters.llm.payloads import parse_payload
+from linguary.adapters.llm.payloads import parse_payload, schema_for
+from pydantic import ValidationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMResponseFormatError, LLMResponseKind
 from linguary.domain import BlockTreatment, ConceptType
@@ -37,10 +38,9 @@ def test_pronunciation_candidate_schema_and_dto_roundtrip(version):
 @pytest.mark.parametrize('field', ['ipa', 'source', 'url', 'hint_id', 'variant'])
 def test_pronunciation_candidate_schema_rejects_ipa_source_and_url(field):
     candidate = pronunciation_candidate() | {field: 'must not be accepted'}
-    with pytest.raises(LLMResponseFormatError):
-        parse_payload(LLMResponseKind.TRANSLATION_RESULT,
-            as_content(dict(blocks=[dict(source_block_id='b1', treatment='READ_AS_IS', translated_text=None, glossary_hints=[])], language_notes=[], pronunciation_candidates=[candidate])),
-            pronunciation_candidates_version=1)
+    with pytest.raises(ValidationError):
+        schema_for(LLMResponseKind.TRANSLATION_RESULT, pronunciation_candidates_version=1).model_validate_json(
+            as_content(dict(blocks=[dict(source_block_id='b1', treatment='READ_AS_IS', translated_text=None, glossary_hints=[])], language_notes=[], pronunciation_candidates=[candidate])))
 
 
 def test_pronunciation_disabled_contract_unchanged():
@@ -251,3 +251,112 @@ def test_v4_rejects_invalid_fragment_assistance(item):
     data.update(content_evidence=[], fragment_assistances=[dict(difficulty_id='d', **item)])
     with pytest.raises(LLMResponseFormatError):
         parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), contract_version=4)
+
+
+def pronunciation_payload(version, candidates):
+    data = translation_payload(pronunciation_candidates=candidates)
+    if version >= 2:
+        data['content_evidence'] = []
+    if version == 4:
+        data['fragment_assistances'] = []
+    return data
+
+
+def malformed_pronunciation_candidates():
+    item = pronunciation_candidate()
+    return [None, 'zorp', 7, [], {}, item | {'form': 123},
+            item | {'anchor': item['anchor'] | {'start': True}},
+            item | {'anchor': item['anchor'] | {'end': '6'}},
+            item | {'context': item['context'] | {'is_proper_name': 'false'}},
+            item | {'selection_reason': 'rare'},
+            {key: value for key, value in item.items() if key != 'context'}]
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+def test_pronunciation_mixed_malformed_candidates_keep_valid_translation_and_candidate(version):
+    first = pronunciation_candidate()
+    last = first | {'selection_reason': 'context_dependent'}
+    result = parse_payload(LLMResponseKind.TRANSLATION_RESULT,
+        as_content(pronunciation_payload(version, [first, *malformed_pronunciation_candidates(), last])),
+        contract_version=version, pronunciation_candidates_version=1)
+    assert result.blocks[0].translated_text == translation_payload()['blocks'][0]['translated_text']
+    assert result.blocks[1].glossary_hints
+    assert result.language_notes
+    assert [item.selection_reason for item in result.pronunciation_candidates] == ['unpredictable_spelling', 'context_dependent']
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+def test_pronunciation_all_malformed_candidates_keep_translation(version):
+    result = parse_payload(LLMResponseKind.TRANSLATION_RESULT,
+        as_content(pronunciation_payload(version, malformed_pronunciation_candidates())),
+        contract_version=version, pronunciation_candidates_version=1)
+    assert result.blocks[0].translated_text
+    assert result.pronunciation_candidates == ()
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+@pytest.mark.parametrize('level', ['candidate', 'anchor', 'context'])
+@pytest.mark.parametrize('field', ['ipa', 'source', 'url', 'hint_id', 'variant', 'extra'])
+def test_pronunciation_forbidden_fields_skip_whole_candidate(version, level, field):
+    item = pronunciation_candidate()
+    if level == 'candidate':
+        item[field] = 'FORBIDDEN_PRIVATE'
+    else:
+        item[level][field] = 'FORBIDDEN_PRIVATE'
+    result = parse_payload(LLMResponseKind.TRANSLATION_RESULT,
+        as_content(pronunciation_payload(version, [item, pronunciation_candidate()])),
+        contract_version=version, pronunciation_candidates_version=1)
+    assert len(result.pronunciation_candidates) == 1
+    assert 'FORBIDDEN_PRIVATE' not in repr(result)
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+@pytest.mark.parametrize('bad', ['translation', 'notes', 'extra', 'evidence', 'fragments'])
+def test_pronunciation_invalid_main_response_still_rejected(version, bad):
+    data = pronunciation_payload(version, [pronunciation_candidate()])
+    if bad == 'translation':
+        data['blocks'][0]['translated_text'] = None
+    elif bad == 'notes':
+        data['language_notes'] = [{}]
+    elif bad == 'extra':
+        data['source'] = 'forbidden'
+    elif bad == 'evidence':
+        data['content_evidence'] = [{}]
+    else:
+        data['fragment_assistances'] = [{}]
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data),
+            contract_version=version, pronunciation_candidates_version=1)
+
+
+@pytest.mark.parametrize('content', ['[]', 'null', '{', '"text"'])
+def test_pronunciation_candidate_envelope_still_required(content):
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT, content, pronunciation_candidates_version=1)
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+@pytest.mark.parametrize('value', [None, {}, 'zorp', 1, True, 'missing'])
+def test_pronunciation_candidate_list_still_required(version, value):
+    data = pronunciation_payload(version, value)
+    if value == 'missing':
+        del data['pronunciation_candidates']
+    with pytest.raises(LLMResponseFormatError):
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data),
+            contract_version=version, pronunciation_candidates_version=1)
+
+
+def test_pronunciation_candidate_dto_error_is_isolated(monkeypatch):
+    from linguary.adapters.llm import payloads
+    from linguary.application.llm_dto import LLMPayloadError
+    original = payloads.PronunciationCandidateResponse
+    def checked(**values):
+        if values['selection_reason'] == 'context_dependent':
+            raise LLMPayloadError('invalid candidate DTO')
+        return original(**values)
+    monkeypatch.setattr(payloads, 'PronunciationCandidateResponse', checked)
+    result = parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(pronunciation_payload(1,
+        [pronunciation_candidate() | {'selection_reason': 'context_dependent'}, pronunciation_candidate()])),
+        pronunciation_candidates_version=1)
+    assert result.blocks[0].translated_text
+    assert len(result.pronunciation_candidates) == 1

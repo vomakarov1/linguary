@@ -1,6 +1,8 @@
 """One accepted book snapshot projects identically for every presentation."""
 from dataclasses import asdict, replace
 
+import pytest
+
 from linguary.application.pronunciation_projection import project_pronunciations
 from linguary.domain import BlockProcessingResult, BlockTreatment, BlockType, DocumentBlock, SourceReference
 from linguary.domain.content_plan import SourceAnchor
@@ -54,3 +56,19 @@ def test_pronunciation_projection_exposes_only_allowed_attribution():
     assert set(asdict(item)) == {'hint_id', 'block_id', 'start', 'end', 'quote', 'ipa', 'variant', 'source_label', 'source_ref', 'is_primary'}
     assert item.source_label == 'Invented test data' and item.source_ref == 'entry-1'
     assert 'private' not in repr(asdict(item))
+
+
+@pytest.mark.parametrize('text,start', [('azorp', 1), ('zorps', 0), ('zorp\u0301', 0), ("zorp's", 0), ('a-zorp', 2)])
+def test_pronunciation_projection_omits_legacy_partial_word(text, start):
+    assert project_pronunciations([block('first', text=text)],
+        {'first': result('first', assistance('first', start=start))}) == ()
+
+
+@pytest.mark.parametrize('unavailable', [False, True])
+def test_pronunciation_failure_does_not_restore_partial_word(unavailable):
+    from linguary.application.validators.pronunciation import PronunciationSelection, preserve_unavailable
+    partial = assistance('first', start=1)
+    whole = assistance('first', start=6)
+    selection = PronunciationSelection(unavailable=unavailable,
+        unavailable_anchors=() if unavailable else (partial.anchor, whole.anchor))
+    assert preserve_unavailable(selection, (partial, whole), texts={'first': 'azorp zorp'}, variant='uk') == (whole,)

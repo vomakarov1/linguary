@@ -3,7 +3,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from linguary.application.validators.pronunciation import group_pronunciations
+from linguary.application.validators.pronunciation import group_pronunciations, is_complete_pronunciation_form
 from linguary.domain import BlockProcessingResult, DocumentBlock
 from linguary.domain.errors import DomainError
 
@@ -39,6 +39,8 @@ def project_pronunciations(
             try:
                 item.anchor.validate(texts)
             except DomainError:
+                continue
+            if not is_complete_pronunciation_form(block.text, item.anchor.start, item.anchor.end):
                 continue
             accepted.append(item)
     projected = []

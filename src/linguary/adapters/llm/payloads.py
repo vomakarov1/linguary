@@ -13,6 +13,7 @@ the format error: otherwise the cause would appear as random syntax corruption.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 import json
 
 from pydantic import BaseModel, ValidationError
@@ -20,6 +21,7 @@ from linguary.adapters.llm.quality_payloads import QualityReviewSchema
 from linguary.domain.llm_log import Violation
 
 from linguary.adapters.llm.schemas import (
+    PronunciationCandidateSchema,
     TranslationWithPronunciationSchema,
     TranslationV2WithPronunciationSchema,
     TranslationV3WithPronunciationSchema,
@@ -131,6 +133,18 @@ def parse_payload(
     """
     schema = schema_for(kind, contract_version=contract_version, name_translation_policy_version=name_translation_policy_version,
                         pronunciation_candidates_version=pronunciation_candidates_version)
+    candidate_items = ()
+    validation_content = content
+    if pronunciation_candidates_version == 1:
+        try:
+            document = json.loads(content)
+        except (ValueError, TypeError):
+            document = None
+        if isinstance(document, dict) and isinstance(document.get('pronunciation_candidates'), list):
+            candidate_items = document.pop('pronunciation_candidates')
+            schema = schema_for(kind, contract_version=contract_version,
+                                name_translation_policy_version=name_translation_policy_version)
+            validation_content = json.dumps(document, ensure_ascii=False)
     if kind == LLMResponseKind.CHAPTER_ANALYSIS and name_translation_policy_version == 1:
         try:
             document = json.loads(content)
@@ -140,9 +154,9 @@ def parse_payload(
             for candidate in document["glossary_candidates"]:
                 if isinstance(candidate, dict):
                     candidate.setdefault("name_translation_assessment", None)
-            content = json.dumps(document, ensure_ascii=False)
+            validation_content = json.dumps(document, ensure_ascii=False)
     try:
-        validated = schema.model_validate_json(content)
+        validated = schema.model_validate_json(validation_content)
     except ValidationError as error:
         raise LLMResponseFormatError(
             _format_error(kind, error=error, truncated=truncated),
@@ -152,7 +166,7 @@ def parse_payload(
                                 safe_message='Ответ не соответствует формату'),
         ) from None
     try:
-        return _to_dto(validated)
+        result = _to_dto(validated)
     except (LLMPayloadError, DomainError, ValueError) as error:
         raise LLMResponseFormatError(
             f"ответ модели ({kind.value}) не соответствует внутреннему контракту: {type(error).__name__}",
@@ -160,6 +174,22 @@ def parse_payload(
             raw_content=content,
             violation=Violation('response_domain', kind.value, safe_message='Ответ не соответствует внутреннему контракту'),
         ) from None
+    if pronunciation_candidates_version == 1:
+        candidates = []
+        for item in candidate_items:
+            try:
+                candidates.append(_pronunciation_candidate(PronunciationCandidateSchema.model_validate(item)))
+            except (ValidationError, LLMPayloadError, DomainError, ValueError):
+                continue
+        result = replace(result, pronunciation_candidates=tuple(candidates))
+    return result
+
+
+def _pronunciation_candidate(item: PronunciationCandidateSchema) -> PronunciationCandidateResponse:
+    return PronunciationCandidateResponse(
+        anchor=PronunciationAnchorResponse(**item.anchor.model_dump()), form=item.form,
+        context=PronunciationContextResponse(**item.context.model_dump()), selection_reason=item.selection_reason,
+    )
 
 
 def _to_dto(validated: BaseModel) -> LLMPayload:
@@ -228,9 +258,7 @@ def _before_you_read(schema: BeforeYouReadEntrySchema) -> BeforeYouReadEntryResp
 def _translation_result(schema: TranslationResultSchema) -> TranslationResultResponse:
     """Block group translation result DTO."""
     return TranslationResultResponse(
-        pronunciation_candidates=tuple(PronunciationCandidateResponse(
-            anchor=PronunciationAnchorResponse(**item.anchor.model_dump()), form=item.form,
-            context=PronunciationContextResponse(**item.context.model_dump()), selection_reason=item.selection_reason)
+        pronunciation_candidates=tuple(_pronunciation_candidate(item)
             for item in getattr(schema, 'pronunciation_candidates', ())),
         content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.content_evidence) if isinstance(schema, (TranslationResultV2Schema, TranslationResultV3Schema)) else (),
         fragment_assistances=tuple(FragmentAssistanceResponse(**item.model_dump()) for item in schema.fragment_assistances) if isinstance(schema, TranslationResultV4Schema) else (),

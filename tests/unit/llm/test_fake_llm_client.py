@@ -170,3 +170,22 @@ async def test_client_without_requests_has_no_last_request() -> None:
 
     with pytest.raises(FakeScenarioError):
         _ = client.last_request
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+async def test_pronunciation_clients_share_item_isolation(version):
+    from test_llm_payload_mapping import pronunciation_candidate, pronunciation_payload
+    from linguary.adapters.llm.payloads import parse_payload
+    from linguary.application.ports.llm import LLMResponseKind
+    from llm_payload_factories import as_content
+    valid = pronunciation_candidate()
+    data = pronunciation_payload(version, [None, valid | {'source': 'FORBIDDEN_PRIVATE'}, valid])
+    client = FakeLLMClient([FakeReply.of_payload(data)])
+    request = LLMRequest.for_translation(instructions='Переводи.', input_text='block-1: zorp',
+        contract_version=version, pronunciation_candidates_version=1)
+    response = await client.generate(request)
+    assert response.payload == parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data),
+        contract_version=version, pronunciation_candidates_version=1)
+    assert len(response.payload.pronunciation_candidates) == 1
+    assert response.payload.blocks[0].translated_text
+    assert client.call_count == 1

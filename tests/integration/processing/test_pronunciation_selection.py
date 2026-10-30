@@ -1,5 +1,6 @@
 """Synthetic pronunciations pass through real JSON, pinned runtime and SQLite."""
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -62,10 +63,10 @@ def processing_reply(candidates=(), *, blocks=1, english_help=False, profile='le
     return FakeReply.of_payload(data)
 
 
-async def prepare_app(tmp_path, source, candidates=(), *, text='zorp', english_help=False, profile='legacy-v1', replies=(), treatment='READ_AS_IS', translated_text=None, glossary_hints=()):
-    fake = FakeLLMClient([analysis_reply(profile=profile, treatment=treatment), processing_reply(candidates,
+async def prepare_app(tmp_path, source, candidates=(), *, text='zorp', english_help=False, profile='legacy-v1', replies=(), treatment='READ_AS_IS', translated_text=None, glossary_hints=(), processing_response=None, analysis_response=None, max_attempts=1, llm_client=None):
+    fake = llm_client or FakeLLMClient([analysis_response or analysis_reply(profile=profile, treatment=treatment), processing_response or processing_reply(candidates,
         english_help=english_help, profile=profile, treatment=treatment, translated_text=translated_text, glossary_hints=glossary_hints), *replies])
-    app = build_application(settings=AppSettings(llm=LLMSettings(model='synthetic', api_key='synthetic', proxy_mode='direct', max_attempts=1),
+    app = build_application(settings=AppSettings(llm=LLMSettings(model='synthetic', api_key='synthetic', proxy_mode='direct', max_attempts=max_attempts),
         storage=StorageSettings(data_root=str(tmp_path / 'data'))), llm_client=fake,
         pronunciation_source=source, content_plan_profile=profile)
     document = store_imported(app, ((text,),))
@@ -329,5 +330,236 @@ async def test_pronunciation_candidates_regeneration_and_recovery(tmp_path):
         assert all('SOURCE_PRIVATE' not in request.instructions + request.input_text
                    and private.ipa not in request.instructions + request.input_text for request in fake.requests)
         assert {result.pronunciation_assistances[0].anchor.block_id for result in results} == {block.id for block in document.sections[0].blocks}
+    finally:
+        await app.aclose()
+
+
+async def test_pronunciation_rejects_read_inside_bread_before_lookup():
+    source = SyntheticSource([entry(form='read')])
+    selected = await verify_candidates([candidate('read', start=1)], source=source,
+        texts={'b1': 'bread'}, variant='uk', scope_id='run')
+    assert selected.accepted == ()
+    assert [item.reason for item in selected.skipped] == ['partial_word']
+    assert source.calls == []
+
+
+@pytest.mark.parametrize('text,start,end', [
+    ('reading', 0, 4), ('bread', 1, 5), ('école', 0, 1), ('école', 1, 5),
+    ('e\u0301cole', 0, 1), ('e\u0301cole', 1, 6), ('e\u0301cole', 2, 6),
+    ('read\u0301', 0, 4), ('\u0301read', 0, 5), ('\u0301', 0, 1),
+])
+async def test_pronunciation_rejects_prefix_suffix_and_combining_mark_splits(text, start, end):
+    source = SyntheticSource()
+    selected = await verify_candidates([candidate(text[start:end], start=start)], source=source,
+        texts={'b1': text}, variant='uk', scope_id='run')
+    assert not selected.accepted
+    assert [item.reason for item in selected.skipped] == ['partial_word']
+    assert source.calls == []
+
+
+@pytest.mark.parametrize('joiner', ["'", '’', 'ʼ', '-', '‐', '‑'])
+@pytest.mark.parametrize('left,right', [('read', 'only'), ('réad', 'ónly'), ('re\u0301ad', 'o\u0301nly')])
+async def test_pronunciation_rejects_apostrophe_and_hyphen_word_parts(joiner, left, right):
+    source = SyntheticSource()
+    text = left + joiner + right
+    selected = await verify_candidates([candidate(left), candidate(right, start=len(left) + 1)],
+        source=source, texts={'b1': text}, variant='uk', scope_id='run')
+    assert [item.reason for item in selected.skipped] == ['partial_word', 'partial_word']
+    assert source.calls == []
+
+
+@pytest.mark.parametrize('text,form,start', [
+    ('read', 'read', 0), ("'read'", 'read', 1), ('“read”', 'read', 1),
+    ('read, only', 'read', 0), ('only. read', 'read', 6),
+    ('read–only', 'only', 5), ('read—only', 'read', 0),
+    ("can't", "can't", 0), ('canʼt', 'canʼt', 0), ('read-only', 'read-only', 0),
+    ('café', 'café', 0), ('cafe\u0301', 'cafe\u0301', 0), ('cafe\u0301-re\u0301ad', 'cafe\u0301-re\u0301ad', 0),
+])
+async def test_pronunciation_accepts_complete_unicode_form_and_quoted_word(text, form, start):
+    source = SyntheticSource([entry(form=form)])
+    selected = await verify_candidates([candidate(form, start=start)], source=source,
+        texts={'b1': text}, variant='uk', scope_id='run')
+    assert len(selected.accepted) == 1
+    assert source.calls == [(form, 'uk')]
+
+
+@pytest.mark.parametrize('form', ['read‐only', 'read‑only'])
+async def test_pronunciation_complete_form_does_not_expand_lookup_support(form):
+    from linguary.application.validators.pronunciation import is_complete_pronunciation_form
+    assert is_complete_pronunciation_form(form, 0, len(form))
+    source = SyntheticSource()
+    selected = await verify_candidates([candidate(form)], source=source,
+        texts={'b1': form}, variant='uk', scope_id='run')
+    assert [item.reason for item in selected.skipped] == ['invalid_form']
+    assert source.calls == []
+
+
+SYNTHETIC_BOOK_TEXT = 'He saw zorp bread.'
+SYNTHETIC_TRANSLATION = 'Он увидел выдумку и хлеб.'
+SYNTHETIC_MEANING = 'Слово обозначает вымышленный объект.'
+
+
+def raw_mixed_reply(*, blocks=1, bad_translation=False, profile='legacy-v1'):
+    data = json.loads(processing_reply([candidate(start=7)], blocks=blocks,
+        profile=profile, treatment='TRANSLATE', translated_text=SYNTHETIC_TRANSLATION,
+        glossary_hints=[dict(original='zorp', translation='выдумка', note='Условное название вымышленного объекта.')]).content)
+    valid = candidate_json(candidate(start=7))
+    forbidden = candidate_json(candidate('bread', start=12))
+    forbidden.update(ipa='REJECTED_PRIVATE_IPA', source='REJECTED_PRIVATE_SOURCE', url='https://rejected.invalid')
+    data['pronunciation_candidates'] = [valid, None, 'malformed', {}, forbidden,
+        valid | {'anchor': valid['anchor'] | {'start': True}},
+        valid | {'context': valid['context'] | {'source': 'REJECTED_PRIVATE_CONTEXT'}},
+        candidate_json(candidate('read', start=13))]
+    data['language_notes'] = [dict(source_block_id='b1', original_excerpt='zorp',
+        translated_excerpt='выдумка', note=SYNTHETIC_MEANING)]
+    if bad_translation:
+        data['blocks'][-1]['translated_text'] = '«' + SYNTHETIC_TRANSLATION
+    if profile != 'legacy-v1':
+        data['content_evidence'] = [dict(difficulty_id='d', point_id='p', artifact_kind='language_note.note',
+            source_block_id='b1', artifact_index=0, body_excerpt=SYNTHETIC_MEANING)]
+    return FakeReply.of_payload(data)
+
+
+def meaning_analysis_reply():
+    data = json.loads(analysis_reply(profile='content-plan-v3', treatment='TRANSLATE').content)
+    data['content_plan']['difficulties'] = [dict(id='d', owner_block_id='b1', kind='vocabulary',
+        priority='critical', help_kind='explanation',
+        anchors=[dict(block_id='b1', start=7, end=11, quote='zorp')],
+        required_points=[dict(id='p', description='Explain the invented object')])]
+    return FakeReply.of_payload(data)
+
+
+async def test_pronunciation_raw_malformed_candidates_preserve_translation_and_meaning(tmp_path):
+    source = SyntheticSource([entry(), entry(form='read'), entry(form='bread')])
+    class MeaningFake(FakeLLMClient):
+        async def generate(self, request):
+            if request.pronunciation_candidates_version == 1:
+                marker = 'Обязательные аспекты и точные связанные привязки:\n'
+                plan, _ = json.JSONDecoder().raw_decode(request.input_text.split(marker, 1)[1])
+                difficulty, = plan['difficulties']
+                point, = difficulty['required_points']
+                data = json.loads(raw_mixed_reply(profile='content-plan-v3').content)
+                data['content_evidence'][0].update(difficulty_id=difficulty['id'], point_id=point['id'])
+                self.replies = [*self.replies, FakeReply.of_payload(data)]
+            return await super().generate(request)
+    fake = MeaningFake([meaning_analysis_reply()])
+    app, fake, document, run, _ = await prepare_app(tmp_path, source, text=SYNTHETIC_BOOK_TEXT,
+        profile='content-plan-v3', treatment='TRANSLATE', llm_client=fake, max_attempts=3)
+    try:
+        with app.unit_of_work.transaction() as tx:
+            saved, = tx.results.list_for_run(run.id)
+        assert saved.translated_text == SYNTHETIC_TRANSLATION
+        assert saved.glossary_hints[0].translation == 'выдумка'
+        assert saved.language_notes[0].note == SYNTHETIC_MEANING
+        assert saved.content_evidence.evidence[0].body_excerpt == SYNTHETIC_MEANING
+        assert [item.form for item in saved.pronunciation_assistances] == ['zorp']
+        assert saved.pronunciation_assistances[0].anchor.block_id == document.sections[0].blocks[0].id
+        assert source.calls == [('zorp', 'uk')]
+        assert len(fake.requests) == 2
+    finally:
+        await app.aclose()
+
+
+async def test_pronunciation_mixed_candidates_process_regenerate_and_recovery(tmp_path):
+    from linguary.domain import LLMCallStage
+    source = SyntheticSource([entry(), entry(form='read'), entry(form='bread')])
+    fake = FakeLLMClient([analysis_reply(2, treatment='TRANSLATE'),
+        raw_mixed_reply(blocks=2, bad_translation=True), raw_mixed_reply(blocks=2, bad_translation=True),
+        raw_mixed_reply(), raw_mixed_reply(), raw_mixed_reply()])
+    app = build_application(settings=AppSettings(llm=LLMSettings(model='synthetic', api_key='synthetic', proxy_mode='direct'),
+        storage=StorageSettings(data_root=str(tmp_path / 'data'))), llm_client=fake, pronunciation_source=source)
+    try:
+        document = store_imported(app, ((SYNTHETIC_BOOK_TEXT, SYNTHETIC_BOOK_TEXT),))
+        ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='reanalyze', expected_revision=0,
+            settings_revision=0, confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='uk')
+        await app.analysis.start('book-1')
+        await drain_tasks(app)
+        run = app.start_processing()(StartProcessingCommand('book-1'))
+        await app.processing.start('book-1')
+        tasks = await drain_tasks(app)
+        assert all(task.status == TaskStatus.SUCCEEDED for task in tasks), [task.last_error for task in tasks]
+        block_id = document.sections[0].blocks[0].id
+        await regenerate(app, block_id)
+        with app.unit_of_work.transaction() as tx:
+            saved = tx.results.list_for_run(run.id)
+        assert len(saved) == 2
+        assert all(item.translated_text == SYNTHETIC_TRANSLATION and item.glossary_hints[0].translation == 'выдумка'
+                   and item.language_notes[0].note == SYNTHETIC_MEANING for item in saved)
+        assert all([help.form for help in item.pronunciation_assistances] == ['zorp'] for item in saved)
+        assert source.calls == [('zorp', 'uk')] * 3
+        assert len(fake.requests) == 6
+        children = [request for request in fake.requests if request.stage == LLMCallStage.TRANSLATION_UNIT
+                    and len(request.ordered_block_ids) == 1]
+        assert len(children) == 2
+        assert len(fake.requests[-1].ordered_block_ids) == 1
+        assert fake.requests[-1].pronunciation_candidates_version == 1
+        assert all(request.pronunciation_candidates_version == 1 for request in children)
+        assert all('REJECTED_PRIVATE' not in request.instructions + request.input_text for request in fake.requests)
+    finally:
+        await app.aclose()
+
+
+@pytest.mark.parametrize('items', [
+    [None], ['invalid'], [candidate_json(candidate(start=7)) | {'ipa': 'REJECTED_PRIVATE_IPA'}],
+    [candidate_json(candidate(start=7)) | {'anchor': dict(block_id='b1', start=True, end=11, quote='zorp')}],
+    [candidate_json(candidate('read', start=13))],
+])
+async def test_pronunciation_candidate_rejections_do_not_retry_translation(tmp_path, items):
+    data = json.loads(raw_mixed_reply().content)
+    data['pronunciation_candidates'] = items
+    source = SyntheticSource([entry(form='read')])
+    app, fake, _, run, _ = await prepare_app(tmp_path, source, text=SYNTHETIC_BOOK_TEXT,
+        treatment='TRANSLATE', processing_response=FakeReply.of_payload(data), max_attempts=3)
+    try:
+        with app.unit_of_work.transaction() as tx:
+            saved, = tx.results.list_for_run(run.id)
+        assert saved.translated_text == SYNTHETIC_TRANSLATION
+        assert saved.pronunciation_assistances == ()
+        assert len(fake.requests) == 2
+        assert source.calls == []
+    finally:
+        await app.aclose()
+
+
+async def test_pronunciation_rejected_content_never_reaches_model(tmp_path):
+    private = replace(entry(), ipa='ˈzɔːpˌɪvɪdəns', evidence=replace(entry().evidence,
+        dictionary_ipa='ˈzɔːpˌɪvɪdəns', attribution='SOURCE_PRIVATE_ATTRIBUTION', entry_id='SOURCE_PRIVATE_ENTRY'))
+    source = SyntheticSource([private])
+    app, fake, document, _, _ = await prepare_app(tmp_path, source, text=SYNTHETIC_BOOK_TEXT,
+        treatment='TRANSLATE', processing_response=raw_mixed_reply(),
+        replies=[raw_mixed_reply(bad_translation=True), raw_mixed_reply(), raw_mixed_reply()], max_attempts=3)
+    try:
+        source.failures = {'zorp'}
+        await regenerate(app, document.sections[0].blocks[0].id)
+        for request in fake.requests:
+            outgoing = request.instructions + request.input_text
+            assert all(marker not in outgoing for marker in ('SOURCE_PRIVATE', 'REJECTED_PRIVATE', private.ipa))
+        assert len(fake.requests) >= 4
+    finally:
+        await app.aclose()
+
+
+async def test_pronunciation_invalid_translation_with_valid_candidate_saves_nothing(tmp_path):
+    data = json.loads(raw_mixed_reply().content)
+    data['pronunciation_candidates'] = [candidate_json(candidate(start=7))]
+    data['blocks'][0]['translated_text'] = None
+    invalid = FakeReply.of_payload(data)
+    source = SyntheticSource([entry()])
+    fake = FakeLLMClient([analysis_reply(treatment='TRANSLATE')], default=invalid)
+    app = build_application(settings=AppSettings(llm=LLMSettings(model='synthetic', api_key='synthetic', proxy_mode='direct', max_attempts=1),
+        storage=StorageSettings(data_root=str(tmp_path / 'data'))), llm_client=fake, pronunciation_source=source)
+    try:
+        store_imported(app, ((SYNTHETIC_BOOK_TEXT,),))
+        ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='reanalyze', expected_revision=0,
+            settings_revision=0, confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='uk')
+        await app.analysis.start('book-1')
+        await drain_tasks(app)
+        run = app.start_processing()(StartProcessingCommand('book-1'))
+        await app.processing.start('book-1')
+        tasks = await drain_tasks(app)
+        assert any(task.status == TaskStatus.FAILED for task in tasks)
+        with app.unit_of_work.transaction() as tx:
+            assert tx.results.list_for_run(run.id) == ()
+        assert source.calls == []
     finally:
         await app.aclose()

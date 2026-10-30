@@ -701,3 +701,31 @@ async def test_quality_total_completion_cap_is_sent_without_legacy_max_tokens():
         assert seen[0]['response_format']['json_schema']['strict'] is True
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize('version', [1, 2, 3, 4])
+async def test_pronunciation_clients_share_item_isolation(version):
+    from linguary.adapters.llm import FakeLLMClient, FakeReply
+    from test_llm_payload_mapping import pronunciation_candidate, pronunciation_payload
+    valid = pronunciation_candidate()
+    data = pronunciation_payload(version, [None, 'invalid', valid | {'ipa': 'FORBIDDEN_PRIVATE'},
+        valid | {'context': valid['context'] | {'source': 'FORBIDDEN_PRIVATE'}}, valid])
+    bodies = []
+    def handle(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=completion(as_content(data)))
+    real = client_over(handle)
+    fake = FakeLLMClient([FakeReply.of_payload(data)])
+    request = LLMRequest.for_translation(instructions='Переводи.', input_text='block-1: zorp',
+        contract_version=version, pronunciation_candidates_version=1)
+    try:
+        response = await real.generate(request)
+        assert response.payload == (await fake.generate(request)).payload
+        assert len(response.payload.pronunciation_candidates) == 1
+        assert response.payload.blocks[0].translated_text
+        assert len(bodies) == fake.call_count == 1
+        assert 'FORBIDDEN_PRIVATE' not in repr(bodies)
+        schema = bodies[0]['response_format']['json_schema']['schema']
+        assert schema['$defs']['PronunciationCandidateSchema']['additionalProperties'] is False
+    finally:
+        await real.aclose()
