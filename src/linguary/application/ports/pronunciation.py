@@ -56,8 +56,8 @@ class SourceEntry:
     form: str
     ipa: str
     variant: PronunciationVariant
-    sense: str
-    grammatical_form: str
+    sense: str | None
+    grammatical_form: str | None
     evidence: PronunciationEvidence
     proper_name_confirmed: bool = False
     inflection_rule: InflectionRule | None = None
@@ -66,8 +66,17 @@ class SourceEntry:
         if (not valid_lookup_form(self.form) or self.variant not in {'uk', 'us'}
                 or not isinstance(self.evidence, PronunciationEvidence)
                 or not _valid_ipa(self.ipa) or not _valid_ipa(self.evidence.dictionary_ipa)
-                or not all(isinstance(value, str) and value.strip()
-                           for value in (self.ipa, self.sense, self.grammatical_form))):
+                or type(self.proper_name_confirmed) is not bool):
+            raise ValueError('неполная запись источника произношения')
+        if self.evidence.kind == 'lexicon_form':
+            if (self.sense is not None or self.grammatical_form is not None
+                    or self.proper_name_confirmed or self.inflection_rule is not None
+                    or self.variant != self.evidence.lexicon_variant
+                    or self.form != self.evidence.dictionary_form
+                    or self.ipa != self.evidence.dictionary_ipa):
+                raise ValueError('некорректная запись точной формы лексикона')
+        elif not all(isinstance(value, str) and value.strip()
+                     for value in (self.sense, self.grammatical_form)):
             raise ValueError('неполная запись источника произношения')
 
 

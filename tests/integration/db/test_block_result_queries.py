@@ -310,3 +310,97 @@ def test_pronunciation_unavailable_preserves_accepted_help(unit_of_work, stored_
     assert call.save(book_id=BOOK_ID, run_id=RUN_ID, results=(changed,))
     with unit_of_work.transaction() as uow:
         assert uow.results.get(RUN_ID, BLOCK_ID) == changed
+
+
+def lexicon_pronunciation():
+    from dataclasses import replace
+    from linguary.domain.pronunciation import PronunciationEvidence
+    snapshot = '972cd67dd5f96bc5660e28070cde26e3928abcd7'
+    return replace(pronunciation(), evidence=PronunciationEvidence(
+        source_id='ipa-dict', source_version=f'ipa-dict@{snapshot}:parser-1',
+        entry_id='en_UK.txt:1:It', sense_id=None, part_of_speech=None,
+        dictionary_form='It', dictionary_ipa='ɪt', attribution='IPA-Dict',
+        kind='lexicon_form', license_id='GPL-3.0',
+        source_uri=f'https://raw.githubusercontent.com/open-dict-data/ipa-dict/{snapshot}/data/en_UK.txt',
+    ))
+
+
+def test_pronunciation_legacy_evidence_json_roundtrip(unit_of_work, stored_results, engine):
+    from dataclasses import asdict, replace
+    from sqlalchemy import update
+    from linguary.adapters.db.models import BlockResultRow
+    old = pronunciation()
+    changed = replace(stored_results[0], pronunciation_assistances=(old,))
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (changed,))
+    legacy = asdict(old)
+    for field in ('kind', 'license_id', 'source_uri'):
+        legacy['evidence'].pop(field, None)
+    with engine.begin() as connection:
+        connection.execute(update(BlockResultRow).where(
+            BlockResultRow.run_id == RUN_ID, BlockResultRow.block_id == BLOCK_ID,
+        ).values(pronunciation_assistances_json=[legacy]))
+
+    with unit_of_work.transaction() as uow:
+        restored = uow.results.get(RUN_ID, BLOCK_ID)
+        assert restored == changed
+        assert restored.pronunciation_assistances[0].evidence.kind == 'dictionary_sense'
+        uow.results.replace_results(RUN_ID, (restored,))
+    with unit_of_work.transaction() as uow:
+        assert uow.results.get(RUN_ID, BLOCK_ID) == changed
+
+
+def test_lexicon_form_evidence_roundtrip_and_archive(unit_of_work, stored_results, engine):
+    from dataclasses import asdict, replace
+    from sqlalchemy import select
+    from linguary.adapters.db.models import ArtifactRevisionRow
+    from linguary.application.use_cases.reset_processing import _archive_run_results
+    help = lexicon_pronunciation()
+    changed = replace(stored_results[0], pronunciation_assistances=(help,))
+    with unit_of_work.transaction() as uow:
+        uow.results.replace_results(RUN_ID, (changed,))
+    with unit_of_work.transaction() as uow:
+        assert uow.results.get(RUN_ID, BLOCK_ID) == changed
+        _archive_run_results(uow, BOOK_ID, make_run())
+        uow.runs.delete(RUN_ID)
+    with engine.connect() as connection:
+        artifact_id = connection.scalar(select(ArtifactRevisionRow.id).where(
+            ArtifactRevisionRow.scope_id == BLOCK_ID,
+        ))
+    with unit_of_work.transaction() as uow:
+        artifact = uow.work.get_artifact(artifact_id)
+        assert artifact['body']['result']['pronunciation_assistances'] == [asdict(help)]
+
+
+@pytest.mark.parametrize('change', [
+    'unknown-field', 'unknown-kind', 'partial-kind', 'partial-license',
+    'mixed-kind', 'wrong-license-type', 'wrong-kind-type', 'foreign-uri', 'legacy-with-kind',
+])
+def test_pronunciation_unknown_kind_and_fields_rejected(change):
+    from dataclasses import asdict
+    from linguary.adapters.db.mapping import _decode_pronunciation
+    from linguary.application.ports.persistence import PersistenceError
+    raw = asdict(lexicon_pronunciation())
+    evidence = raw['evidence']
+    if change == 'unknown-field':
+        evidence['other'] = 'unexpected'
+    elif change == 'unknown-kind':
+        evidence['kind'] = 'other'
+    elif change == 'partial-kind':
+        evidence.pop('kind')
+    elif change == 'partial-license':
+        evidence.pop('license_id')
+    elif change == 'mixed-kind':
+        evidence['kind'] = 'dictionary_sense'
+    elif change == 'wrong-license-type':
+        evidence['license_id'] = True
+    elif change == 'wrong-kind-type':
+        evidence['kind'] = True
+    elif change == 'foreign-uri':
+        evidence['source_uri'] = 'https://example.com/other'
+    else:
+        raw = asdict(pronunciation())
+        raw['evidence'].pop('license_id')
+        raw['evidence'].pop('source_uri')
+    with pytest.raises(PersistenceError):
+        _decode_pronunciation([raw])

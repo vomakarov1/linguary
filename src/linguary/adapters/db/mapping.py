@@ -918,10 +918,16 @@ def _decode_pronunciation(value: object) -> tuple[PronunciationAssistance, ...]:
         return ()
     try:
         result = []
+        evidence_fields = set(PronunciationEvidence.__dataclass_fields__)
+        legacy_fields = evidence_fields - {'kind', 'license_id', 'source_uri'}
         for item in _array(value):
             data = _object(item, {'anchor', 'form', 'ipa', 'variant', 'hint_id', 'evidence'})
             anchor = _object(data['anchor'], {'block_id', 'start', 'end', 'quote'})
-            evidence = _object(data['evidence'], set(PronunciationEvidence.__dataclass_fields__))
+            raw_evidence = data['evidence']
+            if type(raw_evidence) is dict and set(raw_evidence) == legacy_fields:
+                evidence = _object(raw_evidence, legacy_fields)
+            else:
+                evidence = _object(raw_evidence, evidence_fields)
             result.append(PronunciationAssistance(
                 anchor=SourceAnchor(_string(anchor['block_id']), _integer(anchor['start']),
                                     _integer(anchor['end']), _string(anchor['quote'])),
