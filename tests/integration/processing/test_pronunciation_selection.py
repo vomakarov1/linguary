@@ -135,6 +135,130 @@ async def test_pronunciation_no_level_uses_context_and_rejects_length_or_rarity(
     assert {item.reason for item in selected.skipped} == {'selection_reason', 'unknown_context'}
 
 
+async def test_lexicon_unique_exact_form_accepted():
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    item = replace(candidate('queue'), context=PronunciationContextResponse(None, None, None, False))
+    selected = await verify_candidates([item], source=IpaDictPronunciationSource(),
+        texts={'b1': 'queue'}, variant='uk', scope_id='run')
+    accepted, = selected.accepted
+    assert accepted.ipa == 'kjˈuː'
+    assert accepted.evidence.kind == 'lexicon_form'
+    assert accepted.evidence.sense_id is accepted.evidence.part_of_speech is None
+
+
+@pytest.mark.parametrize('form,proper', [('read', False), ('the', False), ('queue', True)])
+async def test_lexicon_multiple_ipa_and_proper_name_skipped(form, proper):
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    selected = await verify_candidates([candidate(form, proper=proper)], source=IpaDictPronunciationSource(),
+        texts={'b1': form}, variant='us', scope_id='run')
+    assert selected.accepted == ()
+    assert selected.skipped[0].reason == 'missing_or_ambiguous'
+
+
+async def test_lexicon_missing_inflected_form_not_invented():
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    selected = await verify_candidates([candidate('queuexyz', grammar='plural')], source=IpaDictPronunciationSource(),
+        texts={'b1': 'queuexyz'}, variant='uk', scope_id='run')
+    assert selected.accepted == ()
+
+
+async def test_lexicon_fake_semantic_fields_rejected():
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    item, = (await IpaDictPronunciationSource().lookup('queue', 'uk')).entries
+    object.__setattr__(item, 'sense', 'invented action')
+    selected = await verify_candidates([candidate('queue')], source=SyntheticSource([item]),
+        texts={'b1': 'queue'}, variant='uk', scope_id='run')
+    assert selected.accepted == ()
+
+
+async def test_ipa_dict_failure_preserves_previous():
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    from linguary.application.validators.pronunciation import preserve_unavailable
+    item = candidate('queue')
+    source = IpaDictPronunciationSource()
+    selected = await verify_candidates([item], source=source, texts={'b1': 'queue'}, variant='uk', scope_id='run')
+    failing = SyntheticSource()
+    failing.failures.add('queue')
+    failed = await verify_candidates([item], source=failing,
+        texts={'b1': 'queue'}, variant='uk', scope_id='run')
+    assert preserve_unavailable(failed, selected.accepted, texts={'b1': 'queue'}, variant='uk') == selected.accepted
+
+
+@pytest.mark.parametrize('source_version', ['disabled', 'ipa-dict@unknown:parser-1'])
+async def test_old_disabled_and_unknown_conditions_never_enable_ipa_dict(tmp_path, monkeypatch, source_version):
+    from linguary.application import book_conditions
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    calls = []
+    async def forbidden_lookup(*args):
+        calls.append(args)
+        raise AssertionError('unsupported conditions must not use the current snapshot')
+    monkeypatch.setattr(IpaDictPronunciationSource, 'lookup', forbidden_lookup)
+    with monkeypatch.context() as patch:
+        patch.setattr(book_conditions, 'PRONUNCIATION_VERSIONS', {
+            'selection_policy': 1, 'form_rules': 1, 'source': source_version})
+        app, _, _, run, conditions = await prepare_app(tmp_path, None, [candidate('queue')], text='queue',
+            treatment='TRANSLATE', translated_text='Очередь.')
+    try:
+        with app.unit_of_work.transaction() as tx:
+            result, = tx.results.list_for_run(run.id)
+        assert result.pronunciation_assistances == ()
+        assert result.translated_text == 'Очередь.'
+        assert conditions.payload['pronunciation_versions']['source'] == source_version
+        assert calls == []
+    finally:
+        await app.aclose()
+
+
+async def test_ipa_dict_runtime_process_regenerate_recovery(tmp_path):
+    from linguary.adapters.pronunciation.source import SOURCE_VERSION
+    def translation(count, *, bad=False, candidates=()):
+        return FakeReply.of_payload(dict(blocks=[dict(source_block_id=f'b{i}', treatment='TRANSLATE',
+            translated_text='«Он увидел очередь дома.' if bad and i == count else 'Он увидел очередь дома.',
+            glossary_hints=[]) for i in range(1, count + 1)], language_notes=[],
+            pronunciation_candidates=[candidate_json(item) for item in candidates]))
+    items = [candidate('queue', start=7)]
+    fake = FakeLLMClient([analysis_reply(2, treatment='TRANSLATE'), translation(2, bad=True),
+        translation(2, bad=True), translation(1, candidates=items), translation(1, candidates=items),
+        translation(1, candidates=items)])
+    app = build_application(settings=AppSettings(llm=LLMSettings(model='synthetic', api_key='synthetic', proxy_mode='direct'),
+        storage=StorageSettings(data_root=str(tmp_path / 'data'))), llm_client=fake)
+    try:
+        document = store_imported(app, (('He saw queue at home.', 'He saw queue at home.'),))
+        conditions = ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1', action='reanalyze',
+            expected_revision=0, settings_revision=0, confirmed=True,
+            pronunciation_help_enabled=True, pronunciation_variant='uk')
+        assert conditions.payload['pronunciation_versions']['source'] == SOURCE_VERSION
+        await app.analysis.start('book-1')
+        await drain_tasks(app)
+        run = app.start_processing()(StartProcessingCommand('book-1'))
+        await app.processing.start('book-1')
+        tasks = await drain_tasks(app)
+        assert all(task.status == TaskStatus.SUCCEEDED for task in tasks), [task.last_error for task in tasks]
+        await regenerate(app, document.sections[0].blocks[0].id)
+        with app.unit_of_work.transaction() as tx:
+            results = tx.results.list_for_run(run.id)
+        assert len(results) == 2
+        assert all(result.pronunciation_assistances[0].evidence.source_version == SOURCE_VERSION for result in results)
+        assert all(result.pronunciation_assistances[0].ipa == 'kjˈuː' for result in results)
+        assert len(fake.requests) == 6
+    finally:
+        await app.aclose()
+
+
+async def test_ipa_dict_content_never_reaches_model(tmp_path):
+    from linguary.adapters.pronunciation.source import SOURCE_VERSION
+    app, fake, _, run, _ = await prepare_app(tmp_path, None, [candidate('queue')], text='queue')
+    try:
+        with app.unit_of_work.transaction() as tx:
+            accepted, = tx.results.list_for_run(run.id)[0].pronunciation_assistances
+        for request in fake.requests:
+            assert SOURCE_VERSION not in request.instructions + request.input_text
+            assert accepted.ipa not in request.instructions + request.input_text
+            assert accepted.evidence.source_uri not in request.instructions + request.input_text
+    finally:
+        await app.aclose()
+
+
 async def test_pronunciation_primary_ignores_completion_order():
     source = SyntheticSource([entry()])
     later = (await verify_candidates([candidate(block='later')], source=source, texts={'later': 'zorp'}, variant='uk', scope_id='run')).accepted[0]

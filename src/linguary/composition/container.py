@@ -41,9 +41,8 @@ from linguary.adapters.llm.rate_limit import LLMRateLimiter
 from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
 from linguary.application.recovery import RecoveryPolicy
 from linguary.application.book_conditions import BookConditionsService, ConditionsError
-from linguary.adapters.pronunciation.source import DisabledPronunciationSource
 from linguary.application.ports.pronunciation import PronunciationSource
-from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload
+from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload, pronunciation_source_for
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
 from linguary.composition.system_settings import SystemSettingsService
 from linguary.adapters.db.engine import create_database_engine
@@ -293,7 +292,7 @@ def build_application(
                 policy = NameTranslationPolicy(**conditions.payload["name_translation_policy"])
             except (TypeError, ValueError):
                 raise ConditionsError("conditions_unavailable") from None
-        pronunciation = dict(pronunciation_source=pronunciation_source or DisabledPronunciationSource(),
+        pronunciation = dict(pronunciation_source=pronunciation_source_for(conditions, injected_source=pronunciation_source),
             pronunciation_help_enabled=bool(conditions and conditions.payload.get('pronunciation_help_enabled')
                 and conditions.payload.get('source_language') == 'en'),
             pronunciation_variant=None if conditions is None else conditions.payload.get('pronunciation_variant'))

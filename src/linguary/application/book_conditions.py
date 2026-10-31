@@ -10,7 +10,8 @@ from linguary.domain.book_conditions import BookConditions, thaw
 from linguary.domain import BookStatus
 
 
-PRONUNCIATION_VERSIONS = {'selection_policy': 1, 'form_rules': 1, 'source': 'disabled'}
+PRONUNCIATION_VERSIONS = {'selection_policy': 2, 'form_rules': 1,
+    'source': 'ipa-dict@972cd67dd5f96bc5660e28070cde26e3928abcd7:parser-1'}
 
 
 class ConditionsError(LLMConfigurationError):

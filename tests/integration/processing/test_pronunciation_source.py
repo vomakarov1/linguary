@@ -1,4 +1,4 @@
-"""Source contracts use invented words and never load dictionary data."""
+"""Source contracts and the pinned local pronunciation snapshot."""
 from dataclasses import replace
 
 import pytest
@@ -63,3 +63,73 @@ def test_pronunciation_source_inflection_rule_checks_form_ipa_and_version():
     assert not rule.confirms(replace(derived, form='zorps'))
     assert not rule.confirms(replace(derived, evidence=replace(derived.evidence, rule_version='2')))
     assert not replace(rule, base_form_suffix='x').confirms(derived)
+
+
+async def test_ipa_dict_uk_us_exact_lookup():
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource, SOURCE_VERSION
+    source = IpaDictPronunciationSource()
+    uk = await source.lookup('colonel', 'uk')
+    us = await source.lookup('colonel', 'us')
+    assert [item.ipa for item in uk.entries] == ['kˈɜːnəl']
+    assert [item.ipa for item in us.entries] == ['ˈkɝnəɫ']
+    assert all(item.evidence.kind == 'lexicon_form' and item.sense is None
+               and item.evidence.source_version == SOURCE_VERSION for item in (*uk.entries, *us.entries))
+    assert (await source.lookup('Colonel', 'uk')).status == 'missing'
+    assert (await source.lookup('colonel', 'au')).status == 'missing'
+
+
+@pytest.mark.parametrize('field, expected', [
+    ('/ðə, ði/', ('ðə', 'ði')),
+    ('/ˈɹɛd/, /ˈɹid/', ('ˈɹɛd', 'ˈɹid')),
+    ('/ðə/, /ðə/', ('ðə',)),
+])
+def test_ipa_dict_all_alternatives_in_one_or_many_wrappers(field, expected):
+    from linguary.adapters.pronunciation.source import _parse_pronunciations
+    assert _parse_pronunciations(field) == expected
+
+
+def test_ipa_dict_duplicate_rows_union_before_selection():
+    from linguary.adapters.pronunciation.source import _parse_rows
+    entries = _parse_rows('zorp\t/zɔːp/\nzorp\t/zɔːp/, /zɛp/\n', 'uk')['zorp']
+    assert [ipa for ipa, line in entries] == ['zɔːp', 'zɛp']
+    assert [line for ipa, line in entries] == [1, 2]
+
+
+@pytest.mark.parametrize('field', ['/zɔːp/, /?/', '/zɔːp, /', '/zɔːp/ garbage', '/zɔː(p)/'])
+def test_ipa_dict_invalid_alternative_never_becomes_unique(field):
+    from linguary.adapters.pronunciation.source import _parse_rows
+    rows = _parse_rows(f'zorp\t/zɔːp/\nzorp\t{field}\n', 'uk')
+    assert rows['zorp'] == ()
+
+
+@pytest.mark.parametrize('missing', [False, True])
+async def test_ipa_dict_corrupt_or_missing_resource_is_unavailable(monkeypatch, missing):
+    from linguary.adapters.pronunciation import source as module
+    original = module._read_resource
+    calls = []
+    def damaged(filename):
+        if filename == 'en_UK.txt':
+            calls.append(filename)
+            if missing:
+                raise FileNotFoundError(filename)
+            return b'corrupted'
+        return original(filename)
+    module._load_index.cache_clear()
+    monkeypatch.setattr(module, '_read_resource', damaged)
+    try:
+        source = module.IpaDictPronunciationSource()
+        assert (await source.lookup('queue', 'uk')).status == 'unavailable'
+        assert (await source.lookup('queue', 'uk')).status == 'unavailable'
+        assert calls == ['en_UK.txt', 'en_UK.txt']
+    finally:
+        module._load_index.cache_clear()
+
+
+async def test_ipa_dict_no_network(monkeypatch):
+    import socket
+    from linguary.adapters.pronunciation import source as module
+    def no_network(*args, **kwargs):
+        raise AssertionError('dictionary lookup must stay local')
+    monkeypatch.setattr(socket, 'create_connection', no_network)
+    module._load_index.cache_clear()
+    assert (await module.IpaDictPronunciationSource().lookup('queue', 'uk')).status == 'found'

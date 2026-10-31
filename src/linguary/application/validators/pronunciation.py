@@ -112,10 +112,6 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
             skipped.append(PronunciationSkip(candidate, 'selection_reason'))
             continue
         context = candidate.context
-        if any(not isinstance(value, str) or not value.strip() for value in
-               (context.meaning_in_context, context.part_of_speech, context.grammatical_form)):
-            skipped.append(PronunciationSkip(candidate, 'unknown_context'))
-            continue
         try:
             found = await source.lookup(candidate.form, variant)
         except Exception:
@@ -126,11 +122,18 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
             unavailable.append(anchor)
             skipped.append(PronunciationSkip(candidate, 'source_unavailable'))
             continue
-        matches = [item for item in found.entries if item.form == candidate.form and item.variant == variant
-            and _normalized(item.sense) == _normalized(context.meaning_in_context)
-            and _normalized(item.evidence.part_of_speech) == _normalized(context.part_of_speech)
-            and _normalized(item.grammatical_form) == _normalized(context.grammatical_form)
-            and (not context.is_proper_name or item.proper_name_confirmed)]
+        if any(item.evidence.kind == 'lexicon_form' for item in found.entries):
+            matches = _lexicon_matches(found.entries, candidate, variant)
+        else:
+            if any(not isinstance(value, str) or not value.strip() for value in
+                   (context.meaning_in_context, context.part_of_speech, context.grammatical_form)):
+                skipped.append(PronunciationSkip(candidate, 'unknown_context'))
+                continue
+            matches = [item for item in found.entries if item.form == candidate.form and item.variant == variant
+                and _normalized(item.sense) == _normalized(context.meaning_in_context)
+                and _normalized(item.evidence.part_of_speech) == _normalized(context.part_of_speech)
+                and _normalized(item.grammatical_form) == _normalized(context.grammatical_form)
+                and (not context.is_proper_name or item.proper_name_confirmed)]
         if len(matches) != 1:
             skipped.append(PronunciationSkip(candidate, 'missing_or_ambiguous'))
             continue
@@ -146,6 +149,21 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
             continue
         accepted.append(assistance)
     return PronunciationSelection(tuple(accepted), tuple(skipped), tuple(unavailable))
+
+
+def _lexicon_matches(entries, candidate, variant):
+    if candidate.context.is_proper_name or any(
+            item.evidence.kind != 'lexicon_form' or item.form != candidate.form or item.variant != variant
+            or item.sense is not None or item.grammatical_form is not None
+            or item.evidence.sense_id is not None or item.evidence.part_of_speech is not None
+            or item.evidence.rule_id is not None or item.evidence.rule_version is not None
+            or item.inflection_rule is not None or item.proper_name_confirmed
+            or item.evidence.dictionary_form != item.form or item.evidence.dictionary_ipa != item.ipa
+            for item in entries):
+        return []
+    if len({item.ipa for item in entries}) != 1:
+        return []
+    return [min(entries, key=lambda item: item.evidence.entry_id)]
 
 
 def preserve_unavailable(selection, previous, *, texts, variant):

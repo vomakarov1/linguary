@@ -293,7 +293,8 @@ async def test_pronunciation_conditions_uk_us(tmp_path, variant):
         assert 'pronunciation_processing' in conditions.payload['prompt_templates']
         assert conditions.payload['prompt_sha256'] == payload_digest(conditions.payload['prompt_templates'])
         assert conditions.payload['pronunciation_versions'] == {
-            'selection_policy': 1, 'form_rules': 1, 'source': 'disabled'}
+            'selection_policy': 2, 'form_rules': 1,
+            'source': 'ipa-dict@972cd67dd5f96bc5660e28070cde26e3928abcd7:parser-1'}
         assert app.book_conditions.require('book-1') == conditions
         app.book_runtime.settings_for(conditions)
     finally:
@@ -375,12 +376,12 @@ async def test_pronunciation_version_change_creates_revision(tmp_path, monkeypat
         old = choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0,
             confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='uk')
         monkeypatch.setattr(module, 'PRONUNCIATION_VERSIONS', {
-            'selection_policy': 2, 'form_rules': 1, 'source': 'disabled'})
+            'selection_policy': 3, 'form_rules': 1, 'source': 'disabled'})
         new = choice('book-1', action='reanalyze', expected_revision=1, settings_revision=0,
             confirmed=True, pronunciation_help_enabled=True, pronunciation_variant='uk')
         assert old.revision == 1 and new.revision == 2
-        assert old.payload['pronunciation_versions']['selection_policy'] == 1
-        assert new.payload['pronunciation_versions']['selection_policy'] == 2
+        assert old.payload['pronunciation_versions']['selection_policy'] == 2
+        assert new.payload['pronunciation_versions']['selection_policy'] == 3
     finally:
         await app.aclose()
 

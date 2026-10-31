@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from linguary.adapters.config.settings import LLMSettings, ReadingSettings, CheckSettings, RecoverySettings
+from linguary.adapters.pronunciation.source import DisabledPronunciationSource, IpaDictPronunciationSource, SOURCE_VERSION
 from linguary.application.book_conditions import ConditionsError, payload_digest
 from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask
@@ -16,6 +17,16 @@ from linguary.domain.recovery import CallAttempt
 from linguary.domain.llm_log import CallContext
 from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.application.diagnostics import diagnostics_for
+
+
+def pronunciation_source_for(conditions, *, injected_source=None):
+    if injected_source is not None:
+        return injected_source
+    if conditions is not None and conditions.payload.get('pronunciation_help_enabled'):
+        versions = thaw(conditions.payload.get('pronunciation_versions', {}))
+        if versions == {'selection_policy': 2, 'form_rules': 1, 'source': SOURCE_VERSION}:
+            return IpaDictPronunciationSource()
+    return DisabledPronunciationSource()
 
 
 def public_url(value):
