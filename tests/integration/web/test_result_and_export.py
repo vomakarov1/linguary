@@ -996,6 +996,7 @@ def test_result_groups_fragment_keeps_group_members_and_tasks(client, applicatio
     assert tree.xpath('.//*[@class="source"]')[0].text == original
     assert tree.xpath('//form[@data-regenerate-form]/@action') == [
         f'/books/{scenario.book_id}/blocks/{identifier}/regenerate' for identifier in ids]
+    assert tree.xpath('//form[@data-regenerate-form]/@data-block-id') == list(ids)
     assert len(tree.xpath('.//*[@class="task-state"]')) == 3
     assert 'Задача: Повторная генерация блока /' in tree.text_content()
 

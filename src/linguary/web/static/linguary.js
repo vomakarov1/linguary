@@ -34,8 +34,9 @@ document.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const block = form.closest("[data-result-block]");
+  const blockId = form.dataset.blockId;
   const button = form.querySelector("button[type='submit']");
-  if (!(block instanceof HTMLElement)) {
+  if (!(block instanceof HTMLElement) || !blockId) {
     form.submit();
     return;
   }
@@ -68,7 +69,10 @@ document.addEventListener("submit", async (event) => {
     submitted = true;
     resultGroupsGeneration += 1;
     resultGroupsRefreshNeeded = true;
-    await refreshResultGroups();
+    const root = document.querySelector("[data-result-groups]");
+    if (root instanceof HTMLElement) {
+      replaceResultGroup(root, blockId, await response.text());
+    }
     refreshResultHeader().catch(() => {});
   } catch (_error) {
     if (block.isConnected) {
@@ -188,6 +192,93 @@ function restoreResultFocus(root, target) {
   }
 }
 
+function resultGroupForBlock(root, blockId) {
+  const form = Array.from(root.querySelectorAll("[data-regenerate-form]"))
+    .find((item) => item.dataset.blockId === blockId);
+  return form?.closest("[data-result-block]") || null;
+}
+
+function replaceResultGroup(root, blockId, markup) {
+  const current = resultGroupForBlock(root, blockId);
+  if (!(current instanceof HTMLElement)) {
+    throw new Error("Result block was detached");
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = markup.trim();
+  const replacement = template.content.firstElementChild;
+  if (
+    !(replacement instanceof HTMLElement) ||
+    template.content.children.length !== 1 ||
+    template.content.querySelectorAll("[data-result-block]").length !== 1 ||
+    !replacement.matches("[data-result-block]") || replacement.id !== current.id
+  ) {
+    throw new Error("Invalid result block response");
+  }
+
+  const scrollX = window.scrollX;
+  const scrollY = window.scrollY;
+  const focus = captureResultFocus(root);
+  current.querySelectorAll("details.ipa-guide").forEach((guide, index) => {
+    const nextGuide = replacement.querySelectorAll("details.ipa-guide")[index];
+    if (nextGuide) {
+      nextGuide.open = guide.open;
+    }
+  });
+  current.replaceWith(replacement);
+  restoreResultFocus(root, focus);
+  window.scrollTo(scrollX, scrollY);
+  return replacement;
+}
+
+async function refreshResultBlock(blockId) {
+  const root = document.querySelector("[data-result-groups]");
+  if (!(root instanceof HTMLElement)) {
+    throw new Error("Missing result groups root");
+  }
+  const group = resultGroupForBlock(root, blockId);
+  const form = Array.from(group?.querySelectorAll("[data-regenerate-form]") || [])
+    .find((item) => item.dataset.blockId === blockId);
+  if (!form) {
+    throw new Error("Missing result block form");
+  }
+
+  const url = new URL(form.action, window.location.href);
+  url.pathname = url.pathname.replace(/\/regenerate$/, "");
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Accept": "text/html",
+      "X-Linguary-Fragment": "result-block",
+    },
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+
+  const currentRoot = document.querySelector("[data-result-groups]");
+  if (currentRoot !== root) {
+    return null;
+  }
+  return replaceResultGroup(root, blockId, await response.text());
+}
+
+async function refreshActiveResultBlocks() {
+  const root = document.querySelector("[data-result-groups]");
+  if (!(root instanceof HTMLElement)) {
+    throw new Error("Missing result groups root");
+  }
+  const activeGroups = Array.from(root.querySelectorAll("[data-result-block]"))
+    .filter((group) => group.querySelector("[data-active-task='true']"));
+  const activeBlockIds = activeGroups.map((group) => {
+    const form = Array.from(group.querySelectorAll("[data-regenerate-form]"))
+      .find((item) => item.querySelector("button:disabled"));
+    return form?.dataset.blockId;
+  }).filter(Boolean);
+  await Promise.all(activeBlockIds.map((blockId) => refreshResultBlock(blockId)));
+}
+
 async function refreshResultGroups() {
   if (resultGroupsRequest) {
     return resultGroupsRequest;
@@ -274,10 +365,15 @@ async function refreshResultGroups() {
 function pollResultGroups(attempt = 1) {
   resultGroupsAttempt = attempt;
   const root = document.querySelector("[data-result-groups]");
+  const hasActiveTasks = root instanceof HTMLElement &&
+    Boolean(root.querySelector("[data-active-task='true']"));
+  if (hasActiveTasks) {
+    resultGroupsRefreshNeeded = true;
+  }
   if (
     attempt > 120 || resultGroupsTimer !== null || resultGroupsRequest ||
     !(root instanceof HTMLElement) ||
-    (!resultGroupsRefreshNeeded && !root.querySelector("[data-active-task='true']"))
+    (!resultGroupsRefreshNeeded && !hasActiveTasks)
   ) {
     return;
   }
@@ -285,9 +381,18 @@ function pollResultGroups(attempt = 1) {
     resultGroupsTimer = null;
     resultGroupsAttempt = attempt + 1;
     try {
-      await refreshResultGroups();
+      await refreshActiveResultBlocks();
+      const currentRoot = document.querySelector("[data-result-groups]");
+      if (
+        resultGroupsRefreshNeeded && currentRoot instanceof HTMLElement &&
+        !currentRoot.querySelector("[data-active-task='true']")
+      ) {
+        await refreshResultGroups();
+      }
       await refreshResultHeader();
     } catch (_error) {
+      resultGroupsRetryDelay = 2000;
+    } finally {
       pollResultGroups(resultGroupsAttempt);
     }
   }, resultGroupsRetryDelay);

@@ -15,7 +15,7 @@
   {% if not loop.first %}<span id="block-{{ block.block_id|replace(':', '-')|replace('/', '-') }}"></span>{% endif %}
   <header>
     <span>{{ block.treatment_label or block.block_type }}</span>
-    <form method="post" action="/books/{{ book_id }}/blocks/{{ block.block_id }}/regenerate" data-regenerate-form>
+    <form method="post" action="/books/{{ book_id }}/blocks/{{ block.block_id }}/regenerate" data-regenerate-form data-block-id="{{ block.block_id }}">
       {% if regenerating %}
         <button type="submit" disabled>Обновляется</button>
       {% else %}
