@@ -37,6 +37,10 @@ from lxml import etree
 from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.resources import package_path
 from linguary.application.pronunciation_projection import project_pronunciations
+from linguary.application.translation_units import (
+    group_paragraph_fragments,
+    paragraph_fragment_label,
+)
 from linguary.adapters.epub.pronunciation_notices import (
     PronunciationNoticeBundle, pronunciation_notice_bundle,
 )
@@ -135,6 +139,22 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   margin-top: 0.25em;
   padding-left: 0.9em;
   font-style: italic;
+}
+
+.linguary-paragraph-fragment {
+  margin: 1.2em 0;
+  padding: 0.6em 0.8em;
+  border: 0.08em solid;
+}
+
+.linguary-fragment-label {
+  margin: 0 0 0.5em 0;
+  font-size: 0.75em;
+  font-weight: bold;
+}
+
+.linguary-paragraph-fragment > .linguary-translation {
+  margin-left: 0.6em;
 }
 
 .linguary-translation,
@@ -689,21 +709,33 @@ class _ChapterRenderer:
                 group, grouped = _sub(parent, wrapper), block.type
             host = group if group is not None else parent
             if len(parts) > 1:
-                original = _sub(host, "p")
-                for part in parts:
-                    for anchor in _anchors(part):
-                        if anchor not in state.used_ids:
-                            _sub(original, "span", {"id": anchor})
-                            state.used_ids.add(anchor)
-                    fragment = _element("span")
-                    _append_inline(fragment, part.text, _nestable(part.inline_annotations), state)
-                    self._insert_help_references(fragment, part, state=state)
-                    _append_characters(original, fragment.text or "")
-                    for child in list(fragment):
-                        original.append(child)
-                if not is_front_matter:
-                    self._append_group_help(host, parts, state=state)
-                self._append_pronunciation_notes(host, parts, state=state)
+                display_groups = group_paragraph_fragments(
+                    parts, text_of=lambda part: part.text
+                )
+                for group_index, group_parts in enumerate(display_groups, start=1):
+                    fragment = _sub(host, "div", {"class": "linguary-paragraph-fragment"})
+                    _sub(
+                        fragment,
+                        "p",
+                        {"class": "linguary-fragment-label", "lang": self._document.source_language},
+                    ).text = paragraph_fragment_label(
+                        group_index, len(display_groups), self._document.source_language
+                    )
+                    original = _sub(fragment, "p")
+                    for part in group_parts:
+                        for anchor in _anchors(part):
+                            if anchor not in state.used_ids:
+                                _sub(original, "span", {"id": anchor})
+                                state.used_ids.add(anchor)
+                        source_fragment = _element("span")
+                        _append_inline(source_fragment, part.text, _nestable(part.inline_annotations), state)
+                        self._insert_help_references(source_fragment, part, state=state)
+                        _append_characters(original, source_fragment.text or "")
+                        for child in list(source_fragment):
+                            original.append(child)
+                    if not is_front_matter:
+                        self._append_group_help(fragment, group_parts, state=state)
+                    self._append_pronunciation_notes(fragment, group_parts, state=state)
                 continue
             self._append_block(
                 host,
@@ -943,6 +975,35 @@ class _ChapterRenderer:
                 for reference in references:
                     _sub(aside, "a", {"href": f"#{reference}",
                         f"{{{_EPUB_NAMESPACE}}}type": "backlink"}).text = "↩"
+
+        translated_results = [
+            (block, result)
+            for block in blocks
+            if (result := self._request.block_results.get(block.id)) is not None
+            and result.translated_text
+            and result.translated_text.strip()
+        ]
+        if translated_results and len(translated_results) == len(blocks):
+            translation = _sub(
+                parent,
+                "p",
+                {
+                    "class": "linguary-translation",
+                    "lang": self._document.target_language,
+                },
+            )
+            for index, (block, result) in enumerate(translated_results):
+                if index:
+                    _append_text(translation, " ")
+                self._append_translation(
+                    translation, result.translated_text.strip(), block=block, state=state
+                )
+            for block in blocks:
+                self._append_help(
+                    parent, block, state=state, include_translation=False
+                )
+            return
+
         for block in blocks:
             self._append_help(parent, block, state=state)
 
@@ -980,12 +1041,23 @@ class _ChapterRenderer:
             state.used_ids.add(anchor)
 
     def _append_help(
-        self, parent: etree._Element, block: DocumentBlock, *, state: _SectionState
+        self,
+        parent: etree._Element,
+        block: DocumentBlock,
+        *,
+        state: _SectionState,
+        include_translation: bool = True,
     ) -> None:
         """Translation or glossary hints and `Language Notes` for this block (PRD § 20)."""
         result = self._request.block_results.get(block.id)
         if result is not None:
-            self._append_result(parent, result, block=block, state=state)
+            self._append_result(
+                parent,
+                result,
+                block=block,
+                state=state,
+                include_translation=include_translation,
+            )
         material = self._request.learning_materials.get(state.section.id)
         if material is None:
             return
@@ -1016,6 +1088,7 @@ class _ChapterRenderer:
         *,
         block: DocumentBlock,
         state: _SectionState,
+        include_translation: bool = True,
     ) -> None:
         """Block translation or its glossary hints.
 
@@ -1023,7 +1096,7 @@ class _ChapterRenderer:
         reference in the original text, using the same link text. The original reference id
         is not reused: the backlink from the footnote continues to point to the original.
         """
-        if result.translated_text:
+        if include_translation and result.translated_text:
             translation = _sub(
                 parent,
                 "p",
@@ -1032,12 +1105,9 @@ class _ChapterRenderer:
                     "lang": self._document.target_language,
                 },
             )
-            for segment in translation_segments(result.translated_text, block):
-                if isinstance(segment, str):
-                    _append_text(translation, segment)
-                    continue
-                link = _sub(translation, "a", _target_attributes(segment, state))
-                link.text = block.text[segment.start : segment.end]
+            self._append_translation(
+                translation, result.translated_text, block=block, state=state
+            )
         if not result.glossary_hints:
             return
         hints = _sub(parent, "ul", {"class": "linguary-glossary"})
@@ -1048,6 +1118,21 @@ class _ChapterRenderer:
             if hint.note:
                 tail = f"{tail} ({hint.note})"
             _append_text(item, tail)
+
+    def _append_translation(
+        self,
+        parent: etree._Element,
+        text: str,
+        *,
+        block: DocumentBlock,
+        state: _SectionState,
+    ) -> None:
+        for segment in translation_segments(text, block):
+            if isinstance(segment, str):
+                _append_text(parent, segment)
+                continue
+            link = _sub(parent, "a", _target_attributes(segment, state))
+            link.text = block.text[segment.start : segment.end]
 
 
 @dataclass(slots=True)

@@ -754,7 +754,7 @@ class _SectionBuilder:
         content: InlineContent,
         context: _BlockContext,
     ) -> list[DocumentBlock]:
-        """Splits a long compound paragraph into a chain of blocks along sentence boundaries."""
+        """Splits a long paragraph into balanced source fragments near 300 characters."""
         fragments = split_inline_content(content)
         if len(fragments) <= 1:
             return []

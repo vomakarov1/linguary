@@ -38,6 +38,7 @@ from linguary.application.book_overview import (
 from linguary.application.pronunciation_projection import PronunciationOccurrence, project_pronunciations
 from linguary.application.glossary_review import GlossaryReview, GlossaryReviewItem
 from linguary.application.ports.persistence import BookRecord
+from linguary.application.translation_units import group_paragraph_fragments
 from linguary.application.use_cases.approve_glossary import GlossaryDecision
 from linguary.application.use_cases.reset_processing import ResetProcessingResult
 from linguary.domain import (
@@ -740,12 +741,25 @@ class ResultBlockResponse(BaseModel):
 class ResultGroupResponse(ResultBlockResponse):
     """One exact source paragraph with the original computational members."""
 
+    source_language: str = "en"
     member_block_ids: tuple[str, ...]
     member_blocks: tuple[ResultBlockResponse, ...]
     fragment_assistance: tuple[dict[str, Any], ...] = ()
 
+    @property
+    def display_groups(self) -> tuple[tuple[ResultBlockResponse, ...], ...]:
+        """Balanced presentation groups for a fully translated split paragraph."""
+        if len(self.member_blocks) <= 1 or not all(
+            member.translated_text is not None for member in self.member_blocks
+        ):
+            return (self.member_blocks,)
+        return group_paragraph_fragments(
+            self.member_blocks, text_of=lambda member: member.original_text
+        )
+
     @classmethod
     def of_group(cls, summaries: Sequence[ResultBlockSummary], *, tasks: Mapping[str, ProcessingTask] | None = None,
+                 source_language: str = "en",
                  block_id: str | None = None,
                  pronunciations: Sequence[PronunciationOccurrence] = ()) -> ResultGroupResponse:
         from dataclasses import asdict
@@ -756,7 +770,8 @@ class ResultGroupResponse(ResultBlockResponse):
         data = selected.model_dump()
         data["pronunciation_assistances"] = tuple(item for member in members for item in member.pronunciation_assistances)
         data["original_text"] = "".join(summary.block.text for summary in summaries)
-        return cls(**data, member_block_ids=tuple(member.block_id for member in members), member_blocks=members,
+        return cls(**data, source_language=source_language,
+                   member_block_ids=tuple(member.block_id for member in members), member_blocks=members,
                    fragment_assistance=tuple(asdict(item) for summary in summaries if summary.result is not None
                                              for item in summary.result.fragment_assistances))
 
@@ -773,6 +788,7 @@ class ResultChapterResponse(BaseModel):
 
     @classmethod
     def of_chapter(cls, chapter: ResultChapterSummary, *,
+                   source_language: str = "en",
                    pronunciations: Sequence[PronunciationOccurrence] = ()) -> ResultChapterResponse:
         return cls(
             section_id=chapter.section_id,
@@ -780,7 +796,9 @@ class ResultChapterResponse(BaseModel):
             title=chapter.title,
             is_notes=chapter.is_notes,
             blocks=tuple(ResultBlockResponse.of_block(block, pronunciations=pronunciations) for block in chapter.blocks),
-            groups=tuple(ResultGroupResponse.of_group(group, pronunciations=pronunciations) for group in result_groups(chapter.blocks)),
+            groups=tuple(ResultGroupResponse.of_group(
+                group, source_language=source_language, pronunciations=pronunciations
+            ) for group in result_groups(chapter.blocks)),
         )
 
 
@@ -828,7 +846,11 @@ class BookResultResponse(BaseModel):
             ),
             warnings=BookWarningsResponse.of_warnings(result.warnings),
             chapters=tuple(
-                ResultChapterResponse.of_chapter(chapter, pronunciations=pronunciations)
+                ResultChapterResponse.of_chapter(
+                    chapter,
+                    source_language=result.book.source_language,
+                    pronunciations=pronunciations,
+                )
                 for chapter in result.chapters
             ),
         )

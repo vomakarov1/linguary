@@ -492,6 +492,34 @@ pre code {
   padding: 1rem;
 }
 
+.result-fragment {
+  margin: 1rem 0;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.result-fragment-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.result-fragment-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.result-fragment .translation {
+  margin-left: 0.5rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--accent-2);
+}
+
 .result-block[aria-busy="true"] {
   border-color: color-mix(in srgb, var(--accent-2), white 45%);
   background: color-mix(in srgb, var(--accent-2), white 94%);

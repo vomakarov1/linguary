@@ -1,19 +1,24 @@
 """Sentence and dialogue tokenization for splitting long book paragraphs.
 
 Performs intelligent division of long compound paragraphs (PRD/ADR-paragraph-splitting)
-into independent semantic fragments along sentence and dialogue turn boundaries
-without splitting abbreviations, initials, quotes, or ellipses.
+into balanced reading fragments. Sentence and dialogue boundaries are preferred without
+splitting abbreviations, initials, quotes, or ellipses; long sentences fall back to word
+boundaries.
 """
 
 from __future__ import annotations
 
 import re
+from math import ceil
 
 from linguary.adapters.epub.inline import InlineContent
 from linguary.domain import InlineAnnotation, InlineAnnotationType
 
 SPLIT_MIN_CHARS: int = 600
 SPLIT_MIN_SENTENCES: int = 2
+SPLIT_TARGET_CHARS: int = 300
+SPLIT_MIN_PART_CHARS: int = 250
+SPLIT_MAX_PART_CHARS: int = 350
 
 #: Honorific titles and salutations where a trailing period is followed by a capitalized name,
 #: rather than the start of a new sentence.
@@ -282,20 +287,96 @@ def split_sentences(
     return tuple((boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1))
 
 
+def split_paragraph(
+    text: str,
+    *,
+    min_chars: int = SPLIT_MIN_CHARS,
+    target_chars: int = SPLIT_TARGET_CHARS,
+    min_sentences: int = SPLIT_MIN_SENTENCES,
+) -> tuple[tuple[int, int], ...]:
+    """Divides long paragraphs into balanced pieces near 300 characters.
+
+    Sentence boundaries are preferred when they are close to the target. Otherwise, a piece
+    ends after a word, with a character boundary as a final fallback for unspaced text. The
+    returned intervals preserve every source character exactly.
+    """
+    if min_chars < 1 or target_chars < 1 or min_sentences < 1:
+        raise ValueError("параметры разбиения абзаца должны быть положительными")
+    if len(text) <= min_chars:
+        return ((0, len(text)),)
+
+    min_count = max(2, ceil(len(text) / SPLIT_MAX_PART_CHARS))
+    max_count = max(2, len(text) // SPLIT_MIN_PART_CHARS)
+    counts = (
+        range(min_count, max_count + 1)
+        if min_count <= max_count
+        else {min_count, max_count}
+    )
+    part_count = min(
+        counts, key=lambda count: (abs(len(text) / count - target_chars), -count)
+    )
+
+    sentence_points = _find_split_points(text)
+    if len(sentence_points) + 1 < min_sentences:
+        sentence_points = []
+    sentence_boundaries = set(sentence_points)
+    word_boundaries = {
+        match.end()
+        for match in re.finditer(r"\s+", text)
+        if 0 < match.end() < len(text)
+    }
+    candidates = sentence_boundaries | word_boundaries
+    if len(candidates) < part_count - 1:
+        candidates.update(range(1, len(text)))
+
+    chosen = [0]
+    preferred_distance = max(35, target_chars // 7)
+    for part_index in range(1, part_count):
+        remaining_parts = part_count - part_index
+        latest_boundary = len(text) - remaining_parts
+        available = [
+            boundary
+            for boundary in candidates
+            if chosen[-1] < boundary <= latest_boundary
+        ]
+        target_boundary = round(len(text) * part_index / part_count)
+        if not available:
+            chosen.append(min(max(chosen[-1] + 1, target_boundary), latest_boundary))
+            continue
+        nearby_sentence_boundaries = [
+            boundary
+            for boundary in available
+            if boundary in sentence_boundaries
+            and abs(boundary - target_boundary) <= preferred_distance
+        ]
+        choices = nearby_sentence_boundaries or available
+        boundary = min(choices, key=lambda item: abs(item - target_boundary))
+        chosen.append(boundary)
+
+    chosen.append(len(text))
+    return tuple((chosen[index], chosen[index + 1]) for index in range(part_count))
+
+
 def split_inline_content(
     content: InlineContent,
     *,
     min_chars: int = SPLIT_MIN_CHARS,
     min_sentences: int = SPLIT_MIN_SENTENCES,
 ) -> tuple[InlineContent, ...]:
-    """Projects inline markup and anchors onto split paragraph fragments.
+    """Projects inline markup and anchors onto balanced paragraph fragments.
 
     Markup offsets are recalculated via `[start - offset, end - offset)`,
-    spanning annotations are clipped at fragment boundaries, footnote references
-    are never cut across, and anchors of the original paragraph attach to the first fragment.
-    If splitting does not occur, a single-element tuple of the original `content` object is returned.
+    spanning annotations are clipped at fragment boundaries, footnote references are never cut
+    across, and anchors of the original paragraph attach to the first fragment. Sentence breaks
+    are preferred; a long sentence can fall back to a word boundary to stay near the target size.
+    If splitting does not occur, a single-element tuple of the original `content` object is
+    returned.
     """
-    slices = split_sentences(content.text, min_chars=min_chars, min_sentences=min_sentences)
+    slices = split_paragraph(
+        content.text,
+        min_chars=min_chars,
+        min_sentences=min_sentences,
+    )
     if len(slices) <= 1:
         return (content,)
 
