@@ -145,6 +145,8 @@ class SystemSettingsService:
     async def drain(self) -> tuple[SettingsError, ...]:
         while self._operations:
             await asyncio.gather(*tuple(self._operations), return_exceptions=True)
+            # Gathering completed tasks may not yield to their collection callbacks.
+            await asyncio.sleep(0)
         return tuple(self._errors)
 
     async def aclose(self) -> None:
