@@ -5,6 +5,7 @@ let resultGroupsAttempt = 1;
 let resultGroupsRefreshNeeded = false;
 let resultGroupsRetryDelay = 1500;
 let resultGroupsPendingFocus = null;
+const RESULT_BLOCK_BATCH_SIZE = 128;
 
 document.addEventListener("submit", async (event) => {
   const form = event.target;
@@ -235,6 +236,12 @@ async function refreshResultBlocks(blockIds) {
   if (blockIds.length === 0) {
     return;
   }
+  for (let offset = 0; offset < blockIds.length; offset += RESULT_BLOCK_BATCH_SIZE) {
+    await refreshResultBlockBatch(blockIds.slice(offset, offset + RESULT_BLOCK_BATCH_SIZE));
+  }
+}
+
+async function refreshResultBlockBatch(blockIds) {
   const root = document.querySelector("[data-result-groups]");
   if (!(root instanceof HTMLElement) || !root.dataset.blocksUrl) {
     throw new Error("Missing result groups root");

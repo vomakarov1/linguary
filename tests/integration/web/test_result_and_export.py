@@ -394,6 +394,36 @@ def test_batch_result_block_fragment_uses_one_snapshot_for_requested_groups(
     assert len(snapshots) == len(projections) == 1
 
 
+def test_batch_result_block_fragment_rejects_more_than_128_ids_without_reflection(
+    client: TestClient,
+) -> None:
+    marker = "private-block-id"
+    response = client.get(
+        "/books/unknown/blocks",
+        params=[("block_id", marker)] * 129,
+        headers={"accept": "text/html", "x-linguary-fragment": "result-blocks"},
+    )
+
+    assert response.status_code == 422
+    assert marker not in response.text
+    assert "Некорректный список блоков." in response.text
+
+
+def test_batch_result_block_fragment_rejects_id_over_512_characters_without_reflection(
+    client: TestClient,
+) -> None:
+    marker = "x" * 513
+    response = client.get(
+        "/books/unknown/blocks",
+        params={"block_id": marker},
+        headers={"accept": "text/html", "x-linguary-fragment": "result-blocks"},
+    )
+
+    assert response.status_code == 422
+    assert marker not in response.text
+    assert "Некорректный список блоков." in response.text
+
+
 def test_unknown_block_regeneration_returns_404(
     client: TestClient, application: Application
 ) -> None:

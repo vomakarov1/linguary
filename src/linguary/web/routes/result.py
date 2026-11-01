@@ -87,6 +87,8 @@ def get_book_result_blocks(
     block_id: list[str] = Query(...),
 ) -> list[ResultGroupResponse] | object:
     """Return selected result groups from one book snapshot for batch polling."""
+    if len(block_id) > 128 or any(len(identifier) > 512 for identifier in block_id):
+        raise HTTPException(status_code=422, detail="Некорректный список блоков.")
     responses = _result_block_responses(application, book_id, block_id)
     if _wants_result_blocks_fragment(request):
         return render(
@@ -188,8 +190,8 @@ def _result_block_responses(
     found_ids: set[str] = set()
     for chapter in snapshot.chapters:
         for group in result_groups(chapter.blocks):
-            group_ids = {member.block.id for member in group}
-            matching_ids = [block_id for block_id in requested_ids if block_id in group_ids]
+            matching_ids = [member.block.id for member in group
+                            if member.block.id in requested_set]
             if matching_ids:
                 selected_groups.append((group, matching_ids[0]))
                 found_ids.update(matching_ids)
