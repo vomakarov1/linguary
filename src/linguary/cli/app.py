@@ -63,6 +63,11 @@ def _parser() -> argparse.ArgumentParser:
     serve = subparsers.add_parser(
         "serve", parents=[reader_parent], help="run local Web UI"
     )
+    serve.add_argument(
+        "--reload",
+        action="store_true",
+        help="restart the server when source files change (development only)",
+    )
     serve.set_defaults(handler=_serve)
 
     doctor = subparsers.add_parser(
@@ -147,8 +152,10 @@ def _serve(args: argparse.Namespace) -> int:
     uvicorn.run(
         "linguary.web.app:create_app",
         factory=True,
-        reload=True,
-        reload_dirs=[str(Path(__file__).resolve().parents[1])],
+        reload=args.reload,
+        reload_dirs=(
+            [str(Path(__file__).resolve().parents[1])] if args.reload else None
+        ),
         proxy_headers=False,
         host=settings.server.host,
         port=settings.server.port,
