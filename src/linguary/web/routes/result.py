@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from fastapi import APIRouter, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from linguary.application.book_overview import book_result, result_groups, ResultBlockNotFoundError
 from linguary.application.pronunciation_projection import project_pronunciations
@@ -17,6 +17,16 @@ from linguary.web.views import render, wants_html
 from linguary.web.routes.quality import quality_page_context
 
 router = APIRouter(tags=["result"])
+
+
+@router.get('/pronunciation-sources', name='pronunciation_sources', response_class=PlainTextResponse)
+def pronunciation_sources(application: CurrentApplication) -> PlainTextResponse:
+    """Serve the fixed local license bundle, without accepting resource paths."""
+    try:
+        notices = application.pronunciation_source_notices()
+    except (OSError, ValueError):
+        raise HTTPException(status_code=503, detail='Уведомления об источниках произношения недоступны.') from None
+    return PlainTextResponse(notices)
 
 
 @router.get("/books/{book_id}/result", response_model=BookResultResponse)

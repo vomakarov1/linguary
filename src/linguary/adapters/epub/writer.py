@@ -37,6 +37,9 @@ from lxml import etree
 from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.resources import package_path
 from linguary.application.pronunciation_projection import project_pronunciations
+from linguary.adapters.epub.pronunciation_notices import (
+    PronunciationNoticeBundle, pronunciation_notice_bundle,
+)
 from linguary.application.analysis_merge import sanitize_before_you_read_explanation
 from linguary.application.ports.epub import (
     EpubExportFatalError,
@@ -191,8 +194,26 @@ class EpubExportWriter(EpubWriter):
         """
         warnings = _ExportWarnings()
         payloads = dict(_resource_payloads(request, warnings))
+        try:
+            notices = pronunciation_notice_bundle(request)
+        except (OSError, ValueError):
+            raise EpubExportFatalError('уведомления об источнике транскрипций недоступны') from None
+        notices_href = None
+        media_types = dict(_resource_media_types(request))
+        if notices is not None:
+            used = set(payloads) | {_contained_name(section.source_resource_path)
+                                    for section in request.document.ordered_sections}
+            used.update((_NAVIGATION_FILE, _STYLESHEET_FILE, _PACKAGE_FILE))
+            notices_href = _unique_resource_name('linguary/pronunciation-sources.xhtml', used)
+            provenance_href = _unique_resource_name('linguary/pronunciation-sources.json', used)
+            payloads[provenance_href] = notices.provenance_json()
+            media_types[provenance_href] = 'application/json'
         with _OpaqueSource(request.source_epub_path) as opaque:
-            chapters = _render_chapters(request, opaque=opaque, warnings=warnings)
+            chapters = _render_chapters(request, opaque=opaque, warnings=warnings,
+                                        pronunciation_notices_href=notices_href)
+        if notices is not None:
+            chapters += (_pronunciation_notices_chapter(notices, href=notices_href,
+                provenance_href=provenance_href, language=request.document.source_language),)
         known_files = (
             set(payloads)
             | {chapter.href for chapter in chapters}
@@ -203,7 +224,7 @@ class EpubExportWriter(EpubWriter):
             payloads,
             document=request.document,
             chapters=chapters,
-            media_types=_resource_media_types(request),
+            media_types=media_types,
         )
         target = Path(request.target_path)
         draft = target.with_name(f"{target.name}.part")
@@ -231,6 +252,21 @@ class _Chapter:
     href: str
     title: str
     root: etree._Element
+
+
+def _pronunciation_notices_chapter(
+    notices: PronunciationNoticeBundle, *, href: str, provenance_href: str, language: str,
+) -> _Chapter:
+    title = 'Источники транскрипций и лицензии'
+    root = _xhtml_document(title=title, language=language,
+                           stylesheet=_relative_href(href, _STYLESHEET_FILE))
+    body = root.find(f'{{{_XHTML_NAMESPACE}}}body')
+    section = _sub(body, 'section', {'id': 'pronunciation-sources', 'class': 'linguary-pronunciation-sources'})
+    _sub(section, 'h1').text = title
+    _sub(section, 'p').text = 'Сведения об источнике добавленных транскрипций и условия использования словарных данных.'
+    _sub(section, 'a', {'href': _relative_href(href, provenance_href)}).text = 'Использованные транскрипции (JSON)'
+    _sub(section, 'pre').text = notices.text
+    return _Chapter('linguary-pronunciation-sources', href, title, root)
 
 
 @dataclass(slots=True)
@@ -423,7 +459,8 @@ def _is_front_matter(
 
 
 def _render_chapters(
-    request: EpubWriteRequest, *, opaque: _OpaqueSource, warnings: _ExportWarnings
+    request: EpubWriteRequest, *, opaque: _OpaqueSource, warnings: _ExportWarnings,
+    pronunciation_notices_href: str | None = None,
 ) -> tuple[_Chapter, ...]:
     """Chapter documents in reading order.
 
@@ -431,7 +468,8 @@ def _render_chapters(
     and a story chapter following them recaps the last preceding story chapter.
     Story chapter numbering is not displaced by front matter sections.
     """
-    renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings)
+    renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings,
+                                pronunciation_notices_href=pronunciation_notices_href)
     chapters: list[_Chapter] = []
     previous: DocumentSection | None = None
     story_chapter_number = 1
@@ -461,10 +499,12 @@ class _ChapterRenderer:
         request: EpubWriteRequest,
         opaque: _OpaqueSource,
         warnings: _ExportWarnings,
+        pronunciation_notices_href: str | None = None,
     ) -> None:
         self._request = request
         self._opaque = opaque
         self._warnings = warnings
+        self._pronunciation_notices_href = pronunciation_notices_href
         self._document = request.document
         sections = request.document.ordered_sections
         self._pronunciations = project_pronunciations(
@@ -865,6 +905,11 @@ class _ChapterRenderer:
                 if item.source_ref:
                     attribution += f" ({item.source_ref})"
                 _sub(note, "p").text = attribution
+                if self._pronunciation_notices_href is not None:
+                    _sub(note, 'a', {
+                        'class': 'linguary-pronunciation-sources-link',
+                        'href': _relative_href(state.href, self._pronunciation_notices_href) + '#pronunciation-sources',
+                    }).text = 'Источники транскрипций и лицензии'
                 _sub(note, "p", {"class": "linguary-ipa-guide"}).text = (
                     "IPA — международная фонетическая транскрипция. "
                     "ˈ — основное ударение, ˌ — вторичное ударение перед слогом; "
@@ -2091,6 +2136,18 @@ def _unique_id(candidate: str, used: set[str]) -> str:
         identifier = f"{candidate}-{suffix}"
     used.add(identifier)
     return identifier
+
+
+def _unique_resource_name(candidate: str, used: set[str]) -> str:
+    """Reserve a generated book resource without replacing an author resource."""
+    stem, extension = posixpath.splitext(candidate)
+    result = candidate
+    suffix = 1
+    while result in used:
+        suffix += 1
+        result = f'{stem}-{suffix}{extension}'
+    used.add(result)
+    return result
 
 
 def _contains_id(element: etree._Element, identifier: str) -> bool:

@@ -266,3 +266,20 @@ def test_pronunciation_epub_generated_ids_preserve_author_anchors(tmp_path):
     original = next(node for node in elements(first, 'p') if node.get('id') == 'linguary-pronunciation')
     assert ''.join(original.itertext()) == 'An existing anchor.'
     assert len([node for node in first.iter() if node.get('id') == 'linguary-pronunciation']) == 1
+
+
+async def test_ipa_dict_epub_notice_links_are_internal_and_unique(tmp_path):
+    import posixpath
+    from test_epub_export_content import ipa_dict_export, pronunciation_nodes
+
+    run, _, _ = await ipa_dict_export(tmp_path, chapter_path='linguary/pronunciation-sources.xhtml')
+    pages = pronunciation_nodes(run.path, 'section', 'linguary-pronunciation-sources')
+    assert len(pages) == 1 and pages[0][0] != 'OEBPS/linguary/pronunciation-sources.xhtml'
+    assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
+    source_page = pages[0][0]
+    for name, note in pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation'):
+        link, = [a for a in elements(note, 'a') if a.get('class') == 'linguary-pronunciation-sources-link']
+        assert not link.get('href').startswith(('http:', 'https:'))
+        path, _, fragment = link.get('href').partition('#')
+        assert posixpath.normpath(posixpath.join(posixpath.dirname(name), path)) == source_page
+        assert fragment and len(pages[0][1].xpath('.//*[@id=$value] | self::*[@id=$value]', value=fragment)) == 1

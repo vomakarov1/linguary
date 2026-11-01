@@ -767,6 +767,63 @@ def _pronunciation_results(application):
     return scenario
 
 
+def test_pronunciation_notices_route_is_offline_and_allowlisted(client, monkeypatch):
+    import socket
+    from linguary.adapters.pronunciation.source import SOURCE_VERSION
+    from linguary.composition import container
+
+    def no_network(*args, **kwargs):
+        raise AssertionError('Source notices must not use the network')
+
+    monkeypatch.setattr(socket, 'create_connection', no_network)
+    response = client.get('/pronunciation-sources')
+    assert response.status_code == 200
+    assert response.headers['content-type'] == 'text/plain; charset=utf-8'
+    assert SOURCE_VERSION in response.text
+    assert all(text in response.text for text in ('MIT License', 'GNU GENERAL PUBLIC LICENSE', 'en_UK.txt', 'en_US.txt'))
+    assert client.get('/pronunciation-sources?filename=/etc/passwd&url=https://example.com').text == response.text
+    assert client.get('/pronunciation-sources/manifest.json').status_code == 404
+    from linguary.adapters.epub import pronunciation_notices
+    with monkeypatch.context() as corrupt:
+        corrupt.setitem(pronunciation_notices._NOTICE_HASHES, 'NOTICE.md', '0' * 64)
+        assert client.get('/pronunciation-sources').status_code == 503
+
+    def unavailable():
+        raise OSError('/private/internal/LICENSES.txt')
+
+    monkeypatch.setattr(container, 'load_pronunciation_source_notices', unavailable, raising=False)
+    failed = client.get('/pronunciation-sources')
+    assert failed.status_code == 503
+    assert '/private/' not in failed.text
+
+
+def test_pronunciation_notice_link_and_escaped_attribution(client, application):
+    from lxml import html
+
+    scenario = _pronunciation_results(application)
+    block_id = scenario.block_ids()[0]
+    with application.unit_of_work.transaction() as tx:
+        result = tx.results.get(scenario.run_id, block_id)
+        item, = result.pronunciation_assistances
+        tx.results.replace_results(scenario.run_id, [replace(result, pronunciation_assistances=(replace(
+            item, evidence=replace(item.evidence, attribution='<script id="source-injection">bad</script>'),
+        ),))])
+    response = client.get(f'/books/{scenario.book_id}/result', headers={'accept': 'text/html'})
+    assert response.status_code == 200
+    tree = html.fromstring(response.text)
+    assert not tree.xpath('//script[@id="source-injection"]')
+    assert '<script id="source-injection">bad</script>' in ''.join(tree.itertext())
+    links = tree.xpath('//details[contains(@class,"ipa-guide")]/following-sibling::p[1]/a[@class="pronunciation-source-notices"]')
+    assert links and all(link.get('href').endswith('/pronunciation-sources') for link in links)
+
+
+def test_legacy_pronunciation_attribution_still_visible(client, application):
+    scenario = _pronunciation_results(application)
+    response = client.get(f'/books/{scenario.book_id}/result', headers={'accept': 'text/html'})
+    assert response.status_code == 200
+    assert 'Invented test data' in response.text and 'entry-1' in response.text
+
+
 def test_pronunciation_result_and_fragment_contract(client, application, monkeypatch):
     from linguary.web.routes import result as route
     captured = []

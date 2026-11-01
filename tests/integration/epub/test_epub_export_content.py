@@ -762,3 +762,83 @@ def test_pronunciation_epub_guide_and_offline_reading(tmp_path, monkeypatch):
         assert all(symbol in text for symbol in ('IPA', 'ˈ', 'ˌ', 'ː', 'UK'))
         assert 'основное' in text and 'вторичное' in text and 'долгот' in text
         assert all(not a.get('href', '').startswith(('http:', 'https:')) for a in elements(note, 'a'))
+
+
+async def ipa_dict_export(tmp_path, *, chapter_path='chapter.xhtml'):
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    from linguary.domain.pronunciation import PronunciationAssistance
+
+    source_path = build_epub(tmp_path / 'ipa-source.epub', documents={
+        chapter_path: xhtml_document('<h1>Chapter One</h1><p>The colonel joined the queue.</p><p>The queue moved.</p>'),
+    }, toc=[(chapter_path, 'Chapter One')])
+    document = run_export(source_path, tmp_path=tmp_path / 'dry').imported.document
+    source = IpaDictPronunciationSource()
+    results = {}
+    for block in document.blocks():
+        items = []
+        for form, variant in [('colonel', 'uk'), ('queue', 'us')]:
+            if form not in block.text:
+                continue
+            entry, = (await source.lookup(form, variant)).entries
+            start = block.text.index(form)
+            items.append(PronunciationAssistance(SourceAnchor(block.id, start, start + len(form), form),
+                form, entry.ipa, variant, 'ipa-' + form, entry.evidence))
+        if items:
+            results[block.id] = BlockProcessingResult(block.id, BlockTreatment.READ_AS_IS,
+                                                     pronunciation_assistances=tuple(items))
+    return run_export(source_path, tmp_path=tmp_path / 'result', block_results=results), document, results
+
+
+async def test_ipa_dict_epub_contains_used_source_licenses_and_provenance(tmp_path, monkeypatch):
+    import json
+    import socket
+    from linguary.adapters.pronunciation.source import SOURCE_VERSION
+
+    monkeypatch.setattr(socket, 'create_connection', lambda *args, **kwargs: pytest.fail('Network is forbidden'))
+    run, _, results = await ipa_dict_export(tmp_path)
+    pages = pronunciation_nodes(run.path, 'section', 'linguary-pronunciation-sources')
+    assert len(pages) == 1
+    text = ''.join(pages[0][1].itertext())
+    assert all(value in text for value in (SOURCE_VERSION, 'GNU GENERAL PUBLIC LICENSE', 'MIT License'))
+    with zipfile.ZipFile(run.path) as archive:
+        attachment, = [name for name in archive.namelist() if name.endswith('pronunciation-sources.json')]
+        provenance = json.loads(archive.read(attachment))
+    expected = {item.evidence.entry_id for result in results.values() for item in result.pronunciation_assistances}
+    assert {record['entry_id'] for record in provenance['entries']} == expected
+    assert {record['form'] for record in provenance['entries']} == {'colonel', 'queue'}
+    assert {record['license_id'] for record in provenance['entries']} == {'MIT', 'GPL-3.0'}
+    assert all(record['source_version'] == SOURCE_VERSION and record['source_uri'].startswith('https://raw.githubusercontent.com/')
+               for record in provenance['entries'])
+
+
+async def test_ipa_dict_epub_original_and_backlinks_unchanged(tmp_path):
+    run, _, _ = await ipa_dict_export(tmp_path)
+    originals = [node for root in documents_of(run.path).values() for node in elements(root, 'p')
+                 if node.get('class') is None and ''.join(node.itertext()) in ('The colonel joined the queue.', 'The queue moved.')]
+    assert len(originals) == 2
+    notes = pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation')
+    references = pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-reference')
+    assert len(notes) == 2 and len(references) == 3
+    backlinks = [link for _, note in notes for link in elements(note, 'a') if link.get('{http://www.idpf.org/2007/ops}type') == 'backlink']
+    assert len(backlinks) == 3
+    assert all(any('linguary-pronunciation-sources-link' in link.get('class', '') for link in elements(note, 'a'))
+               for _, note in notes)
+
+
+def test_legacy_semantic_epub_needs_no_new_license_fields(tmp_path):
+    run, _, _ = pronunciation_export(tmp_path)
+    assert not pronunciation_nodes(run.path, 'section', 'linguary-pronunciation-sources')
+    with zipfile.ZipFile(run.path) as archive:
+        assert not any(name.endswith('pronunciation-sources.json') for name in archive.namelist())
+
+
+async def test_ipa_dict_epub_corrupt_notices_keep_previous_export(tmp_path, monkeypatch):
+    from linguary.adapters.epub import EpubExportWriter, pronunciation_notices
+    from linguary.application.ports.epub import EpubExportFatalError, EpubWriteRequest
+
+    run, document, results = await ipa_dict_export(tmp_path)
+    original = run.path.read_bytes()
+    monkeypatch.setitem(pronunciation_notices._NOTICE_HASHES, 'LICENSES.txt', '0' * 64)
+    with pytest.raises(EpubExportFatalError, match='уведомления'):
+        EpubExportWriter().write(EpubWriteRequest(document=document, target_path=str(run.path), block_results=results))
+    assert run.path.read_bytes() == original

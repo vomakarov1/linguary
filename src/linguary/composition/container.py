@@ -52,6 +52,7 @@ from linguary.adapters.epub import (
     EpubExportWriter,
     FilesystemEpubResourceStore,
 )
+from linguary.adapters.epub.pronunciation_notices import load_pronunciation_source_notices
 from linguary.adapters.llm import LoggingLLMClient, RateLimitedLLMClient
 from linguary.adapters.llm.logging import LoggedObserver
 from linguary.domain.llm_log import TokenPricing
@@ -154,6 +155,10 @@ class Application:
     @property
     def settings(self) -> AppSettings:
         return self.runtime_settings.current.settings
+
+    def pronunciation_source_notices(self) -> str:
+        """Complete notices for the locally supplied pronunciation snapshot."""
+        return load_pronunciation_source_notices()
 
     def start_processing(self) -> StartProcessing:
         """Book processing start use case.
