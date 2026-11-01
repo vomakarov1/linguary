@@ -1,5 +1,5 @@
 # PROGRESS-backend: BRIEF-pronunciation-hints-2026-10-25
-Status: local-code-review
+Status: done
 ## Фазы
 - [x] Фаза P1: Условия книги и сохранение подтверждённых вхождений — done (e26c71c)
 - [x] Фаза P2: Поиск кандидатов и проверка произношения — done (5288fbf)
@@ -16,9 +16,9 @@ Status: local-code-review
 - [x] gates
 - [x] review
 - [x] result
-- [ ] publish
-- [ ] code-review
-- [ ] qa
-- [ ] done
+- [x] publish
+- [x] code-review
+- [x] qa
+- [x] done
 ## Доработки после ревью
 ## Доработки после QA
