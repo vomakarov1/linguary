@@ -147,6 +147,8 @@ def _serve(args: argparse.Namespace) -> int:
     uvicorn.run(
         "linguary.web.app:create_app",
         factory=True,
+        reload=True,
+        reload_dirs=[str(Path(__file__).resolve().parents[1])],
         proxy_headers=False,
         host=settings.server.host,
         port=settings.server.port,
