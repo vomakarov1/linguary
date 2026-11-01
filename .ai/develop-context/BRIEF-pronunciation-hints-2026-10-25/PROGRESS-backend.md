@@ -1,5 +1,5 @@
 # PROGRESS-backend: BRIEF-pronunciation-hints-2026-10-25
-Status: implement
+Status: local-code-review
 ## Фазы
 - [x] Фаза P1: Условия книги и сохранение подтверждённых вхождений — done (e26c71c)
 - [x] Фаза P2: Поиск кандидатов и проверка произношения — done (5288fbf)
@@ -13,9 +13,9 @@ Status: implement
 - [x] Фаза P10: Локальный источник ipa-dict и консервативное принятие — done (8c0f930)
 - [x] Фаза P11: Уведомления в приложении и EPUB и проверка реального набора — done (59af956)
 ## Хвост
-- [ ] gates
-- [ ] review
-- [ ] result
+- [x] gates
+- [x] review
+- [x] result
 - [ ] publish
 - [ ] code-review
 - [ ] qa
