@@ -8,48 +8,109 @@
 {% set active = namespace(value=false) %}
 {% for member in block.member_blocks %}{% if member.regeneration_task and member.regeneration_task.status in ("pending", "running") %}{% set active.value = true %}{% endif %}{% endfor %}
 {% set regenerating = active.value %}
+{% set source_language = block.source_language %}
 <article class="result-block" id="block-{{ block.member_block_ids[0]|replace(':', '-')|replace('/', '-') }}" data-result-block{% if regenerating %} aria-busy="true"{% endif %}>
   {% set group = block %}
-  {% for block in group.member_blocks %}
-  {% set regenerating = block.regeneration_task and block.regeneration_task.status in ("pending", "running") %}
-  {% if not loop.first %}<span id="block-{{ block.block_id|replace(':', '-')|replace('/', '-') }}"></span>{% endif %}
-  <header>
-    <span>{{ block.treatment_label or block.block_type }}</span>
-    <form method="post" action="/books/{{ book_id }}/blocks/{{ block.block_id }}/regenerate" data-regenerate-form data-block-id="{{ block.block_id }}">
-      {% if regenerating %}
-        <button type="submit" disabled>Обновляется</button>
-      {% else %}
-        <button type="submit">Обновить</button>
+  {% set display_groups = group.display_groups %}
+  {% if display_groups|length > 1 %}
+    {% for members in display_groups %}
+    <section class="result-fragment">
+      <header class="result-fragment-header">
+        <span class="result-fragment-label" lang="{{ source_language }}">
+          {% if source_language[:2]|lower == 'ru' %}
+            Часть {{ loop.index }} из {{ display_groups|length }}
+          {% elif source_language[:2]|lower == 'en' %}
+            Part {{ loop.index }} of {{ display_groups|length }}
+          {% else %}
+            {{ loop.index }} / {{ display_groups|length }}
+          {% endif %}
+        </span>
+        <span>{{ members[0].treatment_label or members[0].block_type }}</span>
+        {% for block in members %}
+          {% if block.block_id != group.member_block_ids[0] %}<span id="block-{{ block.block_id|replace(':', '-')|replace('/', '-') }}"></span>{% endif %}
+          {% set regenerating = block.regeneration_task and block.regeneration_task.status in ("pending", "running") %}
+          <form method="post" action="/books/{{ book_id }}/blocks/{{ block.block_id }}/regenerate" data-regenerate-form data-block-id="{{ block.block_id }}">
+            {% if regenerating %}
+              <button type="submit" disabled>Обновляется</button>
+            {% else %}
+              <button type="submit">Обновить</button>
+            {% endif %}
+          </form>
+        {% endfor %}
+      </header>
+      <p class="source">{{ members|map(attribute='original_text')|join('') }}</p>
+      {% set translations = members|map(attribute='translated_text')|select|map('trim')|list %}
+      {% if translations %}<p class="translation">{{ translations|join(' ') }}</p>{% endif %}
+      {% for block in members %}
+        {% set combined = namespace(items=[]) %}
+        {% if block.glossary_hints %}
+          <ul class="hints">
+            {% for hint in block.glossary_hints %}
+              {% set matches = block.pronunciation_assistances|selectattr('quote', 'equalto', hint.original)|list %}
+              <li>{{ hint.original }}{% if matches|length == 1 and block.original_text.count(hint.original) == 1 and matches[0] not in combined.items %} {{ pronunciation(matches[0], show_quote=false) }}{% set combined.items = combined.items + matches %}{% endif %} -> {{ hint.translation }}{% if hint.note %}: {{ hint.note }}{% endif %}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {% if block.pronunciation_assistances|length > combined.items|length %}
+          <ul class="hints pronunciation-hints">
+            {% for item in block.pronunciation_assistances if item not in combined.items %}
+              <li>{{ pronunciation(item) }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {% for note in block.language_notes %}
+          <aside class="note">{{ note.original_excerpt }} — {{ note.note }}</aside>
+        {% endfor %}
+        {% if block.regeneration_task and block.regeneration_task.status in ("pending", "running") %}
+          <p class="task-state" role="status" data-active-task="true"><span class="spinner" aria-hidden="true"></span>{{ block.regeneration_task.task_type_label }}: {{ block.regeneration_task.status_label }}. Блок обновится автоматически.</p>
+        {% elif block.regeneration_task %}
+          <p class="task-state" role="status">Задача: {{ block.regeneration_task.task_type_label }} / {{ block.regeneration_task.status_label }}</p>
+        {% endif %}
+      {% endfor %}
+    </section>
+    {% endfor %}
+  {% else %}
+    {% for block in group.member_blocks %}
+      {% set regenerating = block.regeneration_task and block.regeneration_task.status in ("pending", "running") %}
+      {% if not loop.first %}<span id="block-{{ block.block_id|replace(':', '-')|replace('/', '-') }}"></span>{% endif %}
+      <header>
+        <span>{{ block.treatment_label or block.block_type }}</span>
+        <form method="post" action="/books/{{ book_id }}/blocks/{{ block.block_id }}/regenerate" data-regenerate-form data-block-id="{{ block.block_id }}">
+          {% if regenerating %}
+            <button type="submit" disabled>Обновляется</button>
+          {% else %}
+            <button type="submit">Обновить</button>
+          {% endif %}
+        </form>
+      </header>
+      {% if loop.first %}<p class="source">{{ group.original_text }}</p>{% endif %}
+      {% if block.translated_text %}<p class="translation">{{ block.translated_text }}</p>{% endif %}
+      {% set combined = namespace(items=[]) %}
+      {% if block.glossary_hints %}
+        <ul class="hints">
+          {% for hint in block.glossary_hints %}
+            {% set matches = block.pronunciation_assistances|selectattr('quote', 'equalto', hint.original)|list %}
+            <li>{{ hint.original }}{% if matches|length == 1 and block.original_text.count(hint.original) == 1 and matches[0] not in combined.items %} {{ pronunciation(matches[0], show_quote=false) }}{% set combined.items = combined.items + matches %}{% endif %} -> {{ hint.translation }}{% if hint.note %}: {{ hint.note }}{% endif %}</li>
+          {% endfor %}
+        </ul>
       {% endif %}
-    </form>
-  </header>
-  {% if loop.first %}<p class="source">{{ group.original_text }}</p>{% endif %}
-  {% if block.translated_text %}<p class="translation">{{ block.translated_text }}</p>{% endif %}
-  {% set combined = namespace(items=[]) %}
-  {% if block.glossary_hints %}
-    <ul class="hints">
-      {% for hint in block.glossary_hints %}
-        {% set matches = block.pronunciation_assistances|selectattr('quote', 'equalto', hint.original)|list %}
-        <li>{{ hint.original }}{% if matches|length == 1 and block.original_text.count(hint.original) == 1 and matches[0] not in combined.items %} {{ pronunciation(matches[0], show_quote=false) }}{% set combined.items = combined.items + matches %}{% endif %} -> {{ hint.translation }}{% if hint.note %}: {{ hint.note }}{% endif %}</li>
+      {% if block.pronunciation_assistances|length > combined.items|length %}
+        <ul class="hints pronunciation-hints">
+          {% for item in block.pronunciation_assistances if item not in combined.items %}
+            <li>{{ pronunciation(item) }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+      {% for note in block.language_notes %}
+        <aside class="note">{{ note.original_excerpt }} — {{ note.note }}</aside>
       {% endfor %}
-    </ul>
+      {% if regenerating %}
+        <p class="task-state" role="status" data-active-task="true"><span class="spinner" aria-hidden="true"></span>{{ block.regeneration_task.task_type_label }}: {{ block.regeneration_task.status_label }}. Блок обновится автоматически.</p>
+      {% elif block.regeneration_task %}
+        <p class="task-state" role="status">Задача: {{ block.regeneration_task.task_type_label }} / {{ block.regeneration_task.status_label }}</p>
+      {% endif %}
+    {% endfor %}
   {% endif %}
-  {% if block.pronunciation_assistances|length > combined.items|length %}
-    <ul class="hints pronunciation-hints">
-      {% for item in block.pronunciation_assistances if item not in combined.items %}
-        <li>{{ pronunciation(item) }}</li>
-      {% endfor %}
-    </ul>
-  {% endif %}
-  {% for note in block.language_notes %}
-    <aside class="note">{{ note.original_excerpt }} — {{ note.note }}</aside>
-  {% endfor %}
-  {% if regenerating %}
-    <p class="task-state" role="status" data-active-task="true"><span class="spinner" aria-hidden="true"></span>{{ block.regeneration_task.task_type_label }}: {{ block.regeneration_task.status_label }}. Блок обновится автоматически.</p>
-  {% elif block.regeneration_task %}
-    <p class="task-state" role="status">Задача: {{ block.regeneration_task.task_type_label }} / {{ block.regeneration_task.status_label }}</p>
-  {% endif %}
-  {% endfor %}
   {% if group.pronunciation_assistances %}
   <details class="ipa-guide">
     <summary>Как читать IPA</summary>

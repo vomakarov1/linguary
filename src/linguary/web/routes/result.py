@@ -210,6 +210,7 @@ def _result_block_responses(
     )
     return tuple(
         ResultGroupResponse.of_group(group, tasks=tasks, block_id=block_id,
+                                      source_language=snapshot.book.source_language,
                                       pronunciations=pronunciations)
         for group, block_id in selected_groups
     )
