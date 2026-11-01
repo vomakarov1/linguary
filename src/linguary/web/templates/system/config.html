@@ -10,7 +10,7 @@
 </section>
 
 <section class="panel">
-  <h2>Настройки LLM и фоновой работы</h2>
+  <h2>Настройки</h2>
   {% if confirmation %}<p class="notice" role="status">{{ confirmation }}</p>{% endif %}
   {% if settings_error %}<p class="notice" role="alert">{{ settings_error.message }}</p>{% endif %}
   {% if settings_error or not can_submit %}
@@ -19,10 +19,19 @@
   {% for field, error in field_errors.items() if field not in ('provider', 'base_url', 'api_key', 'model', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'proxy_mode', 'proxy_url', 'requests_per_minute', 'concurrency', 'reader_level', 'name_translation_strategy') %}
   <p class="notice" role="alert">{{ error }}</p>
   {% endfor %}
+  <nav class="tabs settings-tabs" id="settings-tabs" aria-label="Разделы конфигурации" data-settings-tabs hidden>
+    <button type="button" id="settings-tab-models" role="tab" aria-controls="settings-panel-models" aria-selected="true" tabindex="0">Провайдер и модели</button>
+    <button type="button" id="settings-tab-inference" role="tab" aria-controls="settings-panel-inference" aria-selected="false" tabindex="-1">Параметры модели</button>
+    <button type="button" id="settings-tab-network" role="tab" aria-controls="settings-panel-network" aria-selected="false" tabindex="-1">Сеть и прокси</button>
+    <button type="button" id="settings-tab-worker" role="tab" aria-controls="settings-panel-worker" aria-selected="false" tabindex="-1">Фоновая работа</button>
+    <button type="button" id="settings-tab-reader" role="tab" aria-controls="settings-panel-reader" aria-selected="false" tabindex="-1">Уровень читателя</button>
+    <button type="button" id="settings-tab-names" role="tab" aria-controls="settings-panel-names" aria-selected="false" tabindex="-1">Передача имён</button>
+    <button type="button" id="settings-tab-status" role="tab" aria-controls="settings-panel-status" aria-selected="false" tabindex="-1">Состояние</button>
+  </nav>
   <form class="settings-form" action="{{ config_url }}" method="post">
     {% if form_values.expected_revision is not none %}<input type="hidden" name="expected_revision" value="{{ form_values.expected_revision }}">{% endif %}
 
-    <fieldset class="settings-group">
+    <fieldset class="settings-group settings-tab-panel" id="settings-panel-models" role="tabpanel" aria-labelledby="settings-tab-models" tabindex="0">
       <legend>Провайдер и модели</legend>
 
       <div class="settings-field" id="settings-field-provider">
@@ -74,7 +83,7 @@
       </div>
     </fieldset>
 
-    <fieldset class="settings-group">
+    <fieldset class="settings-group settings-tab-panel" id="settings-panel-inference" role="tabpanel" aria-labelledby="settings-tab-inference" tabindex="0">
       <legend>Параметры инференса</legend>
 
       <div class="settings-field" id="settings-field-temperature">
@@ -92,7 +101,7 @@
       </div>
     </fieldset>
 
-    <fieldset class="settings-group">
+    <fieldset class="settings-group settings-tab-panel" id="settings-panel-network" role="tabpanel" aria-labelledby="settings-tab-network" tabindex="0">
       <legend>Сетевое подключение и прокси</legend>
 
       <div class="settings-field" id="settings-field-proxy_mode">
@@ -116,7 +125,7 @@
       </div>
     </fieldset>
 
-    <fieldset class="settings-group">
+    <fieldset class="settings-group settings-tab-panel" id="settings-panel-worker" role="tabpanel" aria-labelledby="settings-tab-worker" tabindex="0">
       <legend>Очередь и фоновая работа</legend>
 
       <div class="settings-field" id="settings-field-requests_per_minute">
@@ -133,7 +142,7 @@
       </div>
     </fieldset>
 
-    <fieldset class="settings-group">
+    <fieldset class="settings-group settings-tab-panel" id="settings-panel-reader" role="tabpanel" aria-labelledby="settings-tab-reader" tabindex="0">
       <legend>Уровень читателя</legend>
 
       <div class="settings-field" id="settings-field-reader_level">
@@ -149,7 +158,7 @@
       </div>
     </fieldset>
 
-    <fieldset class="settings-group">
+    <fieldset class="settings-group settings-tab-panel" id="settings-panel-names" role="tabpanel" aria-labelledby="settings-tab-names" tabindex="0">
       <legend>Передача имён и названий</legend>
       <div class="settings-field" id="settings-field-name_translation_strategy">
         <label for="settings-name_translation_strategy">Способ передачи имён и названий</label>
@@ -163,8 +172,51 @@
         <p>Изменение общей настройки действует для новых условий книги. Для уже сохранённых условий нужен явный повторный анализ.</p>
       </div>
     </fieldset>
+    <section class="settings-tab-panel" id="settings-panel-status" role="tabpanel" aria-labelledby="settings-tab-status" tabindex="0">
+      <section class="metrics">
+        <div><strong>{{ data.llm.provider }}</strong><span>Провайдер</span></div>
+        <div><strong>{{ data.llm.model or "—" }}</strong><span>Модель</span></div>
+        <div><strong>{{ data.reading.reader_level|upper }}</strong><span>Уровень читателя</span></div>
+        <div><strong>{% if data.epubcheck.available %}Да{% else %}Нет{% endif %}</strong><span>EPUBCheck</span></div>
+        <div><strong>{% if data.server.is_local_only %}Локально{% else %}Сеть{% endif %}</strong><span>Сервер</span></div>
+      </section>
 
-    <button type="submit" {% if not can_submit %}disabled{% endif %}>Сохранить настройки</button>
+      <section class="panel settings-info">
+        <h2>Уровень читателя (ReadingSettings)</h2>
+        <p>Текущий уровень: <strong>{{ data.reading.reader_level|upper }}</strong>{% if data.reading.reader_level == data.reading.default_level %} (по умолчанию){% endif %}</p>
+        <ul>
+          <li>Поддерживаемые уровни владения языком (CEFR): <code>a2</code>, <code>b1</code>, <code>b2</code>, <code>c1</code> (значение по умолчанию — <code>b2</code>).</li>
+          <li>Настройка задаётся в конфигурационном файле TOML в новой секции <code>[reading]</code>:</li>
+        </ul>
+        <pre><code>[reading]
+reader_level = "{{ data.reading.reader_level }}"</code></pre>
+        <p>Также уровень можно переопределить переменной окружения <code>LINGUARY_READING_READER_LEVEL</code> или аргументом командной строки <code>--reader-level</code>.</p>
+      </section>
+
+      <section class="panel settings-info">
+        <h2>Внешний провайдер LLM</h2>
+        <p class="notice">{{ data.external_llm_warning }}</p>
+        {% if data.llm.hint %}<p>{{ data.llm.hint }}</p>{% endif %}
+      </section>
+
+      <section class="panel settings-info">
+        <h2>Хранилище</h2>
+        <p>{{ data.storage.data_root }}</p>
+        {% if data.server.warning %}<p>{{ data.server.warning }}</p>{% endif %}
+      </section>
+
+      {% if not data.epubcheck.available %}
+      <section class="panel settings-info">
+        <h2>Проверка EPUB</h2>
+        {% if data.epubcheck.reason %}<p>{{ data.epubcheck.reason }}</p>{% endif %}
+        {% if data.epubcheck.hint %}<p>{{ data.epubcheck.hint }}</p>{% endif %}
+      </section>
+      {% endif %}
+    </section>
+
+    <div class="settings-actions">
+      <button type="submit" {% if not can_submit %}disabled{% endif %}>Сохранить настройки</button>
+    </div>
   </form>
 
   <form class="settings-form settings-reset" action="{{ config_url }}/reset" method="post" data-confirm="Сбросить все настройки к исходным значениям? Это действие отменит все пользовательские изменения." onsubmit="return confirm(this.getAttribute('data-confirm'));">
@@ -173,44 +225,4 @@
     <button type="submit" {% if not can_submit %}disabled{% endif %}>Сбросить настройки</button>
   </form>
 </section>
-
-<section class="metrics">
-  <div><strong>{{ data.llm.provider }}</strong><span>Провайдер</span></div>
-  <div><strong>{{ data.llm.model or "—" }}</strong><span>Модель</span></div>
-  <div><strong>{{ data.reading.reader_level|upper }}</strong><span>Уровень читателя</span></div>
-  <div><strong>{% if data.epubcheck.available %}Да{% else %}Нет{% endif %}</strong><span>EPUBCheck</span></div>
-  <div><strong>{% if data.server.is_local_only %}Локально{% else %}Сеть{% endif %}</strong><span>Сервер</span></div>
-</section>
-
-<section class="panel">
-  <h2>Уровень читателя (ReadingSettings)</h2>
-  <p>Текущий уровень: <strong>{{ data.reading.reader_level|upper }}</strong>{% if data.reading.reader_level == data.reading.default_level %} (по умолчанию){% endif %}</p>
-  <ul>
-    <li>Поддерживаемые уровни владения языком (CEFR): <code>a2</code>, <code>b1</code>, <code>b2</code>, <code>c1</code> (значение по умолчанию — <code>b2</code>).</li>
-    <li>Настройка задаётся в конфигурационном файле TOML в новой секции <code>[reading]</code>:</li>
-  </ul>
-  <pre><code>[reading]
-reader_level = "{{ data.reading.reader_level }}"</code></pre>
-  <p>Также уровень можно переопределить переменной окружения <code>LINGUARY_READING_READER_LEVEL</code> или аргументом командной строки <code>--reader-level</code>.</p>
-</section>
-
-<section class="panel">
-  <h2>Внешний провайдер LLM</h2>
-  <p class="notice">{{ data.external_llm_warning }}</p>
-  {% if data.llm.hint %}<p>{{ data.llm.hint }}</p>{% endif %}
-</section>
-
-<section class="panel">
-  <h2>Хранилище</h2>
-  <p>{{ data.storage.data_root }}</p>
-  {% if data.server.warning %}<p>{{ data.server.warning }}</p>{% endif %}
-</section>
-
-{% if not data.epubcheck.available %}
-<section class="panel">
-  <h2>Проверка EPUB</h2>
-  {% if data.epubcheck.reason %}<p>{{ data.epubcheck.reason }}</p>{% endif %}
-  {% if data.epubcheck.hint %}<p>{{ data.epubcheck.hint }}</p>{% endif %}
-</section>
-{% endif %}
 {% endblock %}

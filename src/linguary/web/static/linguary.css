@@ -189,7 +189,7 @@ p {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
-  max-width: 36rem;
+  max-width: 40rem;
   margin-top: 1rem;
 }
 
@@ -307,7 +307,8 @@ p {
   margin: 0 0 1rem;
 }
 
-.tabs a {
+.tabs a,
+.tabs button {
   display: inline-flex;
   align-items: center;
   min-height: 2.35rem;
@@ -318,11 +319,34 @@ p {
   color: var(--muted);
   padding: 0.45rem 0.75rem;
   text-decoration: none;
+  font: inherit;
+  cursor: pointer;
 }
 
-.tabs a[aria-current="page"] {
+.tabs a[aria-current="page"],
+.tabs button[aria-selected="true"] {
   color: var(--ink);
   background: var(--panel);
+}
+
+.tabs button:hover:not([aria-selected="true"]) {
+  color: var(--ink);
+}
+
+.settings-tab-panel[hidden] {
+  display: none !important;
+}
+
+.settings-info {
+  margin: 0 0 0.75rem;
+}
+
+.settings-info:last-child {
+  margin-bottom: 0;
+}
+
+.settings-actions {
+  margin-top: 0.25rem;
 }
 
 .list {

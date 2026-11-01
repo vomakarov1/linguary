@@ -505,6 +505,95 @@ function pollResultHeader(attempt = 1) {
   }, 1500);
 }
 
+function initSettingsTabs() {
+  const tablist = document.querySelector("[data-settings-tabs]");
+  if (!(tablist instanceof HTMLElement)) {
+    return;
+  }
+
+  const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
+  const form = document.querySelector(".settings-form:not(.settings-reset)");
+  if (tabs.length === 0) {
+    return;
+  }
+
+  function activateTab(activeTab, { focus = false, persist = true } = {}) {
+    for (const tab of tabs) {
+      const isActive = tab === activeTab;
+      const panel = document.getElementById(tab.getAttribute("aria-controls"));
+      tab.setAttribute("aria-selected", String(isActive));
+      tab.tabIndex = isActive ? 0 : -1;
+      if (panel) {
+        panel.hidden = !isActive;
+      }
+    }
+
+    if (persist) {
+      try {
+        window.sessionStorage.setItem("linguary-system-config-tab", activeTab.id);
+      } catch (_error) {
+        // Tab selection still works when browser storage is unavailable.
+      }
+    }
+    if (focus) {
+      activeTab.focus();
+    }
+  }
+
+  const invalidField = form?.querySelector('[aria-invalid="true"]');
+  const invalidPanel = invalidField?.closest(".settings-tab-panel");
+  let activeTab = tabs.find((tab) => tab.getAttribute("aria-controls") === invalidPanel?.id);
+
+  if (!activeTab) {
+    try {
+      const savedTabId = window.sessionStorage.getItem("linguary-system-config-tab");
+      activeTab = tabs.find((tab) => tab.id === savedTabId);
+    } catch (_error) {
+      // Use the default tab when browser storage is unavailable.
+    }
+  }
+  activeTab =
+    activeTab || tabs.find((tab) => tab.getAttribute("aria-selected") === "true") || tabs[0];
+
+  tablist.hidden = false;
+  activateTab(activeTab);
+
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => activateTab(tab));
+  }
+
+  tablist.addEventListener("keydown", (event) => {
+    const currentIndex = tabs.indexOf(event.target.closest('[role="tab"]'));
+    if (currentIndex < 0) {
+      return;
+    }
+
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % tabs.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = tabs.length - 1;
+    } else {
+      return;
+    }
+
+    event.preventDefault();
+    activateTab(tabs[nextIndex], { focus: true });
+  });
+
+  form?.addEventListener("invalid", (event) => {
+    const invalidPanel = event.target.closest(".settings-tab-panel");
+    const invalidTab = tabs.find((tab) => tab.getAttribute("aria-controls") === invalidPanel?.id);
+    if (invalidTab) {
+      activateTab(invalidTab);
+    }
+  }, true);
+}
+
 function initSettingsForm() {
   const form = document.querySelector(".settings-form");
   if (!(form instanceof HTMLFormElement)) {
@@ -605,6 +694,7 @@ window.initSettingsForm = initSettingsForm;
 window.testLLMConnection = testLLMConnection;
 
 document.addEventListener("DOMContentLoaded", () => {
+  initSettingsTabs();
   initSettingsForm();
   pollResultGroups();
 });
