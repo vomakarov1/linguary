@@ -37,6 +37,9 @@ from linguary.domain import (
 #: a full Russian translation of that volume with vocabulary hints, language notes, and
 #: JSON wrapping consumes ~5000-6000 tokens.
 DEFAULT_MAX_UNIT_SOURCE_CHARS = 8000
+PARAGRAPH_FRAGMENT_MIN_CHARS = 250
+PARAGRAPH_FRAGMENT_TARGET_CHARS = 300
+PARAGRAPH_FRAGMENT_MAX_CHARS = 350
 
 _FragmentT = TypeVar("_FragmentT")
 
@@ -83,24 +86,38 @@ def group_paragraph_fragments(
     fragments: Sequence[_FragmentT],
     *,
     text_of: Callable[[_FragmentT], str],
-    target_chars: int = 300,
-    max_groups: int = 4,
+    target_chars: int = PARAGRAPH_FRAGMENT_TARGET_CHARS,
 ) -> tuple[tuple[_FragmentT, ...], ...]:
-    """Balance sentence fragments into a few readable paragraph-sized groups.
+    """Balance fragments into readable paragraph-sized groups.
 
-    EPUB import stores long paragraphs as sentence blocks so they can be processed safely.
-    Presentation joins adjacent blocks into groups of about `target_chars`, keeping sentence
-    boundaries and avoiding one visible translation per sentence.
+    EPUB import stores long paragraphs as source fragments so they can be processed safely.
+    Presentation joins adjacent fragments into groups near `target_chars`, without capping the
+    number of groups and while keeping source fragments intact.
     """
     values = tuple(fragments)
     if len(values) <= 1:
         return (values,) if values else ()
-    if target_chars < 1 or max_groups < 2:
-        raise ValueError("параметры группировки фрагментов должны быть положительными")
+    if target_chars < 1:
+        raise ValueError("целевой размер группы должен быть положительным")
 
     lengths = tuple(len(text_of(fragment)) for fragment in values)
     total = sum(lengths)
-    group_count = min(len(values), max(2, min(max_groups, ceil(total / target_chars))))
+    if total == 0:
+        return (values,)
+    min_count = min(
+        len(values), max(2, ceil(total / PARAGRAPH_FRAGMENT_MAX_CHARS))
+    )
+    max_count = min(
+        len(values), max(2, total // PARAGRAPH_FRAGMENT_MIN_CHARS)
+    )
+    counts = (
+        range(min_count, max_count + 1)
+        if min_count <= max_count
+        else {min_count, max_count}
+    )
+    group_count = min(
+        counts, key=lambda count: (abs(total / count - target_chars), -count)
+    )
     boundaries = [0]
     for length in lengths:
         boundaries.append(boundaries[-1] + length)
