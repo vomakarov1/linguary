@@ -231,25 +231,24 @@ function replaceResultGroup(root, blockId, markup) {
   return replacement;
 }
 
-async function refreshResultBlock(blockId) {
+async function refreshResultBlocks(blockIds) {
+  if (blockIds.length === 0) {
+    return;
+  }
   const root = document.querySelector("[data-result-groups]");
-  if (!(root instanceof HTMLElement)) {
+  if (!(root instanceof HTMLElement) || !root.dataset.blocksUrl) {
     throw new Error("Missing result groups root");
   }
-  const group = resultGroupForBlock(root, blockId);
-  const form = Array.from(group?.querySelectorAll("[data-regenerate-form]") || [])
-    .find((item) => item.dataset.blockId === blockId);
-  if (!form) {
-    throw new Error("Missing result block form");
+  const url = new URL(root.dataset.blocksUrl, window.location.href);
+  for (const blockId of blockIds) {
+    url.searchParams.append("block_id", blockId);
   }
 
-  const url = new URL(form.action, window.location.href);
-  url.pathname = url.pathname.replace(/\/regenerate$/, "");
   const response = await fetch(url, {
     method: "GET",
     headers: {
       "Accept": "text/html",
-      "X-Linguary-Fragment": "result-block",
+      "X-Linguary-Fragment": "result-blocks",
     },
     credentials: "same-origin",
   });
@@ -261,7 +260,53 @@ async function refreshResultBlock(blockId) {
   if (currentRoot !== root) {
     return null;
   }
-  return replaceResultGroup(root, blockId, await response.text());
+
+  const template = document.createElement("template");
+  template.innerHTML = (await response.text()).trim();
+  const fragment = template.content.firstElementChild;
+  if (
+    !(fragment instanceof HTMLElement) ||
+    template.content.children.length !== 1 ||
+    template.content.querySelectorAll("[data-result-blocks]").length !== 1 ||
+    !fragment.matches("[data-result-blocks]")
+  ) {
+    throw new Error("Invalid result blocks response");
+  }
+
+  const replacementGroups = Array.from(fragment.children);
+  if (replacementGroups.some((group) => !group.matches("[data-result-block]"))) {
+    throw new Error("Invalid result blocks response");
+  }
+  const replacements = new Map();
+  for (const blockId of blockIds) {
+    const current = resultGroupForBlock(root, blockId);
+    const replacement = resultGroupForBlock(fragment, blockId);
+    if (
+      !(current instanceof HTMLElement) || !(replacement instanceof HTMLElement) ||
+      current.id !== replacement.id
+    ) {
+      throw new Error("Result block group is missing from response");
+    }
+    replacements.set(current.id, { current, replacement });
+  }
+  if (replacements.size !== replacementGroups.length) {
+    throw new Error("Unexpected result block groups in response");
+  }
+
+  const scrollX = window.scrollX;
+  const scrollY = window.scrollY;
+  const focus = captureResultFocus(root);
+  for (const { current, replacement } of replacements.values()) {
+    current.querySelectorAll("details.ipa-guide").forEach((guide, index) => {
+      const nextGuide = replacement.querySelectorAll("details.ipa-guide")[index];
+      if (nextGuide) {
+        nextGuide.open = guide.open;
+      }
+    });
+    current.replaceWith(replacement);
+  }
+  restoreResultFocus(root, focus);
+  window.scrollTo(scrollX, scrollY);
 }
 
 async function refreshActiveResultBlocks() {
@@ -271,12 +316,13 @@ async function refreshActiveResultBlocks() {
   }
   const activeGroups = Array.from(root.querySelectorAll("[data-result-block]"))
     .filter((group) => group.querySelector("[data-active-task='true']"));
-  const activeBlockIds = activeGroups.map((group) => {
-    const form = Array.from(group.querySelectorAll("[data-regenerate-form]"))
-      .find((item) => item.querySelector("button:disabled"));
-    return form?.dataset.blockId;
-  }).filter(Boolean);
-  await Promise.all(activeBlockIds.map((blockId) => refreshResultBlock(blockId)));
+  const activeBlockIds = activeGroups.flatMap((group) =>
+    Array.from(group.querySelectorAll("[data-regenerate-form]"))
+      .filter((item) => item.querySelector("button:disabled"))
+      .map((form) => form.dataset.blockId)
+      .filter(Boolean),
+  );
+  await refreshResultBlocks(activeBlockIds);
 }
 
 async function refreshResultGroups() {

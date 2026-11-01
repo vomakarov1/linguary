@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from linguary.application.book_overview import book_result, result_groups, ResultBlockNotFoundError
@@ -74,6 +74,28 @@ def get_book_result(
             quality_ui=quality_page_context(request, application, book_id, tasks=summary.tasks),
         )
     return response
+
+
+@router.get(
+    "/books/{book_id}/blocks",
+    response_model=list[ResultGroupResponse],
+)
+def get_book_result_blocks(
+    request: Request,
+    application: CurrentApplication,
+    book_id: str,
+    block_id: list[str] = Query(...),
+) -> list[ResultGroupResponse] | object:
+    """Return selected result groups from one book snapshot for batch polling."""
+    responses = _result_block_responses(application, book_id, block_id)
+    if _wants_result_blocks_fragment(request):
+        return render(
+            request,
+            "partials/result_blocks.html",
+            blocks=responses,
+            book_id=book_id,
+        )
+    return responses
 
 
 @router.get(
@@ -147,21 +169,48 @@ def _result_block_response(
     task: ProcessingTask | None = None,
 ) -> ResultGroupResponse:
     """Construct the block DTO along with its current regeneration task, if any."""
+    response, = _result_block_responses(application, book_id, (block_id,), task=task)
+    return response
+
+
+def _result_block_responses(
+    application: CurrentApplication,
+    book_id: str,
+    block_ids: Sequence[str],
+    *,
+    task: ProcessingTask | None = None,
+) -> tuple[ResultGroupResponse, ...]:
+    """Build selected result groups while taking one book snapshot and pronunciation projection."""
     snapshot = book_result(application.unit_of_work, book_id)
+    requested_ids = tuple(dict.fromkeys(block_ids))
+    requested_set = set(requested_ids)
+    selected_groups = []
+    found_ids: set[str] = set()
+    for chapter in snapshot.chapters:
+        for group in result_groups(chapter.blocks):
+            group_ids = {member.block.id for member in group}
+            matching_ids = [block_id for block_id in requested_ids if block_id in group_ids]
+            if matching_ids:
+                selected_groups.append((group, matching_ids[0]))
+                found_ids.update(matching_ids)
+    missing_ids = requested_set - found_ids
+    if missing_ids:
+        missing_id = next(block_id for block_id in requested_ids if block_id in missing_ids)
+        raise ResultBlockNotFoundError(f"блока {missing_id} нет в книге {book_id}")
+
+    tasks = _regeneration_tasks(snapshot.tasks)
+    if task is not None and task.status is not TaskStatus.SUCCEEDED:
+        tasks[task.scope_id] = task
     summaries = tuple(block for chapter in snapshot.chapters for block in chapter.blocks)
-    group = next((group for chapter in snapshot.chapters for group in result_groups(chapter.blocks)
-                  if any(member.block.id == block_id for member in group)), None)
-    if group is None:
-        raise ResultBlockNotFoundError(f"блока {block_id} нет в книге {book_id}")
     pronunciations = project_pronunciations(
         tuple(summary.block for summary in summaries),
         {summary.block.id: summary.result for summary in summaries if summary.result is not None},
     )
-    tasks = _regeneration_tasks(snapshot.tasks)
-    if task is not None and task.status is not TaskStatus.SUCCEEDED:
-        tasks[task.scope_id] = task
-    return ResultGroupResponse.of_group(group, tasks=tasks, block_id=block_id,
-                                        pronunciations=pronunciations)
+    return tuple(
+        ResultGroupResponse.of_group(group, tasks=tasks, block_id=block_id,
+                                      pronunciations=pronunciations)
+        for group, block_id in selected_groups
+    )
 
 
 def _regeneration_tasks(tasks: Sequence[ProcessingTask]) -> dict[str, ProcessingTask]:
@@ -179,6 +228,11 @@ def _wants_result_header_fragment(request: Request) -> bool:
 def _wants_result_block_fragment(request: Request) -> bool:
     """Frontend request for the HTML fragment of a single block."""
     return request.headers.get("x-linguary-fragment", "").lower() == "result-block"
+
+
+def _wants_result_blocks_fragment(request: Request) -> bool:
+    """Frontend request for one or more block fragments."""
+    return request.headers.get("x-linguary-fragment", "").lower() == "result-blocks"
 
 
 def _block_anchor(block_id: str) -> str:

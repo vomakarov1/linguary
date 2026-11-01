@@ -355,6 +355,45 @@ def test_fragment_result_block_polling_returns_the_current_block(
         assert uow.tasks.list_for_book(scenario.book_id) == ()
 
 
+def test_batch_result_block_fragment_uses_one_snapshot_for_requested_groups(
+    client: TestClient, application: Application, monkeypatch,
+) -> None:
+    from lxml import html
+    from linguary.web.routes import result as result_route
+
+    scenario, _, _ = _split_result_scenario(application)
+    block_ids = scenario.block_ids()
+    original_book_result = result_route.book_result
+    original_projection = result_route.project_pronunciations
+    snapshots = []
+    projections = []
+
+    def snapshot(*args):
+        snapshots.append(1)
+        return original_book_result(*args)
+
+    def project(*args):
+        projections.append(1)
+        return original_projection(*args)
+
+    monkeypatch.setattr(result_route, "book_result", snapshot)
+    monkeypatch.setattr(result_route, "project_pronunciations", project)
+    response = client.get(
+        f"/books/{scenario.book_id}/blocks",
+        params=[("block_id", block_ids[0]), ("block_id", block_ids[1]),
+                ("block_id", block_ids[2])],
+        headers={"accept": "text/html", "x-linguary-fragment": "result-blocks"},
+    )
+
+    assert response.status_code == 200
+    tree = html.fromstring(response.text)
+    assert tree.get("data-result-blocks") is not None
+    assert len(tree.xpath('./article[@data-result-block]')) == 2
+    returned_ids = set(tree.xpath('.//form[@data-regenerate-form]/@data-block-id'))
+    assert returned_ids == set(block_ids[:3])
+    assert len(snapshots) == len(projections) == 1
+
+
 def test_unknown_block_regeneration_returns_404(
     client: TestClient, application: Application
 ) -> None:
@@ -887,6 +926,7 @@ def _groups_tree(client, scenario):
     tree = html.fromstring(response.text)
     assert tree.get('data-result-groups') is not None
     assert tree.get('data-result-url') == f'/books/{scenario.book_id}/result'
+    assert tree.get('data-blocks-url') == f'/books/{scenario.book_id}/blocks'
     for link in tree.xpath('.//a[@class="pronunciation-repeat"]'):
         assert len(tree.xpath('//*[@id=$target]', target=link.get('href')[1:])) == 1
     return tree
