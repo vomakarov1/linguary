@@ -134,3 +134,25 @@ def test_failed_task_requires_error() -> None:
     """A failed task without an error is invalid for the interface."""
     with pytest.raises(TaskTransitionError):
         make_task(status=TaskStatus.FAILED)
+
+
+def test_task_identity_distinguishes_operation_and_policy() -> None:
+    from dataclasses import asdict, replace
+
+    task = replace(make_task(), operation_id="operation-1", policy_version="translation-context-v2")
+    assert task.identity == TaskIdentity("book-1", task.task_type, "unit-1",
+                                         "operation-1", "translation-context-v2")
+    assert task.identity != replace(task, operation_id="operation-2").identity
+    assert task.identity != replace(task, policy_version="translation-context-legacy-v1").identity
+    assert ProcessingTask(**asdict(task)) == task
+    assert make_task().operation_id == make_task().policy_version == ""
+    assert TaskIdentity("book", TaskType.IMPORT_BOOK).operation_id == ""
+
+
+def test_superseded_task_cannot_resume() -> None:
+    task = make_task(status=TaskStatus.SUPERSEDED)
+    assert task.last_error is None
+    assert task.is_retryable is False
+    for action in (task.start, task.retry):
+        with pytest.raises(TaskTransitionError):
+            action()

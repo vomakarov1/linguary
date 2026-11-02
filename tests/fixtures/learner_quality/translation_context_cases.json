@@ -1,0 +1,324 @@
+{
+  "schema_version": 1,
+  "semantic_correctness": "not_evaluated",
+  "source_text_extraction": "Complete paragraph text from XHTML itertext, stripped at edges; paragraph_index is zero-based over all p elements.",
+  "cases": [
+    {
+      "id": "rattled",
+      "target_original": "Mr Dursley stood rooted to the spot. He had been hugged by a complete stranger. He also thought he had been called a Muggle, whatever that was. He was rattled. He hurried to his car and set off home, hoping he was imagining things, which he had never hoped before, because he didn’t approve of imagination.",
+      "context": [
+        {
+          "position": "before",
+          "original": "And the old man hugged Mr Dursley around the middle and walked off.",
+          "locator": {
+            "member": "OEBPS/hp01_ch001_en-gb.html",
+            "paragraph_index": 19
+          },
+          "sha256": "d3e7310236f9ffc75ad6fa2bfe913a681a8d3beff31de541ce69f2265dbfc550"
+        },
+        {
+          "position": "after",
+          "original": "As he pulled into the driveway of number four, the first thing he saw – and it didn’t improve his mood – was the tabby cat he’d spotted that morning. It was now sitting on his garden wall. He was sure it was the same one; it had the same markings around its eyes.",
+          "locator": {
+            "member": "OEBPS/hp01_ch001_en-gb.html",
+            "paragraph_index": 21
+          },
+          "sha256": "3cd13e11d59ad8ea40e2db2bc70d024a5b5a7b3ecd9ae930348dc3928e9759be"
+        }
+      ],
+      "expected_facts": [
+        "Мистер Дёрсли потрясён неожиданной встречей; это эмоциональная растерянность, а не досада.",
+        "Сохраняются все действия и детали целевого абзаца."
+      ],
+      "expected_references": {
+        "He": "Mr Dursley",
+        "rattled": "shaken or unsettled by the encounter"
+      },
+      "forbidden_additions": [
+        "Раздражение или досада как замена потрясению.",
+        "Новые причины или последствия встречи."
+      ],
+      "source": {
+        "kind": "epub",
+        "file": "Harry_Potter_Philosophers_Stone_chapter_1_and_opening_chapter_2.epub",
+        "sha256": "8ef8bae13d96567f61badc0ed3a7f138694edbc14d0f228230a9b60b0bf6083d",
+        "target_sha256": "76d327be5c41314a4d352a1842ad0b8b24d6d90d3a222e0ae3dbe5684771035f",
+        "locator": {
+          "member": "OEBPS/hp01_ch001_en-gb.html",
+          "paragraph_index": 20
+        },
+        "verification": "full_target_and_adjacent_paragraphs",
+        "verified_on": "2026-11-02"
+      }
+    },
+    {
+      "id": "owls",
+      "target_original": "‘Well, Ted,’ said the weatherman, ‘I don’t know about that, but it’s not only the owls that have been acting oddly today. Viewers as far apart as Kent, Yorkshire and Dundee have been phoning in to tell me that instead of the rain I promised yesterday, they’ve had a downpour of shooting stars! Perhaps people have been celebrating Bonfire Night early – it’s not until next week, folks! But I can promise a wet night tonight.’",
+      "context": [
+        {
+          "position": "before",
+          "original": "‘And finally, bird-watchers everywhere have reported that the nation’s owls have been behaving very unusually today. Although owls normally hunt at night and are hardly ever seen in daylight, there have been hundreds of sightings of these birds flying in every direction since sunrise. Experts are unable to explain why the owls have suddenly changed their sleeping pattern.’ The news reader allowed himself a grin. ‘Most mysterious. And now, over to Jim McGuffin with the weather. Going to be any more showers of owls tonight, Jim?’",
+          "locator": {
+            "member": "OEBPS/hp01_ch001_en-gb.html",
+            "paragraph_index": 25
+          },
+          "sha256": "07d98197676c747e64c201d7ca00fd4edc06bc5394a36f5a727bccef1ec2f352"
+        },
+        {
+          "position": "after",
+          "original": "Mr Dursley sat frozen in his armchair. Shooting stars all over Britain? Owls flying by daylight? Mysterious people in cloaks all over the place? And a whisper, a whisper about the Potters …",
+          "locator": {
+            "member": "OEBPS/hp01_ch001_en-gb.html",
+            "paragraph_index": 27
+          },
+          "sha256": "1543119eb2fe3d8d605816c3981c25f2ad750918a5b4ef7de833a42da6b18e4f"
+        }
+      ],
+      "expected_facts": [
+        "В новостях обсуждается необычное поведение сов.",
+        "Совы остаются птицами; наблюдающие люди не подменяют субъект сообщения."
+      ],
+      "expected_references": {
+        "owls": "birds",
+        "acting oddly": "unusual owl behaviour"
+      },
+      "forbidden_additions": [
+        "Совиный народ или люди вместо сов.",
+        "Новые объяснения необычного поведения."
+      ],
+      "source": {
+        "kind": "epub",
+        "file": "Harry_Potter_Philosophers_Stone_chapter_1_and_opening_chapter_2.epub",
+        "sha256": "8ef8bae13d96567f61badc0ed3a7f138694edbc14d0f228230a9b60b0bf6083d",
+        "target_sha256": "c8d8d50c3fcd20fc2cb69caa86c489d0c4518ea73b597d80cf1de76aea5d5d4e",
+        "locator": {
+          "member": "OEBPS/hp01_ch001_en-gb.html",
+          "paragraph_index": 26
+        },
+        "verification": "full_target_and_adjacent_paragraphs",
+        "verified_on": "2026-11-02"
+      }
+    },
+    {
+      "id": "long_robes",
+      "target_original": "Nothing like this man had ever been seen in Privet Drive. He was tall, thin and very old, judging by the silver of his hair and beard, which were both long enough to tuck into his belt. He was wearing long robes, a purple cloak which swept the ground and high-heeled, buckled boots. His blue eyes were light, bright and sparkling behind half-moon spectacles and his nose was very long and crooked, as though it had been broken at least twice. This man’s name was Albus Dumbledore.",
+      "context": [
+        {
+          "position": "before",
+          "original": "A man appeared on the corner the cat had been watching, appeared so suddenly and silently you’d have thought he’d just popped out of the ground. The cat’s tail twitched and its eyes narrowed.",
+          "locator": {
+            "member": "OEBPS/hp01_ch001_en-gb.html",
+            "paragraph_index": 44
+          },
+          "sha256": "95a9adca7de6250fa71c5b8d3514f4ea1508bf67054f4c82e1006396eac1d8be"
+        },
+        {
+          "position": "after",
+          "original": "Albus Dumbledore didn’t seem to realise that he had just arrived in a street where everything from his name to his boots was unwelcome. He was busy rummaging in his cloak, looking for something. But he did seem to realise he was being watched, because he looked up suddenly at the cat, which was still staring at him from the other end of the street. For some reason, the sight of the cat seemed to amuse him. He chuckled and muttered, ‘I should have known.’",
+          "locator": {
+            "member": "OEBPS/hp01_ch001_en-gb.html",
+            "paragraph_index": 46
+          },
+          "sha256": "6c63bbe5172e2b23bdb5a0bd5b3671a6bf2b1d49ced5be2836de687b06306182"
+        }
+      ],
+      "expected_facts": [
+        "Длинная мантия и отдельный пурпурный плащ сохраняются как два предмета одежды.",
+        "Сохраняются цвет, длина и остальные детали внешности целевого абзаца."
+      ],
+      "expected_references": {
+        "long robes": "long robes",
+        "purple cloak": "a separate purple cloak"
+      },
+      "forbidden_additions": [
+        "Объединение мантии и плаща в один предмет.",
+        "Пропуск одного из предметов одежды."
+      ],
+      "source": {
+        "kind": "epub",
+        "file": "Harry_Potter_Philosophers_Stone_chapter_1_and_opening_chapter_2.epub",
+        "sha256": "8ef8bae13d96567f61badc0ed3a7f138694edbc14d0f228230a9b60b0bf6083d",
+        "target_sha256": "a9ba72c2b6dedd8fce3a6dd8f4f828f93fed5f4767b8ffa9515ea65c16ec4375",
+        "locator": {
+          "member": "OEBPS/hp01_ch001_en-gb.html",
+          "paragraph_index": 45
+        },
+        "verification": "full_target_and_adjacent_paragraphs",
+        "verified_on": "2026-11-02"
+      }
+    },
+    {
+      "id": "earmuffs",
+      "target_original": "‘It’s lucky it’s dark. I haven’t blushed so much since Madam Pomfrey told me she liked my new earmuffs.’",
+      "context": [
+        {
+          "position": "before",
+          "original": "‘Only because you’re too – well – noble to use them.’",
+          "locator": {
+            "member": "OEBPS/hp01_ch001_en-gb.html",
+            "paragraph_index": 66
+          },
+          "sha256": "cb85fba3e036724f83eb70779457a7ef23a7567d3e2f1c98829170f22353e0c3"
+        },
+        {
+          "position": "after",
+          "original": "Professor McGonagall shot a sharp look at Dumbledore and said, ‘The owls are nothing to the rumours that are flying around. You know what everyone’s saying? About why he’s disappeared? About what finally stopped him?’",
+          "locator": {
+            "member": "OEBPS/hp01_ch001_en-gb.html",
+            "paragraph_index": 68
+          },
+          "sha256": "0ccc853bea86bafb6c10024ffbd1967379a225d5f57bd151b2c499e9a2680180"
+        }
+      ],
+      "expected_facts": [
+        "Речь о новых утеплителях для ушей.",
+        "Признак новизны и участники реплики сохраняются."
+      ],
+      "expected_references": {
+        "earmuffs": "ear coverings for warmth"
+      },
+      "forbidden_additions": [
+        "Аудионаушники, музыка или прослушивание звука.",
+        "Новые предметы или действия, которых нет в реплике."
+      ],
+      "source": {
+        "kind": "epub",
+        "file": "Harry_Potter_Philosophers_Stone_chapter_1_and_opening_chapter_2.epub",
+        "sha256": "8ef8bae13d96567f61badc0ed3a7f138694edbc14d0f228230a9b60b0bf6083d",
+        "target_sha256": "5a9c6ff2d908dbf71901440ddea8389d6eb303160bd93b3116fbc05ed3a55c97",
+        "locator": {
+          "member": "OEBPS/hp01_ch001_en-gb.html",
+          "paragraph_index": 67
+        },
+        "verification": "full_target_and_adjacent_paragraphs",
+        "verified_on": "2026-11-02"
+      }
+    },
+    {
+      "id": "it",
+      "target_original": "She lifted the lamp. It was not heavier than the box.",
+      "context": [
+        {
+          "position": "before",
+          "original": "Mara said, \"I am ready.\"",
+          "locator": {
+            "json_pointer": "/scene/blocks/0"
+          },
+          "sha256": "b645ffb14c1cb9c01e983cc8adc39539b47054c7db2604ba7c658e7fce9cf66a"
+        },
+        {
+          "position": "after",
+          "original": "He meant well, but he did not open the door.",
+          "locator": {
+            "json_pointer": "/scene/blocks/2"
+          },
+          "sha256": "cbc4589571571b41db4369254be8b584ab0e5104424d03269123bcab68726ee0"
+        }
+      ],
+      "expected_facts": [
+        "Местоимение указывает на лампу.",
+        "Отрицательное сравнение массы с коробкой сохраняется."
+      ],
+      "expected_references": {
+        "It": "lamp"
+      },
+      "forbidden_additions": [
+        "Местоимение отнесено к коробке.",
+        "Сравнение превращено в утверждение, что лампа тяжелее."
+      ],
+      "source": {
+        "kind": "synthetic_fixture",
+        "file": "tests/fixtures/learner_quality/stories.json",
+        "sha256": "0b5ecdd1366567079f1c3cbe661c0c696954ac60e890ee76e7658413e61c9a2c",
+        "target_sha256": "cf758b6ca049bee06e075ad2fc6366907090fd7ade6302b5b399c6679a709916",
+        "locator": {
+          "json_pointer": "/scene/blocks/1"
+        }
+      }
+    },
+    {
+      "id": "idiom",
+      "target_original": "He meant well, but he did not open the door.",
+      "context": [
+        {
+          "position": "before",
+          "original": "She lifted the lamp. It was not heavier than the box.",
+          "locator": {
+            "json_pointer": "/scene/blocks/1"
+          },
+          "sha256": "cf758b6ca049bee06e075ad2fc6366907090fd7ade6302b5b399c6679a709916"
+        },
+        {
+          "position": "after",
+          "original": "\"Shoo!\" she snapped. The light went out.",
+          "locator": {
+            "json_pointer": "/scene/blocks/3"
+          },
+          "sha256": "3026378f2f3852a69c05a099dd7dbba34d22b1ce80ef379cc46f139588802f40"
+        }
+      ],
+      "expected_facts": [
+        "Устойчивое выражение передаёт добрые намерения.",
+        "Дверь осталась неоткрытой этим человеком."
+      ],
+      "expected_references": {
+        "meant well": "had good intentions"
+      },
+      "forbidden_additions": [
+        "Буквальное значение выражения вместо добрых намерений.",
+        "Человек открыл дверь."
+      ],
+      "source": {
+        "kind": "synthetic_fixture",
+        "file": "tests/fixtures/learner_quality/stories.json",
+        "sha256": "0b5ecdd1366567079f1c3cbe661c0c696954ac60e890ee76e7658413e61c9a2c",
+        "target_sha256": "cbc4589571571b41db4369254be8b584ab0e5104424d03269123bcab68726ee0",
+        "locator": {
+          "json_pointer": "/scene/blocks/2"
+        }
+      }
+    },
+    {
+      "id": "negation",
+      "target_original": "He meant well, but he did not open the door.",
+      "context": [
+        {
+          "position": "before",
+          "original": "She lifted the lamp. It was not heavier than the box.",
+          "locator": {
+            "json_pointer": "/scene/blocks/1"
+          },
+          "sha256": "cf758b6ca049bee06e075ad2fc6366907090fd7ade6302b5b399c6679a709916"
+        },
+        {
+          "position": "after",
+          "original": "\"Shoo!\" she snapped. The light went out.",
+          "locator": {
+            "json_pointer": "/scene/blocks/3"
+          },
+          "sha256": "3026378f2f3852a69c05a099dd7dbba34d22b1ce80ef379cc46f139588802f40"
+        }
+      ],
+      "expected_facts": [
+        "Отрицание относится к действию открытия двери.",
+        "Добрые намерения не отменяют отсутствия действия."
+      ],
+      "expected_references": {
+        "negated_action": "open the door"
+      },
+      "forbidden_additions": [
+        "Открытая этим человеком дверь.",
+        "Добавленные причины отказа или невозможности открыть дверь."
+      ],
+      "source": {
+        "kind": "synthetic_fixture",
+        "file": "tests/fixtures/learner_quality/stories.json",
+        "sha256": "0b5ecdd1366567079f1c3cbe661c0c696954ac60e890ee76e7658413e61c9a2c",
+        "target_sha256": "cbc4589571571b41db4369254be8b584ab0e5104424d03269123bcab68726ee0",
+        "locator": {
+          "json_pointer": "/scene/blocks/2"
+        }
+      }
+    }
+  ]
+}

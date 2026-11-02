@@ -103,6 +103,10 @@ class RecoveryRoot(WorkSerialization):
     status: str = 'pending'
     reason: str | None = None
     schema_version: int = 1
+    policy_version: str | None = None
+    operation_kind: str = 'translation'
+    superseded_by: str | None = None
+    compatibility: Mapping | None = None
 
     def __post_init__(self):
         for value in (self.id, self.conditions_id):
@@ -112,6 +116,15 @@ class RecoveryRoot(WorkSerialization):
             nonnegative(value)
         version(self.manifest.get('schema_version'))
         object.__setattr__(self, 'manifest', freeze(self.manifest))
+        if self.policy_version is not None and (not isinstance(self.policy_version, str) or not self.policy_version.strip()):
+            raise WorkStateError('некорректная версия политики перевода')
+        if self.operation_kind not in {'translation', 'regeneration'}:
+            raise WorkStateError('неизвестный вид операции перевода')
+        if self.superseded_by is not None:
+            identifier(self.superseded_by)
+        if self.compatibility is not None:
+            version(self.compatibility.get('schema_version'))
+            object.__setattr__(self, 'compatibility', freeze(self.compatibility))
         if self.status not in {'pending', 'running', 'complete', 'stopped'}:
             raise WorkStateError('неизвестное состояние восстановления')
 

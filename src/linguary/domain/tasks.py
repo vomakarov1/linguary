@@ -1,7 +1,7 @@
 """Local resumable book processing tasks.
 
-A task is identified by the idempotent key `book_id + task_type + scope_id`, stores
-an attempt counter, and tracks typed errors. A successfully completed task is not
+A task is identified by its book, type, scope, operation, and policy. It stores
+an attempt counter and tracks typed errors. A successfully completed task is not
 re-executed after application restart (PRD § 16-18, ADR § 3).
 """
 
@@ -31,6 +31,7 @@ class TaskStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    SUPERSEDED = "superseded"
 
 
 class ErrorType(StrEnum):
@@ -87,6 +88,8 @@ class TaskIdentity:
     book_id: str
     task_type: TaskType
     scope_id: str = ""
+    operation_id: str = ""
+    policy_version: str = ""
 
     def __post_init__(self) -> None:
         if not self.book_id.strip():
@@ -108,6 +111,8 @@ class ProcessingTask:
     status: TaskStatus = TaskStatus.PENDING
     attempts: int = 0
     last_error: TaskError | None = None
+    operation_id: str = ""
+    policy_version: str = ""
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -127,7 +132,8 @@ class ProcessingTask:
     def identity(self) -> TaskIdentity:
         """Idempotent task key."""
         return TaskIdentity(
-            book_id=self.book_id, task_type=self.task_type, scope_id=self.scope_id
+            book_id=self.book_id, task_type=self.task_type, scope_id=self.scope_id,
+            operation_id=self.operation_id, policy_version=self.policy_version,
         )
 
     @property

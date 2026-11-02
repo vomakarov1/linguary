@@ -120,6 +120,7 @@ class CallContext:
     run_id: str | None = None
     task_id: str | None = None
     root_id: str | None = None
+    policy_version: str | None = None
 
     def __post_init__(self):
         from linguary.domain.book_conditions import identifier, nonnegative
@@ -128,6 +129,11 @@ class CallContext:
         nonnegative(self.generation)
         if self.root_id is not None:
             identifier(self.root_id)
+        if self.policy_version is not None:
+            if not isinstance(self.policy_version, str) or not self.policy_version.strip():
+                raise ValueError('некорректная версия политики перевода')
+            if self.stage in {'translation_unit', 'block_regeneration'} and self.root_id is None:
+                raise ValueError('перевод с закреплённой политикой требует корень операции')
         if not self.stage or not self.scope_id or not self.assigned_model:
             raise ValueError('неполный контекст вызова')
         if len(self.prompt_hash) != 64 or any(c not in '0123456789abcdef' for c in self.prompt_hash):
