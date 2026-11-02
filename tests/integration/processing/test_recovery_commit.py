@@ -233,3 +233,119 @@ async def test_excess_notes_do_not_bypass_grounding_dedup_or_coverage(tmp_path, 
                 assert all(r.content_evidence.semantic_correctness == 'not_evaluated' for r in results)
     finally:
         await app.aclose()
+
+
+@pytest.mark.parametrize('failure', [None, 'binding', 'acceptance'])
+async def test_result_and_policy_provenance_commit_atomically(tmp_path, monkeypatch, failure):
+    from linguary.adapters.db.work_state import SqlAlchemyWorkRepository
+    from test_translation_context_capacity import capacity_call
+    from processing_scenario import translated_reply
+    fake = FakeLLMClient([translated_reply(('b1',))])
+    app = make_app(tmp_path)
+    try:
+        work = capacity_call(app, fake)
+        result = await work.call.request(work.context, **work.request_args)
+        artifact_ids = []
+        archive = SqlAlchemyWorkRepository.archive_artifacts
+        def track_artifacts(*args, **kwargs):
+            ids = archive(*args, **kwargs)
+            artifact_ids.extend(ids)
+            return ids
+        monkeypatch.setattr(SqlAlchemyWorkRepository, 'archive_artifacts', track_artifacts)
+        if failure is not None:
+            method = 'replace_result_binding' if failure == 'binding' else 'mark_recovery_accepted'
+            original = getattr(SqlAlchemyWorkRepository, method)
+            def fail(*args, **kwargs):
+                original(*args, **kwargs)
+                raise RuntimeError('injected save failure')
+            monkeypatch.setattr(SqlAlchemyWorkRepository, method, fail)
+            with pytest.raises(RuntimeError, match='injected save failure'):
+                work.call.save(book_id='book-1', run_id=work.run.id, results=result.results)
+        else:
+            assert work.call.save(book_id='book-1', run_id=work.run.id, results=result.results)
+        with app.unit_of_work.transaction() as tx:
+            scope = tx.work.get_scope(work.scope.id)
+            binding = tx.work.get_binding('result', f'{work.run.id}:{work.unit.block_ids[0]}')
+            if failure:
+                assert tx.results.list_for_run(work.run.id) == ()
+                assert binding is None
+                assert artifact_ids and all(tx.work.get_artifact(id) is None for id in artifact_ids)
+                assert scope.status == 'claimed' and scope.accepted_attempt_id is None
+                assert tx.work.get_attempt(fake.requests[0].call_context.attempt_id).state == 'validated'
+            else:
+                context = fake.requests[0].call_context
+                provenance = dict(schema_version=1, root_id=work.root.id,
+                    policy_version=work.root.policy_version, prompt_hash=context.prompt_hash, attempt_id=context.attempt_id)
+                assert binding['payload_json'] == provenance
+                artifact = tx.work.get_artifact(binding['artifact_revision_id'])
+                assert artifact['body']['provenance'] == provenance
+                assert scope.status == 'accepted' and scope.accepted_attempt_id == context.attempt_id
+                assert tx.work.get_attempt(context.attempt_id).state == 'accepted'
+                assert tx.work.root_coverage_complete(work.root.id)
+    finally:
+        await app.aclose()
+
+
+@pytest.mark.parametrize('superseded', [False, True])
+async def test_completion_checks_only_active_roots_and_ignores_superseded_tasks(tmp_path, superseded):
+    from uuid import uuid4
+    from linguary.application.block_processing import complete_processing
+    from linguary.application.recovery import RecoveryError
+    from linguary.domain import BookStatus, ProcessingTask, TaskType
+    from test_translation_context_capacity import capacity_call
+    from processing_scenario import translated_reply
+    app = make_app(tmp_path)
+    try:
+        work = capacity_call(app, FakeLLMClient([translated_reply(('b1',))]), neighbours=False)
+        result = await work.call.request(work.context, **work.request_args)
+        assert work.call.save(book_id='book-1', run_id=work.run.id, results=result.results)
+        unfinished = replace(work.root, id=str(uuid4()), root_key=str(uuid4()),
+            superseded_by=work.root.id if superseded else None)
+        with app.unit_of_work.transaction() as tx:
+            tx.work.add_root(unfinished)
+            tx.work.add_scope(replace(work.scope, id=str(uuid4()), root_id=unfinished.id))
+            tx.tasks.add(ProcessingTask(str(uuid4()), 'book-1', TaskType.PROCESS_TRANSLATION_UNIT,
+                work.context.section_id, status=TaskStatus.SUPERSEDED, operation_id='dispatch:' + str(uuid4())))
+        if superseded:
+            complete_processing(app.unit_of_work, book_id='book-1', finished_task_id=None,
+                task_types=(TaskType.PROCESS_TRANSLATION_UNIT,))
+        else:
+            with pytest.raises(RecoveryError, match='unsafe_partition'):
+                complete_processing(app.unit_of_work, book_id='book-1', finished_task_id=None,
+                    task_types=(TaskType.PROCESS_TRANSLATION_UNIT,))
+        with app.unit_of_work.transaction() as tx:
+            assert tx.books.get('book-1').status == (
+                BookStatus.READY_TO_EXPORT if superseded else BookStatus.PROCESSING)
+    finally:
+        await app.aclose()
+
+
+async def test_late_response_after_restart_is_only_audited(tmp_path):
+    from uuid import uuid4
+    from linguary.domain import ProcessingTask, TaskType
+    from linguary.domain.recovery import RecoveryScope
+    from test_translation_context_capacity import capacity_call
+    from processing_scenario import translated_reply
+    fake = FakeLLMClient([translated_reply(('b1',))])
+    app = make_app(tmp_path)
+    try:
+        work = capacity_call(app, fake)
+        result = await work.call.request(work.context, **work.request_args)
+        with app.unit_of_work.transaction() as tx:
+            current = tx.work.get_root(work.root.id)
+            successor = replace(work.root, id=str(uuid4()), root_key=str(uuid4()))
+            task = ProcessingTask(str(uuid4()), 'book-1', TaskType.PROCESS_TRANSLATION_UNIT,
+                work.context.section_id, operation_id='dispatch:' + str(uuid4()))
+            tx.work.restart_root(current.id, expected_generation=current.generation,
+                successor=successor, scopes=(RecoveryScope(str(uuid4()), successor.id, work.unit.block_ids),), task=task)
+        assert not work.call.save(book_id='book-1', run_id=work.run.id, results=result.results)
+        with app.unit_of_work.transaction() as tx:
+            assert tx.results.list_for_run(work.run.id) == ()
+            assert tx.work.get_binding('result', f'{work.run.id}:{work.unit.block_ids[0]}') is None
+            assert tx.work.get_root(current.id).superseded_by == successor.id
+            attempt = tx.work.get_attempt(fake.requests[0].call_context.attempt_id)
+            assert attempt.state != 'accepted'
+            entry, = tx.llm_calls.list_for_book('book-1')
+            assert entry.diagnostic_meta['decision'] == 'stale'
+    finally:
+        await app.aclose()

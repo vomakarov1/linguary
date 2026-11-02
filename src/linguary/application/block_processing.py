@@ -21,7 +21,7 @@ from linguary.application.context_builder import TranslationContext
 from linguary.application.errors import ApplicationError
 from linguary.application.explained_expressions import ExplainedExpressions
 from linguary.application.llm_rejections import record_rejection, finalize_response
-from linguary.application.ports.llm import LLMClient
+from linguary.application.ports.llm import LLMClient, LLMContextCapacityError
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.validators.pronunciation import (
@@ -30,6 +30,7 @@ from linguary.application.validators.pronunciation import (
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy, violation_of
 from linguary.application.recovery import RecoveryError, RecoverySplit
 from linguary.application.book_conditions import ConditionsError
+from linguary.application.translation_policy import require_policy, TranslationPolicyUnavailable
 from linguary.application.reader_text import ReaderTextPolicy, record_reader_warnings, source_quote_fragments
 from linguary.application.validators import TranslationResultValidator
 from linguary.application.validators.content_plan import resolve_response_evidence, validate_content_coverage
@@ -116,7 +117,27 @@ class TranslationCall:
         Hints and notes duplicating chapter `Before You Read` are filtered out of the validated
         result (PRD § 19.3): duplication is not grounds for rejecting the response.
         """
+        self._validated_response.set(None)
         request = context.request
+        explicit_context = request.call_context
+        if recovery is None and explicit_context is not None and explicit_context.policy_version:
+            raise RecoveryError('conditions_unavailable', explicit_context.root_id)
+        policy = None
+        if recovery is not None:
+            with self._unit_of_work.transaction() as transaction:
+                root = transaction.work.get_root(recovery[0])
+                if root is None:
+                    raise RecoveryError('conditions_unavailable', recovery[0])
+                try:
+                    policy = require_policy(root.policy_version)
+                except TranslationPolicyUnavailable:
+                    raise RecoveryError('conditions_unavailable', recovery[0]) from None
+                if explicit_context is not None and (
+                    explicit_context.root_id != root.id
+                    or explicit_context.policy_version != policy.version
+                    or explicit_context.scope_id != recovery[1]
+                ):
+                    raise RecoveryError('conditions_unavailable', root.id)
         if self._unit_of_work is not None and unit is not None:
             with self._unit_of_work.transaction() as transaction:
                 run = transaction.runs.active_for_book(context.request.book_id) if context.request.book_id else None
@@ -129,6 +150,7 @@ class TranslationCall:
             context.explained_expressions, explanations=context.explained_entries
         )
         attempts = 0
+        capacity_retries = 0
         while True:
             attempts += 1
             response = None
@@ -140,11 +162,16 @@ class TranslationCall:
                     try:
                         with self._unit_of_work.transaction() as transaction:
                             root = transaction.work.get_root(recovery[0])
+                            if root is None or root.policy_version != policy.version:
+                                raise RecoveryError('conditions_unavailable', recovery[0])
                             conditions = transaction.work.get_conditions(root.conditions_id)
+                            if conditions is None:
+                                raise RecoveryError('conditions_unavailable', recovery[0])
                             physical_context = transaction.work.begin_recovery_attempt(*recovery,
                                 task_id=request.task_id, run_id=request.run_id, stage=request.stage.value,
                                 assigned_model=conditions.payload['models']['processing'],
-                                prompt_hash=sha256(request.instructions.encode()).hexdigest())
+                                prompt_hash=sha256(request.instructions.encode()).hexdigest(),
+                                policy_version=policy.version)
                     except RecoveryError:
                         raise
                     except Exception:
@@ -160,6 +187,8 @@ class TranslationCall:
                     if not owns:
                         finalize_response(self._unit_of_work, response, 'stale')
                         raise RecoveryError('interrupted', recovery[0])
+                if physical_context is not None and response.call_context != physical_context:
+                    raise ConditionsError('conditions_unavailable')
                 mapped = context.to_block_ids(response.payload)
                 results = self._validator.validate(
                     mapped,
@@ -226,8 +255,28 @@ class TranslationCall:
                     with self._unit_of_work.transaction() as transaction:
                         split = transaction.work.record_recovery_failure(physical_context.attempt_id,
                             violation_of(error, context=physical_context))
-                    if split:
+                    if split and not isinstance(error, LLMContextCapacityError):
                         raise RecoverySplit(*recovery) from None
+                if isinstance(error, LLMContextCapacityError):
+                    can_retry = (policy is not None and context.has_optional_neighbours
+                        and capacity_retries < policy.capacity_retries_without_neighbours
+                        and attempts < self._retry_policy.max_attempts)
+                    if recovery is not None:
+                        with self._unit_of_work.transaction() as transaction:
+                            root = transaction.work.get_root(recovery[0])
+                            count = transaction.work.scope_attempt_count(recovery[1])
+                            can_retry = (can_retry and root.calls_used < root.manifest['policy']['max_calls'] + root.extra_calls
+                                and count < root.manifest['policy']['max_scope_calls'])
+                            if not can_retry:
+                                transaction.work.stop_root(root.id, 'context_capacity')
+                    if not can_retry:
+                        if recovery is not None:
+                            raise RecoveryError('context_capacity', recovery[0], original_error=error) from error
+                        raise
+                    capacity_retries += 1
+                    context = context.without_optional_neighbours()
+                    request = replace(request, input_text=context.request.input_text, attempt=request.attempt + 1)
+                    continue
                 decision = self._retry_policy.decide(
                     _worded_for_the_model(error, context), attempts=attempts
                 )
@@ -327,19 +376,24 @@ class TranslationCall:
                     scope = transaction.work.get_scope(context.scope_id)
                     if tuple(result.block_id for result in results) != scope.ordered_blocks:
                         raise RecoveryError('unsafe_partition', context.root_id)
-                    transaction.work.mark_recovery_accepted(context.attempt_id)
-                finalize_response(self._unit_of_work, response, 'accepted', transaction=transaction)
                 if context is not None:
+                    provenance = None if context.root_id is None else {
+                        'schema_version': 1, 'root_id': context.root_id, 'policy_version': context.policy_version,
+                        'prompt_hash': context.prompt_hash, 'attempt_id': context.attempt_id}
                     for result in results:
                         artifact_id, = transaction.work.archive_artifacts([dict(book_id=book_id,
                             conditions_id=context.conditions_id, attempt_id=context.attempt_id, run_id=run_id,
                             kind='block_result', scope_id=result.block_id,
-                            body={'schema_version': 1, 'result': asdict(result)})])
+                            body={'schema_version': 1, 'result': asdict(result),
+                                  **({'provenance': provenance} if provenance is not None else {})})])
                         previous_binding = self._expected_bindings.get().get(result.block_id)
                         transaction.work.replace_result_binding(f'{run_id}:{result.block_id}', book_id=book_id,
                             conditions_id=context.conditions_id, attempt_id=context.attempt_id,
-                            artifact_revision_id=artifact_id,
+                            artifact_revision_id=artifact_id, provenance=provenance,
                             expected_attempt_id=None if previous_binding is None else previous_binding['attempt_id'])
+                if context is not None and context.root_id is not None:
+                    transaction.work.mark_recovery_accepted(context.attempt_id)
+                finalize_response(self._unit_of_work, response, 'accepted', transaction=transaction)
                 if text_changed:
                     transaction.work.stale_reviews(book_id)
                 if context is not None and context.root_id is not None:
@@ -413,12 +467,12 @@ def complete_processing(
             for task in transaction.tasks.list_for_book(book_id)
             if task.task_type in task_types
             and task.id != finished_task_id
-            and task.status is not TaskStatus.SUCCEEDED
+            and task.status not in {TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED}
         )
         if unfinished:
             return
         run = transaction.runs.active_for_book(book_id)
-        roots = transaction.work.list_roots(book_id, run_id=run.id) if run is not None else ()
+        roots = transaction.work.list_active_roots(book_id, run_id=run.id) if run is not None else ()
         if any(not transaction.work.root_coverage_complete(root.id) for root in roots):
             raise RecoveryError('unsafe_partition')
         document = transaction.documents.get(book_id)
