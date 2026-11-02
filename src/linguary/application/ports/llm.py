@@ -70,6 +70,23 @@ class LLMProviderError(LLMError):
     """Provider rejected the request and will return the same rejection on retry."""
 
 
+class LLMContextCapacityError(LLMProviderError):
+    """Provider explicitly reported that the request exceeds its context capacity."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        call_context: CallContext | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.call_context = call_context
+
+
 class LLMResponseFormatError(LLMError):
     """Model response cannot be parsed against structured response schema.
 
@@ -242,6 +259,7 @@ class LLMClient(Protocol):
 __all__ = [
     "LLMClient",
     "LLMConfigurationError",
+    "LLMContextCapacityError",
     "LLMError",
     "LLMPayload",
     "LLMProviderError",

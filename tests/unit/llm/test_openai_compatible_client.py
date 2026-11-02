@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -22,12 +24,14 @@ from linguary.adapters.llm import OpenAICompatibleLLMClient, openai_compatible
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import (
     LLMConfigurationError,
+    LLMContextCapacityError,
     LLMProviderError,
     LLMRequest,
     LLMResponseFormatError,
     LLMTransportError,
 )
 from linguary.domain import TokenUsage
+from linguary.domain.llm_log import CallContext
 
 
 async def test_pronunciation_candidate_clients_use_same_contract():
@@ -377,6 +381,95 @@ async def test_provider_status_is_mapped_to_port_error(
         await client.generate(
             LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
         )
+
+
+async def test_context_length_code_maps_to_capacity_error() -> None:
+    client = client_over(responding({"error": {"code": "context_length_exceeded", "message": "Too long"}}, status_code=400))
+    context = CallContext(str(uuid4()), "translation_unit", "scope", ("target",),
+                          str(uuid4()), 0, "test-model", "a" * 64, root_id=str(uuid4()),
+                          policy_version="translation-context-v2")
+    request = replace(LLMRequest.for_translation(instructions="Переводи", input_text="b1: text"), call_context=context)
+    try:
+        with pytest.raises(LLMContextCapacityError) as caught:
+            await client.generate(request)
+        assert isinstance(caught.value, LLMProviderError)
+        assert caught.value.provider == settings().provider
+        assert caught.value.model == "test-model"
+        assert caught.value.call_context == context
+        assert caught.value.__cause__ is None
+    finally:
+        await client._http.aclose()
+
+
+@pytest.mark.parametrize("document", [
+    {"error": {"message": "context_length_exceeded: maximum context length exceeded"}},
+    {"error": {"code": "invalid_request", "message": "context_length_exceeded"}},
+    {"error": {"type": "context_length_exceeded"}},
+    {"code": "context_length_exceeded"},
+    {"error": "context_length_exceeded"},
+    ["context_length_exceeded"],
+])
+async def test_unrelated_bad_request_is_not_capacity_error(document) -> None:
+    client = client_over(responding(document, status_code=400))
+    try:
+        with pytest.raises(LLMProviderError) as caught:
+            await client.generate(LLMRequest.for_translation(instructions="Переводи", input_text="b1: text"))
+        assert not isinstance(caught.value, LLMContextCapacityError)
+    finally:
+        await client._http.aclose()
+
+
+async def test_non_json_bad_request_is_not_capacity_error() -> None:
+    client = client_over(lambda request: httpx.Response(400, text="context_length_exceeded"))
+    try:
+        with pytest.raises(LLMProviderError) as caught:
+            await client.generate(LLMRequest.for_translation(instructions="Переводи", input_text="b1: text"))
+        assert not isinstance(caught.value, LLMContextCapacityError)
+    finally:
+        await client._http.aclose()
+
+
+async def test_capacity_error_redacts_credentials() -> None:
+    proxy = "http://alice:p%40ss@localhost:8123"
+    client = client_over(responding({"error": {
+        "code": "context_length_exceeded",
+        "message": f"{API_KEY} {proxy} alice:p@ss p%40ss Basic YWxpY2U6cEBzcw==",
+    }}, status_code=400), proxy_mode="custom", proxy_url=proxy)
+    try:
+        with pytest.raises(LLMContextCapacityError) as caught:
+            await client.generate(LLMRequest.for_translation(instructions="Переводи", input_text="b1: text"))
+        for secret in (API_KEY, proxy, "alice", "p@ss", "p%40ss", "YWxpY2U6cEBzcw=="):
+            assert secret not in str(caught.value)
+        assert caught.value.__cause__ is None
+    finally:
+        await client._http.aclose()
+
+
+async def test_translation_request_keeps_selected_model_and_response_schema() -> None:
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(400, json={"error": {"code": "context_length_exceeded"}})
+
+    client = client_over(handler, model="selected-model")
+    request = LLMRequest.for_translation(instructions="Saved rules plus accuracy rules", input_text="[b1]\nSource")
+    try:
+        with pytest.raises(LLMProviderError):
+            await client.generate(request)
+        assert len(bodies) == 1
+        assert bodies[0]["model"] == "selected-model"
+        assert bodies[0]["messages"] == [
+            {"role": "system", "content": request.instructions},
+            {"role": "user", "content": request.input_text},
+        ]
+        response_format = bodies[0]["response_format"]
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["strict"] is True
+        assert response_format["json_schema"]["name"] == "translation_result"
+        assert "blocks" in response_format["json_schema"]["schema"]["required"]
+    finally:
+        await client._http.aclose()
 
 
 async def test_payment_required_names_the_balance() -> None:

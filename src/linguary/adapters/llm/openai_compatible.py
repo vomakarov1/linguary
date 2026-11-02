@@ -29,6 +29,7 @@ from linguary.adapters.llm.payloads import parse_payload, schema_for
 from linguary.application.ports.llm import (
     LLMClient,
     LLMConfigurationError,
+    LLMContextCapacityError,
     LLMPayload,
     LLMProviderError,
     LLMRequest,
@@ -91,7 +92,13 @@ class OpenAICompatibleLLMClient(LLMClient):
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
         """Executes request and returns parsed structured response."""
-        document = await self._post(_body(request, settings=self._settings))
+        try:
+            document = await self._post(_body(request, settings=self._settings))
+        except LLMContextCapacityError as error:
+            error.provider = self._settings.provider
+            error.model = self._safe(self._settings.model)
+            error.call_context = request.call_context
+            raise error from None
         usage = _usage(document)
         cost = _cost(document)
         model = safe_detail(
@@ -221,6 +228,8 @@ def _raise_for_status(
     if status < 400:
         return
     detail = f"{status}{_detail(response, api_key=api_key, secrets=secrets)}"
+    if status == 400 and _error_code(response) == "context_length_exceeded":
+        raise LLMContextCapacityError(f"запрос превысил вместимость контекста провайдера {provider}: {detail}")
     if status in _AUTHORIZATION_STATUSES:
         raise LLMConfigurationError(
             f"провайдер {provider} не принял ключ или доступ к модели: {detail}"
@@ -235,6 +244,17 @@ def _raise_for_status(
             retry_after_seconds=_retry_after(response),
         )
     raise LLMProviderError(f"провайдер {provider} отверг запрос: {detail}")
+
+
+def _error_code(response: httpx.Response) -> str | None:
+    """Only the structured provider code can prove a context capacity rejection."""
+    try:
+        document = response.json()
+    except ValueError:
+        return None
+    error = document.get("error") if isinstance(document, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
 
 
 def _retry_after(response: httpx.Response) -> float | None:
