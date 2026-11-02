@@ -92,6 +92,44 @@ def test_late_validated_response_cannot_commit(unit_of_work):
             tx.work.mark_recovery_accepted(ctx.attempt_id)
 
 
+@pytest.mark.parametrize('mismatched_source', [None, 'binding', 'artifact'])
+def test_replace_rooted_result_binding_checks_persisted_prompt_hash(unit_of_work, mismatched_source):
+    root, _, _, ctx = owner(unit_of_work)
+    provenance = {'schema_version': 1, 'root_id': root.id, 'policy_version': CURRENT,
+        'prompt_hash': 'a'*64, 'attempt_id': ctx.attempt_id}
+    binding_provenance = dict(provenance)
+    artifact_provenance = dict(provenance)
+    if mismatched_source == 'binding':
+        binding_provenance['prompt_hash'] = 'b'*64
+    elif mismatched_source == 'artifact':
+        artifact_provenance['prompt_hash'] = 'b'*64
+    artifact_id = uid()
+    with unit_of_work.transaction() as tx:
+        tx.work.transition_attempt(ctx.attempt_id, 'sent', expected_state='created')
+        tx.work.transition_attempt(ctx.attempt_id, 'validated', expected_state='sent')
+        tx.work.archive_artifacts([dict(id=artifact_id, book_id='book-1',
+            conditions_id=root.conditions_id, run_id='run-1', attempt_id=ctx.attempt_id,
+            kind='block_result', scope_id='block-1',
+            body={'schema_version': 1, 'provenance': artifact_provenance})])
+        args = dict(book_id='book-1', conditions_id=root.conditions_id,
+            attempt_id=ctx.attempt_id, artifact_revision_id=artifact_id,
+            expected_attempt_id=None, provenance=binding_provenance)
+        if mismatched_source is not None:
+            with pytest.raises(WorkStateError, match='происхождение новой версии не совпадает'):
+                tx.work.replace_result_binding('run-1:block-1', **args)
+        else:
+            tx.work.replace_result_binding('run-1:block-1', **args)
+    with unit_of_work.transaction() as tx:
+        binding = tx.work.get_binding('result', 'run-1:block-1')
+        if mismatched_source is not None:
+            assert binding is None
+        else:
+            assert binding['attempt_id'] == ctx.attempt_id
+            assert binding['artifact_revision_id'] == artifact_id
+            assert binding['payload_json'] == provenance
+            assert tx.work.get_artifact(artifact_id)['body']['provenance'] == provenance
+
+
 def test_policy_mismatch_cannot_claim_or_accept(unit_of_work):
     old, _, _, ctx = owner(unit_of_work)
     with unit_of_work.transaction() as tx:

@@ -460,7 +460,7 @@ class SqlAlchemyWorkRepository:
             root = self.get_root(attempt.root_id)
             if root is not None and root.policy_version is not None:
                 expected = {'schema_version': 1, 'root_id': root.id, 'policy_version': root.policy_version,
-                    'prompt_hash': attempt.context.get('prompt_hash'), 'attempt_id': attempt_id}
+                    'prompt_hash': attempt.context_json.get('prompt_hash'), 'attempt_id': attempt_id}
                 if (provenance != expected or not self.owns_recovery_attempt(attempt_id)
                         or artifact.body_json.get('provenance') != expected):
                     raise WorkStateError('происхождение новой версии не совпадает')
