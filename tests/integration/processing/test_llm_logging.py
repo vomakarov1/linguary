@@ -5,7 +5,9 @@ from test_book_conditions import choose_legacy_fixture
 
 import json
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -639,3 +641,95 @@ async def test_debug_false_never_persists_success_raw(tmp_path):
             assert transaction.llm_calls.response_text_for(response.call_id) is None
     finally:
         await built.aclose()
+
+
+@pytest.mark.parametrize('outcome', ['success', 'refusal', 'format', 'capacity'])
+async def test_each_translation_call_logs_root_policy_and_actual_prompt_hash(application, outcome):
+    from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
+    from linguary.application.ports.llm import LLMContextCapacityError, LLMProviderError
+    from test_translation_policy_runtime import pinned_request
+
+    _, request = pinned_request(application)
+    request = replace(request, instructions='Translate the exact source without additions.')
+    Diagnostics(application.unit_of_work, policy=DiagnosticsPolicy(bodies_enabled=False))
+    with application.unit_of_work.transaction() as transaction:
+        transaction.work.transition_attempt(request.call_context.attempt_id, 'sent', expected_state='created')
+    steps = {
+        'success': translated_reply(),
+        'refusal': LLMProviderError('request refused'),
+        'format': FakeReply(content='{'),
+        'capacity': LLMContextCapacityError('context capacity exceeded'),
+    }
+    inner = FakeLLMClient.replying([steps[outcome]])
+    logger = LoggingLLMClient(inner, application.unit_of_work, 'fake', 'model', debug_payloads=False)
+    if outcome == 'success':
+        response = await logger.generate(request)
+        assert response.call_context.prompt_hash == sha256(request.instructions.encode()).hexdigest()
+    else:
+        expected_error = {
+            'refusal': LLMProviderError, 'format': LLMResponseFormatError, 'capacity': LLMContextCapacityError,
+        }[outcome]
+        with pytest.raises(expected_error):
+            await logger.generate(request)
+    with application.unit_of_work.transaction() as transaction:
+        (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
+        assert transaction.llm_calls.response_text_for(entry.id) is None
+    sent = inner.requests[0]
+    context = entry.diagnostic_meta['context']
+    assert context['schema_version'] == 1
+    assert context['root_id'] == request.call_context.root_id
+    assert context['policy_version'] == request.call_context.policy_version
+    assert context['attempt_id'] == request.call_context.attempt_id
+    assert context['prompt_hash'] == sha256(sent.instructions.encode()).hexdigest()
+    assert sent.call_context.prompt_hash == context['prompt_hash']
+    assert request.instructions not in repr(entry)
+    assert request.input_text not in repr(entry)
+
+
+async def test_repair_attempt_hash_matches_sent_instructions(application):
+    from test_translation_policy_runtime import pinned_request
+
+    _, request = pinned_request(application)
+    inner = FakeLLMClient.replying([FakeReply(content='{'), translated_reply()])
+    logger = LoggingLLMClient(inner, application.unit_of_work, 'fake', 'model')
+    with application.unit_of_work.transaction() as transaction:
+        transaction.work.transition_attempt(request.call_context.attempt_id, 'sent', expected_state='created')
+    with pytest.raises(LLMResponseFormatError):
+        await logger.generate(request)
+    with application.unit_of_work.transaction() as transaction:
+        transaction.work.record_recovery_failure(request.call_context.attempt_id, None)
+        context = transaction.work.begin_recovery_attempt(request.call_context.root_id,
+            request.call_context.scope_id, task_id=request.task_id, run_id=request.run_id,
+            stage=request.stage.value, assigned_model=request.call_context.assigned_model,
+            prompt_hash=request.call_context.prompt_hash, policy_version=request.call_context.policy_version)
+        transaction.work.transition_attempt(context.attempt_id, 'sent', expected_state='created')
+    repaired = replace(request, instructions=request.instructions + '\nReturn valid JSON.', call_context=context, attempt=2)
+    await logger.generate(repaired)
+    with application.unit_of_work.transaction() as transaction:
+        logs = transaction.llm_calls.list_for_book(BOOK_ID)
+    assert len(logs) == len(inner.requests) == 2
+    assert len({entry.attempt_id for entry in logs}) == 2
+    hashes = [entry.diagnostic_meta['context']['prompt_hash'] for entry in logs]
+    assert hashes == [sha256(sent.instructions.encode()).hexdigest() for sent in inner.requests]
+    assert hashes[0] != hashes[1]
+    assert all(entry.diagnostic_meta['context']['policy_version'] == context.policy_version for entry in logs)
+
+
+async def test_failed_capacity_call_keeps_operation_provenance(application):
+    from linguary.application.ports.llm import LLMContextCapacityError
+    from test_translation_policy_runtime import pinned_request
+
+    _, request = pinned_request(application)
+    inner = FakeLLMClient.replying([LLMContextCapacityError('context capacity exceeded'), translated_reply()])
+    logger = LoggingLLMClient(inner, application.unit_of_work, 'fake', 'model')
+    with application.unit_of_work.transaction() as transaction:
+        transaction.work.transition_attempt(request.call_context.attempt_id, 'sent', expected_state='created')
+    with pytest.raises(LLMContextCapacityError):
+        await logger.generate(request)
+    with application.unit_of_work.transaction() as transaction:
+        (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
+    assert not entry.success
+    assert entry.diagnostic_meta['context']['root_id'] == request.call_context.root_id
+    assert entry.diagnostic_meta['context']['policy_version'] == request.call_context.policy_version
+    assert entry.diagnostic_meta['context']['prompt_hash'] == sha256(request.instructions.encode()).hexdigest()
+    assert inner.call_count == 1

@@ -59,6 +59,8 @@ class SqliteTaskStore:
             book_id=identity.book_id,
             task_type=identity.task_type,
             scope_id=identity.scope_id,
+            operation_id=identity.operation_id,
+            policy_version=identity.policy_version,
         )
         try:
             with self._session_factory.begin() as session:

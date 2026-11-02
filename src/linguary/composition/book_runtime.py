@@ -17,6 +17,8 @@ from linguary.domain.recovery import CallAttempt
 from linguary.domain.llm_log import CallContext
 from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.application.diagnostics import diagnostics_for
+from linguary.application.recovery import RecoveryError
+from linguary.application.translation_policy import require_policy, TranslationPolicyUnavailable
 
 
 def pronunciation_source_for(conditions, *, injected_source=None):
@@ -85,7 +87,8 @@ class BoundTaskQueue:
                 raise ConditionsError('conditions_revision_conflict')
             task = transaction.tasks.find_by_identity(identity)
             if task is None:
-                task = ProcessingTask(self.id_factory(), identity.book_id, identity.task_type, identity.scope_id)
+                task = ProcessingTask(self.id_factory(), identity.book_id, identity.task_type, identity.scope_id,
+                    operation_id=identity.operation_id, policy_version=identity.policy_version)
                 transaction.tasks.add(task)
             binding = transaction.work.get_binding('task', task.id)
             if binding is None:
@@ -119,6 +122,35 @@ class ProvenanceClient:
                 if transaction.work.get_attempt(self.attempts[-1]).state == 'validated':
                     transaction.work.transition_attempt(self.attempts[-1], 'rejected', expected_state='validated')
 
+    def _require_operation_context(self, transaction, request, context):
+        try:
+            require_policy(context.policy_version)
+        except TranslationPolicyUnavailable:
+            raise ConditionsError('conditions_unavailable') from None
+        attempt = transaction.work.get_attempt(context.attempt_id)
+        root = transaction.work.get_root(context.root_id)
+        scope = transaction.work.get_scope(context.scope_id)
+        expected = thaw(context.to_dict())
+        if (attempt is None or root is None or scope is None
+                or root.policy_version != context.policy_version
+                or root.book_id != request.book_id or attempt.book_id != root.book_id
+                or root.conditions_id != self.conditions_id or context.conditions_id != root.conditions_id
+                or attempt.conditions_id != root.conditions_id
+                or attempt.root_id != root.id or attempt.scope_id != scope.id or scope.root_id != root.id
+                or context.ordered_block_ids != scope.ordered_blocks
+                or request.scope_id != scope.id or request.ordered_block_ids != scope.ordered_blocks
+                or context.task_id != request.task_id or context.run_id != request.run_id
+                or context.stage != request.stage.value
+                or root.manifest.get('active_run_id') != request.run_id
+                or context.prompt_hash != sha256(request.instructions.encode()).hexdigest()
+                or any(thaw(attempt.context).get(key) != value for key, value in expected.items())):
+            raise ConditionsError('conditions_unavailable')
+        if (root.superseded_by is not None or root.status not in {'pending', 'running'}
+                or root.generation != attempt.context.get('root_generation')
+                or scope.generation != context.generation or scope.status != 'claimed'):
+            raise RecoveryError('interrupted', context.root_id)
+        return attempt
+
     async def generate(self, request):
         with self.service.uow.transaction() as transaction:
             conditions = self.service.require(request.book_id, transaction=transaction)
@@ -126,13 +158,8 @@ class ProvenanceClient:
                 raise ConditionsError('conditions_revision_conflict')
             if request.call_context is not None and request.call_context.root_id is not None:
                 context = request.call_context
-                attempt = transaction.work.get_attempt(context.attempt_id)
-                root = transaction.work.get_root(context.root_id)
-                scope = transaction.work.get_scope(context.scope_id)
-                if (attempt is None or root is None or scope is None or attempt.state != 'created'
-                        or root.generation != attempt.context['root_generation']
-                        or scope.generation != context.generation or scope.status != 'claimed'):
-                    from linguary.application.recovery import RecoveryError
+                attempt = self._require_operation_context(transaction, request, context)
+                if attempt.state != 'created':
                     raise RecoveryError('interrupted', context.root_id)
                 transaction.work.transition_attempt(attempt.id, 'sent', expected_state='created')
             else:
@@ -156,11 +183,11 @@ class ProvenanceClient:
             raise
         with self.service.uow.transaction() as transaction:
             current_attempt = transaction.work.get_attempt(attempt.id)
-            valid = current_attempt.state == 'sent'
+            valid = current_attempt is not None and current_attempt.state == 'sent'
             if context.root_id is not None:
-                current_root = transaction.work.get_root(context.root_id)
-                current_scope = transaction.work.get_scope(context.scope_id)
-                valid = valid and current_root.generation == current_attempt.context['root_generation'] and current_scope.generation == context.generation and current_scope.status == 'claimed'
+                self._require_operation_context(transaction, request, context)
+                if response.call_context != context:
+                    raise ConditionsError('conditions_unavailable')
             if valid:
                 transaction.work.transition_attempt(attempt.id, 'validated', expected_state='sent',
                     outcome={'schema_version': 1, 'provider': response.provider, 'model': response.model,

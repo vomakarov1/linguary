@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 from task_factories import BOOK_ID, make_identity
@@ -48,6 +49,27 @@ async def test_enqueue_distinguishes_tasks_by_type_and_scope(
         (TaskType.ANALYZE_CHAPTER, "section-2"),
         (TaskType.EXPORT_BOOK, ""),
     }
+
+
+async def test_enqueue_preserves_operation_and_policy_identity(
+    task_queue: SqliteTaskQueue,
+    unit_of_work: SqlAlchemyUnitOfWork,
+    stored_book: None,
+) -> None:
+    identity = replace(make_identity(task_type=TaskType.REGENERATE_BLOCK),
+        operation_id="operation-1", policy_version="translation-context-v2")
+    other_operation = replace(identity, operation_id="operation-2")
+    other_policy = replace(identity, policy_version="translation-context-legacy-v1")
+    tasks = [await task_queue.enqueue(key) for key in (identity, other_operation, other_policy)]
+
+    assert len({task.id for task in tasks}) == 3
+    for key, task in zip((identity, other_operation, other_policy), tasks, strict=True):
+        assert task.identity == key
+        assert await task_queue.enqueue(key) == task
+    with unit_of_work.transaction() as transaction:
+        assert {task.identity for task in transaction.tasks.list_for_book(BOOK_ID)} == {
+            identity, other_operation, other_policy,
+        }
 
 
 async def test_claim_takes_the_earliest_pending_task(

@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from hashlib import sha256
 from uuid import uuid4
 
 from linguary.application.diagnostics import bounded_body, diagnostics_for
@@ -54,6 +55,9 @@ class LoggingLLMClient(LLMClient):
         """Invokes the model and logs the call outcome if the request is associated with a book."""
         if self._observation_failed:
             raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены")
+        if request.call_context is not None:
+            request = replace(request, call_context=replace(request.call_context,
+                prompt_hash=sha256(request.instructions.encode()).hexdigest()))
         if request.book_id is None or request.stage is None:
             return await self.inner.generate(request)
         diagnostics_for(self.unit_of_work).ensure_available()
