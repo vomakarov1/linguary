@@ -5,6 +5,7 @@ import json
 from uuid import uuid4
 
 from linguary.application.ports.llm import LLMConfigurationError
+from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY, require_policy
 from linguary.domain.book_conditions import thaw
 from linguary.domain.recovery import RecoveryRoot, RecoveryScope
 
@@ -109,13 +110,25 @@ class Recovery:
         self.uow = unit_of_work
         self.policy = policy or RecoveryPolicy()
 
-    def prepare_roots(self, work, units, *, max_source_chars, validator):
+    def prepare_roots(self, work, units, *, max_source_chars, validator, operation_refs=None, operation_kind="translation"):
         with self.uow.transaction() as transaction:
             conditions = transaction.work.latest_conditions(work.document.id)
         if conditions is None:
-            return None
+            raise RecoveryError('conditions_unavailable')
         ordered = tuple(block for unit in units for block in unit.block_ids)
         blocks = {item.block.id: item.block for unit in units for item in unit.items}
+        task_id = getattr(work, 'task_id', None)
+        with self.uow.transaction() as transaction:
+            if operation_refs is None and task_id is not None:
+                binding = transaction.work.get_binding('task', task_id)
+                if binding is not None:
+                    if binding['conditions_id'] != conditions.id:
+                        raise RecoveryError('conditions_unavailable')
+                    operation_refs = binding['payload_json'].get('operation_refs')
+            if operation_refs is not None:
+                return self._resume_roots(transaction, work, ordered, conditions, operation_refs, operation_kind)
+        if operation_kind == 'regeneration' and len(ordered) != 1:
+            raise RecoveryError('unsafe_partition')
         indivisible = []
         structural = {}
         for block in blocks.values():
@@ -127,7 +140,7 @@ class Recovery:
             if ((first.parent_id is not None and first.parent_id == second.parent_id)
                     or first.type == second.type and first.type.value in {'list_item', 'poem', 'quote', 'table'}):
                 indivisible.append((left, right))
-        intervals = dependency_intervals(ordered, work.analysis.content_plan, indivisible=indivisible)
+        intervals = dependency_intervals(ordered, None if operation_kind == 'regeneration' else work.analysis.content_plan, indivisible=indivisible)
         boundaries = tuple(unit.block_ids for unit in units)
         merged = merge_unit_boundaries(boundaries, intervals)
         note_owners = set()
@@ -140,9 +153,10 @@ class Recovery:
                     note_owners.add(difficulty.owner_block_id)
         result = []
         with self.uow.transaction() as transaction:
+            latest = transaction.work.latest_conditions(work.document.id)
+            if latest is None or latest.id != conditions.id:
+                raise RecoveryError('conditions_unavailable')
             for group in merged:
-                if group not in boundaries and set(group).intersection(work.processed_block_ids) and not set(group) <= work.processed_block_ids:
-                    raise RecoveryError('unsafe_partition')
                 atomic = tuple(interval for interval in intervals if set(interval) <= set(group))
                 manifest = root_manifest(book_id=work.document.id, conditions_id=conditions.id,
                     glossary_sha=_sha(asdict(work.run.glossary_snapshot)), analysis_sha=_sha(asdict(work.analysis)),
@@ -153,19 +167,21 @@ class Recovery:
                     note_owners=tuple(block for block in group if block in note_owners),
                     chapter_chars=sum(len(block.text) for block in blocks.values()),
                     notes_per_chapter=conditions.payload['checks']['language_notes_per_chapter'])
-                root = transaction.work.find_root_by_key(manifest['root_key'])
-                historical = tuple(block for block in group if block in work.processed_block_ids)
-                if root is None:
-                    if historical:
-                        self._validate_historical(transaction, work, historical, blocks, validator)
-                    payload = {**manifest, 'notes_policy': NOTES_POLICY, 'active_run_id': work.run.id, 'historical_coverage': list(historical)}
-                    root = RecoveryRoot(str(uuid4()), work.document.id, conditions.id, manifest['root_key'], payload)
-                    transaction.work.add_root(root)
-                elif root.manifest.get('notes_policy') != NOTES_POLICY:
-                    raise RecoveryError('conditions_unavailable', root.id)
-                elif root.manifest.get('active_run_id') != work.run.id:
-                    transaction.work.rebind_root(root.id, run_id=work.run.id, historical_coverage=historical)
-                    root = transaction.work.get_root(root.id)
+                historical = () if operation_kind == 'regeneration' else tuple(block for block in group if block in work.processed_block_ids)
+                for interval in atomic:
+                    overlap = set(interval).intersection(historical)
+                    if overlap and overlap != set(interval):
+                        raise RecoveryError('unsafe_partition')
+                if historical:
+                    self._validate_historical(transaction, work, historical, blocks, validator)
+                payload = {**manifest, 'notes_policy': NOTES_POLICY, 'active_run_id': work.run.id,
+                    'historical_coverage': list(historical)}
+                operation_id = str(uuid4())
+                policy_version = require_policy(CURRENT_TRANSLATION_POLICY).version
+                root = RecoveryRoot(operation_id, work.document.id, conditions.id,
+                    f"{operation_id}:{policy_version}:{manifest['root_key']}", payload,
+                    policy_version=policy_version, operation_kind=operation_kind)
+                transaction.work.add_root(root)
                 scopes = transaction.work.list_scopes(root.id)
                 covered = set(root.manifest.get('historical_coverage', ()))
                 for scope in scopes:
@@ -192,7 +208,33 @@ class Recovery:
                         for scope_blocks in pending:
                             transaction.work.add_scope(RecoveryScope(str(uuid4()), root.id, scope_blocks))
                 result.append(root.id)
+            if task_id is not None:
+                transaction.work.bind_operation_refs(task_id, book_id=work.document.id, conditions_id=conditions.id,
+                    operation_refs=tuple({'root_id': root_id, 'policy_version': transaction.work.get_root(root_id).policy_version}
+                                         for root_id in result))
         return tuple(result)
+
+    def _resume_roots(self, transaction, work, ordered, conditions, operation_refs, operation_kind):
+        ids, covered = [], set()
+        for ref in operation_refs:
+            if not isinstance(ref, dict) or set(ref) != {'root_id', 'policy_version'}:
+                raise RecoveryError('conditions_unavailable')
+            require_policy(ref['policy_version'])
+            root = transaction.work.get_root(ref['root_id'])
+            if (root is None or root.book_id != work.document.id or root.conditions_id != conditions.id
+                    or root.policy_version != ref['policy_version'] or root.superseded_by is not None
+                    or root.operation_kind != operation_kind
+                    or root.manifest.get('active_run_id') != work.run.id
+                    or root.manifest.get('notes_policy') != NOTES_POLICY):
+                raise RecoveryError('conditions_unavailable', ref['root_id'])
+            targets = tuple(root.manifest.get('ordered_blocks', ()))
+            if (not targets or not set(targets) <= set(ordered) or covered.intersection(targets)
+                    or root.manifest.get('glossary_sha') != _sha(asdict(work.run.glossary_snapshot))
+                    or root.manifest.get('analysis_sha') != _sha(asdict(work.analysis))):
+                raise RecoveryError('conditions_unavailable', root.id)
+            covered.update(targets)
+            ids.append(root.id)
+        return tuple(ids)
 
     def _validate_historical(self, transaction, work, block_ids, blocks, validator):
         from linguary.domain import TranslationUnit
@@ -219,6 +261,9 @@ class Recovery:
     def plan_unresolved(self, root_id):
         with self.uow.transaction() as transaction:
             root = transaction.work.get_root(root_id)
+            if root is None or root.superseded_by is not None:
+                raise RecoveryError('conditions_unavailable', root_id)
+            require_policy(root.policy_version)
             if root.status == 'stopped':
                 raise RecoveryError(root.reason or 'interrupted', root_id)
             scopes = transaction.work.list_scopes(root_id)
@@ -231,7 +276,7 @@ class Recovery:
         with self.uow.transaction() as transaction:
             root = transaction.work.get_root(root_id)
             scope = transaction.work.get_scope(scope_id)
-            if root is None or scope is None or scope.root_id != root_id:
+            if root is None or scope is None or scope.root_id != root_id or root.superseded_by is not None:
                 raise RecoveryError('unsafe_partition', root_id)
             atoms = [tuple(group) for group in root.manifest['atomic_intervals'] if set(group) <= set(scope.ordered_blocks)]
             scopes = transaction.work.list_scopes(root_id)

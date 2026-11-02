@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 from linguary.adapters.db.models import (
     BookConditionsRow, WorkBindingRow, ArtifactRevisionRow, RecoveryRootRow,
     RecoveryScopeRow, LLMAttemptRow, QualityReviewRow, QualityReservationRow,
-    LLMCallLogRow, ProcessingRunRow,
+    LLMCallLogRow, ProcessingRunRow, ProcessingTaskRow,
 )
 from linguary.adapters.db.mapping import conditions_from_row, conditions_to_row
 from linguary.domain.book_conditions import WorkStateError, identifier, nonnegative, thaw, version
@@ -73,11 +73,61 @@ class SqlAlchemyWorkRepository:
         version(row.payload_json.get('schema_version'))
         return {column.name: getattr(row, column.name) for column in row.__table__.columns}
 
+    def bind_operation_refs(self, task_id, *, book_id, conditions_id, operation_refs):
+        refs = [dict(ref) for ref in operation_refs]
+        if len({ref['root_id'] for ref in refs}) != len(refs):
+            raise WorkStateError('conditions_unavailable')
+        task = self._owned(ProcessingTaskRow, task_id, book_id)
+        if task.status == 'superseded':
+            raise WorkStateError('conditions_unavailable')
+        for ref in refs:
+            root = self.get_root(ref['root_id'])
+            if (root is None or root.book_id != book_id or root.conditions_id != conditions_id
+                    or root.policy_version != ref['policy_version'] or root.superseded_by is not None):
+                raise WorkStateError('conditions_unavailable')
+        binding = self._session.get(WorkBindingRow, ('task', task_id))
+        if binding is None:
+            self.bind('task', task_id, book_id=book_id, conditions_id=conditions_id,
+                payload={'schema_version': 1, 'operation_refs': refs})
+        else:
+            if binding.book_id != book_id or binding.conditions_id != conditions_id:
+                raise WorkStateError('conditions_unavailable')
+            payload = dict(binding.payload_json)
+            if 'operation_refs' in payload and payload['operation_refs'] != refs:
+                raise WorkStateError('conditions_unavailable')
+            binding.payload_json = {**payload, 'operation_refs': refs}
+            self._session.flush()
+
+    def attach_legacy_attempts(self, root_id, scope_id, *, task_id, attempt_ids):
+        root = self.get_root(root_id)
+        scope = self.get_scope(scope_id)
+        if root is None or scope is None or scope.root_id != root_id or root.policy_version is not None:
+            raise WorkStateError('conditions_unavailable')
+        for attempt_id in attempt_ids:
+            attempt = self.get_attempt(attempt_id)
+            if (attempt is None or attempt.book_id != root.book_id or attempt.conditions_id != root.conditions_id
+                    or attempt.run_id != root.manifest.get('active_run_id') or attempt.task_id != task_id
+                    or attempt.root_id is not None or attempt.scope_id is not None
+                    or attempt.state not in {'failed', 'rejected', 'cancelled'}
+                    or tuple(attempt.context.get('ordered_block_ids', ())) != scope.ordered_blocks):
+                raise WorkStateError('conditions_unavailable')
+            self._session.execute(update(LLMAttemptRow).where(
+                LLMAttemptRow.id == attempt_id, LLMAttemptRow.root_id.is_(None),
+                LLMAttemptRow.scope_id.is_(None),
+            ).values(root_id=root_id, scope_id=scope_id))
+        self._session.flush()
+
+    def list_task_attempts(self, task_id):
+        ids = self._session.scalars(select(LLMAttemptRow.id).where(LLMAttemptRow.task_id == task_id)).all()
+        return tuple(self.get_attempt(attempt_id) for attempt_id in ids)
+
     def add_root(self, root):
         self._owned(BookConditionsRow, root.conditions_id, root.book_id)
         self._add(RecoveryRootRow(id=root.id, book_id=root.book_id, conditions_id=root.conditions_id,
                   root_key=root.root_key, manifest_json=_json(root.manifest), generation=root.generation,
-                  calls_used=root.calls_used, extra_calls=root.extra_calls, status=root.status, reason=root.reason))
+                  calls_used=root.calls_used, extra_calls=root.extra_calls, status=root.status, reason=root.reason,
+                  policy_version=root.policy_version, operation_kind=root.operation_kind,
+                  superseded_by=root.superseded_by, compatibility_json=None if root.compatibility is None else _json(root.compatibility)))
 
     def get_root(self, root_id):
         row = self._session.get(RecoveryRootRow, root_id)
@@ -85,7 +135,9 @@ class SqlAlchemyWorkRepository:
             return None
         return RecoveryRoot(row.id, row.book_id, row.conditions_id, row.root_key,
                             row.manifest_json, row.generation, row.calls_used,
-                            row.extra_calls, row.status, row.reason)
+                            row.extra_calls, row.status, row.reason, policy_version=row.policy_version,
+                            operation_kind=row.operation_kind, superseded_by=row.superseded_by,
+                            compatibility=row.compatibility_json)
 
     def add_scope(self, scope):
         root = self._session.get(RecoveryRootRow, scope.root_id)
@@ -167,6 +219,8 @@ class SqlAlchemyWorkRepository:
         if attempt is None or scope is None or attempt.scope_id != scope_id or attempt.generation != expected_generation or attempt.state != 'validated':
             raise WorkStateError('попытка не имеет права принять область')
         root = self.get_root(scope.root_id)
+        if root.policy_version is not None and not self.owns_recovery_attempt(attempt_id):
+            raise WorkStateError('попытка больше не владеет областью')
         latest = self.latest_conditions(root.book_id)
         run = self._session.get(ProcessingRunRow, attempt.run_id) if attempt.run_id else None
         if latest is None or latest.id != root.conditions_id or run is None or run.book_id != root.book_id or run.status != 'active':
@@ -182,13 +236,19 @@ class SqlAlchemyWorkRepository:
                 raise WorkStateError('область изменилась до принятия')
             SqlAlchemyBlockResultRepository(self._session).replace_results(attempt.run_id, results)
             for result in results:
+                provenance = None if root.policy_version is None else {
+                    'schema_version': 1, 'root_id': root.id, 'policy_version': root.policy_version,
+                    'prompt_hash': attempt.context['prompt_hash'], 'attempt_id': attempt.id}
                 body = {'schema_version': 1, 'result': asdict(result)}
+                if provenance is not None:
+                    body['provenance'] = provenance
                 artifact_id = str(uuid4())
                 self.archive_artifacts([dict(id=artifact_id, book_id=root.book_id,
                     conditions_id=root.conditions_id, run_id=attempt.run_id, attempt_id=attempt_id,
                     kind='block_result', scope_id=result.block_id, body=body)])
                 self.bind('result', f'{attempt.run_id}:{result.block_id}', book_id=root.book_id,
-                          conditions_id=root.conditions_id, attempt_id=attempt_id, artifact_revision_id=artifact_id)
+                          conditions_id=root.conditions_id, attempt_id=attempt_id, artifact_revision_id=artifact_id,
+                          payload=provenance)
             self.transition_attempt(attempt_id, 'accepted', expected_state='validated')
 
     def archive_artifacts(self, artifacts):
@@ -389,13 +449,21 @@ class SqlAlchemyWorkRepository:
         return len(rows)
 
     def replace_result_binding(self, entity_id, *, book_id, conditions_id, attempt_id,
-                               artifact_revision_id, expected_attempt_id):
+                               artifact_revision_id, expected_attempt_id, provenance=None):
         """Move a current projection pointer while preserving immutable archived versions."""
         conditions = self.latest_conditions(book_id)
         if conditions is None or conditions.id != conditions_id:
             raise WorkStateError('версия результата больше не активна')
         attempt = self._owned(LLMAttemptRow, attempt_id, book_id)
         artifact = self._owned(ArtifactRevisionRow, artifact_revision_id, book_id)
+        if attempt.root_id is not None:
+            root = self.get_root(attempt.root_id)
+            if root is not None and root.policy_version is not None:
+                expected = {'schema_version': 1, 'root_id': root.id, 'policy_version': root.policy_version,
+                    'prompt_hash': attempt.context.get('prompt_hash'), 'attempt_id': attempt_id}
+                if (provenance != expected or not self.owns_recovery_attempt(attempt_id)
+                        or artifact.body_json.get('provenance') != expected):
+                    raise WorkStateError('происхождение новой версии не совпадает')
         if attempt.conditions_id != conditions_id or artifact.conditions_id != conditions_id or artifact.attempt_id != attempt_id:
             raise WorkStateError('происхождение новой версии не совпадает')
         current = self._session.get(WorkBindingRow, ('result', entity_id))
@@ -403,7 +471,7 @@ class SqlAlchemyWorkRepository:
             if expected_attempt_id is not None:
                 raise WorkStateError('указатель результата изменился')
             self.bind('result', entity_id, book_id=book_id, conditions_id=conditions_id,
-                      attempt_id=attempt_id, artifact_revision_id=artifact_revision_id)
+                      attempt_id=attempt_id, artifact_revision_id=artifact_revision_id, payload=provenance)
             return
         if current.artifact_revision_id is None or self._session.get(ArtifactRevisionRow, current.artifact_revision_id) is None:
             raise WorkStateError('предыдущая версия результата не заархивирована')
@@ -411,7 +479,8 @@ class SqlAlchemyWorkRepository:
             WorkBindingRow.entity_kind == 'result', WorkBindingRow.entity_id == entity_id,
             WorkBindingRow.book_id == book_id, WorkBindingRow.conditions_id == conditions_id,
             WorkBindingRow.attempt_id.is_(None) if expected_attempt_id is None else WorkBindingRow.attempt_id == expected_attempt_id,
-        ).values(attempt_id=attempt_id, artifact_revision_id=artifact_revision_id))
+        ).values(attempt_id=attempt_id, artifact_revision_id=artifact_revision_id,
+                 payload_json=_json(provenance or {'schema_version': 1})))
         if changed.rowcount != 1:
             raise WorkStateError('указатель результата изменился')
 
@@ -424,11 +493,135 @@ class SqlAlchemyWorkRepository:
         return tuple(self.get_root(row.id) for row in rows
                      if run_id is None or row.manifest_json.get('active_run_id') == run_id)
 
+    def list_active_roots(self, book_id, *, run_id):
+        return tuple(root for root in self.list_roots(book_id, run_id=run_id)
+                     if root.superseded_by is None and root.status != 'complete')
+
+    def pin_legacy_policy(self, root_id, *, expected_generation, proof):
+        from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY
+        proof = _json(proof)
+        root = self.get_root(root_id)
+        if (root is None or root.generation != expected_generation or root.superseded_by is not None
+                or proof.get('root_id') != root_id or proof.get('conditions_id') != root.conditions_id
+                or proof.get('policy_version') != LEGACY_TRANSLATION_POLICY
+                or not proof.get('snapshot_sha256') or not proof.get('prompt_sha256')):
+            raise WorkStateError('conditions_unavailable')
+        if root.policy_version is not None:
+            if root.policy_version != LEGACY_TRANSLATION_POLICY or thaw(root.compatibility) != proof:
+                raise WorkStateError('conditions_unavailable')
+            return root
+        conditions = self.get_conditions(root.conditions_id)
+        if (conditions is None or proof['snapshot_sha256'] != sha256(json.dumps(
+                thaw(conditions.payload), ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+                allow_nan=False).encode()).hexdigest()
+                or proof['prompt_sha256'] != conditions.payload.get('prompt_sha256')
+                or proof.get('run_id') != root.manifest.get('active_run_id')):
+            raise WorkStateError('conditions_unavailable')
+        changed = self._session.execute(update(RecoveryRootRow).where(
+            RecoveryRootRow.id == root_id, RecoveryRootRow.generation == expected_generation,
+            RecoveryRootRow.policy_version.is_(None), RecoveryRootRow.superseded_by.is_(None),
+        ).values(policy_version=LEGACY_TRANSLATION_POLICY, compatibility_json=proof))
+        if changed.rowcount != 1:
+            raise WorkStateError('generation_conflict')
+        self._session.flush()
+        return self.get_root(root_id)
+
+    def restart_root(self, root_id, *, expected_generation, successor, scopes, task):
+        from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+        from linguary.adapters.db.repositories import SqlAlchemyTaskRepository
+        root = self.get_root(root_id)
+        scopes = tuple(scopes)
+        if root is None:
+            raise WorkStateError('root_not_found')
+        if root.generation != expected_generation or root.superseded_by is not None:
+            raise WorkStateError('generation_conflict')
+        latest = self.latest_conditions(root.book_id)
+        run_id = root.manifest.get('active_run_id')
+        run = self._session.get(ProcessingRunRow, run_id)
+        if (root.status == 'complete' or latest is None or latest.id != root.conditions_id
+                or run is None or run.status != 'active' or run.book_id != root.book_id
+                or successor.id == root.id or successor.book_id != root.book_id
+                or successor.conditions_id != root.conditions_id
+                or successor.manifest.get('active_run_id') != run_id
+                or successor.policy_version != CURRENT_TRANSLATION_POLICY
+                or task.book_id != root.book_id or task.status.value != 'pending'
+                or not ((task.task_type.value == 'regenerate_block' and task.operation_id == successor.id
+                         and task.policy_version == successor.policy_version)
+                        or (task.task_type.value == 'process_translation_unit'
+                            and task.operation_id.startswith('dispatch:') and task.policy_version == ''))
+                or successor.operation_kind != root.operation_kind
+                or successor.superseded_by is not None or successor.status != 'pending'
+                or successor.generation != 0 or successor.calls_used != 0 or successor.extra_calls != 0):
+            raise WorkStateError('conditions_unavailable')
+        ordered = tuple(root.manifest['ordered_blocks'])
+        historical = set(root.manifest.get('historical_coverage', ()))
+        for scope in self.list_scopes(root_id):
+            if scope.status == 'accepted':
+                historical.update(scope.ordered_blocks)
+        if not historical <= set(ordered):
+            raise WorkStateError('unsafe_partition')
+        for interval in root.manifest['atomic_intervals']:
+            overlap = historical.intersection(interval)
+            if overlap and overlap != set(interval):
+                raise WorkStateError('unsafe_partition')
+        pending = tuple(block for block in ordered if block not in historical)
+        actual = tuple(block for scope in scopes for block in scope.ordered_blocks)
+        if (not pending or actual != pending or len(set(actual)) != len(actual)
+                or any(scope.root_id != successor.id or scope.status != 'pending' or scope.generation != 0 for scope in scopes)
+                or tuple(successor.manifest['ordered_blocks']) != ordered
+                or successor.manifest.get('atomic_intervals') != root.manifest.get('atomic_intervals')
+                or set(successor.manifest.get('historical_coverage', ())) != historical):
+            raise WorkStateError('unsafe_partition')
+        for interval in root.manifest['atomic_intervals']:
+            if not historical.intersection(interval) and not any(set(interval) <= set(scope.ordered_blocks) for scope in scopes):
+                raise WorkStateError('unsafe_partition')
+        # The caller owns BEGIN IMMEDIATE; the savepoint also protects callers that catch errors.
+        with self._session.begin_nested():
+            self.add_root(successor)
+            changed = self._session.execute(update(RecoveryRootRow).where(
+                RecoveryRootRow.id == root_id, RecoveryRootRow.generation == expected_generation,
+                RecoveryRootRow.superseded_by.is_(None),
+            ).values(superseded_by=successor.id, generation=RecoveryRootRow.generation + 1,
+                     status='stopped', reason='superseded'))
+            if changed.rowcount != 1:
+                raise WorkStateError('generation_conflict')
+            self._session.execute(update(RecoveryScopeRow).where(
+                RecoveryScopeRow.root_id == root_id, RecoveryScopeRow.status.in_(('pending', 'claimed', 'stopped')),
+            ).values(status='stopped', generation=RecoveryScopeRow.generation + 1))
+            self._session.execute(update(LLMAttemptRow).where(
+                LLMAttemptRow.root_id == root_id, LLMAttemptRow.state.in_(('created', 'reserved')),
+            ).values(state='cancelled'))
+            self._session.execute(update(ProcessingTaskRow).where(
+                ProcessingTaskRow.book_id == root.book_id, ProcessingTaskRow.operation_id == root_id,
+                ProcessingTaskRow.status.in_(('pending', 'running', 'failed')),
+            ).values(status='superseded', error_type=None, error_message=None, error_detail=None))
+            bindings = self._session.scalars(select(WorkBindingRow).where(
+                WorkBindingRow.book_id == root.book_id, WorkBindingRow.entity_kind == 'task')).all()
+            for binding in bindings:
+                payload = dict(binding.payload_json)
+                refs = payload.get('operation_refs', [])
+                if not any(ref.get('root_id') == root_id for ref in refs):
+                    continue
+                payload['operation_refs'] = [ref for ref in refs if ref.get('root_id') != root_id]
+                binding.payload_json = payload
+                if not payload['operation_refs']:
+                    self._session.execute(update(ProcessingTaskRow).where(
+                        ProcessingTaskRow.id == binding.entity_id,
+                        ProcessingTaskRow.status.in_(('pending', 'running', 'failed')),
+                    ).values(status='superseded', error_type=None, error_message=None, error_detail=None))
+            for scope in scopes:
+                self.add_scope(scope)
+            SqlAlchemyTaskRepository(self._session).add(task)
+            self.bind('task', task.id, book_id=root.book_id, conditions_id=successor.conditions_id,
+                payload={'schema_version': 1, 'operation_refs': [
+                    {'root_id': successor.id, 'policy_version': successor.policy_version}]})
+        return self.get_root(successor.id)
+
     def extend_recovery_limit(self, root_id, *, additional_calls, expected_generation):
         root = self.get_root(root_id)
         if root is None:
             raise WorkStateError('root_not_found')
-        if root.generation != expected_generation:
+        if root.generation != expected_generation or root.superseded_by is not None:
             raise WorkStateError('generation_conflict')
         if (type(additional_calls) is not int or additional_calls <= 0
                 or root.manifest['policy']['max_calls'] + root.extra_calls + additional_calls > 9223372036854775807):
@@ -464,7 +657,7 @@ class SqlAlchemyWorkRepository:
 
     def rebind_root(self, root_id, *, run_id, historical_coverage=()):
         row = self._session.get(RecoveryRootRow, root_id)
-        if row is None:
+        if row is None or row.superseded_by is not None:
             raise WorkStateError('исходная область отсутствует')
         manifest = dict(row.manifest_json)
         manifest.update(active_run_id=run_id, historical_coverage=list(historical_coverage))
@@ -483,14 +676,18 @@ class SqlAlchemyWorkRepository:
             raise WorkStateError('исходная область отсутствует')
         self._session.flush()
 
-    def begin_recovery_attempt(self, root_id, scope_id, *, task_id, run_id, stage, assigned_model, prompt_hash):
+    def begin_recovery_attempt(self, root_id, scope_id, *, task_id, run_id, stage, assigned_model, prompt_hash, policy_version):
         from linguary.application.recovery import RecoveryError
         from linguary.domain.llm_log import CallContext
         root = self.get_root(root_id)
         scope = self.get_scope(scope_id)
         if root is None or scope is None or scope.root_id != root_id:
             raise RecoveryError('unsafe_partition', root_id)
-        if root.status == 'stopped':
+        from linguary.application.translation_policy import require_policy
+        require_policy(policy_version)
+        if root.policy_version != policy_version:
+            raise RecoveryError('conditions_unavailable', root_id)
+        if root.superseded_by is not None or root.status not in {'pending', 'running'}:
             raise RecoveryError(root.reason or 'interrupted', root_id)
         if scope.status != 'pending':
             raise RecoveryError('interrupted', root_id)
@@ -500,6 +697,16 @@ class SqlAlchemyWorkRepository:
                 or run.book_id != root.book_id or run.status != 'active'
                 or root.manifest.get('active_run_id') != run_id):
             raise RecoveryError('conditions_unavailable', root_id)
+        if task_id is not None:
+            task = self._session.get(ProcessingTaskRow, task_id)
+            binding = self.get_binding('task', task_id)
+            refs = [] if binding is None else binding['payload_json'].get('operation_refs', [])
+            direct = task is not None and task.operation_id == root_id and task.policy_version == policy_version
+            dispatch = task is not None and task.operation_id.startswith('dispatch:') and task.policy_version == '' and {
+                'root_id': root_id, 'policy_version': policy_version} in refs
+            if (task is None or task.book_id != root.book_id or task.status not in {'pending', 'running'}
+                    or not (direct or dispatch)):
+                raise RecoveryError('conditions_unavailable', root_id)
         count = self._session.scalar(select(__import__('sqlalchemy').func.count()).select_from(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope_id))
         policy = root.manifest['policy']
         if count >= policy['max_scope_calls'] or root.calls_used >= policy['max_calls'] + root.extra_calls:
@@ -515,7 +722,7 @@ class SqlAlchemyWorkRepository:
             raise RecoveryError('interrupted', root_id)
         context = CallContext(root.conditions_id, stage, scope_id, scope.ordered_blocks,
             str(uuid4()), claimed.generation, assigned_model, prompt_hash,
-            run_id=run_id, task_id=task_id, root_id=root_id)
+            run_id=run_id, task_id=task_id, root_id=root_id, policy_version=policy_version)
         attempt = CallAttempt(context.attempt_id, root.book_id, state='created',
             generation=claimed.generation, ordinal=root.calls_used + 1, conditions_id=root.conditions_id,
             task_id=task_id, run_id=run_id, root_id=root_id, scope_id=scope_id,
@@ -564,7 +771,16 @@ class SqlAlchemyWorkRepository:
         scope = self.get_scope(attempt.scope_id)
         if root is None or scope is None:
             return False
-        return (root.generation == attempt.context['root_generation'] and root.status in {'pending', 'running'}
+        from linguary.application.translation_policy import TRANSLATION_POLICIES
+        run = self._session.get(ProcessingRunRow, attempt.run_id)
+        conditions = self.latest_conditions(root.book_id)
+        return (root.policy_version in TRANSLATION_POLICIES
+                and attempt.context.get('policy_version') == root.policy_version
+                and root.superseded_by is None and scope.root_id == root.id
+                and run is not None and run.status == 'active' and run.book_id == root.book_id
+                and conditions is not None and conditions.id == root.conditions_id
+                and attempt.conditions_id == root.conditions_id and attempt.book_id == root.book_id
+                and root.generation == attempt.context.get('root_generation') and root.status in {'pending', 'running'}
                 and root.manifest['active_run_id'] == attempt.run_id
                 and scope.generation == attempt.generation and scope.status == 'claimed'
                 and attempt.state == 'validated')
@@ -581,7 +797,7 @@ class SqlAlchemyWorkRepository:
 
     def root_coverage_complete(self, root_id, *, update_state=True):
         root = self.get_root(root_id)
-        if root is None or root.status == 'stopped':
+        if root is None or root.status == 'stopped' or root.superseded_by is not None:
             return False
         manifest = root.manifest
         scopes = self.list_scopes(root_id)
@@ -601,6 +817,11 @@ class SqlAlchemyWorkRepository:
         from linguary.adapters.db.repositories import SqlAlchemyBlockResultRepository
         results = SqlAlchemyBlockResultRepository(self._session)
         for scope in leaves:
+            if root.policy_version is not None:
+                accepted = self.get_attempt(scope.accepted_attempt_id)
+                if (accepted is None or accepted.state != 'accepted' or accepted.root_id != root.id
+                        or accepted.context.get('policy_version') != root.policy_version):
+                    return False
             for block in scope.ordered_blocks:
                 binding = self.get_binding('result', f'{run_id}:{block}')
                 if binding is None:
@@ -620,6 +841,8 @@ class SqlAlchemyWorkRepository:
 
     def invalidate_run_coverage(self, book_id, run_id):
         for root in self.list_roots(book_id, run_id=run_id):
+            if root.superseded_by is not None:
+                continue
             manifest = thaw(root.manifest)
             manifest['historical_coverage'] = []
             self._session.execute(update(RecoveryRootRow).where(RecoveryRootRow.id == root.id,

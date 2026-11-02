@@ -32,6 +32,7 @@ from linguary.domain import (
     TermConcept,
     TaskError,
 )
+from linguary.domain.recovery import CallAttempt
 
 
 class PersistenceError(ApplicationError):
@@ -267,6 +268,21 @@ class WorkRepository(Protocol):
     def bind(self, entity_kind, entity_id, *, book_id, conditions_id,
              attempt_id=None, artifact_revision_id=None, payload=None) -> None: ...
     def get_binding(self, entity_kind, entity_id): ...
+    def bind_operation_refs(
+        self,
+        task_id: str,
+        *,
+        book_id: str,
+        conditions_id: str,
+        operation_refs: Sequence[Mapping[str, str]],
+    ) -> None:
+        """Bind ordered `{root_id, policy_version}` references without duplicate roots.
+
+        Check book, conditions, policy and that neither task nor roots are superseded.
+        Repeating the same list is idempotent; changing it raises `WorkStateError`,
+        as do incompatible references. Write within the caller's transaction.
+        """
+
     def add_root(self, root) -> None: ...
     def get_root(self, root_id): ...
     def add_scope(self, scope) -> None: ...
@@ -275,6 +291,24 @@ class WorkRepository(Protocol):
     def accept_scope(self, scope_id, *, attempt_id, expected_generation, results) -> None: ...
     def add_attempt(self, attempt) -> None: ...
     def get_attempt(self, attempt_id): ...
+    def list_task_attempts(self, task_id: str) -> tuple[CallAttempt, ...]:
+        """Return all task attempts without ordering guarantees, or an empty tuple."""
+
+    def attach_legacy_attempts(
+        self,
+        root_id: str,
+        scope_id: str,
+        *,
+        task_id: str,
+        attempt_ids: Sequence[str],
+    ) -> None:
+        """Attach unbound failed, rejected or cancelled task attempts to an unpinned root.
+
+        Verify scope ownership, book, conditions, active run and exact target order.
+        Change only root/scope references, preserving attempt context. Incompatible
+        attempts raise `WorkStateError`; write within the caller's transaction.
+        """
+
     def transition_attempt(self, attempt_id, state, *, expected_state, outcome=None): ...
     def archive_artifacts(self, artifacts): ...
     def get_artifact(self, artifact_id): ...
