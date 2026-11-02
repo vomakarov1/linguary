@@ -1,12 +1,15 @@
-"""Idempotency key for a task: `book_id + task_type + scope_id`."""
+"""Idempotency keys include translation operation and policy without changing other tasks."""
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 import pytest
 from persistence_factories import BOOK_ID, SECTION_ID, make_book, make_task
 from sqlalchemy.exc import IntegrityError
 
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+from linguary.application.ports.persistence import PersistenceError
 from linguary.domain import TaskIdentity, TaskStatus, TaskType
 
 
@@ -118,3 +121,96 @@ def test_task_transition_is_stored(
     assert stored.attempts == 1
     assert stored.last_error == failed.last_error
     assert stored.is_retryable
+
+
+def test_same_scope_different_operations_coexist(unit_of_work, stored_book):
+    first = replace(make_task(task_type=TaskType.REGENERATE_BLOCK, scope_id="block"),
+                    operation_id="first", policy_version="translation-context-v2")
+    second = replace(first, id="second-task", operation_id="second")
+    another_policy = replace(first, id="legacy-task", policy_version="translation-context-legacy-v1")
+    with unit_of_work.transaction() as uow:
+        for task in (first, second, another_policy):
+            uow.tasks.add(task)
+    with unit_of_work.transaction() as uow:
+        assert uow.tasks.list_for_book(BOOK_ID) == (first, second, another_policy)
+        assert uow.tasks.get(first.id) == first
+        uow.tasks.save(first.start())
+    with unit_of_work.transaction() as uow:
+        assert uow.tasks.get(first.id) == first.start()
+    with pytest.raises(IntegrityError), unit_of_work.transaction() as uow:
+        uow.tasks.add(replace(first, id="duplicate"))
+
+
+@pytest.mark.parametrize("identity_change", [
+    {"book_id": "another-book"},
+    {"task_type": TaskType.EXPORT_BOOK},
+    {"scope_id": "another-block"},
+    {"operation_id": "absent"},
+    {"policy_version": "absent"},
+])
+@pytest.mark.parametrize("stored_status", [TaskStatus.PENDING, TaskStatus.SUPERSEDED])
+def test_find_task_never_returns_another_operation(
+    unit_of_work, stored_book, identity_change, stored_status
+):
+    task = replace(make_task(task_type=TaskType.REGENERATE_BLOCK, scope_id="block"),
+                   operation_id="first", policy_version="translation-context-v2",
+                   status=stored_status)
+    with unit_of_work.transaction() as uow:
+        uow.tasks.add(task)
+        uow.tasks.add(replace(task, id="second-task", operation_id="second"))
+        uow.tasks.add(replace(task, id="legacy-task", policy_version="translation-context-legacy-v1"))
+    with unit_of_work.transaction() as uow:
+        assert uow.tasks.find_by_identity(task.identity) == task
+        for identity in (
+            replace(task.identity, operation_id="absent"),
+            replace(task.identity, policy_version="absent"),
+            replace(task.identity, operation_id="", policy_version=""),
+        ):
+            assert uow.tasks.find_by_identity(identity) is None
+    changed = replace(task, **identity_change, attempts=1)
+    with pytest.raises(PersistenceError, match="идентичност"), unit_of_work.transaction() as uow:
+        uow.tasks.save(changed)
+    with unit_of_work.transaction() as uow:
+        assert uow.tasks.get(task.id) == task
+        assert uow.tasks.find_by_identity(task.identity) == task
+        assert uow.tasks.find_by_identity(changed.identity) is None
+
+
+@pytest.mark.parametrize("late_status", [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.SUCCEEDED, TaskStatus.FAILED])
+def test_late_task_save_cannot_undo_supersession(unit_of_work, stored_book, late_status):
+    task = replace(make_task(task_type=TaskType.REGENERATE_BLOCK), operation_id="root",
+                   policy_version="translation-context-v2")
+    with unit_of_work.transaction() as uow:
+        uow.tasks.add(task)
+    with unit_of_work.transaction() as uow:
+        stale = uow.tasks.get(task.id)
+    superseded = replace(task, status=TaskStatus.SUPERSEDED, attempts=2)
+    with unit_of_work.transaction() as uow:
+        uow.tasks.save(superseded)
+    late = {
+        TaskStatus.PENDING: stale,
+        TaskStatus.RUNNING: stale.start(),
+        TaskStatus.SUCCEEDED: stale.start().succeed(),
+        TaskStatus.FAILED: stale.start().interrupt(),
+    }[late_status]
+    with pytest.raises(PersistenceError, match="вытеснена"), unit_of_work.transaction() as uow:
+        uow.tasks.save(late)
+    with unit_of_work.transaction() as uow:
+        # Repeated terminal writes are harmless, including their stale counters.
+        uow.tasks.save(replace(superseded, attempts=0))
+        assert uow.tasks.get(task.id) == superseded
+
+
+@pytest.mark.parametrize("task_type", [
+    TaskType.IMPORT_BOOK, TaskType.ANALYZE_CHAPTER, TaskType.EXPORT_BOOK, TaskType.QUALITY_REVIEW,
+])
+def test_nontranslation_task_idempotency_is_preserved(unit_of_work, stored_book, task_type):
+    task = make_task(task_type=task_type)
+    with unit_of_work.transaction() as uow:
+        uow.tasks.add(task)
+    with pytest.raises(IntegrityError), unit_of_work.transaction() as uow:
+        uow.tasks.add(replace(task, id="duplicate"))
+    with unit_of_work.transaction() as uow:
+        assert uow.tasks.find_by_identity(task.identity) == task
+        assert uow.tasks.get(task.id).operation_id == ""
+        assert uow.tasks.get(task.id).policy_version == ""

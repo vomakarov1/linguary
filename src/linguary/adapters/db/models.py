@@ -391,12 +391,16 @@ class ProcessingTaskRow(Base):
     """
 
     __tablename__ = "processing_tasks"
-    __table_args__ = (UniqueConstraint("book_id", "task_type", "scope_id"),)
+    __table_args__ = (
+        UniqueConstraint("book_id", "task_type", "scope_id", "operation_id", "policy_version"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     book_id: Mapped[str] = mapped_column(ForeignKey("books.id", ondelete="CASCADE"))
     task_type: Mapped[str] = mapped_column(String)
     scope_id: Mapped[str] = mapped_column(String, default="", server_default="")
+    operation_id: Mapped[str] = mapped_column(String, default="", server_default=text("''"))
+    policy_version: Mapped[str] = mapped_column(String, default="", server_default=text("''"))
     status: Mapped[str] = mapped_column(String, index=True)
     attempts: Mapped[int] = mapped_column()
     error_type: Mapped[str | None] = mapped_column(String)
@@ -535,6 +539,12 @@ class RecoveryRootRow(Base):
     extra_calls: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    operation_kind: Mapped[str] = mapped_column(String, default="translation", server_default="translation")
+    superseded_by: Mapped[str | None] = mapped_column(
+        String, ForeignKey('recovery_roots.id'), nullable=True
+    )
+    compatibility_json: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
 
 class RecoveryScopeRow(Base):
     """Persisted recovery scopes."""

@@ -46,6 +46,7 @@ from linguary.domain import (
     ProcessingRunStatus,
     ProcessingTask,
     TaskIdentity,
+    TaskStatus,
     TermConcept,
     TaskError,
 )
@@ -466,11 +467,19 @@ class SqlAlchemyTaskRepository:
         self._session.flush()
 
     def save(self, task: ProcessingTask) -> None:
-        """Save updated task state without modifying its creation timestamp."""
+        """Save state with unchanged identity unless the task has been superseded."""
         row = mapping.to_task_row(task, datetime.now(UTC))
         result = self._session.execute(
             update(ProcessingTaskRow)
-            .where(ProcessingTaskRow.id == task.id)
+            .where(
+                ProcessingTaskRow.id == task.id,
+                ProcessingTaskRow.book_id == task.book_id,
+                ProcessingTaskRow.task_type == task.task_type.value,
+                ProcessingTaskRow.scope_id == task.scope_id,
+                ProcessingTaskRow.operation_id == task.operation_id,
+                ProcessingTaskRow.policy_version == task.policy_version,
+                ProcessingTaskRow.status != TaskStatus.SUPERSEDED.value,
+            )
             .values(
                 status=row.status,
                 attempts=row.attempts,
@@ -480,6 +489,30 @@ class SqlAlchemyTaskRepository:
             )
         )
         if result.rowcount != 1:
+            stored = self._session.execute(
+                select(
+                    ProcessingTaskRow.book_id,
+                    ProcessingTaskRow.task_type,
+                    ProcessingTaskRow.scope_id,
+                    ProcessingTaskRow.operation_id,
+                    ProcessingTaskRow.policy_version,
+                    ProcessingTaskRow.status,
+                ).where(ProcessingTaskRow.id == task.id)
+            ).one_or_none()
+            if stored is None:
+                raise PersistenceError(f"задача {task.id} отсутствует в хранилище")
+            if stored[:5] != (
+                task.book_id,
+                task.task_type.value,
+                task.scope_id,
+                task.operation_id,
+                task.policy_version,
+            ):
+                raise PersistenceError(f"идентичность задачи {task.id} не совпадает с сохранённой")
+            if stored.status == TaskStatus.SUPERSEDED.value:
+                if task.status is TaskStatus.SUPERSEDED:
+                    return
+                raise PersistenceError(f"задача {task.id} вытеснена другой операцией")
             raise PersistenceError(f"задача {task.id} отсутствует в хранилище")
         self._session.flush()
 
@@ -489,12 +522,14 @@ class SqlAlchemyTaskRepository:
         return None if row is None else mapping.to_task(row)
 
     def find_by_identity(self, identity: TaskIdentity) -> ProcessingTask | None:
-        """Find a task by its idempotency key `book_id + task_type + scope_id`."""
+        """Find a task by its complete operation and policy identity."""
         row = self._session.scalars(
             select(ProcessingTaskRow).where(
                 ProcessingTaskRow.book_id == identity.book_id,
                 ProcessingTaskRow.task_type == identity.task_type.value,
                 ProcessingTaskRow.scope_id == identity.scope_id,
+                ProcessingTaskRow.operation_id == identity.operation_id,
+                ProcessingTaskRow.policy_version == identity.policy_version,
             )
         ).one_or_none()
         return None if row is None else mapping.to_task(row)

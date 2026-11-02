@@ -281,7 +281,7 @@ def test_content_downgrade_refuses_all_nonnull_before_ddl(
         event.remove(Engine, 'before_cursor_execute', track_ddl)
     assert ddl == []
     with engine.connect() as connection:
-        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0010'
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0011'
         assert connection.execute(text(f'SELECT {column} FROM {table}')).scalar_one() == payload
         for target, name in CONTENT_COLUMNS:
             assert name in {item['name'] for item in inspect(connection).get_columns(target)}
@@ -346,7 +346,7 @@ def test_fragment_downgrade_refuses_nonnull_before_ddl(alembic_config, engine, c
     assert ddl == []
     with engine.connect() as connection:
         assert connection.execute(text('SELECT fragment_assistance_json FROM block_results')).scalar_one() == payload
-        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0010'
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0011'
 
 
 def test_pronunciation_upgrade_preserves_0009_rows(alembic_config, engine, content_rows):
@@ -381,4 +381,4 @@ def test_pronunciation_migration_refuses_data_loss(alembic_config, engine, conte
     assert ddl == []
     with engine.connect() as connection:
         assert connection.execute(text('SELECT pronunciation_assistances_json FROM block_results')).scalar_one() == payload
-        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0010'
+        assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0011'
