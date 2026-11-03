@@ -450,7 +450,10 @@ async def test_pronunciation_candidates_regeneration_and_recovery(tmp_path):
         children = [request for request in fake.requests if request.stage == LLMCallStage.TRANSLATION_UNIT and len(request.ordered_block_ids) == 1]
         assert len(children) == 2
         assert all(request.pronunciation_candidates_version == 1 for request in children)
-        assert all('Контекст исходной сцены' in request.input_text for request in children)
+        assert {request.ordered_block_ids for request in children} == {
+            (block.id,) for block in document.sections[0].blocks
+        }
+        assert all('Контекст исходной сцены' not in request.input_text for request in children)
         assert all('SOURCE_PRIVATE' not in request.instructions + request.input_text
                    and private.ipa not in request.instructions + request.input_text for request in fake.requests)
         assert {result.pronunciation_assistances[0].anchor.block_id for result in results} == {block.id for block in document.sections[0].blocks}
