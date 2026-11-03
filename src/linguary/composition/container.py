@@ -100,6 +100,7 @@ from linguary.application.use_cases.regenerate_block import (
 from linguary.application.use_cases.register_book import RegisterBook
 from linguary.application.use_cases.reset_processing import ResetProcessing
 from linguary.application.use_cases.retry_task import RetryTask
+from linguary.application.use_cases.restart_translation import RestartTranslation
 from linguary.application.validators import TranslationResultValidator
 from linguary.composition.llm import ConfiguredLLMClient
 from linguary.composition.migrations import apply_migrations
@@ -144,6 +145,7 @@ class Application:
     approve_glossary: ApproveGlossary
     reset_processing: ResetProcessing
     retry_task: RetryTask
+    restart_translation: RestartTranslation
     analysis: RuntimeSequence
     processing: RuntimeSequence
     regeneration: RuntimeSequence
@@ -469,6 +471,11 @@ def build_application(
         ),
         reset_processing=ResetProcessing(unit_of_work=unit_of_work),
         retry_task=RetryTask(unit_of_work=unit_of_work),
+        restart_translation=RestartTranslation(
+            unit_of_work=unit_of_work,
+            queue=task_queue,
+            recovery_policy=lambda: RecoveryPolicy(**asdict(runtime_settings.current.settings.recovery)),
+        ),
         analysis=analysis,
         processing=processing,
         regeneration=regeneration,
