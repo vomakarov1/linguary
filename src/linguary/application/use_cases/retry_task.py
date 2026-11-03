@@ -56,6 +56,8 @@ class RetryTask:
 
 def _ensure_retryable(task: ProcessingTask) -> None:
     """Ensures that retrying the task makes sense."""
+    if task.status is TaskStatus.SUPERSEDED:
+        raise RetryTaskError(f"задача {task.id} вытеснена новой операцией и не может быть повторена")
     if task.status is TaskStatus.SUCCEEDED:
         raise RetryTaskError(
             f"задача {task.id} уже выполнена успешно и повторно не выполняется"

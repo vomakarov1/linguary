@@ -23,6 +23,10 @@ class SqliteTaskQueue:
     def __init__(self, store: SqliteTaskStore) -> None:
         self._store = store
 
+    def new_task_id(self) -> str:
+        """Return an identifier from the queue's configured factory."""
+        return self._store.new_task_id()
+
     @classmethod
     def for_engine(
         cls, engine: Engine, *, id_factory: Callable[[], str] | None = None

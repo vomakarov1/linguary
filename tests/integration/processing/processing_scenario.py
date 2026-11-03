@@ -213,6 +213,16 @@ def make_process_chapter(
     checks: CheckSettings | None = None,
 ) -> tuple[ProcessChapter, list[float]]:
     """Chapter processing use case along with a list of recorded retry delays."""
+    from linguary.composition.book_runtime import ProvenanceClient
+    if not isinstance(client, ProvenanceClient):
+        conditions_service, conditions_id = _ensure_test_translation_conditions(unit_of_work)
+        from linguary.adapters.llm.logging import LoggingLLMClient
+
+        client = ProvenanceClient(
+            LoggingLLMClient(client, unit_of_work, 'fake', 'test-processing'),
+            conditions_service,
+            conditions_id,
+        )
     delays: list[float] = []
     scenario = ProcessChapter(
         unit_of_work=unit_of_work,
@@ -224,6 +234,32 @@ def make_process_chapter(
         sleep=_recording_sleep(delays),
     )
     return scenario, delays
+
+
+def _ensure_test_translation_conditions(unit_of_work: SqlAlchemyUnitOfWork):
+    """Give direct use-case tests persisted conditions and their provenance service."""
+    from linguary.application.book_conditions import BookConditionsService
+
+    service = BookConditionsService(
+        unit_of_work,
+        snapshot_factory=lambda book, revision: {
+            'schema_version': 1,
+            'reader_level': 'b1',
+            'models': {'analysis': 'test-analysis', 'processing': 'test-processing'},
+            'checks': {'language_notes_per_chapter': 10},
+        },
+        settings_revision=lambda: 0,
+        source_digest=lambda path: 'synthetic-source',
+    )
+
+    with unit_of_work.transaction() as transaction:
+        book = transaction.books.get(BOOK_ID)
+        if book is None:
+            return service, None
+        conditions = transaction.work.latest_conditions(BOOK_ID)
+        if conditions is None:
+            conditions = service.create(transaction, book, 0)
+    return service, conditions.id
 
 
 def make_regenerate_block(

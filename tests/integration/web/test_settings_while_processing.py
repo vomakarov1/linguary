@@ -10,12 +10,12 @@ from threading import Event
 
 import httpx
 import pytest
-from web_scenario import bound_queue, BOOK_ID, SOURCE_TEXT, TRANSLATED_TEXT, start_run, store_book
+from web_scenario import BOOK_ID, SOURCE_TEXT, TRANSLATED_TEXT, continue_legacy, start_run, store_book
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.runtime import ExecutorLock
 from linguary.composition import build_application
-from linguary.domain import BookStatus, TaskIdentity, TaskStatus, TaskType
+from linguary.domain import BookStatus, TaskStatus
 from linguary.web import create_app
 
 
@@ -38,6 +38,7 @@ class Provider:
 
     def __init__(self):
         self.calls = []
+        self.call_handles = []
         self.entered = defaultdict(asyncio.Event)
         self.release = defaultdict(asyncio.Event)
         self.blocked = {0}
@@ -46,7 +47,7 @@ class Provider:
         self.clock = lambda: 0.0
         self.real_http = httpx.AsyncClient
 
-    async def respond(self, request):
+    async def respond(self, request, handle_index):
         body = json.loads(request.content)
         model = body["model"]
         expected_key = "old-generation-secret" if model == "old-model" else "new-generation-secret"
@@ -54,6 +55,7 @@ class Provider:
             raise AssertionError("Generation sent an invalid authorization key")
         index = len(self.calls)
         self.calls.append((str(request.url), model, self.clock()))
+        self.call_handles.append(handle_index)
         self.entered[index].set()
         if index in self.blocked:
             await self.release[index].wait()
@@ -76,7 +78,12 @@ class Provider:
                 provider.closed[provider.handles.index(self)].set()
 
         def factory(*args, **kwargs):
-            kwargs["transport"] = httpx.MockTransport(self.respond)
+            handle_index = len(self.handles)
+
+            async def respond(request):
+                return await self.respond(request, handle_index)
+
+            kwargs["transport"] = httpx.MockTransport(respond)
             client = OwnedHTTP(*args, **kwargs)
             self.handles.append(client)
             return client
@@ -120,10 +127,9 @@ def observe_tasks(app, monkeypatch):
 
 
 async def enqueue(app, scenario, index):
-    return await bound_queue(app, scenario.book_id).enqueue(TaskIdentity(
-        book_id=scenario.book_id, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-        scope_id=scenario.section(index).id,
-    ))
+    continue_legacy(app, scenario.book_id)
+    tasks = await app.processing.start(scenario.book_id)
+    return next(task for task in tasks if task.scope_id == scenario.section(index).id)
 
 
 @asynccontextmanager
@@ -144,23 +150,24 @@ async def test_owned_generations_use_new_url_model_key_and_close_after_release(
 ):
     app = build(tmp_path)
     completed, outcomes = observe_tasks(app, monkeypatch)
-    scenario = store_book(app, status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * 2,) * 2)
+    scenario = store_book(app, status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * 2,))
     start_run(app, scenario)
     async with working_web(app, provider) as web:
         old = await enqueue(app, scenario, 0)
         await wait(provider.entered[0])
+        old_client = provider.handles[provider.call_handles[0]]
         saved = await web.post("/system/config", json=payload())
         assert saved.status_code == 200
-        assert len(provider.handles) == 3
-        assert not provider.handles[1].is_closed
-        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),) * 2)
+        published_client = provider.handles[-1]
+        assert not old_client.is_closed and not published_client.is_closed
+        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),))
         start_run(app, new_scenario)
-        new = await enqueue(app, new_scenario, 1)
+        new = await enqueue(app, new_scenario, 0)
         provider.release[0].set()
         await wait(completed[old.id])
         await wait(completed[new.id])
-        await wait(provider.closed[1])
-        assert not provider.handles[2].is_closed
+        await wait(provider.closed[provider.handles.index(old_client)])
+        assert not published_client.is_closed
         assert [call[:2] for call in provider.calls] == [
             ("https://old-provider.test/v1/chat/completions", "old-model"),
             ("https://old-provider.test/v1/chat/completions", "old-model"),
@@ -178,18 +185,19 @@ async def test_owned_generations_use_new_url_model_key_and_close_after_release(
 async def test_save_during_active_task_preserves_old_and_new_models(tmp_path, monkeypatch, provider):
     app = build(tmp_path, concurrency=2)
     completed, outcomes = observe_tasks(app, monkeypatch)
-    scenario = store_book(app, status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,),) * 2)
+    scenario = store_book(app, status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,),))
     start_run(app, scenario)
     async with working_web(app, provider) as web:
         old = await enqueue(app, scenario, 0)
         await wait(provider.entered[0])
+        old_client = provider.handles[provider.call_handles[0]]
         assert (await web.post("/system/config", json=payload(concurrency=2))).status_code == 200
-        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),) * 2)
+        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),))
         start_run(app, new_scenario)
-        new = await enqueue(app, new_scenario, 1)
+        new = await enqueue(app, new_scenario, 0)
         await wait(completed[new.id])
         assert not completed[old.id].is_set()
-        assert not provider.handles[1].is_closed
+        assert not old_client.is_closed
         provider.release[0].set()
         await wait(completed[old.id])
         assert [call[1] for call in provider.calls] == ["old-model", "new-model"]
@@ -278,20 +286,21 @@ async def test_new_generation_shares_rate_limit_with_old(tmp_path, monkeypatch, 
     monkeypatch.setattr(app.rate_limiter, "_clock", lambda: now[0])
     monkeypatch.setattr(app.rate_limiter, "_sleep", sleep)
     provider.clock = lambda: now[0]
-    scenario = store_book(app, status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,),) * 2)
+    scenario = store_book(app, status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,),))
     start_run(app, scenario)
     async with working_web(app, provider) as web:
         old = await enqueue(app, scenario, 0)
         await wait(provider.entered[0])
+        old_client = provider.handles[provider.call_handles[0]]
         assert (await web.post("/system/config", json=payload(concurrency=2, requests_per_minute=60))).status_code == 200
-        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),) * 2)
+        new_scenario = store_book(app, book_id='new-book', status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,) * len(scenario.block_ids()),))
         start_run(app, new_scenario)
-        new = await enqueue(app, new_scenario, 1)
+        new = await enqueue(app, new_scenario, 0)
         await wait(waiting)
         assert delays == [1.0]
         app.rate_limiter.hold(3)
         assert len(provider.calls) == 1
-        assert not provider.handles[1].is_closed
+        assert not old_client.is_closed
         now[0] = 3
         advance.set()
         await wait(completed[new.id])

@@ -75,9 +75,9 @@ async def test_restart_keeps_root_manifest_and_rejects_incompatible_notes_policy
         await restarted.aclose()
 
 
-async def test_reset_keeps_root_key_counter_and_discards_old_coverage(tmp_path):
+async def test_reset_preserves_historical_counter_and_creates_new_operation(tmp_path):
     fake = FakeLLMClient([analysis_reply(2), translation_reply(2, bad=True), translation_reply(2, bad=True),
-                          translation_reply(1), translation_reply(1), translation_reply(1), translation_reply(1)])
+                          translation_reply(1), translation_reply(1), translation_reply(2)])
     app = make_app(tmp_path, fake)
     try:
         doc, run, task = await prepare(app)
@@ -95,7 +95,8 @@ async def test_reset_keeps_root_key_counter_and_discards_old_coverage(tmp_path):
         assert completed[0].status == TaskStatus.SUCCEEDED, completed[0].last_error
         with app.unit_of_work.transaction() as transaction:
             root, = transaction.work.list_roots('book-1', run_id=new_run.id)
-            assert root.id == before.id and root.root_key == before.root_key and root.calls_used == 6
+            assert root.id != before.id and root.root_key != before.root_key and root.calls_used == 1
+            assert transaction.work.get_root(before.id).calls_used == 4
             assert len(transaction.results.list_for_run(new_run.id)) == 2
     finally:
         await app.aclose()
@@ -113,7 +114,8 @@ async def prepared_root(app, run, task):
     with app.unit_of_work.transaction() as transaction:
         scope, = transaction.work.list_scopes(roots[0])
         context = transaction.work.begin_recovery_attempt(roots[0], scope.id, task_id=task.id,
-            run_id=run.id, stage='translation_unit', assigned_model='pinned-model', prompt_hash='a' * 64)
+            run_id=run.id, stage='translation_unit', assigned_model='pinned-model', prompt_hash='a' * 64,
+            policy_version=transaction.work.get_root(roots[0]).policy_version)
     return roots[0], context
 
 
@@ -168,8 +170,7 @@ async def test_crash_after_commit_before_task_succeed_does_not_send_again(tmp_pa
             assert len(transaction.results.list_for_run(run.id)) == 2
             stored_task = transaction.tasks.get(task.id)
             if stored_task.status == TaskStatus.SUCCEEDED:
-                from linguary.domain import ProcessingTask, TaskType
-                transaction.tasks.save(ProcessingTask(task.id, task.book_id, task.task_type, task.scope_id))
+                transaction.tasks.save(replace(stored_task, status=TaskStatus.PENDING))
         monkeypatch.setattr(app.task_queue, 'save', original)
         assert (await drain_tasks(app))[0].status == TaskStatus.SUCCEEDED
         assert len(fake.requests) == 2
@@ -339,7 +340,8 @@ async def test_regeneration_stales_review_and_preserves_root_coverage(tmp_path):
         assert completed[0].status == TaskStatus.SUCCEEDED, completed[0].last_error
         with app.unit_of_work.transaction() as transaction:
             assert transaction.work.get_review(review_id).state == 'stale'
-            root, = transaction.work.list_roots('book-1', run_id=run.id)
+            root, = (root for root in transaction.work.list_roots('book-1', run_id=run.id)
+                     if root.operation_kind == 'translation')
             assert root.calls_used == 1
             assert transaction.work.root_coverage_complete(root.id)
             assert transaction.results.get(run.id, doc.sections[0].blocks[0].id).translated_text == 'Он возвратился домой.'
@@ -362,7 +364,12 @@ async def test_legacy_partial_coverage_keeps_unknown_attempt_and_calls_only_unre
         with app.unit_of_work.transaction() as transaction:
             transaction.results.replace_results(scenario.run_id, (historical,))
         choose_legacy_fixture(app)
-        await app.processing.start('book-1')
+        if invalid_historical:
+            from linguary.application.retry_policy import ResultValidationError
+            with pytest.raises(ResultValidationError):
+                await app.processing.start('book-1')
+        else:
+            await app.processing.start('book-1')
         completed = await drain_tasks(app)
         with app.unit_of_work.transaction() as transaction:
             assert transaction.work.get_binding('result', f'{scenario.run_id}:{first}') is None
@@ -370,7 +377,8 @@ async def test_legacy_partial_coverage_keeps_unknown_attempt_and_calls_only_unre
             conditions = transaction.work.latest_conditions('book-1')
             assert conditions.reproducibility == 'legacy_partial'
             if invalid_historical:
-                assert completed[0].status == TaskStatus.FAILED
+                assert completed == ()
+                assert transaction.tasks.list_for_book('book-1') == ()
                 assert fake.requests == []
                 assert transaction.results.get(scenario.run_id, second) is None
             else:

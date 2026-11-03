@@ -80,6 +80,10 @@ class BoundTaskQueue:
         self.queue, self.service, self.conditions_id = queue, service, conditions_id
         self.id_factory = id_factory or (lambda: str(uuid4()))
 
+    def new_task_id(self):
+        """Use the identifier factory shared with the backing queue."""
+        return self.id_factory()
+
     async def enqueue(self, identity):
         with self.service.uow.transaction() as transaction:
             conditions = self.service.require(identity.book_id, transaction=transaction)

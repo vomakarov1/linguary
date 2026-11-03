@@ -42,6 +42,10 @@ class SqliteTaskStore:
         self._session_factory = session_factory
         self._id_factory = id_factory or _new_task_id
 
+    def new_task_id(self) -> str:
+        """Return an identifier using the same factory as persisted queue tasks."""
+        return self._id_factory()
+
     @classmethod
     def for_engine(
         cls, engine: Engine, *, id_factory: Callable[[], str] | None = None

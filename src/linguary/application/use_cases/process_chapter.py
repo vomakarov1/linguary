@@ -11,10 +11,9 @@ then in a short transaction verify that the book's run is still active and is th
 and replace block results for the group. Verifying the run inside the transaction discards
 stale results: the user may have returned to glossary review while the model call was in flight (P3.T7).
 
-The queue task is the entire chapter rather than a single group: `TranslationUnit` is not
-persisted, its ID lives for one call, and an idempotent task key cannot be built from it.
-Retrying a chapter task is safe: already stored groups are skipped, and storing the remaining
-groups replaces previous results of the same blocks (PRD § 18.1).
+The chapter task is a dispatcher whose binding persists exact root IDs and policy versions.
+Translation units are rebuilt from unresolved scopes of those roots; retries preserve the
+original operations and skip accepted scopes (PRD § 18.1).
 
 `ChapterProcessingSequence` enqueues chapter tasks and transitions the book to `READY_TO_EXPORT`
 when all chapters have been processed. The processing run remains active: full export looks up
@@ -27,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
@@ -44,7 +44,9 @@ from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.application.retry_policy import RetryPolicy
-from linguary.application.recovery import Recovery, RecoveryPolicy, RecoverySplit
+from linguary.application.recovery import Recovery, RecoveryError, RecoveryPolicy, RecoverySplit
+from linguary.application.translation_compatibility import ensure_legacy_operation
+from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY
 from linguary.application.task_runner import TaskQueue
 from linguary.application.translation_units import (
     DEFAULT_MAX_UNIT_SOURCE_CHARS,
@@ -60,6 +62,7 @@ from linguary.domain import (
     ProcessingRun,
     ProcessingTask,
     TaskIdentity,
+    TaskStatus,
     TaskType,
     TokenUsage,
     TranslationUnit,
@@ -80,6 +83,7 @@ class ProcessChapterCommand:
     book_id: str
     section_id: str
     task_id: str | None = None
+    root_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,30 +172,75 @@ class ProcessChapter:
         A chapter without textual blocks — cover, image-only page — is handled
         without model calls: it has no units, nothing to save.
         """
-        work = self._load(command)
-        units = plan_translation_units(
-            work.section.ordered_blocks,
-            work.analysis.treatment_plan,
-            id_factory=self._id_factory,
-            max_source_chars=self._max_unit_source_chars,
-        )
+        work, roots = self.prepare(command)
         note_ids = note_id_factory(
             chapter_number=work.chapter_number, used=work.used_note_ids
         )
         result = ProcessChapterResult(
-            section_id=work.section.id, run_id=work.run.id, units=len(units)
+            section_id=work.section.id, run_id=work.run.id, units=len(roots)
         )
-        roots = self._recovery.prepare_roots(work, units, max_source_chars=self._max_unit_source_chars,
-                                             validator=self._validator)
-        if roots is not None:
+        try:
             return await self._process_roots(roots, work=work, note_ids=note_ids, result=result)
-        for unit in units:
-            if self._is_processed(unit, work=work):
-                continue
-            result = await self._process_unit(unit, work=work, note_ids=note_ids, result=result)
-            if result.discarded:
-                break
-        return result
+        except RecoveryError as error:
+            if error.reason == 'interrupted' and command.task_id is None:
+                return replace(result, processed_units=result.processed_units + 1, discarded=True)
+            if command.task_id is None and error.original_error is not None:
+                raise error.original_error from error
+            raise
+
+    def prepare(
+        self, command: ProcessChapterCommand, *, new_dispatcher: bool = False,
+        transaction=None,
+    ) -> tuple[_ChapterWork, tuple[str, ...]]:
+        """Pin a new dispatch once, or resume only its persisted operation references."""
+        transaction_context = nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
+        with transaction_context as tx:
+            work = self._load(command, transaction=tx)
+            units = plan_translation_units(
+                work.section.ordered_blocks,
+                work.analysis.treatment_plan,
+                id_factory=self._id_factory,
+                max_source_chars=self._max_unit_source_chars,
+            )
+            refs = None
+            conditions = tx.work.latest_conditions(command.book_id)
+            if conditions is None:
+                raise RecoveryError('conditions_unavailable')
+            if command.task_id is not None:
+                task = tx.tasks.get(command.task_id)
+                if (task is None or task.book_id != command.book_id
+                        or task.scope_id != command.section_id
+                        or task.task_type is not TaskType.PROCESS_TRANSLATION_UNIT
+                        or task.status is TaskStatus.SUPERSEDED
+                        or not task.operation_id.startswith('dispatch:') or task.policy_version != ''):
+                    raise RecoveryError('conditions_unavailable')
+                binding = tx.work.get_binding('task', task.id)
+                if binding is None and not new_dispatcher:
+                    raise RecoveryError('conditions_unavailable')
+                if binding is not None and binding['conditions_id'] != conditions.id:
+                    raise RecoveryError('conditions_unavailable')
+                if binding is not None:
+                    refs = binding['payload_json'].get('operation_refs')
+                if refs is None and not new_dispatcher:
+                    refs = ensure_legacy_operation(tx, task=task, conditions=conditions)
+            if command.root_ids is not None:
+                if len(set(command.root_ids)) != len(command.root_ids):
+                    raise RecoveryError('conditions_unavailable')
+                if refs is None:
+                    roots = tuple(tx.work.get_root(root_id) for root_id in command.root_ids)
+                    if any(root is None for root in roots):
+                        raise RecoveryError('conditions_unavailable')
+                    refs = tuple({'root_id': root.id, 'policy_version': root.policy_version} for root in roots)
+                else:
+                    by_id = {ref['root_id']: ref for ref in refs}
+                    if not set(command.root_ids) <= by_id.keys():
+                        raise RecoveryError('conditions_unavailable')
+                    refs = tuple(by_id[root_id] for root_id in command.root_ids)
+            roots = self._recovery.prepare_roots(
+                work, units, max_source_chars=self._max_unit_source_chars,
+                validator=self._validator, operation_refs=refs, transaction=tx,
+            )
+            return work, roots
 
     async def _process_unit(
         self,
@@ -200,15 +249,12 @@ class ProcessChapter:
         work: _ChapterWork,
         note_ids: Callable[[], str],
         result: ProcessChapterResult,
-        recovery: tuple[str, str] | None = None,
+        recovery: tuple[str, str],
     ) -> ProcessChapterResult:
         """One ALG-04 cycle: context assembly, model call, validation, atomic save."""
-        child_options = {}
-        if recovery is not None:
-            with self._unit_of_work.transaction() as transaction:
-                root = transaction.work.get_root(recovery[0])
-            if tuple(unit.block_ids) != tuple(root.manifest['ordered_blocks']):
-                child_options['recovery_child'] = True
+        with self._unit_of_work.transaction() as transaction:
+            root = transaction.work.get_root(recovery[0])
+        recovery_child = tuple(unit.block_ids) != tuple(root.manifest['ordered_blocks'])
         context = self._context_builder.for_translation_unit(
             document=work.document,
             section=work.section,
@@ -216,7 +262,8 @@ class ProcessChapter:
             analysis=work.analysis,
             glossary=work.run.glossary_snapshot,
             book_candidates=work.book_candidates,
-            **child_options,
+            recovery_child=recovery_child,
+            policy_version=root.policy_version,
         )
         context = replace(
             context,
@@ -226,14 +273,13 @@ class ProcessChapter:
                 task_id=work.task_id,
             ),
         )
-        if recovery is not None:
-            with self._unit_of_work.transaction() as transaction:
-                root = transaction.work.get_root(recovery[0])
-            if tuple(unit.block_ids) != tuple(root.manifest['ordered_blocks']):
-                blocks = {block.id: block for block in work.section.ordered_blocks}
-                readonly = '\n'.join(f'[read-only context] {blocks[block].text}' for block in root.manifest['ordered_blocks'])
-                context = replace(context, request=replace(context.request,
-                    input_text=context.request.input_text + '\n\nКонтекст исходной сцены; эти строки не являются дополнительными целями изменения:\n' + readonly))
+        if recovery_child and root.policy_version == LEGACY_TRANSLATION_POLICY:
+            blocks = {block.id: block for block in work.section.ordered_blocks}
+            readonly = '\n'.join(
+                f'[read-only context] {blocks[block].text}' for block in root.manifest['ordered_blocks']
+            )
+            context = replace(context, request=replace(context.request,
+                input_text=context.request.input_text + '\n\nКонтекст исходной сцены; эти строки не являются дополнительными целями изменения:\n' + readonly))
         call = await self._call.request(
             context, unit=unit, target_language=work.target_language, note_ids=note_ids,
             recovery=recovery,
@@ -273,14 +319,15 @@ class ProcessChapter:
             used = sum(transaction.work.get_root(root).calls_used for root in roots) - before
         return replace(result, attempts=used)
 
-    def _load(self, command: ProcessChapterCommand) -> _ChapterWork:
+    def _load(self, command: ProcessChapterCommand, *, transaction=None) -> _ChapterWork:
         """Loads the book, chapter analysis, and active run in a single transaction."""
-        with self._unit_of_work.transaction() as transaction:
-            document = transaction.documents.get(command.book_id)
+        transaction_context = nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
+        with transaction_context as tx:
+            document = tx.documents.get(command.book_id)
             if document is None:
                 raise ProcessChapterError(f"книги {command.book_id} нет в хранилище")
             section = _section_of(document, command)
-            analysis = transaction.analyses.get_for_section(
+            analysis = tx.analyses.get_for_section(
                 command.book_id, command.section_id
             )
             if analysis is None:
@@ -289,15 +336,15 @@ class ProcessChapter:
                     f"обрабатывать её нельзя"
                 )
             analysis.ensure_ready_for_processing()
-            run = transaction.runs.active_for_book(command.book_id)
+            run = tx.runs.active_for_book(command.book_id)
             if run is None:
                 raise ProcessChapterError(
                     f"у книги {command.book_id} нет активного запуска обработки"
                 )
-            stored = transaction.results.list_for_run(run.id)
+            stored = tx.results.list_for_run(run.id)
             book_candidates = tuple(
                 candidate
-                for chapter in transaction.analyses.list_for_book(command.book_id)
+                for chapter in tx.analyses.list_for_book(command.book_id)
                 for candidate in chapter.glossary_candidates
             )
         section_block_ids = {block.id for block in section.ordered_blocks}
@@ -321,14 +368,6 @@ class ProcessChapter:
             task_id=command.task_id,
         )
 
-    def _is_processed(self, unit: TranslationUnit, *, work: _ChapterWork) -> bool:
-        """Whether the result of this unit has been saved in full (PRD § 18.1).
-
-        A task retry does not pay for already completed work. A group is considered
-        completed only as a whole: partial saved groups do not exist, and matching
-        only some blocks would imply a different chapter splitting — requiring reprocessing.
-        """
-        return set(unit.block_ids) <= work.processed_block_ids
 
 
 class ChapterProcessingSequence:
@@ -351,20 +390,34 @@ class ChapterProcessingSequence:
         Chapters are processed independently, so all tasks are enqueued at once:
         processing order does not affect results, and worker parallelism remains
         effective (PRD § 25). A chapter without textual blocks receives no task —
-        there is nothing to process. Re-enqueuing does not duplicate tasks: enqueuing
-        is idempotent by `book_id + task_type + scope_id` (ALG-02).
+        there is nothing to process. Repeated starts return this run's existing
+        dispatchers, preserving their operation references and identities (ALG-02).
         """
         section_ids = self._section_ids_with_text(book_id)
-        tasks = [
-            await self._queue.enqueue(
-                TaskIdentity(
-                    book_id=book_id,
-                    task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-                    scope_id=section_id,
-                )
-            )
-            for section_id in section_ids
-        ]
+        tasks = []
+        for section_id in section_ids:
+            enqueue_identity = None
+            with self._unit_of_work.transaction() as transaction:
+                task = self._existing_dispatcher(book_id, section_id, transaction=transaction)
+                if task is None:
+                    enqueue_identity = TaskIdentity(
+                        book_id=book_id,
+                        task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+                        scope_id=section_id,
+                        operation_id='dispatch:' + str(uuid4()),
+                    )
+                    task = ProcessingTask(
+                        id=_new_task_id(self._queue), book_id=enqueue_identity.book_id,
+                        task_type=enqueue_identity.task_type, scope_id=enqueue_identity.scope_id,
+                        operation_id=enqueue_identity.operation_id,
+                    )
+                    transaction.tasks.add(task)
+                    self._process_chapter.prepare(ProcessChapterCommand(
+                        book_id, section_id, task.id,
+                    ), new_dispatcher=True, transaction=transaction)
+            if enqueue_identity is not None:
+                task = await self._queue.enqueue(enqueue_identity)
+            tasks.append(task)
         if not tasks:
             self._complete_processing(book_id, finished_task_id=None)
         return tuple(tasks)
@@ -375,14 +428,46 @@ class ChapterProcessingSequence:
             raise ProcessChapterError(
                 f"задача {task.id} типа {task.task_type} не является обработкой главы"
             )
-        await self._process_chapter(
-            ProcessChapterCommand(
-                book_id=task.book_id,
-                section_id=task.scope_id,
-                task_id=task.id,
+        try:
+            await self._process_chapter(
+                ProcessChapterCommand(
+                    book_id=task.book_id,
+                    section_id=task.scope_id,
+                    task_id=task.id,
+                )
             )
-        )
+        except RecoveryError as error:
+            if error.reason != 'interrupted':
+                raise
+            with self._unit_of_work.transaction() as transaction:
+                current = transaction.tasks.get(task.id)
+            if current is not None and current.status is not TaskStatus.SUPERSEDED:
+                raise
+            return
         self._complete_processing(task.book_id, finished_task_id=task.id)
+
+    def _existing_dispatcher(self, book_id: str, section_id: str, *, transaction=None) -> ProcessingTask | None:
+        """Find a dispatcher for this run; its roots are resolved only by exact refs."""
+        transaction_context = nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
+        with transaction_context as tx:
+            run = tx.runs.active_for_book(book_id)
+            conditions = tx.work.latest_conditions(book_id)
+            if run is None or conditions is None:
+                raise RecoveryError('conditions_unavailable')
+            for task in reversed(tx.tasks.list_for_book(book_id)):
+                if (task.task_type is not TaskType.PROCESS_TRANSLATION_UNIT
+                        or task.scope_id != section_id or task.status is TaskStatus.SUPERSEDED):
+                    continue
+                binding = tx.work.get_binding('task', task.id)
+                if binding is None or binding['conditions_id'] != conditions.id:
+                    continue
+                refs = binding['payload_json'].get('operation_refs')
+                if refs is None:
+                    return task
+                roots = tuple(tx.work.get_root(ref['root_id']) for ref in refs)
+                if all(root is not None and root.manifest.get('active_run_id') == run.id for root in roots):
+                    return task
+        return None
 
     def _section_ids_with_text(self, book_id: str) -> tuple[str, ...]:
         """Book chapters that contain textual blocks, in reading order."""
@@ -426,6 +511,12 @@ def _section_of(
 def _new_id() -> str:
     """Identifier for a new block group."""
     return str(uuid4())
+
+
+def _new_task_id(queue: TaskQueue) -> str:
+    """Reuse the queue's task ID source for atomically created dispatcher rows."""
+    factory = getattr(queue, "new_task_id", None)
+    return factory() if callable(factory) else _new_id()
 
 
 __all__ = [

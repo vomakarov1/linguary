@@ -8,12 +8,12 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from web_scenario import bound_queue, BOOK_ID, SOURCE_TEXT, TRANSLATED_TEXT, start_run, store_book
+from web_scenario import BOOK_ID, SOURCE_TEXT, TRANSLATED_TEXT, continue_legacy, start_run, store_book
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.llm import FakeLLMClient, FakeReply
 from linguary.composition import build_application
-from linguary.domain import BookStatus, TaskIdentity, TaskStatus, TaskType
+from linguary.domain import BookStatus, TaskStatus
 from linguary.web import create_app
 
 
@@ -147,11 +147,9 @@ async def test_unconfigured_llm_can_be_configured_without_restart(tmp_path, monk
         assert_key_is_private(configured, "saved-secret")
         assert fake.call_count == 0
         scenario = store_book(app, status=BookStatus.PROCESSING, chapters=((SOURCE_TEXT,),))
+        continue_legacy(app)
         start_run(app, scenario)
-        task = await bound_queue(app).enqueue(TaskIdentity(
-            book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-            scope_id=scenario.section().id,
-        ))
+        (task,) = await app.processing.start(BOOK_ID)
         await asyncio.wait_for(completed.wait(), 5)
         assert app.task_queue is stable_queue and app.runner is stable_runner
         assert outcomes[0].id == task.id and outcomes[0].status is TaskStatus.SUCCEEDED

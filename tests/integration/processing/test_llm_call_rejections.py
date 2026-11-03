@@ -18,7 +18,7 @@ from linguary.application.ports.llm import LLMRequest, LLMResponse
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.use_cases.analyze_chapter import AnalyzeChapter, AnalyzeChapterCommand
 from linguary.composition import build_application, drain_tasks
-from linguary.domain import ErrorType, TaskIdentity, TaskType
+from linguary.domain import ErrorType
 from processing_scenario import (
     BOOK_ID,
     block_reply,
@@ -71,14 +71,8 @@ async def test_rejected_translation_logged_unsuccessful_with_reason(
     )
     try:
         scenario = store_processing_book(application.unit_of_work)
-        await application.task_queue.enqueue(
-            TaskIdentity(
-                book_id=BOOK_ID,
-                task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-                scope_id=scenario.section().id,
-            )
-        )
         choose_legacy_fixture(application)
+        await application.processing.start(BOOK_ID)
         await drain_tasks(application)
         with application.unit_of_work.transaction() as transaction:
             calls = transaction.llm_calls.list_for_book(BOOK_ID)
@@ -161,13 +155,8 @@ async def test_retry_instruction_uses_alias_and_keeps_rejection_log(
         scenario = store_processing_book(
             application.unit_of_work, chapters=(('"We shall return." He left.',),)
         )
-        await application.task_queue.enqueue(
-            TaskIdentity(
-                book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-                scope_id=scenario.section().id,
-            )
-        )
         choose_legacy_fixture(application)
+        await application.processing.start(BOOK_ID)
         await drain_tasks(application)
         assert client.call_count == 2
         retry = client.requests[1].instructions
