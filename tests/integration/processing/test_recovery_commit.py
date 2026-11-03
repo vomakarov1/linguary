@@ -63,7 +63,10 @@ async def test_rejected_original_never_partially_accepted_and_children_union_com
             assert [call.diagnostic_meta['decision'] for call in calls] == ['rejected', 'rejected', 'accepted', 'accepted']
         child_requests = [request for request in fake.requests if request.stage == LLMCallStage.TRANSLATION_UNIT and len(request.ordered_block_ids) == 1]
         assert len(child_requests) == 2
-        assert all('Контекст исходной сцены' in request.input_text for request in child_requests)
+        assert {request.ordered_block_ids for request in child_requests} == {
+            (block.id,) for block in doc.sections[0].blocks
+        }
+        assert all('Контекст исходной сцены' not in request.input_text for request in child_requests)
     finally:
         await app.aclose()
 
