@@ -42,9 +42,9 @@ class SqliteTaskQueue:
         """Claims the next `pending` task, transitioning it to `running`."""
         return await asyncio.to_thread(self._store.claim_next_pending)
 
-    async def save(self, task: ProcessingTask) -> None:
-        """Persists the updated task state."""
-        await asyncio.to_thread(self._store.save, task)
+    async def save(self, task: ProcessingTask) -> ProcessingTask:
+        """Persists the task and returns its effective stored state."""
+        return await asyncio.to_thread(self._store.save, task)
 
     async def list_running(self) -> tuple[ProcessingTask, ...]:
         """Tasks currently in `running` state in creation order."""

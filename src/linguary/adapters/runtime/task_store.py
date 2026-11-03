@@ -22,6 +22,7 @@ from linguary.adapters.db import mapping
 from linguary.adapters.db.engine import create_session_factory
 from linguary.adapters.db.models import ProcessingTaskRow
 from linguary.adapters.db.repositories import SqlAlchemyTaskRepository
+from linguary.application.ports.persistence import PersistenceError
 from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus
 
 #: Explicit write transaction start. A deferred SQLite transaction acquires write locks only
@@ -101,19 +102,26 @@ class SqliteTaskStore:
         finally:
             session.close()
 
-    def save(self, task: ProcessingTask) -> None:
-        """Persists updated task state without resurrecting canceled tasks.
+    def save(self, task: ProcessingTask) -> ProcessingTask:
+        """Persists task state and returns its effective state.
 
         Returning to glossary review deletes tasks from the canceled run, including
         any task currently being executed (PRD § 21.5). There is no longer a row to record
-        its outcome: a missing row is normal completion for canceled work rather than a queue failure,
-        and workers must not crash because of it.
+        its outcome, so the passed task is returned for canceled work. If a newer operation
+        superseded the task, its stored superseded state is returned.
         """
         with self._session_factory.begin() as session:
             repository = SqlAlchemyTaskRepository(session)
-            if repository.get(task.id) is None:
-                return
-            repository.save(task)
+            try:
+                repository.save(task)
+            except PersistenceError:
+                current = repository.get(task.id)
+                if current is None:
+                    return task
+                if current.status is TaskStatus.SUPERSEDED and current.identity == task.identity:
+                    return current
+                raise
+            return task
 
     def list_running(self) -> tuple[ProcessingTask, ...]:
         """Tasks currently in `running` state in creation order."""

@@ -63,8 +63,8 @@ class TaskQueue(Protocol):
         Returns the claimed task or `None` if the queue is empty.
         """
 
-    async def save(self, task: ProcessingTask) -> None:
-        """Persists the new status of a task.
+    async def save(self, task: ProcessingTask) -> ProcessingTask:
+        """Persists the new status and returns the current stored task.
 
         Saving does not resurrect a task removed from the queue: returning to glossary
         review removes tasks of the cancelled run along with active ones, leaving nowhere
@@ -137,8 +137,7 @@ class TaskRunner:
 
     async def _save(self, task: ProcessingTask) -> ProcessingTask:
         """Persists the completed state of the task."""
-        await self._queue.save(task)
-        return task
+        return await self._queue.save(task)
 
 
 def _unregistered_handler_error(task: ProcessingTask) -> TaskError:

@@ -428,22 +428,30 @@ class ChapterProcessingSequence:
             raise ProcessChapterError(
                 f"задача {task.id} типа {task.task_type} не является обработкой главы"
             )
-        try:
-            await self._process_chapter(
-                ProcessChapterCommand(
-                    book_id=task.book_id,
-                    section_id=task.scope_id,
-                    task_id=task.id,
-                )
-            )
-        except RecoveryError as error:
-            if error.reason != 'interrupted':
-                raise
-            with self._unit_of_work.transaction() as transaction:
-                current = transaction.tasks.get(task.id)
-            if current is not None and current.status is not TaskStatus.SUPERSEDED:
-                raise
-            return
+        command = ProcessChapterCommand(
+            book_id=task.book_id,
+            section_id=task.scope_id,
+            task_id=task.id,
+        )
+        while True:
+            try:
+                await self._process_chapter(command)
+                break
+            except RecoveryError as error:
+                if error.reason != 'interrupted':
+                    raise
+                with self._unit_of_work.transaction() as transaction:
+                    current = transaction.tasks.get(task.id)
+                    binding = transaction.work.get_binding('task', task.id)
+                if current is None or current.status is TaskStatus.SUPERSEDED:
+                    return
+                refs = () if binding is None else binding['payload_json'].get('operation_refs', ())
+                if error.root_id is None or any(ref['root_id'] == error.root_id for ref in refs):
+                    raise
+                # Restart removed this root from a still-active dispatcher. Re-read its
+                # saved references so the remaining roots continue under the same task.
+                if current.status is not TaskStatus.RUNNING:
+                    raise
         self._complete_processing(task.book_id, finished_task_id=task.id)
 
     def _existing_dispatcher(self, book_id: str, section_id: str, *, transaction=None) -> ProcessingTask | None:

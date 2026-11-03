@@ -136,9 +136,10 @@ async def test_unconfigured_llm_can_be_configured_without_restart(tmp_path, monk
         outcomes = []
 
         async def save(task):
-            await original_save(task)
-            outcomes.append(task)
+            stored = await original_save(task)
+            outcomes.append(stored)
             completed.set()
+            return stored
 
         monkeypatch.setattr(app.task_queue, "save", save)
         configured = await web.post("/system/config", json=payload(requests_per_minute=None))

@@ -4,17 +4,19 @@ import asyncio
 
 import pytest
 
+from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.llm import FakeLLMClient, FakeReply
 from linguary.application.ports.llm import LLMTransportError
+from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.restart_translation import (
     RestartTranslationCommand,
     RestartTranslationConflict,
     RestartTranslationError,
 )
 from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
-from linguary.composition import drain_tasks
+from linguary.composition import build_application, drain_tasks
 from linguary.domain import LLMCallStage, TaskStatus
-from test_book_conditions import make_app
+from test_book_conditions import make_app, store_imported
 from test_recovery_commit import analysis_reply, prepare, translation_reply
 
 
@@ -145,16 +147,16 @@ async def test_concurrent_old_response_cannot_overwrite_successor(tmp_path):
     fake = PausingClient([analysis_reply(1), translation_reply(1)])
     app = make_app(tmp_path, fake)
     document, run, task = await prepare(app, blocks=1)
-    claimed = await app.task_queue.claim_next_pending()
-    assert claimed is not None and claimed.id == task.id
-    running = asyncio.create_task(app.processing.run_task(claimed))
+    running = asyncio.create_task(app.runner.run_next())
     try:
         await asyncio.wait_for(entered.wait(), 5)
         with app.unit_of_work.transaction() as transaction:
             old_root, = transaction.work.list_roots("book-1", run_id=run.id)
         result = restart(app, old_root)
         release.set()
-        await asyncio.wait_for(running, 5)
+        old_completed = await asyncio.wait_for(running, 5)
+        assert old_completed is not None
+        assert old_completed.status is TaskStatus.SUPERSEDED
         fake.default = translation_reply(1)
         with app.unit_of_work.transaction() as transaction:
             assert transaction.results.get(run.id, document.sections[0].blocks[0].id) is None
@@ -172,6 +174,91 @@ async def test_concurrent_old_response_cannot_overwrite_successor(tmp_path):
         release.set()
         if not running.done():
             await running
+        await app.aclose()
+
+
+async def test_restart_one_root_keeps_other_dispatch_roots_running(tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausingClient(FakeLLMClient):
+        async def generate(self, request):
+            if request.stage == LLMCallStage.TRANSLATION_UNIT:
+                if not entered.is_set():
+                    entered.set()
+                    await release.wait()
+                steps = list(self.replies)
+                index = len(self.requests)
+                while len(steps) <= index:
+                    steps.append(FakeReply.of_payload({"blocks": [], "language_notes": []}))
+                steps[index] = FakeReply.of_payload({
+                    "blocks": [
+                        {
+                            "source_block_id": f"b{block_index}",
+                            "treatment": "TRANSLATE",
+                            "translated_text": "Кот был здесь.",
+                            "glossary_hints": [],
+                        }
+                        for block_index, _ in enumerate(request.ordered_block_ids, start=1)
+                    ],
+                    "language_notes": [],
+                })
+                self.replies = tuple(steps)
+            return await super().generate(request)
+
+    fake = PausingClient([analysis_reply(2)])
+    app = build_application(settings=AppSettings(
+        llm=LLMSettings(
+            model="pinned-model",
+            api_key="synthetic-secret",
+            proxy_mode="direct",
+            max_unit_source_chars=15,
+        ),
+        storage=StorageSettings(data_root=str(tmp_path / "data")),
+    ), llm_client=fake)
+    try:
+        document = store_imported(app, (("The cat sat.", "The dog ran."),))
+        await app.analysis.start("book-1")
+        analysis = await drain_tasks(app)
+        assert analysis[0].status is TaskStatus.SUCCEEDED
+        run = app.start_processing()(StartProcessingCommand("book-1"))
+        dispatchers = await app.processing.start("book-1")
+        dispatcher = dispatchers[0]
+        with app.unit_of_work.transaction() as transaction:
+            binding = transaction.work.get_binding("task", dispatcher.id)
+            refs = binding["payload_json"]["operation_refs"]
+            assert len(refs) == 2
+            restarted_root = transaction.work.get_root(refs[0]["root_id"])
+            retained_root = transaction.work.get_root(refs[1]["root_id"])
+
+        running = asyncio.create_task(app.runner.run_next())
+        await asyncio.wait_for(entered.wait(), 5)
+        successor = restart(app, restarted_root)
+        release.set()
+        completed_dispatcher = await asyncio.wait_for(running, 5)
+        assert completed_dispatcher is not None
+        assert completed_dispatcher.id == dispatcher.id
+        assert completed_dispatcher.status is TaskStatus.SUCCEEDED, completed_dispatcher.last_error
+
+        with app.unit_of_work.transaction() as transaction:
+            assert transaction.work.get_root(retained_root.id).status == "complete"
+            assert transaction.tasks.get(dispatcher.id).status is TaskStatus.SUCCEEDED
+            assert transaction.tasks.get(successor.task_id).status is TaskStatus.PENDING
+
+        completed_successor = await drain_tasks(app)
+        assert completed_successor[0].id == successor.task_id
+        assert completed_successor[0].status is TaskStatus.SUCCEEDED, completed_successor[0].last_error
+        with app.unit_of_work.transaction() as transaction:
+            successor_root = transaction.work.get_root(successor.successor_root_id)
+            assert successor_root.status == "complete"
+            for block_id, root_id in (
+                (document.sections[0].blocks[0].id, successor_root.id),
+                (document.sections[0].blocks[1].id, retained_root.id),
+            ):
+                binding = transaction.work.get_binding("result", f"{run.id}:{block_id}")
+                assert binding["payload_json"]["root_id"] == root_id
+    finally:
+        release.set()
         await app.aclose()
 
 

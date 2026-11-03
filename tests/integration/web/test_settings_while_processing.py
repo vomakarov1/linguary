@@ -117,10 +117,11 @@ def observe_tasks(app, monkeypatch):
     original = app.task_queue.save
 
     async def save(task):
-        await original(task)
+        stored = await original(task)
         if task.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}:
-            outcomes[task.id] = task
+            outcomes[task.id] = stored
             completed[task.id].set()
+        return stored
 
     monkeypatch.setattr(app.task_queue, "save", save)
     return completed, outcomes

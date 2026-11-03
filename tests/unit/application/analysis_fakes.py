@@ -479,12 +479,13 @@ class FakeTaskQueue:
                 return claimed
         return None
 
-    async def save(self, task: ProcessingTask) -> None:
+    async def save(self, task: ProcessingTask) -> ProcessingTask:
         for index, stored in enumerate(self.tasks):
             if stored.id == task.id:
                 self.tasks[index] = task
-                return
+                return task
         self.tasks.append(task)
+        return task
 
     async def list_running(self) -> tuple[ProcessingTask, ...]:
         return tuple(

@@ -102,7 +102,7 @@ class BoundTaskQueue:
         return task
 
     async def save(self, task):
-        await self.queue.save(task)
+        return await self.queue.save(task)
 
 
 class ProvenanceClient:

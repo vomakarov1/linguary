@@ -121,10 +121,11 @@ class SlowSavingQueue:
     async def claim_next_pending(self) -> ProcessingTask | None:
         return await self.inner.claim_next_pending()
 
-    async def save(self, task: ProcessingTask) -> None:
+    async def save(self, task: ProcessingTask) -> ProcessingTask:
         await asyncio.sleep(self.delay_seconds)
-        await self.inner.save(task)
+        stored = await self.inner.save(task)
         self.saved.append(task.id)
+        return stored
 
     async def list_running(self) -> tuple[ProcessingTask, ...]:
         return await self.inner.list_running()
