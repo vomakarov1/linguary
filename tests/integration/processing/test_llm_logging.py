@@ -69,10 +69,11 @@ async def test_llm_calls_are_logged_per_attempt(application: Application) -> Non
     assert [entry.attempt for entry in logs] == [1, 2]
     assert [entry.success for entry in logs] == [False, True]
     assert logs[0].stage is LLMCallStage.TRANSLATION_UNIT
-    assert logs[0].task_id == "task-1"
+    assert logs[0].task_id == finished[0].id
     assert logs[0].error is not None
     assert logs[0].error.type is ErrorType.MODEL_OUTPUT
     assert logs[1].usage == TokenUsage(prompt_tokens=10, completion_tokens=20)
+    assert logs[1].task_id == finished[0].id
 
 
 @pytest.mark.parametrize("debug", [False, True])
