@@ -17,17 +17,18 @@ is still active. The shared logic lives in `application/block_processing.py`.
 
 The queue task scope is the block rather than the chapter: regeneration of different blocks
 runs independently, and a chapter-scoped key would collapse such requests into a single task.
-A repeated request for the same block removes its previous completed task and enqueues a new one —
-otherwise the idempotent key would forever remember the initial result (PRD § 18.1).
+Each explicit repeat creates an operation with a pinned policy; completed tasks remain in history.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
+from linguary.application import recovery
 from linguary.application.block_processing import (
     BlockProcessingError,
     Sleep,
@@ -41,8 +42,10 @@ from linguary.application.context_builder import ContextBuilder, is_textual
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
+from linguary.application.recovery import Recovery, RecoveryError, RecoverySplit
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.task_runner import TaskQueue
+from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
 from linguary.application.validators import TranslationResultValidator
 from linguary.domain import (
     BookEvent,
@@ -62,6 +65,7 @@ from linguary.domain import (
     TranslationUnit,
     apply_book_event,
 )
+from linguary.domain.recovery import RecoveryRoot
 
 #: Tasks after which the book returns to READY_TO_EXPORT: chapter processing and block
 #: regeneration both keep the book in PROCESSING (ALG-06).
@@ -86,6 +90,7 @@ class RegenerateBlockCommand:
     book_id: str
     block_id: str
     task_id: str | None = None
+    root_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,12 +162,20 @@ class RegenerateBlock:
         )
         self._context_builder = context_builder or ContextBuilder()
         self._id_factory = id_factory or _new_id
+        self._validator = validator
+        self._recovery = Recovery(unit_of_work)
 
     async def __call__(self, command: RegenerateBlockCommand) -> RegenerateBlockResult:
         """One ALG-04 cycle for a single block (PRD § 13, § 19.3)."""
         work = self._load(command)
+        root = self._prepare_root(work, command)
+        scopes = self._recovery.plan_unresolved(root.id)
+        if not scopes:
+            self._recovery.assert_complete(root.id)
+            return RegenerateBlockResult(work.block.id, work.run.id, saved=True)
+        (scope,) = scopes
         unit = TranslationUnit.of_blocks(
-            id=self._id_factory(),
+            id=scope.id,
             blocks=(work.block,),
             plan=work.analysis.treatment_plan,
         )
@@ -173,6 +186,7 @@ class RegenerateBlock:
             analysis=work.analysis,
             glossary=work.run.glossary_snapshot,
             book_candidates=work.book_candidates,
+            policy_version=root.policy_version,
         )
         context = replace(
             context,
@@ -182,14 +196,25 @@ class RegenerateBlock:
                 task_id=work.task_id,
             ),
         )
-        call = await self._call.request(
-            context,
-            unit=unit,
-            target_language=work.target_language,
-            note_ids=note_id_factory(
-                chapter_number=work.chapter_number, used=work.used_note_ids
-            ),
-        )
+        try:
+            call = await self._call.request(
+                context,
+                unit=unit,
+                target_language=work.target_language,
+                note_ids=note_id_factory(
+                    chapter_number=work.chapter_number, used=work.used_note_ids
+                ),
+                recovery=(root.id, scope.id),
+            )
+        except RecoverySplit:
+            self._recovery.split(root.id, scope.id)
+            raise
+        except RecoveryError:
+            with self._unit_of_work.transaction() as transaction:
+                run = transaction.runs.active_for_book(work.document.id)
+            if run is None or run.id != work.run.id:
+                return RegenerateBlockResult(work.block.id, work.run.id)
+            raise
         saved = self._call.save(
             book_id=work.document.id, run_id=work.run.id, results=call.results
         )
@@ -205,9 +230,36 @@ class RegenerateBlock:
         """Validates the request before enqueuing a background task."""
         self._load(command)
 
-    def _load(self, command: RegenerateBlockCommand) -> _BlockWork:
+    def prepare_operation(self, command: RegenerateBlockCommand, *, transaction=None) -> RecoveryRoot:
+        """Pin a single-block operation before scheduling its first physical call."""
+        return self._prepare_root(self._load(command, transaction=transaction), command, transaction=transaction)
+
+    def _prepare_root(
+        self, work: _BlockWork, command: RegenerateBlockCommand, *, transaction=None
+    ) -> RecoveryRoot:
+        refs = None
+        context = lambda: nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
+        if command.root_id is not None:
+            with context() as tx:
+                root = tx.work.get_root(command.root_id)
+                if root is None:
+                    raise RecoveryError('conditions_unavailable', command.root_id)
+            refs = ({'root_id': root.id, 'policy_version': root.policy_version},)
+        unit = TranslationUnit.of_blocks(
+            id=self._id_factory(), blocks=(work.block,), plan=work.analysis.treatment_plan
+        )
+        (root_id,) = self._recovery.prepare_roots(
+            work, (unit,), max_source_chars=DEFAULT_MAX_UNIT_SOURCE_CHARS,
+            validator=self._validator, operation_refs=refs, operation_kind='regeneration',
+            transaction=transaction
+        )
+        with context() as tx:
+            return tx.work.get_root(root_id)
+
+    def _load(self, command: RegenerateBlockCommand, *, transaction=None) -> _BlockWork:
         """Loads the book, block, chapter analysis, and active run in a single transaction."""
-        with self._unit_of_work.transaction() as transaction:
+        context = nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
+        with context as transaction:
             document = transaction.documents.get(command.book_id)
             if document is None:
                 raise RegenerateBlockNotFoundError(
@@ -229,8 +281,11 @@ class RegenerateBlock:
                 raise RegenerateBlockError(
                     f"у книги {command.book_id} нет активного запуска обработки"
                 )
-            if any(not transaction.work.root_coverage_complete(root.id)
-                   for root in transaction.work.list_roots(command.book_id, run_id=run.id)):
+            if any(
+                root.operation_kind == 'translation'
+                and not transaction.work.root_coverage_complete(root.id)
+                for root in transaction.work.list_active_roots(command.book_id, run_id=run.id)
+            ):
                 raise RegenerateBlockError('книга ещё обрабатывается: восстановление не завершено')
             stored = transaction.results.list_for_run(run.id)
             book_candidates = tuple(
@@ -269,33 +324,50 @@ class BlockRegenerationSequence:
         self._unit_of_work = unit_of_work
         self._queue = queue
         self._regenerate_block = regenerate_block
-
     async def start(self, book_id: str, block_id: str) -> ProcessingTask:
-        """User request to regenerate a block (ALG-02, ALG-06).
-
-        While a task for this block is pending or running, a repeated request does not create
-        a new task: the user clicked the button twice. A completed task is removed; otherwise
-        its idempotent key would forever remember the first result and the block could not
-        be regenerated a second time.
-        """
-        self._regenerate_block.ensure_regeneratable(
-            RegenerateBlockCommand(book_id=book_id, block_id=block_id)
-        )
-        identity = TaskIdentity(
-            book_id=book_id, task_type=TaskType.REGENERATE_BLOCK, scope_id=block_id
-        )
+        """Atomically persist a regeneration operation, then return its queued task."""
+        command = RegenerateBlockCommand(book_id=book_id, block_id=block_id)
         with self._unit_of_work.transaction() as transaction:
             book = book_record(transaction, book_id)
-            existing = transaction.tasks.find_by_identity(identity)
-            if existing is not None and existing.status in _ACTIVE_TASK_STATUSES:
-                return existing
             status = _status_after_request(transaction, book)
-            if existing is not None:
-                transaction.tasks.delete(existing.id)
+            self._regenerate_block._load(command, transaction=transaction)
+            run = transaction.runs.active_for_book(book_id)
+            conditions = transaction.work.latest_conditions(book_id)
+            for existing in transaction.tasks.list_for_book(book_id):
+                if (existing.task_type is not TaskType.REGENERATE_BLOCK
+                        or existing.scope_id != block_id or existing.status not in _ACTIVE_TASK_STATUSES
+                        or existing.policy_version != recovery.CURRENT_TRANSLATION_POLICY):
+                    continue
+                root = transaction.work.get_root(existing.operation_id)
+                binding = transaction.work.get_binding('task', existing.id)
+                if (root is not None and root.book_id == book_id and root.superseded_by is None
+                        and root.status != 'stopped' and root.operation_kind == 'regeneration'
+                        and root.policy_version == existing.policy_version
+                        and run is not None and root.manifest.get('active_run_id') == run.id
+                        and tuple(root.manifest.get('ordered_blocks', ())) == (block_id,)
+                        and conditions is not None and root.conditions_id == conditions.id
+                        and binding is not None and binding['book_id'] == book_id
+                        and binding['conditions_id'] == root.conditions_id
+                        and binding['payload_json'].get('operation_refs') == [
+                            {'root_id': root.id, 'policy_version': root.policy_version}
+                        ]):
+                    scopes = transaction.work.list_scopes(root.id)
+                    if len(scopes) == 1 and scopes[0].ordered_blocks == (block_id,):
+                        return existing
+            root = self._regenerate_block.prepare_operation(command, transaction=transaction)
+            identity = TaskIdentity(book_id=book_id, task_type=TaskType.REGENERATE_BLOCK,
+                                    scope_id=block_id, operation_id=root.id,
+                                    policy_version=root.policy_version)
+            task = ProcessingTask(id=_new_id(), book_id=book_id, task_type=identity.task_type,
+                                  scope_id=block_id, operation_id=root.id,
+                                  policy_version=root.policy_version)
+            transaction.tasks.add(task)
+            transaction.work.bind_operation_refs(
+                task.id, book_id=book_id, conditions_id=root.conditions_id,
+                operation_refs=({'root_id': root.id, 'policy_version': root.policy_version},)
+            )
             if status is not book.status:
-                transaction.books.save(
-                    replace(book, status=status, export_validation_status=None)
-                )
+                transaction.books.save(replace(book, status=status, export_validation_status=None))
         return await self._queue.enqueue(identity)
 
     async def run_task(self, task: ProcessingTask) -> None:
@@ -304,11 +376,16 @@ class BlockRegenerationSequence:
             raise RegenerateBlockError(
                 f"задача {task.id} типа {task.task_type} не является повторной генерацией"
             )
+        with self._unit_of_work.transaction() as transaction:
+            root = transaction.work.get_root(task.operation_id) if task.operation_id else None
+            if root is None or root.policy_version != task.policy_version:
+                raise RecoveryError('conditions_unavailable', task.operation_id)
         await self._regenerate_block(
             RegenerateBlockCommand(
                 book_id=task.book_id,
                 block_id=task.scope_id,
                 task_id=task.id,
+                root_id=task.operation_id,
             )
         )
         complete_processing(
@@ -334,7 +411,7 @@ def _status_after_request(transaction: UnitOfWork, book: BookRecord) -> BookStat
         task
         for task in transaction.tasks.list_for_book(book.id)
         if task.task_type is TaskType.PROCESS_TRANSLATION_UNIT
-        and task.status is not TaskStatus.SUCCEEDED
+        and task.status not in (TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED)
     )
     if unfinished:
         raise RegenerateBlockError(

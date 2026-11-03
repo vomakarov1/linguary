@@ -18,8 +18,8 @@ from processing_scenario import (
     TRANSLATED_TEXT,
     InterruptingLLMClient,
     block_reply,
-    make_process_chapter,
-    make_regenerate_block,
+    make_process_chapter as _make_process_chapter,
+    make_regenerate_block as _make_regenerate_block,
     note_reply,
     store_book_with_rejected_variant,
     store_processing_book,
@@ -29,7 +29,11 @@ from processing_scenario import (
 
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.llm import FakeLLMClient
+from linguary.adapters.llm.logging import LoggingLLMClient
+from linguary.application.book_conditions import BookConditionsService
 from linguary.application.context_builder import ContextBuilder
+from linguary.application.recovery import RecoveryError
+from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
 from linguary.application.retry_policy import ResultValidationError
 from linguary.application.use_cases.process_chapter import ProcessChapterCommand
 from linguary.application.use_cases.regenerate_block import (
@@ -37,6 +41,7 @@ from linguary.application.use_cases.regenerate_block import (
     RegenerateBlockError,
 )
 from linguary.domain import BlockProcessingResult, BlockTreatment
+from linguary.composition.book_runtime import ProvenanceClient
 
 #: Another translation of the same paragraph: demonstrates that the block result was replaced.
 REGENERATED_TEXT = "Всем известно: одинокий богач непременно ищет себе жену."
@@ -55,6 +60,30 @@ DISTINCT_CHAPTER = (
     "The fourth paragraph turns the mood.",
     "The fifth paragraph closes the visit.",
 )
+
+
+def pinned_client(unit_of_work, client):
+    """Use the persisted call lifecycle for isolated processing fixtures."""
+    service = BookConditionsService(unit_of_work,
+        snapshot_factory=lambda book, revision: {"schema_version": 1,
+            "reader_level": "b1",
+            "models": {"processing": "pinned-model"},
+            "checks": {"language_notes_per_chapter": 10}},
+        settings_revision=lambda: 0, source_digest=lambda path: "synthetic-source")
+    with unit_of_work.transaction() as uow:
+        conditions = uow.work.latest_conditions(BOOK_ID)
+        if conditions is None:
+            conditions = service.create(uow, uow.books.get(BOOK_ID), 0)
+    return ProvenanceClient(LoggingLLMClient(client, unit_of_work, "fake", "pinned-model"),
+        service, conditions.id)
+
+
+def make_process_chapter(unit_of_work, client, **options):
+    return _make_process_chapter(unit_of_work, pinned_client(unit_of_work, client), **options)
+
+
+def make_regenerate_block(unit_of_work, client, **options):
+    return _make_regenerate_block(unit_of_work, pinned_client(unit_of_work, client), **options)
 
 
 def stored_results(
@@ -109,6 +138,90 @@ async def test_regeneration_replaces_only_the_target_block(
     ]
 
 
+async def test_regeneration_replaces_only_explicit_target_and_keeps_old_provenance(unit_of_work):
+    scenario = store_processing_book(unit_of_work)
+    await process_chapter(unit_of_work, aliases=("b1", "b2"))
+    target, neighbour = scenario.block_ids()
+    with unit_of_work.transaction() as uow:
+        previous = uow.work.get_binding("result", f"{RUN_ID}:{target}")
+        previous_artifact = uow.work.get_artifact(previous["artifact_revision_id"])
+        neighbour_binding = uow.work.get_binding("result", f"{RUN_ID}:{neighbour}")
+    client = FakeLLMClient.always(translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)]))
+    regenerate, _ = make_regenerate_block(unit_of_work, client)
+
+    await regenerate(RegenerateBlockCommand(BOOK_ID, target))
+
+    context = client.last_request.call_context
+    assert context is not None
+    assert context.policy_version == CURRENT_TRANSLATION_POLICY
+    assert client.last_request.ordered_block_ids == (target,)
+    with unit_of_work.transaction() as uow:
+        current = uow.work.get_binding("result", f"{RUN_ID}:{target}")
+        assert current["payload_json"]["root_id"] == context.root_id
+        assert current["payload_json"]["root_id"] != previous["payload_json"]["root_id"]
+        assert uow.work.get_artifact(previous["artifact_revision_id"]) == previous_artifact
+        assert uow.work.get_binding("result", f"{RUN_ID}:{neighbour}") == neighbour_binding
+
+
+async def test_regeneration_and_chapter_share_context_rules(unit_of_work):
+    from linguary.domain import TranslationUnit
+
+    scenario = store_processing_book(unit_of_work, chapters=(DISTINCT_CHAPTER,))
+    target = scenario.block_ids()[2]
+    builder = ContextBuilder()
+    with unit_of_work.transaction() as uow:
+        analysis = uow.analyses.get_for_section(BOOK_ID, "section-1")
+        run = uow.runs.active_for_book(BOOK_ID)
+    unit = TranslationUnit.of_blocks(id="target", blocks=(scenario.section().ordered_blocks[2],), plan=analysis.treatment_plan)
+    chapter = builder.for_translation_unit(document=scenario.document, section=scenario.section(), unit=unit,
+        analysis=analysis, glossary=run.glossary_snapshot, policy_version=CURRENT_TRANSLATION_POLICY)
+    client = FakeLLMClient.always(translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)]))
+    regenerate, _ = make_regenerate_block(unit_of_work, client, context_builder=builder)
+
+    await regenerate(RegenerateBlockCommand(BOOK_ID, target))
+
+    assert client.last_request.input_text == chapter.request.input_text
+    assert client.last_request.ordered_block_ids == (target,)
+
+
+async def test_resuming_completed_regeneration_does_not_replace_its_result(unit_of_work):
+    scenario = store_processing_book(unit_of_work)
+    client = FakeLLMClient.always(translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)]))
+    regenerate, _ = make_regenerate_block(unit_of_work, client)
+    target = scenario.block_ids()[0]
+    await regenerate(RegenerateBlockCommand(BOOK_ID, target))
+    root_id = client.last_request.call_context.root_id
+    previous = stored_results(unit_of_work)
+
+    result = await regenerate(RegenerateBlockCommand(BOOK_ID, target, root_id=root_id))
+
+    assert result.saved
+    assert result.attempts == 0
+    assert client.call_count == 1
+    assert stored_results(unit_of_work) == previous
+    with unit_of_work.transaction() as uow:
+        assert len(uow.work.list_roots(BOOK_ID, run_id=RUN_ID)) == 1
+
+
+async def test_superseded_translation_root_does_not_block_regeneration(unit_of_work):
+    from dataclasses import replace
+    from uuid import uuid4
+
+    scenario = store_processing_book(unit_of_work)
+    await process_chapter(unit_of_work, aliases=("b1", "b2"))
+    with unit_of_work.transaction() as uow:
+        successor, = uow.work.list_roots(BOOK_ID, run_id=RUN_ID)
+        uow.work.add_root(replace(successor, id=str(uuid4()), root_key=str(uuid4()),
+            status="stopped", reason="interrupted", superseded_by=successor.id))
+    client = FakeLLMClient.always(translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)]))
+    regenerate, _ = make_regenerate_block(unit_of_work, client)
+
+    result = await regenerate(RegenerateBlockCommand(BOOK_ID, scenario.block_ids()[0]))
+
+    assert result.saved
+    assert client.call_count == 1
+
+
 async def test_regeneration_replaces_notes_of_the_target_block(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
@@ -159,10 +272,10 @@ async def test_request_carries_neighbour_blocks_without_aliases(
     assert "[b2]" not in text
 
 
-async def test_neighbour_context_is_limited_by_the_builder(
+async def test_neighbour_context_is_limited_by_the_pinned_policy(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
-    """Neighbors count is exactly as limited by `ContextBuilder`, and only within its chapter."""
+    """Current operations use the shared two-neighbour rule over old local settings."""
     scenario = store_processing_book(unit_of_work, chapters=(DISTINCT_CHAPTER,))
     client = FakeLLMClient.always(
         translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)])
@@ -178,7 +291,8 @@ async def test_neighbour_context_is_limited_by_the_builder(
     text = client.last_request.input_text
     assert "До блока:" not in text
     assert DISTINCT_CHAPTER[1] in text
-    assert DISTINCT_CHAPTER[2] not in text
+    assert DISTINCT_CHAPTER[2] in text
+    assert DISTINCT_CHAPTER[3] not in text
 
 
 async def test_result_for_a_neighbour_block_is_rejected(
@@ -197,10 +311,12 @@ async def test_result_for_a_neighbour_block_is_rejected(
     )
     regenerate, _ = make_regenerate_block(unit_of_work, client, max_attempts=1)
 
-    with pytest.raises(ResultValidationError, match="вне запроса"):
+    with pytest.raises(RecoveryError, match="unsafe_partition") as rejected:
         await regenerate(
             RegenerateBlockCommand(book_id=BOOK_ID, block_id=scenario.block_ids()[0])
         )
+    assert isinstance(rejected.value.original_error, ResultValidationError)
+    assert "вне запроса" in str(rejected.value.original_error)
 
     assert [item.translated_text for item in stored_results(unit_of_work)] == [
         TRANSLATED_TEXT,
@@ -363,8 +479,9 @@ async def test_regeneration_atomically_replaces_evidence(unit_of_work, accept):
         assert current[0].content_evidence.evidence[0].body_excerpt == body
         assert current[1] == previous[1]
     else:
-        with pytest.raises(ResultValidationError):
+        with pytest.raises(RecoveryError, match="unsafe_partition") as rejected:
             await regenerate(command)
+        assert isinstance(rejected.value.original_error, ResultValidationError)
         assert len(client.requests) == 2
         assert stored_results(unit_of_work) == previous
 
@@ -386,7 +503,8 @@ async def test_failed_regeneration_preserves_accepted_fragment_help(unit_of_work
         block_reply('b1', translated_text=UNTRANSLATED_TEXT),
     ]))
     regenerate, _ = make_regenerate_block(unit_of_work, client, max_attempts=1)
-    with pytest.raises(ResultValidationError):
+    with pytest.raises(RecoveryError, match="unsafe_partition") as rejected:
         await regenerate(RegenerateBlockCommand(book_id=BOOK_ID, block_id=owner))
+    assert isinstance(rejected.value.original_error, ResultValidationError)
     assert stored_results(unit_of_work) == previous
     assert previous[0].fragment_assistances == (help,)

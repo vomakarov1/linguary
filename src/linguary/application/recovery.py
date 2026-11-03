@@ -1,4 +1,5 @@
 """Finite durable recovery of disjoint, source-bound processing scopes."""
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
@@ -110,23 +111,24 @@ class Recovery:
         self.uow = unit_of_work
         self.policy = policy or RecoveryPolicy()
 
-    def prepare_roots(self, work, units, *, max_source_chars, validator, operation_refs=None, operation_kind="translation"):
-        with self.uow.transaction() as transaction:
-            conditions = transaction.work.latest_conditions(work.document.id)
+    def prepare_roots(self, work, units, *, max_source_chars, validator, operation_refs=None, operation_kind="translation", transaction=None):
+        transaction_context = lambda: nullcontext(transaction) if transaction is not None else self.uow.transaction()
+        with transaction_context() as tx:
+            conditions = tx.work.latest_conditions(work.document.id)
         if conditions is None:
             raise RecoveryError('conditions_unavailable')
         ordered = tuple(block for unit in units for block in unit.block_ids)
         blocks = {item.block.id: item.block for unit in units for item in unit.items}
         task_id = getattr(work, 'task_id', None)
-        with self.uow.transaction() as transaction:
+        with transaction_context() as tx:
             if operation_refs is None and task_id is not None:
-                binding = transaction.work.get_binding('task', task_id)
+                binding = tx.work.get_binding('task', task_id)
                 if binding is not None:
                     if binding['conditions_id'] != conditions.id:
                         raise RecoveryError('conditions_unavailable')
                     operation_refs = binding['payload_json'].get('operation_refs')
             if operation_refs is not None:
-                return self._resume_roots(transaction, work, ordered, conditions, operation_refs, operation_kind)
+                return self._resume_roots(tx, work, ordered, conditions, operation_refs, operation_kind)
         if operation_kind == 'regeneration' and len(ordered) != 1:
             raise RecoveryError('unsafe_partition')
         indivisible = []
@@ -152,8 +154,8 @@ class Recovery:
                         and any((difficulty.id, point.id) not in covered for point in difficulty.required_points)):
                     note_owners.add(difficulty.owner_block_id)
         result = []
-        with self.uow.transaction() as transaction:
-            latest = transaction.work.latest_conditions(work.document.id)
+        with transaction_context() as tx:
+            latest = tx.work.latest_conditions(work.document.id)
             if latest is None or latest.id != conditions.id:
                 raise RecoveryError('conditions_unavailable')
             for group in merged:
@@ -173,7 +175,7 @@ class Recovery:
                     if overlap and overlap != set(interval):
                         raise RecoveryError('unsafe_partition')
                 if historical:
-                    self._validate_historical(transaction, work, historical, blocks, validator)
+                    self._validate_historical(tx, work, historical, blocks, validator)
                 payload = {**manifest, 'notes_policy': NOTES_POLICY, 'active_run_id': work.run.id,
                     'historical_coverage': list(historical)}
                 operation_id = str(uuid4())
@@ -181,8 +183,8 @@ class Recovery:
                 root = RecoveryRoot(operation_id, work.document.id, conditions.id,
                     f"{operation_id}:{policy_version}:{manifest['root_key']}", payload,
                     policy_version=policy_version, operation_kind=operation_kind)
-                transaction.work.add_root(root)
-                scopes = transaction.work.list_scopes(root.id)
+                tx.work.add_root(root)
+                scopes = tx.work.list_scopes(root.id)
                 covered = set(root.manifest.get('historical_coverage', ()))
                 for scope in scopes:
                     if scope.status != 'split':
@@ -203,14 +205,14 @@ class Recovery:
                     if current:
                         pending.append(tuple(current))
                     if sum(scope.status != 'split' for scope in scopes) + len(pending) > root.manifest['policy']['max_leaves']:
-                        transaction.work.stop_root(root.id, 'unsafe_partition')
+                        tx.work.stop_root(root.id, 'unsafe_partition')
                     else:
                         for scope_blocks in pending:
-                            transaction.work.add_scope(RecoveryScope(str(uuid4()), root.id, scope_blocks))
+                            tx.work.add_scope(RecoveryScope(str(uuid4()), root.id, scope_blocks))
                 result.append(root.id)
             if task_id is not None:
-                transaction.work.bind_operation_refs(task_id, book_id=work.document.id, conditions_id=conditions.id,
-                    operation_refs=tuple({'root_id': root_id, 'policy_version': transaction.work.get_root(root_id).policy_version}
+                tx.work.bind_operation_refs(task_id, book_id=work.document.id, conditions_id=conditions.id,
+                    operation_refs=tuple({'root_id': root_id, 'policy_version': tx.work.get_root(root_id).policy_version}
                                          for root_id in result))
         return tuple(result)
 

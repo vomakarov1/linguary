@@ -8,6 +8,7 @@ via `BlockRegenerationSequence.run_task`.
 
 from __future__ import annotations
 
+import asyncio
 import pytest
 from processing_scenario import (
     BOOK_ID,
@@ -15,18 +16,21 @@ from processing_scenario import (
     SOURCE_TEXT,
     TRANSLATED_TEXT,
     block_reply,
-    make_process_chapter,
-    make_regenerate_block,
     store_processing_book,
     translated_reply,
     translation_reply,
 )
+from test_regenerate_block import make_process_chapter, make_regenerate_block
 
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.llm import FakeLLMClient
 from linguary.adapters.runtime import SqliteTaskQueue, TaskWorkerPool
 from linguary.application.ports.llm import LLMClient
 from linguary.application.task_runner import TaskRunner
+from linguary.application.translation_policy import (
+    CURRENT_TRANSLATION_POLICY,
+    LEGACY_TRANSLATION_POLICY,
+)
 from linguary.application.use_cases.process_chapter import ProcessChapterCommand
 from linguary.application.use_cases.regenerate_block import (
     BlockRegenerationSequence,
@@ -135,21 +139,101 @@ async def test_repeated_request_of_a_scheduled_block_does_not_duplicate_the_task
     assert first.id == second.id
     with unit_of_work.transaction() as uow:
         assert len(uow.tasks.list_for_book(BOOK_ID)) == 1
+        root, = uow.work.list_roots(BOOK_ID, run_id=RUN_ID)
+        assert root.id == first.operation_id
 
 
-async def test_block_can_be_regenerated_twice(
+async def test_double_click_deduplicates_active_operation(unit_of_work, task_queue, monkeypatch):
+    scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
+    sequence = make_sequence(unit_of_work, task_queue, regenerated_reply())
+    other_sequence = make_sequence(unit_of_work, task_queue, regenerated_reply())
+    enqueue = task_queue.enqueue
+
+    async def delayed_enqueue(identity):
+        await asyncio.sleep(0)
+        return await enqueue(identity)
+
+    monkeypatch.setattr(task_queue, "enqueue", delayed_enqueue)
+
+    first, second = await asyncio.gather(
+        other_sequence.start(BOOK_ID, scenario.block_ids()[0]),
+        sequence.start(BOOK_ID, scenario.block_ids()[0]),
+    )
+
+    assert first.id == second.id
+    assert first.operation_id == second.operation_id
+    with unit_of_work.transaction() as uow:
+        assert len(uow.tasks.list_for_book(BOOK_ID)) == 1
+        (root,) = uow.work.list_roots(BOOK_ID, run_id=RUN_ID)
+        assert root.id == first.operation_id
+        (scope,) = uow.work.list_scopes(root.id)
+        assert scope.ordered_blocks == (scenario.block_ids()[0],)
+        assert uow.work.get_binding("task", first.id)["payload_json"]["operation_refs"] == [
+            {"root_id": root.id, "policy_version": root.policy_version}
+        ]
+
+
+@pytest.mark.parametrize(
+    ("repository", "method"),
+    [("work", "add_root"), ("work", "add_scope"), ("tasks", "add"),
+     ("work", "bind_operation_refs"), ("books", "save")],
+)
+async def test_regeneration_start_transaction_failure_rolls_back_root_scope_task_binding_and_book_status(
+    unit_of_work, task_queue, monkeypatch, repository, method
+):
+    scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
+    sequence = make_sequence(unit_of_work, task_queue, regenerated_reply())
+    with unit_of_work.transaction() as uow:
+        repository_type = type(getattr(uow, repository))
+    original = getattr(repository_type, method)
+
+    def fail_after_write(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        raise RuntimeError("injected failure")
+
+    monkeypatch.setattr(repository_type, method, fail_after_write)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        await sequence.start(BOOK_ID, scenario.block_ids()[0])
+    with unit_of_work.transaction() as uow:
+        assert uow.work.list_roots(BOOK_ID, run_id=RUN_ID) == ()
+        assert uow.tasks.list_for_book(BOOK_ID) == ()
+        assert uow.books.get(BOOK_ID).status is BookStatus.READY_TO_EXPORT
+
+
+async def test_committed_regeneration_is_claimable_without_enqueue(unit_of_work, task_queue, monkeypatch):
+    scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
+    sequence = make_sequence(unit_of_work, task_queue, regenerated_reply())
+
+    async def fail_before_enqueue(identity):
+        raise RuntimeError("queue unavailable")
+
+    monkeypatch.setattr(task_queue, "enqueue", fail_before_enqueue)
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        await sequence.start(BOOK_ID, scenario.block_ids()[0])
+    task = await task_queue.claim_next_pending()
+    assert task is not None and task.status is TaskStatus.RUNNING
+    with unit_of_work.transaction() as uow:
+        root = uow.work.get_root(task.operation_id)
+        assert root is not None
+        assert len(uow.work.list_scopes(root.id)) == 1
+        assert uow.work.get_binding("task", task.id)["payload_json"]["operation_refs"] == [
+            {"root_id": root.id, "policy_version": root.policy_version}
+        ]
+        assert uow.books.get(BOOK_ID).status is BookStatus.PROCESSING
+
+
+async def test_second_completed_regeneration_has_new_identity(
     unit_of_work: SqlAlchemyUnitOfWork, task_queue: SqliteTaskQueue
 ) -> None:
     """A second request for the same block runs rather than returning previous result.
 
-    The task idempotency key lives while the task lives: a completed block task is
-    cleared, otherwise block regeneration would only work once (PRD § 21.5).
+    Each explicit repeat has its own operation; completed tasks remain in history.
     """
     scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
     await process_chapter(unit_of_work)
     block_id = scenario.block_ids()[0]
     first = make_sequence(unit_of_work, task_queue, regenerated_reply())
-    await first.start(BOOK_ID, block_id)
+    first_task = await first.start(BOOK_ID, block_id)
     await make_pool(task_queue, first).drain()
 
     second = make_sequence(
@@ -161,6 +245,53 @@ async def test_block_can_be_regenerated_twice(
     assert task.status is TaskStatus.PENDING
     assert [item.status for item in finished] == [TaskStatus.SUCCEEDED]
     assert translations(unit_of_work) == [TWICE_REGENERATED_TEXT, TRANSLATED_TEXT]
+    assert task.operation_id != first_task.operation_id
+    assert task.policy_version == first_task.policy_version == CURRENT_TRANSLATION_POLICY
+    with unit_of_work.transaction() as uow:
+        assert uow.tasks.get(first_task.id).status is TaskStatus.SUCCEEDED
+        assert uow.work.get_root(first_task.operation_id).operation_kind == "regeneration"
+        assert uow.work.get_root(task.operation_id).operation_kind == "regeneration"
+
+
+async def test_regeneration_has_own_root_and_current_policy(unit_of_work, task_queue):
+    scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
+    await process_chapter(unit_of_work)
+    client = regenerated_reply()
+    sequence = make_sequence(unit_of_work, task_queue, client)
+
+    task = await sequence.start(BOOK_ID, scenario.block_ids()[0])
+
+    assert client.call_count == 0
+    assert task.operation_id
+    assert task.policy_version == CURRENT_TRANSLATION_POLICY
+    with unit_of_work.transaction() as uow:
+        root = uow.work.get_root(task.operation_id)
+        assert root.operation_kind == "regeneration"
+        assert root.policy_version == task.policy_version
+        assert tuple(root.manifest["ordered_blocks"]) == (scenario.block_ids()[0],)
+        assert uow.work.get_binding("task", task.id)["payload_json"]["operation_refs"] == [
+            {"root_id": root.id, "policy_version": root.policy_version}
+        ]
+
+
+async def test_regeneration_resume_keeps_policy_after_upgrade(unit_of_work, task_queue, monkeypatch):
+    from linguary.application import recovery
+
+    scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
+    client = regenerated_reply()
+    sequence = make_sequence(unit_of_work, task_queue, client)
+    monkeypatch.setattr(recovery, "CURRENT_TRANSLATION_POLICY", LEGACY_TRANSLATION_POLICY)
+    task = await sequence.start(BOOK_ID, scenario.block_ids()[0])
+    monkeypatch.setattr(recovery, "CURRENT_TRANSLATION_POLICY", CURRENT_TRANSLATION_POLICY)
+
+    finished = await make_pool(task_queue, sequence).drain()
+
+    assert [item.status for item in finished] == [TaskStatus.SUCCEEDED]
+    assert client.last_request.call_context.root_id == task.operation_id
+    assert task.policy_version == LEGACY_TRANSLATION_POLICY
+    assert client.last_request.call_context.policy_version == LEGACY_TRANSLATION_POLICY
+    with unit_of_work.transaction() as uow:
+        assert len(uow.work.list_roots(BOOK_ID, run_id=RUN_ID)) == 1
 
 
 async def test_request_during_processing_is_rejected(
