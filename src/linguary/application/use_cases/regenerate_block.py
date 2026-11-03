@@ -358,7 +358,7 @@ class BlockRegenerationSequence:
             identity = TaskIdentity(book_id=book_id, task_type=TaskType.REGENERATE_BLOCK,
                                     scope_id=block_id, operation_id=root.id,
                                     policy_version=root.policy_version)
-            task = ProcessingTask(id=_new_id(), book_id=book_id, task_type=identity.task_type,
+            task = ProcessingTask(id=_new_task_id(self._queue), book_id=book_id, task_type=identity.task_type,
                                   scope_id=block_id, operation_id=root.id,
                                   policy_version=root.policy_version)
             transaction.tasks.add(task)
@@ -456,6 +456,12 @@ def _ensure_planned_as_text(analysis: ChapterAnalysis, block: DocumentBlock) -> 
 def _new_id() -> str:
     """Identifier for a single-block unit: it lives for exactly one call."""
     return str(uuid4())
+
+
+def _new_task_id(queue: TaskQueue) -> str:
+    """Reuse the queue's task ID source for atomically created task rows."""
+    factory = getattr(queue, "new_task_id", None)
+    return factory() if callable(factory) else _new_id()
 
 
 __all__ = [
