@@ -373,6 +373,7 @@ async def test_final_epub_preserves_original_and_glossary(tmp_path):
     workspace = prepare_workspace(tmp_path / 'comparison', [tmp_path / 'production'], protocol())
     result = await run_comparison(protocol(), workspace, Factory())
     for variant in result.variants:
+        assert variant.epubs, variant.failures
         path, = variant.epubs.values()
         text = exported_text(path)
         assert 'Wren Calder' in text and 'Рен Колдер' in text

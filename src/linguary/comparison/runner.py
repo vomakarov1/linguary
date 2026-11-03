@@ -180,6 +180,22 @@ def _model(application, inner, ledger):
     return RateLimitedLLMClient(inner=LoggingLLMClient(inner=inner, unit_of_work=application.unit_of_work, provider=application.settings.llm.provider, model=application.settings.llm.model, debug_payloads=False, on_logged=ledger.on_logged), limiter=application.rate_limiter)
 
 
+class _BookProvenanceClient:
+    """Validate each comparison call against the conditions of its selected book."""
+
+    def __init__(self, inner, conditions_service):
+        self.inner = inner
+        self.conditions_service = conditions_service
+
+    async def generate(self, request):
+        from linguary.composition.book_runtime import ProvenanceClient
+
+        conditions = self.conditions_service.require(request.book_id)
+        return await ProvenanceClient(
+            self.inner, self.conditions_service, conditions.id
+        ).generate(request)
+
+
 def _finalize(application, ledger, book_ids):
     statuses = {}
     with application.unit_of_work.transaction() as transaction:
@@ -391,6 +407,10 @@ async def _run_analysis(protocol, workspace, client_factory, result, budget, sim
         imported = await drain_tasks(application)
         if any(task.last_error is not None for task in imported):
             raise ComparisonStopped('Импорт источника не завершён')
+        for book_id in dict.fromkeys(sources.values()):
+            application.book_conditions.freeze_before_analysis(
+                book_id, application.runtime_settings.revision
+            )
         selection, fixed = _selection(application, protocol, sources)
         seeded_section = _import_analysis_seed(seed, application, selection, fixed, ledger, analysis_model, repeat) if seed is not None else None
         _manifest(analysis_ws, result, f"analysis:{repeat}:{analysis_model}", selection, fixed)
@@ -455,7 +475,8 @@ async def _run_processing(protocol, client_factory, result, budget, simulated, s
         _manifest(processing_ws, result, f"{repeat}:{variant.id}", selection, fixed, artifact.content_hash)
         selected_uow = _SelectedUnitOfWork(application.unit_of_work, selection)
         start = StartProcessing(unit_of_work=selected_uow, glossary_confidence_threshold=application.settings.checks.glossary_confidence_threshold, glossary_review_min_mentions=application.settings.checks.glossary_review_min_mentions, glossary_review_min_chapters=application.settings.checks.glossary_review_min_chapters, llm_settings_snapshot=_llm_snapshot(application.settings))
-        sequence = ChapterProcessingSequence(unit_of_work=selected_uow, queue=application.task_queue, process_chapter=ProcessChapter(unit_of_work=selected_uow, llm_client=_model(application, inner, ledger), retry_policy=RetryPolicy(max_attempts=application.settings.llm.max_attempts), validator=_validator(application.settings), max_unit_source_chars=application.settings.llm.max_unit_source_chars, context_builder=_ObservedContext(ledger, language_notes_per_chapter=application.settings.checks.language_notes_per_chapter)))
+        processing_client = _BookProvenanceClient(_model(application, inner, ledger), application.book_conditions)
+        sequence = ChapterProcessingSequence(unit_of_work=selected_uow, queue=application.task_queue, process_chapter=ProcessChapter(unit_of_work=selected_uow, llm_client=processing_client, retry_policy=RetryPolicy(max_attempts=application.settings.llm.max_attempts), validator=_validator(application.settings), max_unit_source_chars=application.settings.llm.max_unit_source_chars, context_builder=_ObservedContext(ledger, language_notes_per_chapter=application.settings.checks.language_notes_per_chapter)))
         for book_id in sources.values():
             run = start(StartProcessingCommand(book_id))
             branch.llm_snapshots[book_id] = run.llm_settings_snapshot
