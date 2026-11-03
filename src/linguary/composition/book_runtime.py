@@ -145,11 +145,14 @@ class ProvenanceClient:
                 or context.prompt_hash != sha256(request.instructions.encode()).hexdigest()
                 or any(thaw(attempt.context).get(key) != value for key, value in expected.items())):
             raise ConditionsError('conditions_unavailable')
-        if (root.superseded_by is not None or root.status not in {'pending', 'running'}
-                or root.generation != attempt.context.get('root_generation')
-                or scope.generation != context.generation or scope.status != 'claimed'):
-            raise RecoveryError('interrupted', context.root_id)
         return attempt
+
+    def _has_operation_ownership(self, transaction, context, attempt):
+        root = transaction.work.get_root(context.root_id)
+        scope = transaction.work.get_scope(context.scope_id)
+        return (root.superseded_by is None and root.status in {'pending', 'running'}
+            and root.generation == attempt.context.get('root_generation')
+            and scope.generation == context.generation and scope.status == 'claimed')
 
     async def generate(self, request):
         with self.service.uow.transaction() as transaction:
@@ -159,7 +162,7 @@ class ProvenanceClient:
             if request.call_context is not None and request.call_context.root_id is not None:
                 context = request.call_context
                 attempt = self._require_operation_context(transaction, request, context)
-                if attempt.state != 'created':
+                if attempt.state != 'created' or not self._has_operation_ownership(transaction, context, attempt):
                     raise RecoveryError('interrupted', context.root_id)
                 transaction.work.transition_attempt(attempt.id, 'sent', expected_state='created')
             else:
@@ -185,9 +188,10 @@ class ProvenanceClient:
             current_attempt = transaction.work.get_attempt(attempt.id)
             valid = current_attempt is not None and current_attempt.state == 'sent'
             if context.root_id is not None:
-                self._require_operation_context(transaction, request, context)
+                current_attempt = self._require_operation_context(transaction, request, context)
                 if response.call_context != context:
                     raise ConditionsError('conditions_unavailable')
+                valid = valid and self._has_operation_ownership(transaction, context, current_attempt)
             if valid:
                 transaction.work.transition_attempt(attempt.id, 'validated', expected_state='sent',
                     outcome={'schema_version': 1, 'provider': response.provider, 'model': response.model,

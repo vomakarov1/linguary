@@ -130,17 +130,89 @@ async def test_provenance_rejects_policy_or_root_mismatch_before_send(tmp_path, 
         await app.aclose()
 
 
-async def test_provenance_rejects_response_context_mismatch(tmp_path):
+@pytest.mark.parametrize('ownership_transferred', [False, True])
+async def test_provenance_rejects_response_context_mismatch(tmp_path, ownership_transferred):
     app = make_app(tmp_path)
     try:
         conditions, request = pinned_request(app)
         inner = AsyncMock()
-        inner.generate.return_value = LLMResponse(payload=object(), provider='fake', model='model',
-            call_context=replace(request.call_context, policy_version=CURRENT_TRANSLATION_POLICY))
+        async def mismatched_response(_request):
+            if ownership_transferred:
+                with app.unit_of_work.transaction() as transaction:
+                    transaction.work.invalidate_run_coverage('book-1', request.run_id)
+            return LLMResponse(payload=object(), provider='fake', model='model',
+                call_context=replace(request.call_context, policy_version=CURRENT_TRANSLATION_POLICY))
+        inner.generate.side_effect = mismatched_response
         with pytest.raises((ConditionsError, RecoveryError), match='conditions_unavailable'):
             await ProvenanceClient(inner, app.book_conditions, conditions.id).generate(request)
         with app.unit_of_work.transaction() as transaction:
             assert transaction.work.get_attempt(request.call_context.attempt_id).state != 'validated'
+    finally:
+        await app.aclose()
+
+
+async def test_provenance_rejects_revoked_ownership_before_send(tmp_path):
+    app = make_app(tmp_path)
+    try:
+        conditions, request = pinned_request(app)
+        with app.unit_of_work.transaction() as transaction:
+            transaction.work.invalidate_run_coverage('book-1', request.run_id)
+        inner = AsyncMock()
+        with pytest.raises(RecoveryError, match='interrupted'):
+            await ProvenanceClient(inner, app.book_conditions, conditions.id).generate(request)
+        inner.generate.assert_not_awaited()
+        with app.unit_of_work.transaction() as transaction:
+            assert transaction.work.get_attempt(request.call_context.attempt_id).state == 'created'
+    finally:
+        await app.aclose()
+
+
+async def test_valid_response_after_ownership_transfer_is_returned_for_stale_audit(tmp_path, monkeypatch):
+    from linguary.adapters.llm import FakeLLMClient
+    from test_recovery_commit import analysis_reply, prepare, translation_reply
+
+    class TransferringClient(FakeLLMClient):
+        async def generate(self, request):
+            response = await super().generate(request)
+            if request.stage == LLMCallStage.TRANSLATION_UNIT:
+                with app.unit_of_work.transaction() as transaction:
+                    transaction.work.invalidate_run_coverage('book-1', request.run_id)
+                    context = request.call_context
+                    transaction.work.begin_recovery_attempt(context.root_id, context.scope_id,
+                        task_id=request.task_id, run_id=request.run_id, stage=request.stage.value,
+                        assigned_model=context.assigned_model, prompt_hash=context.prompt_hash,
+                        policy_version=context.policy_version)
+            return response
+
+    app = make_app(tmp_path, TransferringClient([analysis_reply(2), translation_reply(2)]))
+    returned_states = []
+    original_generate = ProvenanceClient.generate
+
+    async def observe_return(client, request):
+        response = await original_generate(client, request)
+        if request.stage == LLMCallStage.TRANSLATION_UNIT:
+            assert response.call_context == request.call_context
+            with app.unit_of_work.transaction() as transaction:
+                attempt = transaction.work.get_attempt(response.call_context.attempt_id)
+                returned_states.append(attempt.state)
+                assert not transaction.work.owns_recovery_attempt(attempt.id)
+        return response
+
+    monkeypatch.setattr(ProvenanceClient, 'generate', observe_return)
+    try:
+        _, run, task = await prepare(app)
+        with pytest.raises(RecoveryError, match='interrupted'):
+            await app.processing.run_task(task)
+        assert returned_states == ['sent']
+        with app.unit_of_work.transaction() as transaction:
+            assert transaction.results.list_for_run(run.id) == ()
+            (call,) = [call for call in transaction.llm_calls.list_for_book('book-1')
+                       if call.stage == LLMCallStage.TRANSLATION_UNIT]
+            assert call.diagnostic_meta['decision'] == 'stale'
+            attempt = transaction.work.get_attempt(call.attempt_id)
+            assert attempt.state not in {'validated', 'accepted'}
+            root = transaction.work.get_root(attempt.root_id)
+            assert transaction.work.list_scopes(root.id)[0].accepted_attempt_id is None
     finally:
         await app.aclose()
 

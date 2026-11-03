@@ -23,7 +23,7 @@ from linguary.composition import Application, build_application, drain_tasks
 from linguary.web import create_app
 from linguary.domain.llm_log import TokenPricing
 from linguary.domain import (
-    ErrorType, LLMCallLog, LLMCallStage, TaskError, TaskIdentity, TaskType, TokenUsage,
+    ErrorType, LLMCallLog, LLMCallStage, TaskError, TokenUsage,
 )
 from processing_scenario import BOOK_ID, store_processing_book, translated_reply
 
@@ -57,16 +57,9 @@ def application(
 
 async def test_llm_calls_are_logged_per_attempt(application: Application) -> None:
     """Unsuccessful and successful attempts of a single call are logged without payloads."""
-    scenario = store_processing_book(application.unit_of_work)
-    await application.task_queue.enqueue(
-        TaskIdentity(
-            book_id=BOOK_ID,
-            task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-            scope_id=scenario.section().id,
-        )
-    )
-
+    store_processing_book(application.unit_of_work)
     choose_legacy_fixture(application)
+    await application.processing.start(BOOK_ID)
     finished = await drain_tasks(application)
 
     with application.unit_of_work.transaction() as transaction:
@@ -270,12 +263,9 @@ async def test_reference_pricing_fills_cost_without_provider_cost(tmp_path: Path
         ]),
     )
     try:
-        scenario = store_processing_book(built.unit_of_work)
-        await built.task_queue.enqueue(TaskIdentity(
-            book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-            scope_id=scenario.section().id,
-        ))
+        store_processing_book(built.unit_of_work)
         choose_legacy_fixture(built)
+        await built.processing.start(BOOK_ID)
         await drain_tasks(built)
         with built.unit_of_work.transaction() as transaction:
             (entry,) = transaction.llm_calls.list_for_book(BOOK_ID)
@@ -509,12 +499,9 @@ async def test_task_and_llm_log_errors_do_not_contain_key(
             llm_client=OpenAICompatibleLLMClient(settings=settings, http_client=http),
         )
         try:
-            scenario = store_processing_book(built.unit_of_work)
-            await built.task_queue.enqueue(TaskIdentity(
-                book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-                scope_id=scenario.section().id,
-            ))
+            store_processing_book(built.unit_of_work)
             choose_legacy_fixture(built)
+            await built.processing.start(BOOK_ID)
             finished = await drain_tasks(built)
             assert len(finished) == 1
             error = finished[0].last_error
@@ -557,9 +544,9 @@ async def test_proxy_secret_not_in_task_llm_logs_or_http_responses(tmp_path, fai
         llm = OpenAICompatibleLLMClient(settings=settings, http_client=transport)
         built = build_application(settings=AppSettings(llm=settings, storage=StorageSettings(data_root=str(tmp_path))), llm_client=llm)
         try:
-            scenario = store_processing_book(built.unit_of_work)
-            await built.task_queue.enqueue(TaskIdentity(book_id=BOOK_ID, task_type=TaskType.PROCESS_TRANSLATION_UNIT, scope_id=scenario.section().id))
+            store_processing_book(built.unit_of_work)
             choose_legacy_fixture(built)
+            await built.processing.start(BOOK_ID)
             finished = await drain_tasks(built)
             with built.unit_of_work.transaction() as transaction:
                 logs = transaction.llm_calls.list_for_book(BOOK_ID)
