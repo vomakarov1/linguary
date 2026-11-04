@@ -328,7 +328,7 @@ class WorkRepository(Protocol):
     def archive_artifacts(self, artifacts): ...
     def get_artifact(self, artifact_id): ...
     def replace_result_binding(self, entity_id, *, book_id, conditions_id, attempt_id,
-                               artifact_revision_id, expected_attempt_id, provenance=None,
+                               artifact_revision_id, expected_attempt_id, provenance,
                                expected_artifact_revision_id=None) -> None:
         """Replace a projection pointer, verifying exact correction predecessor lineage.
 

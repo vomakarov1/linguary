@@ -3,7 +3,8 @@ from decimal import Decimal
 import json
 import pytest
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeReply
+from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.ports.llm import LLMResponseKind, LLMResponseFormatError, LLMTransportError
 from linguary.application.quality_budget import QualityRoute
 from linguary.application.use_cases.quality_review import StartQualityReview

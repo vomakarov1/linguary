@@ -62,6 +62,19 @@ CORRECTION_SETTINGS = CorrectionSnapshot(
 )
 
 
+def test_product_processing_requires_correction_snapshot():
+    from linguary.application.book_conditions import ConditionsError
+    with pytest.raises(ConditionsError, match='correction_policy_unavailable'):
+        StartProcessing(unit_of_work=None, glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            llm_settings_snapshot=LLM_SETTINGS, book_conditions=object())
+
+
+def test_legacy_processing_without_conditions_service_keeps_compatibility():
+    start = StartProcessing(unit_of_work=None, glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+        llm_settings_snapshot=LLM_SETTINGS)
+    assert start._correction_snapshot is None
+
+
 class ProcessingWork:
     """Conditions and run bindings needed by the processing start use case."""
 

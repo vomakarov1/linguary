@@ -554,7 +554,7 @@ class SqlAlchemyWorkRepository:
         return None
 
     def replace_result_binding(self, entity_id, *, book_id, conditions_id, attempt_id,
-                               artifact_revision_id, expected_attempt_id, provenance=None,
+                               artifact_revision_id, expected_attempt_id, provenance,
                                expected_artifact_revision_id=None):
         """Move a current projection pointer while preserving immutable archived versions."""
         conditions = self.latest_conditions(book_id)

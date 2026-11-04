@@ -14,7 +14,8 @@ from test_content_plan_pipeline import import_story, analysis_payload, processin
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.config.settings import ReadingSettings
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeReply
+from correction_e2e_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
 from linguary.application.ports.llm import LLMResponseKind
 from linguary.application.recovery import dependency_intervals, local_failure_signature
@@ -73,6 +74,8 @@ class SceneFake(FakeLLMClient):
         self.after_response = None
 
     async def generate(self, request):
+        if request.kind == LLMResponseKind.CHAPTER_CORRECTION:
+            return await super().generate(request)
         if request.kind == LLMResponseKind.QUALITY_REVIEW:
             manifest = json.loads(request.input_text)
             artifacts = manifest['artifacts']
@@ -93,6 +96,11 @@ class SceneFake(FakeLLMClient):
                     translated_text=STORY['translations'][i], glossary_hints=[]) for j, i in enumerate(indices, 1)], language_notes=[])
             else:
                 payload = processing_payload(STORY, self.blocks, self.plan, indices=indices)
+                if self.profile == 'content-plan-v2':
+                    for note in payload['language_notes']:
+                        note['note'] = note['note'].removeprefix('[b17] ')
+                    for evidence in payload['content_evidence']:
+                        evidence['body_excerpt'] = evidence['body_excerpt'].removeprefix('[b17] ')
             if self.reject and len(indices) > 1:
                 payload['blocks'][-1]['translated_text'] = '«Незаконченная цитата.'
             if self.defect == 'erased_help':
@@ -187,7 +195,7 @@ async def test_full_book_quality_pipeline(tmp_path, monkeypatch):
         with restarted.unit_of_work.transaction() as tx:
             tx.tasks.save(tx.tasks.get(task.id).retry())
         await successful(restarted)
-        assert all(accepted.block_id not in r.ordered_block_ids for r in later.requests)
+        assert all(accepted.block_id not in r.ordered_block_ids for r in later.scripted_requests)
         with restarted.unit_of_work.transaction() as tx:
             results = tx.results.list_for_run(run.id)
             assert tx.work.get_binding('result', f'{run.id}:{accepted.block_id}') == binding
@@ -202,7 +210,7 @@ async def test_full_book_quality_pipeline(tmp_path, monkeypatch):
         assert {f.kind for f in later.plan.context_facts} == {'speaker', 'gender', 'pronoun_referent'}
         assert all(r.content_evidence.semantic_correctness == 'not_evaluated' for r in results)
         assert all('[b17]' not in n.note for r in results for n in r.language_notes)
-        assert all('A2' in r.instructions and 'Мара' in r.input_text for r in later.requests)
+        assert all('A2' in r.instructions and 'Мара' in r.input_text for r in later.scripted_requests)
         assert restarted.quality_review.get(BOOK)['state'] == 'not-requested'
         count = len(later.requests)
         limited = await restarted.quality_review.start(review_command(restarted, 'limit', budget=1))
@@ -269,7 +277,7 @@ async def test_legacy_v1_v2_fixture_roundtrip(tmp_path, profile):
         with app.unit_of_work.transaction() as tx:
             results = tx.results.list_for_run(run.id)
             assert len(results) == len(tuple(document.blocks()))
-        assert all(r.contract_version == (1 if profile == 'legacy-v1' else 2) for r in fake.requests)
+        assert all(r.contract_version == (1 if r.kind == LLMResponseKind.CHAPTER_CORRECTION or profile == 'legacy-v1' else 2) for r in fake.requests)
         visible = '\n'.join(''.join(r.itertext()) for r in exported_documents(app.paths.export_epub(BOOK)).values())
         assert all(text in visible for text in STORY['blocks'])
         assert hashlib.sha256(app.paths.source_epub(BOOK).read_bytes()).hexdigest() == source_sha

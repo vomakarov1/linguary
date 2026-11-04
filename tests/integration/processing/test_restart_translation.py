@@ -5,7 +5,8 @@ import asyncio
 import pytest
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeReply
+from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.ports.llm import LLMTransportError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.restart_translation import (

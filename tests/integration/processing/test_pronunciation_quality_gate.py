@@ -62,7 +62,7 @@ async def test_pronunciation_partial_failure_preserves_materials(tmp_path):
     source = SyntheticSource((entry(), entry(form='bip', ipa='bɪp')))
     candidates = [candidate(), candidate('bip', start=5)]
     from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
-    from linguary.adapters.llm import FakeLLMClient
+    from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
     from linguary.application.use_cases.reset_processing import ChooseBookConditions
     from linguary.application.use_cases.approve_glossary import StartProcessingCommand
     from linguary.composition import build_application, drain_tasks

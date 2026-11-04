@@ -5,7 +5,8 @@ import json
 import pytest
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeReply
+from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.llm_dto import PronunciationAnchorResponse, PronunciationCandidateResponse, PronunciationContextResponse
 from linguary.application.ports.pronunciation import InflectionRule, SourceLookupResult
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
@@ -95,7 +96,7 @@ async def test_pronunciation_read_as_is_without_translation(tmp_path, english_he
         assert accepted.ipa == 'zɔːp'
         assert result.translated_text is None and result.glossary_hints == result.fragment_assistances == ()
         assert source.calls == [('zorp', 'uk')]
-        assert fake.requests[-1].pronunciation_candidates_version == 1
+        assert fake.scripted_requests[-1].pronunciation_candidates_version == 1
         assert conditions.payload['prompt_templates']['pronunciation_candidates_version'] == 1
     finally:
         await app.aclose()
@@ -240,7 +241,7 @@ async def test_ipa_dict_runtime_process_regenerate_recovery(tmp_path):
         assert len(results) == 2
         assert all(result.pronunciation_assistances[0].evidence.source_version == SOURCE_VERSION for result in results)
         assert all(result.pronunciation_assistances[0].ipa == 'kjˈuː' for result in results)
-        assert len(fake.requests) == 6
+        assert len(fake.scripted_requests) == 6
     finally:
         await app.aclose()
 
@@ -315,7 +316,7 @@ async def test_pronunciation_partial_failure_keeps_confirmed_new_and_previous_fa
         with app.unit_of_work.transaction() as tx:
             assert tx.results.get(run.id, block_id).pronunciation_assistances == checked
             assert tx.documents.get('book-1').sections[0].blocks[0].text == 'zorp bip'
-        assert len(fake.requests) == 5
+        assert len(fake.scripted_requests) == 5
         assert all('SOURCE_PRIVATE' not in request.instructions + request.input_text for request in fake.requests)
     finally:
         await app.aclose()
@@ -349,7 +350,7 @@ async def test_pronunciation_candidate_invalid_does_not_discard_translation(tmp_
         assert result.pronunciation_assistances == ()
         assert result.translated_text == 'Он увидел выдумку дома.'
         assert result.glossary_hints[0].original == 'zorp'
-        assert len(fake.requests) == 2
+        assert len(fake.scripted_requests) == 2
         assert source.calls == []
         assert result.block_id == document.sections[0].blocks[0].id
     finally:
@@ -410,9 +411,9 @@ async def test_pronunciation_candidate_mode_pinned_to_conditions(tmp_path):
         changed = replace(app.settings, reading=replace(app.settings.reading, reader_level='a2'))
         app.runtime_settings.publish(app.runtime_settings.prepare(changed), 1)
         await regenerate(app, document.sections[0].blocks[0].id)
-        assert fake.requests[-1].pronunciation_candidates_version == 1
-        assert conditions.payload['prompt_templates']['pronunciation_processing'] in fake.requests[-1].instructions
-        assert 'Уровень читателя: b2.' in fake.requests[-1].instructions
+        assert fake.scripted_requests[-1].pronunciation_candidates_version == 1
+        assert conditions.payload['prompt_templates']['pronunciation_processing'] in fake.scripted_requests[-1].instructions
+        assert 'Уровень читателя: b2.' in fake.scripted_requests[-1].instructions
     finally:
         await app.aclose()
 
@@ -582,7 +583,7 @@ async def test_pronunciation_raw_malformed_candidates_preserve_translation_and_m
         assert [item.form for item in saved.pronunciation_assistances] == ['zorp']
         assert saved.pronunciation_assistances[0].anchor.block_id == document.sections[0].blocks[0].id
         assert source.calls == [('zorp', 'uk')]
-        assert len(fake.requests) == 2
+        assert len(fake.scripted_requests) == 2
     finally:
         await app.aclose()
 
@@ -614,12 +615,12 @@ async def test_pronunciation_mixed_candidates_process_regenerate_and_recovery(tm
                    and item.language_notes[0].note == SYNTHETIC_MEANING for item in saved)
         assert all([help.form for help in item.pronunciation_assistances] == ['zorp'] for item in saved)
         assert source.calls == [('zorp', 'uk')] * 3
-        assert len(fake.requests) == 6
+        assert len(fake.scripted_requests) == 6
         children = [request for request in fake.requests if request.stage == LLMCallStage.TRANSLATION_UNIT
                     and len(request.ordered_block_ids) == 1]
         assert len(children) == 2
-        assert len(fake.requests[-1].ordered_block_ids) == 1
-        assert fake.requests[-1].pronunciation_candidates_version == 1
+        assert len(fake.scripted_requests[-1].ordered_block_ids) == 1
+        assert fake.scripted_requests[-1].pronunciation_candidates_version == 1
         assert all(request.pronunciation_candidates_version == 1 for request in children)
         assert all('REJECTED_PRIVATE' not in request.instructions + request.input_text for request in fake.requests)
     finally:
@@ -642,7 +643,7 @@ async def test_pronunciation_candidate_rejections_do_not_retry_translation(tmp_p
             saved, = tx.results.list_for_run(run.id)
         assert saved.translated_text == SYNTHETIC_TRANSLATION
         assert saved.pronunciation_assistances == ()
-        assert len(fake.requests) == 2
+        assert len(fake.scripted_requests) == 2
         assert source.calls == []
     finally:
         await app.aclose()
@@ -661,7 +662,7 @@ async def test_pronunciation_rejected_content_never_reaches_model(tmp_path):
         for request in fake.requests:
             outgoing = request.instructions + request.input_text
             assert all(marker not in outgoing for marker in ('SOURCE_PRIVATE', 'REJECTED_PRIVATE', private.ipa))
-        assert len(fake.requests) >= 4
+        assert len(fake.scripted_requests) >= 4
     finally:
         await app.aclose()
 

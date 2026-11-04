@@ -71,23 +71,20 @@ class CorrectChapter:
         return inputs, task, payload
 
     def _request(self, inputs, task, block_ids):
-        body = dict(inputs.context, blocks=[dict(block_id=block_id,
+        context = inputs.context
+        # Dictionary evidence stays local, including in the full input fingerprint.
+        conditions = dict(context['book_conditions'])
+        conditions.pop('pronunciation_versions', None)
+        body = dict(context, book_conditions=conditions, blocks=[dict(block_id=block_id,
             original=original_block_payload(next(b for b in inputs.blocks if b.id == block_id)),
-            current_result=asdict(inputs.results[block_id])) for block_id in block_ids])
+            current_result={key: value for key, value in asdict(inputs.results[block_id]).items()
+                            if key != 'pronunciation_assistances'}) for block_id in block_ids])
         request = LLMRequest.for_chapter_correction(instructions=self.snapshot.prompt,
             input_text=_json(body), ordered_block_ids=block_ids).with_logging(
                 book_id=task.book_id, stage=LLMCallStage.CHAPTER_CORRECTION,
                 task_id=task.id, scope_id=task.scope_id, ordered_block_ids=block_ids,
                 run_id=inputs.run.id)
         return replace(request, max_completion_tokens=self.snapshot.parameters['max_output_tokens'])
-
-    def _fits(self, request, inputs):
-        # Count the full serialized request and reserve room for complete output.
-        reserve = len(_json([asdict(inputs.results[b]) for b in request.ordered_block_ids]))
-        configured = self.snapshot.parameters['max_output_tokens']
-        if configured is not None:
-            reserve = max(reserve, configured * 4)
-        return len(_json(asdict(request))) + reserve <= self.snapshot.parameters['max_unit_source_chars']
 
     async def __call__(self, command):
         checked = 0
@@ -97,15 +94,9 @@ class CorrectChapter:
                 missing = unchecked_blocks(tx, inputs)
             if not missing:
                 return CorrectChapterResult(command.section_id, inputs.run.id, checked)
-            group = ()
-            for block_id in missing:
-                candidate = (*group, block_id)
-                if not self._fits(self._request(inputs, task, candidate), inputs):
-                    if not group:
-                        raise LLMContextCapacityError('целый блок с обязательным контекстом исправления превышает лимит')
-                    break
-                group = candidate
-            checked += await self._group(command, group)
+            # Source-text limits do not describe a provider's context window.
+            # Preserve the full request and let capacity errors split whole blocks.
+            checked += await self._group(command, missing)
 
     async def _group(self, command, block_ids):
         response = None
@@ -169,6 +160,7 @@ class CorrectChapter:
                             book_id=command.book_id, conditions_id=current.conditions.id,
                             attempt_id=attempt.id, artifact_revision_id=artifact,
                             expected_attempt_id=predecessor['attempt_id'],
+                            provenance=None,
                             expected_artifact_revision_id=predecessor['artifact_revision_id'])
                     if changed:
                         tx.results.replace_results(current.run.id, changed)
@@ -260,7 +252,8 @@ class CorrectChapter:
         _validate_content_plans(inputs.document, (inputs.analysis,), merged,
                                english_help=inputs.conditions.payload.get('english_help', False))
         for candidate in candidates:
-            for assistance in candidate.fragment_assistances:
+            for assistance in (candidate.fragment_assistances
+                               if inputs.conditions.payload.get('english_help', False) else ()):
                 quotes = {anchor.quote for anchor in assistance.anchors}
                 if (candidate.translated_text or any(h.original in quotes for h in candidate.glossary_hints)
                         or any(n.original_excerpt in quotes for n in candidate.language_notes)):

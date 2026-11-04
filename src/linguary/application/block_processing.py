@@ -476,12 +476,12 @@ def complete_processing(
         )
         if unfinished:
             return
-        if not correction_coverage_complete(transaction, book_id):
-            return
         run = transaction.runs.active_for_book(book_id)
         roots = transaction.work.list_active_roots(book_id, run_id=run.id) if run is not None else ()
         if any(not transaction.work.root_coverage_complete(root.id) for root in roots):
             raise RecoveryError('unsafe_partition')
+        if not correction_coverage_complete(transaction, book_id):
+            return
         document = transaction.documents.get(book_id)
         if run is not None and document is not None:
             from linguary.application.context_builder import textual_blocks

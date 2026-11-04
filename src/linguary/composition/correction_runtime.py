@@ -194,9 +194,9 @@ class CorrectionProvenanceClient:
         )
 
     def _attempt_context(self, context, task, binding):
-        return {**context.to_dict(), 'route_id': self.snapshot.route['route_id'],
+        return thaw({**context.to_dict(), 'route_id': self.snapshot.route['route_id'],
                 'operation_id': task.operation_id, 'task_attempt': task.attempts,
-                'input_generation': binding['input_generation']}
+                'input_generation': binding['input_generation']})
 
     async def generate(self, request):
         if (request.kind != LLMResponseKind.CHAPTER_CORRECTION

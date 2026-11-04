@@ -3,6 +3,9 @@
 from dataclasses import replace
 import json
 from types import SimpleNamespace
+from contextlib import nullcontext
+
+import pytest
 
 from analysis_fakes import make_analysis_document, make_analysis_section
 
@@ -18,7 +21,8 @@ def test_correction_fingerprints_include_source_attributes():
     inputs = CorrectionInputs(
         document=make_analysis_document((section,)), section=section, analysis=None,
         run=SimpleNamespace(id='run', glossary_snapshot=GlossarySnapshot()),
-        conditions=SimpleNamespace(payload={'schema_version': 1}),
+        conditions=SimpleNamespace(payload={'schema_version': 1,
+            'pronunciation_versions': {'source': 'private-dictionary-source'}}),
         snapshot=SimpleNamespace(to_payload=lambda: {'model': 'correction'}),
         blocks=(block,), results={}, bindings={block.id: None},
     )
@@ -41,3 +45,27 @@ def test_correction_fingerprints_include_source_attributes():
     task = SimpleNamespace(book_id=inputs.document.id, id='task', scope_id=section.id)
     request = correct._request(replace(inputs, results={block.id: result}), task, (block.id,))
     assert json.loads(request.input_text)['blocks'][0]['original'] == original
+    assert 'private-dictionary-source' not in request.input_text
+    assert 'pronunciation_assistances' not in json.loads(request.input_text)['blocks'][0]['current_result']
+    changed_conditions = replace(inputs, conditions=SimpleNamespace(payload={'schema_version': 1,
+        'pronunciation_versions': {'source': 'different-dictionary-source'}}))
+    assert changed_conditions.checksums != inputs.checksums
+
+
+@pytest.mark.asyncio
+async def test_source_text_limit_does_not_reject_complete_correction_context(monkeypatch):
+    import linguary.application.use_cases.correct_chapter as module
+    missing = [('one', 'two'), ()]
+    monkeypatch.setattr(module, 'unchecked_blocks', lambda tx, inputs: missing.pop(0))
+    snapshot = SimpleNamespace(parameters={'max_attempts': 1, 'max_unit_source_chars': 1})
+    correct = CorrectChapter(unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(None)),
+        llm_client=None, snapshot=snapshot, validator=None)
+    correct._load = lambda tx, command: (SimpleNamespace(run=SimpleNamespace(id='run')), None, None)
+    groups = []
+    async def group(command, blocks):
+        groups.append(blocks)
+        return len(blocks)
+    correct._group = group
+    result = await correct(SimpleNamespace(section_id='chapter'))
+    assert groups == [('one', 'two')]
+    assert result.checked_blocks == 2
