@@ -43,6 +43,7 @@ from linguary.application.recovery import RecoveryPolicy
 from linguary.application.book_conditions import BookConditionsService, ConditionsError
 from linguary.application.ports.pronunciation import PronunciationSource
 from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload, pronunciation_source_for
+from linguary.composition.correction_runtime import CorrectionRuntimeResolver, correction_snapshot
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
 from linguary.composition.system_settings import SystemSettingsService
 from linguary.adapters.db.engine import create_database_engine
@@ -57,6 +58,7 @@ from linguary.adapters.llm import LoggingLLMClient, RateLimitedLLMClient
 from linguary.adapters.llm.logging import LoggedObserver
 from linguary.domain.llm_log import TokenPricing
 from linguary.domain.name_translation import NameTranslationPolicy
+from linguary.domain.book_conditions import thaw
 from linguary.adapters.runtime import (
     ExecutorLock,
     SqliteTaskQueue,
@@ -66,6 +68,7 @@ from linguary.adapters.runtime import (
 )
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator, Py3LangidDetector
 from linguary.application.use_cases.quality_review import QualityReviewService
+from linguary.application.use_cases.correct_chapter import CorrectionSequence
 from linguary.application.context_builder import ContextBuilder
 from linguary.application.ports.llm import LLMClient
 from linguary.application.retry_policy import RetryPolicy
@@ -149,6 +152,7 @@ class Application:
     analysis: RuntimeSequence
     processing: RuntimeSequence
     regeneration: RuntimeSequence
+    correction: CorrectionSequence
     quality_review: QualityReviewService
     _close_quality: Callable
     _dispose: Callable[[], None]
@@ -180,6 +184,7 @@ class Application:
             glossary_review_min_mentions=settings.checks.glossary_review_min_mentions,
             glossary_review_min_chapters=settings.checks.glossary_review_min_chapters,
             llm_settings_snapshot=_llm_snapshot(settings),
+            correction_snapshot=correction_snapshot(settings),
         )
 
     async def start_import(self, book_id: str) -> ProcessingTask:
@@ -396,6 +401,11 @@ def build_application(
     analysis = RuntimeSequence(runtime_settings, "analysis", book_runtime=book_runtime)
     processing = RuntimeSequence(runtime_settings, "processing", book_runtime=book_runtime)
     regeneration = RuntimeSequence(runtime_settings, "regeneration", book_runtime=book_runtime)
+    correction = CorrectionSequence(unit_of_work=unit_of_work, queue=task_queue,
+        runtime_resolver=CorrectionRuntimeResolver(book_conditions, runtime_settings,
+            limiter=rate_limiter, on_logged=on_logged, injected_client=llm_client),
+        validator_factory=lambda settings, conditions: _validator(replace(settings,
+            checks=type(settings.checks)(**thaw(conditions.payload['checks'])))))
     quality_settings = replace(app_settings.llm, temperature=None, max_output_tokens=None)
     quality_configured = ConfiguredLLMClient(quality_settings)
     quality_clients = {}
@@ -415,11 +425,16 @@ def build_application(
         with unit_of_work.transaction() as transaction:
             transaction.work.reconcile_recovery_attempts()
             transaction.work.reconcile_quality_attempts()
+        correction.reconcile()
+
+    def maintain_work():
+        diagnostics.ensure_available()
+        correction.reconcile()
 
     runner = TaskRunner(
         queue=task_queue,
         recover_work=recover_work,
-        maintenance=diagnostics.ensure_available,
+        maintenance=maintain_work,
         handlers=_handlers(
             unit_of_work=unit_of_work,
             paths=paths,
@@ -428,6 +443,7 @@ def build_application(
             analysis=analysis,
             processing=processing,
             regeneration=regeneration,
+            correction=correction,
             quality_review=quality_review,
         ),
     )
@@ -479,6 +495,7 @@ def build_application(
         analysis=analysis,
         processing=processing,
         regeneration=regeneration,
+        correction=correction,
         quality_review=quality_review,
         _close_quality=quality_configured.aclose,
         _dispose=engine.dispose,
@@ -657,6 +674,7 @@ def _handlers(
     analysis: ChapterAnalysisSequence,
     processing: ChapterProcessingSequence,
     regeneration: BlockRegenerationSequence,
+    correction: CorrectionSequence,
     quality_review: QualityReviewService,
 ) -> dict[TaskType, TaskHandler]:
     """Handlers for all queue task types (ALG-02).
@@ -675,6 +693,7 @@ def _handlers(
         TaskType.ANALYZE_CHAPTER: analysis.run_task,
         TaskType.PROCESS_TRANSLATION_UNIT: processing.run_task,
         TaskType.REGENERATE_BLOCK: regeneration.run_task,
+        TaskType.CHAPTER_CORRECTION: correction.run_task,
         TaskType.QUALITY_REVIEW: quality_review.run_task,
     }
 

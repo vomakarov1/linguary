@@ -26,7 +26,7 @@ from linguary.domain import BookEvent, TaskType, apply_book_event
 #: Tasks removed by reset: they belong to the cancelled run and should not
 #: execute after reset (PRD § 21.5).
 RESET_TASK_TYPES: frozenset[TaskType] = frozenset(
-    {TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK}
+    {TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK, TaskType.CHAPTER_CORRECTION}
 )
 
 
@@ -83,8 +83,9 @@ class ResetProcessing:
                 _archive_run_results(transaction, book.id, run)
                 transaction.work.invalidate_run_coverage(book.id, run.id)
                 transaction.work.stale_reviews(book.id)
+                transaction.work.delete_correction_checks(run.id)
                 transaction.runs.delete(run.id)
-            transaction.books.save(replace(book, status=status))
+            transaction.books.save(replace(book, status=status, export_validation_status=None))
         return ResetProcessingResult(
             book_id=book.id,
             run_id=run.id if run is not None else None,
@@ -169,12 +170,14 @@ class ChooseBookConditions:
                     _archive_run_results(transaction, book_id, run)
                     transaction.work.invalidate_run_coverage(book_id, run.id)
                     transaction.work.stale_reviews(book_id)
+                    transaction.work.delete_correction_checks(run.id)
                     transaction.runs.delete(run.id)
                 transaction.analyses.delete_for_book(book_id)
                 for task in transaction.tasks.list_for_book(book_id):
-                    if task.task_type in {TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK, TaskType.EXPORT_BOOK}:
+                    if task.task_type in {TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK, TaskType.CHAPTER_CORRECTION, TaskType.EXPORT_BOOK}:
                         transaction.tasks.delete(task.id)
-                transaction.books.save(replace(book, status=apply_book_event(book.status, BookEvent.REANALYSIS_CONFIRMED)))
+                transaction.books.save(replace(book, status=apply_book_event(book.status, BookEvent.REANALYSIS_CONFIRMED),
+                                               export_validation_status=None))
             else:
                 # Bind only future execution; old analyses and results stay unknown.
                 if run is not None:

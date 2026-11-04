@@ -93,6 +93,7 @@ _MANDATORY_TASK_TYPES = frozenset(
         TaskType.ANALYZE_CHAPTER,
         TaskType.PROCESS_TRANSLATION_UNIT,
         TaskType.REGENERATE_BLOCK,
+        TaskType.CHAPTER_CORRECTION,
     }
 )
 
@@ -553,6 +554,9 @@ def _validate_v3_bodies(analysis, results, texts):
 
 
 def _ensure_recovery_complete(transaction, book_id, run_id):
+    from linguary.application.correction import correction_coverage_complete
+    if not correction_coverage_complete(transaction, book_id):
+        raise ExportBookError('обязательное исправление глав не завершено или устарело')
     for root in transaction.work.list_roots(book_id, run_id=run_id):
         if not transaction.work.root_coverage_complete(root.id):
             raise ExportBookError('восстановление книги не завершено: полный экспорт недоступен')

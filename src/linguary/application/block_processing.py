@@ -398,6 +398,9 @@ class TranslationCall:
                     transaction.work.stale_reviews(book_id)
                 if context is not None and context.root_id is not None:
                     transaction.work.root_coverage_complete(context.root_id)
+                from linguary.application.correction import invalidate_correction
+                invalidate_correction(transaction, book_id, run_id,
+                                      (result.block_id for result in results))
                 saved = True
         if not saved:
             finalize_response(self._unit_of_work, response, 'stale')
@@ -459,17 +462,21 @@ def complete_processing(
     """
     with unit_of_work.transaction() as transaction:
         _record_success(transaction, finished_task_id)
+        from linguary.application.correction import reconcile_corrections, correction_coverage_complete
+        reconcile_corrections(transaction, book_id)
         book = book_record(transaction, book_id)
         if book.status is not BookStatus.PROCESSING:
             return
         unfinished = tuple(
             task
             for task in transaction.tasks.list_for_book(book_id)
-            if task.task_type in task_types
+            if task.task_type in {*task_types, TaskType.CHAPTER_CORRECTION}
             and task.id != finished_task_id
             and task.status not in {TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED}
         )
         if unfinished:
+            return
+        if not correction_coverage_complete(transaction, book_id):
             return
         run = transaction.runs.active_for_book(book_id)
         roots = transaction.work.list_active_roots(book_id, run_id=run.id) if run is not None else ()
