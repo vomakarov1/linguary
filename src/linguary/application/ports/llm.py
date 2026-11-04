@@ -31,13 +31,14 @@ from enum import StrEnum
 from typing import Protocol
 
 from linguary.application.errors import ApplicationError
+from linguary.application.correction_dto import ChapterCorrectionResponse
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.domain.llm_log import CallContext, Violation
 from linguary.application.quality_context import QualityReviewResponse
 from linguary.domain import LLMCallStage, TokenUsage
 
 #: Structured responses that the model can return (PRD § 23).
-type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse | QualityReviewResponse
+type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse | QualityReviewResponse | ChapterCorrectionResponse
 
 
 class LLMError(ApplicationError):
@@ -126,6 +127,7 @@ class LLMResponseKind(StrEnum):
     """Kind of structured response requested by the use case."""
 
     QUALITY_REVIEW = "quality_review"
+    CHAPTER_CORRECTION = "chapter_correction"
     CHAPTER_ANALYSIS = "chapter_analysis"
     TRANSLATION_RESULT = "translation_result"
 
@@ -156,6 +158,13 @@ class LLMRequest[PayloadT: LLMPayload]:
     pronunciation_candidates_version: int | None = None
 
     def __post_init__(self) -> None:
+        if self.kind == LLMResponseKind.CHAPTER_CORRECTION:
+            object.__setattr__(self, 'ordered_block_ids', tuple(self.ordered_block_ids))
+            if (not self.ordered_block_ids or len(set(self.ordered_block_ids)) != len(self.ordered_block_ids)
+                    or any(not isinstance(value, str) or not value.strip() for value in self.ordered_block_ids)):
+                raise LLMError('исправление требует явный список уникальных блоков')
+            if type(self.contract_version) is not int or self.contract_version != 1:
+                raise LLMError('неизвестная версия контракта исправления')
         if self.pronunciation_candidates_version is not None and (
             type(self.pronunciation_candidates_version) is not int
             or self.pronunciation_candidates_version != 1
@@ -188,7 +197,19 @@ class LLMRequest[PayloadT: LLMPayload]:
         """Returns the same request with metadata for the call log."""
         return replace(
             self, book_id=book_id, stage=stage, task_id=task_id, attempt=1,
-            scope_id=scope_id, ordered_block_ids=ordered_block_ids, run_id=run_id
+            scope_id=scope_id,
+            ordered_block_ids=(ordered_block_ids or self.ordered_block_ids)
+                if self.kind == LLMResponseKind.CHAPTER_CORRECTION else ordered_block_ids,
+            run_id=run_id
+        )
+
+    @classmethod
+    def for_chapter_correction(
+        cls, *, instructions: str, input_text: str, ordered_block_ids: tuple[str, ...],
+    ) -> LLMRequest[ChapterCorrectionResponse]:
+        return LLMRequest[ChapterCorrectionResponse](
+            kind=LLMResponseKind.CHAPTER_CORRECTION, instructions=instructions,
+            input_text=input_text, ordered_block_ids=tuple(ordered_block_ids),
         )
 
     @classmethod

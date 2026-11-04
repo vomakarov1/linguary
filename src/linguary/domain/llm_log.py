@@ -20,6 +20,7 @@ class LLMCallStage(StrEnum):
     """Processing stage at which the call was made."""
 
     QUALITY_REVIEW = "quality_review"
+    CHAPTER_CORRECTION = "chapter_correction"
     CHAPTER_ANALYSIS = "chapter_analysis"
     TRANSLATION_UNIT = "translation_unit"
     BLOCK_REGENERATION = "block_regeneration"
