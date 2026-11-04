@@ -867,6 +867,7 @@ class LLMConfigResponse(BaseModel):
     model: str | None = None
     analysis_model: str | None = None
     processing_model: str | None = None
+    correction_model: str | None = None
     temperature: float | None = None
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     proxy_mode: Literal["auto", "direct", "custom"] = "auto"
@@ -890,6 +891,7 @@ class LLMConfigResponse(BaseModel):
             model=public_text(llm.model) or None,
             analysis_model=public_text(llm.analysis_model) or None,
             processing_model=public_text(llm.processing_model) or None,
+            correction_model=public_text(llm.correction_model) or None,
             temperature=llm.temperature,
             timeout_seconds=llm.timeout_seconds,
             proxy_mode=llm.proxy_mode,
@@ -974,7 +976,7 @@ class SystemConfigResponse(BaseModel):
 type SettingsField = Literal[
     "provider", "model", "api_key", "base_url", "requests_per_minute",
     "concurrency", "expected_revision", "form", "proxy_mode", "proxy_url",
-    "analysis_model", "processing_model", "temperature", "timeout_seconds",
+    "analysis_model", "processing_model", "correction_model", "temperature", "timeout_seconds",
     "reader_level",
     "name_translation_strategy",
 ]
@@ -1003,6 +1005,7 @@ class SafeSettingsFormValues:
     proxy_mode: str = "auto"
     analysis_model: str = field(default="", repr=False)
     processing_model: str = field(default="", repr=False)
+    correction_model: str = field(default="", repr=False)
     temperature: float | None = None
     timeout_seconds: float | None = None
     reader_level: str = "b2"
