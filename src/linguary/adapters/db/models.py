@@ -323,6 +323,25 @@ class ProcessingRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
 
 
+class CorrectionCheckRow(Base):
+    """Current correction coverage for a block within a processing run."""
+
+    __tablename__ = "correction_checks"
+    __table_args__ = (
+        Index("ix_correction_checks_run_section", "run_id", "section_id"),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        String(255), ForeignKey("processing_runs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    block_id: Mapped[str] = mapped_column(
+        String(255), ForeignKey("document_blocks.id", ondelete="CASCADE"), primary_key=True,
+    )
+    section_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt_id: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
 class BlockResultRow(Base):
     """Processing result of a single block within a run."""
 
@@ -450,6 +469,7 @@ __all__ = [
     "BlockResultRow",
     "BookRow",
     "ChapterAnalysisRow",
+    "CorrectionCheckRow",
     "DecimalAsText",
     "DocumentBlockRow",
     "GlossaryCandidateRow",

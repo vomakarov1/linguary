@@ -5,16 +5,17 @@ from hashlib import sha256
 import json
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from linguary.adapters.db.models import (
     BookConditionsRow, WorkBindingRow, ArtifactRevisionRow, RecoveryRootRow,
     RecoveryScopeRow, LLMAttemptRow, QualityReviewRow, QualityReservationRow,
-    LLMCallLogRow, ProcessingRunRow, ProcessingTaskRow,
+    LLMCallLogRow, ProcessingRunRow, ProcessingTaskRow, CorrectionCheckRow, DocumentBlockRow,
 )
 from linguary.adapters.db.mapping import conditions_from_row, conditions_to_row
 from linguary.domain.book_conditions import WorkStateError, identifier, nonnegative, thaw, version
 from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
 from linguary.domain.quality_review import QualityReview, QualityReservation
+from linguary.domain.correction import CorrectionCheck
 
 
 def _json(value):
@@ -72,6 +73,49 @@ class SqlAlchemyWorkRepository:
             return None
         version(row.payload_json.get('schema_version'))
         return {column.name: getattr(row, column.name) for column in row.__table__.columns}
+
+    def correction_checks(self, run_id, section_id):
+        rows = self._session.scalars(select(CorrectionCheckRow).join(
+            DocumentBlockRow, DocumentBlockRow.id == CorrectionCheckRow.block_id,
+        ).where(CorrectionCheckRow.run_id == run_id,
+                CorrectionCheckRow.section_id == section_id).order_by(DocumentBlockRow.order)).all()
+        return tuple(CorrectionCheck(row.run_id, row.block_id, row.section_id,
+                                     row.input_sha256, row.attempt_id) for row in rows)
+
+    def replace_correction_checks(self, run_id, section_id, checks):
+        checks = tuple(checks)
+        run = self._session.get(ProcessingRunRow, run_id)
+        if run is None or run.status != 'active':
+            raise WorkStateError('запуск исправления больше не активен')
+        conditions = self.latest_conditions(run.book_id)
+        binding = self.get_binding('run', run_id)
+        if (conditions is None or binding is None or binding['book_id'] != run.book_id
+                or binding['conditions_id'] != conditions.id
+                or len({check.block_id for check in checks}) != len(checks)):
+            raise WorkStateError('условия отметок исправления не совпадают')
+        for check in checks:
+            block = self._session.get(DocumentBlockRow, check.block_id)
+            attempt = self.get_attempt(check.attempt_id)
+            if (check.run_id != run_id or check.section_id != section_id or block is None
+                    or block.book_id != run.book_id or block.section_id != section_id
+                    or attempt is None or attempt.state != 'accepted'
+                    or attempt.book_id != run.book_id or attempt.run_id != run_id
+                    or attempt.conditions_id != conditions.id
+                    or attempt.context.get('stage') != 'chapter_correction'
+                    or check.block_id not in attempt.context.get('ordered_block_ids', ())):
+                raise WorkStateError('отметка не принадлежит принятому исправлению главы')
+        for check in checks:
+            self._session.merge(CorrectionCheckRow(**asdict(check)))
+        self._session.flush()
+
+    def delete_correction_checks(self, run_id, *, section_id=None, block_ids=None):
+        query = delete(CorrectionCheckRow).where(CorrectionCheckRow.run_id == run_id)
+        if section_id is not None:
+            query = query.where(CorrectionCheckRow.section_id == section_id)
+        if block_ids is not None:
+            query = query.where(CorrectionCheckRow.block_id.in_(tuple(block_ids)))
+        self._session.execute(query)
+        self._session.flush()
 
     def bind_operation_refs(self, task_id, *, book_id, conditions_id, operation_refs):
         refs = [dict(ref) for ref in operation_refs]
@@ -279,7 +323,9 @@ class SqlAlchemyWorkRepository:
             return None
         version(row.body_json.get('schema_version'))
         return {'id': row.id, 'book_id': row.book_id, 'body': row.body_json,
-                'sha256': row.sha256, 'attempt_id': row.attempt_id}
+                'sha256': row.sha256, 'attempt_id': row.attempt_id,
+                'conditions_id': row.conditions_id, 'run_id': row.run_id,
+                'kind': row.kind, 'scope_id': row.scope_id}
 
     def add_review(self, review):
         if review.conditions_id:
@@ -448,14 +494,99 @@ class SqlAlchemyWorkRepository:
         self._session.flush()
         return len(rows)
 
+    def _translation_source(self, *, book_id, run_id, conditions_id, block_id,
+                            artifact_revision_id, attempt_id):
+        """Resolve accepted correction archives to their verified translation source."""
+        seen = set()
+        seen_attempts = set()
+        while artifact_revision_id not in seen:
+            if attempt_id in seen_attempts:
+                return None
+            seen.add(artifact_revision_id)
+            seen_attempts.add(attempt_id)
+            artifact = self._session.get(ArtifactRevisionRow, artifact_revision_id)
+            attempt = self.get_attempt(attempt_id) if attempt_id is not None else None
+            if (artifact is None or attempt is None or attempt.state != 'accepted'
+                    or artifact.book_id != book_id or attempt.book_id != book_id
+                    or artifact.run_id != run_id or attempt.run_id != run_id
+                    or artifact.conditions_id != conditions_id or attempt.conditions_id != conditions_id
+                    or artifact.attempt_id != attempt_id or artifact.scope_id != block_id
+                    or artifact.kind != 'block_result'
+                    or block_id not in attempt.context.get('ordered_block_ids', ())):
+                return None
+            body = artifact.body_json
+            if (not isinstance(body, dict) or body.get('schema_version') != 1
+                    or not isinstance(body.get('result'), dict)
+                    or body['result'].get('block_id') != block_id):
+                return None
+            try:
+                encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+            except (TypeError, ValueError):
+                return None
+            if sha256(encoded.encode()).hexdigest() != artifact.sha256:
+                return None
+            stage = attempt.context.get('stage')
+            if stage == 'chapter_correction':
+                artifact_revision_id = body.get('source_revision')
+                attempt_id = body.get('source_attempt')
+                if not isinstance(artifact_revision_id, str) or not isinstance(attempt_id, str):
+                    return None
+                continue
+            if stage not in {'translation_unit', 'block_regeneration'}:
+                return None
+            if attempt.root_id is not None:
+                root = self.get_root(attempt.root_id)
+                scope = self.get_scope(attempt.scope_id)
+                if (root is None or scope is None or root.book_id != book_id
+                        or root.conditions_id != conditions_id or root.manifest.get('active_run_id') != run_id
+                        or scope.root_id != root.id or scope.status != 'accepted'
+                        or scope.accepted_attempt_id != attempt.id
+                        or scope.generation != attempt.generation or block_id not in scope.ordered_blocks):
+                    return None
+                if root.policy_version is not None:
+                    expected = {'schema_version': 1, 'root_id': root.id,
+                                'policy_version': root.policy_version,
+                                'prompt_hash': attempt.context.get('prompt_hash'), 'attempt_id': attempt.id}
+                    if (attempt.context.get('policy_version') != root.policy_version
+                            or body.get('provenance') != expected):
+                        return None
+            return attempt
+        return None
+
     def replace_result_binding(self, entity_id, *, book_id, conditions_id, attempt_id,
-                               artifact_revision_id, expected_attempt_id, provenance=None):
+                               artifact_revision_id, expected_attempt_id, provenance=None,
+                               expected_artifact_revision_id=None):
         """Move a current projection pointer while preserving immutable archived versions."""
         conditions = self.latest_conditions(book_id)
         if conditions is None or conditions.id != conditions_id:
             raise WorkStateError('версия результата больше не активна')
         attempt = self._owned(LLMAttemptRow, attempt_id, book_id)
         artifact = self._owned(ArtifactRevisionRow, artifact_revision_id, book_id)
+        current = self._session.get(WorkBindingRow, ('result', entity_id))
+        correction = attempt.context_json.get('stage') == 'chapter_correction'
+        if correction:
+            run = self._session.get(ProcessingRunRow, attempt.run_id)
+            block = self._session.get(DocumentBlockRow, artifact.scope_id)
+            body = artifact.body_json
+            if (current is None or run is None or run.status != 'active' or run.book_id != book_id
+                    or block is None or block.book_id != book_id
+                    or entity_id != f'{run.id}:{block.id}' or artifact.run_id != run.id
+                    or artifact.kind != 'block_result' or attempt.state not in {'validated', 'accepted'}
+                    or current.book_id != book_id or current.conditions_id != conditions_id
+                    or current.attempt_id != expected_attempt_id
+                    or (expected_artifact_revision_id is not None
+                        and current.artifact_revision_id != expected_artifact_revision_id)
+                    or block.id not in attempt.context_json.get('ordered_block_ids', ())
+                    or not isinstance(body, dict) or not isinstance(body.get('result'), dict)
+                    or body['result'].get('block_id') != block.id
+                    or body.get('source_revision') != current.artifact_revision_id
+                    or body.get('source_attempt') != current.attempt_id
+                    or artifact.id == current.artifact_revision_id
+                    or self._translation_source(book_id=book_id, run_id=run.id,
+                        conditions_id=conditions_id, block_id=block.id,
+                        artifact_revision_id=current.artifact_revision_id,
+                        attempt_id=current.attempt_id) is None):
+                raise WorkStateError('исправление не является доказуемым преемником перевода')
         if attempt.root_id is not None:
             root = self.get_root(attempt.root_id)
             if root is not None and root.policy_version is not None:
@@ -466,7 +597,6 @@ class SqlAlchemyWorkRepository:
                     raise WorkStateError('происхождение новой версии не совпадает')
         if attempt.conditions_id != conditions_id or artifact.conditions_id != conditions_id or artifact.attempt_id != attempt_id:
             raise WorkStateError('происхождение новой версии не совпадает')
-        current = self._session.get(WorkBindingRow, ('result', entity_id))
         if current is None:
             if expected_attempt_id is not None:
                 raise WorkStateError('указатель результата изменился')
@@ -475,10 +605,12 @@ class SqlAlchemyWorkRepository:
             return
         if current.artifact_revision_id is None or self._session.get(ArtifactRevisionRow, current.artifact_revision_id) is None:
             raise WorkStateError('предыдущая версия результата не заархивирована')
+        previous_revision = current.artifact_revision_id
         changed = self._session.execute(update(WorkBindingRow).where(
             WorkBindingRow.entity_kind == 'result', WorkBindingRow.entity_id == entity_id,
             WorkBindingRow.book_id == book_id, WorkBindingRow.conditions_id == conditions_id,
             WorkBindingRow.attempt_id.is_(None) if expected_attempt_id is None else WorkBindingRow.attempt_id == expected_attempt_id,
+            WorkBindingRow.artifact_revision_id == previous_revision,
         ).values(attempt_id=attempt_id, artifact_revision_id=artifact_revision_id,
                  payload_json=_json(provenance or {'schema_version': 1})))
         if changed.rowcount != 1:
@@ -812,10 +944,24 @@ class SqlAlchemyWorkRepository:
         run_id = manifest['active_run_id']
         run = self._session.get(ProcessingRunRow, run_id)
         conditions = self.latest_conditions(root.book_id)
-        if run is None or run.status != 'active' or conditions is None or conditions.id != root.conditions_id:
+        if (run is None or run.status != 'active' or run.book_id != root.book_id
+                or conditions is None or conditions.id != root.conditions_id):
             return False
         from linguary.adapters.db.repositories import SqlAlchemyBlockResultRepository
         results = SqlAlchemyBlockResultRepository(self._session)
+        correction_sources = {}
+        for block in blocks:
+            binding = self.get_binding('result', f'{run_id}:{block}')
+            attempt = None if binding is None else self.get_attempt(binding['attempt_id'])
+            if attempt is not None and attempt.context.get('stage') == 'chapter_correction':
+                if binding['book_id'] != root.book_id or binding['conditions_id'] != root.conditions_id:
+                    return False
+                source = self._translation_source(book_id=root.book_id, run_id=run_id,
+                    conditions_id=root.conditions_id, block_id=block,
+                    artifact_revision_id=binding['artifact_revision_id'], attempt_id=binding['attempt_id'])
+                if source is None:
+                    return False
+                correction_sources[block] = source
         for scope in leaves:
             if root.policy_version is not None:
                 accepted = self.get_attempt(scope.accepted_attempt_id)
@@ -826,9 +972,12 @@ class SqlAlchemyWorkRepository:
                 binding = self.get_binding('result', f'{run_id}:{block}')
                 if binding is None:
                     return False
-                if binding['attempt_id'] != scope.accepted_attempt_id:
-                    replacement = self.get_attempt(binding['attempt_id'])
+                source = correction_sources.get(block)
+                current_attempt_id = source.id if source is not None else binding['attempt_id']
+                if current_attempt_id != scope.accepted_attempt_id:
+                    replacement = source if source is not None else self.get_attempt(current_attempt_id)
                     if (replacement is None or replacement.state != 'accepted' or replacement.run_id != run_id
+                            or replacement.book_id != root.book_id
                             or replacement.conditions_id != root.conditions_id
                             or replacement.context.get('stage') != 'block_regeneration'):
                         return False

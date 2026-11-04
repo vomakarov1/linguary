@@ -33,6 +33,7 @@ from linguary.domain import (
     TaskError,
 )
 from linguary.domain.recovery import CallAttempt
+from linguary.domain.correction import CorrectionCheck
 
 
 class PersistenceError(ApplicationError):
@@ -268,6 +269,20 @@ class WorkRepository(Protocol):
     def bind(self, entity_kind, entity_id, *, book_id, conditions_id,
              attempt_id=None, artifact_revision_id=None, payload=None) -> None: ...
     def get_binding(self, entity_kind, entity_id): ...
+    def correction_checks(self, run_id: str, section_id: str) -> tuple[CorrectionCheck, ...]:
+        """Read the current chapter checks in block reading order."""
+
+    def replace_correction_checks(self, run_id: str, section_id: str,
+                                  checks: Sequence[CorrectionCheck]) -> None:
+        """Replace checks for the supplied blocks within the caller's transaction.
+
+        Preserve checks for other blocks, including earlier accepted groups.
+        Validate run, chapter, block and accepted correction attempt ownership.
+        """
+
+    def delete_correction_checks(self, run_id: str, *, section_id: str | None = None,
+                                 block_ids: Sequence[str] | None = None) -> None:
+        """Delete matching checks, or all checks in a run when no filter is given."""
     def bind_operation_refs(
         self,
         task_id: str,
@@ -313,7 +328,14 @@ class WorkRepository(Protocol):
     def archive_artifacts(self, artifacts): ...
     def get_artifact(self, artifact_id): ...
     def replace_result_binding(self, entity_id, *, book_id, conditions_id, attempt_id,
-                               artifact_revision_id, expected_attempt_id, provenance) -> None: ...
+                               artifact_revision_id, expected_attempt_id, provenance=None,
+                               expected_artifact_revision_id=None) -> None:
+        """Replace a projection pointer, verifying exact correction predecessor lineage.
+
+        Correction archives contain source_revision and source_attempt matching the
+        current pointer. Their accepted chain must reach a translation in the same
+        book, run, conditions and block; cycles or broken archives are rejected.
+        """
     def find_review(self, book_id, request_key): ...
     def list_reviews(self, book_id): ...
     def review_progress(self, review_id): ...
@@ -353,7 +375,7 @@ class WorkRepository(Protocol):
     def split_scope(self, scope_id, *, expected_generation, children): ...
     def owns_recovery_attempt(self, attempt_id) -> bool: ...
     def mark_recovery_accepted(self, attempt_id): ...
-    def root_coverage_complete(self, root_id) -> bool: ...
+    def root_coverage_complete(self, root_id, *, update_state=True) -> bool: ...
     def invalidate_run_coverage(self, book_id, run_id): ...
     def reconcile_recovery_attempts(self): ...
     def scope_attempt_count(self, scope_id) -> int: ...
