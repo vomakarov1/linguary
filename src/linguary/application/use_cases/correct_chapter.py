@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from linguary.application.block_processing import chapter_number, complete_processing, note_id_factory
 from linguary.application.correction import (
-    correction_inputs, reconcile_corrections, task_matches_inputs, unchecked_blocks,
+    correction_inputs, original_block_payload, reconcile_corrections, task_matches_inputs, unchecked_blocks,
 )
 from linguary.application.correction_dto import ChapterCorrectionResponse, CorrectedBlockResponse
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
@@ -72,7 +72,7 @@ class CorrectChapter:
 
     def _request(self, inputs, task, block_ids):
         body = dict(inputs.context, blocks=[dict(block_id=block_id,
-            original=asdict(next(b for b in inputs.blocks if b.id == block_id)),
+            original=original_block_payload(next(b for b in inputs.blocks if b.id == block_id)),
             current_result=asdict(inputs.results[block_id])) for block_id in block_ids])
         request = LLMRequest.for_chapter_correction(instructions=self.snapshot.prompt,
             input_text=_json(body), ordered_block_ids=block_ids).with_logging(

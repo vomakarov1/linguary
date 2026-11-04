@@ -1,6 +1,6 @@
 """Current correction coverage and transactional recovery of required chapter work."""
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from uuid import uuid4
 
 from linguary.application.context_builder import textual_blocks
@@ -12,6 +12,14 @@ from linguary.domain import (
 from linguary.domain.book_conditions import BookConditions, WorkStateError, thaw
 from linguary.domain.content_plan import canonical_sha
 from linguary.domain.correction import correction_policy, correction_task_identity
+
+
+def original_block_payload(block):
+    payload = {field.name: getattr(block, field.name) for field in fields(block)}
+    payload['source_reference'] = asdict(block.source_reference)
+    payload['inline_annotations'] = [asdict(annotation) for annotation in block.inline_annotations]
+    payload['attributes'] = dict(block.attributes)
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +40,7 @@ class CorrectionInputs:
             source_language=self.document.source_language,
             target_language=self.document.target_language,
             section_id=self.section.id,
-            chapter_originals=[asdict(block) for block in self.section.ordered_blocks],
+            chapter_originals=[original_block_payload(block) for block in self.section.ordered_blocks],
             chapter_analysis=None if self.analysis is None else asdict(self.analysis),
             book_conditions=thaw(self.conditions.payload),
             run_glossary=asdict(self.run.glossary_snapshot),
@@ -41,7 +49,7 @@ class CorrectionInputs:
     @property
     def checksums(self):
         context = self.context
-        return {block.id: canonical_sha(dict(context=context, original=asdict(block),
+        return {block.id: canonical_sha(dict(context=context, original=original_block_payload(block),
                     current_persisted_result=None if block.id not in self.results
                     else asdict(self.results[block.id]))) for block in self.blocks}
 

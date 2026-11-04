@@ -22,6 +22,7 @@ from linguary.application.glossary_review import (
     GlossaryReviewError,
     GlossaryReviewIncompleteError,
 )
+from linguary.application.correction_dto import CorrectionSnapshot, CORRECTION_VERSIONS
 from linguary.application.use_cases.approve_glossary import (
     ApproveGlossary,
     GlossaryDecision,
@@ -47,6 +48,32 @@ from linguary.domain.name_translation import (
 )
 
 LLM_SETTINGS = LLMSettingsSnapshot(provider="openai_compatible", model="gpt-test")
+CORRECTION_SETTINGS = CorrectionSnapshot(
+    model=LLM_SETTINGS.model,
+    route={"provider": LLM_SETTINGS.provider, "base_url": "https://example.test/v1",
+           "proxy": "", "route_id": "test-route"},
+    parameters={"temperature": LLM_SETTINGS.temperature,
+                "max_output_tokens": LLM_SETTINGS.max_output_tokens,
+                "timeout_seconds": 30, "max_attempts": 3,
+                "max_unit_source_chars": 1000,
+                "input_price_per_mtok": 0, "output_price_per_mtok": 0},
+    prompt="Check the chapter translation.",
+    versions=CORRECTION_VERSIONS,
+)
+
+
+class ProcessingWork:
+    """Conditions and run bindings needed by the processing start use case."""
+
+    def __init__(self, conditions: SimpleNamespace) -> None:
+        self.conditions = conditions
+        self.bindings: dict[tuple[str, str], dict] = {}
+
+    def latest_conditions(self, book_id: str) -> SimpleNamespace:
+        return self.conditions
+
+    def bind(self, scope: str, scope_id: str, **binding) -> None:
+        self.bindings[scope, scope_id] = binding
 
 #: High-confidence translated term: hint, does not require a decision.
 HINT = "entailed estate"
@@ -89,10 +116,27 @@ def approve(unit_of_work: FakeUnitOfWork) -> ApproveGlossary:
 
 def start(unit_of_work: FakeUnitOfWork) -> StartProcessing:
     """Start processing use case on top of storage double."""
+    work = getattr(unit_of_work, "work", None)
+    conditions = None if work is None else work.latest_conditions(BOOK_ID)
+    payload = {
+        "route": {"provider": LLM_SETTINGS.provider},
+        "models": {"processing": LLM_SETTINGS.model},
+        "llm_parameters": {"temperature": LLM_SETTINGS.temperature,
+                           "max_output_tokens": LLM_SETTINGS.max_output_tokens},
+    }
+    if conditions is not None:
+        payload.update(conditions.payload)
+    conditions = SimpleNamespace(
+        id="conditions-1" if conditions is None else conditions.id,
+        payload=payload,
+    )
+    unit_of_work.work = ProcessingWork(conditions)
     return StartProcessing(
         unit_of_work=unit_of_work,  # type: ignore[arg-type]  # storage port double
         glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
         llm_settings_snapshot=LLM_SETTINGS,
+        correction_snapshot=CORRECTION_SETTINGS,
+        book_conditions=SimpleNamespace(require=lambda *args, **kwargs: conditions),
         id_factory=sequential_ids(),
     )
 

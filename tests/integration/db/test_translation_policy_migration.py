@@ -168,7 +168,7 @@ def test_migrated_schema_matches_models(alembic_config, legacy_database):
     "UPDATE processing_tasks SET status='superseded'",
 ])
 def test_downgrade_refuses_to_discard_operation_history(alembic_config, legacy_database, mutation):
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0011")
     with legacy_database.begin() as connection:
         connection.execute(text("UPDATE processing_tasks SET operation_id='', policy_version=''"))
         connection.execute(text(mutation))
@@ -201,7 +201,7 @@ def test_empty_policy_downgrade_and_upgrade_preserve_work(alembic_config, legacy
 
 
 def test_downgrade_preserves_migrated_task_identity(alembic_config, legacy_database):
-    command.upgrade(alembic_config, "head")
+    command.upgrade(alembic_config, "0011")
     before = snapshot(legacy_database, ("processing_tasks", "alembic_version"))
     with pytest.raises(RuntimeError, match="историю операций"):
         command.downgrade(alembic_config, "0010")
