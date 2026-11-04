@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -25,6 +26,7 @@ from linguary.domain import (
     LLMCallLog,
     LLMCallStage,
     ProcessingTask,
+    TaskStatus,
     TaskType,
 )
 
@@ -286,6 +288,37 @@ def test_book_detail_reports_failed_task_with_retry_flag(
     assert failures[0]["error_type_label"] == "Временный сбой — попробуйте повторить"
     assert failures[0]["message"] == "провайдер не ответил"
     assert failures[0]["is_retryable"] is True
+
+
+def test_failed_chapter_correction_remains_visible_and_can_be_retried(
+    client: TestClient, application: Application
+) -> None:
+    """A correction failure keeps the book card available and returns a valid retry response."""
+    scenario = store_book(application, status=BookStatus.PROCESSING)
+    task = store_task(
+        application,
+        task=replace(failed_task(scenario), task_type=TaskType.CHAPTER_CORRECTION),
+    )
+
+    response = client.get(f"/books/{scenario.book_id}")
+
+    assert response.status_code == 200
+    failure = response.json()["progress"]["failures"][0]
+    assert failure["task_type"] == TaskType.CHAPTER_CORRECTION.value
+    assert failure["task_type_label"] == "Исправление главы"
+    assert failure["is_retryable"] is True
+
+    page = client.get(f"/books/{scenario.book_id}", headers=HTML_HEADERS)
+
+    assert page.status_code == 200
+    assert "Исправление главы: провайдер не ответил" in page.text
+
+    retry = client.post(f"/tasks/{task.id}/retry")
+
+    assert retry.status_code == 200
+    assert retry.json()["task_type"] == TaskType.CHAPTER_CORRECTION.value
+    assert retry.json()["task_type_label"] == "Исправление главы"
+    assert retry.json()["status"] == TaskStatus.PENDING.value
 
 
 def test_permanent_failure_is_not_retryable(

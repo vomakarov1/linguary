@@ -429,7 +429,6 @@ def build_application(
 
     def maintain_work():
         diagnostics.ensure_available()
-        correction.reconcile()
 
     runner = TaskRunner(
         queue=task_queue,
