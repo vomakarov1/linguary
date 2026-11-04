@@ -9,13 +9,16 @@ from sqlalchemy import delete, select, update
 from linguary.adapters.db.models import (
     BookConditionsRow, WorkBindingRow, ArtifactRevisionRow, RecoveryRootRow,
     RecoveryScopeRow, LLMAttemptRow, QualityReviewRow, QualityReservationRow,
-    LLMCallLogRow, ProcessingRunRow, ProcessingTaskRow, CorrectionCheckRow, DocumentBlockRow,
+    LLMCallLogRow, ProcessingRunRow, ProcessingTaskRow, CorrectionCheckRow, CorrectionCandidateRow, CorrectionInputRow, DocumentBlockRow,
 )
 from linguary.adapters.db.mapping import conditions_from_row, conditions_to_row
 from linguary.domain.book_conditions import WorkStateError, identifier, nonnegative, thaw, version
 from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
 from linguary.domain.quality_review import QualityReview, QualityReservation
-from linguary.domain.correction import CorrectionCheck
+from linguary.domain.correction import (
+    CorrectionCheck, CorrectionCandidate, CorrectionDecision, CORRECTION_POLICY_VERSION_V2,
+)
+from linguary.domain.content_plan import canonical_sha
 
 
 def _json(value):
@@ -80,7 +83,7 @@ class SqlAlchemyWorkRepository:
         ).where(CorrectionCheckRow.run_id == run_id,
                 CorrectionCheckRow.section_id == section_id).order_by(DocumentBlockRow.order)).all()
         return tuple(CorrectionCheck(row.run_id, row.block_id, row.section_id,
-                                     row.input_sha256, row.attempt_id) for row in rows)
+                                     row.input_sha256, row.attempt_id, row.basis, row.candidate_id) for row in rows)
 
     def replace_correction_checks(self, run_id, section_id, checks):
         checks = tuple(checks)
@@ -104,9 +107,204 @@ class SqlAlchemyWorkRepository:
                     or attempt.context.get('stage') != 'chapter_correction'
                     or check.block_id not in attempt.context.get('ordered_block_ids', ())):
                 raise WorkStateError('отметка не принадлежит принятому исправлению главы')
+            if binding['payload_json'].get('correction', {}).get('policy_version') == CORRECTION_POLICY_VERSION_V2:
+                if check.basis == 'unchanged':
+                    group = self.get_binding('correction_group', check.attempt_id)
+                    if (group is None or group['payload_json'].get('run_id') != run_id
+                            or check.block_id not in group['payload_json'].get('unchanged_block_ids', ())):
+                        raise WorkStateError('отсутствует квитанция неизменённого блока')
+                else:
+                    candidate = self.get_correction_candidate(check.candidate_id)
+                    if (candidate is None or candidate.run_id != run_id or candidate.block_id != check.block_id
+                            or candidate.proposal_attempt_id != check.attempt_id
+                            or (check.basis == 'confirmed' and (candidate.state != 'auto_applied'
+                                or not self._confirmed_candidate(candidate)))
+                            or (check.basis == 'human' and (candidate.decision is None
+                                or candidate.state not in {'accepted', 'kept'}))
+                            or check.basis not in {'confirmed', 'human'}):
+                        raise WorkStateError('отсутствует принятое решение исправления')
         for check in checks:
             self._session.merge(CorrectionCheckRow(**asdict(check)))
         self._session.flush()
+
+    def get_correction_candidate(self, candidate_id):
+        row = self._session.get(CorrectionCandidateRow, candidate_id) if candidate_id else None
+        if row is None:
+            return None
+        return CorrectionCandidate(row.candidate_id, row.book_id, row.run_id, row.conditions_id,
+            row.section_id, row.block_id, row.input_sha256, row.input_generation, row.proposal_sha256,
+            row.payload_json, row.group_id, row.proposal_attempt_id, row.state,
+            row.review_attempt_id, row.review_json, row.decision_json)
+
+    def correction_input_generations(self, run_id):
+        return {row.block_id: row.generation for row in self._session.scalars(
+            select(CorrectionInputRow).where(CorrectionInputRow.run_id == run_id)).all()}
+
+    def observe_correction_input(self, run_id, block_id, fingerprint):
+        run = self._session.get(ProcessingRunRow, run_id)
+        block = self._session.get(DocumentBlockRow, block_id)
+        if run is None or run.status != 'active' or block is None or block.book_id != run.book_id:
+            raise WorkStateError('вход исправления не принадлежит активному запуску')
+        row = self._session.get(CorrectionInputRow, (run_id, block_id))
+        if row is None:
+            self._add(CorrectionInputRow(run_id=run_id, block_id=block_id, generation=1, fingerprint=fingerprint))
+            return 1
+        if row.fingerprint == fingerprint:
+            return row.generation
+        generation = row.generation + 1
+        changed = self._session.execute(update(CorrectionInputRow).where(
+            CorrectionInputRow.run_id == run_id, CorrectionInputRow.block_id == block_id,
+            CorrectionInputRow.generation == row.generation, CorrectionInputRow.fingerprint == row.fingerprint,
+        ).values(generation=generation, fingerprint=fingerprint))
+        if changed.rowcount != 1:
+            raise WorkStateError('поколение входа изменилось одновременно')
+        self._session.flush()
+        return generation
+
+    def advance_correction_input(self, run_id, block_id, *, expected_generation, fingerprint):
+        changed = self._session.execute(update(CorrectionInputRow).where(
+            CorrectionInputRow.run_id == run_id, CorrectionInputRow.block_id == block_id,
+            CorrectionInputRow.generation == expected_generation,
+        ).values(fingerprint=fingerprint))
+        if changed.rowcount != 1:
+            raise WorkStateError('поколение входа изменилось до принятия исправления')
+        self._session.flush()
+
+    def list_correction_candidates(self, run_id, *, section_id=None, states=None):
+        query = select(CorrectionCandidateRow.candidate_id).join(
+            DocumentBlockRow, DocumentBlockRow.id == CorrectionCandidateRow.block_id,
+        ).where(CorrectionCandidateRow.run_id == run_id)
+        if section_id is not None:
+            query = query.where(CorrectionCandidateRow.section_id == section_id)
+        if states is not None:
+            query = query.where(CorrectionCandidateRow.state.in_(tuple(states)))
+        return tuple(self.get_correction_candidate(i) for i in self._session.scalars(
+            query.order_by(DocumentBlockRow.order, CorrectionCandidateRow.candidate_id)).all())
+
+    def add_correction_candidates(self, candidates):
+        for candidate in candidates:
+            run = self._owned(ProcessingRunRow, candidate.run_id, candidate.book_id)
+            block = self._owned(DocumentBlockRow, candidate.block_id, candidate.book_id)
+            attempt = self.get_attempt(candidate.proposal_attempt_id)
+            inputs = self._session.get(CorrectionInputRow, (candidate.run_id, candidate.block_id))
+            if (run.status != 'active' or block.section_id != candidate.section_id
+                    or inputs is None or inputs.generation != candidate.input_generation
+                    or inputs.fingerprint != canonical_sha(dict(input_sha256=candidate.input_sha256,
+                        source_result_binding=thaw(candidate.payload['source_binding'])))
+                    or candidate.state != 'awaiting_review' or candidate.review is not None or candidate.decision is not None
+                    or attempt is None or attempt.state not in {'validated', 'accepted'}
+                    or attempt.book_id != candidate.book_id or attempt.run_id != candidate.run_id
+                    or attempt.conditions_id != candidate.conditions_id
+                    or attempt.context.get('stage') != 'chapter_correction'
+                    or attempt.context.get('policy_version') != CORRECTION_POLICY_VERSION_V2
+                    or candidate.block_id not in attempt.context.get('ordered_block_ids', ())):
+                raise WorkStateError('кандидат не принадлежит предложению исправления')
+            previous = self._session.scalar(select(CorrectionCandidateRow).where(
+                CorrectionCandidateRow.run_id == candidate.run_id,
+                CorrectionCandidateRow.block_id == candidate.block_id,
+                CorrectionCandidateRow.input_generation == candidate.input_generation))
+            if previous is not None:
+                if previous.candidate_id != candidate.candidate_id or previous.proposal_sha256 != candidate.proposal_sha256:
+                    raise WorkStateError('предложение для этих входов уже сохранено')
+                continue
+            self._add(CorrectionCandidateRow(candidate_id=candidate.candidate_id,
+                book_id=candidate.book_id, run_id=candidate.run_id, conditions_id=candidate.conditions_id,
+                section_id=candidate.section_id, block_id=candidate.block_id,
+                input_sha256=candidate.input_sha256, input_generation=candidate.input_generation,
+                proposal_sha256=candidate.proposal_sha256, payload_json=thaw(candidate.payload),
+                group_id=candidate.group_id, proposal_attempt_id=candidate.proposal_attempt_id,
+                state=candidate.state))
+
+    def record_correction_verdict(self, candidate_id, *, proposal_sha256, input_sha256,
+                                  review_attempt_id, review, state):
+        candidate = self.get_correction_candidate(candidate_id)
+        attempt = self.get_attempt(review_attempt_id)
+        if (candidate is None or state not in {'auto_applied', 'awaiting_human'}
+                or candidate.state != 'awaiting_review' or candidate.review is not None
+                or candidate.proposal_sha256 != proposal_sha256 or candidate.input_sha256 != input_sha256
+                or review.get('candidate_id') != candidate_id or review.get('proposal_sha256') != proposal_sha256
+                or attempt is None or attempt.state not in {'validated', 'accepted'}
+                or attempt.run_id != candidate.run_id or attempt.book_id != candidate.book_id
+                or attempt.conditions_id != candidate.conditions_id
+                or attempt.context.get('stage') != 'chapter_correction_review'
+                or attempt.context.get('policy_version') != CORRECTION_POLICY_VERSION_V2
+                or candidate.block_id not in attempt.context.get('ordered_block_ids', ())):
+            raise WorkStateError('вердикт проверки относится к изменившемуся кандидату')
+        if state == 'auto_applied' and (candidate.payload.get('evidence_valid') is not True
+                or review.get('verdict') != 'confirmed'
+                or any(review.get(k) is not True for k in ('error_supported', 'evidence_valid', 'minimal', 'no_semantic_loss'))):
+            raise WorkStateError('кандидат не подтверждён всеми проверками')
+        result = self._session.execute(update(CorrectionCandidateRow).where(
+            CorrectionCandidateRow.candidate_id == candidate_id,
+            CorrectionCandidateRow.state == 'awaiting_review',
+            CorrectionCandidateRow.review_json.is_(None),
+            CorrectionCandidateRow.proposal_sha256 == proposal_sha256,
+        ).values(state=state, review_attempt_id=review_attempt_id, review_json=thaw(review)))
+        if result.rowcount != 1:
+            raise WorkStateError('кандидат изменился до сохранения вердикта')
+        self._session.flush()
+
+    def resolve_correction_candidate(self, candidate_id, *, proposal_sha256, input_sha256, decision):
+        decision = CorrectionDecision(decision['action'], decision['reason'])
+        result = self._session.execute(update(CorrectionCandidateRow).where(
+            CorrectionCandidateRow.candidate_id == candidate_id,
+            CorrectionCandidateRow.state == 'awaiting_human',
+            CorrectionCandidateRow.proposal_sha256 == proposal_sha256,
+            CorrectionCandidateRow.input_sha256 == input_sha256,
+            CorrectionCandidateRow.decision_json.is_(None),
+        ).values(state='accepted' if decision.action == 'accept' else 'kept',
+                 decision_json={'action': decision.action, 'reason': decision.reason}))
+        if result.rowcount != 1:
+            raise WorkStateError('кандидат изменился до принятия решения')
+        self._session.flush()
+
+    def stale_correction_candidates(self, run_id, *, block_ids=None, candidate_ids=None):
+        query = update(CorrectionCandidateRow).where(CorrectionCandidateRow.run_id == run_id,
+                                                    CorrectionCandidateRow.state != 'stale')
+        if block_ids is not None:
+            query = query.where(CorrectionCandidateRow.block_id.in_(tuple(block_ids)))
+        if candidate_ids is not None:
+            query = query.where(CorrectionCandidateRow.candidate_id.in_(tuple(candidate_ids)))
+        self._session.execute(query.values(state='stale'))
+        self._session.flush()
+
+    def _confirmed_candidate(self, candidate):
+        review = candidate.review
+        attempt = self.get_attempt(candidate.review_attempt_id) if candidate.review_attempt_id else None
+        artifact = None if not review else self.get_artifact(review.get('artifact_revision_id'))
+        if artifact is None:
+            return False
+        verdict = {k: thaw(v) for k, v in review.items() if k != 'artifact_revision_id'}
+        encoded = json.dumps(artifact['body'], ensure_ascii=False, sort_keys=True,
+                             separators=(',', ':'), allow_nan=False)
+        return bool(candidate.payload.get('evidence_valid') is True
+            and review.get('verdict') == 'confirmed'
+            and all(review.get(k) is True for k in ('error_supported', 'evidence_valid', 'minimal', 'no_semantic_loss'))
+            and attempt is not None and attempt.state == 'accepted'
+            and attempt.context.get('stage') == 'chapter_correction_review'
+            and attempt.run_id == candidate.run_id and attempt.conditions_id == candidate.conditions_id
+            and artifact['kind'] == 'correction_review' and artifact['attempt_id'] == attempt.id
+            and artifact['run_id'] == candidate.run_id and artifact['conditions_id'] == candidate.conditions_id
+            and artifact['book_id'] == candidate.book_id
+            and sha256(encoded.encode()).hexdigest() == artifact['sha256']
+            and verdict in artifact['body'].get('response', {}).get('candidates', ()))
+
+    def _candidate_successor(self, body, attempt, *, require_current=False):
+        candidate = self.get_correction_candidate(body.get('correction_candidate_id'))
+        if (candidate is None or candidate.proposal_attempt_id != attempt.id
+                or candidate.proposal_sha256 != body.get('proposal_sha256')
+                or candidate.block_id != body.get('result', {}).get('block_id')
+                or candidate.book_id != attempt.book_id
+                or candidate.run_id != attempt.run_id or candidate.conditions_id != attempt.conditions_id
+                or thaw(candidate.payload.get('result')) != body.get('result')
+                or candidate.payload.get('source_binding', {}).get('attempt_id') != body.get('source_attempt')
+                or candidate.payload.get('source_binding', {}).get('artifact_revision_id') != body.get('source_revision')):
+            return False
+        if require_current and candidate.state not in {'auto_applied', 'accepted'}:
+            return False
+        return bool((candidate.state in {'accepted', 'stale'} and candidate.decision
+                     and candidate.decision.get('action') == 'accept' and candidate.decision.get('reason'))
+                    or (candidate.state in {'auto_applied', 'stale'} and self._confirmed_candidate(candidate)))
 
     def delete_correction_checks(self, run_id, *, section_id=None, block_ids=None):
         query = delete(CorrectionCheckRow).where(CorrectionCheckRow.run_id == run_id)
@@ -527,6 +725,9 @@ class SqlAlchemyWorkRepository:
                 return None
             stage = attempt.context.get('stage')
             if stage == 'chapter_correction':
+                if (attempt.context.get('policy_version') == CORRECTION_POLICY_VERSION_V2
+                        and not self._candidate_successor(body, attempt)):
+                    return None
                 artifact_revision_id = body.get('source_revision')
                 attempt_id = body.get('source_attempt')
                 if not isinstance(artifact_revision_id, str) or not isinstance(attempt_id, str):
@@ -587,6 +788,9 @@ class SqlAlchemyWorkRepository:
                         artifact_revision_id=current.artifact_revision_id,
                         attempt_id=current.attempt_id) is None):
                 raise WorkStateError('исправление не является доказуемым преемником перевода')
+            if (attempt.context_json.get('policy_version') == CORRECTION_POLICY_VERSION_V2
+                    and not self._candidate_successor(body, self.get_attempt(attempt_id), require_current=True)):
+                raise WorkStateError('результат не подтверждён решением по кандидату')
         if attempt.root_id is not None:
             root = self.get_root(attempt.root_id)
             if root is not None and root.policy_version is not None:

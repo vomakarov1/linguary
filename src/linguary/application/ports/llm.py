@@ -31,14 +31,14 @@ from enum import StrEnum
 from typing import Protocol
 
 from linguary.application.errors import ApplicationError
-from linguary.application.correction_dto import ChapterCorrectionResponse
+from linguary.application.correction_dto import ChapterCorrectionResponse, ChapterCorrectionReviewResponse
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.domain.llm_log import CallContext, Violation
 from linguary.application.quality_context import QualityReviewResponse
 from linguary.domain import LLMCallStage, TokenUsage
 
 #: Structured responses that the model can return (PRD § 23).
-type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse | QualityReviewResponse | ChapterCorrectionResponse
+type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse | QualityReviewResponse | ChapterCorrectionResponse | ChapterCorrectionReviewResponse
 
 
 class LLMError(ApplicationError):
@@ -128,6 +128,7 @@ class LLMResponseKind(StrEnum):
 
     QUALITY_REVIEW = "quality_review"
     CHAPTER_CORRECTION = "chapter_correction"
+    CHAPTER_CORRECTION_REVIEW = "chapter_correction_review"
     CHAPTER_ANALYSIS = "chapter_analysis"
     TRANSLATION_RESULT = "translation_result"
 
@@ -156,6 +157,7 @@ class LLMRequest[PayloadT: LLMPayload]:
     max_completion_tokens: int | None = None
     name_translation_policy_version: int | None = None
     pronunciation_candidates_version: int | None = None
+    correction_candidate_refs: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind == LLMResponseKind.CHAPTER_CORRECTION:
@@ -163,8 +165,20 @@ class LLMRequest[PayloadT: LLMPayload]:
             if (not self.ordered_block_ids or len(set(self.ordered_block_ids)) != len(self.ordered_block_ids)
                     or any(not isinstance(value, str) or not value.strip() for value in self.ordered_block_ids)):
                 raise LLMError('исправление требует явный список уникальных блоков')
-            if type(self.contract_version) is not int or self.contract_version != 1:
+            if type(self.contract_version) is not int or self.contract_version not in {1, 2}:
                 raise LLMError('неизвестная версия контракта исправления')
+        if self.kind == LLMResponseKind.CHAPTER_CORRECTION_REVIEW:
+            object.__setattr__(self, 'ordered_block_ids', tuple(self.ordered_block_ids))
+            object.__setattr__(self, 'correction_candidate_refs', tuple(tuple(r) for r in self.correction_candidate_refs))
+            if (type(self.contract_version) is not int or self.contract_version != 1
+                    or not self.ordered_block_ids or len(set(self.ordered_block_ids)) != len(self.ordered_block_ids)
+                    or any(not isinstance(b, str) or not b for b in self.ordered_block_ids)
+                    or not self.correction_candidate_refs
+                    or len(set(self.correction_candidate_refs)) != len(self.correction_candidate_refs)
+                    or any(len(r) != 2 or any(not isinstance(v, str) or not v for v in r)
+                           or len(r[1]) != 64 for r in self.correction_candidate_refs)
+                    or len({r[0] for r in self.correction_candidate_refs}) != len(self.correction_candidate_refs)):
+                raise LLMError('проверка требует точные идентификаторы и хеши кандидатов')
         if self.pronunciation_candidates_version is not None and (
             type(self.pronunciation_candidates_version) is not int
             or self.pronunciation_candidates_version != 1
@@ -199,18 +213,24 @@ class LLMRequest[PayloadT: LLMPayload]:
             self, book_id=book_id, stage=stage, task_id=task_id, attempt=1,
             scope_id=scope_id,
             ordered_block_ids=(ordered_block_ids or self.ordered_block_ids)
-                if self.kind == LLMResponseKind.CHAPTER_CORRECTION else ordered_block_ids,
+                if self.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW} else ordered_block_ids,
             run_id=run_id
         )
 
     @classmethod
     def for_chapter_correction(
-        cls, *, instructions: str, input_text: str, ordered_block_ids: tuple[str, ...],
+        cls, *, instructions: str, input_text: str, ordered_block_ids: tuple[str, ...], contract_version: int = 1,
     ) -> LLMRequest[ChapterCorrectionResponse]:
         return LLMRequest[ChapterCorrectionResponse](
             kind=LLMResponseKind.CHAPTER_CORRECTION, instructions=instructions,
-            input_text=input_text, ordered_block_ids=tuple(ordered_block_ids),
+            input_text=input_text, ordered_block_ids=tuple(ordered_block_ids), contract_version=contract_version,
         )
+
+    @classmethod
+    def for_chapter_correction_review(cls, *, instructions, input_text, ordered_block_ids, candidate_refs):
+        return cls(kind=LLMResponseKind.CHAPTER_CORRECTION_REVIEW, instructions=instructions,
+                   input_text=input_text, ordered_block_ids=tuple(ordered_block_ids),
+                   correction_candidate_refs=tuple(candidate_refs))
 
     @classmethod
     def for_chapter_analysis(

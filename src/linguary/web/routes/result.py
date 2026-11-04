@@ -6,13 +6,19 @@ from collections.abc import Sequence
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse, RedirectResponse
+from pydantic import ValidationError
 
 from linguary.application.book_overview import book_result, result_groups, ResultBlockNotFoundError
 from linguary.application.pronunciation_projection import project_pronunciations
 from linguary.application.use_cases.retry_task import RetryTaskCommand
+from linguary.application.use_cases.resolve_correction_candidate import (
+    ResolveCorrectionCommand, CorrectionCandidateNotFound, CorrectionCandidateConflict,
+)
+from linguary.application.retry_policy import ResultValidationError
+from linguary.domain.book_conditions import WorkStateError
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
 from linguary.web.dependencies import CurrentApplication
-from linguary.web.schemas import BookResultResponse, ResultGroupResponse, TaskResponse
+from linguary.web.schemas import BookResultResponse, ResultGroupResponse, TaskResponse, ResolveCorrectionInput
 from linguary.web.views import render, wants_html
 from linguary.web.routes.quality import quality_page_context
 
@@ -147,6 +153,34 @@ async def regenerate_book_block(
             url=f"/books/{book_id}/result#{_block_anchor(block_id)}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
+    return response
+
+
+@router.post('/books/{book_id}/correction-candidates/{candidate_id}/resolve', response_model=ResultGroupResponse)
+async def resolve_correction_candidate(request: Request, application: CurrentApplication,
+                                       book_id: str, candidate_id: str):
+    try:
+        raw = (await request.json() if request.headers.get('content-type', '').split(';')[0] == 'application/json'
+               else dict(await request.form()))
+        data = ResolveCorrectionInput.model_validate(raw)
+    except (ValidationError, ValueError, TypeError):
+        raise HTTPException(status_code=422, detail='Проверьте решение и укажите его причину.') from None
+    if application.resolve_correction_candidate is None:
+        raise HTTPException(status_code=503, detail='Решения по исправлениям недоступны.')
+    try:
+        block_id = application.resolve_correction_candidate(ResolveCorrectionCommand(
+            book_id, candidate_id, data.proposal_sha256, data.input_sha256, data.action, data.reason))
+    except CorrectionCandidateNotFound:
+        raise HTTPException(status_code=404, detail='Предложение исправления не найдено.') from None
+    except (CorrectionCandidateConflict, WorkStateError, ResultValidationError):
+        raise HTTPException(status_code=409,
+            detail='Предложение или данные книги изменились. Обновите страницу результата.') from None
+    response = _result_block_response(application, book_id, block_id)
+    if _wants_result_block_fragment(request):
+        return render(request, 'partials/result_block.html', block=response, book_id=book_id)
+    if wants_html(request):
+        return RedirectResponse(url=f'/books/{book_id}/result#{_block_anchor(block_id)}',
+                                status_code=status.HTTP_303_SEE_OTHER)
     return response
 
 

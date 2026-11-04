@@ -112,7 +112,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         try:
             choice = _choice(document)
             truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
-            if request.kind == LLMResponseKind.CHAPTER_CORRECTION:
+            if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
                 message = choice.get('message')
                 if isinstance(message, dict) and message.get('refusal'):
                     raise LLMResponseFormatError(
@@ -122,9 +122,10 @@ class OpenAICompatibleLLMClient(LLMClient):
                     )
             content = _content(choice)
             payload = parse_payload(request.kind, content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=truncated)
-            if request.kind == LLMResponseKind.CHAPTER_CORRECTION:
+            if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
                 try:
-                    payload.validate_coverage(request.ordered_block_ids)
+                    payload.validate_coverage(request.correction_candidate_refs
+                        if request.kind == LLMResponseKind.CHAPTER_CORRECTION_REVIEW else request.ordered_block_ids)
                 except LLMPayloadError:
                     raise LLMResponseFormatError(
                         'ответ исправления не покрывает переданные блоки',

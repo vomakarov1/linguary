@@ -32,7 +32,7 @@ from linguary.application.glossary_review import (
     build_glossary_review,
     glossary_snapshot,
 )
-from linguary.application.correction_dto import CorrectionSnapshot
+from linguary.application.correction_dto import CorrectionSnapshot, CorrectionSnapshotV2, parse_correction_snapshot
 from linguary.application.mention_counter import mention_counter
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
@@ -348,7 +348,7 @@ class StartProcessing:
         unit_of_work: UnitOfWork,
         glossary_confidence_threshold: float,
         llm_settings_snapshot: LLMSettingsSnapshot,
-        correction_snapshot: CorrectionSnapshot | None = None,
+        correction_snapshot: CorrectionSnapshot | CorrectionSnapshotV2 | None = None,
         glossary_review_min_mentions: int = 5,
         glossary_review_min_chapters: int = 3,
         id_factory: IdFactory | None = None,
@@ -364,7 +364,7 @@ class StartProcessing:
             from linguary.application.book_conditions import ConditionsError
             raise ConditionsError('correction_policy_unavailable')
         self._correction_snapshot = (None if correction_snapshot is None else
-            CorrectionSnapshot.from_payload(correction_snapshot.to_payload()))
+            parse_correction_snapshot(correction_snapshot.to_payload()))
         self._id_factory = id_factory or _new_id
 
     def __call__(self, command: StartProcessingCommand) -> ProcessingRun:

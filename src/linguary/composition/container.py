@@ -69,6 +69,7 @@ from linguary.adapters.runtime import (
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator, Py3LangidDetector
 from linguary.application.use_cases.quality_review import QualityReviewService
 from linguary.application.use_cases.correct_chapter import CorrectionSequence
+from linguary.application.use_cases.resolve_correction_candidate import ResolveCorrectionCandidate
 from linguary.application.context_builder import ContextBuilder
 from linguary.application.ports.llm import LLMClient
 from linguary.application.retry_policy import RetryPolicy
@@ -156,6 +157,7 @@ class Application:
     quality_review: QualityReviewService
     _close_quality: Callable
     _dispose: Callable[[], None]
+    resolve_correction_candidate: ResolveCorrectionCandidate | None = None
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
@@ -495,6 +497,9 @@ def build_application(
         processing=processing,
         regeneration=regeneration,
         correction=correction,
+        resolve_correction_candidate=ResolveCorrectionCandidate(unit_of_work=unit_of_work,
+            validator_factory=lambda conditions: _validator(replace(runtime_settings.current.settings,
+                checks=type(runtime_settings.current.settings.checks)(**thaw(conditions.payload['checks']))))),
         quality_review=quality_review,
         _close_quality=quality_configured.aclose,
         _dispose=engine.dispose,

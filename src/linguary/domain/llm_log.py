@@ -21,6 +21,7 @@ class LLMCallStage(StrEnum):
 
     QUALITY_REVIEW = "quality_review"
     CHAPTER_CORRECTION = "chapter_correction"
+    CHAPTER_CORRECTION_REVIEW = "chapter_correction_review"
     CHAPTER_ANALYSIS = "chapter_analysis"
     TRANSLATION_UNIT = "translation_unit"
     BLOCK_REGENERATION = "block_regeneration"

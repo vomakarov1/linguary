@@ -1,17 +1,17 @@
 """Current correction coverage and transactional recovery of required chapter work."""
 
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from uuid import uuid4
 
 from linguary.application.context_builder import textual_blocks
-from linguary.application.correction_dto import CorrectionSnapshot
+from linguary.application.correction_dto import CorrectionSnapshot, CorrectionSnapshotV2, parse_correction_snapshot
 from linguary.domain import (
     BlockProcessingResult, BookStatus, CanonicalDocument, ChapterAnalysis, DocumentBlock,
     DocumentSection, DomainError, ProcessingRun, ProcessingTask, TaskStatus, TaskType,
 )
 from linguary.domain.book_conditions import BookConditions, WorkStateError, thaw
 from linguary.domain.content_plan import canonical_sha
-from linguary.domain.correction import correction_policy, correction_task_identity
+from linguary.domain.correction import CorrectionCheck, correction_policy, correction_task_identity, CORRECTION_POLICY_VERSION_V2
 
 
 def original_block_payload(block):
@@ -29,10 +29,11 @@ class CorrectionInputs:
     analysis: ChapterAnalysis | None
     run: ProcessingRun
     conditions: BookConditions
-    snapshot: CorrectionSnapshot
+    snapshot: CorrectionSnapshot | CorrectionSnapshotV2
     blocks: tuple[DocumentBlock, ...]
     results: dict[str, BlockProcessingResult]
     bindings: dict[str, dict | None]
+    input_generations: dict[str, int] = field(default_factory=dict)
 
     @property
     def context(self):
@@ -55,7 +56,10 @@ class CorrectionInputs:
 
     @property
     def manifest(self):
-        return dict(checksums=self.checksums, bindings=self.bindings)
+        result = dict(checksums=self.checksums, bindings=self.bindings)
+        if isinstance(self.snapshot, CorrectionSnapshotV2):
+            result['input_generations'] = self.input_generations
+        return result
 
     @property
     def translated(self):
@@ -92,7 +96,7 @@ def correction_inputs(tx, book_id, section_id):
     if (binding['book_id'] != book_id or conditions is None
             or binding['conditions_id'] != conditions.id):
         raise WorkStateError('условия исправления больше не активны')
-    snapshot = CorrectionSnapshot.from_payload(policy)
+    snapshot = parse_correction_snapshot(policy)
     document = tx.documents.get(book_id)
     if document is None:
         raise WorkStateError('книга исправления отсутствует')
@@ -103,8 +107,10 @@ def correction_inputs(tx, book_id, section_id):
     results = {r.block_id: r for r in tx.results.list_for_run(run.id)
                if r.block_id in {b.id for b in blocks}}
     bindings = {b.id: tx.work.get_binding('result', f'{run.id}:{b.id}') for b in blocks}
+    generations = tx.work.correction_input_generations(run.id) if isinstance(snapshot, CorrectionSnapshotV2) else {}
     return CorrectionInputs(document, section, tx.analyses.get_for_section(book_id, section_id),
-                            run, conditions, snapshot, blocks, results, bindings)
+                            run, conditions, snapshot, blocks, results, bindings,
+                            {b.id: generations.get(b.id, 0) for b in blocks})
 
 
 def unchecked_blocks(tx, inputs):
@@ -117,8 +123,110 @@ def unchecked_blocks(tx, inputs):
                 and attempt.conditions_id == inputs.conditions.id
                 and attempt.context.get('stage') == 'chapter_correction'
                 and check.block_id in attempt.context.get('ordered_block_ids', ())):
+            if isinstance(inputs.snapshot, CorrectionSnapshotV2):
+                if check.basis == 'unchanged':
+                    group = tx.work.get_binding('correction_group', check.attempt_id)
+                    payload = {} if group is None else group['payload_json']
+                    if (check.block_id not in payload.get('unchanged_block_ids', ())
+                            or payload.get('manifest', {}).get('bindings', {}).get(check.block_id) != inputs.bindings[check.block_id]
+                            or payload.get('manifest', {}).get('input_generations', {}).get(check.block_id) != inputs.input_generations[check.block_id]):
+                        continue
+                elif check.basis in {'confirmed', 'human'}:
+                    candidate = tx.work.get_correction_candidate(check.candidate_id)
+                    if (candidate is None or not candidate_is_current(tx, inputs, candidate)
+                            or candidate.state not in {'auto_applied', 'accepted', 'kept'}
+                            or candidate.proposal_attempt_id != check.attempt_id):
+                        continue
+                else:
+                    continue
             checked[check.block_id] = check.input_sha256
     return tuple(b.id for b in inputs.blocks if checked.get(b.id) != current[b.id])
+
+
+def candidate_is_current(tx, inputs, candidate):
+    if (candidate.state == 'stale' or candidate.run_id != inputs.run.id
+            or candidate.conditions_id != inputs.conditions.id or candidate.book_id != inputs.document.id
+            or candidate.section_id != inputs.section.id or candidate.block_id not in inputs.results
+            or candidate.input_generation != inputs.input_generations.get(candidate.block_id)
+            or candidate.payload.get('context_sha256') != canonical_sha(inputs.context)):
+        return False
+    binding = inputs.bindings[candidate.block_id]
+    if candidate.state in {'awaiting_review', 'awaiting_human', 'kept'}:
+        return (candidate.input_sha256 == inputs.checksums[candidate.block_id]
+                and thaw(candidate.payload['source_binding']) == binding)
+    if candidate.state not in {'auto_applied', 'accepted'} or binding is None:
+        return False
+    artifact = tx.work.get_artifact(binding['artifact_revision_id'])
+    return (artifact is not None and artifact['body'].get('correction_candidate_id') == candidate.candidate_id
+            and artifact['body'].get('proposal_sha256') == candidate.proposal_sha256
+            and binding['attempt_id'] == candidate.proposal_attempt_id
+            and canonical_sha(asdict(inputs.results[candidate.block_id])) == canonical_sha(thaw(candidate.payload['result'])))
+
+
+def current_correction_candidates(tx, inputs, *, states=None):
+    if not isinstance(inputs.snapshot, CorrectionSnapshotV2):
+        return ()
+    return tuple(c for c in tx.work.list_correction_candidates(inputs.run.id, section_id=inputs.section.id,
+        states=states) if candidate_is_current(tx, inputs, c))
+
+
+def model_correction_blocks(tx, inputs):
+    waiting = {c.block_id for c in current_correction_candidates(tx, inputs, states={'awaiting_human'})}
+    return tuple(b for b in unchecked_blocks(tx, inputs) if b not in waiting)
+
+
+def correction_input_fingerprint(inputs, block_id):
+    return canonical_sha(dict(input_sha256=inputs.checksums[block_id],
+                              source_result_binding=inputs.bindings[block_id]))
+
+
+def _observe_correction_inputs(tx, inputs):
+    if not isinstance(inputs.snapshot, CorrectionSnapshotV2):
+        return inputs
+    for block in inputs.blocks:
+        generation = tx.work.observe_correction_input(inputs.run.id, block.id,
+            correction_input_fingerprint(inputs, block.id))
+        if inputs.input_generations[block.id] and generation != inputs.input_generations[block.id]:
+            tx.work.stale_correction_candidates(inputs.run.id, block_ids=(block.id,))
+    return correction_inputs(tx, inputs.document.id, inputs.section.id)
+
+
+def _restore_correction_checks(tx, inputs, tasks):
+    if not isinstance(inputs.snapshot, CorrectionSnapshotV2):
+        return
+    candidates = tx.work.list_correction_candidates(inputs.run.id, section_id=inputs.section.id)
+    checks = []
+    for candidate in candidates:
+        if not candidate_is_current(tx, inputs, candidate):
+            if candidate.state != 'stale':
+                tx.work.stale_correction_candidates(inputs.run.id, candidate_ids=(candidate.candidate_id,))
+            continue
+        if candidate.state in {'auto_applied', 'accepted', 'kept'}:
+            checks.append(CorrectionCheck(inputs.run.id, candidate.block_id, inputs.section.id,
+                inputs.checksums[candidate.block_id], candidate.proposal_attempt_id,
+                'confirmed' if candidate.state == 'auto_applied' else 'human', candidate.candidate_id))
+    for task in tasks:
+        if task.task_type != TaskType.CHAPTER_CORRECTION or task.scope_id != inputs.section.id:
+            continue
+        for attempt in tx.work.list_task_attempts(task.id):
+            if attempt.state != 'accepted' or attempt.run_id != inputs.run.id:
+                continue
+            group = tx.work.get_binding('correction_group', attempt.id)
+            if group is None:
+                continue
+            payload = group['payload_json']
+            members = [c for c in candidates if c.group_id == attempt.id]
+            if any(c.review is None or c.state == 'stale' for c in members):
+                continue
+            for block_id in payload.get('unchanged_block_ids', ()):
+                if (payload['manifest']['checksums'].get(block_id) == inputs.checksums.get(block_id)
+                        and payload['manifest']['bindings'].get(block_id) == inputs.bindings.get(block_id)
+                        and payload['manifest'].get('input_generations', {}).get(block_id) == inputs.input_generations.get(block_id)):
+                    checks.append(CorrectionCheck(inputs.run.id, block_id, inputs.section.id,
+                        inputs.checksums[block_id], attempt.id, 'unchanged'))
+    if checks:
+        unique = {c.block_id: c for c in checks}
+        tx.work.replace_correction_checks(inputs.run.id, inputs.section.id, tuple(unique.values()))
 
 
 def task_matches_inputs(tx, task, payload, inputs):
@@ -129,6 +237,9 @@ def task_matches_inputs(tx, task, payload, inputs):
     if set(baseline.get('checksums', {})) != set(current['checksums']):
         return False
     for block_id, checksum in current['checksums'].items():
+        if (isinstance(inputs.snapshot, CorrectionSnapshotV2)
+                and baseline.get('input_generations', {}).get(block_id) != inputs.input_generations[block_id]):
+            return False
         if (baseline['checksums'][block_id] == checksum
                 and baseline.get('bindings', {}).get(block_id) == inputs.bindings[block_id]):
             continue
@@ -152,7 +263,8 @@ def correction_coverage_complete(tx, book_id):
         return False
     for section in document.ordered_sections:
         inputs = correction_inputs(tx, book_id, section.id)
-        if not inputs.translated or unchecked_blocks(tx, inputs):
+        if (not inputs.translated or unchecked_blocks(tx, inputs)
+                or current_correction_candidates(tx, inputs, states={'awaiting_review', 'awaiting_human'})):
             return False
     return True
 
@@ -182,7 +294,10 @@ def reconcile_corrections(tx, book_id):
     complete = True
     for section in document.ordered_sections:
         inputs = correction_inputs(tx, book_id, section.id)
+        inputs = _observe_correction_inputs(tx, inputs)
+        _restore_correction_checks(tx, inputs, tasks)
         missing = unchecked_blocks(tx, inputs)
+        model_missing = model_correction_blocks(tx, inputs)
         covered = inputs.translated and not missing
         complete = complete and covered
         matching = None
@@ -196,12 +311,16 @@ def reconcile_corrections(tx, book_id):
                 and payload.get('run_id') == run.id and payload.get('section_id') == section.id
                 and bool(payload.get('input_generation')) and task_matches_inputs(tx, task, payload, inputs)
                 and task.identity == correction_task_identity(book_id=book_id, run_id=run.id,
-                    section_id=section.id, input_generation=payload['input_generation']))
+                    section_id=section.id, input_generation=payload['input_generation'],
+                    policy_version=inputs.snapshot.policy_version))
             if current and task.status is not TaskStatus.SUPERSEDED:
                 matching = task
             elif task.status is not TaskStatus.SUPERSEDED:
                 _supersede(tx, task)
-        if covered or not inputs.translated:
+        if covered and isinstance(inputs.snapshot, CorrectionSnapshotV2) and matching is not None:
+            if matching.status not in {TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED}:
+                tx.tasks.save(replace(matching, status=TaskStatus.SUCCEEDED, last_error=None))
+        if covered or not inputs.translated or not model_missing:
             continue
         if matching is not None and matching.status is not TaskStatus.SUCCEEDED:
             pending.append(matching)
@@ -212,14 +331,14 @@ def reconcile_corrections(tx, book_id):
         if matching is not None:
             _supersede(tx, matching)
         identity = correction_task_identity(book_id=book_id, run_id=run.id,
-            section_id=section.id, input_generation=generation)
+            section_id=section.id, input_generation=generation, policy_version=inputs.snapshot.policy_version)
         task = tx.tasks.find_by_identity(identity)
         if task is None or task.status is TaskStatus.SUPERSEDED:
             if task is not None:
                 # Returning to old input still represents a fresh operation.
                 generation = canonical_sha(dict(generation=generation, nonce=str(uuid4())))
                 identity = correction_task_identity(book_id=book_id, run_id=run.id,
-                    section_id=section.id, input_generation=generation)
+                    section_id=section.id, input_generation=generation, policy_version=inputs.snapshot.policy_version)
             task = ProcessingTask(id=str(uuid4()), book_id=book_id,
                 task_type=identity.task_type, scope_id=identity.scope_id,
                 operation_id=identity.operation_id, policy_version=identity.policy_version)
@@ -238,4 +357,8 @@ def reconcile_corrections(tx, book_id):
 def invalidate_correction(tx, book_id, run_id, block_ids):
     """Revoke checks and readiness in the transaction that changes source results."""
     tx.work.delete_correction_checks(run_id, block_ids=tuple(block_ids))
+    binding = tx.work.get_binding('run', run_id)
+    policy = {} if binding is None else binding['payload_json'].get('correction', {})
+    if policy.get('policy_version') == CORRECTION_POLICY_VERSION_V2:
+        tx.work.stale_correction_candidates(run_id, block_ids=tuple(block_ids))
     reconcile_corrections(tx, book_id)
