@@ -4,7 +4,13 @@
     <ul>{% for hint in result.glossary_hints %}<li>{{ hint.original }} — {{ hint.translation }}{% if hint.note %}: {{ hint.note }}{% endif %}</li>{% endfor %}</ul>
   {% endif %}
   {% if result.language_notes %}
-    <ul>{% for note in result.language_notes %}<li>{{ note.original_excerpt }} — {{ note.note }}</li>{% endfor %}</ul>
+    <ul>{% for note in result.language_notes %}
+      <li>
+        <p>Исходный фрагмент: {{ note.original_excerpt }}</p>
+        {% if note.translated_excerpt %}<p>Перевод фрагмента: {{ note.translated_excerpt }}</p>{% else %}<p>Перевод фрагмента отсутствует.</p>{% endif %}
+        <p>Заметка: {{ note.note }}</p>
+      </li>
+    {% endfor %}</ul>
   {% endif %}
 {%- endmacro %}
 {% for candidate in block.correction_candidates %}

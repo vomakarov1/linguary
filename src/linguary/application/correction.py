@@ -1,6 +1,8 @@
 """Current correction coverage and transactional recovery of required chapter work."""
 
 from dataclasses import asdict, dataclass, field, fields, replace
+from hashlib import sha256
+import json
 from uuid import uuid4
 
 from linguary.application.context_builder import textual_blocks
@@ -34,10 +36,12 @@ class CorrectionInputs:
     results: dict[str, BlockProcessingResult]
     bindings: dict[str, dict | None]
     input_generations: dict[str, int] = field(default_factory=dict)
+    _context: dict = field(init=False, repr=False, compare=False)
+    _context_sha256: str = field(init=False, repr=False, compare=False)
+    _checksums: dict[str, str] = field(init=False, repr=False, compare=False)
 
-    @property
-    def context(self):
-        return dict(schema_version=1, book_id=self.document.id,
+    def __post_init__(self):
+        context = dict(schema_version=1, book_id=self.document.id,
             source_language=self.document.source_language,
             target_language=self.document.target_language,
             section_id=self.section.id,
@@ -46,13 +50,36 @@ class CorrectionInputs:
             book_conditions=thaw(self.conditions.payload),
             run_glossary=asdict(self.run.glossary_snapshot),
             correction_snapshot=self.snapshot.to_payload())
+        def encoded(value):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+
+        context_bytes = encoded(context)
+        # Preserve the existing canonical JSON checksum while hashing the shared context once.
+        prefix = sha256(b'{"context":' + context_bytes + b',"current_persisted_result":')
+        checksums = {}
+        for block in self.blocks:
+            digest = prefix.copy()
+            result = None if block.id not in self.results else asdict(self.results[block.id])
+            digest.update(encoded(result))
+            digest.update(b',"original":')
+            digest.update(encoded(original_block_payload(block)))
+            digest.update(b'}')
+            checksums[block.id] = digest.hexdigest()
+        object.__setattr__(self, '_context', context)
+        object.__setattr__(self, '_context_sha256', sha256(context_bytes).hexdigest())
+        object.__setattr__(self, '_checksums', checksums)
+
+    @property
+    def context(self):
+        return self._context
+
+    @property
+    def context_sha256(self):
+        return self._context_sha256
 
     @property
     def checksums(self):
-        context = self.context
-        return {block.id: canonical_sha(dict(context=context, original=original_block_payload(block),
-                    current_persisted_result=None if block.id not in self.results
-                    else asdict(self.results[block.id]))) for block in self.blocks}
+        return self._checksums
 
     @property
     def manifest(self):
@@ -148,7 +175,7 @@ def candidate_is_current(tx, inputs, candidate):
             or candidate.conditions_id != inputs.conditions.id or candidate.book_id != inputs.document.id
             or candidate.section_id != inputs.section.id or candidate.block_id not in inputs.results
             or candidate.input_generation != inputs.input_generations.get(candidate.block_id)
-            or candidate.payload.get('context_sha256') != canonical_sha(inputs.context)):
+            or candidate.payload.get('context_sha256') != inputs.context_sha256):
         return False
     binding = inputs.bindings[candidate.block_id]
     if candidate.state in {'awaiting_review', 'awaiting_human', 'kept'}:
@@ -167,7 +194,8 @@ def current_correction_candidates(tx, inputs, *, states=None):
     if not isinstance(inputs.snapshot, CorrectionSnapshotV2):
         return ()
     return tuple(c for c in tx.work.list_correction_candidates(inputs.run.id, section_id=inputs.section.id,
-        states=states) if candidate_is_current(tx, inputs, c))
+        states=states if states is not None else {'awaiting_review', 'awaiting_human', 'auto_applied', 'accepted', 'kept'})
+        if candidate_is_current(tx, inputs, c))
 
 
 def model_correction_blocks(tx, inputs):
@@ -194,7 +222,8 @@ def _observe_correction_inputs(tx, inputs):
 def _restore_correction_checks(tx, inputs, tasks):
     if not isinstance(inputs.snapshot, CorrectionSnapshotV2):
         return
-    candidates = tx.work.list_correction_candidates(inputs.run.id, section_id=inputs.section.id)
+    candidates = tx.work.list_correction_candidates(inputs.run.id, section_id=inputs.section.id,
+        states={'awaiting_review', 'awaiting_human', 'auto_applied', 'accepted', 'kept'})
     checks = []
     for candidate in candidates:
         if not candidate_is_current(tx, inputs, candidate):
@@ -230,7 +259,7 @@ def _restore_correction_checks(tx, inputs, tasks):
 
 
 def task_matches_inputs(tx, task, payload, inputs):
-    """Own accepted groups advance results without changing operation generation."""
+    """Accept proven successors of the task's exact inputs, including adopted candidates."""
     baseline = payload.get('manifest', {})
     checks = {c.block_id: c for c in tx.work.correction_checks(inputs.run.id, inputs.section.id)}
     current = inputs.manifest
@@ -246,8 +275,36 @@ def task_matches_inputs(tx, task, payload, inputs):
         check = checks.get(block_id)
         attempt = None if check is None else tx.work.get_attempt(check.attempt_id)
         if (check is None or check.input_sha256 != checksum or attempt is None
-                or attempt.state != 'accepted' or attempt.task_id != task.id
-                or attempt.run_id != inputs.run.id or attempt.conditions_id != inputs.conditions.id):
+                or attempt.state != 'accepted'
+                or attempt.book_id != inputs.document.id or attempt.run_id != inputs.run.id
+                or attempt.conditions_id != inputs.conditions.id
+                or attempt.context.get('stage') != 'chapter_correction'):
+            return False
+        if not isinstance(inputs.snapshot, CorrectionSnapshotV2):
+            if attempt.task_id != task.id:
+                return False
+            continue
+        candidate = tx.work.get_correction_candidate(check.candidate_id)
+        if (candidate is None or candidate.proposal_attempt_id != attempt.id
+                or candidate.block_id != block_id
+                or candidate.input_generation != baseline.get('input_generations', {}).get(block_id)
+                or candidate.input_sha256 != baseline['checksums'][block_id]
+                or thaw(candidate.payload['source_binding']) != baseline.get('bindings', {}).get(block_id)
+                or not candidate_is_current(tx, inputs, candidate)):
+            return False
+        if check.basis == 'confirmed' and candidate.state == 'auto_applied':
+            review_attempt = tx.work.get_attempt(candidate.review_attempt_id)
+            receipt = None if review_attempt is None else tx.work.get_binding('correction_review_request', review_attempt.id)
+            refs = () if receipt is None else receipt['payload_json'].get('candidate_refs', ())
+            if (review_attempt is None or review_attempt.state != 'accepted' or review_attempt.task_id != task.id
+                    or review_attempt.book_id != inputs.document.id or review_attempt.run_id != inputs.run.id
+                    or review_attempt.conditions_id != inputs.conditions.id
+                    or review_attempt.context.get('stage') != 'chapter_correction_review'
+                    or (candidate.candidate_id, candidate.proposal_sha256) not in tuple(map(tuple, refs))):
+                return False
+        elif not (check.basis == 'human' and candidate.state == 'accepted'
+                  and candidate.decision and candidate.decision.get('action') == 'accept'
+                  and candidate.decision.get('reason')):
             return False
     return True
 

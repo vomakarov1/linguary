@@ -72,10 +72,21 @@ class SqlAlchemyWorkRepository:
 
     def get_binding(self, entity_kind, entity_id):
         row = self._session.get(WorkBindingRow, (entity_kind, entity_id))
+        return self._binding_from_row(row)
+
+    @staticmethod
+    def _binding_from_row(row):
         if row is None:
             return None
         version(row.payload_json.get('schema_version'))
         return {column.name: getattr(row, column.name) for column in row.__table__.columns}
+
+    def result_bindings(self, run_id):
+        prefix = f'{run_id}:'
+        rows = self._session.scalars(select(WorkBindingRow).where(
+            WorkBindingRow.entity_kind == 'result', WorkBindingRow.entity_id >= prefix,
+            WorkBindingRow.entity_id < f'{run_id};')).all()
+        return {row.entity_id[len(prefix):]: self._binding_from_row(row) for row in rows}
 
     def correction_checks(self, run_id, section_id):
         rows = self._session.scalars(select(CorrectionCheckRow).join(
@@ -129,6 +140,10 @@ class SqlAlchemyWorkRepository:
 
     def get_correction_candidate(self, candidate_id):
         row = self._session.get(CorrectionCandidateRow, candidate_id) if candidate_id else None
+        return self._correction_candidate_from_row(row)
+
+    @staticmethod
+    def _correction_candidate_from_row(row):
         if row is None:
             return None
         return CorrectionCandidate(row.candidate_id, row.book_id, row.run_id, row.conditions_id,
@@ -171,14 +186,14 @@ class SqlAlchemyWorkRepository:
         self._session.flush()
 
     def list_correction_candidates(self, run_id, *, section_id=None, states=None):
-        query = select(CorrectionCandidateRow.candidate_id).join(
+        query = select(CorrectionCandidateRow).join(
             DocumentBlockRow, DocumentBlockRow.id == CorrectionCandidateRow.block_id,
         ).where(CorrectionCandidateRow.run_id == run_id)
         if section_id is not None:
             query = query.where(CorrectionCandidateRow.section_id == section_id)
         if states is not None:
             query = query.where(CorrectionCandidateRow.state.in_(tuple(states)))
-        return tuple(self.get_correction_candidate(i) for i in self._session.scalars(
+        return tuple(self._correction_candidate_from_row(row) for row in self._session.scalars(
             query.order_by(DocumentBlockRow.order, CorrectionCandidateRow.candidate_id)).all())
 
     def add_correction_candidates(self, candidates):

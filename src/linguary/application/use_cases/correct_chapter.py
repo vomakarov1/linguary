@@ -216,8 +216,9 @@ class CorrectChapter:
         all_results = tx.results.list_for_run(inputs.run.id)
         used_note_ids = {note.id for result in all_results for note in result.language_notes}
         if isinstance(inputs.snapshot, CorrectionSnapshotV2):
-            used_note_ids.update(n['id'] for c in tx.work.list_correction_candidates(inputs.run.id)
-                if c.state != 'stale' for n in c.payload['result']['language_notes'])
+            used_note_ids.update(n['id'] for c in tx.work.list_correction_candidates(inputs.run.id,
+                states={'awaiting_review', 'awaiting_human', 'auto_applied', 'accepted', 'kept'})
+                for n in c.payload['result']['language_notes'])
         notes = note_id_factory(chapter_number=chapter_number(inputs.document, inputs.section), used=used_note_ids)
         originals = {b.id: b for b in inputs.blocks}
         candidates = []
@@ -415,7 +416,7 @@ class CorrectChapterV2(CorrectChapter):
                             input_sha256=current.checksums[result.block_id],
                             input_generation=current.input_generations[result.block_id],
                             group_id=attempt.id, proposal_attempt_id=attempt.id,
-                            context_sha256=canonical_sha(current.context),
+                            context_sha256=current.context_sha256,
                             source_binding=current.bindings[result.block_id],
                             original=original_block_payload(next(b for b in current.blocks if b.id == result.block_id)),
                             current_result=asdict(current.results[result.block_id]), result=asdict(result),

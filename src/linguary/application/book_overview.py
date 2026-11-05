@@ -275,7 +275,7 @@ class BookResultSummary:
     pending_corrections: int = 0
 
 
-def _quality_projection(transaction, book, document, analyses, run, tasks):
+def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None):
     """Current technical coverage and optional review, without accepting or scheduling work."""
     from linguary.application.use_cases.quality_review import quality_review_state
     from linguary.application.use_cases.export_book import _ensure_ready, _validate_content_plans, ExportBookError
@@ -293,7 +293,7 @@ def _quality_projection(transaction, book, document, analyses, run, tasks):
             name_translation_policy=thaw(policy) if policy is not None else None,
             pronunciation_help_enabled=conditions.pronunciation_help_enabled,
             pronunciation_variant=conditions.pronunciation_variant)
-    results = () if run is None else transaction.results.list_for_run(run.id)
+    results = (() if run is None else transaction.results.list_for_run(run.id)) if stored_results is None else stored_results
     textual = {block.id for section in document.sections for block in textual_blocks(section)} if document else set()
     result_ids = {result.block_id for result in results}
     roots = () if run is None else transaction.work.list_roots(book.id, run_id=run.id)
@@ -510,11 +510,15 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
         import_warnings = transaction.documents.import_warnings(book_id)
         run = transaction.runs.active_for_book(book_id)
         tasks = transaction.tasks.list_for_book(book_id)
-        quality = _quality_projection(transaction, book, document, analyses, run, tasks)
         stored_results = (
             transaction.results.list_for_run(run.id) if run is not None else ()
         )
-        candidates = _correction_candidates_projection(transaction, book_id, run)
+        quality = _quality_projection(transaction, book, document, analyses, run, tasks,
+                                      stored_results=stored_results)
+        candidates = _correction_candidates_projection(
+            transaction, book_id, run, document=document, analyses=analyses,
+            stored_results=stored_results,
+        )
     treatments = {
         item.block_id: item.treatment
         for analysis in analyses
@@ -561,17 +565,49 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
     )
 
 
-def _correction_candidates_projection(transaction, book_id, run):
-    from linguary.application.correction import correction_inputs, candidate_is_current
-    from linguary.domain.book_conditions import thaw
-    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2
+def _correction_candidates_projection(transaction, book_id, run, *, document, analyses,
+                                      stored_results=None, section_id=None):
+    from linguary.application.correction import CorrectionInputs, candidate_is_current
+    from linguary.application.correction_dto import parse_correction_snapshot
+    from linguary.domain.book_conditions import WorkStateError, thaw
+    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2, correction_policy
+
     binding = None if run is None else transaction.work.get_binding('run', run.id)
     policy = {} if binding is None else binding['payload_json'].get('correction', {})
     if policy.get('policy_version') != CORRECTION_POLICY_VERSION_V2:
         return ()
-    pending = transaction.work.list_correction_candidates(run.id, states={'awaiting_review', 'awaiting_human'})
-    sections = {section_id: correction_inputs(transaction, book_id, section_id)
-                for section_id in {c.section_id for c in pending}}
+    pending = transaction.work.list_correction_candidates(
+        run.id, section_id=section_id, states={'awaiting_review', 'awaiting_human'},
+    )
+    if not pending:
+        return ()
+    policy = correction_policy(binding['payload_json'])
+    conditions = transaction.work.latest_conditions(book_id)
+    if (binding['book_id'] != book_id or conditions is None
+            or binding['conditions_id'] != conditions.id):
+        raise WorkStateError('условия исправления больше не активны')
+    if document is None:
+        raise WorkStateError('книга исправления отсутствует')
+    snapshot = parse_correction_snapshot(policy)
+    if stored_results is None:
+        stored_results = transaction.results.list_for_run(run.id)
+    results = {result.block_id: result for result in stored_results}
+    bindings = transaction.work.result_bindings(run.id)
+    generations = transaction.work.correction_input_generations(run.id)
+    analyses_by_section = {analysis.section_id: analysis for analysis in analyses if analysis is not None}
+    sections_by_id = {section.id: section for section in document.ordered_sections}
+    sections = {}
+    for pending_section_id in {candidate.section_id for candidate in pending}:
+        section = sections_by_id.get(pending_section_id)
+        if section is None:
+            raise WorkStateError('глава исправления отсутствует')
+        blocks = textual_blocks(section)
+        sections[pending_section_id] = CorrectionInputs(
+            document, section, analyses_by_section.get(pending_section_id), run, conditions, snapshot,
+            blocks, {block.id: results[block.id] for block in blocks if block.id in results},
+            {block.id: bindings.get(block.id) for block in blocks},
+            {block.id: generations.get(block.id, 0) for block in blocks},
+        )
     projected = []
     for candidate in pending:
         if not candidate_is_current(transaction, sections[candidate.section_id], candidate):
@@ -606,7 +642,9 @@ def result_block(
         members = next(group for group in groups if any(b.block.id == block_id for b in group))
         analysis = transaction.analyses.get_for_section(book_id, section_id)
         run = transaction.runs.active_for_book(book_id)
-        candidates = _correction_candidates_projection(transaction, book_id, run)
+        candidates = _correction_candidates_projection(
+            transaction, book_id, run, document=document, analyses=(analysis,), section_id=section_id,
+        )
         return tuple(ResultBlockSummary(
             block=member.block,
             chapter_number=chapter_number,
