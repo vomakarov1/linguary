@@ -33,12 +33,15 @@ from linguary.application.ports.llm import (
     LLMPayload,
     LLMProviderError,
     LLMRequest,
+    LLMResponseKind,
     LLMResponse,
     LLMResponseFormatError,
     LLMTransportError,
 )
 from linguary.domain import TokenUsage
 from linguary.application.diagnostics import bounded_body
+from linguary.application.llm_dto import LLMPayloadError
+from linguary.domain.llm_log import Violation
 
 #: Path for chat completion endpoint in compatible API.
 _COMPLETIONS_PATH = "chat/completions"
@@ -109,8 +112,26 @@ class OpenAICompatibleLLMClient(LLMClient):
         try:
             choice = _choice(document)
             truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
+            if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
+                message = choice.get('message')
+                if isinstance(message, dict) and message.get('refusal'):
+                    raise LLMResponseFormatError(
+                        'провайдер отказался исправлять главу', truncated=truncated,
+                        violation=Violation('provider_refusal', request.kind.value,
+                                            safe_message='Провайдер отказался исправлять главу'),
+                    )
             content = _content(choice)
             payload = parse_payload(request.kind, content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=truncated)
+            if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
+                try:
+                    payload.validate_coverage(request.correction_candidate_refs
+                        if request.kind == LLMResponseKind.CHAPTER_CORRECTION_REVIEW else request.ordered_block_ids)
+                except LLMPayloadError:
+                    raise LLMResponseFormatError(
+                        'ответ исправления не покрывает переданные блоки',
+                        violation=Violation('response_coverage', request.kind.value,
+                                            safe_message='Ответ исправления не покрывает переданные блоки'),
+                    ) from None
         except LLMResponseFormatError as error:
             safe_content, body_meta = bounded_body(content,
                 secrets=(*self._proxy_secrets, self._settings.api_key))

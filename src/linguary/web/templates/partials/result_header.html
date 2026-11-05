@@ -1,7 +1,9 @@
 <section class="page-head" data-result-header data-result-url="/books/{{ data.book_id }}/result">
   <div>
     <h1>Результат</h1>
-    {% if export_task %}
+    {% if data.pending_corrections %}
+      <p role="status">Ожидают вашего решения: {{ data.pending_corrections }}. Проверьте предложения исправлений ниже; до этого EPUB нельзя собрать.</p>
+    {% elif export_task %}
       <p role="status">Сборка EPUB: {{ export_task.status_label }}.</p>
     {% elif data.epub_ready and data.status == "READY_TO_EXPORT" %}
       <p>EPUB нужно собрать после последних изменений.</p>
@@ -18,7 +20,7 @@
         <a class="button-link" href="/books/{{ data.book_id }}/download">Скачать EPUB</a>
       {% endif %}
       <form method="post" action="/books/{{ data.book_id }}/export" data-export-form>
-        <button type="submit" {% if export_task and export_task.status in ("pending", "running") %}disabled{% endif %}>
+        <button type="submit" {% if data.pending_corrections or (export_task and export_task.status in ("pending", "running")) %}disabled{% endif %}>
           {% if export_task and export_task.status in ("pending", "running") %}Собирается{% else %}Собрать EPUB{% endif %}
         </button>
       </form>

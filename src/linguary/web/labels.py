@@ -93,6 +93,7 @@ TASK_TYPE_LABELS: Mapping[TaskType, str] = {
     TaskType.ANALYZE_CHAPTER: "Анализ главы",
     TaskType.PROCESS_TRANSLATION_UNIT: "Обработка главы",
     TaskType.REGENERATE_BLOCK: "Повторная генерация блока",
+    TaskType.CHAPTER_CORRECTION: "Исправление главы",
     TaskType.EXPORT_BOOK: "Сборка EPUB",
 }
 

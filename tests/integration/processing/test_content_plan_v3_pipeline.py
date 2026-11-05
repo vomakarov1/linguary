@@ -3,7 +3,8 @@ from dataclasses import replace
 import json
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.config.settings import ReadingSettings
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeReply
+from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.composition import build_application, drain_tasks
 from linguary.domain import TaskStatus
@@ -64,8 +65,8 @@ async def test_v3_pinned_runtime_clean_bodies_and_evidence_survive_restart(tmp_p
         await restarted.processing.start('book-1')
         completed = await drain_tasks(restarted)
         assert all(task.status == TaskStatus.SUCCEEDED for task in completed), [task.last_error for task in completed]
-        assert all(request.contract_version == 3 for request in fake.requests)
-        assert all('learner-quality-v3.1' in request.instructions and 'Для A2' in request.instructions for request in fake.requests)
+        assert all(request.contract_version == 3 for request in fake.scripted_requests)
+        assert all('learner-quality-v3.1' in request.instructions and 'Для A2' in request.instructions for request in fake.scripted_requests)
         assert 'context_facts' in fake.requests[-1].input_text
         with restarted.unit_of_work.transaction() as transaction:
             result, = transaction.results.list_for_run(run.id)

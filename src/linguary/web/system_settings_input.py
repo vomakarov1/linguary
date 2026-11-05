@@ -18,11 +18,11 @@ from linguary.web.schemas import SafeSettingsFormValues
 _SAVE_FIELDS = frozenset({
     'provider', 'model', 'api_key', 'base_url', 'requests_per_minute',
     'concurrency', 'expected_revision', 'proxy_mode', 'proxy_url',
-    'analysis_model', 'processing_model', 'temperature', 'timeout_seconds',
+    'analysis_model', 'processing_model', 'correction_model', 'temperature', 'timeout_seconds',
     'reader_level',
     'name_translation_strategy',
 })
-_OPTIONAL_FIELDS = {'api_key', 'proxy_mode', 'proxy_url', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'reader_level', 'name_translation_strategy'}
+_OPTIONAL_FIELDS = {'api_key', 'proxy_mode', 'proxy_url', 'analysis_model', 'processing_model', 'correction_model', 'temperature', 'timeout_seconds', 'reader_level', 'name_translation_strategy'}
 _REQUIRED_FIELDS = _SAVE_FIELDS - _OPTIONAL_FIELDS
 _INTEGER = re.compile(r'[+-]?[0-9]+\Z')
 _FLOAT = re.compile(r'[+-]?[0-9]+(?:\.[0-9]+)?\Z')
@@ -121,6 +121,7 @@ def _projection(values: Mapping[str, object], current_settings: AppSettings, *, 
         model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('model'), secrets),
         analysis_model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('analysis_model'), secrets),
         processing_model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('processing_model'), secrets),
+        correction_model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('correction_model'), secrets),
         temperature=_float(fields.get('temperature'), form=form),
         timeout_seconds=_float(fields.get('timeout_seconds'), form=form),
         base_url='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_url(_safe_text(fields.get('base_url'), secrets)),
@@ -144,6 +145,7 @@ def safe_form_values(current_settings: AppSettings, *, update: SystemSettingsUpd
         model=source.model,
         analysis_model=source.analysis_model,
         processing_model=source.processing_model,
+        correction_model=current_settings.llm.correction_model if source.correction_model is None else source.correction_model,
         temperature=source.temperature if (update is None or update.temperature is not UNSET) else current_settings.llm.temperature,
         timeout_seconds=source.timeout_seconds,
         base_url=source.base_url,
@@ -222,7 +224,7 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
     for name in ('proxy_mode', 'proxy_url'):
         if name in values and not isinstance(values[name], str):
             errors[name] = labels.SETTINGS_STRING_FIELD
-    for name in ('analysis_model', 'processing_model'):
+    for name in ('analysis_model', 'processing_model', 'correction_model'):
         if name in values:
             value = values[name]
             if not isinstance(value, str):

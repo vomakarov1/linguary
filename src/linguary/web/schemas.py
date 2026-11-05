@@ -662,6 +662,20 @@ class PronunciationOccurrenceResponse(BaseModel):
         return cls(**asdict(item))
 
 
+class ResolveCorrectionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', strict=True)
+    proposal_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    input_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    action: Literal['accept', 'keep']
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode='after')
+    def nonempty_reason(self):
+        if not self.reason.strip():
+            raise ValueError('Укажите причину решения.')
+        return self
+
+
 class ResultBlockResponse(BaseModel):
     """Original text and model assistance for a single stable book block."""
 
@@ -678,6 +692,7 @@ class ResultBlockResponse(BaseModel):
     warnings: tuple[ResultWarningResponse, ...] = ()
     regeneration_task: TaskResponse | None = None
     pronunciation_assistances: tuple[PronunciationOccurrenceResponse, ...] = ()
+    correction_candidates: tuple[dict, ...] = ()
 
     @classmethod
     def of_block(
@@ -691,6 +706,7 @@ class ResultBlockResponse(BaseModel):
         result = summary.result
         treatment = summary.treatment
         return cls(
+            correction_candidates=tuple(dict(c) for c in summary.correction_candidates),
             pronunciation_assistances=tuple(PronunciationOccurrenceResponse.of_occurrence(item)
                 for item in pronunciations if item.block_id == summary.block.id),
             block_id=summary.block.id,
@@ -819,6 +835,7 @@ class BookResultResponse(BaseModel):
     quality_review: dict = Field(default_factory=lambda: {'state': 'not-requested'})
     epub_ready: bool = False
     ordinary_cost: dict = Field(default_factory=dict)
+    pending_corrections: int = 0
 
     @classmethod
     def of_result(cls, result: BookResultSummary) -> BookResultResponse:
@@ -830,6 +847,7 @@ class BookResultResponse(BaseModel):
         )
         return cls(
             book_id=result.book.id,
+            pending_corrections=result.pending_corrections,
             conditions=dict(result.conditions), reproducibility=result.reproducibility,
             recovery=dict(result.recovery), quality_review=dict(result.quality_review),
             epub_ready=result.epub_ready, ordinary_cost=dict(result.ordinary_cost),            status=result.book.status.value,
@@ -867,6 +885,7 @@ class LLMConfigResponse(BaseModel):
     model: str | None = None
     analysis_model: str | None = None
     processing_model: str | None = None
+    correction_model: str | None = None
     temperature: float | None = None
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     proxy_mode: Literal["auto", "direct", "custom"] = "auto"
@@ -890,6 +909,7 @@ class LLMConfigResponse(BaseModel):
             model=public_text(llm.model) or None,
             analysis_model=public_text(llm.analysis_model) or None,
             processing_model=public_text(llm.processing_model) or None,
+            correction_model=public_text(llm.correction_model) or None,
             temperature=llm.temperature,
             timeout_seconds=llm.timeout_seconds,
             proxy_mode=llm.proxy_mode,
@@ -974,7 +994,7 @@ class SystemConfigResponse(BaseModel):
 type SettingsField = Literal[
     "provider", "model", "api_key", "base_url", "requests_per_minute",
     "concurrency", "expected_revision", "form", "proxy_mode", "proxy_url",
-    "analysis_model", "processing_model", "temperature", "timeout_seconds",
+    "analysis_model", "processing_model", "correction_model", "temperature", "timeout_seconds",
     "reader_level",
     "name_translation_strategy",
 ]
@@ -1003,6 +1023,7 @@ class SafeSettingsFormValues:
     proxy_mode: str = "auto"
     analysis_model: str = field(default="", repr=False)
     processing_model: str = field(default="", repr=False)
+    correction_model: str = field(default="", repr=False)
     temperature: float | None = None
     timeout_seconds: float | None = None
     reader_level: str = "b2"

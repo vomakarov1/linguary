@@ -101,6 +101,7 @@ class SystemSettingsService:
                         model=candidate.llm.model,
                         analysis_model=candidate.llm.analysis_model,
                         processing_model=candidate.llm.processing_model,
+                        correction_model=candidate.llm.correction_model,
                         temperature=candidate.llm.temperature,
                         timeout_seconds=candidate.llm.timeout_seconds,
                         base_url=candidate.llm.base_url,

@@ -97,7 +97,8 @@ async def test_missing_content_marks_unavailable(unit_of_work):
 
 
 async def test_result_correlates_to_accepted_attempt(tmp_path):
-    from linguary.adapters.llm import FakeLLMClient, FakeReply
+    from linguary.adapters.llm import FakeReply
+    from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
     from linguary.application.use_cases.approve_glossary import StartProcessingCommand
     fake = FakeLLMClient([reply(), FakeReply.of_payload({'blocks': [{'source_block_id': 'b1', 'treatment': 'READ_AS_IS', 'translated_text': None, 'glossary_hints': []}], 'language_notes': []})])
     app = make_app(tmp_path, fake)
@@ -189,7 +190,8 @@ async def test_body_failure_honestly_marks_unavailable(unit_of_work, monkeypatch
 
 async def test_late_result_does_not_replace_accepted_attempt(tmp_path):
     import asyncio
-    from linguary.adapters.llm import FakeLLMClient, FakeReply
+    from linguary.adapters.llm import FakeReply
+    from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
     from linguary.application.ports.llm import LLMResponseKind
     from linguary.application.use_cases.approve_glossary import StartProcessingCommand
     from linguary.composition import drain_tasks

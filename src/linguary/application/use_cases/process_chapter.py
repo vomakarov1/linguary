@@ -500,7 +500,8 @@ class ChapterProcessingSequence:
             self._unit_of_work,
             book_id=book_id,
             finished_task_id=finished_task_id,
-            task_types=(TaskType.PROCESS_TRANSLATION_UNIT,),
+            task_types=(TaskType.PROCESS_TRANSLATION_UNIT, TaskType.CHAPTER_CORRECTION,
+                        TaskType.REGENERATE_BLOCK),
         )
 
 

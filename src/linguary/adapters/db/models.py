@@ -323,6 +323,60 @@ class ProcessingRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
 
 
+class CorrectionCheckRow(Base):
+    """Current correction coverage for a block within a processing run."""
+
+    __tablename__ = "correction_checks"
+    __table_args__ = (
+        Index("ix_correction_checks_run_section", "run_id", "section_id"),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        String(255), ForeignKey("processing_runs.id", ondelete="CASCADE"), primary_key=True,
+    )
+    block_id: Mapped[str] = mapped_column(
+        String(255), ForeignKey("document_blocks.id", ondelete="CASCADE"), primary_key=True,
+    )
+    section_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    input_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    basis: Mapped[str] = mapped_column(String(32), default='legacy', server_default='legacy', nullable=False)
+    candidate_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class CorrectionInputRow(Base):
+    __tablename__ = 'correction_inputs'
+    run_id: Mapped[str] = mapped_column(ForeignKey('processing_runs.id', ondelete='CASCADE'), primary_key=True)
+    block_id: Mapped[str] = mapped_column(ForeignKey('document_blocks.id', ondelete='CASCADE'), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+
+
+class CorrectionCandidateRow(Base):
+    __tablename__ = 'correction_candidates'
+    __table_args__ = (
+        UniqueConstraint('run_id', 'block_id', 'input_generation'),
+        Index('ix_correction_candidates_run_section_state', 'run_id', 'section_id', 'state'),
+    )
+
+    candidate_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    book_id: Mapped[str] = mapped_column(ForeignKey('books.id', ondelete='CASCADE'))
+    run_id: Mapped[str] = mapped_column(ForeignKey('processing_runs.id', ondelete='CASCADE'))
+    conditions_id: Mapped[str] = mapped_column(ForeignKey('book_conditions.id', ondelete='CASCADE'))
+    section_id: Mapped[str] = mapped_column(String(255))
+    block_id: Mapped[str] = mapped_column(ForeignKey('document_blocks.id', ondelete='CASCADE'))
+    input_sha256: Mapped[str] = mapped_column(String(64))
+    input_generation: Mapped[int] = mapped_column(Integer)
+    proposal_sha256: Mapped[str] = mapped_column(String(64))
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    group_id: Mapped[str] = mapped_column(String(255))
+    proposal_attempt_id: Mapped[str] = mapped_column(String(255))
+    state: Mapped[str] = mapped_column(String(32))
+    review_attempt_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    review_json: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    decision_json: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+
+
 class BlockResultRow(Base):
     """Processing result of a single block within a run."""
 
@@ -450,6 +504,9 @@ __all__ = [
     "BlockResultRow",
     "BookRow",
     "ChapterAnalysisRow",
+    "CorrectionCheckRow",
+    "CorrectionCandidateRow",
+    "CorrectionInputRow",
     "DecimalAsText",
     "DocumentBlockRow",
     "GlossaryCandidateRow",

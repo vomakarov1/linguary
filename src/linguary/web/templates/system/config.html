@@ -14,7 +14,7 @@
   {% if settings_error or not can_submit %}
   <p><a href="{{ config_url }}">{% if is_conflict or not can_submit %}Загрузить актуальные настройки{% else %}Вернуться к конфигурации{% endif %}</a></p>
   {% endif %}
-  {% for field, error in field_errors.items() if field not in ('provider', 'base_url', 'api_key', 'model', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'proxy_mode', 'proxy_url', 'requests_per_minute', 'concurrency', 'reader_level', 'name_translation_strategy') %}
+  {% for field, error in field_errors.items() if field not in ('provider', 'base_url', 'api_key', 'model', 'analysis_model', 'processing_model', 'correction_model', 'temperature', 'timeout_seconds', 'proxy_mode', 'proxy_url', 'requests_per_minute', 'concurrency', 'reader_level', 'name_translation_strategy') %}
   <p class="notice" role="alert">{{ error }}</p>
   {% endfor %}
   <nav class="tabs settings-tabs" id="settings-tabs" aria-label="Разделы конфигурации" data-settings-tabs hidden>
@@ -73,6 +73,13 @@
         <input id="settings-processing_model" name="processing_model" type="text" value="{{ form_values.processing_model if form_values.processing_model is not none else '' }}" {% if 'processing_model' in field_errors %}aria-invalid="true" aria-describedby="settings-error-processing_model"{% endif %}>
         {% if 'processing_model' in field_errors %}<span id="settings-error-processing_model" class="settings-field-error" role="alert">{{ field_errors['processing_model'] }}</span>{% endif %}
         <p>Модель для перевода фрагментов (опционально).</p>
+      </div>
+
+      <div class="settings-field" id="settings-field-correction_model">
+        <label for="settings-correction_model">Модель исправления</label>
+        <input id="settings-correction_model" name="correction_model" type="text" value="{{ form_values.correction_model if form_values.correction_model is not none else '' }}" aria-describedby="settings-hint-correction_model{% if 'correction_model' in field_errors %} settings-error-correction_model{% endif %}" {% if 'correction_model' in field_errors %}aria-invalid="true"{% endif %}>
+        {% if 'correction_model' in field_errors %}<span id="settings-error-correction_model" class="settings-field-error" role="alert">{{ field_errors['correction_model'] }}</span>{% endif %}
+        <p id="settings-hint-correction_model">Если поле пустое, используется основная модель</p>
       </div>
 
       <div class="settings-field settings-test-row">

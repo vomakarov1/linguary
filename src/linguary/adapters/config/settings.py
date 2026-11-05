@@ -147,6 +147,7 @@ class LLMSettings:
     model: str = ""
     analysis_model: str = ""
     processing_model: str = ""
+    correction_model: str = ""
     api_key: str | None = field(default=None, repr=False)
     proxy_mode: Literal["auto", "direct", "custom"] = "auto"
     proxy_url: str | None = field(default=None, repr=False)
@@ -163,6 +164,8 @@ class LLMSettings:
 
     def __post_init__(self) -> None:
         validate_proxy(self.proxy_mode, self.proxy_url)
+        if not isinstance(self.correction_model, str):
+            raise SettingsError("модель исправления должна быть строкой")
         if not self.provider.strip():
             raise SettingsError("провайдер LLM не задан")
         if not self.base_url.strip():
@@ -201,6 +204,11 @@ class LLMSettings:
     def effective_processing_model(self) -> str:
         """Model for processing and regeneration: explicit processing_model or fallback to model."""
         return self.processing_model.strip() or self.model
+
+    @property
+    def effective_correction_model(self) -> str:
+        """Model for chapter correction: explicit correction_model or fallback to model."""
+        return self.correction_model.strip() or self.model
 
     @property
     def is_ready(self) -> bool:

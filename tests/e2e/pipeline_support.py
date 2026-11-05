@@ -59,7 +59,7 @@ def llm_replies(
     if broken_reply_before_processing:
         replies.append(FakeReply(content="{"))
     replies.extend(
-        _translation_reply(_block_aliases(section), translation)
+        _translation_reply(section, translation)
         for section in document.ordered_sections
     )
     return tuple(replies)
@@ -184,26 +184,29 @@ def _analysis_reply(
     )
 
 
-def _translation_reply(aliases: list[str], fixture: dict[str, object]) -> FakeReply:
+def _translation_reply(section: DocumentSection, fixture: dict[str, object]) -> FakeReply:
     """Translation reply for one chapter with translation, hints, and language note."""
     hint = fixture["glossary_hint"]
     note = fixture["language_note"]
     assert isinstance(hint, dict)
     assert isinstance(note, dict)
+    aliases = _block_aliases(section)
+    note_alias = next(alias for alias, block in zip(aliases, textual_blocks(section), strict=True)
+                      if note['original_excerpt'] in block.text)
     return FakeReply.of_payload(
         {
             "blocks": [
                 {
                     "source_block_id": alias,
                     "treatment": "TRANSLATE",
-                    "translated_text": f"{fixture['translated_text']} ({alias}).",
+                    "translated_text": f"{fixture['translated_text']} ({alias[1:]}).",
                     "glossary_hints": [hint],
                 }
                 for alias in aliases
             ],
             "language_notes": [
                 {
-                    "source_block_id": aliases[0],
+                    "source_block_id": note_alias,
                     "original_excerpt": note["original_excerpt"],
                     "translated_excerpt": note["translated_excerpt"],
                     "note": note["note"],

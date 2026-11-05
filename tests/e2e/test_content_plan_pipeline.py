@@ -15,6 +15,7 @@ from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings, 
 from linguary.adapters.llm import FakeLLMClient, FakeReply
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
 from linguary.application.context_builder import textual_blocks
+from linguary.application.ports.llm import LLMResponseKind
 from linguary.application.use_cases.approve_glossary import GlossaryDecision, GlossaryDecisionCommand, StartProcessingCommand
 from linguary.application.use_cases.register_book import RegisterBookCommand
 from linguary.composition import build_application, drain_tasks
@@ -139,6 +140,10 @@ def processing_payload(story, blocks, plan, *, indices=None, regenerated=False, 
     return response
 
 
+def correction_payload(blocks):
+    return dict(blocks=[dict(block_id=block.id, status='unchanged') for block in blocks])
+
+
 @dataclass
 class Completed:
     story: dict
@@ -186,6 +191,7 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
         replies = [FakeReply.of_payload(good)]
         if retry:
             replies.insert(0, FakeReply.of_payload(processing_payload(story, blocks, plan, omit_evidence=True)))
+        replies.append(FakeReply.of_payload(correction_payload(blocks)))
         # FakeLLMClient consumes a single cursor across stages.
         client.replies = (*client.replies, *replies)
         run(app.processing.start(BOOK))
@@ -206,11 +212,17 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
             rejected = [log for log in logs if not log.success]
             assert len(rejected) == 1 and rejected[0].error is not None
             assert 'аспект' in rejected[0].error.message
-            assert len(client.requests) == len(groups) + 2
-        assert all(request.contract_version == 2 for request in client.requests)
+            assert len(client.requests) == len(groups) + 3
+        correction_requests = [request for request in client.requests
+                               if request.kind is LLMResponseKind.CHAPTER_CORRECTION]
+        assert correction_requests and all(request.contract_version == 2 for request in correction_requests)
+        assert all(request.contract_version == 2 for request in client.requests
+                   if request.kind is not LLMResponseKind.CHAPTER_CORRECTION)
         if regenerate:
             owner = story['difficulties'][0]['owner']
-            client.replies = (*client.replies, FakeReply.of_payload(processing_payload(story, blocks, plan, indices=[owner], regenerated=True)))
+            client.replies = (*client.replies,
+                              FakeReply.of_payload(processing_payload(story, blocks, plan, indices=[owner], regenerated=True)),
+                              FakeReply.of_payload(correction_payload((blocks[owner],))))
             run(app.regeneration.start(BOOK, blocks[owner].id))
             finish(app)
         with app.unit_of_work.transaction() as uow:

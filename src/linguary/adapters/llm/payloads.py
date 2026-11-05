@@ -17,6 +17,9 @@ from dataclasses import replace
 import json
 
 from pydantic import BaseModel, ValidationError
+from linguary.adapters.llm.correction_payloads import (
+    ChapterCorrectionSchema, ChapterCorrectionV2Schema, ChapterCorrectionReviewSchema,
+)
 from linguary.adapters.llm.quality_payloads import QualityReviewSchema
 from linguary.domain.llm_log import Violation
 
@@ -73,6 +76,8 @@ from linguary.domain.name_translation import NameTranslationAssessment
 
 #: Response schema for each request kind.
 SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
+    LLMResponseKind.CHAPTER_CORRECTION: ChapterCorrectionSchema,
+    LLMResponseKind.CHAPTER_CORRECTION_REVIEW: ChapterCorrectionReviewSchema,
     LLMResponseKind.QUALITY_REVIEW: QualityReviewSchema,
     LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisSchema,
     LLMResponseKind.TRANSLATION_RESULT: TranslationResultSchema,
@@ -84,6 +89,15 @@ def schema_for(
     pronunciation_candidates_version: int | None = None,
 ) -> type[BaseModel]:
     """Structured response schema for request kind."""
+    if kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
+        if (type(contract_version) is not int or contract_version not in {1, 2}
+                or name_translation_policy_version is not None or pronunciation_candidates_version is not None):
+            raise LLMResponseFormatError('неизвестная версия контракта исправления')
+        if kind == LLMResponseKind.CHAPTER_CORRECTION_REVIEW:
+            if contract_version != 1:
+                raise LLMResponseFormatError('неизвестная версия проверки кандидатов')
+            return ChapterCorrectionReviewSchema
+        return ChapterCorrectionSchema if contract_version == 1 else ChapterCorrectionV2Schema
     if pronunciation_candidates_version is not None:
         if (type(pronunciation_candidates_version) is not int or pronunciation_candidates_version != 1
                 or kind != LLMResponseKind.TRANSLATION_RESULT):
@@ -133,6 +147,11 @@ def parse_payload(
     """
     schema = schema_for(kind, contract_version=contract_version, name_translation_policy_version=name_translation_policy_version,
                         pronunciation_candidates_version=pronunciation_candidates_version)
+    if kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW} and truncated:
+        raise LLMResponseFormatError(
+            'ответ исправления оборван по лимиту токенов', truncated=True, raw_content=content,
+            violation=Violation('provider_truncated', kind.value, safe_message='Ответ исправления оборван'),
+        )
     candidate_items = ()
     validation_content = content
     if pronunciation_candidates_version == 1:
@@ -194,6 +213,8 @@ def _pronunciation_candidate(item: PronunciationCandidateSchema) -> Pronunciatio
 
 def _to_dto(validated: BaseModel) -> LLMPayload:
     """Converts validated schema object into an application layer DTO."""
+    if isinstance(validated, (ChapterCorrectionSchema, ChapterCorrectionV2Schema, ChapterCorrectionReviewSchema)):
+        return validated.to_dto()
     if isinstance(validated, QualityReviewSchema):
         return validated.to_dto()
     if isinstance(validated, ChapterAnalysisSchema):

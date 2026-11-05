@@ -1,7 +1,8 @@
 from dataclasses import replace
 import asyncio
 import pytest
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeReply
+from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.recovery import RecoveryError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.reset_processing import ResetProcessingCommand
@@ -142,7 +143,7 @@ async def test_crash_boundaries_do_not_reset_counter_or_repeat_unknown(tmp_path,
             else:
                 assert completed[0].status == TaskStatus.FAILED
                 assert root.reason == 'interrupted' and root.calls_used == 1
-                assert len(fake.requests) == 1
+                assert len(fake.scripted_requests) == 1
                 assert transaction.results.list_for_run(run.id) == ()
     finally:
         await app.aclose()
@@ -173,7 +174,7 @@ async def test_crash_after_commit_before_task_succeed_does_not_send_again(tmp_pa
                 transaction.tasks.save(replace(stored_task, status=TaskStatus.PENDING))
         monkeypatch.setattr(app.task_queue, 'save', original)
         assert (await drain_tasks(app))[0].status == TaskStatus.SUCCEEDED
-        assert len(fake.requests) == 2
+        assert len(fake.scripted_requests) == 2
         with app.unit_of_work.transaction() as transaction:
             assert transaction.work.get_root(root.id).calls_used == 1
     finally:
@@ -234,7 +235,7 @@ async def test_resume_only_unresolved_child_after_saved_child_crash(tmp_path, mo
             transaction.tasks.save(transaction.tasks.get(task.id).retry())
         completed = await drain_tasks(restarted)
         assert completed[0].status == TaskStatus.SUCCEEDED, completed[0].last_error
-        assert len(remaining.requests) == 1
+        assert len(remaining.scripted_requests) == 1
         assert accepted.block_id not in remaining.requests[0].ordered_block_ids
         with restarted.unit_of_work.transaction() as transaction:
             assert transaction.work.get_root(root.id).calls_used == 4
@@ -383,7 +384,7 @@ async def test_legacy_partial_coverage_keeps_unknown_attempt_and_calls_only_unre
                 assert transaction.results.get(scenario.run_id, second) is None
             else:
                 assert completed[0].status == TaskStatus.SUCCEEDED, completed[0].last_error
-                assert len(fake.requests) == 1 and fake.requests[0].ordered_block_ids == (second,)
+                assert len(fake.scripted_requests) == 1 and fake.requests[0].ordered_block_ids == (second,)
                 root, = transaction.work.list_roots('book-1', run_id=scenario.run_id)
                 assert tuple(root.manifest['historical_coverage']) == (first,)
                 assert root.calls_used == 1 and transaction.work.root_coverage_complete(root.id)

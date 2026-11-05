@@ -37,7 +37,7 @@ def _positive_integer(value: object, name: str) -> None:
 
 
 BASE_OVERRIDE_FIELDS = frozenset({'provider', 'model', 'base_url', 'requests_per_minute', 'concurrency'})
-OPTIONAL_OVERRIDE_FIELDS = frozenset({'proxy_mode', 'analysis_model', 'processing_model', 'temperature', 'timeout_seconds', 'reader_level', 'name_translation_strategy'})
+OPTIONAL_OVERRIDE_FIELDS = frozenset({'proxy_mode', 'analysis_model', 'processing_model', 'correction_model', 'temperature', 'timeout_seconds', 'reader_level', 'name_translation_strategy'})
 ALLOWED_OVERRIDE_FIELDS = BASE_OVERRIDE_FIELDS | OPTIONAL_OVERRIDE_FIELDS
 
 
@@ -66,6 +66,7 @@ class SystemSettingsUpdate:
 
     analysis_model: str | None = None
     processing_model: str | None = None
+    correction_model: str | None = None
     temperature: float | None | object = UNSET
     timeout_seconds: float | None = None
     reader_level: str | None = None
@@ -119,6 +120,7 @@ class SystemSettingsUpdate:
 
         analysis_model = None if self.analysis_model is None else _string(self.analysis_model, 'analysis_model')
         processing_model = None if self.processing_model is None else _string(self.processing_model, 'processing_model')
+        correction_model = None if self.correction_model is None else _string(self.correction_model, 'correction_model')
         if self.temperature is not None and self.temperature is not UNSET:
             if isinstance(self.temperature, bool) or not isinstance(self.temperature, (int, float)):
                 raise SystemSettingsValidationError('temperature', 'Ожидается число')
@@ -137,6 +139,8 @@ class SystemSettingsUpdate:
             object.__setattr__(self, 'analysis_model', analysis_model)
         if processing_model is not None:
             object.__setattr__(self, 'processing_model', processing_model)
+        if correction_model is not None:
+            object.__setattr__(self, 'correction_model', correction_model)
         if self.reader_level is not None:
             level = _string(self.reader_level, 'reader_level').lower()
             if level not in SUPPORTED_READER_LEVELS:
@@ -166,6 +170,10 @@ def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> Ap
         current.llm.processing_model if update.processing_model is None
         else update.processing_model
     )
+    correction_model = (
+        current.llm.correction_model if update.correction_model is None
+        else update.correction_model
+    )
     temperature = (
         current.llm.temperature if update.temperature is UNSET
         else update.temperature
@@ -193,6 +201,7 @@ def candidate_settings(current: AppSettings, update: SystemSettingsUpdate) -> Ap
             model=update.model,
             analysis_model=analysis_model,
             processing_model=processing_model,
+            correction_model=correction_model,
             temperature=temperature,
             timeout_seconds=timeout_seconds,
             base_url=update.base_url,

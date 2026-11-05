@@ -32,6 +32,7 @@ from linguary.application.glossary_review import (
     build_glossary_review,
     glossary_snapshot,
 )
+from linguary.application.correction_dto import CorrectionSnapshot, CorrectionSnapshotV2, parse_correction_snapshot
 from linguary.application.mention_counter import mention_counter
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
@@ -347,6 +348,7 @@ class StartProcessing:
         unit_of_work: UnitOfWork,
         glossary_confidence_threshold: float,
         llm_settings_snapshot: LLMSettingsSnapshot,
+        correction_snapshot: CorrectionSnapshot | CorrectionSnapshotV2 | None = None,
         glossary_review_min_mentions: int = 5,
         glossary_review_min_chapters: int = 3,
         id_factory: IdFactory | None = None,
@@ -358,6 +360,11 @@ class StartProcessing:
         self._glossary_review_min_mentions = glossary_review_min_mentions
         self._glossary_review_min_chapters = glossary_review_min_chapters
         self._llm_settings_snapshot = llm_settings_snapshot
+        if book_conditions is not None and correction_snapshot is None:
+            from linguary.application.book_conditions import ConditionsError
+            raise ConditionsError('correction_policy_unavailable')
+        self._correction_snapshot = (None if correction_snapshot is None else
+            parse_correction_snapshot(correction_snapshot.to_payload()))
         self._id_factory = id_factory or _new_id
 
     def __call__(self, command: StartProcessingCommand) -> ProcessingRun:
@@ -370,6 +377,9 @@ class StartProcessing:
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, command.book_id)
             conditions = None if self._book_conditions is None else self._book_conditions.require(book.id, transaction=transaction)
+            if self._book_conditions is not None and conditions is None:
+                from linguary.application.book_conditions import ConditionsError
+                raise ConditionsError('conditions_unavailable')
             snapshot = self._llm_settings_snapshot
             if conditions is not None:
                 payload = conditions.payload
@@ -402,7 +412,8 @@ class StartProcessing:
                 from linguary.application.book_conditions import payload_digest
                 glossary = asdict(run.glossary_snapshot)
                 transaction.work.bind('run', run.id, book_id=book.id, conditions_id=conditions.id,
-                    payload={'schema_version': 1, 'glossary_snapshot': glossary, 'glossary_sha256': payload_digest(glossary)})
+                    payload={'schema_version': 1, 'glossary_snapshot': glossary, 'glossary_sha256': payload_digest(glossary),
+                             'correction': self._correction_snapshot.to_payload()})
             transaction.books.save(replace(book, status=started))
         return run
 

@@ -398,6 +398,9 @@ class TranslationCall:
                     transaction.work.stale_reviews(book_id)
                 if context is not None and context.root_id is not None:
                     transaction.work.root_coverage_complete(context.root_id)
+                from linguary.application.correction import invalidate_correction
+                invalidate_correction(transaction, book_id, run_id,
+                                      (result.block_id for result in results))
                 saved = True
         if not saved:
             finalize_response(self._unit_of_work, response, 'stale')
@@ -458,38 +461,49 @@ def complete_processing(
     the user could have returned to glossary review.
     """
     with unit_of_work.transaction() as transaction:
-        _record_success(transaction, finished_task_id)
-        book = book_record(transaction, book_id)
-        if book.status is not BookStatus.PROCESSING:
-            return
-        unfinished = tuple(
-            task
-            for task in transaction.tasks.list_for_book(book_id)
-            if task.task_type in task_types
-            and task.id != finished_task_id
-            and task.status not in {TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED}
-        )
-        if unfinished:
-            return
-        run = transaction.runs.active_for_book(book_id)
-        roots = transaction.work.list_active_roots(book_id, run_id=run.id) if run is not None else ()
-        if any(not transaction.work.root_coverage_complete(root.id) for root in roots):
+        complete_processing_in_transaction(transaction, book_id=book_id,
+            finished_task_id=finished_task_id, task_types=task_types)
+
+
+def complete_processing_in_transaction(transaction, *, book_id, finished_task_id, task_types):
+    """Recompute mandatory coverage and readiness within the caller's transaction."""
+    _record_success(transaction, finished_task_id)
+    from linguary.application.correction import reconcile_corrections, correction_coverage_complete
+    reconcile_corrections(transaction, book_id)
+    book = book_record(transaction, book_id)
+    if book.status is not BookStatus.PROCESSING:
+        return
+    unfinished = tuple(
+        task
+        for task in transaction.tasks.list_for_book(book_id)
+        if task.task_type in {*task_types, TaskType.CHAPTER_CORRECTION}
+        and task.id != finished_task_id
+        and task.status not in {TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED}
+    )
+    if unfinished:
+        return
+    run = transaction.runs.active_for_book(book_id)
+    roots = transaction.work.list_active_roots(book_id, run_id=run.id) if run is not None else ()
+    if any(not transaction.work.root_coverage_complete(root.id) for root in roots):
+        raise RecoveryError('unsafe_partition')
+    if not correction_coverage_complete(transaction, book_id):
+        return
+    document = transaction.documents.get(book_id)
+    if run is not None and document is not None:
+        from linguary.application.context_builder import textual_blocks
+        expected = {block.id for section in document.sections for block in textual_blocks(section)}
+        actual = {result.block_id for result in transaction.results.list_for_run(run.id)}
+        if not actual <= expected:
             raise RecoveryError('unsafe_partition')
-        document = transaction.documents.get(book_id)
-        if run is not None and document is not None:
-            from linguary.application.context_builder import textual_blocks
-            expected = {block.id for section in document.sections for block in textual_blocks(section)}
-            actual = {result.block_id for result in transaction.results.list_for_run(run.id)}
-            if not actual <= expected:
-                raise RecoveryError('unsafe_partition')
-            if expected != actual:
-                return
-        transaction.books.save(
-            replace(
-                book,
-                status=apply_book_event(book.status, BookEvent.PROCESSING_COMPLETED),
-            )
+        if expected != actual:
+            return
+    transaction.books.save(
+        replace(
+            book,
+            status=apply_book_event(book.status, BookEvent.PROCESSING_COMPLETED),
         )
+    )
+
 
 
 def _record_success(transaction: UnitOfWork, task_id: str | None) -> None:

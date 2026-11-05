@@ -264,6 +264,7 @@ def test_content_downgrade_refuses_all_nonnull_before_ddl(
     alembic_config, engine, content_rows, table, column, payload,
 ):
     from sqlalchemy import text
+    command.downgrade(alembic_config, '0011')
     with engine.begin() as connection:
         connection.execute(text(f'UPDATE {table} SET {column} = :payload'), {'payload': payload})
     from sqlalchemy import event
@@ -331,6 +332,7 @@ def test_fragment_upgrade_preserves_0007_rows(alembic_config, engine, content_ro
 @pytest.mark.parametrize('payload', ['[{"kind":"unresolved"}]', '[]', 'null'])
 def test_fragment_downgrade_refuses_nonnull_before_ddl(alembic_config, engine, content_rows, payload):
     from sqlalchemy import event, text
+    command.downgrade(alembic_config, '0011')
     with engine.begin() as connection:
         connection.execute(text('UPDATE block_results SET fragment_assistance_json=:payload'), {'payload': payload})
     ddl = []
@@ -366,6 +368,7 @@ def test_pronunciation_upgrade_preserves_0009_rows(alembic_config, engine, conte
 @pytest.mark.parametrize('payload', ['[{"ipa":"invented"}]', '[]', 'null'])
 def test_pronunciation_migration_refuses_data_loss(alembic_config, engine, content_rows, payload):
     from sqlalchemy import event, text
+    command.downgrade(alembic_config, '0011')
     with engine.begin() as connection:
         connection.execute(text('UPDATE block_results SET pronunciation_assistances_json=:payload'), {'payload': payload})
     ddl = []

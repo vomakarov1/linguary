@@ -10,7 +10,7 @@ from lxml import etree
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.epub import EpubExportWriter, verify_exported_epub
-from linguary.adapters.llm import FakeLLMClient
+from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.adapters.pronunciation.source import SOURCE_VERSION
 from linguary.application.ports.epub import EpubWriteRequest
 from linguary.application.pronunciation_projection import project_pronunciations

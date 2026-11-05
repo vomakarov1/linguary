@@ -21,6 +21,7 @@ class TaskType(StrEnum):
     ANALYZE_CHAPTER = "analyze_chapter"
     PROCESS_TRANSLATION_UNIT = "process_translation_unit"
     REGENERATE_BLOCK = "regenerate_block"
+    CHAPTER_CORRECTION = "chapter_correction"
     EXPORT_BOOK = "export_book"
 
 

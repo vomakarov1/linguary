@@ -5,7 +5,8 @@ import json
 import pytest
 
 from test_content_plan_pipeline import BOOK, finish, import_story, make_app, run
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeReply
+from correction_e2e_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.adapters.llm.payloads import parse_payload
 from linguary.application.analysis_merge import AnalysisMergeError, validate_content_plan
 from linguary.application.ports.llm import LLMResponseKind
@@ -78,7 +79,11 @@ def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, lev
             'b2': 'Для B2 используй естественный английский',
         }[level] in processing_instructions
         assert 'Служебные context_facts применяй' not in processing_instructions
-        assert [request.contract_version for request in client.requests] == [3, 4]
+        assert [(request.kind, request.contract_version) for request in client.requests] == [
+            (LLMResponseKind.CHAPTER_ANALYSIS, 3),
+            (LLMResponseKind.TRANSLATION_RESULT, 4),
+            (LLMResponseKind.CHAPTER_CORRECTION, 2),
+        ]
         with app.unit_of_work.transaction() as tx:
             results = tx.results.list_for_run(processing_run.id)
         assert len(results) == 1

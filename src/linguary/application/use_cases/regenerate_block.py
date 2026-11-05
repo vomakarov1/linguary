@@ -328,6 +328,8 @@ class BlockRegenerationSequence:
         """Atomically persist a regeneration operation, then return its queued task."""
         command = RegenerateBlockCommand(book_id=book_id, block_id=block_id)
         with self._unit_of_work.transaction() as transaction:
+            from linguary.application.correction import reconcile_corrections
+            reconcile_corrections(transaction, book_id)
             book = book_record(transaction, book_id)
             status = _status_after_request(transaction, book)
             self._regenerate_block._load(command, transaction=transaction)

@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
-from linguary.adapters.llm import FakeLLMClient, FakeReply
+from linguary.adapters.llm import FakeReply
+from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.composition import build_application, drain_tasks
 from linguary.domain import LLMCallStage, TaskStatus

@@ -61,6 +61,7 @@
         {% for note in block.language_notes %}
           <aside class="note">{{ note.original_excerpt }} — {{ note.note }}</aside>
         {% endfor %}
+        {% include "partials/correction_candidate.html" %}
         {% if block.regeneration_task and block.regeneration_task.status in ("pending", "running") %}
           <p class="task-state" role="status" data-active-task="true"><span class="spinner" aria-hidden="true"></span>{{ block.regeneration_task.task_type_label }}: {{ block.regeneration_task.status_label }}. Блок обновится автоматически.</p>
         {% elif block.regeneration_task %}
@@ -104,6 +105,7 @@
       {% for note in block.language_notes %}
         <aside class="note">{{ note.original_excerpt }} — {{ note.note }}</aside>
       {% endfor %}
+      {% include "partials/correction_candidate.html" %}
       {% if regenerating %}
         <p class="task-state" role="status" data-active-task="true"><span class="spinner" aria-hidden="true"></span>{{ block.regeneration_task.task_type_label }}: {{ block.regeneration_task.status_label }}. Блок обновится автоматически.</p>
       {% elif block.regeneration_task %}

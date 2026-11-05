@@ -1,0 +1,55 @@
+{% macro correction_fields(result) -%}
+  {% if result.translated_text %}<p>{{ result.translated_text }}</p>{% else %}<p>Полного перевода нет.</p>{% endif %}
+  {% if result.glossary_hints %}
+    <ul>{% for hint in result.glossary_hints %}<li>{{ hint.original }} — {{ hint.translation }}{% if hint.note %}: {{ hint.note }}{% endif %}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if result.language_notes %}
+    <ul>{% for note in result.language_notes %}
+      <li>
+        <p>Исходный фрагмент: {{ note.original_excerpt }}</p>
+        {% if note.translated_excerpt %}<p>Перевод фрагмента: {{ note.translated_excerpt }}</p>{% else %}<p>Перевод фрагмента отсутствует.</p>{% endif %}
+        <p>Заметка: {{ note.note }}</p>
+      </li>
+    {% endfor %}</ul>
+  {% endif %}
+{%- endmacro %}
+{% for candidate in block.correction_candidates %}
+  <details class="correction-candidate" open>
+    <summary>{% if candidate.state == 'awaiting_human' %}Исправление требует вашего решения{% else %}Предложение проходит проверку{% endif %}</summary>
+    <h3>Оригинал</h3>
+    <p>{{ candidate.original_text }}</p>
+    <h3>Текущий вариант</h3>
+    {{ correction_fields(candidate.current_result) }}
+    <h3>Предложенный вариант</h3>
+    {{ correction_fields(candidate.proposed_result) }}
+    <h3>Основания</h3>
+    <ul>
+      {% for issue in candidate.issues %}
+        <li>
+          <p>В оригинале: «{{ issue.source_quote }}».</p>
+          {% if issue.current_evidence.kind == 'quote' %}
+            <p>В текущем варианте: «{{ issue.current_evidence.quote }}».</p>
+          {% else %}
+            <p>Модель считает, что пропущен смысл: {{ issue.current_evidence.missing_meaning }}.</p>
+          {% endif %}
+          <p>{{ issue.problem }} {{ issue.minimal_fix_reason }}</p>
+        </li>
+      {% endfor %}
+    </ul>
+    {% if not candidate.evidence_valid %}<p>Приложение не подтвердило все приведённые цитаты или признаки отсутствия.</p>{% endif %}
+    {% if candidate.review_reason %}<p>Результат перепроверки: {{ candidate.review_reason }}</p>{% endif %}
+    {% if candidate.state == 'awaiting_human' %}
+      <p>Пока решение не сохранено, EPUB нельзя собрать.</p>
+      <form method="post" action="/books/{{ book_id }}/correction-candidates/{{ candidate.candidate_id }}/resolve">
+        <input type="hidden" name="proposal_sha256" value="{{ candidate.proposal_sha256 }}">
+        <input type="hidden" name="input_sha256" value="{{ candidate.input_sha256 }}">
+        <label for="correction-reason-{{ candidate.candidate_id }}">Причина решения</label>
+        <textarea id="correction-reason-{{ candidate.candidate_id }}" name="reason" required maxlength="4000" rows="2"></textarea>
+        <div class="actions">
+          <button type="submit" name="action" value="accept">Принять предложение</button>
+          <button type="submit" name="action" value="keep">Оставить текущий текст</button>
+        </div>
+      </form>
+    {% endif %}
+  </details>
+{% endfor %}
