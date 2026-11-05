@@ -79,7 +79,11 @@ def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, lev
             'b2': 'Для B2 используй естественный английский',
         }[level] in processing_instructions
         assert 'Служебные context_facts применяй' not in processing_instructions
-        assert [request.contract_version for request in client.requests] == [3, 4, 1]
+        assert [(request.kind, request.contract_version) for request in client.requests] == [
+            (LLMResponseKind.CHAPTER_ANALYSIS, 3),
+            (LLMResponseKind.TRANSLATION_RESULT, 4),
+            (LLMResponseKind.CHAPTER_CORRECTION, 2),
+        ]
         with app.unit_of_work.transaction() as tx:
             results = tx.results.list_for_run(processing_run.id)
         assert len(results) == 1

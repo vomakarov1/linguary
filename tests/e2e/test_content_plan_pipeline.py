@@ -213,8 +213,11 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
             assert len(rejected) == 1 and rejected[0].error is not None
             assert 'аспект' in rejected[0].error.message
             assert len(client.requests) == len(groups) + 3
-        assert all(request.contract_version == (1 if request.kind is LLMResponseKind.CHAPTER_CORRECTION else 2)
-                   for request in client.requests)
+        correction_requests = [request for request in client.requests
+                               if request.kind is LLMResponseKind.CHAPTER_CORRECTION]
+        assert correction_requests and all(request.contract_version == 2 for request in correction_requests)
+        assert all(request.contract_version == 2 for request in client.requests
+                   if request.kind is not LLMResponseKind.CHAPTER_CORRECTION)
         if regenerate:
             owner = story['difficulties'][0]['owner']
             client.replies = (*client.replies,

@@ -277,7 +277,10 @@ async def test_legacy_v1_v2_fixture_roundtrip(tmp_path, profile):
         with app.unit_of_work.transaction() as tx:
             results = tx.results.list_for_run(run.id)
             assert len(results) == len(tuple(document.blocks()))
-        assert all(r.contract_version == (1 if r.kind == LLMResponseKind.CHAPTER_CORRECTION or profile == 'legacy-v1' else 2) for r in fake.requests)
+        corrections = [r for r in fake.requests if r.kind == LLMResponseKind.CHAPTER_CORRECTION]
+        assert corrections and all(r.contract_version == 2 for r in corrections)
+        assert all(r.contract_version == (1 if profile == 'legacy-v1' else 2)
+                   for r in fake.requests if r.kind != LLMResponseKind.CHAPTER_CORRECTION)
         visible = '\n'.join(''.join(r.itertext()) for r in exported_documents(app.paths.export_epub(BOOK)).values())
         assert all(text in visible for text in STORY['blocks'])
         assert hashlib.sha256(app.paths.source_epub(BOOK).read_bytes()).hexdigest() == source_sha
