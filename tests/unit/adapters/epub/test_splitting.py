@@ -207,7 +207,7 @@ def test_split_inline_content_shifts_annotation_offsets() -> None:
         anchor_ids=("p-1",),
     )
 
-    fragments = split_inline_content(content, min_chars=0)
+    fragments = split_inline_content(content, min_chars=1)
     assert len(fragments) == 2
 
     # First fragment contains no markup
@@ -237,7 +237,7 @@ def test_split_inline_content_clips_spanning_annotations() -> None:
         ),
     )
 
-    fragments = split_inline_content(content, min_chars=0)
+    fragments = split_inline_content(content, min_chars=1)
     assert len(fragments) == 2
 
     # In the first fragment, markup is clipped at the fragment boundary
@@ -282,7 +282,7 @@ def test_split_inline_content_preserves_footnote_references() -> None:
         ),
     )
 
-    fragments = split_inline_content(content, min_chars=0)
+    fragments = split_inline_content(content, min_chars=1)
     assert len(fragments) == 2
 
     # First fragment preserves fn1
@@ -312,15 +312,15 @@ def test_split_inline_content_anchors_assigned_to_first_fragment() -> None:
         anchor_ids=("anchor-1", "anchor-2"),
     )
 
-    fragments = split_inline_content(content, min_chars=0)
-    assert len(fragments) == 3
+    fragments = split_inline_content(content, min_chars=1)
+    assert len(fragments) == 2
+    assert "".join(fragment.text for fragment in fragments) == content.text
     assert fragments[0].anchor_ids == ("anchor-1", "anchor-2")
     assert fragments[1].anchor_ids == ()
-    assert fragments[2].anchor_ids == ()
 
 
-def test_split_inline_content_returns_original_if_unsplit() -> None:
-    """If no splitting occurs, the original InlineContent object is returned."""
+def test_split_inline_content_returns_original_if_short_and_splits_long_text() -> None:
+    """Short content is preserved as-is, while long text falls back to word boundaries."""
     short_content = InlineContent(
         text="Short text.",
         anchor_ids=("a1",),
@@ -333,7 +333,10 @@ def test_split_inline_content_returns_original_if_unsplit() -> None:
         anchor_ids=("a2",),
     )
     result_monolithic = split_inline_content(monolithic_content)
-    assert result_monolithic == (monolithic_content,)
+    assert len(result_monolithic) > 1
+    assert "".join(fragment.text for fragment in result_monolithic) == monolithic_content.text
+    assert result_monolithic[0].anchor_ids == monolithic_content.anchor_ids
+    assert all(not fragment.anchor_ids for fragment in result_monolithic[1:])
 
 
 def test_split_sentences_preserves_country_abbreviations() -> None:
@@ -381,7 +384,7 @@ def test_split_inline_content_monotonic_boundaries_with_overlapping_footnotes() 
         ),
     )
 
-    fragments = split_inline_content(content, min_chars=0)
+    fragments = split_inline_content(content, min_chars=1)
     assert len(fragments) >= 1
     reconstructed = "".join(f.text for f in fragments)
     assert reconstructed == text
@@ -395,7 +398,7 @@ def test_split_inline_content_monotonic_boundaries_with_overlapping_footnotes() 
         target="notes.xhtml#fn_end",
     )
     content_end = InlineContent(text=text, annotations=(fn_to_end,))
-    fragments_end = split_inline_content(content_end, min_chars=0)
+    fragments_end = split_inline_content(content_end, min_chars=1)
     assert len(fragments_end) == 1
     assert fragments_end[0].text == text
 

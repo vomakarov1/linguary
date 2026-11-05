@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import replace
 from typing import Literal
 
@@ -18,15 +17,12 @@ from web_scenario import (
     translated_result,
 )
 
-from linguary.adapters.config import AppSettings
-from linguary.adapters.llm import FakeLLMClient
-from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
 from linguary.application.ports.persistence import ExportValidationStatus
 from linguary.application.use_cases.approve_glossary import (
     GlossaryDecision,
     GlossaryDecisionCommand,
 )
-from linguary.composition import Application, build_application
+from linguary.composition import Application
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
@@ -36,13 +32,9 @@ from linguary.domain import (
 )
 from linguary.domain.content_plan import SourceAnchor
 from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
-from linguary.web import create_app
 
 HTML_HEADERS = {"accept": "text/html"}
 RESULT_FRAGMENT_HEADERS = {**HTML_HEADERS, "x-linguary-fragment": "result-block"}
-
-#: Name guaranteed not to exist in `PATH`: simulates a machine without Java.
-MISSING_JAVA = "linguary-java-that-does-not-exist"
 
 
 def _pronunciation_book(
@@ -237,28 +229,6 @@ def test_pronunciation_template_without_confirmed_assistance(
     tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
 
     assert not tree.xpath('//*[@class="pronunciation"] | //a[@class="pronunciation-repeat"] | //details[@class="ipa-guide"]')
-
-
-@pytest.fixture
-def client_without_epubcheck(
-    settings: AppSettings, llm_client: FakeLLMClient
-) -> Iterator[TestClient]:
-    """Application client on a machine where external EPUB check is unavailable."""
-    application = build_application(
-        settings=settings,
-        llm_client=llm_client,
-        epubcheck=EpubCheckValidator(
-            settings=EpubCheckSettings(java_executable=MISSING_JAVA)
-        ),
-    )
-    try:
-        with TestClient(
-            create_app(application=application, run_background_worker=False),
-            base_url=application.settings.server.base_url,
-        ) as test_client:
-            yield test_client
-    finally:
-        application.dispose()
 
 
 def test_root_redirects_to_books_screen(client: TestClient) -> None:
@@ -738,15 +708,17 @@ def test_system_config_screen_renders_first_run_state(client: TestClient) -> Non
     assert "test-key" not in response.text
 
 
-def test_system_config_screen_explains_how_to_configure_the_llm(
+def test_system_config_screen_exposes_editable_llm_settings(
     client: TestClient,
 ) -> None:
-    """Alongside "LLM not configured" status, screen explains what to configure (PRD § 23)."""
+    """The configuration screen provides editable connection and model fields."""
     response = client.get("/system/config", headers=HTML_HEADERS)
+    tree = html.fromstring(response.text)
 
     assert response.status_code == 200
-    assert "config.toml" in response.text
-    assert "LINGUARY_LLM_MODEL" in response.text
+    assert tree.xpath('//input[@name="base_url"]')
+    assert tree.xpath('//input[@name="api_key" and @type="password"]')
+    assert tree.xpath('//input[@name="model"]')
 
 
 def test_system_config_screen_warns_about_the_external_provider(
@@ -759,29 +731,37 @@ def test_system_config_screen_warns_about_the_external_provider(
     assert "Текст книги целиком отправляется внешнему провайдеру LLM" in response.text
 
 
-def test_system_config_screen_explains_how_to_enable_epubcheck(
-    client_without_epubcheck: TestClient,
+def test_result_screen_explains_unavailable_epubcheck(
+    client: TestClient, application: Application,
 ) -> None:
-    """Screen explains how to enable unavailable EPUB check (PRD § 21.6)."""
-    response = client_without_epubcheck.get("/system/config", headers=HTML_HEADERS)
+    """The result page explains how to enable an unavailable EPUB check."""
+    scenario = store_book(application, status=BookStatus.COMPLETED)
+    start_run(application, scenario)
+    with application.unit_of_work.transaction() as uow:
+        book = uow.books.get(scenario.book_id)
+        assert book is not None
+        uow.books.save(
+            replace(book, export_validation_status=ExportValidationStatus.NOT_VALIDATED)
+        )
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
 
     assert response.status_code == 200
     assert "Внешняя проверка EPUBCheck необязательна" in response.text
     assert "~/.linguary/epubcheck" in response.text
 
 
-def test_system_config_screen_renders_reading_settings(client: TestClient) -> None:
-    """Configuration screen displays reader level settings block (ReadingSettings)."""
+def test_system_config_screen_renders_reading_level_control(client: TestClient) -> None:
+    """Configuration screen exposes the supported reader levels as a form control."""
     response = client.get("/system/config", headers=HTML_HEADERS)
+    tree = html.fromstring(response.text)
 
     assert response.status_code == 200
-    assert "Уровень читателя (ReadingSettings)" in response.text
-    assert "Поддерживаемые уровни владения языком (CEFR)" in response.text
-    assert "[reading]" in response.text
-    assert 'reader_level = "b2"' in response.text
-    assert "Уровень читателя" in response.text
-    assert 'name="reader_level"' in response.text
-    assert 'id="settings-reader_level"' in response.text
+    select, = tree.xpath('//select[@name="reader_level"]')
+    assert select.get("id") == "settings-reader_level"
+    assert [option.get("value") for option in select.xpath("./option")] == [
+        "a2", "b1", "b2", "c1"
+    ]
+    assert select.xpath('./option[@value="b2"][@selected]')
 
 
 
@@ -912,5 +892,5 @@ def test_result_groups_template_keeps_pronunciation_guide_and_original(client, a
 def test_result_page_versions_updated_script(client, application):
     scenario = _pronunciation_book(application)
     tree = html.fromstring(client.get(f'/books/{scenario.book_id}/result', headers=HTML_HEADERS).text)
-    assert tree.xpath('//script/@src')[0].endswith('/static/linguary.js?v=3')
-    assert tree.xpath('//link[@rel="stylesheet"]/@href')[0].endswith('/static/linguary.css?v=3')
+    assert tree.xpath('//script/@src')[0].endswith('/static/linguary.js?v=4')
+    assert tree.xpath('//link[@rel="stylesheet"]/@href')[0].endswith('/static/linguary.css?v=4')

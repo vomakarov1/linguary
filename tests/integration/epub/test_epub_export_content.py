@@ -641,16 +641,37 @@ def test_fragment_assistance_follows_the_complete_split_original(tmp_path: Path)
     )
     run = run_export(source, tmp_path=tmp_path / "full", block_results={parts[0].id: result})
     root = documents_of(run.path)["OEBPS/chapter.xhtml"]
-    original = next(p for p in elements(root, "p") if p.get("class") is None)
-    assert "".join(original.itertext()) == "".join(part.text for part in parts)
+    fragment_containers = [
+        node for node in elements(root, "div")
+        if "linguary-paragraph-fragment" in (node.get("class") or "").split()
+    ]
+    originals = [
+        paragraph
+        for fragment in fragment_containers
+        for paragraph in elements(fragment, "p")
+        if paragraph.getparent() is fragment
+        if "linguary-fragment-label" not in (paragraph.get("class") or "").split()
+    ]
+    assert len(originals) > 1
+    assert "".join("".join(paragraph.itertext()) for paragraph in originals) == "".join(
+        part.text for part in parts
+    )
+    original = originals[0]
     container = original.getnext()
     assert container.get("class") == "linguary-fragment-help"
     assert len(root.xpath('//*[@class="linguary-fragment-help"]')) == 1
     assert len(container) == 1
     assert next(iter(elements(original, "b"))).text == "Repeated phrase."
-    source_link = next(a for a in elements(original, "a") if a.get("href") == "https://example.com")
+    source_link = next(
+        a for paragraph in originals for a in elements(paragraph, "a")
+        if a.get("href") == "https://example.com"
+    )
     assert source_link.text == "linked ending"
-    assert len([a for a in elements(original, "a") if a.get("class") == "linguary-help-reference"]) == len(parts)
+    assert sum(
+        a.get("class") == "linguary-help-reference"
+        for paragraph in originals
+        for a in elements(paragraph, "a")
+    ) == len(parts)
 
 
 def pronunciation_book(tmp_path):

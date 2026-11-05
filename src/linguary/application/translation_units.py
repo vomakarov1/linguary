@@ -105,10 +105,10 @@ def group_paragraph_fragments(
     if total == 0:
         return (values,)
     min_count = min(
-        len(values), max(2, ceil(total / PARAGRAPH_FRAGMENT_MAX_CHARS))
+        len(values), max(1, ceil(total / PARAGRAPH_FRAGMENT_MAX_CHARS))
     )
     max_count = min(
-        len(values), max(2, total // PARAGRAPH_FRAGMENT_MIN_CHARS)
+        len(values), max(1, total // PARAGRAPH_FRAGMENT_MIN_CHARS)
     )
     counts = (
         range(min_count, max_count + 1)

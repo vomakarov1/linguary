@@ -118,14 +118,22 @@ def test_pipeline_import_process_and_export_split_paragraphs(tmp_path: Path) -> 
     ]
     assert continuation_elements == []
 
-    original_paragraphs = [
-        p for p in p_elements
-        if split_blocks[0].text[:30] in "".join(p.itertext())
+    fragment_containers = [
+        node for node in elements(chapter_doc, "div")
+        if "linguary-paragraph-fragment" in (node.get("class") or "").split()
     ]
-    assert len(original_paragraphs) == 1
-    original = original_paragraphs[0]
-    assert "".join(original.itertext()) == "".join(block.text for block in split_blocks)
-    bold = elements(original, "b")
+    original_paragraphs = [
+        paragraph
+        for fragment in fragment_containers
+        for paragraph in elements(fragment, "p")
+        if paragraph.getparent() is fragment
+        if "linguary-fragment-label" not in (paragraph.get("class") or "").split()
+    ]
+    assert len(original_paragraphs) > 1
+    assert "".join("".join(paragraph.itertext()) for paragraph in original_paragraphs) == "".join(
+        block.text for block in split_blocks
+    )
+    bold = [node for paragraph in original_paragraphs for node in elements(paragraph, "b")]
     assert bold
     expected_bold = "".join(
         block.text[annotation.start:annotation.end]

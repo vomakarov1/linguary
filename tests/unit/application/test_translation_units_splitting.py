@@ -7,6 +7,7 @@ from processing_fakes import make_plan
 
 from linguary.application.translation_units import (
     _is_cohesive_with,
+    group_paragraph_fragments,
     plan_translation_units,
 )
 from linguary.domain import BlockType, DocumentBlock, SourceReference
@@ -67,6 +68,12 @@ def test_is_cohesive_with_matches_split_group() -> None:
     # Normal Paragraph blocks without split_group -> not cohesive
     b5 = _make_block(4, "Another regular paragraph")
     assert _is_cohesive_with(b4, b5) is False
+
+
+def test_group_paragraph_fragments_keeps_short_source_together() -> None:
+    fragments = ("First bold ", "linked end.")
+
+    assert group_paragraph_fragments(fragments, text_of=lambda fragment: fragment) == (fragments,)
 
 
 def test_plan_translation_units_keeps_split_group_together() -> None:

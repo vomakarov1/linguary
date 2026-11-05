@@ -713,14 +713,23 @@ class _ChapterRenderer:
                     parts, text_of=lambda part: part.text
                 )
                 for group_index, group_parts in enumerate(display_groups, start=1):
-                    fragment = _sub(host, "div", {"class": "linguary-paragraph-fragment"})
-                    _sub(
-                        fragment,
-                        "p",
-                        {"class": "linguary-fragment-label", "lang": self._document.source_language},
-                    ).text = paragraph_fragment_label(
-                        group_index, len(display_groups), self._document.source_language
-                    )
+                    fragment = host
+                    if len(display_groups) > 1:
+                        fragment = _sub(
+                            host, "div", {"class": "linguary-paragraph-fragment"}
+                        )
+                        _sub(
+                            fragment,
+                            "p",
+                            {
+                                "class": "linguary-fragment-label",
+                                "lang": self._document.source_language,
+                            },
+                        ).text = paragraph_fragment_label(
+                            group_index,
+                            len(display_groups),
+                            self._document.source_language,
+                        )
                     original = _sub(fragment, "p")
                     for part in group_parts:
                         for anchor in _anchors(part):

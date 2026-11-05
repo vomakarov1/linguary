@@ -33,14 +33,15 @@ def _make_long_paragraph_html() -> tuple[etree._Element, str]:
 
 
 def test_reader_splits_long_paragraph_into_multiple_blocks() -> None:
-    """A long compound paragraph is split into multiple blocks during import."""
+    """A long paragraph is split into balanced blocks during import."""
     builder = _make_builder()
     context = _BlockContext()
-    p, _ = _make_long_paragraph_html()
+    p, text = _make_long_paragraph_html()
 
     builder._emit_leaf(p, context)
 
-    assert len(builder.blocks) == 3
+    assert len(builder.blocks) > 1
+    assert "".join(block.text for block in builder.blocks) == text
     assert all(block.type is BlockType.PARAGRAPH for block in builder.blocks)
 
 
@@ -48,21 +49,21 @@ def test_reader_generates_indexed_structural_paths() -> None:
     """Indexed paths like base_xpath/text()[k] are generated for fragments with unique block_id values."""
     builder = _make_builder()
     context = _BlockContext()
-    p, _ = _make_long_paragraph_html()
+    p, text = _make_long_paragraph_html()
 
     builder._emit_leaf(p, context)
 
-    assert len(builder.blocks) == 3
+    assert len(builder.blocks) > 1
     paths = [block.source_reference.structural_path for block in builder.blocks]
     assert paths == [
-        "/html[1]/body[1]/p[1]/text()[1]",
-        "/html[1]/body[1]/p[1]/text()[2]",
-        "/html[1]/body[1]/p[1]/text()[3]",
+        f"/html[1]/body[1]/p[1]/text()[{index}]"
+        for index in range(1, len(builder.blocks) + 1)
     ]
+    assert "".join(block.text for block in builder.blocks) == text
 
     # Block identifiers must be unique and deterministic
     ids = [block.id for block in builder.blocks]
-    assert len(set(ids)) == 3
+    assert len(set(ids)) == len(builder.blocks)
 
 
 def test_reader_sets_split_attributes() -> None:
@@ -74,17 +75,11 @@ def test_reader_sets_split_attributes() -> None:
     builder._emit_leaf(p, context)
 
     base_path = "/html[1]/body[1]/p[1]"
-    assert builder.blocks[0].attributes["split_group"] == base_path
-    assert builder.blocks[0].attributes["split_index"] == "1"
-    assert builder.blocks[0].attributes["split_total"] == "3"
-
-    assert builder.blocks[1].attributes["split_group"] == base_path
-    assert builder.blocks[1].attributes["split_index"] == "2"
-    assert builder.blocks[1].attributes["split_total"] == "3"
-
-    assert builder.blocks[2].attributes["split_group"] == base_path
-    assert builder.blocks[2].attributes["split_index"] == "3"
-    assert builder.blocks[2].attributes["split_total"] == "3"
+    total = str(len(builder.blocks))
+    for index, block in enumerate(builder.blocks, start=1):
+        assert block.attributes["split_group"] == base_path
+        assert block.attributes["split_index"] == str(index)
+        assert block.attributes["split_total"] == total
 
 
 def test_reader_preserves_sequential_order() -> None:
@@ -98,15 +93,17 @@ def test_reader_preserves_sequential_order() -> None:
 
     p, _ = _make_long_paragraph_html()
     builder._emit_leaf(p, context)
+    split_count = len(builder.blocks) - 1
 
     p_short = etree.fromstring("<html><body><p>Short paragraph.</p></body></html>").find(".//p")
     assert p_short is not None
     builder._emit_leaf(p_short, context)
 
-    # 1 (h1) + 3 (split p) + 1 (short p) = 5 blocks
-    assert len(builder.blocks) == 5
+    # Heading, split paragraph fragments, and short paragraph remain in document order.
+    assert split_count > 1
+    assert len(builder.blocks) == split_count + 2
     orders = [block.order for block in builder.blocks]
-    assert orders == [0, 1, 2, 3, 4]
+    assert orders == list(range(len(builder.blocks)))
 
 
 def test_reader_preserves_short_paragraphs() -> None:

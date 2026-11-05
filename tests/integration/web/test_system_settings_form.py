@@ -196,10 +196,19 @@ def test_first_run_and_incomplete_settings_remain_editable(client):
     assert all('disabled' not in b for f in FormPage(page(client).text).forms.values() for b in f['buttons'])
 
 
-def test_existing_monitoring_panels_remain_visible(client):
+def test_configuration_controls_remain_available(client):
     text = page(client).text
-    for title in ['Внешний провайдер LLM', 'Хранилище', 'EPUBCheck', 'Сервер']:
-        assert title in text
+    for label in [
+        'Провайдер и модели',
+        'Основная модель',
+        'Параметры инференса',
+        'Сетевое подключение и прокси',
+        'Очередь и фоновая работа',
+        'Уровень читателя (CEFR)',
+        'Передача имён и названий',
+    ]:
+        assert label in text
+    assert 'Текст книги целиком отправляется внешнему провайдеру LLM' in text
 
 
 def test_missing_revision_disables_both_forms(client):
