@@ -356,6 +356,8 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
                 analyses,
                 results,
                 english_help=bool(conditions and conditions.payload.get("english_help")),
+                validators_version=1 if conditions is None else conditions.payload['versions']['validators'],
+                reader_level=None if conditions is None else conditions.payload.get('reader_level'),
             )
         except (ExportBookError, ResultValidationError, DomainError):
             epub_ready = False

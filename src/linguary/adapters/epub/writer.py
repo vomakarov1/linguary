@@ -637,7 +637,7 @@ class _ChapterRenderer:
             for assistance in result.fragment_assistances)
         if unresolved:
             text = f"Есть трудности без пояснения: {unresolved}."
-        elif any(result.content_evidence or result.fragment_assistances for result in results):
+        elif results and all(result.content_evidence or result.fragment_assistances for result in results):
             text = "Сохранённые пояснения доступны."
         else:
             text = "Поддержка не оценена."
