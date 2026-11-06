@@ -30,6 +30,7 @@ from linguary.domain import (
     CoverageStatus,
     DocumentBlock,
     DocumentSection,
+    DomainError,
     ErrorType,
     LLMCallLog,
     LLMCallStage,
@@ -356,7 +357,7 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
                 results,
                 english_help=bool(conditions and conditions.payload.get("english_help")),
             )
-        except (ExportBookError, ResultValidationError):
+        except (ExportBookError, ResultValidationError, DomainError):
             epub_ready = False
     ordinary = [call for call in transaction.llm_calls.list_for_book(book.id) if call.stage != LLMCallStage.QUALITY_REVIEW]
     known_cost = sum((call.cost for call in ordinary if call.cost is not None), Decimal('0'))
@@ -624,7 +625,7 @@ def _reading_support_coverage(analysis, section, results, *, english_help):
     covered = set()
     for result in chapter_results:
         evidence = result.content_evidence
-        if evidence is not None and evidence.plan_sha256 == plan.sha256 and evidence.version == plan.version:
+        if evidence and evidence.plan_sha256 == plan.sha256 and evidence.version == plan.version:
             covered.update((item.difficulty_id, item.point_id) for item in evidence.evidence)
         for item in result.fragment_assistances:
             difficulty = next((d for d in plan.difficulties if d.id == item.difficulty_id
@@ -634,7 +635,7 @@ def _reading_support_coverage(analysis, section, results, *, english_help):
     required = {(difficulty.id, point.id) for difficulty in plan.difficulties for point in difficulty.required_points}
     if required and required <= covered:
         return 'checked', 0
-    if not required and (english_help is True or all(result.content_evidence is not None
+    if not required and (english_help is True or all(result.content_evidence
             and result.content_evidence.plan_sha256 == plan.sha256
             and result.content_evidence.version == plan.version for result in chapter_results)):
         return 'checked', 0
