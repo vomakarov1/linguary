@@ -56,6 +56,7 @@ def route_snapshot(llm):
 def conditions_payload(book, settings, revision, profile):
     templates = snapshot_prompt_templates(source_language=book.source_language,
         target_language=book.target_language, reader_level=settings.reading.normalized_level, profile=profile,
+        validators_version=3 if profile == 'content-plan-v3' else 1,
         name_translation_policy={'version': 1, 'strategy': settings.reading.name_translation_strategy})
     llm = asdict(settings.llm)
     for key in ('api_key', 'proxy_url', 'base_url'):
@@ -227,9 +228,17 @@ class BookRuntimeResolver:
         implementation = 3 if payload.get('profile') == 'content-plan-v3' else 1
         expected_versions = {'runtime': 1, 'context_builder': implementation, 'validators': implementation, 'schemas': self.supported.get(payload.get('profile')), 'prompts': implementation}
         if payload.get('english_help', False):
+            if payload.get('profile') != 'content-plan-v3':
+                raise ConditionsError('conditions_unavailable')
             expected_versions['schemas'] = 4
             expected_versions['prompts'] = 4
-        if payload.get('profile') not in self.supported or thaw(payload.get('versions', {})) != expected_versions:
+        supported_versions = [expected_versions]
+        if payload.get('reader_level') == 'a2':
+            supported_versions.append({**expected_versions, 'validators': 4})
+        versions = thaw(payload.get('versions', {}))
+        if (payload.get('profile') not in self.supported or not isinstance(versions, dict)
+                or any(type(value) is not int for value in versions.values())
+                or versions not in supported_versions):
             raise ConditionsError('conditions_unavailable')
         if payload_digest(payload['prompt_templates']) != payload['prompt_sha256']:
             raise ConditionsError('conditions_unavailable')

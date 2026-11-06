@@ -53,6 +53,7 @@ class BookConditionsService:
             payload['prompt_templates'] = snapshot_prompt_templates(
                 source_language=book.source_language, target_language=book.target_language,
                 reader_level=payload['reader_level'], profile=payload['profile'],
+                validators_version=payload['versions']['validators'],
             )
             payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
         if reader_level is not None and reader_level not in {'a2', 'b1', 'b2'}:
@@ -73,11 +74,14 @@ class BookConditionsService:
         if english_help:
             payload['profile'] = 'content-plan-v3'
             payload['versions'] = {'runtime': 1, 'context_builder': 3, 'validators': 3, 'schemas': 4, 'prompts': 4}
-        if english_help or reader_level is not None or pronunciation_help_enabled:
+        if payload['reader_level'] == 'a2' and not continue_legacy:
+            payload['versions'] = {**payload['versions'], 'validators': 4}
+        if english_help or reader_level is not None or pronunciation_help_enabled or payload['versions']['validators'] == 4:
             payload['prompt_templates'] = snapshot_prompt_templates(source_language=book.source_language,
                 target_language=book.target_language, reader_level=payload['reader_level'],
                 profile=payload['profile'], english_help=english_help,
                 pronunciation_help_enabled=pronunciation_help_enabled,
+                validators_version=payload['versions']['validators'],
                 name_translation_policy=payload.get('name_translation_policy'))
             payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
         payload['source_sha256'] = self.source_digest(book)

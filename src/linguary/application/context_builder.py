@@ -982,7 +982,7 @@ class ContextBuilder:
 
 def chapter_analysis_instructions(
     *, source_language: str, target_language: str, reader_level: str = "b2",
-    english_help: bool = False,
+    english_help: bool = False, validators_version: int = 1,
 ) -> str:
     """Invariant chapter analysis instructions (PRD § 10.1, § 11, § 14, § 19)."""
     return _instructions(
@@ -996,12 +996,13 @@ def chapter_analysis_instructions(
         ),
         reader_level=reader_level,
         english_help=english_help,
+        validators_version=validators_version,
     )
 
 
 def chapter_fragment_instructions(
     *, source_language: str, target_language: str, reader_level: str = "b2",
-    english_help: bool = False,
+    english_help: bool = False, validators_version: int = 1,
 ) -> str:
     """Instructions for analyzing a fragment of a long chapter (PRD § 14, ALG-03).
 
@@ -1021,6 +1022,7 @@ def chapter_fragment_instructions(
         ),
         reader_level=reader_level,
         english_help=english_help,
+        validators_version=validators_version,
     )
 
 
@@ -1084,7 +1086,7 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 
 Длина блока не определяет режим. Если сомневаешься между режимами, выбирай более сильную помощь (TRANSLATE). \
 Перед ответом в этом же запросе проверь план: ориентир TRANSLATE — 65–80% блоков; GLOSSARY_ONLY — до 25% блоков.\
-""" + _A2_GRAMMAR_SUPPORT_GUIDANCE
+"""
     if level == "b1":
         return """\
 Читатель владеет изучаемым языком на среднем уровне (B1). Ему необходима повышенная языковая поддержка при чтении художественной литературы в оригинале.
@@ -1173,6 +1175,7 @@ def _instructions(
     summary: str,
     reader_level: str = "b2",
     english_help: bool = False,
+    validators_version: int = 1,
 ) -> str:
     """Analysis instructions compiled for a whole chapter or a chapter fragment."""
     languages = {"source_language": source_language, "target_language": target_language}
@@ -1181,7 +1184,7 @@ def _instructions(
         if english_help
         else _reader_level_treatment_guidance(reader_level)
     )
-    if english_help and reader_level.strip().lower() == "a2":
+    if validators_version == 4 and reader_level.strip().lower() == "a2":
         treatment_guidance += _A2_GRAMMAR_SUPPORT_GUIDANCE
     return _ANALYSIS_INSTRUCTIONS.format(
         scope=scope.format(**languages),
@@ -1907,14 +1910,14 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     }, ensure_ascii=False)
 
 
-def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None, pronunciation_help_enabled=False):
+def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None, pronunciation_help_enabled=False, validators_version=1):
     """Render immutable instruction templates without book text or secrets."""
     pronunciation_level = reader_level
     reader_level = reader_level or 'b2'
     languages = dict(source_language=source_language, target_language=target_language)
     result = {
-        'analysis': chapter_analysis_instructions(**languages, reader_level=reader_level, english_help=english_help),
-        'fragment': chapter_fragment_instructions(**languages, reader_level=reader_level, english_help=english_help),
+        'analysis': chapter_analysis_instructions(**languages, reader_level=reader_level, english_help=english_help, validators_version=validators_version),
+        'fragment': chapter_fragment_instructions(**languages, reader_level=reader_level, english_help=english_help, validators_version=validators_version),
         'translation': translation_unit_instructions(**languages),
         'regeneration': block_regeneration_instructions(**languages),
         'content_analysis': _CONTENT_PLAN_ANALYSIS,
