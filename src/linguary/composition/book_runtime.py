@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from linguary.adapters.config.settings import LLMSettings, ReadingSettings, CheckSettings, RecoverySettings
 from linguary.adapters.pronunciation.source import DisabledPronunciationSource, IpaDictPronunciationSource, SOURCE_VERSION
-from linguary.application.book_conditions import ConditionsError, payload_digest
+from linguary.application.book_conditions import A2_CONTENT_PLAN_VERSIONS, ConditionsError, payload_digest
 from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask
 from linguary.domain.book_conditions import thaw
@@ -29,6 +29,20 @@ def pronunciation_source_for(conditions, *, injected_source=None):
         if versions == {'selection_policy': 2, 'form_rules': 1, 'source': SOURCE_VERSION}:
             return IpaDictPronunciationSource()
     return DisabledPronunciationSource()
+
+
+def effective_content_plan_profile(conditions):
+    """Select the pinned internal plan without changing the reader's saved choice."""
+    payload = conditions.payload
+    profile = payload['profile']
+    versions = thaw(payload.get('versions', {}))
+    if profile != 'legacy-v1' or versions.get('validators') != 4:
+        return profile
+    if (payload.get('reader_level') != 'a2' or payload.get('english_help', False)
+            or versions != A2_CONTENT_PLAN_VERSIONS
+            or any(type(value) is not int for value in versions.values())):
+        raise ConditionsError('conditions_unavailable')
+    return 'content-plan-v3'
 
 
 def public_url(value):
@@ -234,7 +248,9 @@ class BookRuntimeResolver:
             expected_versions['prompts'] = 4
         supported_versions = [expected_versions]
         if payload.get('reader_level') == 'a2':
-            supported_versions.append({**expected_versions, 'validators': 4})
+            supported_versions.append(dict(A2_CONTENT_PLAN_VERSIONS)
+                if payload.get('profile') == 'legacy-v1' and not payload.get('english_help', False)
+                else {**expected_versions, 'validators': 4})
         versions = thaw(payload.get('versions', {}))
         if (payload.get('profile') not in self.supported or not isinstance(versions, dict)
                 or any(type(value) is not int for value in versions.values())

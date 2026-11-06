@@ -42,7 +42,7 @@ from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
 from linguary.application.recovery import RecoveryPolicy
 from linguary.application.book_conditions import BookConditionsService, ConditionsError
 from linguary.application.ports.pronunciation import PronunciationSource
-from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload, pronunciation_source_for
+from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload, effective_content_plan_profile, pronunciation_source_for
 from linguary.composition.correction_runtime import CorrectionRuntimeResolver, correction_snapshot
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
 from linguary.composition.system_settings import SystemSettingsService
@@ -297,7 +297,7 @@ def build_application(
     rate_limiter = LLMRateLimiter(app_settings.llm.requests_per_minute)
 
     def generation_factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
-        profile = content_plan_profile if conditions is None else conditions.payload["profile"]
+        profile = content_plan_profile if conditions is None else effective_content_plan_profile(conditions)
         templates = None if conditions is None else conditions.payload["prompt_templates"]
         if conditions is None or "name_translation_policy" not in conditions.payload:
             policy = None

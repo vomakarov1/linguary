@@ -1923,7 +1923,8 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
         'content_analysis': _CONTENT_PLAN_ANALYSIS,
         'content_processing': _CONTENT_PLAN_PROCESSING,
     }
-    if profile == 'content-plan-v3':
+    if (profile == 'content-plan-v3' or profile == 'legacy-v1' and reader_level.strip().lower() == 'a2'
+            and validators_version == 4 and not english_help):
         result.update(content_analysis=_CONTENT_PLAN_ANALYSIS_V3, content_processing=_CONTENT_PLAN_PROCESSING_V3,
                       learner_quality=learner_instructions(reader_level))
     if english_help:
