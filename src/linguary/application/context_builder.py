@@ -228,6 +228,17 @@ GLOSSARY_ONLY. Отмечай трудные слова, выражения и �
 чтобы отдельная помощь появилась рядом с ними. Понятные места оставляй без помощи.
 """
 
+_A2_GRAMMAR_SUPPORT_GUIDANCE = """
+Для A2 явно отмечай в content_plan синтаксические и грамматические трудности с
+help_kind=explanation. В required_points укажи, какие связи нужно прояснить читателю.
+Инверсия «On went her old brown jacket» требует объяснить, кто надевает куртку;
+Past Perfect в «had lost its color» — временное отношение к другим действиям;
+оборот «let it fall to its full length» — действие и связь местоимения с предметом
+в контексте. Для таких мест нужна опора на уровне предложения, проясняющая порядок
+слов, время и связи действий. Одна подсказка к «fluttered» или «whirled» не закрывает
+эти грамматические трудности. Проверяй их независимо от целевой доли переводов.
+"""
+
 
 class ContextBuildError(ApplicationError):
     """Request context cannot be assembled."""
@@ -1073,7 +1084,7 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 
 Длина блока не определяет режим. Если сомневаешься между режимами, выбирай более сильную помощь (TRANSLATE). \
 Перед ответом в этом же запросе проверь план: ориентир TRANSLATE — 65–80% блоков; GLOSSARY_ONLY — до 25% блоков.\
-"""
+""" + _A2_GRAMMAR_SUPPORT_GUIDANCE
     if level == "b1":
         return """\
 Читатель владеет изучаемым языком на среднем уровне (B1). Ему необходима повышенная языковая поддержка при чтении художественной литературы в оригинале.
@@ -1170,6 +1181,8 @@ def _instructions(
         if english_help
         else _reader_level_treatment_guidance(reader_level)
     )
+    if english_help and reader_level.strip().lower() == "a2":
+        treatment_guidance += _A2_GRAMMAR_SUPPORT_GUIDANCE
     return _ANALYSIS_INSTRUCTIONS.format(
         scope=scope.format(**languages),
         summary=summary.format(**languages),
