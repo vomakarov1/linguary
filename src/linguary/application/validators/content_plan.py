@@ -112,7 +112,7 @@ def _checked_content_coverage(plan, results, before_you_read, evidence, *, owner
 def validate_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids, source_texts=None):
     checked, missing = _checked_content_coverage(plan, results, before_you_read, evidence,
         owner_block_ids=owner_block_ids, source_texts=source_texts)
-    if missing:
+    if missing or evidence.structural_coverage != 'complete':
         raise ResultValidationError('не все обязательные аспекты имеют конечное объяснение')
     return checked
 
@@ -124,10 +124,17 @@ def resolve_content_coverage(plan, results, before_you_read, evidence, *, owner_
     owners = set(owner_block_ids)
     checked, missing = _checked_content_coverage(plan, results, before_you_read, evidence,
         owner_block_ids=owners, source_texts=source_texts)
-    unresolved = {owner: tuple(FragmentAssistance(d.id, tuple(p.id for p in d.required_points),
+    unresolved = {owner: tuple(FragmentAssistance(d.id, tuple(p.id for p in d.required_points if (d.id, p.id) in missing),
         'unresolved', None, d.anchors) for d in plan.difficulties
         if d.owner_block_id == owner and any((d.id, p.id) in missing for p in d.required_points))
         for owner in owners}
+    for owner in owners:
+        covered = {(item.difficulty_id, item.point_id) for item in checked if item.block_id == owner}
+        uncovered = {(item.difficulty_id, point_id) for item in unresolved[owner] for point_id in item.point_ids}
+        required = {(difficulty.id, point.id) for difficulty in plan.difficulties
+            if difficulty.owner_block_id == owner for point in difficulty.required_points}
+        if covered & uncovered or covered | uncovered != required:
+            raise ResultValidationError('покрытые и неразрешённые аспекты не совпадают с планом владельца')
     return checked, unresolved
 
 

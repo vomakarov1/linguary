@@ -259,8 +259,9 @@ class TranslationCall:
                         checked = validate_content_coverage(context.content_plan, results, context.before_you_read, evidence, owner_block_ids=owners)
                         unresolved = {owner: () for owner in owners}
                     results = tuple(replace(r,
-                        content_evidence=None if unresolved[r.block_id] else ContentEvidence(context.content_plan.sha256,
-                            tuple(e for e in checked if e.block_id == r.block_id), version=context.content_plan.version),
+                        content_evidence=ContentEvidence(context.content_plan.sha256,
+                            tuple(e for e in checked if e.block_id == r.block_id), version=context.content_plan.version,
+                            structural_coverage='partial' if unresolved[r.block_id] else 'complete'),
                         fragment_assistances=unresolved[r.block_id]) for r in results)
                 else:
                     results = tuple(explained.without_repeats(r) for r in results)

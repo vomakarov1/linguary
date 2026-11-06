@@ -196,5 +196,5 @@ class ContentEvidence:
         object.__setattr__(self, "evidence", tuple(self.evidence))
         if not (self.version == 2 or (type(self.version) is int and self.version == 3)) or len(self.plan_sha256) != 64 or any(c not in "0123456789abcdef" for c in self.plan_sha256):
             raise DomainError("неизвестная версия свидетельств или неверный SHA плана")
-        if self.structural_coverage != "complete" or self.semantic_correctness != "not_evaluated":
+        if self.structural_coverage not in {"complete", "partial"} or self.semantic_correctness != "not_evaluated":
             raise DomainError("неподдерживаемая оценка содержательной помощи")
