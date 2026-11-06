@@ -8,6 +8,13 @@
 {% set active_tab = "result" %}
 {% include "partials/book_tabs.html" %}
 
+<section class="panel" aria-labelledby="reading-support-title">
+  <h2 id="reading-support-title">Помощь при чтении</h2>
+  <p>Уровень читателя: {% if data.reading_support.reader_level %}{{ data.reading_support.reader_level|upper }}{% else %}не сохранён{% endif %}.</p>
+  <p>Английские пояснения: {% if data.reading_support.english_help is true %}включены{% elif data.reading_support.english_help is false %}не включены{% else %}выбор не сохранён{% endif %}.</p>
+  <p>{{ data.reading_support.coverage_label }}.</p>
+</section>
+
 {% if data.status in ("PROCESSING", "READY_TO_EXPORT", "COMPLETED") %}
   <section class="panel action-panel">
     <p>Возврат к проверке глоссария удалит текущие результаты обработки. Готовые переводы,

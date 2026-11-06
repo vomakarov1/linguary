@@ -2,6 +2,20 @@
 {% for chapter in data.chapters %}
   <section class="chapter">
     <h2>{% if chapter.is_notes %}Сноски - {{ chapter.title }}{% else %}Глава {{ chapter.chapter_number }} - {{ chapter.title }}{% endif %}</h2>
+    {% if not chapter.is_notes %}
+      <p>{{ chapter.support_coverage_label }}{% if chapter.unresolved_count %}: {{ chapter.unresolved_count }}{% endif %}.</p>
+      {% if chapter.before_you_read %}
+        <section class="panel" aria-labelledby="chapter-preparation-{{ chapter.chapter_number }}">
+          <h3 id="chapter-preparation-{{ chapter.chapter_number }}">Перед чтением</h3>
+          <dl>
+            {% for entry in chapter.before_you_read %}
+              <dt>{{ entry.expression }}</dt>
+              <dd>{{ entry.explanation }}</dd>
+            {% endfor %}
+          </dl>
+        </section>
+      {% endif %}
+    {% endif %}
     {% for block in chapter.groups %}
       {% set book_id = data.book_id %}
       {% include "partials/result_block.html" %}

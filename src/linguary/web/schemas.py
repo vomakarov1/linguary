@@ -792,6 +792,21 @@ class ResultGroupResponse(ResultBlockResponse):
                                              for item in summary.result.fragment_assistances))
 
 
+_READING_SUPPORT_COVERAGE_LABELS = {
+    'not_evaluated': 'Поддержка не оценена',
+    'pending': 'Проверка поддержки ещё не завершена',
+    'unresolved': 'Есть трудности без пояснения',
+    'checked': 'Пояснения к найденным трудностям доступны',
+}
+
+
+class BeforeYouReadResponse(BaseModel):
+    """Saved chapter preparation shown before its original text."""
+
+    expression: str
+    explanation: str
+
+
 class ResultChapterResponse(BaseModel):
     """Single result chapter in reading order."""
 
@@ -801,6 +816,10 @@ class ResultChapterResponse(BaseModel):
     is_notes: bool = False
     blocks: tuple[ResultBlockResponse, ...] = ()
     groups: tuple[ResultGroupResponse, ...] = ()
+    before_you_read: tuple[BeforeYouReadResponse, ...] = ()
+    support_coverage: str = 'not_evaluated'
+    support_coverage_label: str = _READING_SUPPORT_COVERAGE_LABELS['not_evaluated']
+    unresolved_count: int = 0
 
     @classmethod
     def of_chapter(cls, chapter: ResultChapterSummary, *,
@@ -811,6 +830,11 @@ class ResultChapterResponse(BaseModel):
             chapter_number=chapter.chapter_number,
             title=chapter.title,
             is_notes=chapter.is_notes,
+            before_you_read=tuple(BeforeYouReadResponse(expression=entry.expression, explanation=entry.explanation)
+                for entry in chapter.before_you_read),
+            support_coverage=chapter.support_coverage,
+            support_coverage_label=_READING_SUPPORT_COVERAGE_LABELS[chapter.support_coverage],
+            unresolved_count=chapter.unresolved_count,
             blocks=tuple(ResultBlockResponse.of_block(block, pronunciations=pronunciations) for block in chapter.blocks),
             groups=tuple(ResultGroupResponse.of_group(
                 group, source_language=source_language, pronunciations=pronunciations
@@ -836,6 +860,7 @@ class BookResultResponse(BaseModel):
     epub_ready: bool = False
     ordinary_cost: dict = Field(default_factory=dict)
     pending_corrections: int = 0
+    reading_support: dict = Field(default_factory=dict)
 
     @classmethod
     def of_result(cls, result: BookResultSummary) -> BookResultResponse:
@@ -848,6 +873,8 @@ class BookResultResponse(BaseModel):
         return cls(
             book_id=result.book.id,
             pending_corrections=result.pending_corrections,
+            reading_support={**dict(result.reading_support), 'coverage_label': _READING_SUPPORT_COVERAGE_LABELS[
+                result.reading_support.get('coverage_state', 'not_evaluated')]},
             conditions=dict(result.conditions), reproducibility=result.reproducibility,
             recovery=dict(result.recovery), quality_review=dict(result.quality_review),
             epub_ready=result.epub_ready, ordinary_cost=dict(result.ordinary_cost),            status=result.book.status.value,

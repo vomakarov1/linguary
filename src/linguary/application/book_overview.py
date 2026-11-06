@@ -248,6 +248,14 @@ def result_groups(blocks: Sequence[ResultBlockSummary]) -> tuple[tuple[ResultBlo
 
 
 @dataclass(frozen=True, slots=True)
+class BeforeYouReadSummary:
+    """Chapter preparation after applying its existing reader presentation policy."""
+
+    expression: str
+    explanation: str
+
+
+@dataclass(frozen=True, slots=True)
 class ResultChapterSummary:
     """Result chapter with blocks in reading order."""
 
@@ -256,6 +264,9 @@ class ResultChapterSummary:
     title: str
     blocks: tuple[ResultBlockSummary, ...] = ()
     is_notes: bool = False
+    before_you_read: tuple[BeforeYouReadSummary, ...] = ()
+    support_coverage: str = 'not_evaluated'
+    unresolved_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +284,7 @@ class BookResultSummary:
     ordinary_cost: Mapping = field(default_factory=dict)
     tasks: tuple[ProcessingTask, ...] = ()
     pending_corrections: int = 0
+    reading_support: Mapping = field(default_factory=dict)
 
 
 def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None):
@@ -282,12 +294,12 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
     from linguary.application.retry_policy import ResultValidationError
     from linguary.domain.book_conditions import thaw
     conditions = transaction.work.latest_conditions(book.id)
-    summary = dict(conditions_id=None, revision=None, reader_level=None, profile=None, models={}, state='unknown', name_translation_state='not_saved', name_translation_policy=None,
+    summary = dict(conditions_id=None, revision=None, reader_level=None, english_help=None, profile=None, models={}, state='unknown', name_translation_state='not_saved', name_translation_policy=None,
         source_language=book.source_language, pronunciation_help_enabled=False, pronunciation_variant=None)
     if conditions is not None:
         policy = conditions.payload.get('name_translation_policy')
         summary.update(conditions_id=conditions.id, revision=conditions.revision,
-            reader_level=conditions.payload.get('reader_level'), profile=conditions.payload.get('profile'),
+            reader_level=conditions.payload.get('reader_level'), english_help=conditions.payload.get('english_help'), profile=conditions.payload.get('profile'),
             models=thaw(conditions.payload.get('models', {})), state='saved',
             name_translation_state='configured' if policy is not None else 'legacy',
             name_translation_policy=thaw(policy) if policy is not None else None,
@@ -515,6 +527,7 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
         )
         quality = _quality_projection(transaction, book, document, analyses, run, tasks,
                                       stored_results=stored_results)
+        reading_support = _saved_reading_support(transaction, run)
         candidates = _correction_candidates_projection(
             transaction, book_id, run, document=document, analyses=analyses,
             stored_results=stored_results,
@@ -525,16 +538,24 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
         for item in analysis.treatment_plan.items
     }
     results = {result.block_id: result for result in stored_results}
+    analyses_by_section = {analysis.section_id: analysis for analysis in analyses}
     candidates_by_block = {}
     for candidate in candidates:
         candidates_by_block.setdefault(candidate['block_id'], []).append(candidate)
-    chapters = (
-        tuple(
-            ResultChapterSummary(
+    chapters = []
+    if document is not None:
+        for number, section in enumerate(document.ordered_sections, start=1):
+            analysis = analyses_by_section.get(section.id)
+            coverage, unresolved_count = _reading_support_coverage(analysis, section, results,
+                english_help=reading_support['english_help'])
+            chapters.append(ResultChapterSummary(
                 section_id=section.id,
                 chapter_number=number,
                 title=section.title,
                 is_notes=section.is_notes_only,
+                before_you_read=_result_before_you_read(analysis) if not section.is_notes_only else (),
+                support_coverage=coverage,
+                unresolved_count=unresolved_count,
                 blocks=tuple(
                     ResultBlockSummary(
                         block=block,
@@ -545,24 +566,79 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
                     )
                     for block in section.ordered_blocks
                 ),
-            )
-            for number, section in enumerate(document.ordered_sections, start=1)
-        )
-        if document is not None
-        else ()
-    )
+            ))
+    states = {chapter.support_coverage for chapter in chapters if not chapter.is_notes}
+    reading_support['coverage_state'] = next((state for state in ('unresolved', 'not_evaluated', 'pending')
+        if state in states), 'checked' if states else 'not_evaluated')
     return BookResultSummary(
         book=book,
         tasks=tasks,
         pending_corrections=sum(c['state'] == 'awaiting_human' for c in candidates),
         **quality,
-        chapters=chapters,
+        chapters=tuple(chapters),
+        reading_support=reading_support,
         warnings=_warnings_of(
             document=document,
             import_warnings=import_warnings,
             results=stored_results,
         ),
     )
+
+
+def _saved_reading_support(transaction, run):
+    summary = dict(reader_level=None, english_help=None)
+    if run is None:
+        return summary
+    binding = transaction.work.get_binding('run', run.id)
+    bindings = (binding,) if binding is not None else tuple(transaction.work.result_bindings(run.id).values())
+    conditions_ids = {item['conditions_id'] for item in bindings if item.get('conditions_id')}
+    if len(conditions_ids) != 1:
+        return summary
+    conditions = transaction.work.get_conditions(next(iter(conditions_ids)))
+    if conditions is not None:
+        summary.update(reader_level=conditions.payload.get('reader_level'),
+            english_help=conditions.payload.get('english_help'))
+    return summary
+
+
+def _result_before_you_read(analysis):
+    if analysis is None:
+        return ()
+    from linguary.application.analysis_merge import sanitize_before_you_read_explanation
+
+    verified = analysis.content_plan is not None and analysis.content_plan.version == 3
+    return tuple(BeforeYouReadSummary(entry.expression, entry.explanation if verified
+        else sanitize_before_you_read_explanation(entry.explanation)) for entry in analysis.before_you_read)
+
+
+def _reading_support_coverage(analysis, section, results, *, english_help):
+    chapter_results = tuple(results[block.id] for block in textual_blocks(section) if block.id in results)
+    unresolved = sum(item.kind == 'unresolved' for result in chapter_results for item in result.fragment_assistances)
+    if unresolved:
+        return 'unresolved', unresolved
+    plan = None if analysis is None else analysis.content_plan
+    if plan is None:
+        return 'not_evaluated', 0
+    if len(chapter_results) != len(textual_blocks(section)):
+        return 'pending', 0
+    covered = set()
+    for result in chapter_results:
+        evidence = result.content_evidence
+        if evidence is not None and evidence.plan_sha256 == plan.sha256 and evidence.version == plan.version:
+            covered.update((item.difficulty_id, item.point_id) for item in evidence.evidence)
+        for item in result.fragment_assistances:
+            difficulty = next((d for d in plan.difficulties if d.id == item.difficulty_id
+                and d.owner_block_id == result.block_id), None)
+            if difficulty is not None and item.anchors == difficulty.anchors:
+                covered.update((difficulty.id, point_id) for point_id in item.point_ids)
+    required = {(difficulty.id, point.id) for difficulty in plan.difficulties for point in difficulty.required_points}
+    if required and required <= covered:
+        return 'checked', 0
+    if not required and (english_help is True or all(result.content_evidence is not None
+            and result.content_evidence.plan_sha256 == plan.sha256
+            and result.content_evidence.version == plan.version for result in chapter_results)):
+        return 'checked', 0
+    return 'not_evaluated', 0
 
 
 def _correction_candidates_projection(transaction, book_id, run, *, document, analyses,
