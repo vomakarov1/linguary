@@ -198,11 +198,25 @@ class TranslationCall:
                     truncated=response.truncated,
                     expectation=context.expectation,
                 )
+                conditions = None
+                current_run = None
+                call_context = response.call_context or request.call_context
+                if call_context is not None:
+                    with self._unit_of_work.transaction() as transaction:
+                        conditions = transaction.work.get_conditions(call_context.conditions_id)
+                    if conditions is None:
+                        raise ConditionsError('conditions_unavailable')
+                validators_version = 1 if conditions is None else conditions.payload['versions']['validators']
+                if type(validators_version) is not int or validators_version not in (1, 3, 4):
+                    raise ConditionsError('conditions_unavailable')
+                a2_v4 = (validators_version == 4 and conditions is not None
+                    and conditions.payload.get('reader_level') == 'a2')
+                if validators_version == 4 and not a2_v4:
+                    raise ConditionsError('conditions_unavailable')
                 if context.content_plan is not None and context.content_plan.version == 3:
                     from linguary.application.analysis_merge import validate_fact_glossary, glossary_context_constraints
                     with self._unit_of_work.transaction() as transaction:
                         current_run = transaction.runs.active_for_book(request.book_id)
-                        conditions = transaction.work.get_conditions(response.call_context.conditions_id) if response.call_context else None
                     if current_run is not None:
                         validate_fact_glossary(context.content_plan, glossary_context_constraints(current_run.glossary_snapshot.mandatory_entries))
                     restored = []
@@ -236,27 +250,26 @@ class TranslationCall:
                     source_texts = {block.id: block.text for section in document.sections for block in section.blocks}
                     assistance = resolve_fragment_assistances(context.content_plan, mapped, results, source_texts,
                         owner_block_ids=owners, before_you_read=context.before_you_read,
-                        glossary_entries=() if current_run is None else current_run.glossary_snapshot.mandatory_entries)
+                        glossary_entries=() if current_run is None else current_run.glossary_snapshot.mandatory_entries,
+                        validators_version=validators_version)
                     results = tuple(replace(r, fragment_assistances=assistance[r.block_id]) for r in results)
                 elif context.content_plan is not None:
                     owners = tuple(r.block_id for r in results)
                     evidence = resolve_response_evidence(context.content_plan, mapped, results, context.before_you_read, owner_block_ids=owners)
                     results = tuple(explained.without_repeats_v2(r) for r in results)
-                    call_context = response.call_context or request.call_context
-                    retain_unresolved = False
                     document = None
-                    if call_context is not None:
+                    if a2_v4:
                         with self._unit_of_work.transaction() as transaction:
-                            conditions = transaction.work.get_conditions(call_context.conditions_id)
-                            retain_unresolved = conditions is not None and conditions.payload.get('reader_level') == 'a2'
-                            document = transaction.documents.get(request.book_id) if retain_unresolved else None
-                    if retain_unresolved:
+                            document = transaction.documents.get(request.book_id)
+                    if a2_v4:
                         source_texts = ({block.id: block.text for section in document.sections for block in section.blocks}
                             if document is not None else {item.block.id: item.block.text for item in unit.items})
                         checked, unresolved = resolve_content_coverage(context.content_plan, results,
-                            context.before_you_read, evidence, owner_block_ids=owners, source_texts=source_texts)
+                            context.before_you_read, evidence, owner_block_ids=owners, source_texts=source_texts,
+                            validators_version=validators_version)
                     else:
-                        checked = validate_content_coverage(context.content_plan, results, context.before_you_read, evidence, owner_block_ids=owners)
+                        checked = validate_content_coverage(context.content_plan, results, context.before_you_read, evidence,
+                            owner_block_ids=owners, validators_version=validators_version)
                         unresolved = {owner: () for owner in owners}
                     results = tuple(replace(r,
                         content_evidence=ContentEvidence(context.content_plan.sha256,

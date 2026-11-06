@@ -262,7 +262,9 @@ class CorrectChapter:
         if len(set(note_ids)) != len(note_ids):
             raise ResultValidationError('идентификаторы языковых заметок повторяются')
         _validate_content_plans(inputs.document, (inputs.analysis,), merged,
-                               english_help=inputs.conditions.payload.get('english_help', False))
+                               english_help=inputs.conditions.payload.get('english_help', False),
+                               validators_version=inputs.conditions.payload['versions']['validators'],
+                               reader_level=inputs.conditions.payload.get('reader_level'))
         for candidate in candidates:
             for assistance in (candidate.fragment_assistances
                                if inputs.conditions.payload.get('english_help', False) else ()):

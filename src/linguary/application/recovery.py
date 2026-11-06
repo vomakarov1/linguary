@@ -175,7 +175,7 @@ class Recovery:
                     if overlap and overlap != set(interval):
                         raise RecoveryError('unsafe_partition')
                 if historical:
-                    self._validate_historical(tx, work, historical, blocks, validator)
+                    self._validate_historical(tx, work, historical, blocks, validator, conditions)
                 payload = {**manifest, 'notes_policy': NOTES_POLICY, 'active_run_id': work.run.id,
                     'historical_coverage': list(historical)}
                 operation_id = str(uuid4())
@@ -238,10 +238,10 @@ class Recovery:
             ids.append(root.id)
         return tuple(ids)
 
-    def _validate_historical(self, transaction, work, block_ids, blocks, validator):
+    def _validate_historical(self, transaction, work, block_ids, blocks, validator, conditions):
         from linguary.domain import TranslationUnit
         from linguary.application.llm_dto import TranslationResultResponse, BlockResultResponse, GlossaryHintResponse, LanguageNoteResponse
-        from linguary.application.validators.content_plan import validate_content_coverage
+        from linguary.application.validators.content_plan import validate_content_coverage, validate_saved_content_coverage
         from linguary.domain.content_plan import ContentEvidence
         unit = TranslationUnit.of_blocks(id='historical-coverage', blocks=tuple(blocks[b] for b in block_ids), plan=work.analysis.treatment_plan)
         stored = tuple(transaction.results.get(work.run.id, block) for block in block_ids)
@@ -256,9 +256,18 @@ class Recovery:
                            note_id_factory=lambda: str(uuid4()))
         if work.analysis.content_plan is not None:
             plan = work.analysis.content_plan
-            evidence = tuple(item for result in stored for item in getattr(result.content_evidence, 'evidence', ()))
-            validate_content_coverage(plan, stored, work.analysis.before_you_read,
-                ContentEvidence(plan.sha256, evidence, version=plan.version), owner_block_ids=block_ids)
+            validators_version = conditions.payload['versions']['validators']
+            if validators_version == 4:
+                if conditions.payload.get('reader_level') != 'a2':
+                    raise RecoveryError('conditions_unavailable')
+                validate_saved_content_coverage(plan, stored, work.analysis.before_you_read,
+                    owner_block_ids=block_ids, source_texts={block.id: block.text for block in work.document.blocks()},
+                    validators_version=validators_version, english_help=conditions.payload.get('english_help', False))
+            else:
+                evidence = tuple(item for result in stored for item in getattr(result.content_evidence, 'evidence', ()))
+                validate_content_coverage(plan, stored, work.analysis.before_you_read,
+                    ContentEvidence(plan.sha256, evidence, version=plan.version), owner_block_ids=block_ids,
+                    validators_version=validators_version)
 
     def plan_unresolved(self, root_id):
         with self.uow.transaction() as transaction:
