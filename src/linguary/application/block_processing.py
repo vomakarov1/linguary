@@ -33,7 +33,7 @@ from linguary.application.book_conditions import ConditionsError
 from linguary.application.translation_policy import require_policy, TranslationPolicyUnavailable
 from linguary.application.reader_text import ReaderTextPolicy, record_reader_warnings, source_quote_fragments
 from linguary.application.validators import TranslationResultValidator
-from linguary.application.validators.content_plan import resolve_response_evidence, validate_content_coverage
+from linguary.application.validators.content_plan import resolve_content_coverage, resolve_response_evidence, validate_content_coverage
 from linguary.domain.content_plan import ContentEvidence
 from linguary.domain import (
     BlockProcessingResult,
@@ -242,8 +242,26 @@ class TranslationCall:
                     owners = tuple(r.block_id for r in results)
                     evidence = resolve_response_evidence(context.content_plan, mapped, results, context.before_you_read, owner_block_ids=owners)
                     results = tuple(explained.without_repeats_v2(r) for r in results)
-                    checked = validate_content_coverage(context.content_plan, results, context.before_you_read, evidence, owner_block_ids=owners)
-                    results = tuple(replace(r, content_evidence=ContentEvidence(context.content_plan.sha256, tuple(e for e in checked if e.block_id == r.block_id), version=context.content_plan.version)) for r in results)
+                    call_context = response.call_context or request.call_context
+                    retain_unresolved = False
+                    document = None
+                    if call_context is not None:
+                        with self._unit_of_work.transaction() as transaction:
+                            conditions = transaction.work.get_conditions(call_context.conditions_id)
+                            retain_unresolved = conditions is not None and conditions.payload.get('reader_level') == 'a2'
+                            document = transaction.documents.get(request.book_id) if retain_unresolved else None
+                    if retain_unresolved:
+                        source_texts = ({block.id: block.text for section in document.sections for block in section.blocks}
+                            if document is not None else {item.block.id: item.block.text for item in unit.items})
+                        checked, unresolved = resolve_content_coverage(context.content_plan, results,
+                            context.before_you_read, evidence, owner_block_ids=owners, source_texts=source_texts)
+                    else:
+                        checked = validate_content_coverage(context.content_plan, results, context.before_you_read, evidence, owner_block_ids=owners)
+                        unresolved = {owner: () for owner in owners}
+                    results = tuple(replace(r,
+                        content_evidence=None if unresolved[r.block_id] else ContentEvidence(context.content_plan.sha256,
+                            tuple(e for e in checked if e.block_id == r.block_id), version=context.content_plan.version),
+                        fragment_assistances=unresolved[r.block_id]) for r in results)
                 else:
                     results = tuple(explained.without_repeats(r) for r in results)
             except Exception as error:

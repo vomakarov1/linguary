@@ -52,10 +52,38 @@ def validate_note_sources(results, source_texts):
             seen.add(body)
 
 
-def validate_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids):
+def _validate_difficulties(plan, owners, source_texts=None):
+    for difficulty in plan.difficulties:
+        if difficulty.owner_block_id not in owners:
+            continue
+        if difficulty.kind == 'grammar' and difficulty.help_kind != 'explanation':
+            raise ResultValidationError('грамматическая трудность требует объяснения')
+        if source_texts is not None:
+            for anchor in difficulty.anchors:
+                try:
+                    anchor.validate(source_texts)
+                except DomainError as error:
+                    raise ResultValidationError(str(error)) from error
+
+
+def _validate_artifact_source(artifact, difficulty, source_texts=None):
+    quote = without_footnote_markers(artifact.quotes[0]).strip()
+    anchors = tuple(anchor for anchor in difficulty.anchors
+        if artifact.kind == 'before_you_read.explanation' or anchor.block_id == artifact.block_id)
+    anchor_quotes = tuple(without_footnote_markers(anchor.quote).strip() for anchor in anchors)
+    if not quote or not any(anchor in quote if difficulty.kind == 'grammar'
+            else anchor in quote or quote in anchor for anchor in anchor_quotes):
+        raise ResultValidationError('помощь не относится к исходной цитате трудности')
+    if source_texts is not None and not any(quote in without_footnote_markers(source_texts.get(anchor.block_id, ''))
+            for anchor in anchors):
+        raise ResultValidationError('цитата помощи отсутствует в исходном блоке')
+
+
+def _checked_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids, source_texts=None):
     owners = set(owner_block_ids)
     if evidence.version != plan.version or evidence.plan_sha256 != plan.sha256 or {r.block_id for r in results} != owners:
         raise ResultValidationError('устаревший план или неполный состав владельцев помощи')
+    _validate_difficulties(plan, owners, source_texts)
     catalog = {(a.kind, a.block_id, a.key): a for a in artifact_catalog(results, before_you_read, owners)}
     checked = []
     for item in evidence.evidence:
@@ -69,17 +97,38 @@ def validate_content_coverage(plan, results, before_you_read, evidence, *, owner
         a = catalog.get((item.artifact_kind, item.block_id, item.artifact_key))
         if a is None or item.body_excerpt not in a.body:
             raise ResultValidationError('свидетельство не указывает на конечное тело помощи')
+        _validate_artifact_source(a, difficulty, source_texts)
         if item.artifact_kind.endswith('.translation'):
-            if difficulty.help_kind != 'lexical_hint' or not _substance(item.body_excerpt):
+            if difficulty.kind == 'grammar' or difficulty.help_kind != 'lexical_hint' or not _substance(item.body_excerpt):
                 raise ResultValidationError('перевод не покрывает объяснение')
         elif not _substance(item.body_excerpt) or _substance(item.body_excerpt) in {_substance(q) for q in (*a.quotes, *(anchor.quote for anchor in difficulty.anchors))}:
             raise ResultValidationError('цитата или перевод без объясняющего тела')
         checked.append(item)
     covered = {(e.difficulty_id, e.point_id) for e in checked}
     required = {(d.id, p.id) for d in plan.difficulties if d.owner_block_id in owners for p in d.required_points}
-    if not required <= covered:
+    return tuple(checked), required - covered
+
+
+def validate_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids, source_texts=None):
+    checked, missing = _checked_content_coverage(plan, results, before_you_read, evidence,
+        owner_block_ids=owner_block_ids, source_texts=source_texts)
+    if missing:
         raise ResultValidationError('не все обязательные аспекты имеют конечное объяснение')
-    return tuple(checked)
+    return checked
+
+
+def resolve_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids, source_texts):
+    """Retain uncovered planned difficulties without accepting invalid evidence."""
+    from linguary.domain.learning import FragmentAssistance
+
+    owners = set(owner_block_ids)
+    checked, missing = _checked_content_coverage(plan, results, before_you_read, evidence,
+        owner_block_ids=owners, source_texts=source_texts)
+    unresolved = {owner: tuple(FragmentAssistance(d.id, tuple(p.id for p in d.required_points),
+        'unresolved', None, d.anchors) for d in plan.difficulties
+        if d.owner_block_id == owner and any((d.id, p.id) in missing for p in d.required_points))
+        for owner in owners}
+    return checked, unresolved
 
 
 def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_block_ids):
@@ -132,6 +181,7 @@ def resolve_fragment_assistances(plan, payload, results, source_texts, *, owner_
     """Bind structural assistance to the accepted plan; this is not a language assessment."""
     from linguary.domain.learning import FragmentAssistance
     owners = set(owner_block_ids)
+    _validate_difficulties(plan, owners, source_texts)
     planned = {d.id: d for d in plan.difficulties if d.owner_block_id in owners}
     found = {}
     occurrences = set()
@@ -144,6 +194,8 @@ def resolve_fragment_assistances(plan, payload, results, source_texts, *, owner_
             raise ResultValidationError('чужая или повторная трудность помощи')
         if len(item.point_ids) != len(set(item.point_ids)) or set(item.point_ids) != {p.id for p in difficulty.required_points}:
             raise ResultValidationError('неполный состав смысловых пунктов помощи')
+        if item.kind == 'lexical_hint' and difficulty.help_kind != 'lexical_hint':
+            raise ResultValidationError('лексическая подсказка не покрывает объяснение')
         for anchor in difficulty.anchors:
             try:
                 anchor.validate(source_texts)
