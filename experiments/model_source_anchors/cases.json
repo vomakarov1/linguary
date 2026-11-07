@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "source": {
+    "title": "The Yellow Wallpaper",
+    "author": "Charlotte Perkins Gilman",
+    "project_gutenberg_ebook_id": 1952,
+    "ebook_url": "https://www.gutenberg.org/ebooks/1952",
+    "plain_text_url": "https://www.gutenberg.org/cache/epub/1952/pg1952.txt",
+    "source_updated": "2026-09-16",
+    "source_sha256": "20c7788eeae2fe3a0efd51a1f08b6723366a4be0778d65db219149a3522651d4",
+    "paragraph_indexing": "0-based paragraphs starting with the opening Project Gutenberg marker paragraph",
+    "extraction": "Collapsed source line wraps to spaces within each paragraph; retained paragraph breaks as blank lines."
+  },
+  "cases": [
+    {
+      "id": "yw-01",
+      "block_id": "b1",
+      "text": "John is practical in the extreme. He has no patience with faith, an intense horror of superstition, and he scoffs openly at any talk of things not to be felt and seen and put down in figures.\n\nJohn is a physician, and perhaps—(I would not say it to a living soul, of course, but this is dead paper and a great relief to my mind)—perhaps that is one reason I do not get well faster.\n\nYou see, he does not believe I am sick!",
+      "text_sha256": "bbdd58984e4042ca8da487809e8388eb16a43945526b7d07893b137f33209a63",
+      "expected_anchor_count": 1,
+      "expected_fact": "The narrator suspects John's medical beliefs may be slowing her recovery.",
+      "reference_quotes": [
+        {
+          "text": "perhaps that is one reason I do not get well faster.",
+          "offsets": [
+            329
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        8,
+        11
+      ]
+    },
+    {
+      "id": "yw-02",
+      "block_id": "b1",
+      "text": "If a physician of high standing, and one’s own husband, assures friends and relatives that there is really nothing the matter with one but temporary nervous depression—a slight hysterical tendency—what is one to do?\n\nMy brother is also a physician, and also of high standing, and he says the same thing.\n\nSo I take phosphates or phosphites—whichever it is, and tonics, and journeys, and air, and exercise, and am absolutely forbidden to “work” until I am well again.\n\nPersonally, I disagree with their ideas.\n\nPersonally, I believe that congenial work, with excitement and change, would do me good.\n\nBut what is one to do?",
+      "text_sha256": "558517cc3c90f6a46cfecd88b754e923f1ae062da93e813402f5d1a264493445",
+      "expected_anchor_count": 1,
+      "expected_fact": "The narrator believes congenial work would help her.",
+      "reference_quotes": [
+        {
+          "text": "Personally, I believe that congenial work, with excitement and change, would do me good.",
+          "offsets": [
+            510
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        12,
+        18
+      ]
+    },
+    {
+      "id": "yw-03",
+      "block_id": "b1",
+      "text": "I have a schedule prescription for each hour in the day; he takes all care from me, and so I feel basely ungrateful not to value it more.\n\nHe said we came here solely on my account, that I was to have perfect rest and all the air I could get. “Your exercise depends on your strength, my dear,” said he, “and your food somewhat on your appetite; but air you can absorb all the time.” So we took the nursery, at the top of the house.\n\nIt is a big, airy room, the whole floor nearly, with windows that look all ways, and air and sunshine galore. It was nursery first and then playground and gymnasium, I should judge; for the windows are barred for little children, and there are rings and things in the walls.\n\nThe paint and paper look as if a boys’ school had used it. It is stripped off—the paper—in great patches all around the head of my bed, about as far as I can reach, and in a great place on the other side of the room low down. I never saw a worse paper in my life.",
+      "text_sha256": "06e2edea88663eb2e60430eb1da39c8f90326836a6d9c83147e4688d8fe66a62",
+      "expected_anchor_count": 1,
+      "expected_fact": "The room was previously a nursery or playground, as shown by the barred windows and rings.",
+      "reference_quotes": [
+        {
+          "text": "It was nursery first and then playground and gymnasium, I should judge; for the windows are barred for little children, and there are rings and things in the walls.",
+          "offsets": [
+            543
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        32,
+        36
+      ]
+    },
+    {
+      "id": "yw-04",
+      "block_id": "b1",
+      "text": "One of those sprawling flamboyant patterns committing every artistic sin.\n\nIt is dull enough to confuse the eye in following, pronounced enough to constantly irritate, and provoke study, and when you follow the lame, uncertain curves for a little distance they suddenly commit suicide—plunge off at outrageous angles, destroy themselves in unheard-of contradictions.\n\nThe color is repellant, almost revolting; a smouldering, unclean yellow, strangely faded by the slow-turning sunlight.",
+      "text_sha256": "f16c0dee8d7d83ef0ab8bd663206811316566cb43cbd20c7b4c2708d4e4c015f",
+      "expected_anchor_count": 1,
+      "expected_fact": "The wallpaper's pattern is difficult to follow and irritates the narrator.",
+      "reference_quotes": [
+        {
+          "text": "It is dull enough to confuse the eye in following, pronounced enough to constantly irritate, and provoke study, and when you follow the lame, uncertain curves for a little distance they suddenly commit suicide—plunge off at outrageous angles, destroy themselves in unheard-of contradictions.",
+          "offsets": [
+            75
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        36,
+        39
+      ]
+    },
+    {
+      "id": "yw-05",
+      "block_id": "b1",
+      "text": "Of course it is only nervousness. It does weigh on me so not to do my duty in any way!\n\nI meant to be such a help to John, such a real rest and comfort, and here I am a comparative burden already!\n\nNobody would believe what an effort it is to do what little I am able—to dress and entertain, and order things.",
+      "text_sha256": "c84137c7d572a8070774186f38eb396216a1894a68afe90506ca28d6f1ec47f4",
+      "expected_anchor_count": 1,
+      "expected_fact": "The narrator feels she has become a burden to John.",
+      "reference_quotes": [
+        {
+          "text": "I meant to be such a help to John, such a real rest and comfort, and here I am a comparative burden already!",
+          "offsets": [
+            88
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        48,
+        51
+      ]
+    },
+    {
+      "id": "yw-06",
+      "block_id": "b1",
+      "text": "Out of one window I can see the garden, those mysterious deep-shaded arbors, the riotous old-fashioned flowers, and bushes and gnarly trees.\n\nOut of another I get a lovely view of the bay and a little private wharf belonging to the estate. There is a beautiful shaded lane that runs down there from the house. I always fancy I see people walking in these numerous paths and arbors, but John has cautioned me not to give way to fancy in the least. He says that with my imaginative power and habit of story-making a nervous weakness like mine is sure to lead to all manner of excited fancies, and that I ought to use my will and good sense to check the tendency. So I try.",
+      "text_sha256": "379efae5882ce059f4a9b7c641f1e22cbbfa3e6d7e87004a4b83e61cb274219e",
+      "expected_anchor_count": 1,
+      "expected_fact": "John tells the narrator to treat the people she thinks she sees as products of her imagination.",
+      "reference_quotes": [
+        {
+          "text": "John has cautioned me not to give way to fancy in the least.",
+          "offsets": [
+            386
+          ]
+        },
+        {
+          "text": "He says that with my imaginative power and habit of story-making a nervous weakness like mine is sure to lead to all manner of excited fancies, and that I ought to use my will and good sense to check the tendency.",
+          "offsets": [
+            447
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        62,
+        64
+      ]
+    },
+    {
+      "id": "yw-07",
+      "block_id": "b1",
+      "text": "By moonlight—the moon shines in all night when there is a moon—I wouldn’t know it was the same paper.\n\nAt night in any kind of light, in twilight, candlelight, lamplight, and worst of all by moonlight, it becomes bars! The outside pattern I mean, and the woman behind it is as plain as can be.\n\nI didn’t realize for a long time what the thing was that showed behind,—that dim sub-pattern,—but now I am quite sure it is a woman.",
+      "text_sha256": "8c9f82dbc37688d9810dc50720e90e8b8dfafa81b0f602d2b284f49f6c9eacf3",
+      "expected_anchor_count": 1,
+      "expected_fact": "At night, the narrator sees the wallpaper's outer pattern as bars with a woman behind it.",
+      "reference_quotes": [
+        {
+          "text": "At night in any kind of light, in twilight, candlelight, lamplight, and worst of all by moonlight, it becomes bars! The outside pattern I mean, and the woman behind it is as plain as can be.",
+          "offsets": [
+            103
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        154,
+        157
+      ]
+    },
+    {
+      "id": "yw-08",
+      "block_id": "b1",
+      "text": "And that cultivates deceit, for I don’t tell them I’m awake,—oh, no!\n\nThe fact is, I am getting a little afraid of John.\n\nHe seems very queer sometimes, and even Jennie has an inexplicable look.\n\nIt strikes me occasionally, just as a scientific hypothesis, that perhaps it is the paper!",
+      "text_sha256": "391dda3e6f3e1b013e5bf3db4fd4f10803ed35aed337c60b553175262b254015",
+      "expected_anchor_count": 1,
+      "expected_fact": "The narrator has begun to fear John.",
+      "reference_quotes": [
+        {
+          "text": "The fact is, I am getting a little afraid of John.",
+          "offsets": [
+            70
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        161,
+        165
+      ]
+    },
+    {
+      "id": "yw-09",
+      "block_id": "b1",
+      "text": "Through watching so much at night, when it changes so, I have finally found out.\n\nThe front pattern does move—and no wonder! The woman behind shakes it!\n\nSometimes I think there are a great many women behind, and sometimes only one, and she crawls around fast, and her crawling shakes it all over.",
+      "text_sha256": "6201baf847696cc7a0000337e5b67a6718ffdb7fd0ece30d383630dc7219a9d9",
+      "expected_anchor_count": 1,
+      "expected_fact": "The narrator believes the woman behind the wallpaper is shaking its front pattern.",
+      "reference_quotes": [
+        {
+          "text": "The front pattern does move—and no wonder! The woman behind shakes it!",
+          "offsets": [
+            82
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        190,
+        193
+      ]
+    },
+    {
+      "id": "yw-10",
+      "block_id": "b1",
+      "text": "I have locked the door and thrown the key down into the front path.\n\nI don’t want to go out, and I don’t want to have anybody come in, till John comes.\n\nI want to astonish him.\n\nI’ve got a rope up here that even Jennie did not find. If that woman does get out, and tries to get away, I can tie her!\n\nBut I forgot I could not reach far without anything to stand on!\n\nThis bed will not move!\n\nI tried to lift and push it until I was lame, and then I got so angry I bit off a little piece at one corner—but it hurt my teeth.\n\nThen I peeled off all the paper I could reach standing on the floor. It sticks horribly and the pattern just enjoys it! All those strangled heads and bulbous eyes and waddling fungus growths just shriek with derision!\n\nI am getting angry enough to do something desperate. To jump out of the window would be admirable exercise, but the bars are too strong even to try.\n\nBesides I wouldn’t do it. Of course not. I know well enough that a step like that is improper and might be misconstrued.\n\nI don’t like to look out of the windows even—there are so many of those creeping women, and they creep so fast.\n\nI wonder if they all come out of that wallpaper as I did?\n\nBut I am securely fastened now by my well-hidden rope—you don’t get me out in the road there!\n\nI suppose I shall have to get back behind the pattern when it comes night, and that is hard!\n\nIt is so pleasant to be out in this great room and creep around as I please!\n\nI don’t want to go outside. I won’t, even if Jennie asks me to.\n\nFor outside you have to creep on the ground, and everything is green instead of yellow.",
+      "text_sha256": "aa55ca59fde7f4a5a4dc648675f31b36c943251914a76afe407f43c0476de8e4",
+      "expected_anchor_count": 1,
+      "expected_fact": "The narrator refuses to leave the room or let anyone enter until John returns.",
+      "reference_quotes": [
+        {
+          "text": "I don’t want to go out, and I don’t want to have anybody come in, till John comes.",
+          "offsets": [
+            69
+          ]
+        }
+      ],
+      "source_paragraph_range": [
+        238,
+        255
+      ]
+    }
+  ]
+}
