@@ -31,9 +31,12 @@ from linguary.adapters.llm.schemas import (
     TranslationV4WithPronunciationSchema,
     ChapterAnalysisV2Schema,
     ChapterAnalysisV3Schema,
+    ChapterAnalysisV5Schema,
     ChapterAnalysisWithNameAssessmentSchema,
     ChapterAnalysisV2WithNameAssessmentSchema,
     ChapterAnalysisV3WithNameAssessmentSchema,
+    ChapterAnalysisV5WithNameAssessmentSchema,
+    QuotedContentPlanSchema,
     GlossaryCandidateWithNameAssessmentSchema,
     TranslationResultV3Schema,
     TranslationResultV4Schema,
@@ -52,6 +55,10 @@ from linguary.application.llm_dto import (
     PronunciationCandidateResponse,
     PronunciationContextResponse,
     ContentPlanResponse,
+    QuotedContentPlanResponse,
+    QuotedSourceAnchorResponse,
+    QuotedDifficultyResponse,
+    QuotedContextFactResponse,
     FragmentAssistanceResponse,
     HelpEvidenceResponse,
     BeforeYouReadEntryResponse,
@@ -114,8 +121,13 @@ def schema_for(
         if contract_version != 1 or name_translation_policy_version is not None:
             raise LLMResponseFormatError("неизвестная версия вычитки")
         return QualityReviewSchema
-    if type(contract_version) is not int or contract_version not in (1, 2, 3, 4):
+    if type(contract_version) is not int or contract_version not in (1, 2, 3, 4, 5):
         raise LLMResponseFormatError("неизвестная версия контракта ответа")
+    if contract_version == 5:
+        if kind != LLMResponseKind.CHAPTER_ANALYSIS:
+            raise LLMResponseFormatError('версия 5 доступна только для анализа главы')
+        return (ChapterAnalysisV5WithNameAssessmentSchema
+                if name_translation_policy_version == 1 else ChapterAnalysisV5Schema)
     if contract_version == 4:
         if kind != LLMResponseKind.TRANSLATION_RESULT:
             raise LLMResponseFormatError('версия 4 доступна только для обработки')
@@ -226,8 +238,14 @@ def _to_dto(validated: BaseModel) -> LLMPayload:
 
 def _chapter_analysis(schema: ChapterAnalysisSchema) -> ChapterAnalysisResponse:
     """Chapter analysis DTO."""
+    if isinstance(getattr(schema, 'content_plan', None), QuotedContentPlanSchema):
+        content_plan = _quoted_content_plan(schema.content_plan)
+    elif isinstance(schema, (ChapterAnalysisV2Schema, ChapterAnalysisV3Schema)):
+        content_plan = _content_plan(schema.content_plan)
+    else:
+        content_plan = None
     return ChapterAnalysisResponse(
-        content_plan=_content_plan(schema.content_plan) if isinstance(schema, (ChapterAnalysisV2Schema, ChapterAnalysisV3Schema)) else None,
+        content_plan=content_plan,
         translation_instructions=schema.translation_instructions,
         chapter_summary=schema.chapter_summary,
         glossary_candidates=tuple(
@@ -364,4 +382,34 @@ def _content_plan(schema) -> ContentPlanResponse:
             anchors=tuple(SourceAnchor(**anchor.model_dump()) for anchor in fact.anchors),
             subject_anchor=SourceAnchor(**fact.subject_anchor.model_dump()), value=fact.value, certainty=fact.certainty)
             for fact in getattr(schema, 'context_facts', ())),
+    )
+
+
+def _quoted_content_plan(schema: QuotedContentPlanSchema) -> QuotedContentPlanResponse:
+    """Preserve v5 quotes without inventing source coordinates at the adapter boundary."""
+    return QuotedContentPlanResponse(
+        version=schema.version,
+        profile=schema.profile,
+        difficulties=tuple(QuotedDifficultyResponse(
+            id=difficulty.id,
+            anchors=tuple(QuotedSourceAnchorResponse(**anchor.model_dump())
+                          for anchor in difficulty.anchors),
+            owner_block_id=difficulty.owner_block_id,
+            kind=difficulty.kind,
+            priority=difficulty.priority,
+            help_kind=difficulty.help_kind,
+            required_points=tuple(RequiredPoint(**point.model_dump())
+                                  for point in difficulty.required_points),
+        ) for difficulty in schema.difficulties),
+        before_you_read_evidence=tuple(HelpEvidenceResponse(**item.model_dump())
+                                       for item in schema.before_you_read_evidence),
+        context_facts=tuple(QuotedContextFactResponse(
+            id=fact.id,
+            kind=fact.kind,
+            anchors=tuple(QuotedSourceAnchorResponse(**anchor.model_dump())
+                          for anchor in fact.anchors),
+            subject_anchor=QuotedSourceAnchorResponse(**fact.subject_anchor.model_dump()),
+            value=fact.value,
+            certainty=fact.certainty,
+        ) for fact in schema.context_facts),
     )

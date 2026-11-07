@@ -9,7 +9,9 @@ from uuid import uuid4
 
 from linguary.adapters.config.settings import LLMSettings, ReadingSettings, CheckSettings, RecoverySettings
 from linguary.adapters.pronunciation.source import DisabledPronunciationSource, IpaDictPronunciationSource, SOURCE_VERSION
-from linguary.application.book_conditions import A2_CONTENT_PLAN_VERSIONS, ConditionsError, payload_digest
+from linguary.application.book_conditions import (
+    A2_CONTENT_PLAN_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS, ConditionsError, payload_digest,
+)
 from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask
 from linguary.domain.book_conditions import thaw
@@ -38,8 +40,14 @@ def effective_content_plan_profile(conditions):
     versions = thaw(payload.get('versions', {}))
     if profile != 'legacy-v1' or versions.get('validators') != 4:
         return profile
+    prompt_templates = thaw(payload.get('prompt_templates', {}))
+    marker = (prompt_templates.get('analysis_contract_version')
+              if isinstance(prompt_templates, dict) else None)
+    expected_a2_versions = (A2_CONTENT_PLAN_VERSIONS if marker is None
+                            else A2_CONTENT_PLAN_V5_VERSIONS if type(marker) is int and marker == 5
+                            else None)
     if (payload.get('reader_level') != 'a2' or payload.get('english_help', False)
-            or versions != A2_CONTENT_PLAN_VERSIONS
+            or versions != expected_a2_versions
             or any(type(value) is not int for value in versions.values())):
         raise ConditionsError('conditions_unavailable')
     return 'content-plan-v3'
@@ -71,7 +79,8 @@ def conditions_payload(book, settings, revision, profile):
     templates = snapshot_prompt_templates(source_language=book.source_language,
         target_language=book.target_language, reader_level=settings.reading.normalized_level, profile=profile,
         validators_version=3 if profile == 'content-plan-v3' else 1,
-        name_translation_policy={'version': 1, 'strategy': settings.reading.name_translation_strategy})
+        name_translation_policy={'version': 1, 'strategy': settings.reading.name_translation_strategy},
+        analysis_contract_version=5 if profile == 'content-plan-v3' else None)
     llm = asdict(settings.llm)
     for key in ('api_key', 'proxy_url', 'base_url'):
         llm.pop(key)
@@ -84,8 +93,8 @@ def conditions_payload(book, settings, revision, profile):
         'recovery_policy': asdict(settings.recovery),
         'versions': {'runtime': 1, 'context_builder': 3 if profile == 'content-plan-v3' else 1,
                      'validators': 3 if profile == 'content-plan-v3' else 1,
-                     'schemas': {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 3}[profile],
-                     'prompts': 3 if profile == 'content-plan-v3' else 1}, 'prompt_templates': templates,
+                     'schemas': {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 5}[profile],
+                     'prompts': 5 if profile == 'content-plan-v3' else 1}, 'prompt_templates': templates,
         'prompt_sha256': payload_digest(templates), 'settings_revision': revision}
 
 
@@ -246,11 +255,29 @@ class BookRuntimeResolver:
                 raise ConditionsError('conditions_unavailable')
             expected_versions['schemas'] = 4
             expected_versions['prompts'] = 4
-        supported_versions = [expected_versions]
-        if payload.get('reader_level') == 'a2':
-            supported_versions.append(dict(A2_CONTENT_PLAN_VERSIONS)
-                if payload.get('profile') == 'legacy-v1' and not payload.get('english_help', False)
-                else {**expected_versions, 'validators': 4})
+        templates = payload.get('prompt_templates')
+        template_values = thaw(templates) if templates is not None else None
+        marker = (template_values.get('analysis_contract_version')
+                  if isinstance(template_values, dict) else None)
+        if marker is not None and (type(marker) is not int or marker != 5):
+            raise ConditionsError('conditions_unavailable')
+        if marker == 5:
+            supported_versions = []
+            if payload.get('profile') == 'content-plan-v3':
+                quoted_versions = {'runtime': 1, 'context_builder': 3,
+                    'validators': 3, 'schemas': 5, 'prompts': 5}
+                if payload.get('reader_level') == 'a2':
+                    quoted_versions['validators'] = 4
+                supported_versions.append(quoted_versions)
+            elif (payload.get('profile') == 'legacy-v1' and payload.get('reader_level') == 'a2'
+                    and not payload.get('english_help', False)):
+                supported_versions.append(dict(A2_CONTENT_PLAN_V5_VERSIONS))
+        else:
+            supported_versions = [expected_versions]
+            if payload.get('reader_level') == 'a2':
+                supported_versions.append(dict(A2_CONTENT_PLAN_VERSIONS)
+                    if payload.get('profile') == 'legacy-v1' and not payload.get('english_help', False)
+                    else {**expected_versions, 'validators': 4})
         versions = thaw(payload.get('versions', {}))
         if (payload.get('profile') not in self.supported or not isinstance(versions, dict)
                 or any(type(value) is not int for value in versions.values())

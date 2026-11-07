@@ -24,7 +24,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from linguary.domain.content_plan import ContentPlan, ContextFact, HelpEvidence, SourceAnchor, artifact_key
+from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, SourceAnchor, artifact_key
 
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
@@ -33,6 +33,7 @@ from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
     ChapterAnalysisResponse,
     GlossaryCandidateResponse,
+    QuotedContentPlanResponse,
 )
 from linguary.domain import (
     BeforeYouReadEntry,
@@ -118,6 +119,7 @@ class FragmentAnalysis:
         order: int,
         block_ids_by_alias: Mapping[str, str],
         texts: Mapping[str, str] | None = None,
+        visible_texts_by_alias: Mapping[str, str] | None = None,
     ) -> FragmentAnalysis:
         """Fragment response with plan mapped to chapter block IDs.
 
@@ -144,7 +146,10 @@ class FragmentAnalysis:
             ),
             glossary_candidates=payload.glossary_candidates,
             before_you_read=payload.before_you_read,
-            content_plan=content_plan_from_response(payload, block_ids_by_alias, texts=texts),
+            content_plan=content_plan_from_response(
+                payload, block_ids_by_alias, texts=texts,
+                visible_texts_by_alias=visible_texts_by_alias,
+            ),
         )
 
 
@@ -640,40 +645,88 @@ def content_plan_from_response(
     payload: ChapterAnalysisResponse,
     aliases: Mapping[str, str],
     texts: Mapping[str, str] | None = None,
+    *,
+    visible_texts_by_alias: Mapping[str, str] | None = None,
 ) -> ContentPlan | None:
     """Replaces local aliases and computes stable application references."""
     if payload.content_plan is None:
         return None
+    is_quoted = isinstance(payload.content_plan, QuotedContentPlanResponse)
     is_v3 = payload.content_plan.version == 3
     if is_v3 and texts is None:
         raise AnalysisMergeError('план v3 требует доступный исходный фрагмент')
+
+    resolved_difficulties = []
+    resolved_facts = []
+    if is_quoted:
+        if visible_texts_by_alias is None:
+            return None
+        for difficulty in payload.content_plan.difficulties:
+            owner_block_id = aliases.get(difficulty.owner_block_id)
+            if owner_block_id is None:
+                return None
+            anchors = tuple(
+                _resolve_quoted_anchor(anchor.block_id, anchor.quote, aliases, texts,
+                                       visible_texts_by_alias)
+                for anchor in difficulty.anchors
+            )
+            if any(anchor is None for anchor in anchors):
+                return None
+            resolved_difficulties.append((difficulty, anchors, owner_block_id))
+        for fact in payload.content_plan.context_facts:
+            anchors = tuple(
+                _resolve_quoted_anchor(anchor.block_id, anchor.quote, aliases, texts,
+                                       visible_texts_by_alias)
+                for anchor in fact.anchors
+            )
+            subject_anchor = _resolve_quoted_anchor(
+                fact.subject_anchor.block_id, fact.subject_anchor.quote, aliases, texts,
+                visible_texts_by_alias,
+            )
+            if subject_anchor is None or any(anchor is None for anchor in anchors):
+                return None
+            resolved_facts.append((fact, anchors, subject_anchor))
+
     difficulties = []
     ids = {}
-    for difficulty in payload.content_plan.difficulties:
+    difficulty_rows = (resolved_difficulties if is_quoted else
+                       [(difficulty, None, None) for difficulty in payload.content_plan.difficulties])
+    for difficulty, resolved_anchors, resolved_owner in difficulty_rows:
         try:
-            mapped_anchors = []
-            for a in difficulty.anchors:
-                real_block_id = aliases[a.block_id]
-                if is_v3:
-                    mapped_anchor = replace(a, block_id=real_block_id)
-                    mapped_anchor.validate(texts)
-                    mapped_anchors.append(mapped_anchor)
-                elif texts is not None and real_block_id in texts:
-                    span = find_quote_span(texts[real_block_id], a.quote, estimated_start=a.start)
-                    if span is not None:
-                        start, end, actual_quote = span
-                        mapped_anchors.append(
-                            SourceAnchor(block_id=real_block_id, start=start, end=end, quote=actual_quote)
-                        )
+            if is_quoted:
+                mapped = Difficulty(
+                    id=difficulty.id,
+                    anchors=resolved_anchors,
+                    owner_block_id=resolved_owner,
+                    kind=difficulty.kind,
+                    priority=difficulty.priority,
+                    help_kind=difficulty.help_kind,
+                    required_points=difficulty.required_points,
+                )
+            else:
+                mapped_anchors = []
+                for a in difficulty.anchors:
+                    real_block_id = aliases[a.block_id]
+                    if is_v3:
+                        mapped_anchor = replace(a, block_id=real_block_id)
+                        mapped_anchor.validate(texts)
+                        mapped_anchors.append(mapped_anchor)
+                    elif texts is not None and real_block_id in texts:
+                        span = find_quote_span(texts[real_block_id], a.quote, estimated_start=a.start)
+                        if span is not None:
+                            start, end, actual_quote = span
+                            mapped_anchors.append(
+                                SourceAnchor(block_id=real_block_id, start=start, end=end, quote=actual_quote)
+                            )
+                        else:
+                            mapped_anchors.append(replace(a, block_id=real_block_id))
                     else:
                         mapped_anchors.append(replace(a, block_id=real_block_id))
-                else:
-                    mapped_anchors.append(replace(a, block_id=real_block_id))
-            mapped = replace(
-                difficulty,
-                anchors=tuple(mapped_anchors),
-                owner_block_id=aliases[difficulty.owner_block_id],
-            )
+                mapped = replace(
+                    difficulty,
+                    anchors=tuple(mapped_anchors),
+                    owner_block_id=aliases[difficulty.owner_block_id],
+                )
         except KeyError as error:
             raise AnalysisMergeError("привязка к невидимому блоку") from error
         mapped = replace(mapped, id=mapped.canonical_id)
@@ -707,17 +760,54 @@ def content_plan_from_response(
         except KeyError as error:
             raise AnalysisMergeError("неизвестная трудность или владелец свидетельства") from error
     facts = []
-    for fact in payload.content_plan.context_facts:
-        try:
-            mapped = replace(fact,
-                anchors=tuple(replace(anchor, block_id=aliases[anchor.block_id]) for anchor in fact.anchors),
-                subject_anchor=replace(fact.subject_anchor, block_id=aliases[fact.subject_anchor.block_id]))
-        except KeyError:
-            raise AnalysisMergeError('контекстная атрибуция ссылается на невидимый блок') from None
+    fact_rows = (resolved_facts if is_quoted else
+                 [(fact, None, None) for fact in payload.content_plan.context_facts])
+    for fact, resolved_anchors, resolved_subject in fact_rows:
+        if is_quoted:
+            mapped = ContextFact(id=fact.id, kind=fact.kind, anchors=resolved_anchors,
+                subject_anchor=resolved_subject, value=fact.value, certainty=fact.certainty)
+        else:
+            try:
+                mapped = replace(fact,
+                    anchors=tuple(replace(anchor, block_id=aliases[anchor.block_id]) for anchor in fact.anchors),
+                    subject_anchor=replace(fact.subject_anchor, block_id=aliases[fact.subject_anchor.block_id]))
+            except KeyError:
+                raise AnalysisMergeError('контекстная атрибуция ссылается на невидимый блок') from None
         mapped.validate(texts)
         facts.append(replace(mapped, id=mapped.canonical_id))
     return ContentPlan(version=payload.content_plan.version, profile=payload.content_plan.profile,
         difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence), context_facts=tuple(facts))
+
+
+def _resolve_quoted_anchor(block_alias, quote, aliases, texts, visible_texts_by_alias):
+    """Resolve a quote only when it is unique in both views of its source block."""
+    block_id = aliases.get(block_alias)
+    if block_id is None or texts is None or block_id not in texts or block_alias not in visible_texts_by_alias:
+        return None
+    visible_span = _unique_exact_span(visible_texts_by_alias[block_alias], quote)
+    source_span = _unique_exact_span(texts[block_id], quote)
+    if visible_span is None or source_span is None:
+        return None
+    start, end = source_span
+    return SourceAnchor(block_id=block_id, start=start, end=end, quote=quote)
+
+
+def _unique_exact_span(text, quote):
+    if not text or not quote:
+        return None
+    first = None
+    position = 0
+    while True:
+        position = text.find(quote, position)
+        if position < 0:
+            break
+        if first is not None:
+            return None
+        first = position
+        position += 1
+    if first is None:
+        return None
+    return first, first + len(quote)
 
 
 def _merged_content_plan(fragments: Sequence[FragmentAnalysis]) -> ContentPlan | None:
@@ -827,10 +917,14 @@ def validate_content_plan(
     english_help: bool = False,
     note_limits_by_block: Mapping[str, int] | None = None,
     note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
+    visible_texts_by_alias: Mapping[str, str] | None = None,
 ) -> None:
     """Validates source anchors and channel eligibility prior to accepting the response."""
-    plan = content_plan_from_response(payload, aliases, texts=texts)
+    plan = content_plan_from_response(payload, aliases, texts=texts,
+                                      visible_texts_by_alias=visible_texts_by_alias)
     if plan is None:
+        if payload.content_plan is not None:
+            raise AnalysisMergeError("цитата не разрешается однозначно в тексте блока")
         if english_help:
             raise AnalysisMergeError("режиму английской помощи нужен содержательный план")
         return

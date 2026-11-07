@@ -13,6 +13,7 @@ from linguary.domain import BookStatus
 PRONUNCIATION_VERSIONS = {'selection_policy': 2, 'form_rules': 1,
     'source': 'ipa-dict@972cd67dd5f96bc5660e28070cde26e3928abcd7:parser-1'}
 A2_CONTENT_PLAN_VERSIONS = {'runtime': 1, 'context_builder': 3, 'validators': 4, 'schemas': 3, 'prompts': 3}
+A2_CONTENT_PLAN_V5_VERSIONS = {'runtime': 1, 'context_builder': 3, 'validators': 4, 'schemas': 5, 'prompts': 5}
 
 
 class ConditionsError(LLMConfigurationError):
@@ -74,18 +75,32 @@ class BookConditionsService:
         payload['english_help'] = english_help
         if english_help:
             payload['profile'] = 'content-plan-v3'
-            payload['versions'] = {'runtime': 1, 'context_builder': 3, 'validators': 3, 'schemas': 4, 'prompts': 4}
+            payload['versions'] = {'runtime': 1, 'context_builder': 3, 'validators': 3,
+                'schemas': 4 if continue_legacy else 5, 'prompts': 4 if continue_legacy else 5}
         if payload['reader_level'] == 'a2' and not continue_legacy:
-            payload['versions'] = (dict(A2_CONTENT_PLAN_VERSIONS)
-                if payload['profile'] == 'legacy-v1' and not english_help
-                else {**payload['versions'], 'validators': 4})
+            if payload['profile'] == 'legacy-v1' and not english_help:
+                payload['versions'] = dict(A2_CONTENT_PLAN_V5_VERSIONS)
+            else:
+                payload['versions'] = {**payload['versions'], 'validators': 4}
+        elif continue_legacy and not english_help:
+            if payload['profile'] == 'legacy-v1' and payload['reader_level'] == 'a2':
+                payload['versions'] = dict(A2_CONTENT_PLAN_VERSIONS)
+            elif payload['profile'] == 'content-plan-v3':
+                payload['versions'] = {'runtime': 1, 'context_builder': 3,
+                    'validators': 4 if payload['reader_level'] == 'a2' else 3,
+                    'schemas': 3, 'prompts': 3}
+        effective_v3 = (payload['profile'] == 'content-plan-v3'
+                        or payload['profile'] == 'legacy-v1' and payload['reader_level'] == 'a2'
+                        and not english_help)
+        analysis_contract_version = 5 if effective_v3 and not continue_legacy else None
         if english_help or reader_level is not None or pronunciation_help_enabled or payload['versions']['validators'] == 4:
             payload['prompt_templates'] = snapshot_prompt_templates(source_language=book.source_language,
                 target_language=book.target_language, reader_level=payload['reader_level'],
                 profile=payload['profile'], english_help=english_help,
                 pronunciation_help_enabled=pronunciation_help_enabled,
                 validators_version=payload['versions']['validators'],
-                name_translation_policy=payload.get('name_translation_policy'))
+                name_translation_policy=payload.get('name_translation_policy'),
+                analysis_contract_version=analysis_contract_version)
             payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
         payload['source_sha256'] = self.source_digest(book)
         conditions = BookConditions(str(uuid4()), book.id, 1 if previous is None else previous.revision + 1,

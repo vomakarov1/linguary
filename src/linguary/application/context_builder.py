@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import re
 import json
-from dataclasses import asdict
+from dataclasses import asdict, field
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -166,6 +166,25 @@ subject_anchor, value, certainty (explicit, inferred, unknown).
 Не распространяй факт за видимый фрагмент. При certainty=unknown значение не задано (value=null).
 Различай подтверждённый текстом факт и предположение; противоречащие атрибуции не выбирай молча.
 """
+_CONTENT_PLAN_ANALYSIS_V5 = (
+    _CONTENT_PLAN_ANALYSIS_V3
+    .replace('anchors [{block_id, start, end, quote}]', 'anchors [{block_id, quote}]')
+    .replace(
+        'Смещения — Unicode\nкодовые точки точного исходного текста, end исключён; quote=text[start:end].\n'
+        'Копируй quote ДОСЛОВНО из текста блока, не раскрывай и не меняй сокращения '
+        '(например, she’s нельзя заменять на she is).',
+        'Укажи для каждой опоры только block_id и quote. Не возвращай start/end: приложение '
+        'найдёт точные координаты. Копируй quote посимвольно из видимого текста блока, '
+        'не раскрывай и не меняй сокращения (например, she’s нельзя заменять на she is).',
+    )
+    .replace(
+        'Каждая привязка содержит видимый block_id, точные start/end и дословную quote.\n'
+        'Не исправляй цитату и смещения; subject_anchor проверяется отдельно от anchors.',
+        'Каждая привязка содержит только видимый block_id и дословную quote; координаты '
+        'не возвращай. Не исправляй цитату; subject_anchor проверяется отдельно от anchors.',
+    )
+    + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5: у опор нет полей start и end.\n'
+)
 _CONTENT_PLAN_PROCESSING_V3 = _CONTENT_PLAN_PROCESSING.replace('content-plan-v2.1', 'learner-quality-v3.1').replace('content-plan-v2', 'content-plan-v3') + """
 Служебные context_facts применяй только к назначенным субъектам и их точным исходным привязкам.
 Не выдавай inferred/unknown за подтверждённый факт; решения глоссария имеют приоритет.
@@ -190,6 +209,21 @@ before_you_read и before_you_read_evidence всегда должны быть �
 Верни context_facts в формате content-plan-v3. Сохраняй точные привязки и степень
 уверенности; неизвестные факты не додумывай. Пустой список трудностей допустим.
 """
+_ENGLISH_HELP_CONTENT_PLAN_ANALYSIS_V5 = (
+    _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS
+    .replace('start, end и quote', 'quote')
+    .replace(
+        'Смещения — индексы Unicode-кодовых точек, end не включается; quote обязан точно\n'
+        'совпадать с текстом.',
+        'Копируй quote дословно из видимого текста блока; start/end не возвращай, '
+        'приложение вычислит координаты.',
+    )
+    .replace(
+        'Сохраняй точные привязки и степень',
+        'Сохраняй дословные цитаты и степень',
+    )
+    + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5: у опор нет полей start и end.\n'
+)
 
 _ENGLISH_HELP_CONTENT_PLAN_PROCESSING = """\
 Режим чтения на английском с помощью к трудным местам. Все блоки обрабатываются
@@ -318,6 +352,7 @@ class ChapterAnalysisContext(AliasedBlocksContext):
     request: LLMRequest[ChapterAnalysisResponse]
     block_ids_by_alias: Mapping[str, str]
     expectation: ResultExpectation
+    visible_texts_by_alias: Mapping[str, str] = field(default_factory=dict)
     before_you_read_limit: int = 10
     language_notes_per_chapter: int = 8
     note_limits_by_block: Mapping[str, int] | None = None
@@ -327,6 +362,7 @@ class ChapterAnalysisContext(AliasedBlocksContext):
         object.__setattr__(
             self, "block_ids_by_alias", MappingProxyType(dict(self.block_ids_by_alias))
         )
+        object.__setattr__(self, "visible_texts_by_alias", MappingProxyType(dict(self.visible_texts_by_alias)))
         if self.note_limits_by_block is not None:
             object.__setattr__(self, "note_limits_by_block", MappingProxyType(dict(self.note_limits_by_block)))
 
@@ -462,6 +498,15 @@ class ContextBuilder:
         self._content_plan_profile = content_plan_profile
         self._reader_level = reader_level.strip().lower()
         self._prompt_templates = MappingProxyType(dict(prompt_templates or {}))
+        contract_marker = self._prompt_templates.get('analysis_contract_version')
+        if contract_marker is not None and (type(contract_marker) is not int or contract_marker != 5):
+            raise ContextBuildError('неизвестная версия контракта анализа')
+        if contract_marker == 5 and content_plan_profile != 'content-plan-v3':
+            raise ContextBuildError('контракт анализа v5 требует план v3')
+        self._analysis_contract_version = (contract_marker if contract_marker is not None else
+            (5 if prompt_templates is None and content_plan_profile == 'content-plan-v3' else
+             (3 if content_plan_profile == 'content-plan-v3' else
+              (2 if content_plan_profile == 'content-plan-v2' else 1))))
         saved_policy = self._prompt_templates.get('name_translation_policy')
         self._name_translation_policy = _name_policy(name_translation_policy if name_translation_policy is not None else saved_policy)
         self._user_decisions = tuple(user_decisions)
@@ -848,6 +893,10 @@ class ContextBuilder:
     ) -> ChapterAnalysisContext:
         """Ready request for chapter blocks along with response parsing metadata."""
         aliases = {_alias(index): block.id for index, block in enumerate(blocks, start=1)}
+        visible_texts_by_alias = {
+            alias: source_text_for_model(block)
+            for alias, block in zip(aliases, blocks, strict=True)
+        }
         candidate = self._content_plan_profile in {"content-plan-v2", "content-plan-v3"}
         version = 3 if self._content_plan_profile == "content-plan-v3" else (2 if candidate else 1)
         note_limit = self._language_notes_per_chapter if language_notes_limit is None else language_notes_limit
@@ -859,7 +908,9 @@ class ContextBuilder:
         if candidate and section.is_notes_only:
             before_you_read_limit = 0
         if candidate:
-            instructions += "\n" + self._prompt_templates.get("content_analysis", _CONTENT_PLAN_ANALYSIS_V3 if version == 3 else _CONTENT_PLAN_ANALYSIS)
+            default_analysis = (_CONTENT_PLAN_ANALYSIS_V5 if self._analysis_contract_version == 5
+                                else _CONTENT_PLAN_ANALYSIS_V3) if version == 3 else _CONTENT_PLAN_ANALYSIS
+            instructions += "\n" + self._prompt_templates.get("content_analysis", default_analysis)
             if version == 3 and not self._english_help:
                 instructions += "\n" + self._prompt_templates.get("learner_quality", learner_instructions(self._reader_level))
             if not self._english_help:
@@ -874,7 +925,7 @@ class ContextBuilder:
             note_limits_by_block={b.id: 0 if self._english_help else (notes_budget(unit_chars=len(b.text), chapter_chars=sum(len(t.text) for t in textual_blocks(section)), per_chapter=self._language_notes_per_chapter) if self._language_notes_per_chapter else 0) for b in blocks},
             section_id=section.id,
             request=LLMRequest.for_chapter_analysis(
-                contract_version=version,
+                contract_version=self._analysis_contract_version if version == 3 else version,
                 name_translation_policy_version=self._name_translation_policy.version if self._name_translation_policy else None,
                 instructions=instructions,
                 input_text=self._chapter_input(
@@ -886,9 +937,11 @@ class ContextBuilder:
                     nonbinding_suggestions=nonbinding_suggestions,
                     fragment_label=fragment_label,
                     findings=findings,
+                    visible_texts_by_alias=visible_texts_by_alias,
                 ),
             ),
             block_ids_by_alias=aliases,
+            visible_texts_by_alias=visible_texts_by_alias,
             expectation=ResultExpectation(
                 target_language=document.target_language,
                 blocks=tuple(ExpectedBlock(block_id=alias) for alias in aliases),
@@ -943,6 +996,7 @@ class ContextBuilder:
         nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None,
         fragment_label: str | None,
         findings: FragmentFindings | None = None,
+        visible_texts_by_alias: Mapping[str, str] | None = None,
     ) -> str:
         """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
         parts = [_chapter_header(document=document, section=section, fragment_label=fragment_label)]
@@ -959,7 +1013,7 @@ class ContextBuilder:
                 f"Указания: {findings.instructions}\n"
                 f"Выражения: {', '.join(findings.expressions)}"
             )
-        parts.append(_chapter_blocks(blocks))
+        parts.append(_chapter_blocks(blocks, visible_texts_by_alias))
         return "\n\n".join(parts)
 
     def _selected_candidates(
@@ -1837,11 +1891,13 @@ def _name_context(
     )
 
 
-def _chapter_blocks(blocks: Sequence[DocumentBlock]) -> str:
+def _chapter_blocks(
+    blocks: Sequence[DocumentBlock], visible_texts_by_alias: Mapping[str, str] | None = None,
+) -> str:
     """Textual blocks of chapter under aliases."""
     lines = ["Текстовые блоки главы:"]
     lines.extend(
-        f"[{_alias(index)}]\n{source_text_for_model(block)}"
+        f"[{_alias(index)}]\n{visible_texts_by_alias[_alias(index)] if visible_texts_by_alias is not None and _alias(index) in visible_texts_by_alias else source_text_for_model(block)}"
         for index, block in enumerate(blocks, start=1)
     )
     return "\n\n".join(lines)
@@ -1910,8 +1966,14 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     }, ensure_ascii=False)
 
 
-def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None, pronunciation_help_enabled=False, validators_version=1):
+def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None, pronunciation_help_enabled=False, validators_version=1, analysis_contract_version=None):
     """Render immutable instruction templates without book text or secrets."""
+    if analysis_contract_version is not None and (
+        type(analysis_contract_version) is not int or analysis_contract_version != 5
+        or not (profile == 'content-plan-v3' or
+                (profile == 'legacy-v1' and reader_level == 'a2' and validators_version == 4 and not english_help))
+    ):
+        raise ContextBuildError('неизвестная версия контракта анализа')
     pronunciation_level = reader_level
     reader_level = reader_level or 'b2'
     languages = dict(source_language=source_language, target_language=target_language)
@@ -1923,17 +1985,25 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
         'content_analysis': _CONTENT_PLAN_ANALYSIS,
         'content_processing': _CONTENT_PLAN_PROCESSING,
     }
+    if analysis_contract_version is not None:
+        result['analysis_contract_version'] = analysis_contract_version
     if (profile == 'content-plan-v3' or profile == 'legacy-v1' and reader_level.strip().lower() == 'a2'
             and validators_version == 4 and not english_help):
         result.update(content_analysis=_CONTENT_PLAN_ANALYSIS_V3, content_processing=_CONTENT_PLAN_PROCESSING_V3,
                       learner_quality=learner_instructions(reader_level))
+    if analysis_contract_version == 5:
+        result['content_analysis'] = _CONTENT_PLAN_ANALYSIS_V5
     if english_help:
         processing = _ENGLISH_HELP_CONTENT_PLAN_PROCESSING.format(
             reader_level_guidance=_ENGLISH_HELP_READER_LEVEL_GUIDANCE[reader_level.strip().lower()]
         )
         result.update(
             english_help=f"enabled for {reader_level.upper()}",
-            content_analysis=_ENGLISH_HELP_CONTENT_PLAN_ANALYSIS.format(reader_level=reader_level.upper()),
+            content_analysis=(
+                _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS_V5
+                if analysis_contract_version == 5
+                else _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS
+            ).format(reader_level=reader_level.upper()),
             content_processing=processing,
             english_help_processing=processing,
         )

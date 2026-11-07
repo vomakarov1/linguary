@@ -239,6 +239,35 @@ class ChapterAnalysisV3Schema(ChapterAnalysisSchema):
     content_plan: ContentPlanV3Schema
 
 
+class QuotedSourceAnchorSchema(_ResponseModel):
+    block_id: str = Field(min_length=1)
+    quote: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
+
+    @model_validator(mode="after")
+    def _check_quote(self):
+        if not self.quote.strip():
+            raise ValueError('цитата не должна быть пустой')
+        return self
+
+
+class QuotedDifficultySchema(DifficultySchema):
+    anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)
+
+
+class QuotedContextFactSchema(ContextFactSchema):
+    anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)
+    subject_anchor: QuotedSourceAnchorSchema
+
+
+class QuotedContentPlanSchema(ContentPlanV3Schema):
+    difficulties: list[QuotedDifficultySchema]
+    context_facts: list[QuotedContextFactSchema]
+
+
+class ChapterAnalysisV5Schema(ChapterAnalysisSchema):
+    content_plan: QuotedContentPlanSchema
+
+
 class TranslationResultV3Schema(TranslationResultSchema):
     content_evidence: list[HelpEvidenceSchema]
 
@@ -293,6 +322,10 @@ class ChapterAnalysisV2WithNameAssessmentSchema(ChapterAnalysisV2Schema):
 
 
 class ChapterAnalysisV3WithNameAssessmentSchema(ChapterAnalysisV3Schema):
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+
+
+class ChapterAnalysisV5WithNameAssessmentSchema(ChapterAnalysisV5Schema):
     glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
 
 

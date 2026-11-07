@@ -303,6 +303,7 @@ class AnalyzeChapter:
                     order=fragment.order,
                     block_ids_by_alias=context.block_ids_by_alias,
                     texts={b.id: b.text for b in fragment.blocks},
+                    visible_texts_by_alias=context.visible_texts_by_alias,
                 )
             )
         analysis = merge_chapter_analysis(
@@ -383,7 +384,7 @@ class AnalyzeChapter:
             response = None
             try:
                 response = await self._llm_client.generate(request)
-                if request.contract_version == 3:
+                if request.contract_version in {3, 5}:
                     response = replace(response, payload=prepare_analysis_payload(response.payload))
                 if self._context_builder._reader_level == "a2":
                     validate_a2_summary(
@@ -392,7 +393,7 @@ class AnalyzeChapter:
                         source_language=source_language,
                         language_detector=self._language_detector,
                     )
-                if request.contract_version == 3:
+                if request.contract_version in {3, 5}:
                     record_reader_warnings(self._unit_of_work, response,
                         [('summary', response.payload.chapter_summary),
                          *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],
@@ -407,9 +408,14 @@ class AnalyzeChapter:
                         language_notes_per_chapter=context.language_notes_per_chapter,
                         note_limits_by_block=context.note_limits_by_block,
                         note_group_limits=context.note_group_limits,
+                        visible_texts_by_alias=context.visible_texts_by_alias,
                     )
-                    if request.contract_version == 3:
-                        plan = content_plan_from_response(response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks})
+                    if request.contract_version in {3, 5}:
+                        plan = content_plan_from_response(
+                            response.payload, context.block_ids_by_alias,
+                            {b.id: b.text for b in blocks},
+                            visible_texts_by_alias=context.visible_texts_by_alias,
+                        )
                         with self._unit_of_work.transaction() as transaction:
                             decisions = transaction.glossary.list_for_book(request.book_id)
                         validate_fact_glossary(plan, glossary_context_constraints(decisions))
@@ -463,7 +469,8 @@ class AnalyzeChapter:
             glossary_candidates=self._candidates(payload, analysis_id=analysis_id),
             before_you_read=_before_you_read(payload),
             content_plan=content_plan_from_response(
-                payload, context.block_ids_by_alias, {b.id: b.text for b in blocks}
+                payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
+                visible_texts_by_alias=context.visible_texts_by_alias,
             ),
         )
 

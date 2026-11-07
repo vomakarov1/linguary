@@ -17,7 +17,7 @@ from math import isfinite
 
 from linguary.application.errors import ApplicationError
 from linguary.domain import BlockTreatment, ConceptType
-from linguary.domain.content_plan import ContextFact, Difficulty
+from linguary.domain.content_plan import ContextFact, Difficulty, RequiredPoint
 from linguary.domain.errors import DomainError
 from linguary.domain.name_translation import NameTranslationAssessment
 
@@ -112,7 +112,7 @@ class ChapterAnalysisResponse:
     treatment_plan: tuple[TreatmentPlanItemResponse, ...] = ()
     before_you_read: tuple[BeforeYouReadEntryResponse, ...] = ()
 
-    content_plan: ContentPlanResponse | None = None
+    content_plan: ContentPlanResponse | QuotedContentPlanResponse | None = None
 
     def __post_init__(self) -> None:
         if not self.translation_instructions.strip():
@@ -307,6 +307,67 @@ class ContentPlanResponse:
         ids = [d.id for d in self.difficulties]
         if len(ids) != len(set(ids)):
             raise LLMPayloadError("повторяющийся идентификатор трудности")
+
+
+@dataclass(frozen=True, slots=True)
+class QuotedSourceAnchorResponse:
+    """Unresolved, exact quote returned by the v5 analysis contract."""
+
+    block_id: str
+    quote: str
+
+    def __post_init__(self) -> None:
+        if not self.block_id.strip() or not self.quote.strip():
+            raise LLMPayloadError('цитата требует видимый блок и непустой текст')
+
+
+@dataclass(frozen=True, slots=True)
+class QuotedDifficultyResponse:
+    id: str
+    anchors: tuple[QuotedSourceAnchorResponse, ...]
+    owner_block_id: str
+    kind: str
+    priority: str
+    help_kind: str
+    required_points: tuple[RequiredPoint, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'anchors', tuple(self.anchors))
+        object.__setattr__(self, 'required_points', tuple(self.required_points))
+
+
+@dataclass(frozen=True, slots=True)
+class QuotedContextFactResponse:
+    id: str
+    kind: str
+    anchors: tuple[QuotedSourceAnchorResponse, ...]
+    subject_anchor: QuotedSourceAnchorResponse
+    value: str | None = None
+    certainty: str = 'unknown'
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'anchors', tuple(self.anchors))
+
+
+@dataclass(frozen=True, slots=True)
+class QuotedContentPlanResponse:
+    """v3 plan whose source references have not yet been resolved."""
+
+    difficulties: tuple[QuotedDifficultyResponse, ...] = ()
+    before_you_read_evidence: tuple[HelpEvidenceResponse, ...] = ()
+    version: int = 3
+    profile: str = 'content-plan-v3'
+    context_facts: tuple[QuotedContextFactResponse, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, 'difficulties', tuple(self.difficulties))
+        object.__setattr__(self, 'before_you_read_evidence', tuple(self.before_you_read_evidence))
+        object.__setattr__(self, 'context_facts', tuple(self.context_facts))
+        if type(self.version) is not int or self.version != 3 or self.profile != 'content-plan-v3':
+            raise LLMPayloadError('неизвестная версия содержательного плана')
+        ids = [difficulty.id for difficulty in self.difficulties]
+        if len(ids) != len(set(ids)):
+            raise LLMPayloadError('повторяющийся идентификатор трудности')
 
 
 @dataclass(frozen=True, slots=True)
