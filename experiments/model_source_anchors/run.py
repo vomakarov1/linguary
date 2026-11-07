@@ -14,6 +14,7 @@ import random
 import statistics
 import shutil
 import sys
+import tempfile
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -285,9 +286,26 @@ def fetch_generation_metadata(api_key: str, generation: str) -> dict[str, Any]:
 
 
 def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def run_experiment(
@@ -578,6 +596,29 @@ def write_report(run_dir: Path) -> Path:
         if evaluation_complete
         else "- Ручная оценка ещё не завершена; заполните поля в `evaluation.csv`."
     )
+    run_complete = len(records) == manifest["scheduled_model_calls"]
+    if not run_complete:
+        resolution_conclusion = (
+            f"- Прогон неполный: сохранено {len(records)}/{manifest['scheduled_model_calls']} ответов; "
+            "сравнение разрешимости пока предварительное."
+        )
+    elif summaries["quote_only"]["resolved"] > summaries["with_offsets"]["resolved"]:
+        resolution_conclusion = (
+            f"- В этом полном прогоне `quote_only` разрешил больше привязок: "
+            f"{summaries['quote_only']['resolved']}/{expected} против "
+            f"{summaries['with_offsets']['resolved']}/{expected} у `with_offsets`."
+        )
+    elif summaries["quote_only"]["resolved"] < summaries["with_offsets"]["resolved"]:
+        resolution_conclusion = (
+            f"- В этом полном прогоне `with_offsets` разрешил больше привязок: "
+            f"{summaries['with_offsets']['resolved']}/{expected} против "
+            f"{summaries['quote_only']['resolved']}/{expected} у `quote_only`."
+        )
+    else:
+        resolution_conclusion = (
+            f"- В этом полном прогоне оба способа разрешили одинаковое число привязок: "
+            f"{summaries['with_offsets']['resolved']}/{expected}."
+        )
 
     lines = [
         "# Отчёт: сравнение привязки цитат",
@@ -610,7 +651,8 @@ def write_report(run_dir: Path) -> Path:
             "- Для `with_offsets` привязка разрешима, если `text[start:end]` точно равен цитате.",
             "- Для `quote_only` привязка разрешима только при ровно одном точном вхождении цитаты в исходном блоке.",
             "- `uncertain` означает, что вывод частично подтверждён или ответ недостаточно ясен; такие случаи остаются в знаменателе.",
-            "- Для этой выборки вариант `quote_only` дал больше разрешимых привязок; общий успех требует также подтверждения целевого факта и смысловой поддержки цитатой.",
+            resolution_conclusion,
+            "- Общий успех требует также подтверждения целевого факта и смысловой поддержки цитатой.",
             "- OpenRouter распределил запросы между фактическими провайдерами, указанными в таблице; их выбор не фиксировался.",
             "- Выводы относятся только к выбранному рассказу и этим десяти отрывкам.",
         ]
