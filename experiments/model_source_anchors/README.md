@@ -12,14 +12,14 @@
 
 ## Запуск
 
-Нужен ключ OpenRouter в переменной окружения `OPENROUTER_API_KEY`. Скрипт не читает ключ из файлов и не записывает его в результаты.
+Скрипт сначала проверяет `OPENROUTER_API_KEY`. Если переменная не задана, он использует ключ из обычной конфигурации Linguary (`~/.linguary/config.toml` или файл из `LINGUARY_CONFIG`), только когда `llm.base_url` указывает на `openrouter.ai`. Ключ остаётся в памяти процесса и не записывается в результаты. Ключ из конфигурации для другого адреса не используется.
 
 ```sh
 python3 experiments/model_source_anchors/prepare_cases.py
-python3 experiments/model_source_anchors/run.py run --execute
+uv run python experiments/model_source_anchors/run.py run --execute
 ```
 
-Before the second command, set `OPENROUTER_API_KEY` securely in the shell environment.
+Перед запуском можно безопасно задать `OPENROUTER_API_KEY`; иначе будет использована конфигурация приложения, если в ней указан OpenRouter.
 
 Запуск создаёт ровно 40 запросов модели: 10 фрагментов × 2 схемы × 2 независимых повтора. Запросы выполняются по одному, без истории и автоматических повторов; порядок схем внутри каждой пары перемешан фиксированным начальным значением. Используется модель [`deepseek/deepseek-v3.2`](https://openrouter.ai/deepseek/deepseek-v3.2), `temperature=0.2`, `top_p=1.0`, `max_tokens=512` и строгая JSON Schema. Сведения о фактическом провайдере, расходе токенов и стоимости запрашиваются отдельно по идентификатору генерации и не считаются дополнительными вызовами модели.
 

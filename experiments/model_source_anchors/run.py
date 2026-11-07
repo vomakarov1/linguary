@@ -13,10 +13,11 @@ from pathlib import Path
 import random
 import statistics
 import shutil
+import sys
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -32,6 +33,7 @@ API_TIMEOUT_SECONDS = 120
 METADATA_TIMEOUT_SECONDS = 30
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
 CASES_PATH = Path(__file__).with_name("cases.json")
 FEATURE_DIR = ROOT / ".ai/develop-context.local/BRIEF-model-source-anchors-2026-11-07"
 DEFAULT_RUNS_DIR = FEATURE_DIR / "runs"
@@ -288,7 +290,12 @@ def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def run_experiment(cases_path: Path, output_root: Path, api_key: str) -> Path:
+def run_experiment(
+    cases_path: Path,
+    output_root: Path,
+    api_key: str,
+    credential_source: str,
+) -> Path:
     source_manifest, cases = read_cases(cases_path)
     schedule = make_schedule(cases)
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -304,6 +311,7 @@ def run_experiment(cases_path: Path, output_root: Path, api_key: str) -> Path:
         "source": source_manifest["source"],
         "cases_file_sha256": case_file_hash,
         "model": MODEL_ID,
+        "credential_source": credential_source,
         "generation_parameters": {
             "temperature": TEMPERATURE,
             "top_p": TOP_P,
@@ -536,13 +544,11 @@ def write_report(run_dir: Path) -> Path:
             for row in variant_records
             if isinstance(row.get("elapsed_ms"), (int, float))
         ]
-        providers = sorted(
-            {
-                metadata_by_call.get(row.get("call_id"), {}).get("provider_name")
-                for row in variant_records
-                if metadata_by_call.get(row.get("call_id"), {}).get("provider_name")
-            }
-        )
+        provider_counts: dict[str, int] = {}
+        for row in variant_records:
+            provider = metadata_by_call.get(row.get("call_id"), {}).get("provider_name")
+            if provider:
+                provider_counts[provider] = provider_counts.get(provider, 0) + 1
         summaries[variant] = {
             "http_success": http_success,
             "valid_format": valid_format,
@@ -550,15 +556,28 @@ def write_report(run_dir: Path) -> Path:
             "resolved": resolved,
             "fact_yes": sum(value == "yes" for value in fact_ratings),
             "fact_judged": sum(value in {"yes", "no", "uncertain"} for value in fact_ratings),
+            "fact_uncertain": sum(value == "uncertain" for value in fact_ratings),
             "quote_yes": sum(value == "yes" for value in quote_ratings),
             "quote_judged": sum(value in {"yes", "no", "uncertain"} for value in quote_ratings),
+            "quote_uncertain": sum(value == "uncertain" for value in quote_ratings),
             "overall": overall,
             "cost_total": sum(costs),
             "cost_known": len(costs),
             "latency_mean": statistics.mean(latencies) if latencies else None,
             "latency_known": len(latencies),
-            "providers": providers,
+            "provider_counts": provider_counts,
         }
+
+    evaluation_complete = all(
+        row.get("manual_fact_supported", "").strip().lower() in {"yes", "no", "uncertain"}
+        and row.get("manual_quote_supports_aid", "").strip().lower() in {"yes", "no", "uncertain"}
+        for row in evaluations
+    ) and len(evaluations) == manifest["scheduled_model_calls"]
+    manual_status = (
+        f"- Ручная оценка заполнена для {len(evaluations)} ответов; основания приведены в `evaluation.csv`."
+        if evaluation_complete
+        else "- Ручная оценка ещё не завершена; заполните поля в `evaluation.csv`."
+    )
 
     lines = [
         "# Отчёт: сравнение привязки цитат",
@@ -567,7 +586,7 @@ def write_report(run_dir: Path) -> Path:
         f"- Запланировано вызовов модели: {manifest['scheduled_model_calls']}",
         f"- SHA-256 файла наборов: `{manifest['cases_file_sha256']}`",
         f"- Источник: [Project Gutenberg, eBook №1952]({manifest['source']['ebook_url']})",
-        "- Ручная оценка смысловой пригодности заполняется в `evaluation.csv`.",
+        manual_status,
         "",
         "| Показатель | `with_offsets` | `quote_only` |",
         "| --- | ---: | ---: |",
@@ -575,12 +594,12 @@ def write_report(run_dir: Path) -> Path:
         f"| Ответ прошёл проверку формата | {summaries['with_offsets']['valid_format']}/{expected} | {summaries['quote_only']['valid_format']}/{expected} |",
         f"| Цитата найдена дословно | {summaries['with_offsets']['exact_quote']}/{expected} | {summaries['quote_only']['exact_quote']}/{expected} |",
         f"| Привязка разрешима | {summaries['with_offsets']['resolved']}/{expected} | {summaries['quote_only']['resolved']}/{expected} |",
-        f"| Целевой факт подтверждён вручную | {summaries['with_offsets']['fact_yes']}/{expected} (оценено {summaries['with_offsets']['fact_judged']}/{expected}) | {summaries['quote_only']['fact_yes']}/{expected} (оценено {summaries['quote_only']['fact_judged']}/{expected}) |",
-        f"| Цитата подтверждает пояснение | {summaries['with_offsets']['quote_yes']}/{expected} (оценено {summaries['with_offsets']['quote_judged']}/{expected}) | {summaries['quote_only']['quote_yes']}/{expected} (оценено {summaries['quote_only']['quote_judged']}/{expected}) |",
+        f"| Целевой факт подтверждён вручную | {summaries['with_offsets']['fact_yes']}/{expected} (неопределённо {summaries['with_offsets']['fact_uncertain']}; оценено {summaries['with_offsets']['fact_judged']}/{expected}) | {summaries['quote_only']['fact_yes']}/{expected} (неопределённо {summaries['quote_only']['fact_uncertain']}; оценено {summaries['quote_only']['fact_judged']}/{expected}) |",
+        f"| Цитата подтверждает пояснение | {summaries['with_offsets']['quote_yes']}/{expected} (неопределённо {summaries['with_offsets']['quote_uncertain']}; оценено {summaries['with_offsets']['quote_judged']}/{expected}) | {summaries['quote_only']['quote_yes']}/{expected} (неопределённо {summaries['quote_only']['quote_uncertain']}; оценено {summaries['quote_only']['quote_judged']}/{expected}) |",
         f"| Общий успех | {summaries['with_offsets']['overall']}/{expected} | {summaries['quote_only']['overall']}/{expected} |",
         f"| Стоимость USD (известно вызовов) | {summaries['with_offsets']['cost_total']:.8f} ({summaries['with_offsets']['cost_known']}/{expected}) | {summaries['quote_only']['cost_total']:.8f} ({summaries['quote_only']['cost_known']}/{expected}) |",
         f"| Средняя задержка, мс (измерено вызовов) | {summaries['with_offsets']['latency_mean'] if summaries['with_offsets']['latency_mean'] is not None else 'нет данных'} ({summaries['with_offsets']['latency_known']}/{expected}) | {summaries['quote_only']['latency_mean'] if summaries['quote_only']['latency_mean'] is not None else 'нет данных'} ({summaries['quote_only']['latency_known']}/{expected}) |",
-        f"| Фактические провайдеры | {', '.join(summaries['with_offsets']['providers']) or 'неизвестны'} | {', '.join(summaries['quote_only']['providers']) or 'неизвестны'} |",
+        f"| Фактические провайдеры | {', '.join(f'{name} ({count})' for name, count in sorted(summaries['with_offsets']['provider_counts'].items())) or 'неизвестны'} | {', '.join(f'{name} ({count})' for name, count in sorted(summaries['quote_only']['provider_counts'].items())) or 'неизвестны'} |",
     ]
     lines.extend(
         [
@@ -590,7 +609,9 @@ def write_report(run_dir: Path) -> Path:
             "- В каждой схеме знаменатель вызовов и ожидаемых опор — 20; отсутствующий или ошибочный ответ считается неуспехом.",
             "- Для `with_offsets` привязка разрешима, если `text[start:end]` точно равен цитате.",
             "- Для `quote_only` привязка разрешима только при ровно одном точном вхождении цитаты в исходном блоке.",
-            "- Заполните `manual_fact_supported` и `manual_quote_supports_aid` значениями `yes`, `no` или `uncertain`; после этого повторно запустите отчёт.",
+            "- `uncertain` означает, что вывод частично подтверждён или ответ недостаточно ясен; такие случаи остаются в знаменателе.",
+            "- Для этой выборки вариант `quote_only` дал больше разрешимых привязок; общий успех требует также подтверждения целевого факта и смысловой поддержки цитатой.",
+            "- OpenRouter распределил запросы между фактическими провайдерами, указанными в таблице; их выбор не фиксировался.",
             "- Выводы относятся только к выбранному рассказу и этим десяти отрывкам.",
         ]
     )
@@ -601,9 +622,28 @@ def write_report(run_dir: Path) -> Path:
 
 def run_command(args: argparse.Namespace) -> None:
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    credential_source = "OPENROUTER_API_KEY"
     if not api_key:
-        raise SystemExit("OPENROUTER_API_KEY is missing; no requests were sent.")
-    run_experiment(args.cases, args.output_root, api_key)
+        try:
+            from linguary.adapters.config.loader import load_settings
+
+            settings = load_settings()
+        except Exception:
+            settings = None
+        if (
+            settings is not None
+            and urlsplit(settings.llm.base_url).hostname == "openrouter.ai"
+            and settings.llm.api_key
+            and settings.llm.api_key.strip()
+        ):
+            api_key = settings.llm.api_key.strip()
+            credential_source = "Linguary application settings"
+    if not api_key:
+        raise SystemExit(
+            "No OpenRouter credential found in OPENROUTER_API_KEY or OpenRouter application settings; "
+            "no requests were sent."
+        )
+    run_experiment(args.cases, args.output_root, api_key, credential_source)
 
 
 def report_command(args: argparse.Namespace) -> None:
