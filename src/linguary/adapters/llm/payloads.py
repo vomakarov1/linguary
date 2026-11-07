@@ -24,6 +24,7 @@ from linguary.adapters.llm.quality_payloads import QualityReviewSchema
 from linguary.domain.llm_log import Violation
 
 from linguary.adapters.llm.schemas import (
+    HelpEvidenceSchema,
     PronunciationCandidateSchema,
     TranslationWithPronunciationSchema,
     TranslationV2WithPronunciationSchema,
@@ -186,6 +187,27 @@ def parse_payload(
                 if isinstance(candidate, dict):
                     candidate.setdefault("name_translation_assessment", None)
             validation_content = json.dumps(document, ensure_ascii=False)
+    byr_evidence_items = ()
+    content_evidence_items = ()
+    try:
+        doc = json.loads(validation_content)
+    except (ValueError, TypeError):
+        doc = None
+    if isinstance(doc, dict):
+        modified = False
+        if kind == LLMResponseKind.TRANSLATION_RESULT and "content_evidence" in doc:
+            raw_ev = doc.pop("content_evidence")
+            if isinstance(raw_ev, list):
+                content_evidence_items = raw_ev
+            modified = True
+        elif kind == LLMResponseKind.CHAPTER_ANALYSIS and isinstance(doc.get("content_plan"), dict):
+            if "before_you_read_evidence" in doc["content_plan"]:
+                raw_byr = doc["content_plan"].pop("before_you_read_evidence")
+                if isinstance(raw_byr, list):
+                    byr_evidence_items = raw_byr
+                modified = True
+        if modified:
+            validation_content = json.dumps(doc, ensure_ascii=False)
     try:
         validated = schema.model_validate_json(validation_content)
     except ValidationError as error:
@@ -205,6 +227,32 @@ def parse_payload(
             raw_content=content,
             violation=Violation('response_domain', kind.value, safe_message='Ответ не соответствует внутреннему контракту'),
         ) from None
+    if byr_evidence_items and getattr(result, "content_plan", None) is not None:
+        evs = []
+        for item in byr_evidence_items:
+            try:
+                evs.append(HelpEvidenceResponse(**HelpEvidenceSchema.model_validate(item).model_dump()))
+            except ValidationError as error:
+                raise LLMResponseFormatError(
+                    _format_error(kind, error=error, truncated=truncated),
+                    truncated=truncated,
+                    raw_content=content,
+                    violation=Violation('response_schema', kind.value, safe_message='Ответ не соответствует формату'),
+                ) from None
+        result = replace(result, content_plan=replace(result.content_plan, before_you_read_evidence=tuple(evs)))
+    if content_evidence_items and isinstance(result, TranslationResultResponse):
+        evs = []
+        for item in content_evidence_items:
+            try:
+                evs.append(HelpEvidenceResponse(**HelpEvidenceSchema.model_validate(item).model_dump()))
+            except ValidationError as error:
+                raise LLMResponseFormatError(
+                    _format_error(kind, error=error, truncated=truncated),
+                    truncated=truncated,
+                    raw_content=content,
+                    violation=Violation('response_schema', kind.value, safe_message='Ответ не соответствует формату'),
+                ) from None
+        result = replace(result, content_evidence=tuple(evs))
     if pronunciation_candidates_version == 1:
         candidates = []
         for item in candidate_items:
@@ -299,7 +347,7 @@ def _translation_result(schema: TranslationResultSchema) -> TranslationResultRes
     return TranslationResultResponse(
         pronunciation_candidates=tuple(_pronunciation_candidate(item)
             for item in getattr(schema, 'pronunciation_candidates', ())),
-        content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.content_evidence) if isinstance(schema, (TranslationResultV2Schema, TranslationResultV3Schema)) else (),
+        content_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in getattr(schema, 'content_evidence', ())),
         fragment_assistances=tuple(FragmentAssistanceResponse(**item.model_dump()) for item in schema.fragment_assistances) if isinstance(schema, TranslationResultV4Schema) else (),
         blocks=tuple(_block_result(item) for item in schema.blocks),
         language_notes=tuple(_language_note(item) for item in schema.language_notes),
@@ -377,7 +425,7 @@ def _content_plan(schema) -> ContentPlanResponse:
         version=schema.version,
         profile=schema.profile,
         difficulties=tuple(difficulties),
-        before_you_read_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in schema.before_you_read_evidence),
+        before_you_read_evidence=tuple(HelpEvidenceResponse(**e.model_dump()) for e in getattr(schema, 'before_you_read_evidence', ())),
         context_facts=tuple(ContextFact(id=fact.id, kind=fact.kind,
             anchors=tuple(SourceAnchor(**anchor.model_dump()) for anchor in fact.anchors),
             subject_anchor=SourceAnchor(**fact.subject_anchor.model_dump()), value=fact.value, certainty=fact.certainty)
@@ -402,7 +450,7 @@ def _quoted_content_plan(schema: QuotedContentPlanSchema) -> QuotedContentPlanRe
                                   for point in difficulty.required_points),
         ) for difficulty in schema.difficulties),
         before_you_read_evidence=tuple(HelpEvidenceResponse(**item.model_dump())
-                                       for item in schema.before_you_read_evidence),
+                                       for item in getattr(schema, 'before_you_read_evidence', ())),
         context_facts=tuple(QuotedContextFactResponse(
             id=fact.id,
             kind=fact.kind,

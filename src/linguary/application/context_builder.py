@@ -123,8 +123,7 @@ _CONTENT_PLAN_ANALYSIS = """
 Профиль content-plan-v2, инструкция content-plan-v2.1.
 Сначала ищи игру слов, смысловые и логические связи, непрозрачную грамматику;
 обычная лексика не должна вытеснять эти трудности. Выбирай минимальную помощь.
-Верни content_plan с version=2, profile=content-plan-v2, difficulties и
-before_you_read_evidence (пустые списки обязательны, если трудностей нет).
+Верни content_plan с version=2, profile=content-plan-v2 и difficulties (пустой список обязателен, если трудностей нет).
 Каждая трудность: id, anchors [{block_id, start, end, quote}], owner_block_id,
 kind, priority, help_kind, required_points [{id, description}]. Смещения — Unicode
 кодовые точки точного исходного текста, end исключён; quote=text[start:end].
@@ -135,11 +134,7 @@ lexical_hint допустим ТОЛЬКО для блоков GLOSSARY_ONLY и�
 Для блоков TRANSLATE и READ_AS_IS используй help_kind=explanation.
 explanation требует объясняющего BYR, языковой заметки либо содержательного glossary_hint.note.
 Перевод, цитата и пересказ не заменяют объяснение. Не повышай квоты.
-Если BYR уже покрывает аспект, не требуй лишней заметки. Для каждого такого аспекта
-верни свидетельство: difficulty_id, point_id, artifact_kind=before_you_read.explanation,
-source_block_id владельца, artifact_index, body_excerpt.
-artifact_index — строго порядковый номер (начиная с 0) той записи в before_you_read, в чьём explanation находится body_excerpt.
-body_excerpt обязан быть точной подстрокой из русского текста explanation соответствующего элемента before_you_read[artifact_index], не цитатой оригинала.
+Если BYR уже покрывает аспект, не требуй лишней заметки.
 Не выдумывай связи с невидимыми частями. Пустой план допустим.
 """
 _CONTENT_PLAN_PROCESSING = """
@@ -147,14 +142,8 @@ _CONTENT_PLAN_PROCESSING = """
 Выполни все required_points назначенных владельцам трудностей минимальной помощью
 в пределах прежних режимов и бюджета. Решения глоссария выше формулировок помощи;
 объясни смысл, сохраняя согласованный перевод. Не повторяй уже покрытый BYR аспект.
-Верни content_evidence (включая пустой список): difficulty_id, point_id,
-artifact_kind (before_you_read.explanation, language_note.note, glossary_hint.note;
-для lexical_hint также glossary_hint.translation), source_block_id владельца,
-artifact_index с нуля в соответствующем списке (подсказки внутри блока), body_excerpt.
-Отрывок должен дословно входить в реальное тело помощи, а не только цитировать
-оригинал. Перевод и пересказ не считаются объяснением. Соседние anchors служат
-контекстом, не требуют результата. Свидетельства показывают только структуру,
-смысловая правильность отдельно не проверена.
+Перевод и пересказ не считаются объяснением. Соседние anchors служат
+контекстом, не требуют результата.
 """
 
 
@@ -2018,16 +2007,6 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
                 related.setdefault(source_id, f"related-source-{len(related) + 1}")
             anchor["block_id"] = aliases.get(source_id, related.get(source_id))
         difficulties.append(value)
-    evidence = []
-    for item in analysis.content_plan.before_you_read_evidence:
-        if item.block_id in aliases:
-            value = asdict(item)
-            value["block_id"] = aliases[item.block_id]
-            for index, entry in enumerate(analysis.before_you_read):
-                if artifact_key(item.artifact_kind, item.block_id, {"expression": entry.expression, "explanation": entry.explanation}) == item.artifact_key:
-                    value["artifact_index"] = index
-                    break
-            evidence.append(value)
     facts = []
     for fact in analysis.content_plan.context_facts:
         if fact.subject_anchor.block_id not in aliases:
@@ -2040,8 +2019,8 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
             anchor['block_id'] = aliases.get(source_id, related.get(source_id))
         facts.append(value)
     return "Обязательные аспекты и точные связанные привязки:\n" + json.dumps({
-        "version": analysis.content_plan.version, "difficulties": difficulties, "before_you_read_evidence": evidence,
-        "before_you_read": [dict(artifact_index=i, expression=e.expression, explanation=e.explanation) for i, e in enumerate(analysis.before_you_read)],
+        "version": analysis.content_plan.version, "difficulties": difficulties,
+        "before_you_read": [dict(expression=e.expression, explanation=e.explanation) for e in analysis.before_you_read],
         **({'context_facts': facts} if analysis.content_plan.version == 3 else {}),
     }, ensure_ascii=False)
 

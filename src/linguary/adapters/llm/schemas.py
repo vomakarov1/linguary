@@ -203,7 +203,6 @@ class ContentPlanSchema(_ResponseModel):
     version: Literal[2]
     profile: Literal['content-plan-v2']
     difficulties: list[DifficultySchema]
-    before_you_read_evidence: list[HelpEvidenceSchema]
 
 
 class ChapterAnalysisV2Schema(ChapterAnalysisSchema):
@@ -211,7 +210,7 @@ class ChapterAnalysisV2Schema(ChapterAnalysisSchema):
 
 
 class TranslationResultV2Schema(TranslationResultSchema):
-    content_evidence: list[HelpEvidenceSchema]
+    pass
 
 
 class ContextFactSchema(_ResponseModel):
@@ -269,7 +268,7 @@ class ChapterAnalysisV5Schema(ChapterAnalysisSchema):
 
 
 class TranslationResultV3Schema(TranslationResultSchema):
-    content_evidence: list[HelpEvidenceSchema]
+    pass
 
 
 class FragmentAssistanceSchema(_ResponseModel):

@@ -46,6 +46,7 @@ from linguary.domain import (
     glossary_key,
     spellings_by_preference,
     translations_conflict,
+    without_footnote_markers,
 )
 from linguary.domain.name_translation import (
     NameTranslationEvidence, NameTranslationObservation, NameTranslationPolicy,
@@ -641,6 +642,10 @@ def find_quote_span(
     return None
 
 
+def _substance(text: str) -> str:
+    return "".join(re.findall(r"\w+", without_footnote_markers(text).casefold()))
+
+
 def content_plan_from_response(
     payload: ChapterAnalysisResponse,
     aliases: Mapping[str, str],
@@ -734,31 +739,64 @@ def content_plan_from_response(
         difficulties.append(mapped)
     evidence = []
     selected = before_you_read_entries(payload.before_you_read, strict=is_v3)
-    for item in payload.content_plan.before_you_read_evidence:
-        if item.artifact_kind != "before_you_read.explanation" or item.artifact_index >= len(payload.before_you_read):
-            raise AnalysisMergeError("свидетельство анализа не ссылается на существующий BYR")
-        entry = payload.before_you_read[item.artifact_index]
-        if not any(e.expression == entry.expression and e.explanation == entry.explanation for e in selected):
-            if (
-                not is_v3
-                and any(candidate.expression == entry.expression for candidate in selected)
-            ):
-                raise AnalysisMergeError("BYR удалён нормализацией или превышает бюджет")
-            representative = _before_you_read_stem_duplicate(entry, selected)
-            if representative is None:
-                raise AnalysisMergeError("BYR удалён нормализацией или превышает бюджет")
-            body_excerpt = _align_byr_evidence_excerpt(representative, item.body_excerpt)
+    if not payload.content_plan.before_you_read_evidence:
+        seen_points = set()
+        for difficulty in difficulties:
+            for anchor in difficulty.anchors:
+                for entry in selected:
+                    expr = entry.expression.strip()
+                    quote = anchor.quote.strip()
+                    matched = (
+                        _same_word(expr, quote)
+                        or find_quote_span(quote, expr) is not None
+                        or find_quote_span(expr, quote) is not None
+                    )
+                    if matched and _substance(entry.explanation) != _substance(anchor.quote):
+                        key = artifact_key(
+                            "before_you_read.explanation",
+                            difficulty.owner_block_id,
+                            {"expression": entry.expression, "explanation": entry.explanation},
+                        )
+                        for point in difficulty.required_points:
+                            pair = (difficulty.id, point.id)
+                            if pair not in seen_points:
+                                seen_points.add(pair)
+                                evidence.append(
+                                    HelpEvidence(
+                                        difficulty.id,
+                                        point.id,
+                                        "before_you_read.explanation",
+                                        difficulty.owner_block_id,
+                                        key,
+                                        entry.explanation,
+                                    )
+                                )
+    else:
+        for item in payload.content_plan.before_you_read_evidence:
+            if item.artifact_kind != "before_you_read.explanation" or item.artifact_index >= len(payload.before_you_read):
+                raise AnalysisMergeError("свидетельство анализа не ссылается на существующий BYR")
+            entry = payload.before_you_read[item.artifact_index]
+            if not any(e.expression == entry.expression and e.explanation == entry.explanation for e in selected):
+                if (
+                    not is_v3
+                    and any(candidate.expression == entry.expression for candidate in selected)
+                ):
+                    raise AnalysisMergeError("BYR удалён нормализацией или превышает бюджет")
+                representative = _before_you_read_stem_duplicate(entry, selected)
+                if representative is None:
+                    raise AnalysisMergeError("BYR удалён нормализацией или превышает бюджет")
+                body_excerpt = _align_byr_evidence_excerpt(representative, item.body_excerpt)
+                if body_excerpt is None:
+                    continue
+                entry = representative
+            else:
+                body_excerpt = _align_byr_evidence_excerpt(entry, item.body_excerpt)
             if body_excerpt is None:
-                continue
-            entry = representative
-        else:
-            body_excerpt = _align_byr_evidence_excerpt(entry, item.body_excerpt)
-        if body_excerpt is None:
-            raise AnalysisMergeError("отрывок не принадлежит телу объяснения BYR")
-        try:
-            evidence.append(HelpEvidence(ids[item.difficulty_id], item.point_id, item.artifact_kind, aliases[item.source_block_id], artifact_key(item.artifact_kind, aliases[item.source_block_id], {"expression": entry.expression, "explanation": entry.explanation}), body_excerpt))
-        except KeyError as error:
-            raise AnalysisMergeError("неизвестная трудность или владелец свидетельства") from error
+                raise AnalysisMergeError("отрывок не принадлежит телу объяснения BYR")
+            try:
+                evidence.append(HelpEvidence(ids[item.difficulty_id], item.point_id, item.artifact_kind, aliases[item.source_block_id], artifact_key(item.artifact_kind, aliases[item.source_block_id], {"expression": entry.expression, "explanation": entry.explanation}), body_excerpt))
+            except KeyError as error:
+                raise AnalysisMergeError("неизвестная трудность или владелец свидетельства") from error
     facts = []
     fact_rows = (resolved_facts if is_quoted else
                  [(fact, None, None) for fact in payload.content_plan.context_facts])

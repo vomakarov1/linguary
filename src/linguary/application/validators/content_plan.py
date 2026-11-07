@@ -251,6 +251,81 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
                 if stripped and stripped in a.body:
                     excerpt = stripped
         evidence.append(HelpEvidence(item.difficulty_id, item.point_id, kind, owner, a.key, excerpt))
+    if not payload.content_evidence:
+        from linguary.application.analysis_merge import find_quote_span
+        from linguary.application.explained_expressions import _same_word
+
+        covered = {(e.difficulty_id, e.point_id) for e in evidence}
+        for difficulty in plan.difficulties:
+            if difficulty.owner_block_id not in owner_block_ids:
+                continue
+            for point in difficulty.required_points:
+                if (difficulty.id, point.id) in covered:
+                    continue
+                matched = False
+                for anchor in difficulty.anchors:
+                    r = by_owner.get(anchor.block_id) or by_owner.get(difficulty.owner_block_id)
+                    if r is None:
+                        continue
+                    anchor_quote = without_footnote_markers(anchor.quote).strip()
+                    for note in r.language_notes:
+                        note_quote = without_footnote_markers(note.original_excerpt).strip()
+                        if (
+                            anchor_quote in note_quote
+                            or note_quote in anchor_quote
+                            or _same_word(anchor_quote, note_quote)
+                            or find_quote_span(note_quote, anchor_quote) is not None
+                            or find_quote_span(anchor_quote, note_quote) is not None
+                        ):
+                            body_excerpt = note.note
+                            if body_excerpt and _substance(body_excerpt) != _substance(anchor.quote):
+                                excerpt = body_excerpt if plan.version == 3 else without_footnote_markers(body_excerpt)
+                                if plan.version == 3:
+                                    from linguary.application.reader_text import ReaderTextPolicy
+                                    excerpt = ReaderTextPolicy().prepare('language_note.note', excerpt, (note.original_excerpt,))
+                                elif excerpt != body_excerpt:
+                                    excerpt = excerpt.strip()
+                                if excerpt:
+                                    content = dict(original_excerpt=note.original_excerpt, note=note.note, translated_excerpt=note.translated_excerpt)
+                                    key = artifact_key('language_note.note', r.block_id, content)
+                                    evidence.append(HelpEvidence(difficulty.id, point.id, 'language_note.note', r.block_id, key, excerpt))
+                                    covered.add((difficulty.id, point.id))
+                                    matched = True
+                                    break
+                    if matched:
+                        break
+
+                    for hint in r.glossary_hints:
+                        hint_quote = without_footnote_markers(hint.original).strip()
+                        if (
+                            anchor_quote in hint_quote
+                            or hint_quote in anchor_quote
+                            or _same_word(anchor_quote, hint_quote)
+                            or find_quote_span(hint_quote, anchor_quote) is not None
+                            or find_quote_span(anchor_quote, hint_quote) is not None
+                        ):
+                            if difficulty.help_kind == 'lexical_hint':
+                                kind = 'glossary_hint.translation'
+                                body_excerpt = hint.translation
+                            else:
+                                kind = 'glossary_hint.note'
+                                body_excerpt = hint.note
+                            if body_excerpt and _substance(body_excerpt) != _substance(anchor.quote):
+                                excerpt = body_excerpt if plan.version == 3 else without_footnote_markers(body_excerpt)
+                                if plan.version == 3:
+                                    from linguary.application.reader_text import ReaderTextPolicy
+                                    excerpt = ReaderTextPolicy().prepare(kind, excerpt, (hint.original,))
+                                elif excerpt != body_excerpt:
+                                    excerpt = excerpt.strip()
+                                if excerpt:
+                                    content = dict(original=hint.original, translation=hint.translation, note=hint.note)
+                                    key = artifact_key(kind, r.block_id, content)
+                                    evidence.append(HelpEvidence(difficulty.id, point.id, kind, r.block_id, key, excerpt))
+                                    covered.add((difficulty.id, point.id))
+                                    matched = True
+                                    break
+                    if matched:
+                        break
     return ContentEvidence(plan.sha256, tuple(evidence), version=plan.version)
 
 

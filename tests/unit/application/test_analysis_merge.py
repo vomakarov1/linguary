@@ -887,4 +887,61 @@ def test_before_you_read_entries_sanitizes_explanation():
     assert result[0].explanation == "Искажение грамматики."
 
 
+def test_content_plan_without_byr_evidence_binds_algorithmically() -> None:
+    """When LLM returns no before_you_read_evidence, it is bound algorithmically by matching anchors (AC-008)."""
+    from linguary.application.analysis_merge import content_plan_from_response
+    from linguary.application.llm_dto import ContentPlanResponse
+    from linguary.domain.content_plan import Difficulty, RequiredPoint, SourceAnchor
+
+    text = "She snapped at him angrily."
+    d = Difficulty(
+        "d1",
+        (SourceAnchor("b1", 4, 14, "snapped at"),),
+        "b1",
+        "idiom",
+        "critical",
+        "explanation",
+        (RequiredPoint("p1", "Explain the idiom"),),
+    )
+    payload = ChapterAnalysisResponse(
+        "instructions",
+        "summary",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),),
+        before_you_read=(BeforeYouReadEntryResponse("snapped at", "Ответил собеседнику сердито и резко."),),
+        content_plan=ContentPlanResponse(
+            (d,),
+            before_you_read_evidence=(),  # Empty from LLM
+        ),
+    )
+    plan = content_plan_from_response(payload, {"b1": "block-1"}, {"block-1": text})
+    assert plan is not None
+    assert len(plan.before_you_read_evidence) == 1
+    ev = plan.before_you_read_evidence[0]
+    assert ev.difficulty_id == plan.difficulties[0].id
+    assert ev.point_id == "p1"
+    assert ev.artifact_kind == "before_you_read.explanation"
+    assert ev.block_id == "block-1"
+    assert ev.body_excerpt == "Ответил собеседнику сердито и резко."
+
+
+def test_content_plan_schemas_do_not_contain_evidence_in_strict_json_schema() -> None:
+    """Evidence fields are excluded from JSON schemas sent to the provider (AC-008)."""
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    from linguary.adapters.llm.schemas import (
+        ContentPlanSchema,
+        TranslationResultV2Schema,
+        TranslationResultV3Schema,
+    )
+
+    plan_schema = strict_json_schema(ContentPlanSchema)
+    assert "before_you_read_evidence" not in plan_schema.get("properties", {})
+
+    t_v2_schema = strict_json_schema(TranslationResultV2Schema)
+    assert "content_evidence" not in t_v2_schema.get("properties", {})
+
+    t_v3_schema = strict_json_schema(TranslationResultV3Schema)
+    assert "content_evidence" not in t_v3_schema.get("properties", {})
+
+
+
 

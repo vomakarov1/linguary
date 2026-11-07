@@ -735,3 +735,112 @@ def test_retry_joins_own_authorial_tail_without_dropping_it() -> None:
     joined = f"{speech} {tail}"
     corrected = make_response((make_block_result(block, translated_text=joined),))
     assert validate(corrected, unit=unit)[0].translated_text == joined
+
+
+def test_dialogue_line_breaks_accepted_with_speech_markers() -> None:
+    """Translation of a block with direct speech markers split into dialogue dashes is accepted (AC-009)."""
+    from linguary.application.validators.paragraphs import paragraph_violation
+
+    source = '"Hello," he said. "How are you?"'
+    translation = "— Привет, — сказал он.\n— Как дела?"
+    violation = paragraph_violation("block-1", source_text=source, translated_text=translation)
+    assert violation is None
+
+    block = make_block(order=0, text=source)
+    payload = make_response((make_block_result(block, translated_text=translation),))
+    results = validate(payload, unit=make_unit((block,)))
+    assert results[0].translated_text == translation
+
+
+def test_dialogue_line_breaks_rejected_without_speech_markers() -> None:
+    """Extra lines are rejected if the source text lacks direct speech markers (AC-009)."""
+    from linguary.application.validators.paragraphs import paragraph_violation
+
+    source = "Hello he said how are you."
+    translation = "— Привет, — сказал он.\n— Как дела?"
+    violation = paragraph_violation("block-1", source_text=source, translated_text=translation)
+    assert violation is not None
+    assert violation.rule_code == "extra_paragraphs"
+
+
+def test_dialogue_line_breaks_rejected_if_extra_line_lacks_dash() -> None:
+    """Extra lines are rejected if any extra line does not begin with a dialogue dash (AC-009)."""
+    from linguary.application.validators.paragraphs import paragraph_violation
+
+    source = '"Hello," he said. "How are you?"'
+    translation = "— Привет, — сказал он.\nАвторский текст без тире."
+    violation = paragraph_violation("block-1", source_text=source, translated_text=translation)
+    assert violation is not None
+    assert violation.rule_code == "extra_paragraphs"
+
+
+def test_reader_text_policy_preserves_dialogue_newlines() -> None:
+    """ReaderTextPolicy preserves newlines in translation (AC-009)."""
+    from linguary.application.reader_text import ReaderTextPolicy
+
+    text = "— Привет, — сказал он.\n— Как дела?"
+    prepared = ReaderTextPolicy().prepare("translation", text)
+    assert prepared == text
+    assert "\n" in prepared
+
+
+def test_resolve_response_evidence_algorithmically_binds_when_content_evidence_is_empty() -> None:
+    """When LLM returns empty content_evidence, notes and hints are bound algorithmically (AC-008)."""
+    from linguary.application.llm_dto import (
+        GlossaryHintResponse,
+        LanguageNoteResponse,
+        TranslationResultResponse,
+    )
+    from linguary.application.validators.content_plan import resolve_response_evidence
+    from linguary.domain import (
+        BlockProcessingResult,
+        BlockTreatment,
+        GlossaryHint,
+        LanguageNote,
+    )
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
+
+    d1 = Difficulty(
+        "d1",
+        (SourceAnchor("b1", 0, 7, "grammar"),),
+        "b1",
+        "grammar",
+        "critical",
+        "explanation",
+        (RequiredPoint("p1", "Explain grammar point"),),
+    )
+    d2 = Difficulty(
+        "d2",
+        (SourceAnchor("b1", 8, 12, "hint"),),
+        "b1",
+        "wordplay",
+        "critical",
+        "lexical_hint",
+        (RequiredPoint("p2", "Explain hint point"),),
+    )
+    p = ContentPlan(version=2, profile="content-plan-v2", difficulties=(d1, d2))
+    payload = TranslationResultResponse(
+        content_evidence=(),  # Empty from LLM
+    )
+    res = BlockProcessingResult(
+        "b1",
+        BlockTreatment.TRANSLATE,
+        translated_text="Перевод предложения.",
+        language_notes=(LanguageNote("n1", "b1", "grammar", "Объяснение грамматической конструкции.", None),),
+        glossary_hints=(GlossaryHint("hint", "подсказка", "Заметка к подсказке."),),
+    )
+    evidence = resolve_response_evidence(p, payload, (res,), (), owner_block_ids=("b1",))
+    assert len(evidence.evidence) == 2
+    by_diff = {e.difficulty_id: e for e in evidence.evidence}
+    assert by_diff["d1"].point_id == "p1"
+    assert by_diff["d1"].artifact_kind == "language_note.note"
+    assert by_diff["d1"].body_excerpt == "Объяснение грамматической конструкции."
+    assert by_diff["d2"].point_id == "p2"
+    assert by_diff["d2"].artifact_kind == "glossary_hint.translation"
+    assert by_diff["d2"].body_excerpt == "подсказка"
+

@@ -222,7 +222,7 @@ def test_v2_round_trip_plan_and_evidence():
     assert parse_payload(LLMResponseKind.TRANSLATION_RESULT, as_content(data), contract_version=2).content_evidence == ()
 
 
-@pytest.mark.parametrize('kind,data', [(LLMResponseKind.CHAPTER_ANALYSIS, analysis_payload()), (LLMResponseKind.TRANSLATION_RESULT, translation_payload())])
+@pytest.mark.parametrize('kind,data', [(LLMResponseKind.CHAPTER_ANALYSIS, analysis_payload())])
 def test_v2_missing_fields_rejected(kind, data):
     with pytest.raises(LLMResponseFormatError):
         parse_payload(kind, as_content(data), contract_version=2)
