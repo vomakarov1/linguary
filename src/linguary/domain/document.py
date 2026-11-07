@@ -7,6 +7,7 @@ processing result, and regeneration; it is never split or merged (ADR § 3).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -352,6 +353,161 @@ class CanonicalDocument:
             if block.id == block_id:
                 return block
         raise UnknownBlockError(f"блок {block_id} отсутствует в документе {self.id}")
+
+    def is_front_matter(self, section: DocumentSection) -> bool:
+        """Whether the section is classified as front matter."""
+        return is_front_matter(section, self)
+
+
+_FRONT_MATTER_FILENAMES = frozenset(
+    {
+        "cover",
+        "title",
+        "titlepage",
+        "title_page",
+        "half_title",
+        "halftitle",
+        "copyright",
+        "imprint",
+        "dedication",
+        "epigraph",
+        "toc",
+        "nav",
+        "colophon",
+    }
+)
+
+_FRONT_MATTER_TITLES = frozenset(
+    {
+        "cover",
+        "contents",
+        "table of contents",
+        "toc",
+        "оглавление",
+        "содержание",
+        "title",
+        "title page",
+        "titlepage",
+        "half title",
+        "half-title",
+        "титул",
+        "титульный лист",
+        "copyright",
+        "colophon",
+        "dedication",
+        "посвящение",
+        "imprint",
+        "выходные данные",
+    }
+)
+
+_FRONT_MATTER_MARKERS = frozenset(
+    {
+        "contents",
+        "table of contents",
+        "toc",
+        "оглавление",
+        "содержание",
+        "copyright",
+        "isbn",
+        "all rights reserved",
+        "все права защищены",
+        "imprint",
+        "colophon",
+        "dedication",
+        "посвящение",
+    }
+)
+
+_STORY_CHAPTER_PATTERNS = (
+    re.compile(r"\b(chapter|глава|часть)\b", re.IGNORECASE),
+    re.compile(r"\b(book|книга)\s+([0-9ivxlcdm]+|\w+)\b", re.IGNORECASE),
+    re.compile(r"\b(prologue|пролог)\b", re.IGNORECASE),
+    re.compile(r"\b(act|акт)\s+([0-9ivxlcdm]+|\w+)\b", re.IGNORECASE),
+    re.compile(r"\b(scene|сцена)\s+([0-9ivxlcdm]+|\w+)\b", re.IGNORECASE),
+    re.compile(r"\b(epilogue|эпилог)\b", re.IGNORECASE),
+)
+
+
+def _is_story_chapter(section: DocumentSection) -> bool:
+    if section.is_notes_only:
+        return False
+    title_norm = section.title.strip().casefold().strip("\"'«»")
+    headings = [
+        b.text.strip().casefold()
+        for b in section.blocks
+        if b.type is BlockType.HEADING and b.text.strip()
+    ]
+    texts_to_check = [title_norm] + headings
+    for text in texts_to_check:
+        for pattern in _STORY_CHAPTER_PATTERNS:
+            if pattern.search(text):
+                return True
+    return False
+
+
+def is_front_matter(
+    section: DocumentSection, document: CanonicalDocument | None = None
+) -> bool:
+    """Identifies introductory front matter sections (title page, table of contents, colophon).
+
+    Such sections are not story chapters: they receive no footnotes or translations,
+    do not open the book with a recap block, and do not serve as sources for 'Previously in...'.
+    """
+    if section.is_notes_only:
+        return False
+
+    if _is_story_chapter(section):
+        return False
+
+    title_norm = section.title.strip().casefold().strip("\"'«»")
+    headings = [
+        b.text.strip().casefold()
+        for b in section.blocks
+        if b.type is BlockType.HEADING and b.text.strip()
+    ]
+
+    filename = section.source_resource_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    stem = filename.rsplit(".", 1)[0].casefold()
+    if stem.startswith("wrap") or stem in _FRONT_MATTER_FILENAMES:
+        return True
+
+    if title_norm in _FRONT_MATTER_TITLES or any(h in _FRONT_MATTER_TITLES for h in headings):
+        return True
+
+    text_blocks = [
+        b
+        for b in section.blocks
+        if b.type
+        in (
+            BlockType.PARAGRAPH,
+            BlockType.POEM,
+            BlockType.QUOTE,
+            BlockType.LIST_ITEM,
+        )
+        and b.text.strip()
+    ]
+    if not text_blocks:
+        return True
+
+    combined_sample = " ".join([title_norm] + headings + [b.text.casefold() for b in text_blocks[:5]])
+    if any(marker in combined_sample for marker in _FRONT_MATTER_MARKERS):
+        return True
+
+    if document is not None and document.metadata.title:
+        book_title = document.metadata.title.strip().casefold()
+        if (title_norm == book_title or (headings and headings[0] == book_title)) and len(text_blocks) <= 2:
+            return True
+
+    if document is not None:
+        first_story_order = min(
+            (s.order for s in document.ordered_sections if _is_story_chapter(s)),
+            default=None,
+        )
+        if first_story_order is not None and section.order < first_story_order:
+            return True
+
+    return False
 
 
 class ImportWarningKind(StrEnum):

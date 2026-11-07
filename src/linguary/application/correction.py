@@ -319,6 +319,8 @@ def correction_coverage_complete(tx, book_id):
     if document is None:
         return False
     for section in document.ordered_sections:
+        if document.is_front_matter(section) or section.is_notes_only:
+            continue
         inputs = correction_inputs(tx, book_id, section.id)
         if (not inputs.translated or unchecked_blocks(tx, inputs)
                 or current_correction_candidates(tx, inputs, states={'awaiting_review', 'awaiting_human'})):
@@ -350,6 +352,8 @@ def reconcile_corrections(tx, book_id):
     pending = []
     complete = True
     for section in document.ordered_sections:
+        if document.is_front_matter(section) or section.is_notes_only:
+            continue
         inputs = correction_inputs(tx, book_id, section.id)
         inputs = _observe_correction_inputs(tx, inputs)
         _restore_correction_checks(tx, inputs, tasks)

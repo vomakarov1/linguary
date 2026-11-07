@@ -239,3 +239,52 @@ def test_concept_rejects_variant_of_other_concept() -> None:
                 TermVariant(concept_id="concept-2", language="ru", text="двоемыслие"),
             ),
         )
+
+
+def test_build_glossary_review_orders_analyses_by_document_sections() -> None:
+    """build_glossary_review sorts analyses by document section order regardless of arrival order (P1.T2, AC-001, AC-002)."""
+    from linguary.application.glossary_review import build_glossary_review
+    from linguary.domain import ChapterAnalysis, TreatmentPlan, TreatmentPlanItem, BlockTreatment
+    from linguary.domain.document import CanonicalDocument, BookMetadata, DocumentSection
+
+    sec1 = DocumentSection(id="sec-1", document_id="b1", title="Chapter 1", order=0, source_resource_path="c1.xhtml")
+    sec2 = DocumentSection(id="sec-2", document_id="b1", title="Chapter 2", order=1, source_resource_path="c2.xhtml")
+    doc = CanonicalDocument(
+        id="b1", metadata=BookMetadata(title="Test"), source_language="en", target_language="ru",
+        sections=(sec1, sec2),
+    )
+
+    c1 = GlossaryCandidate.create(
+        id="c1", analysis_id="a1", source_text="Mr. Wonka", type=ConceptType.PERSON,
+        suggested_translation="мистер Вонка", confidence=0.9, model_flagged_review=False,
+        confidence_threshold=0.8,
+    )
+    c2 = GlossaryCandidate.create(
+        id="c2", analysis_id="a2", source_text="Mr Wonka", type=ConceptType.PERSON,
+        suggested_translation="мистер Вонка", confidence=0.9, model_flagged_review=False,
+        confidence_threshold=0.8,
+    )
+
+    a1 = ChapterAnalysis.create(
+        id="a1", section_id="sec-1",
+        treatment_plan=TreatmentPlan("sec-1", (TreatmentPlanItem("b1", BlockTreatment.TRANSLATE),)),
+        translation_instructions="", chapter_summary="summary 1",
+        expected_block_ids=("b1",),
+        glossary_candidates=(c1,),
+    )
+    a2 = ChapterAnalysis.create(
+        id="a2", section_id="sec-2",
+        treatment_plan=TreatmentPlan("sec-2", (TreatmentPlanItem("b2", BlockTreatment.TRANSLATE),)),
+        translation_instructions="", chapter_summary="summary 2",
+        expected_block_ids=("b2",),
+        glossary_candidates=(c2,),
+    )
+
+    # Pass in reverse order: [a2, a1]
+    review = build_glossary_review(
+        book_id="b1", analyses=[a2, a1], confidence_threshold=0.8, document=doc
+    )
+    item = review.items[0]
+    # First spelling in spellings list should be from sec-1 ("Mr. Wonka")
+    assert item.spellings[0] == "Mr. Wonka"
+

@@ -49,13 +49,14 @@ class BookConditionsService:
         if previous is not None:
             self.verify_source(book, previous)
         payload = self._snapshot_factory(book, settings_revision)
+        payload.setdefault('checks', {}).setdefault('auto_approve_glossary', False)
         from linguary.application.context_builder import snapshot_prompt_templates
         if continue_legacy:
             payload.pop('name_translation_policy', None)
             payload['prompt_templates'] = snapshot_prompt_templates(
                 source_language=book.source_language, target_language=book.target_language,
-                reader_level=payload['reader_level'], profile=payload['profile'],
-                validators_version=payload['versions']['validators'],
+                reader_level=payload.get('reader_level', 'b1'), profile=payload.get('profile', 'legacy-v1'),
+                validators_version=payload.get('versions', {}).get('validators', 1),
             )
             payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
         if reader_level is not None and reader_level not in {'a2', 'b1', 'b2'}:
@@ -93,12 +94,13 @@ class BookConditionsService:
                         or payload['profile'] == 'legacy-v1' and payload['reader_level'] == 'a2'
                         and not english_help)
         analysis_contract_version = 5 if effective_v3 and not continue_legacy else None
-        if english_help or reader_level is not None or pronunciation_help_enabled or payload['versions']['validators'] == 4:
+        validators_version = payload.get('versions', {}).get('validators', 1)
+        if english_help or reader_level is not None or pronunciation_help_enabled or validators_version == 4:
             payload['prompt_templates'] = snapshot_prompt_templates(source_language=book.source_language,
                 target_language=book.target_language, reader_level=payload['reader_level'],
-                profile=payload['profile'], english_help=english_help,
+                profile=payload.get('profile', 'legacy-v1'), english_help=english_help,
                 pronunciation_help_enabled=pronunciation_help_enabled,
-                validators_version=payload['versions']['validators'],
+                validators_version=validators_version,
                 name_translation_policy=payload.get('name_translation_policy'),
                 analysis_contract_version=analysis_contract_version)
             payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])

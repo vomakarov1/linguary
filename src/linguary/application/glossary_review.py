@@ -30,6 +30,7 @@ from linguary.application.chapter_instructions import note_respecting_glossary
 from linguary.application.errors import ApplicationError
 from linguary.domain import (
     BookStatus,
+    CanonicalDocument,
     ChapterAnalysis,
     ConceptType,
     GlossaryCandidate,
@@ -206,12 +207,16 @@ def build_glossary_review(
     min_chapters: int = 3,
     name_translation_policy: NameTranslationPolicy | None = None,
     conditions_id: str | None = None,
+    document: CanonicalDocument | None = None,
 ) -> GlossaryReview:
     """Assembles book glossary from candidates across all analyzed chapters (PRD § 11-12).
 
     A decision whose source text no longer appears in any chapter is excluded: the book
     glossary reflects what was found in its text, not an archive of stale decisions.
     """
+    if document is not None:
+        order_by_section = {s.id: i for i, s in enumerate(document.ordered_sections)}
+        analyses = sorted(analyses, key=lambda a: order_by_section.get(a.section_id, 999999))
     grouped: dict[str, list[GlossaryCandidate]] = {}
     for analysis in analyses:
         for candidate in analysis.glossary_candidates:

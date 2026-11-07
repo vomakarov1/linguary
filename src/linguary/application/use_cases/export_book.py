@@ -489,6 +489,9 @@ def _validate_content_plans(document, analyses, results, *, english_help=False, 
     blocks = tuple(document.blocks())
     texts = {block.id: block.text for block in blocks}
     for analysis in analyses:
+        section = sections[analysis.section_id]
+        if document.is_front_matter(section) or section.is_notes_only:
+            continue
         plan = analysis.content_plan
         if plan is None:
             if a2_v4 and not sections[analysis.section_id].is_notes_only:
@@ -559,7 +562,8 @@ def _validate_v3_bodies(analysis, results, texts):
             anchor.validate(texts)
     for fact in plan.context_facts:
         fact.validate(texts)
-    policy.validate_final('summary', analysis.chapter_summary, tuple(e.expression for e in analysis.before_you_read))
+    if analysis.chapter_summary.strip():
+        policy.validate_final('summary', analysis.chapter_summary, tuple(e.expression for e in analysis.before_you_read))
     for entry in analysis.before_you_read:
         policy.validate_final('before_you_read.explanation', entry.explanation, (entry.expression,))
         if policy.prepare('before_you_read.explanation', entry.explanation, (entry.expression,)) != entry.explanation:

@@ -66,6 +66,7 @@ from linguary.domain import (
     build_language_note_id,
     translation_segments,
 )
+from linguary.domain.document import is_front_matter
 from linguary.domain.learning import FragmentAssistance
 
 _XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
@@ -423,64 +424,7 @@ _FRONT_MATTER_TITLES = frozenset(
 )
 
 
-def _is_front_matter(
-    section: DocumentSection, document: CanonicalDocument | None = None
-) -> bool:
-    """Identifies introductory front matter sections (title page, table of contents, colophon).
-
-    Such sections are not story chapters: they receive no footnotes or translations,
-    do not open the book with a recap block, and do not serve as sources for "Previously in...".
-    """
-    if section.is_notes_only:
-        return False
-
-    title_norm = section.title.strip().casefold().strip("\"'«»")
-    headings = [
-        b.text.strip().casefold()
-        for b in section.blocks
-        if b.type is BlockType.HEADING and b.text.strip()
-    ]
-
-    has_chapter = (
-        any("chapter" in h or "глава" in h or "часть" in h for h in headings)
-        or "chapter" in title_norm
-        or "глава" in title_norm
-        or "часть" in title_norm
-    )
-    if has_chapter:
-        return False
-
-    stem = Path(section.source_resource_path).stem.casefold()
-    if stem.startswith("wrap") or stem in _FRONT_MATTER_FILENAMES:
-        return True
-
-    if title_norm in _FRONT_MATTER_TITLES:
-        return True
-
-    if any(h in _FRONT_MATTER_TITLES for h in headings):
-        return True
-
-    text_blocks = [
-        b
-        for b in section.blocks
-        if b.type
-        in (
-            BlockType.PARAGRAPH,
-            BlockType.POEM,
-            BlockType.QUOTE,
-            BlockType.LIST_ITEM,
-        )
-        and b.text.strip()
-    ]
-    if not text_blocks:
-        return True
-
-    if document is not None and document.metadata.title:
-        book_title = document.metadata.title.strip().casefold()
-        if (title_norm == book_title or (headings and headings[0] == book_title)) and len(text_blocks) <= 2:
-            return True
-
-    return False
+_is_front_matter = is_front_matter
 
 
 def _render_chapters(
@@ -499,7 +443,7 @@ def _render_chapters(
     previous: DocumentSection | None = None
     story_chapter_number = 1
     for section in request.document.ordered_sections:
-        is_front = _is_front_matter(section, request.document)
+        is_front = request.document.is_front_matter(section)
         number = 0 if is_front else story_chapter_number
         chapters.append(
             renderer.render(

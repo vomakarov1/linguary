@@ -67,10 +67,12 @@ from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators.mixed_script import mixed_script_word
 from linguary.application.task_runner import TaskQueue
+from linguary.domain.content_plan import ContentPlan
 from linguary.domain.errors import DomainError
 from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.domain import (
     BeforeYouReadEntry,
+    BlockTreatment,
     BookEvent,
     BookStatus,
     CanonicalDocument,
@@ -161,37 +163,80 @@ class AnalyzeChapter:
         is sent to the model in sequential fragments, and its analysis is assembled
         from their responses (PRD § 14, ALG-03).
         """
-        document, accumulated, user_decisions, nonbinding_suggestions = self._load(command)
-        section = _section_of(document, command)
-        blocks = textual_blocks(section)
-        if not blocks:
-            analysis = _empty_analysis(section, id=self._id_factory())
+        token_attempts = None
+        token_responses = None
+        if hasattr(self._llm_client, "_attempts"):
+            token_attempts = self._llm_client._attempts.set(())
+        if hasattr(self._llm_client, "_responses"):
+            token_responses = self._llm_client._responses.set(())
+        try:
+            document, accumulated, user_decisions, nonbinding_suggestions = self._load(command)
+            section = _section_of(document, command)
+            blocks = textual_blocks(section)
+            if not blocks:
+                analysis = _empty_analysis(section, id=self._id_factory())
+                self._save(command.book_id, analysis, task_id=command.task_id)
+                return AnalyzeChapterResult(analysis=analysis)
+            if document.is_front_matter(section):
+                analysis = self._front_matter_analysis(section, blocks, id=self._id_factory())
+                self._save(command.book_id, analysis, task_id=command.task_id)
+                return AnalyzeChapterResult(analysis=analysis)
+            fragments = plan_fragments(blocks, max_blocks=self._max_fragment_blocks)
+            if len(fragments) == 1:
+                analysis, attempts, usage = await self._analyze_whole_chapter(
+                    document=document,
+                    section=section,
+                    blocks=blocks,
+                    accumulated=accumulated,
+                    user_decisions=user_decisions,
+                    nonbinding_suggestions=nonbinding_suggestions,
+                    command=command,
+                )
+            else:
+                analysis, attempts, usage = await self._analyze_by_fragments(
+                    document=document,
+                    section=section,
+                    blocks=blocks,
+                    fragments=fragments,
+                    accumulated=accumulated,
+                    user_decisions=user_decisions,
+                    nonbinding_suggestions=nonbinding_suggestions,
+                    command=command,
+                )
             self._save(command.book_id, analysis, task_id=command.task_id)
-            return AnalyzeChapterResult(analysis=analysis)
-        fragments = plan_fragments(blocks, max_blocks=self._max_fragment_blocks)
-        if len(fragments) == 1:
-            analysis, attempts, usage = await self._analyze_whole_chapter(
-                document=document,
-                section=section,
-                blocks=blocks,
-                accumulated=accumulated,
-                user_decisions=user_decisions,
-                nonbinding_suggestions=nonbinding_suggestions,
-                command=command,
-            )
-        else:
-            analysis, attempts, usage = await self._analyze_by_fragments(
-                document=document,
-                section=section,
-                blocks=blocks,
-                fragments=fragments,
-                accumulated=accumulated,
-                user_decisions=user_decisions,
-                nonbinding_suggestions=nonbinding_suggestions,
-                command=command,
-            )
-        self._save(command.book_id, analysis, task_id=command.task_id)
-        return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
+            return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
+        finally:
+            if token_attempts is not None:
+                self._llm_client._attempts.reset(token_attempts)
+            if token_responses is not None:
+                self._llm_client._responses.reset(token_responses)
+
+    def _front_matter_analysis(
+        self, section: DocumentSection, blocks: Sequence[DocumentBlock], *, id: str
+    ) -> ChapterAnalysis:
+        profile = getattr(self._context_builder, "_content_plan_profile", "legacy-v1")
+        reader_level = getattr(self._context_builder, "_reader_level", "")
+        plan = None
+        if profile == "content-plan-v3":
+            plan = ContentPlan(version=3, profile="content-plan-v3", difficulties=(), before_you_read_evidence=(), context_facts=())
+        elif profile == "content-plan-v2":
+            plan = ContentPlan(version=2, profile="content-plan-v2", difficulties=(), before_you_read_evidence=(), context_facts=())
+        elif reader_level == "a2":
+            plan = ContentPlan(version=3, profile="content-plan-v3", difficulties=(), before_you_read_evidence=(), context_facts=())
+        return ChapterAnalysis.create(
+            id=id,
+            section_id=section.id,
+            treatment_plan=TreatmentPlan.of_treatments(
+                section.id,
+                ((b.id, BlockTreatment.READ_AS_IS) for b in blocks),
+            ),
+            translation_instructions="",
+            chapter_summary="",
+            expected_block_ids=[block.id for block in blocks],
+            glossary_candidates=(),
+            before_you_read=(),
+            content_plan=plan,
+        )
 
     async def _analyze_whole_chapter(
         self,
@@ -536,8 +581,19 @@ class AnalyzeChapter:
             transaction.analyses.save(book_id, analysis)
 
 
+def _record_success_in_tx(transaction: UnitOfWork, task_id: str | None) -> None:
+    if task_id is None:
+        return
+    tasks_repo = getattr(transaction, "tasks", None)
+    if tasks_repo is None:
+        return
+    task = tasks_repo.get(task_id)
+    if task is not None and task.status is TaskStatus.RUNNING:
+        tasks_repo.save(task.succeed())
+
+
 class ChapterAnalysisSequence:
-    """Enqueues chapter analysis tasks strictly one at a time, in reading order (PRD § 13, § 25)."""
+    """Enqueues chapter analysis tasks for all unanalyzed chapters in parallel (P1.T2)."""
 
     def __init__(
         self,
@@ -551,30 +607,25 @@ class ChapterAnalysisSequence:
         self._analyze_chapter = analyze_chapter
 
     async def start(self, book_id: str) -> ProcessingTask | None:
-        """Starts book analysis: transitions book to `ANALYZING` and enqueues the first chapter.
+        """Starts book analysis: transitions book to `ANALYZING` and enqueues all chapters.
 
         Returns `None` if there is nothing left to analyze: a book without chapters or one
-        already fully analyzed. Re-running after application restart resumes from the first
-        unanalyzed chapter.
+        already fully analyzed. Re-running after application restart resumes from unanalyzed chapters.
 
-        If analysis of this chapter previously failed with a retryable error
-        (e.g., provider rejected API key, and user fixed it), restarting returns its task
-        to the queue: otherwise the book would remain in `ANALYZING` without any active task.
-        A task with a permanent error is left as is.
+        If analysis of chapters previously failed with a retryable error, restarting
+        returns tasks to the queue. Returns the first task to preserve caller expectations.
         """
         self._begin_analysis(book_id)
-        task = await self._enqueue_next(book_id)
-        if task is not None and task.status is TaskStatus.FAILED and task.is_retryable:
-            task = task.retry()
-            await self._queue.save(task)
-        return task
+        tasks = await self._enqueue_all(book_id)
+        for i, task in enumerate(tasks):
+            if task is not None and task.status is TaskStatus.FAILED and task.is_retryable:
+                task = task.retry()
+                await self._queue.save(task)
+                tasks[i] = task
+        return tasks[0] if tasks else None
 
     async def run_task(self, task: ProcessingTask) -> None:
-        """Handler for `ANALYZE_CHAPTER` task for the local runner (ALG-02).
-
-        The next chapter is enqueued only after saving the current chapter's analysis:
-        this ensures the set of accumulated candidates is deterministic and independent of concurrency.
-        """
+        """Handler for `ANALYZE_CHAPTER` task for the local runner (ALG-02)."""
         if task.task_type is not TaskType.ANALYZE_CHAPTER:
             raise AnalyzeChapterError(
                 f"задача {task.id} типа {task.task_type} не является анализом главы"
@@ -586,24 +637,28 @@ class ChapterAnalysisSequence:
                 task_id=task.id,
             )
         )
-        await self._enqueue_next(task.book_id)
+        self._try_complete_analysis(task.book_id, finished_task_id=task.id)
 
-    async def _enqueue_next(self, book_id: str) -> ProcessingTask | None:
-        """Enqueues the next unanalyzed chapter task or completes analysis."""
-        section_id = self._next_section_id(book_id)
-        if section_id is None:
-            self._complete_analysis(book_id)
-            return None
-        return await self._queue.enqueue(
-            TaskIdentity(
-                book_id=book_id,
-                task_type=TaskType.ANALYZE_CHAPTER,
-                scope_id=section_id,
+    async def _enqueue_all(self, book_id: str) -> list[ProcessingTask]:
+        """Enqueues tasks for all unanalyzed chapters in parallel."""
+        section_ids = self._unanalyzed_section_ids(book_id)
+        if not section_ids:
+            self._try_complete_analysis(book_id)
+            return []
+        tasks = []
+        for section_id in section_ids:
+            task = await self._queue.enqueue(
+                TaskIdentity(
+                    book_id=book_id,
+                    task_type=TaskType.ANALYZE_CHAPTER,
+                    scope_id=section_id,
+                )
             )
-        )
+            tasks.append(task)
+        return tasks
 
-    def _next_section_id(self, book_id: str) -> str | None:
-        """First chapter in reading order for which no analysis exists yet."""
+    def _unanalyzed_section_ids(self, book_id: str) -> list[str]:
+        """Chapters in reading order for which no analysis exists yet."""
         with self._unit_of_work.transaction() as transaction:
             document = transaction.documents.get(book_id)
             if document is None:
@@ -612,22 +667,24 @@ class ChapterAnalysisSequence:
                 analysis.section_id
                 for analysis in transaction.analyses.list_for_book(book_id)
             }
-        return next(
-            (
-                section.id
-                for section in document.ordered_sections
-                if section.id not in analyzed
-            ),
-            None,
-        )
+        return [
+            section.id
+            for section in document.ordered_sections
+            if section.id not in analyzed
+        ]
+
+    def _next_section_id(self, book_id: str) -> str | None:
+        """First chapter in reading order for which no analysis exists yet."""
+        ids = self._unanalyzed_section_ids(book_id)
+        return ids[0] if ids else None
+
+    async def _enqueue_next(self, book_id: str) -> ProcessingTask | None:
+        """Enqueues the next unanalyzed chapter task or completes analysis (legacy alias)."""
+        tasks = await self._enqueue_all(book_id)
+        return tasks[0] if tasks else None
 
     def _begin_analysis(self, book_id: str) -> None:
-        """Transitions book to `ANALYZING` (ALG-06).
-
-        Continuing an already running analysis does not change state. A book that
-        has not yet reached analysis or has already progressed past it is rejected by domain:
-        transitions outside table ALG-06 are prohibited, returning `409` in Web UI.
-        """
+        """Transitions book to `ANALYZING` (ALG-06)."""
         with self._unit_of_work.transaction() as transaction:
             book = self._book(transaction, book_id)
             if book.status is BookStatus.ANALYZING:
@@ -639,20 +696,128 @@ class ChapterAnalysisSequence:
             )
 
     def _complete_analysis(self, book_id: str) -> None:
-        """Transitions analyzed book to glossary review (ALG-06).
+        """Transitions analyzed book to glossary review (ALG-06)."""
+        self._try_complete_analysis(book_id)
 
-        A book that has already completed glossary review remains unchanged: re-analyzing
-        an individual chapter does not rewind it backward in the process.
-        """
+    def _try_complete_analysis(self, book_id: str, *, finished_task_id: str | None = None) -> None:
+        """Atomically checks if all chapters are analyzed and performs auto-approve if configured."""
         with self._unit_of_work.transaction() as transaction:
+            _record_success_in_tx(transaction, finished_task_id)
             book = self._book(transaction, book_id)
             if book.status is not BookStatus.ANALYZING:
                 return
-            transaction.books.save(
-                _with_status(
-                    book, apply_book_event(book.status, BookEvent.ANALYSIS_COMPLETED)
-                )
+
+            tasks_repo = getattr(transaction, "tasks", None)
+            if tasks_repo is not None:
+                unfinished = [
+                    t for t in tasks_repo.list_for_book(book_id)
+                    if t.task_type is TaskType.ANALYZE_CHAPTER
+                    and t.id != finished_task_id
+                    and t.status not in {TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED}
+                ]
+                if unfinished:
+                    return
+
+            document = transaction.documents.get(book_id)
+            if document is not None:
+                analyzed = {
+                    analysis.section_id
+                    for analysis in transaction.analyses.list_for_book(book_id)
+                }
+                if any(section.id not in analyzed for section in document.ordered_sections):
+                    return
+
+            book = _with_status(
+                book, apply_book_event(book.status, BookEvent.ANALYSIS_COMPLETED)
             )
+            transaction.books.save(book)
+
+            work_repo = getattr(transaction, "work", None)
+            conditions = work_repo.latest_conditions(book_id) if work_repo is not None else None
+            auto_approve = False
+            confidence_threshold = 0.7
+            min_mentions = 5
+            min_chapters = 3
+            policy = None
+
+            if conditions is not None:
+                checks = conditions.payload.get("checks", {})
+                auto_approve = checks.get("auto_approve_glossary", False)
+                confidence_threshold = checks.get("glossary_confidence_threshold", 0.7)
+                min_mentions = checks.get("glossary_review_min_mentions", 5)
+                min_chapters = checks.get("glossary_review_min_chapters", 3)
+                if "name_translation_policy" in conditions.payload:
+                    from linguary.domain.book_conditions import thaw
+                    from linguary.domain.name_translation import NameTranslationPolicy
+                    try:
+                        policy = NameTranslationPolicy(**thaw(conditions.payload["name_translation_policy"]))
+                    except (TypeError, ValueError):
+                        policy = None
+
+            if auto_approve:
+                from linguary.application.glossary_review import build_glossary_review
+                from linguary.application.mention_counter import mention_counter
+                from linguary.domain import TermConcept, TermStatus, TermVariant
+
+                review = build_glossary_review(
+                    book_id=book_id,
+                    analyses=transaction.analyses.list_for_book(book_id),
+                    confidence_threshold=confidence_threshold,
+                    decisions=transaction.glossary.list_for_book(book_id),
+                    count_mentions=mention_counter(document) if document else None,
+                    min_mentions=min_mentions,
+                    min_chapters=min_chapters,
+                    name_translation_policy=policy,
+                    conditions_id=conditions.id if conditions is not None else None,
+                    document=document,
+                )
+
+                for item in review.items:
+                    if (
+                        item.decision is None
+                        and item.suggested_translation.strip()
+                        and item.confidence >= confidence_threshold
+                        and not item.model_flagged_review
+                        and not item.has_translation_conflict
+                    ):
+                        concept = TermConcept(
+                            id=item.concept_id,
+                            book_id=book.id,
+                            type=item.type,
+                            canonical_source_text=item.source_text,
+                            status=TermStatus.APPROVED,
+                            note=item.suggested_note,
+                            variants=(
+                                TermVariant(
+                                    concept_id=item.concept_id,
+                                    language=book.target_language,
+                                    text=item.suggested_translation,
+                                    status=TermStatus.APPROVED,
+                                ),
+                            ),
+                        )
+                        transaction.glossary.save(concept)
+                        for superseded in item.superseded_decisions:
+                            transaction.glossary.delete(superseded.id)
+
+                # Re-check if review is complete
+                review = build_glossary_review(
+                    book_id=book_id,
+                    analyses=transaction.analyses.list_for_book(book_id),
+                    confidence_threshold=confidence_threshold,
+                    decisions=transaction.glossary.list_for_book(book_id),
+                    count_mentions=mention_counter(document) if document else None,
+                    min_mentions=min_mentions,
+                    min_chapters=min_chapters,
+                    name_translation_policy=policy,
+                    conditions_id=conditions.id if conditions is not None else None,
+                    document=document,
+                )
+                if review.is_complete:
+                    book = _with_status(
+                        book, apply_book_event(book.status, BookEvent.GLOSSARY_REVIEW_COMPLETED)
+                    )
+                    transaction.books.save(book)
 
     def _book(self, transaction: UnitOfWork, book_id: str) -> BookRecord:
         """Book record in open transaction."""

@@ -28,6 +28,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from uuid import uuid4
 
 from linguary.application.block_processing import (
@@ -40,7 +41,7 @@ from linguary.application.block_processing import (
     total_usage,
 )
 from linguary.application.context_builder import ContextBuilder, textual_blocks
-from linguary.application.ports.llm import LLMClient
+from linguary.application.ports.llm import LLMClient, LLMResponse
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.application.retry_policy import RetryPolicy
@@ -54,6 +55,8 @@ from linguary.application.translation_units import (
 )
 from linguary.application.validators import TranslationResultValidator
 from linguary.domain import (
+    BlockProcessingResult,
+    BlockTreatment,
     CanonicalDocument,
     ChapterAnalysis,
     DocumentSection,
@@ -252,6 +255,68 @@ class ProcessChapter:
         recovery: tuple[str, str],
     ) -> ProcessChapterResult:
         """One ALG-04 cycle: context assembly, model call, validation, atomic save."""
+        all_read_as_is = all(
+            work.analysis.treatment_plan.treatment_for(b_id) is BlockTreatment.READ_AS_IS
+            for b_id in unit.block_ids
+        )
+        plan = work.analysis.content_plan
+        unit_block_ids = set(unit.block_ids)
+        has_difficulties = bool(plan and any(
+            d.owner_block_id in unit_block_ids
+            or any(a.block_id in unit_block_ids for a in d.anchors)
+            for d in plan.difficulties
+        ))
+        if all_read_as_is and not has_difficulties:
+            results = tuple(
+                BlockProcessingResult(
+                    block_id=b_id,
+                    treatment=BlockTreatment.READ_AS_IS,
+                    translated_text=None,
+                    glossary_hints=(),
+                    language_notes=(),
+                )
+                for b_id in unit.block_ids
+            )
+            with self._unit_of_work.transaction() as transaction:
+                root = transaction.work.get_root(recovery[0])
+                if root is None:
+                    raise RecoveryError('conditions_unavailable', recovery[0])
+                conditions = transaction.work.get_conditions(root.conditions_id)
+                if conditions is None:
+                    raise RecoveryError('conditions_unavailable', recovery[0])
+                physical_context = transaction.work.begin_recovery_attempt(
+                    *recovery,
+                    task_id=work.task_id,
+                    run_id=work.run.id,
+                    stage=LLMCallStage.TRANSLATION_UNIT.value,
+                    assigned_model=conditions.payload['models']['processing'],
+                    prompt_hash=sha256(b"read_as_is").hexdigest(),
+                    policy_version=root.policy_version,
+                )
+                if physical_context is None:
+                    raise RecoveryError('limit', recovery[0])
+                transaction.work.transition_attempt(physical_context.attempt_id, 'sent', expected_state='created')
+                transaction.work.transition_attempt(
+                    physical_context.attempt_id,
+                    'validated',
+                    expected_state='sent',
+                    outcome={'schema_version': 1, 'provider': 'local', 'model': 'local', 'call_id': None},
+                )
+            response = LLMResponse(raw_content="", payload=None, provider="local", model="local", call_context=physical_context, call_id=None)
+            self._call._validated_response.set(response)
+            with self._unit_of_work.transaction() as transaction:
+                expected = {b_id: transaction.work.get_binding('result', f'{work.run.id}:{b_id}') for b_id in unit.block_ids}
+            self._call._expected_bindings.set(expected)
+            saved = self._call.save(book_id=work.document.id, run_id=work.run.id, results=results)
+            return replace(
+                result,
+                processed_units=result.processed_units + 1,
+                saved_blocks=result.saved_blocks + (len(results) if saved else 0),
+                attempts=result.attempts,
+                usage=result.usage,
+                discarded=not saved,
+            )
+
         with self._unit_of_work.transaction() as transaction:
             root = transaction.work.get_root(recovery[0])
         recovery_child = tuple(unit.block_ids) != tuple(root.manifest['ordered_blocks'])

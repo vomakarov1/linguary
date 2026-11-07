@@ -7,6 +7,7 @@ from analysis_fakes import (
     BOOK_ID,
     CONFIDENCE_THRESHOLD,
     TARGET_LANGUAGE,
+    FakeTaskQueue,
     FakeUnitOfWork,
     analysis_reply,
     make_analysis_block,
@@ -14,19 +15,24 @@ from analysis_fakes import (
     make_analysis_document,
     make_analysis_section,
     make_analyze_chapter,
+    make_book_record,
     make_chapter_analysis,
 )
 
 from linguary.adapters.llm import FakeLLMClient
 from linguary.application.context_builder import ContextBuilder
 from linguary.application.ports.llm import LLMTransportError
+from types import SimpleNamespace
+
 from linguary.application.use_cases.analyze_chapter import (
     AnalyzeChapterCommand,
     AnalyzeChapterError,
+    ChapterAnalysisSequence,
 )
 from linguary.domain import (
     BlockTreatment,
     BlockType,
+    BookStatus,
     ConceptType,
     CoverageStatus,
     TermConcept,
@@ -674,3 +680,226 @@ async def test_unknown_section_is_rejected() -> None:
 
     with pytest.raises(AnalyzeChapterError):
         await scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-9"))
+
+
+async def test_front_matter_section_analyzed_locally_without_llm() -> None:
+    """Front matter sections receive local analysis with READ_AS_IS without invoking LLM (P1.T1, AC-003, AC-004)."""
+    front_sec = make_analysis_section(
+        section_id="section-title",
+        title="Title Page",
+        order=0,
+        texts=("Pride and Prejudice", "Jane Austen"),
+    )
+    story_sec = make_analysis_section(
+        section_id="section-ch1",
+        title="Chapter 1",
+        order=1,
+        texts=("It is a truth universally acknowledged...",),
+    )
+    doc = make_analysis_document((front_sec, story_sec))
+    unit_of_work = FakeUnitOfWork(document=doc)
+    client = FakeLLMClient.always(analysis_reply())
+    scenario, _ = make_analyze_chapter(
+        unit_of_work, client,
+    )
+    # Inject context_builder with content-plan-v3
+    scenario._context_builder = ContextBuilder(content_plan_profile="content-plan-v3")
+
+    result = await scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-title"))
+
+    assert client.call_count == 0
+    assert result.analysis is not None
+    assert result.analysis.chapter_summary == ""
+    assert result.analysis.before_you_read == ()
+    assert result.analysis.glossary_candidates == ()
+    assert result.analysis.translation_instructions == ""
+    for item in result.analysis.treatment_plan.items:
+        assert item.treatment is BlockTreatment.READ_AS_IS
+    assert result.analysis.content_plan is not None
+    assert result.analysis.content_plan.profile == "content-plan-v3"
+    assert result.analysis.content_plan.difficulties == ()
+
+
+async def test_chapter_analysis_sequence_enqueues_all_chapters_in_parallel() -> None:
+    """Starting sequence queues tasks for all unanalyzed chapters at once (P1.T2, AC-001)."""
+    front_sec = make_analysis_section(section_id="section-title", title="Title Page", order=0, texts=("Title",))
+    ch1 = make_analysis_section(section_id="section-1", title="Chapter 1", order=1, texts=("Ch 1 text",))
+    ch2 = make_analysis_section(section_id="section-2", title="Chapter 2", order=2, texts=("Ch 2 text",))
+    doc = make_analysis_document((front_sec, ch1, ch2))
+    unit_of_work = FakeUnitOfWork(document=doc, book=make_book_record(BookStatus.IMPORTED))
+    queue = FakeTaskQueue()
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+    )
+
+    first_task = await sequence.start(BOOK_ID)
+
+    assert first_task is not None
+    assert first_task.scope_id == "section-title"
+    assert len(queue.tasks) == 3
+    assert [t.scope_id for t in queue.tasks] == ["section-title", "section-1", "section-2"]
+    book = unit_of_work.books.get(BOOK_ID)
+    assert book is not None and book.status is BookStatus.ANALYZING
+
+
+async def test_chapter_analysis_sequence_auto_approve_glossary_success() -> None:
+    """Clean glossary candidates are auto-approved, transitioning book to READY_TO_PROCESS (P1.T2)."""
+    ch1 = make_analysis_section(section_id="section-1", title="Chapter 1", order=0, texts=("Ch 1",))
+    ch2 = make_analysis_section(section_id="section-2", title="Chapter 2", order=1, texts=("Ch 2",))
+    doc = make_analysis_document((ch1, ch2))
+    unit_of_work = FakeUnitOfWork(document=doc, book=make_book_record(BookStatus.ANALYZING))
+    conditions = SimpleNamespace(
+        id="cond-1",
+        payload={
+            "checks": {
+                "auto_approve_glossary": True,
+                "glossary_confidence_threshold": 0.7,
+                "glossary_review_min_mentions": 1,
+                "glossary_review_min_chapters": 1,
+            }
+        },
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    queue = FakeTaskQueue()
+    reply = analysis_reply(
+        aliases=("b1",),
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    client = FakeLLMClient.always(reply)
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+    )
+
+    tasks = await sequence._enqueue_all(BOOK_ID)
+    assert len(tasks) == 2
+    await sequence.run_task(tasks[0].start())
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.ANALYZING
+
+    await sequence.run_task(tasks[1].start())
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
+    glossary_items = unit_of_work.glossary.list_for_book(BOOK_ID)
+    assert len(glossary_items) == 1
+    assert glossary_items[0].canonical_source_text == "Duskmere"
+    assert glossary_items[0].status == TermStatus.APPROVED
+
+
+async def test_chapter_analysis_sequence_auto_approve_glossary_skips_conflicts() -> None:
+    """Candidates with conflicting translations remain unapproved in GLOSSARY_REVIEW (P1.T2)."""
+    ch1 = make_analysis_section(section_id="section-1", title="Chapter 1", order=0, texts=("Ch 1",))
+    ch2 = make_analysis_section(section_id="section-2", title="Chapter 2", order=1, texts=("Ch 2",))
+    doc = make_analysis_document((ch1, ch2))
+    unit_of_work = FakeUnitOfWork(document=doc, book=make_book_record(BookStatus.ANALYZING))
+    conditions = SimpleNamespace(
+        id="cond-1",
+        payload={
+            "checks": {
+                "auto_approve_glossary": True,
+                "glossary_confidence_threshold": 0.7,
+                "glossary_review_min_mentions": 1,
+                "glossary_review_min_chapters": 1,
+            }
+        },
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    queue = FakeTaskQueue()
+    reply1 = analysis_reply(
+        aliases=("b1",),
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    reply2 = analysis_reply(
+        aliases=("b1",),
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Сумеречье",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    client = FakeLLMClient.replying((reply1, reply2))
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+    )
+
+    tasks = await sequence._enqueue_all(BOOK_ID)
+    await sequence.run_task(tasks[0].start())
+    await sequence.run_task(tasks[1].start())
+
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.GLOSSARY_REVIEW
+    glossary_items = unit_of_work.glossary.list_for_book(BOOK_ID)
+    assert len(glossary_items) == 0
+
+
+async def test_chapter_analysis_sequence_auto_approve_disabled_leaves_in_glossary_review() -> None:
+    """When auto_approve_glossary is disabled, book remains in GLOSSARY_REVIEW (P1.T2)."""
+    ch1 = make_analysis_section(section_id="section-1", title="Chapter 1", order=0, texts=("Ch 1",))
+    doc = make_analysis_document((ch1,))
+    unit_of_work = FakeUnitOfWork(document=doc, book=make_book_record(BookStatus.ANALYZING))
+    conditions = SimpleNamespace(
+        id="cond-1",
+        payload={
+            "checks": {
+                "auto_approve_glossary": False,
+            }
+        },
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    queue = FakeTaskQueue()
+    reply = analysis_reply(
+        aliases=("b1",),
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    client = FakeLLMClient.always(reply)
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+    )
+
+    tasks = await sequence._enqueue_all(BOOK_ID)
+    await sequence.run_task(tasks[0].start())
+
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.GLOSSARY_REVIEW
+    assert len(unit_of_work.glossary.list_for_book(BOOK_ID)) == 0
+

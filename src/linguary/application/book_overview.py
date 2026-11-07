@@ -549,14 +549,16 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
     if document is not None:
         for number, section in enumerate(document.ordered_sections, start=1):
             analysis = analyses_by_section.get(section.id)
+            is_front = document.is_front_matter(section)
+            is_notes_or_front = section.is_notes_only or is_front
             coverage, unresolved_count = _reading_support_coverage(analysis, section, results,
                 english_help=reading_support['english_help'])
             chapters.append(ResultChapterSummary(
                 section_id=section.id,
                 chapter_number=number,
                 title=section.title,
-                is_notes=section.is_notes_only,
-                before_you_read=_result_before_you_read(analysis) if not section.is_notes_only else (),
+                is_notes=is_notes_or_front,
+                before_you_read=_result_before_you_read(analysis) if not is_notes_or_front else (),
                 support_coverage=coverage,
                 unresolved_count=unresolved_count,
                 blocks=tuple(
