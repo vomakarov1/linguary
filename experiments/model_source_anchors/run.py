@@ -43,8 +43,9 @@ source quote that supports the explanation. Copy the quote exactly, including pu
 Do not invent context or quote text that is absent from the passage."""
 
 OFFSET_INSTRUCTIONS = """Return the source anchor with quote, start, and end. start and end
-are zero-based Unicode code-point indexes in the exact passage text supplied by the user;
-end is excluded, and quote must equal passage[start:end]."""
+are zero-based Unicode code-point indexes in the exact source-block text between the delimiters;
+exclude the block label and delimiters themselves. end is excluded, and quote must equal the
+source-block text sliced as [start:end]."""
 
 QUOTE_ONLY_INSTRUCTIONS = """Return the source anchor with quote only. Do not return any
 position, offset, block identifier, or other anchor field."""
@@ -419,6 +420,12 @@ def evaluation_row(record: dict[str, Any], case: dict[str, Any]) -> dict[str, st
         and case["text"][start:end] == quote
     )
     reference_match = any(item.get("text") == quote for item in case.get("reference_quotes", []))
+    if record.get("variant") == "with_offsets" and offsets_match_quote:
+        resolved_start, resolved_end = start, end
+    elif record.get("variant") == "quote_only" and len(positions) == 1:
+        resolved_start, resolved_end = positions[0], positions[0] + len(quote)
+    else:
+        resolved_start = resolved_end = ""
     return {
         "call_id": str(record.get("call_id", "")),
         "case_id": str(record.get("case_id", "")),
@@ -433,6 +440,8 @@ def evaluation_row(record: dict[str, Any], case: dict[str, Any]) -> dict[str, st
         "start": "" if start is None else str(start),
         "end": "" if end is None else str(end),
         "offsets_match_quote": "" if record.get("variant") == "quote_only" else str(offsets_match_quote).lower(),
+        "resolved_start": str(resolved_start) if resolved_start != "" else "",
+        "resolved_end": str(resolved_end) if resolved_end != "" else "",
         "manual_fact_supported": "",
         "manual_quote_supports_aid": "",
         "manual_reason": "",
@@ -453,7 +462,7 @@ def build_evaluation_csv(
     fields = [
         "call_id", "case_id", "variant", "replicate", "call_status", "expected_fact",
         "reading_aid", "quote", "quote_exact_occurrences", "reference_quote_match", "start",
-        "end", "offsets_match_quote", *JUDGMENT_FIELDS,
+        "end", "offsets_match_quote", "resolved_start", "resolved_end", *JUDGMENT_FIELDS,
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
