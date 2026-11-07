@@ -172,7 +172,7 @@ class RetryDecision:
             return replace(request, attempt=request.attempt + 1)
         return replace(
             request,
-            instructions=f"{request.instructions}\n\n{self.repair_instruction}",
+            repair_instructions=(*request.repair_instructions, self.repair_instruction),
             attempt=request.attempt + 1,
         )
 

@@ -19,9 +19,9 @@ from analysis_fakes import (
     make_chapter_analysis,
 )
 
-from linguary.adapters.llm import FakeLLMClient
+from linguary.adapters.llm import FakeLLMClient, FakeReply
 from linguary.application.context_builder import ContextBuilder
-from linguary.application.ports.llm import LLMTransportError
+from linguary.application.ports.llm import LLMResponseFormatError, LLMTransportError
 from types import SimpleNamespace
 
 from linguary.application.use_cases.analyze_chapter import (
@@ -160,7 +160,7 @@ async def test_request_carries_previous_chapter_candidates_only() -> None:
         section_id="section-1", title="Chapter 1", order=0, texts=("First chapter text.",)
     )
     second = make_analysis_section(
-        section_id="section-2", title="Chapter 2", order=1, texts=("Second chapter text.",)
+        section_id="section-2", title="Chapter 2", order=1, texts=("Second chapter text with Mr. Bennet.",)
     )
     unit_of_work = FakeUnitOfWork(document=make_analysis_document((first, second)))
     client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
@@ -172,7 +172,7 @@ async def test_request_carries_previous_chapter_candidates_only() -> None:
     second_request = client.requests[1].input_text
     assert "Mr. Bennet" in second_request
     assert "First chapter text." not in second_request
-    assert "Second chapter text." in second_request
+    assert "Second chapter text with Mr. Bennet." in second_request
 
 
 async def test_repeated_analysis_skips_candidates_of_following_chapters() -> None:
@@ -182,7 +182,7 @@ async def test_repeated_analysis_skips_candidates_of_following_chapters() -> Non
             section_id=f"section-{number}",
             title=f"Chapter {number}",
             order=number - 1,
-            texts=(f"Chapter {number} text.",),
+            texts=(f"Chapter {number} text with Mr. Bennet, Selene Row, gatehouse, and Lady Grey.",),
         )
         for number in (1, 2, 3)
     )
@@ -248,7 +248,7 @@ async def test_user_decision_outranks_model_candidate_in_next_chapter(
             section_id=f"section-{number}",
             title=f"Chapter {number}",
             order=number - 1,
-            texts=(f"Chapter {number} text.",),
+            texts=(f"Chapter {number} text with Duskmere, the marsh gate, and boardwalk.",),
         )
         for number in (1, 2)
     )
@@ -315,7 +315,8 @@ def _decision(
 
 
 async def test_first_request_after_reanalysis_contains_saved_decisions() -> None:
-    unit_of_work = two_block_book()
+    section = make_analysis_section(texts=("First paragraph with Duskmere.", "Second paragraph with Ravenwood."))
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document((section,)))
     unit_of_work.glossary.save(_decision('approved-1', 'Duskmere', 'Даскмер', TermStatus.APPROVED))
     unit_of_work.glossary.save(_decision('suggested-1', 'Ravenwood', 'Рейвенвуд', TermStatus.SUGGESTED))
     client = FakeLLMClient.always(analysis_reply())
@@ -337,7 +338,7 @@ async def test_first_request_after_reanalysis_contains_saved_decisions() -> None
 async def test_suggested_and_model_candidates_are_not_accepted() -> None:
     sections = (
         make_analysis_section(section_id='section-1', order=0, texts=('First chapter.',)),
-        make_analysis_section(section_id='section-2', order=1, texts=('Second chapter.',)),
+        make_analysis_section(section_id='section-2', order=1, texts=('Second chapter with Ravenwood and Stonebridge.',)),
     )
     unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
     unit_of_work.analyses.save(BOOK_ID, make_chapter_analysis(section_id='section-1', candidates=(
@@ -370,7 +371,7 @@ async def test_repeated_analysis_sees_user_decisions_of_whole_book() -> None:
             section_id=f"section-{number}",
             title=f"Chapter {number}",
             order=number - 1,
-            texts=(f"Chapter {number} text.",),
+            texts=(f"Chapter {number} text with Mr. Bennet, Selene Row, gatehouse, and Lady Grey.",),
         )
         for number in (1, 2, 3)
     )
@@ -431,7 +432,7 @@ async def test_glossary_note_in_analysis_context_drops_rejected_variant() -> Non
             section_id=f"section-{number}",
             title=f"Chapter {number}",
             order=number - 1,
-            texts=(f"Chapter {number} text.",),
+            texts=(f"Chapter {number} text with Duskmere, the marsh gate, and boardwalk.",),
         )
         for number in (1, 2)
     )
@@ -532,9 +533,8 @@ async def test_missing_block_in_plan_is_retried_with_repair_instruction() -> Non
 
     assert result.attempts == 2
     assert client.call_count == 2
-    repaired = client.requests[1].instructions
-    assert repaired.startswith(client.requests[0].instructions)
-    assert "b2" in repaired
+    assert client.requests[1].instructions == client.requests[0].instructions
+    assert any("b2" in instr for instr in client.requests[1].repair_instructions)
     assert result.analysis.coverage_status is CoverageStatus.COMPLETE
 
 
@@ -586,7 +586,8 @@ async def test_unknown_block_in_plan_is_rejected() -> None:
     result = await scenario(command())
 
     assert result.attempts == 2
-    assert "b3" in client.requests[1].instructions
+    assert client.requests[1].instructions == client.requests[0].instructions
+    assert any("b3" in instr for instr in client.requests[1].repair_instructions)
 
 
 async def test_duplicated_block_in_plan_is_rejected() -> None:
@@ -625,7 +626,8 @@ async def test_mixed_script_glossary_variant_is_rejected() -> None:
     result = await scenario(command())
 
     assert result.attempts == 2
-    assert "PГЛАФ" in client.requests[1].instructions
+    assert client.requests[1].instructions == client.requests[0].instructions
+    assert any("PГЛАФ" in instr for instr in client.requests[1].repair_instructions)
 
 
 async def test_transient_error_is_retried_after_backoff() -> None:
@@ -902,4 +904,45 @@ async def test_chapter_analysis_sequence_auto_approve_disabled_leaves_in_glossar
 
     assert unit_of_work.books.get(BOOK_ID).status is BookStatus.GLOSSARY_REVIEW
     assert len(unit_of_work.glossary.list_for_book(BOOK_ID)) == 0
+
+
+async def test_truncated_chapter_analysis_splits_blocks_dynamically() -> None:
+    """When analysis response is truncated, blocks are dynamically split into fragments (AC-005)."""
+    section = make_analysis_section(
+        texts=("Paragraph 1.", "Paragraph 2.", "Paragraph 3.", "Paragraph 4.")
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document((section,)))
+    client = FakeLLMClient.replying(
+        (
+            FakeReply(content="truncated json...", truncated=True),
+            analysis_reply(aliases=("b1", "b2")),
+            FakeReply(content="truncated json fragment...", truncated=True),
+            analysis_reply(aliases=("b1",)),
+            analysis_reply(aliases=("b1",)),
+        )
+    )
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    result = await scenario(command())
+
+    assert result.analysis.coverage_status is CoverageStatus.COMPLETE
+    assert len(result.analysis.treatment_plan.block_ids) == 4
+    stored = unit_of_work.analyses.get_for_section(BOOK_ID, "section-1")
+    assert stored is not None
+    assert stored.coverage_status is CoverageStatus.COMPLETE
+    assert len(stored.treatment_plan.block_ids) == 4
+
+
+async def test_truncated_single_block_analysis_raises_give_up() -> None:
+    """When a single-block fragment is truncated, splitting is impossible and an error is raised (AC-005)."""
+    section = make_analysis_section(texts=("Single paragraph.",))
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document((section,)))
+    client = FakeLLMClient.always(FakeReply(content="truncated json...", truncated=True))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    with pytest.raises(LLMResponseFormatError) as exc_info:
+        await scenario(command())
+
+    assert exc_info.value.truncated is True
+
 

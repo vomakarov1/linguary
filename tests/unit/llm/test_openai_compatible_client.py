@@ -822,3 +822,43 @@ async def test_pronunciation_clients_share_item_isolation(version):
         assert schema['$defs']['PronunciationCandidateSchema']['additionalProperties'] is False
     finally:
         await real.aclose()
+
+
+def test_repair_instructions_sent_as_separate_user_messages() -> None:
+    """Repair instructions are sent as separate user messages following input_text, leaving system prompt intact (AC-007)."""
+    settings = LLMSettings(
+        provider="openai",
+        api_key="secret",
+        model="gpt-4o",
+    )
+    request = LLMRequest.for_translation(
+        instructions="System instructions: translate accurately.",
+        input_text="Source text of the chapter.",
+    )
+    request = LLMRequest(
+        kind=request.kind,
+        instructions=request.instructions,
+        input_text=request.input_text,
+        repair_instructions=("Fix block b1: keep English intact", "Add missing translation for b2"),
+    )
+
+    body = openai_compatible._body(request, settings=settings)
+
+    assert len(body["messages"]) == 4
+    assert body["messages"][0] == {
+        "role": "system",
+        "content": "System instructions: translate accurately.",
+    }
+    assert body["messages"][1] == {
+        "role": "user",
+        "content": "Source text of the chapter.",
+    }
+    assert body["messages"][2] == {
+        "role": "user",
+        "content": "Fix block b1: keep English intact",
+    }
+    assert body["messages"][3] == {
+        "role": "user",
+        "content": "Add missing translation for b2",
+    }
+

@@ -369,7 +369,8 @@ class CorrectChapterV2(CorrectChapter):
             manifest=inputs.manifest, request=dict(instructions=request.instructions,
                 input_text=request.input_text, contract_version=request.contract_version,
                 ordered_block_ids=list(request.ordered_block_ids),
-                candidate_refs=[list(r) for r in request.correction_candidate_refs]))
+                candidate_refs=[list(r) for r in request.correction_candidate_refs],
+                repair_instructions=list(request.repair_instructions)))
         artifact, = tx.work.archive_artifacts([dict(book_id=inputs.document.id,
             conditions_id=inputs.conditions.id, run_id=inputs.run.id, attempt_id=context.attempt_id,
             kind=kind, scope_id=inputs.section.id, body=body)])

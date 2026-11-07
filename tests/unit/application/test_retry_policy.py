@@ -367,8 +367,8 @@ def test_repair_instruction_is_appended_to_the_original_request() -> None:
 
     repaired = decision.next_request(request)
 
-    assert repaired.instructions.startswith(request.instructions)
-    assert len(repaired.instructions) > len(request.instructions)
+    assert repaired.instructions == request.instructions
+    assert repaired.repair_instructions == (decision.repair_instruction,)
     assert repaired.attempt == 2
     assert repaired.input_text == request.input_text
     assert repaired.kind is request.kind
@@ -476,7 +476,8 @@ async def test_retried_call_carries_the_repair_instruction_to_the_model() -> Non
     assert client.call_count == 2
     first, second = client.requests
     assert first.instructions == translation_request().instructions
-    assert second.instructions.startswith(first.instructions)
-    assert "block-1" in second.instructions
-    assert "TRANSLATE" in second.instructions
-    assert TARGET_LANGUAGE in second.instructions
+    assert second.instructions == first.instructions
+    assert len(second.repair_instructions) == 1
+    assert "block-1" in second.repair_instructions[0]
+    assert "TRANSLATE" in second.repair_instructions[0]
+    assert TARGET_LANGUAGE in second.repair_instructions[0]

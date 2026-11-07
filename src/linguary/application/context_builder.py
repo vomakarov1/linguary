@@ -473,6 +473,45 @@ class _NeighbourBlocks:
     blocks: tuple[DocumentBlock, ...]
 
 
+_STEM_SUFFIXES = ("'s", "ies", "ing", "ed", "es", "s")
+
+
+def _stem_word(word: str) -> set[str]:
+    stems = {word}
+    for suf in _STEM_SUFFIXES:
+        if word.endswith(suf) and len(word) > len(suf) + 2:
+            base = word[:-len(suf)]
+            stems.add(base)
+            if suf == "ies":
+                stems.add(base + "y")
+    return stems
+
+
+def _extract_word_stems(text: str) -> set[str]:
+    words = re.findall(r"[A-Za-zА-Яа-я0-9]+", text.casefold())
+    stems: set[str] = set()
+    for w in words:
+        stems.update(_stem_word(w))
+    return stems
+
+
+def _matches_chapter_text(term_source: str, blocks_text: str, word_stems: set[str]) -> bool:
+    """Checks whether a glossary term or candidate appears in the chapter text (P2.T2, AC-006)."""
+    key = glossary_key(term_source)
+    if not key:
+        return False
+    if key in glossary_key(blocks_text):
+        return True
+    term_words = re.findall(r"[A-Za-zА-Яа-я0-9]+", term_source.casefold())
+    if not term_words:
+        return False
+    for w in term_words:
+        for stem in _stem_word(w):
+            if stem in word_stems:
+                return True
+    return False
+
+
 class ContextBuilder:
     """Assembles prompt context according to PRD § 13 policy."""
 
@@ -647,7 +686,7 @@ class ContextBuilder:
             ), self._name_translation_policy),
             neighbours=(
                 () if policy.version == LEGACY_TRANSLATION_POLICY
-                else self._neighbours(section, unit, policy_version=policy.version)
+                else self._neighbours(section, unit, policy_version=policy.version, document=document)
             ),
             recovery_child=recovery_child,
             policy_version=policy.version,
@@ -688,7 +727,7 @@ class ContextBuilder:
                 source_language=document.source_language,
                 target_language=document.target_language,
             ), self._name_translation_policy),
-            neighbours=self._neighbours(section, unit, policy_version=policy.version),
+            neighbours=self._neighbours(section, unit, policy_version=policy.version, document=document),
             policy_version=policy.version,
         )
 
@@ -824,6 +863,7 @@ class ContextBuilder:
     def _neighbours(
         self, section: DocumentSection, unit: TranslationUnit,
         *, policy_version: str = LEGACY_TRANSLATION_POLICY,
+        document: CanonicalDocument | None = None,
     ) -> tuple[_NeighbourBlocks, ...]:
         """Neighbouring source text around block: several paragraphs before and after (PRD § 13).
 
@@ -844,8 +884,20 @@ class ContextBuilder:
         ]
         if not positions:
             return ()
-        before = blocks[max(positions[0] - limit, 0) : positions[0]]
-        after = blocks[positions[-1] + 1 : positions[-1] + 1 + limit]
+        before = list(blocks[max(positions[0] - limit, 0) : positions[0]])
+        if positions[0] < limit and document is not None:
+            needed = limit - positions[0]
+            ordered = document.ordered_sections
+            current_idx = next((i for i, s in enumerate(ordered) if s.id == section.id), None)
+            if current_idx is not None and current_idx > 0:
+                for prev_sec in reversed(ordered[:current_idx]):
+                    if not prev_sec.is_notes_only and not document.is_front_matter(prev_sec):
+                        prev_blocks = textual_blocks(prev_sec)
+                        if prev_blocks:
+                            extra = list(prev_blocks[-needed:])
+                            before = extra + before
+                        break
+        after = list(blocks[positions[-1] + 1 : positions[-1] + 1 + limit])
         if policy.max_neighbour_chars is not None:
             chars = sum(len(block.text) for block in (*before, *after))
             while chars > policy.max_neighbour_chars:
@@ -999,13 +1051,29 @@ class ContextBuilder:
         visible_texts_by_alias: Mapping[str, str] | None = None,
     ) -> str:
         """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
+        blocks_text = " ".join(block.text for block in blocks)
+        word_stems = _extract_word_stems(blocks_text)
+
         parts = [_chapter_header(document=document, section=section, fragment_label=fragment_label)]
         if self._name_translation_policy is None:
-            parts.append(_known_decisions(self._selected_candidates(accumulated_candidates), target_language=document.target_language))
+            parts.append(_known_decisions(self._selected_candidates(accumulated_candidates, blocks=blocks), target_language=document.target_language))
         else:
-            decisions = tuple(self._user_decisions if user_decisions is None else user_decisions)
-            suggestions = tuple(self._nonbinding_suggestions if nonbinding_suggestions is None else nonbinding_suggestions)
-            parts.extend(_name_context(decisions, (*suggestions, *self._selected_candidates(accumulated_candidates)), document.target_language))
+            raw_decisions = tuple(self._user_decisions if user_decisions is None else user_decisions)
+            raw_suggestions = tuple(self._nonbinding_suggestions if nonbinding_suggestions is None else nonbinding_suggestions)
+
+            decisions = tuple(
+                d for d in raw_decisions
+                if _matches_chapter_text(d.canonical_source_text, blocks_text, word_stems)
+            )
+            suggestions = tuple(
+                s for s in raw_suggestions
+                if _matches_chapter_text(
+                    s.canonical_source_text if hasattr(s, "canonical_source_text") else s.source_text,
+                    blocks_text,
+                    word_stems,
+                )
+            )
+            parts.extend(_name_context(decisions, (*suggestions, *self._selected_candidates(accumulated_candidates, blocks=blocks)), document.target_language))
         if findings is not None:
             parts.append(
                 "Уже найдено в предыдущих частях главы:\n"
@@ -1017,7 +1085,10 @@ class ContextBuilder:
         return "\n\n".join(parts)
 
     def _selected_candidates(
-        self, candidates: Iterable[GlossaryCandidate]
+        self,
+        candidates: Iterable[GlossaryCandidate],
+        *,
+        blocks: Sequence[DocumentBlock] | None = None,
     ) -> tuple[GlossaryCandidate, ...]:
         """Decisions from previous chapters that enter context.
 
@@ -1026,8 +1097,17 @@ class ContextBuilder:
         it appeared in. When overflowing, earlier chapter decisions are retained: key characters
         and places appear early and recur, while a one-off term from the latest chapter adds little.
         """
+        filtered_candidates = candidates
+        if blocks is not None:
+            blocks_text = " ".join(block.text for block in blocks)
+            word_stems = _extract_word_stems(blocks_text)
+            filtered_candidates = [
+                c for c in candidates
+                if _matches_chapter_text(c.source_text, blocks_text, word_stems)
+            ]
+
         selected: dict[str, GlossaryCandidate] = {}
-        for candidate in candidates:
+        for candidate in filtered_candidates:
             if len(selected) >= self._max_accumulated_candidates:
                 break
             selected.setdefault(glossary_key(candidate.source_text), candidate)

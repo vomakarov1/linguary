@@ -143,6 +143,10 @@ class LoggingLLMClient(LLMClient):
         context = request.call_context
         metadata = {'schema_version': 1, 'decision': 'unknown', 'body_meta': supplied_meta,
                     'context': None if context is None else context.to_dict()}
+        if request.repair_instructions:
+            metadata['repair_instructions'] = list(request.repair_instructions)
+            if request.attempt > 1:
+                metadata['input_text'] = request.input_text + "\n\n" + "\n\n".join(request.repair_instructions)
         entry = LLMCallLog(
             id=call_id or self._new_id(),
             book_id=request.book_id,
@@ -176,8 +180,14 @@ class LoggingLLMClient(LLMClient):
             self._observation_failed = True
             diagnostics_for(self.unit_of_work).fail()
         if self.on_logged is not None and outcome is not None:
+            logged_request = request
+            if request.repair_instructions and request.attempt > 1:
+                logged_request = replace(
+                    request,
+                    input_text=request.input_text + "\n\n" + "\n\n".join(request.repair_instructions),
+                )
             try:
-                self.on_logged(entry, request, outcome)
+                self.on_logged(entry, logged_request, outcome)
             except Exception:
                 self._observation_failed = True
                 raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены") from None

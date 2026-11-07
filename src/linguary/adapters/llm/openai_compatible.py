@@ -220,6 +220,7 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
         "messages": [
             {"role": "system", "content": request.instructions},
             {"role": "user", "content": request.input_text},
+            *[{"role": "user", "content": instruction} for instruction in request.repair_instructions],
         ],
         "response_format": {
             "type": "json_schema",

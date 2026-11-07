@@ -418,4 +418,5 @@ async def test_real_group_note_budget_retries_before_save():
     assert result.attempts == 2
     assert len(result.analysis.content_plan.difficulties) == 1
     assert work.analyses.get_for_section(BOOK_ID, 'section-1') == result.analysis
-    assert 'реальную группу' in client.requests[1].instructions
+    assert client.requests[1].instructions == client.requests[0].instructions
+    assert any('реальную группу' in instr for instr in client.requests[1].repair_instructions)

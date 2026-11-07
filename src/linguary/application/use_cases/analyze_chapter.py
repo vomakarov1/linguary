@@ -61,7 +61,7 @@ from linguary.application.reader_text import (
 from linguary.application.glossary_review import candidates_with_decisions
 from linguary.application.llm_dto import ChapterAnalysisResponse
 from linguary.application.llm_rejections import record_rejection, finalize_response
-from linguary.application.ports.llm import LLMClient, LLMRequest
+from linguary.application.ports.llm import LLMClient, LLMRequest, LLMResponseFormatError
 from linguary.application.ports.language_detection import LanguageDetector
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
@@ -181,17 +181,37 @@ class AnalyzeChapter:
                 analysis = self._front_matter_analysis(section, blocks, id=self._id_factory())
                 self._save(command.book_id, analysis, task_id=command.task_id)
                 return AnalyzeChapterResult(analysis=analysis)
-            fragments = plan_fragments(blocks, max_blocks=self._max_fragment_blocks)
+            fragments = list(plan_fragments(blocks, max_blocks=self._max_fragment_blocks))
             if len(fragments) == 1:
-                analysis, attempts, usage = await self._analyze_whole_chapter(
-                    document=document,
-                    section=section,
-                    blocks=blocks,
-                    accumulated=accumulated,
-                    user_decisions=user_decisions,
-                    nonbinding_suggestions=nonbinding_suggestions,
-                    command=command,
-                )
+                try:
+                    analysis, attempts, usage = await self._analyze_whole_chapter(
+                        document=document,
+                        section=section,
+                        blocks=blocks,
+                        accumulated=accumulated,
+                        user_decisions=user_decisions,
+                        nonbinding_suggestions=nonbinding_suggestions,
+                        command=command,
+                    )
+                except LLMResponseFormatError as error:
+                    if error.truncated and len(blocks) > 1:
+                        mid = len(blocks) // 2
+                        initial_fragments = [
+                            ChapterFragment(order=0, blocks=tuple(blocks[:mid])),
+                            ChapterFragment(order=1, blocks=tuple(blocks[mid:])),
+                        ]
+                        analysis, attempts, usage = await self._analyze_by_fragments(
+                            document=document,
+                            section=section,
+                            blocks=blocks,
+                            fragments=initial_fragments,
+                            accumulated=accumulated,
+                            user_decisions=user_decisions,
+                            nonbinding_suggestions=nonbinding_suggestions,
+                            command=command,
+                        )
+                    else:
+                        raise
             else:
                 analysis, attempts, usage = await self._analyze_by_fragments(
                     document=document,
@@ -294,7 +314,9 @@ class AnalyzeChapter:
         analysed: list[FragmentAnalysis] = []
         attempts = 0
         usages: list[TokenUsage | None] = []
-        for fragment in fragments:
+        queue: list[ChapterFragment] = list(fragments)
+        while queue:
+            fragment = queue.pop(0)
             previous = None
             if analysed:
                 previous = FragmentFindings(
@@ -317,11 +339,12 @@ class AnalyzeChapter:
                         for entry in part.before_you_read
                     ),
                 )
+            total_fragments = len(analysed) + 1 + len(queue)
             context = self._context_builder.for_chapter_fragment(
                 document=document,
                 section=section,
                 fragment=fragment,
-                fragment_count=len(fragments),
+                fragment_count=total_fragments,
                 accumulated_candidates=accumulated,
                 user_decisions=user_decisions,
                 nonbinding_suggestions=nonbinding_suggestions,
@@ -337,9 +360,21 @@ class AnalyzeChapter:
                     ordered_block_ids=tuple(block.id for block in fragment.blocks),
                 ),
             )
-            payload, fragment_attempts, usage = await self._request_analysis(
-                context, blocks=fragment.blocks, source_language=document.source_language
-            )
+            try:
+                payload, fragment_attempts, usage = await self._request_analysis(
+                    context, blocks=fragment.blocks, source_language=document.source_language
+                )
+            except LLMResponseFormatError as error:
+                if error.truncated and len(fragment.blocks) > 1:
+                    mid = len(fragment.blocks) // 2
+                    left = ChapterFragment(order=0, blocks=tuple(fragment.blocks[:mid]))
+                    right = ChapterFragment(order=0, blocks=tuple(fragment.blocks[mid:]))
+                    queue = [left, right] + queue
+                    for idx, item in enumerate(queue):
+                        queue[idx] = replace(item, order=len(analysed) + idx)
+                    continue
+                raise
+
             attempts += fragment_attempts
             usages.append(usage)
             analysed.append(
@@ -351,6 +386,7 @@ class AnalyzeChapter:
                     visible_texts_by_alias=context.visible_texts_by_alias,
                 )
             )
+        analysed = [replace(part, order=i) for i, part in enumerate(analysed)]
         analysis = merge_chapter_analysis(
             analysed,
             id=self._id_factory(),
@@ -429,6 +465,12 @@ class AnalyzeChapter:
             response = None
             try:
                 response = await self._llm_client.generate(request)
+                if response.truncated:
+                    raise LLMResponseFormatError(
+                        "ответ модели оборван по лимиту выходных токенов",
+                        raw_content=response.raw_content,
+                        truncated=True,
+                    )
                 if request.contract_version in {3, 5}:
                     response = replace(response, payload=prepare_analysis_payload(response.payload))
                 if self._context_builder._reader_level == "a2":

@@ -232,13 +232,14 @@ def test_preserved_block_text_stays_out_of_the_request() -> None:
 
 
 def test_accumulated_candidates_reach_the_request() -> None:
-    """Candidates from previous chapters are passed as book decisions."""
+    """Candidates from previous chapters matching chapter text are passed as book decisions."""
     context = build_context(
+        texts=("Longbourn was the estate.",),
         candidates=(
             make_analysis_candidate(
                 source_text="Longbourn", suggested_translation="Лонгборн"
             ),
-        )
+        ),
     )
 
     assert "Longbourn" in context.request.input_text
@@ -253,6 +254,7 @@ def test_empty_accumulated_candidates_are_stated_explicitly() -> None:
 def test_accumulated_candidates_are_deduplicated_and_limited() -> None:
     """Duplicates are collapsed, and the list is capped at the configured limit."""
     context = build_context(
+        texts=("Longbourn and Netherfield were visited.",),
         candidates=(
             make_analysis_candidate(source_text="Longbourn", analysis_id="analysis-1"),
             make_analysis_candidate(source_text="Longbourn", analysis_id="analysis-2"),
@@ -261,7 +263,7 @@ def test_accumulated_candidates_are_deduplicated_and_limited() -> None:
         max_accumulated_candidates=1,
     )
 
-    decisions = context.request.input_text
+    decisions = context.request.input_text.split("Текстовые блоки главы:")[0]
     assert decisions.count("Longbourn") == 1
     assert "Netherfield" not in decisions
 
@@ -269,6 +271,7 @@ def test_accumulated_candidates_are_deduplicated_and_limited() -> None:
 def test_obvious_spellings_of_one_decision_reach_the_request_once() -> None:
     """Variants of a single name with and without a dot are sent as a single decision (QA-11)."""
     context = build_context(
+        texts=("Mr Wonka opened the factory doors.",),
         candidates=(
             make_analysis_candidate(
                 source_text="Mr. Wonka",
@@ -285,6 +288,22 @@ def test_obvious_spellings_of_one_decision_reach_the_request_once() -> None:
 
     assert context.request.input_text.count("мистер Вонка") == 1
     assert "MR WONKA" not in context.request.input_text
+
+
+def test_glossary_candidates_not_matching_chapter_text_are_filtered_out() -> None:
+    """Candidates from previous chapters that do not appear in the chapter are filtered out (P2.T2, AC-006)."""
+    context = build_context(
+        texts=("Only Netherfield is mentioned here.",),
+        candidates=(
+            make_analysis_candidate(source_text="Longbourn", suggested_translation="Лонгборн"),
+            make_analysis_candidate(source_text="Netherfield", suggested_translation="Нетерфилд"),
+        ),
+    )
+
+    assert "Netherfield" in context.request.input_text
+    assert "Нетерфилд" in context.request.input_text
+    assert "Longbourn" not in context.request.input_text
+    assert "Лонгборн" not in context.request.input_text
 
 
 def test_instructions_keep_named_things_out_of_persons() -> None:
@@ -648,3 +667,25 @@ def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     assert f'Для {level.upper()}' in processing
     assert not any(f'Для {other.upper()}' in processing for other in {'a2', 'b1', 'b2'} - {level})
     assert 'english_help' not in snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=level)
+
+
+def test_cross_chapter_neighbours_pulls_blocks_from_previous_story_chapter() -> None:
+    """When a unit has fewer preceding blocks than limit, neighbours pull from previous story chapter (P2.T2, AC-011)."""
+    from linguary.domain import TranslationUnit, TranslationUnitItem
+    title_sec = make_analysis_section(section_id="sec-title", title="Title Page", order=0, texts=("Pride and Prejudice",))
+    ch1 = make_analysis_section(section_id="sec-1", title="Chapter 1", order=1, texts=("Ch1 End block 1.", "Ch1 End block 2."))
+    ch2 = make_analysis_section(section_id="sec-2", title="Chapter 2", order=2, texts=("Ch2 Start block.", "Ch2 Middle block."))
+    doc = make_analysis_document((title_sec, ch1, ch2))
+
+    builder = ContextBuilder()
+    unit = TranslationUnit(
+        id="unit-1",
+        section_id="sec-2",
+        items=(TranslationUnitItem(ch2.blocks[0], BlockTreatment.TRANSLATE),),
+    )
+    neighbours = builder._neighbours(ch2, unit, policy_version="translation-context-v2", document=doc)
+    assert len(neighbours) >= 1
+    before_group = next(n for n in neighbours if n.title == "До блока:")
+    before_texts = [b.text for b in before_group.blocks]
+    assert "Ch1 End block 2." in before_texts
+    assert "Pride and Prejudice" not in before_texts

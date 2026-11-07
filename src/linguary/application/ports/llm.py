@@ -158,8 +158,10 @@ class LLMRequest[PayloadT: LLMPayload]:
     name_translation_policy_version: int | None = None
     pronunciation_candidates_version: int | None = None
     correction_candidate_refs: tuple[tuple[str, str], ...] = ()
+    repair_instructions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "repair_instructions", tuple(self.repair_instructions))
         if self.kind == LLMResponseKind.CHAPTER_CORRECTION:
             object.__setattr__(self, 'ordered_block_ids', tuple(self.ordered_block_ids))
             if (not self.ordered_block_ids or len(set(self.ordered_block_ids)) != len(self.ordered_block_ids)
