@@ -55,7 +55,7 @@ position, offset, block identifier, or other anchor field."""
 
 VARIANTS = ("with_offsets", "quote_only")
 JUDGMENT_FIELDS = (
-    "manual_fact_supported",
+    "manual_aid_supported_by_source",
     "manual_quote_supports_aid",
     "manual_reason",
 )
@@ -468,7 +468,7 @@ def evaluation_row(record: dict[str, Any], case: dict[str, Any]) -> dict[str, st
         "offsets_match_quote": "" if record.get("variant") == "quote_only" else str(offsets_match_quote).lower(),
         "resolved_start": str(resolved_start) if resolved_start != "" else "",
         "resolved_end": str(resolved_end) if resolved_end != "" else "",
-        "manual_fact_supported": "",
+        "manual_aid_supported_by_source": "",
         "manual_quote_supports_aid": "",
         "manual_reason": "",
     }
@@ -532,7 +532,7 @@ def write_report(run_dir: Path) -> Path:
             resolved = sum(row.get("offsets_match_quote") == "true" for row in variant_evaluations)
         else:
             resolved = sum(int(row.get("quote_exact_occurrences") or 0) == 1 for row in variant_evaluations)
-        fact_ratings = [row.get("manual_fact_supported", "").strip().lower() for row in variant_evaluations]
+        aid_ratings = [row.get("manual_aid_supported_by_source", "").strip().lower() for row in variant_evaluations]
         quote_ratings = [row.get("manual_quote_supports_aid", "").strip().lower() for row in variant_evaluations]
         overall = 0
         for row in variant_evaluations:
@@ -543,7 +543,7 @@ def write_report(run_dir: Path) -> Path:
             )
             if (
                 row.get("call_status") == "ok"
-                and row.get("manual_fact_supported", "").strip().lower() == "yes"
+                and row.get("manual_aid_supported_by_source", "").strip().lower() == "yes"
                 and row.get("manual_quote_supports_aid", "").strip().lower() == "yes"
                 and anchor_resolved
             ):
@@ -572,9 +572,9 @@ def write_report(run_dir: Path) -> Path:
             "valid_format": valid_format,
             "exact_quote": exact_quote,
             "resolved": resolved,
-            "fact_yes": sum(value == "yes" for value in fact_ratings),
-            "fact_judged": sum(value in {"yes", "no", "uncertain"} for value in fact_ratings),
-            "fact_uncertain": sum(value == "uncertain" for value in fact_ratings),
+            "aid_yes": sum(value == "yes" for value in aid_ratings),
+            "aid_judged": sum(value in {"yes", "no", "uncertain"} for value in aid_ratings),
+            "aid_uncertain": sum(value == "uncertain" for value in aid_ratings),
             "quote_yes": sum(value == "yes" for value in quote_ratings),
             "quote_judged": sum(value in {"yes", "no", "uncertain"} for value in quote_ratings),
             "quote_uncertain": sum(value == "uncertain" for value in quote_ratings),
@@ -587,7 +587,7 @@ def write_report(run_dir: Path) -> Path:
         }
 
     evaluation_complete = all(
-        row.get("manual_fact_supported", "").strip().lower() in {"yes", "no", "uncertain"}
+        row.get("manual_aid_supported_by_source", "").strip().lower() in {"yes", "no", "uncertain"}
         and row.get("manual_quote_supports_aid", "").strip().lower() in {"yes", "no", "uncertain"}
         for row in evaluations
     ) and len(evaluations) == manifest["scheduled_model_calls"]
@@ -635,7 +635,7 @@ def write_report(run_dir: Path) -> Path:
         f"| Ответ прошёл проверку формата | {summaries['with_offsets']['valid_format']}/{expected} | {summaries['quote_only']['valid_format']}/{expected} |",
         f"| Цитата найдена дословно | {summaries['with_offsets']['exact_quote']}/{expected} | {summaries['quote_only']['exact_quote']}/{expected} |",
         f"| Привязка разрешима | {summaries['with_offsets']['resolved']}/{expected} | {summaries['quote_only']['resolved']}/{expected} |",
-        f"| Целевой факт подтверждён вручную | {summaries['with_offsets']['fact_yes']}/{expected} (неопределённо {summaries['with_offsets']['fact_uncertain']}; оценено {summaries['with_offsets']['fact_judged']}/{expected}) | {summaries['quote_only']['fact_yes']}/{expected} (неопределённо {summaries['quote_only']['fact_uncertain']}; оценено {summaries['quote_only']['fact_judged']}/{expected}) |",
+        f"| Пояснение основано на исходном отрывке | {summaries['with_offsets']['aid_yes']}/{expected} (неопределённо {summaries['with_offsets']['aid_uncertain']}; оценено {summaries['with_offsets']['aid_judged']}/{expected}) | {summaries['quote_only']['aid_yes']}/{expected} (неопределённо {summaries['quote_only']['aid_uncertain']}; оценено {summaries['quote_only']['aid_judged']}/{expected}) |",
         f"| Цитата подтверждает пояснение | {summaries['with_offsets']['quote_yes']}/{expected} (неопределённо {summaries['with_offsets']['quote_uncertain']}; оценено {summaries['with_offsets']['quote_judged']}/{expected}) | {summaries['quote_only']['quote_yes']}/{expected} (неопределённо {summaries['quote_only']['quote_uncertain']}; оценено {summaries['quote_only']['quote_judged']}/{expected}) |",
         f"| Общий успех | {summaries['with_offsets']['overall']}/{expected} | {summaries['quote_only']['overall']}/{expected} |",
         f"| Стоимость USD (известно вызовов) | {summaries['with_offsets']['cost_total']:.8f} ({summaries['with_offsets']['cost_known']}/{expected}) | {summaries['quote_only']['cost_total']:.8f} ({summaries['quote_only']['cost_known']}/{expected}) |",
@@ -651,8 +651,9 @@ def write_report(run_dir: Path) -> Path:
             "- Для `with_offsets` привязка разрешима, если `text[start:end]` точно равен цитате.",
             "- Для `quote_only` привязка разрешима только при ровно одном точном вхождении цитаты в исходном блоке.",
             "- `uncertain` означает, что вывод частично подтверждён или ответ недостаточно ясен; такие случаи остаются в знаменателе.",
+            "- Запрос предлагал модели выбрать любую полезную деталь; скрытый `expected_fact` не передавался и не служит критерием общего успеха.",
             resolution_conclusion,
-            "- Общий успех требует также подтверждения целевого факта и смысловой поддержки цитатой.",
+            "- Общий успех требует, чтобы пояснение было основано на отрывке, цитата его поддерживала, а привязка была разрешима.",
             "- OpenRouter распределил запросы между фактическими провайдерами, указанными в таблице; их выбор не фиксировался.",
             "- Выводы относятся только к выбранному рассказу и этим десяти отрывкам.",
         ]
