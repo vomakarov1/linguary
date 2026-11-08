@@ -96,6 +96,22 @@ class SqlAlchemyUnitOfWork:
             self._current.reset(token)
             session.close()
 
+    @contextmanager
+    def read_transaction(self) -> Iterator[SqlAlchemyUnitOfWork]:
+        """Open a read-only transaction without acquiring SQLite's writer lock."""
+        if self._current.get() is not None:
+            raise PersistenceError(
+                "транзакция уже открыта: вложенные транзакции не поддерживаются"
+            )
+        session = self._session_factory()
+        token = self._current.set(session)
+        try:
+            with session.begin():
+                yield self
+        finally:
+            self._current.reset(token)
+            session.close()
+
     @property
     def books(self) -> SqlAlchemyBookRepository:
         """Book repository."""

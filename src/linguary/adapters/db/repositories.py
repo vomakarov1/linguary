@@ -484,6 +484,14 @@ class SqlAlchemyBlockResultRepository:
             or 0
         )
 
+    def block_ids_for_run(self, run_id: str) -> frozenset[str]:
+        """Return processed block IDs for a run without loading full block results."""
+        return frozenset(
+            self._session.scalars(
+                select(BlockResultRow.block_id).where(BlockResultRow.run_id == run_id)
+            ).all()
+        )
+
     def _notes(self, run_id: str, block_id: str) -> Sequence[LanguageNoteRow]:
         """Get block language notes in stable order."""
         return self._session.scalars(

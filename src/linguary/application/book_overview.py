@@ -292,6 +292,11 @@ class BookResultSummary:
     reading_support: Mapping = field(default_factory=dict)
 
 
+def _read_transaction(unit_of_work: UnitOfWork):
+    """Open a read-only transaction when supported by the unit of work."""
+    return getattr(unit_of_work, "read_transaction", unit_of_work.transaction)()
+
+
 def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None, stored_calls=None):
     """Current technical coverage and optional review, without accepting or scheduling work."""
     from linguary.application.use_cases.quality_review import quality_review_state
@@ -310,15 +315,51 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
             name_translation_policy=thaw(policy) if policy is not None else None,
             pronunciation_help_enabled=conditions.pronunciation_help_enabled,
             pronunciation_variant=conditions.pronunciation_variant)
-    results = (() if run is None else transaction.results.list_for_run(run.id)) if stored_results is None else stored_results
+    results = stored_results
+    if results is not None:
+        result_ids = {result.block_id for result in results}
+    elif run is None:
+        result_ids = set()
+    else:
+        block_ids_for_run = getattr(transaction.results, "block_ids_for_run", None)
+        if block_ids_for_run is not None:
+            result_ids = set(block_ids_for_run(run.id))
+        else:
+            results = transaction.results.list_for_run(run.id)
+            result_ids = {result.block_id for result in results}
     textual = {block.id for section in document.sections for block in textual_blocks(section)} if document else set()
-    result_ids = {result.block_id for result in results}
     roots = () if run is None else transaction.work.list_roots(book.id, run_id=run.id)
     root_summaries = []
     durable_coverage = set()
+    if roots:
+        root_ids = tuple(root.id for root in roots)
+        list_scopes_for_roots = getattr(transaction.work, "list_scopes_for_roots", None)
+        scopes_by_root = (
+            list_scopes_for_roots(root_ids)
+            if list_scopes_for_roots is not None
+            else {root.id: transaction.work.list_scopes(root.id) for root in roots}
+        )
+        list_attempts_for_roots = getattr(transaction.work, "list_attempts_for_roots", None)
+        attempts_by_root = (
+            list_attempts_for_roots(root_ids)
+            if list_attempts_for_roots is not None
+            else {root.id: transaction.work.list_root_attempts(root.id) for root in roots}
+        )
+        result_bindings_fn = getattr(transaction.work, "result_bindings", None)
+        bindings = result_bindings_fn(run.id) if result_bindings_fn is not None else None
+        attempts_by_id = {
+            attempt.id: attempt
+            for attempts in attempts_by_root.values()
+            for attempt in attempts
+        }
+    else:
+        scopes_by_root = {}
+        attempts_by_root = {}
+        bindings = None
+        attempts_by_id = {}
     for root in roots:
-        scopes = transaction.work.list_scopes(root.id)
-        attempts = transaction.work.list_root_attempts(root.id)
+        scopes = scopes_by_root.get(root.id, ())
+        attempts = attempts_by_root.get(root.id, ())
         unknown = any(attempt.state in ('sent', 'unknown') for attempt in attempts)
         current = conditions is not None and root.conditions_id == conditions.id
         scope_counts = {scope.id: sum(attempt.scope_id == scope.id for attempt in attempts) for scope in scopes}
@@ -335,7 +376,20 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
             covered.clear()
         durable_coverage.update(covered)
         limit = root.manifest['policy']['max_calls'] + root.extra_calls
-        complete = transaction.work.root_coverage_complete(root.id, update_state=False)
+        try:
+            complete = transaction.work.root_coverage_complete(
+                root.id,
+                update_state=False,
+                root=root,
+                scopes=scopes,
+                bindings=bindings,
+                attempts_by_id=attempts_by_id,
+                present_blocks=result_ids,
+                conditions=conditions,
+                run=run,
+            )
+        except TypeError:
+            complete = transaction.work.root_coverage_complete(root.id, update_state=False)
         root_summaries.append(dict(root_id=root.id, generation=root.generation,
             covered=len(covered), total=len(root.manifest['ordered_blocks']), calls_used=root.calls_used,
             limit=limit, reason='conditions_unavailable' if not current else 'unknown' if unknown else root.reason,
@@ -355,6 +409,8 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
     if epub_ready:
         try:
             _ensure_ready(book, tasks)
+            if results is None:
+                results = transaction.results.list_for_run(run.id)
             _validate_content_plans(
                 document,
                 analyses,
@@ -386,7 +442,7 @@ def list_books(
     unit_of_work: UnitOfWork, *, status: BookStatus | None = None
 ) -> tuple[BookRecord, ...]:
     """Books ordered by addition, optionally filtered by status."""
-    with unit_of_work.transaction() as transaction:
+    with _read_transaction(unit_of_work) as transaction:
         books = transaction.books.list_all()
     if status is None:
         return books
@@ -405,7 +461,7 @@ def book_overview(
     `concurrency` and `requests_per_minute` — worker concurrency and rate limits:
     without them, remaining time estimation cannot determine how many calls run in parallel.
     """
-    with unit_of_work.transaction() as transaction:
+    with _read_transaction(unit_of_work) as transaction:
         book = _book(transaction, book_id)
         document = transaction.documents.get(book_id)
         analyses = transaction.analyses.list_for_book(book_id)
@@ -483,7 +539,7 @@ def processing_plan(unit_of_work: UnitOfWork, book_id: str) -> ProcessingPlanSum
     raises an error rather than returning an empty summary, which would look like a book
     with zero textual blocks (HTTP 409 in Web UI).
     """
-    with unit_of_work.transaction() as transaction:
+    with _read_transaction(unit_of_work) as transaction:
         _book(transaction, book_id)
         document = transaction.documents.get(book_id)
         analyses = transaction.analyses.list_for_book(book_id)
@@ -508,7 +564,7 @@ def processing_plan(unit_of_work: UnitOfWork, book_id: str) -> ProcessingPlanSum
 
 def book_warnings(unit_of_work: UnitOfWork, book_id: str) -> BookWarnings:
     """Import warnings and block processing result warnings for a book."""
-    with unit_of_work.transaction() as transaction:
+    with _read_transaction(unit_of_work) as transaction:
         _book(transaction, book_id)
         import_warnings = transaction.documents.import_warnings(book_id)
         document = transaction.documents.get(book_id)
@@ -527,7 +583,7 @@ def book_result(
     Document, plan, and results are read in a single transaction: book warnings are
     derived from the same dataset without a secondary query.
     """
-    with unit_of_work.transaction() as transaction:
+    with _read_transaction(unit_of_work) as transaction:
         book = _book(transaction, book_id)
         document = transaction.documents.get(book_id)
         analyses = transaction.analyses.list_for_book(book_id)
@@ -734,7 +790,7 @@ def result_block(
     unit_of_work: UnitOfWork, book_id: str, block_id: str
 ) -> tuple[ResultBlockSummary, ...]:
     """Read only the adjacent group containing the requested block."""
-    with unit_of_work.transaction() as transaction:
+    with _read_transaction(unit_of_work) as transaction:
         _book(transaction, book_id)
         document = transaction.documents.get(book_id)
         located = _locate_block(document, block_id)

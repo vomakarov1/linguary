@@ -7,6 +7,7 @@ import re
 from fastapi import APIRouter, Request, status
 from fastapi.responses import FileResponse, RedirectResponse
 
+from linguary.application.book_overview import _read_transaction
 from linguary.application.use_cases.export_book import ExportArtifactNotFoundError
 from linguary.web.dependencies import CurrentApplication
 from linguary.web.schemas import TaskResponse
@@ -50,7 +51,7 @@ def download_export(application: CurrentApplication, book_id: str) -> FileRespon
         raise ExportArtifactNotFoundError(
             f"файл экспортированной книги {book_id} не найден"
         )
-    with application.unit_of_work.transaction() as transaction:
+    with _read_transaction(application.unit_of_work) as transaction:
         book = transaction.books.get(book_id)
     if book is None:
         raise ExportArtifactNotFoundError(f"книги {book_id} нет в хранилище")

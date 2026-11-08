@@ -470,3 +470,370 @@ def test_book_result_without_quality_skips_quality_projection_queries() -> None:
     assert groups[0].block_id == "blk-1"
 
 
+def test_book_overview_uses_read_transaction_and_skips_full_results_while_processing() -> None:
+    """`book_overview` uses `read_transaction` and `block_ids_for_run` without loading full results while processing."""
+    document = _sample_document(chapters=1)
+    book = BookRecord(
+        id="book-1",
+        metadata=document.metadata,
+        source_language="en",
+        target_language="ru",
+        status=BookStatus.PROCESSING,
+        source_epub_path="/tmp/book.epub",
+        created_at=datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+    )
+    tasks = (
+        ProcessingTask(
+            id="t-1",
+            book_id="book-1",
+            task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+            scope_id="sec-1",
+            status=TaskStatus.RUNNING,
+        ),
+    )
+    run = SimpleNamespace(id="run-1", book_id="book-1", status="active")
+    block_ids_queries: list[str] = []
+    read_tx_entered = 0
+
+    def _block_ids_for_run(run_id: str) -> frozenset[str]:
+        block_ids_queries.append(run_id)
+        return frozenset({"blk-1"})
+
+    def _unexpected_list_for_run(run_id: str):
+        raise AssertionError("list_for_run should not be called while book is still processing")
+
+    tx = SimpleNamespace(
+        books=SimpleNamespace(get=lambda book_id: book),
+        documents=SimpleNamespace(
+            get=lambda book_id: document,
+            import_warnings=lambda book_id: (),
+        ),
+        analyses=SimpleNamespace(list_for_book=lambda book_id: ()),
+        tasks=SimpleNamespace(list_for_book=lambda book_id: tasks),
+        runs=SimpleNamespace(active_for_book=lambda book_id: run),
+        results=SimpleNamespace(
+            count_for_run=lambda run_id: 1,
+            block_ids_for_run=_block_ids_for_run,
+            list_for_run=_unexpected_list_for_run,
+        ),
+        llm_calls=SimpleNamespace(list_for_book=lambda book_id: ()),
+        work=SimpleNamespace(
+            latest_conditions=lambda book_id: None,
+            list_roots=lambda book_id, run_id=None: (),
+            list_reviews=lambda book_id: (),
+        ),
+    )
+
+    class _ReadOnlyStubUoW:
+        @contextmanager
+        def transaction(self):
+            raise AssertionError("write transaction() should not be used for read-only book_overview")
+            yield tx
+
+        @contextmanager
+        def read_transaction(self):
+            nonlocal read_tx_entered
+            read_tx_entered += 1
+            yield tx
+
+    overview = book_overview(_ReadOnlyStubUoW(), "book-1", concurrency=1)  # type: ignore[arg-type]
+
+    assert read_tx_entered == 1
+    assert block_ids_queries == ["run-1"]
+    assert overview.epub_ready is False
+    assert overview.recovery["covered"] == 1
+
+    from linguary.adapters.db.repositories import SqlAlchemyBlockResultRepository
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+
+    driver_sql_calls: list[str] = []
+
+    class _FakeSession:
+        @contextmanager
+        def begin(self):
+            yield
+
+        def connection(self):
+            return SimpleNamespace(exec_driver_sql=driver_sql_calls.append)
+
+        def scalars(self, _stmt):
+            return SimpleNamespace(all=lambda: ["blk-1", "blk-2"])
+
+        def close(self):
+            pass
+
+    real_uow = SqlAlchemyUnitOfWork(_FakeSession)  # type: ignore[arg-type]
+    with real_uow.read_transaction() as read_tx:
+        assert isinstance(read_tx.results, SqlAlchemyBlockResultRepository)
+        assert read_tx.results.block_ids_for_run("run-1") == frozenset({"blk-1", "blk-2"})
+    assert driver_sql_calls == []
+
+
+def test_quality_projection_batches_root_scopes_and_attempts_queries() -> None:
+    """`_quality_projection` batches scopes, attempts, and result bindings across all recovery roots."""
+    from linguary.adapters.db.work_state import SqlAlchemyWorkRepository
+    from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
+
+    root_1_id = "00000000-0000-0000-0000-000000000001"
+    root_2_id = "00000000-0000-0000-0000-000000000002"
+    scope_1_id = "00000000-0000-0000-0000-000000000011"
+    scope_2_id = "00000000-0000-0000-0000-000000000012"
+    att_1_id = "00000000-0000-0000-0000-000000000021"
+    att_2_id = "00000000-0000-0000-0000-000000000022"
+    cond_id = "00000000-0000-0000-0000-000000000031"
+    run_id = "00000000-0000-0000-0000-000000000041"
+    book_id = "00000000-0000-0000-0000-000000000051"
+
+    document = _sample_document(chapters=2)
+    book = BookRecord(
+        id=book_id,
+        metadata=document.metadata,
+        source_language="en",
+        target_language="ru",
+        status=BookStatus.PROCESSING,
+        source_epub_path="/tmp/book.epub",
+        created_at=datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+    )
+    conditions = SimpleNamespace(
+        id=cond_id,
+        book_id=book_id,
+        revision=1,
+        payload={
+            "reader_level": "B2",
+            "english_help": False,
+            "profile": "standard",
+            "models": {},
+            "versions": {"validators": 1},
+        },
+        pronunciation_help_enabled=False,
+        pronunciation_variant=None,
+        reproducibility="strict",
+    )
+    run = SimpleNamespace(id=run_id, book_id=book_id, status="active")
+    roots = (
+        RecoveryRoot(
+            id=root_1_id,
+            book_id=book_id,
+            conditions_id=cond_id,
+            root_key="rk-1",
+            manifest={
+                "schema_version": 1,
+                "active_run_id": run_id,
+                "ordered_blocks": ["blk-1"],
+                "historical_coverage": [],
+                "policy": {"max_calls": 4, "max_scope_calls": 2},
+            },
+            generation=1,
+            calls_used=1,
+            extra_calls=0,
+            status="running",
+            reason=None,
+            policy_version="translation_recovery_v1",
+        ),
+        RecoveryRoot(
+            id=root_2_id,
+            book_id=book_id,
+            conditions_id=cond_id,
+            root_key="rk-2",
+            manifest={
+                "schema_version": 1,
+                "active_run_id": run_id,
+                "ordered_blocks": ["blk-2"],
+                "historical_coverage": [],
+                "policy": {"max_calls": 4, "max_scope_calls": 2},
+            },
+            generation=1,
+            calls_used=1,
+            extra_calls=0,
+            status="running",
+            reason=None,
+            policy_version="translation_recovery_v1",
+        ),
+    )
+    scopes_by_root = {
+        root_1_id: (
+            RecoveryScope(
+                id=scope_1_id,
+                root_id=root_1_id,
+                ordered_blocks=("blk-1",),
+                generation=1,
+                status="accepted",
+                accepted_attempt_id=att_1_id,
+            ),
+        ),
+        root_2_id: (
+            RecoveryScope(
+                id=scope_2_id,
+                root_id=root_2_id,
+                ordered_blocks=("blk-2",),
+                generation=1,
+                status="accepted",
+                accepted_attempt_id=att_2_id,
+            ),
+        ),
+    }
+    attempts_by_root = {
+        root_1_id: (
+            CallAttempt(
+                id=att_1_id,
+                book_id=book_id,
+                state="accepted",
+                generation=1,
+                ordinal=1,
+                conditions_id=cond_id,
+                run_id=run_id,
+                root_id=root_1_id,
+                scope_id=scope_1_id,
+                context={"schema_version": 1, "stage": "translation_unit", "policy_version": "translation_recovery_v1"},
+            ),
+        ),
+        root_2_id: (
+            CallAttempt(
+                id=att_2_id,
+                book_id=book_id,
+                state="accepted",
+                generation=1,
+                ordinal=1,
+                conditions_id=cond_id,
+                run_id=run_id,
+                root_id=root_2_id,
+                scope_id=scope_2_id,
+                context={"schema_version": 1, "stage": "translation_unit", "policy_version": "translation_recovery_v1"},
+            ),
+        ),
+    }
+
+    batch_scopes_calls: list[tuple[str, ...]] = []
+    batch_attempts_calls: list[tuple[str, ...]] = []
+    bindings_calls: list[str] = []
+
+    work_repo = SqlAlchemyWorkRepository(session=SimpleNamespace())
+
+    def _list_scopes_for_roots(root_ids):
+        batch_scopes_calls.append(tuple(root_ids))
+        return scopes_by_root
+
+    def _list_attempts_for_roots(root_ids):
+        batch_attempts_calls.append(tuple(root_ids))
+        return attempts_by_root
+
+    def _result_bindings(r_id: str):
+        bindings_calls.append(r_id)
+        return {
+            "blk-1": {
+                "book_id": book_id,
+                "conditions_id": cond_id,
+                "attempt_id": att_1_id,
+                "artifact_revision_id": "art-1",
+            },
+            "blk-2": {
+                "book_id": book_id,
+                "conditions_id": cond_id,
+                "attempt_id": att_2_id,
+                "artifact_revision_id": "art-2",
+            },
+        }
+
+    def _unexpected(*args, **kwargs):
+        raise AssertionError("per-root query should not be called when batch data is preloaded")
+
+    work = SimpleNamespace(
+        latest_conditions=lambda b_id: conditions,
+        list_roots=lambda b_id, run_id=None: roots,
+        list_scopes_for_roots=_list_scopes_for_roots,
+        list_attempts_for_roots=_list_attempts_for_roots,
+        result_bindings=_result_bindings,
+        list_scopes=_unexpected,
+        list_root_attempts=_unexpected,
+        get_root=_unexpected,
+        get_attempt=_unexpected,
+        root_coverage_complete=work_repo.root_coverage_complete,
+        list_reviews=lambda b_id: (),
+    )
+    tx = SimpleNamespace(
+        books=SimpleNamespace(get=lambda b_id: book),
+        documents=SimpleNamespace(
+            get=lambda b_id: document,
+            import_warnings=lambda b_id: (),
+        ),
+        analyses=SimpleNamespace(list_for_book=lambda b_id: ()),
+        tasks=SimpleNamespace(
+            list_for_book=lambda b_id: (
+                ProcessingTask(
+                    id="t-1",
+                    book_id=book_id,
+                    task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+                    scope_id="sec-1",
+                    status=TaskStatus.RUNNING,
+                ),
+            )
+        ),
+        runs=SimpleNamespace(active_for_book=lambda b_id: run),
+        results=SimpleNamespace(
+            count_for_run=lambda r_id: 2,
+            block_ids_for_run=lambda r_id: frozenset({"blk-1", "blk-2"}),
+            list_for_run=_unexpected,
+        ),
+        llm_calls=SimpleNamespace(list_for_book=lambda b_id: ()),
+        work=work,
+    )
+
+    class _ReadOnlyStubUoW:
+        @contextmanager
+        def read_transaction(self):
+            yield tx
+
+        @contextmanager
+        def transaction(self):
+            yield tx
+
+    overview = book_overview(_ReadOnlyStubUoW(), book_id, concurrency=1)  # type: ignore[arg-type]
+
+    assert batch_scopes_calls == [(root_1_id, root_2_id)]
+    assert batch_attempts_calls == [(root_1_id, root_2_id)]
+    assert bindings_calls == [run_id]
+    assert [item["complete"] for item in overview.recovery["roots"]] == [True, True]
+    assert overview.recovery["covered"] == 2
+
+    regen_att_id = "00000000-0000-0000-0000-000000000099"
+    fetched_missing: list[str] = []
+
+    def _get_attempt_fallback(attempt_id: str):
+        fetched_missing.append(attempt_id)
+        return CallAttempt(
+            id=attempt_id,
+            book_id=book_id,
+            state="accepted",
+            generation=1,
+            ordinal=2,
+            conditions_id=cond_id,
+            run_id=run_id,
+            context={"schema_version": 1, "stage": "block_regeneration"},
+        )
+
+    work_repo.get_attempt = _get_attempt_fallback  # type: ignore[method-assign]
+    assert (
+        work_repo.root_coverage_complete(
+            root_1_id,
+            update_state=False,
+            root=roots[0],
+            scopes=scopes_by_root[root_1_id],
+            bindings={
+                "blk-1": {
+                    "book_id": book_id,
+                    "conditions_id": cond_id,
+                    "attempt_id": regen_att_id,
+                    "artifact_revision_id": "art-regen",
+                }
+            },
+            attempts_by_id={att_1_id: attempts_by_root[root_1_id][0]},
+            present_blocks={"blk-1"},
+            conditions=conditions,
+            run=run,
+        )
+        is True
+    )
+    assert fetched_missing == [regen_att_id]
+
+
+

@@ -458,6 +458,10 @@ class SqlAlchemyWorkRepository:
 
     def get_scope(self, scope_id):
         row = self._session.get(RecoveryScopeRow, scope_id)
+        return self._scope_from_row(row)
+
+    @staticmethod
+    def _scope_from_row(row):
         if row is None:
             return None
         version(row.ordered_blocks_json.get('schema_version'))
@@ -1060,9 +1064,33 @@ class SqlAlchemyWorkRepository:
         rows = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.root_id == root_id)).all()
         return tuple(self._attempt_from_row(row) for row in rows)
 
+    def list_attempts_for_roots(self, root_ids):
+        root_ids = tuple(root_ids)
+        if not root_ids:
+            return {}
+        grouped = {root_id: [] for root_id in root_ids}
+        rows = self._session.scalars(
+            select(LLMAttemptRow).where(LLMAttemptRow.root_id.in_(root_ids))
+        ).all()
+        for row in rows:
+            grouped.setdefault(row.root_id, []).append(self._attempt_from_row(row))
+        return {root_id: tuple(items) for root_id, items in grouped.items()}
+
     def list_scopes(self, root_id):
         rows = self._session.scalars(select(RecoveryScopeRow).where(RecoveryScopeRow.root_id == root_id)).all()
-        return tuple(self.get_scope(row.id) for row in rows)
+        return tuple(self._scope_from_row(row) for row in rows)
+
+    def list_scopes_for_roots(self, root_ids):
+        root_ids = tuple(root_ids)
+        if not root_ids:
+            return {}
+        grouped = {root_id: [] for root_id in root_ids}
+        rows = self._session.scalars(
+            select(RecoveryScopeRow).where(RecoveryScopeRow.root_id.in_(root_ids))
+        ).all()
+        for row in rows:
+            grouped.setdefault(row.root_id, []).append(self._scope_from_row(row))
+        return {root_id: tuple(items) for root_id, items in grouped.items()}
 
     def rebind_root(self, root_id, *, run_id, historical_coverage=()):
         row = self._session.get(RecoveryRootRow, root_id)
@@ -1207,12 +1235,24 @@ class SqlAlchemyWorkRepository:
             self.transition_attempt(attempt_id, 'accepted', expected_state='validated',
                                     outcome={**(thaw(attempt.outcome) or {}), 'decision': 'accepted'})
 
-    def root_coverage_complete(self, root_id, *, update_state=True):
-        root = self.get_root(root_id)
+    def root_coverage_complete(
+        self,
+        root_id,
+        *,
+        update_state=True,
+        root=None,
+        scopes=None,
+        bindings=None,
+        attempts_by_id=None,
+        present_blocks=None,
+        conditions=None,
+        run=None,
+    ):
+        root = self.get_root(root_id) if root is None else root
         if root is None or root.status == 'stopped' or root.superseded_by is not None:
             return False
         manifest = root.manifest
-        scopes = self.list_scopes(root_id)
+        scopes = self.list_scopes(root_id) if scopes is None else scopes
         leaves = [scope for scope in scopes if scope.status != 'split']
         blocks = list(manifest.get('historical_coverage', ()))
         if any(scope.status != 'accepted' for scope in leaves):
@@ -1222,15 +1262,20 @@ class SqlAlchemyWorkRepository:
         if len(blocks) != len(set(blocks)) or set(blocks) != set(manifest['ordered_blocks']):
             return False
         run_id = manifest['active_run_id']
-        run = self._session.get(ProcessingRunRow, run_id)
-        conditions = self.latest_conditions(root.book_id)
+        if run is None or getattr(run, 'id', None) != run_id:
+            run = self._session.get(ProcessingRunRow, run_id)
+        if conditions is None:
+            conditions = self.latest_conditions(root.book_id)
         if (run is None or run.status != 'active' or run.book_id != root.book_id
                 or conditions is None or conditions.id != root.conditions_id):
             return False
-        from linguary.adapters.db.repositories import SqlAlchemyBlockResultRepository
-        results = SqlAlchemyBlockResultRepository(self._session)
-        bindings = self.result_bindings(run_id)
-        attempts_by_id = {}
+        if bindings is None:
+            bindings = self.result_bindings(run_id)
+        attempts_by_id = (
+            {}
+            if attempts_by_id is None
+            else (attempts_by_id if isinstance(attempts_by_id, dict) else dict(attempts_by_id))
+        )
 
         def cached_attempt(attempt_id):
             if attempt_id is None:
@@ -1271,7 +1316,10 @@ class SqlAlchemyWorkRepository:
                             or replacement.conditions_id != root.conditions_id
                             or replacement.context.get('stage') != 'block_regeneration'):
                         return False
-        if hasattr(self._session, 'scalars'):
+        if present_blocks is not None:
+            if any(block not in present_blocks for block in blocks):
+                return False
+        elif hasattr(self._session, 'scalars'):
             if blocks:
                 present_blocks = set(
                     self._session.scalars(
@@ -1283,8 +1331,11 @@ class SqlAlchemyWorkRepository:
                 )
                 if any(block not in present_blocks for block in blocks):
                     return False
-        elif any(results.get(run_id, block) is None for block in blocks):
-            return False
+        else:
+            from linguary.adapters.db.repositories import SqlAlchemyBlockResultRepository
+            results = SqlAlchemyBlockResultRepository(self._session)
+            if any(results.get(run_id, block) is None for block in blocks):
+                return False
         if update_state:
             self._session.execute(update(RecoveryRootRow).where(RecoveryRootRow.id == root.id,
                 RecoveryRootRow.generation == root.generation).values(status='complete', reason=None))
