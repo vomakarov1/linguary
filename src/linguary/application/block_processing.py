@@ -374,7 +374,7 @@ class TranslationCall:
 
     def save(
         self, *, book_id: str, run_id: str, results: Sequence[BlockProcessingResult],
-        pronunciation_unavailable: bool = False,
+        pronunciation_unavailable: bool = False, reconcile: bool = True,
     ) -> bool:
         """Atomically replaces results of the specified blocks (ALG-04, PRD § 17).
 
@@ -441,8 +441,13 @@ class TranslationCall:
                 if context is not None and context.root_id is not None:
                     transaction.work.root_coverage_complete(context.root_id)
                 from linguary.application.correction import invalidate_correction
-                invalidate_correction(transaction, book_id, run_id,
-                                      (result.block_id for result in results))
+                invalidate_correction(
+                    transaction,
+                    book_id,
+                    run_id,
+                    (result.block_id for result in results),
+                    reconcile=reconcile,
+                )
                 saved = True
         if not saved:
             finalize_response(self._unit_of_work, response, 'stale')

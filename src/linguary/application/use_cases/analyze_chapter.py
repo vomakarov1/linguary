@@ -862,12 +862,14 @@ class ChapterAnalysisSequence:
                 from linguary.application.mention_counter import mention_counter
                 from linguary.domain import TermConcept, TermStatus, TermVariant
 
+                analyses = transaction.analyses.list_for_book(book_id)
+                count_mentions = mention_counter(document) if document else None
                 review = build_glossary_review(
                     book_id=book_id,
-                    analyses=transaction.analyses.list_for_book(book_id),
+                    analyses=analyses,
                     confidence_threshold=confidence_threshold,
                     decisions=transaction.glossary.list_for_book(book_id),
-                    count_mentions=mention_counter(document) if document else None,
+                    count_mentions=count_mentions,
                     min_mentions=min_mentions,
                     min_chapters=min_chapters,
                     name_translation_policy=policy,
@@ -906,10 +908,10 @@ class ChapterAnalysisSequence:
                 # Re-check if review is complete
                 review = build_glossary_review(
                     book_id=book_id,
-                    analyses=transaction.analyses.list_for_book(book_id),
+                    analyses=analyses,
                     confidence_threshold=confidence_threshold,
                     decisions=transaction.glossary.list_for_book(book_id),
-                    count_mentions=mention_counter(document) if document else None,
+                    count_mentions=count_mentions,
                     min_mentions=min_mentions,
                     min_chapters=min_chapters,
                     name_translation_policy=policy,

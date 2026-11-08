@@ -145,6 +145,97 @@ class CorrectionInputs:
             return False
 
 
+def _section_correction_inputs(
+    tx,
+    *,
+    document,
+    section,
+    run,
+    conditions,
+    snapshot,
+    analyses_by_section=None,
+    result_bindings=None,
+    generations=None,
+    run_results=None,
+):
+    blocks = textual_blocks(section)
+    block_ids = {b.id for b in blocks}
+    list_for_section = getattr(tx.results, 'list_for_section', None)
+    stored_results = (
+        list_for_section(run.id, section.id)
+        if callable(list_for_section)
+        else (run_results if run_results is not None else tx.results.list_for_run(run.id))
+    )
+    results = {r.block_id: r for r in stored_results if r.block_id in block_ids}
+    if result_bindings is not None:
+        bindings = {b.id: result_bindings.get(b.id) for b in blocks}
+    else:
+        bindings = {b.id: tx.work.get_binding('result', f'{run.id}:{b.id}') for b in blocks}
+    if generations is None:
+        generations = (
+            tx.work.correction_input_generations(run.id)
+            if isinstance(snapshot, CorrectionSnapshotV2)
+            else {}
+        )
+    analysis = (
+        analyses_by_section.get(section.id)
+        if analyses_by_section is not None
+        else tx.analyses.get_for_section(document.id, section.id)
+    )
+    return CorrectionInputs(
+        document,
+        section,
+        analysis,
+        run,
+        conditions,
+        snapshot,
+        blocks,
+        results,
+        bindings,
+        {b.id: generations.get(b.id, 0) for b in blocks},
+    )
+
+
+def _load_book_correction_inputs_state(tx, book_id, *, run, binding, policy):
+    conditions = tx.work.latest_conditions(book_id)
+    if (binding['book_id'] != book_id or conditions is None
+            or binding['conditions_id'] != conditions.id):
+        raise WorkStateError('условия исправления больше не активны')
+    snapshot = parse_correction_snapshot(policy)
+    list_analyses = getattr(tx.analyses, 'list_for_book', None)
+    analyses_by_section = (
+        {analysis.section_id: analysis for analysis in list_analyses(book_id)}
+        if callable(list_analyses)
+        else None
+    )
+    list_result_bindings = getattr(tx.work, 'result_bindings', None)
+    result_bindings = (
+        list_result_bindings(run.id)
+        if callable(list_result_bindings)
+        else None
+    )
+    generations = (
+        tx.work.correction_input_generations(run.id)
+        if isinstance(snapshot, CorrectionSnapshotV2)
+        else {}
+    )
+    list_for_section = getattr(tx.results, 'list_for_section', None)
+    run_results = (
+        None
+        if callable(list_for_section)
+        else tx.results.list_for_run(run.id)
+    )
+    return dict(
+        run=run,
+        conditions=conditions,
+        snapshot=snapshot,
+        analyses_by_section=analyses_by_section,
+        result_bindings=result_bindings,
+        generations=generations,
+        run_results=run_results,
+    )
+
+
 def correction_inputs(tx, book_id, section_id):
     """Read all significant inputs through the caller's existing transaction."""
     run = tx.runs.active_for_book(book_id)
@@ -165,20 +256,14 @@ def correction_inputs(tx, book_id, section_id):
     section = next((s for s in document.ordered_sections if s.id == section_id), None)
     if section is None:
         raise WorkStateError('глава исправления отсутствует')
-    blocks = textual_blocks(section)
-    block_ids = {b.id for b in blocks}
-    list_for_section = getattr(tx.results, 'list_for_section', None)
-    stored_results = (
-        list_for_section(run.id, section.id)
-        if callable(list_for_section)
-        else tx.results.list_for_run(run.id)
+    return _section_correction_inputs(
+        tx,
+        document=document,
+        section=section,
+        run=run,
+        conditions=conditions,
+        snapshot=snapshot,
     )
-    results = {r.block_id: r for r in stored_results if r.block_id in block_ids}
-    bindings = {b.id: tx.work.get_binding('result', f'{run.id}:{b.id}') for b in blocks}
-    generations = tx.work.correction_input_generations(run.id) if isinstance(snapshot, CorrectionSnapshotV2) else {}
-    return CorrectionInputs(document, section, tx.analyses.get_for_section(book_id, section_id),
-                            run, conditions, snapshot, blocks, results, bindings,
-                            {b.id: generations.get(b.id, 0) for b in blocks})
 
 
 def _is_pure_read_as_is(block: DocumentBlock, inputs: CorrectionInputs) -> bool:
@@ -282,12 +367,14 @@ def correction_input_fingerprint(inputs, block_id):
 def _observe_correction_inputs(tx, inputs):
     if not isinstance(inputs.snapshot, CorrectionSnapshotV2):
         return inputs
+    updated_generations = dict(inputs.input_generations)
     for block in inputs.blocks:
         generation = tx.work.observe_correction_input(inputs.run.id, block.id,
             correction_input_fingerprint(inputs, block.id))
-        if inputs.input_generations[block.id] and generation != inputs.input_generations[block.id]:
+        if inputs.input_generations.get(block.id) and generation != inputs.input_generations.get(block.id):
             tx.work.stale_correction_candidates(inputs.run.id, block_ids=(block.id,))
-    return correction_inputs(tx, inputs.document.id, inputs.section.id)
+        updated_generations[block.id] = generation
+    return replace(inputs, input_generations=updated_generations)
 
 
 def _restore_correction_checks(tx, inputs, tasks):
@@ -384,15 +471,23 @@ def correction_coverage_complete(tx, book_id):
     """Legacy runs retain their prior export semantics; required runs need current checks."""
     run = tx.runs.active_for_book(book_id)
     binding = None if run is None else tx.work.get_binding('run', run.id)
-    if correction_policy({} if binding is None else binding['payload_json']) is None:
+    policy = correction_policy({} if binding is None else binding['payload_json'])
+    if policy is None:
         return True
     document = tx.documents.get(book_id)
     if document is None:
         return False
-    for section in document.ordered_sections:
-        if document.is_front_matter(section) or section.is_notes_only:
-            continue
-        inputs = correction_inputs(tx, book_id, section.id)
+    sections = tuple(
+        section for section in document.ordered_sections
+        if not document.is_front_matter(section) and not section.is_notes_only
+    )
+    if not sections:
+        return True
+    shared = _load_book_correction_inputs_state(
+        tx, book_id, run=run, binding=binding, policy=policy,
+    )
+    for section in sections:
+        inputs = _section_correction_inputs(tx, document=document, section=section, **shared)
         if (not inputs.translated or model_correction_blocks(tx, inputs)
                 or current_correction_candidates(tx, inputs, states={'awaiting_review'})):
             return False
@@ -410,22 +505,42 @@ def _supersede(tx, task):
             tx.work.transition_attempt(attempt.id, target, expected_state=attempt.state)
 
 
+def _reset_book_readiness(tx, book_id):
+    books = getattr(tx, 'books', None)
+    if books is None:
+        return
+    book = books.get(book_id)
+    if book is not None and (
+        book.status in {BookStatus.READY_TO_EXPORT, BookStatus.COMPLETED}
+        or getattr(book, 'export_validation_status', None) is not None
+    ):
+        books.save(replace(book, status=BookStatus.PROCESSING, export_validation_status=None))
+
+
 def reconcile_corrections(tx, book_id):
     """ALG-03: restore tasks from run policy, preserving explicit retries of FAILED work."""
     run = tx.runs.active_for_book(book_id)
     binding = None if run is None else tx.work.get_binding('run', run.id)
-    if correction_policy({} if binding is None else binding['payload_json']) is None:
+    policy = correction_policy({} if binding is None else binding['payload_json'])
+    if policy is None:
         return ()
     document = tx.documents.get(book_id)
     if document is None:
         return ()
+    sections = tuple(
+        section for section in document.ordered_sections
+        if not document.is_front_matter(section) and not section.is_notes_only
+    )
+    if not sections:
+        return ()
+    shared = _load_book_correction_inputs_state(
+        tx, book_id, run=run, binding=binding, policy=policy,
+    )
     tasks = tx.tasks.list_for_book(book_id)
     pending = []
     complete = True
-    for section in document.ordered_sections:
-        if document.is_front_matter(section) or section.is_notes_only:
-            continue
-        inputs = correction_inputs(tx, book_id, section.id)
+    for section in sections:
+        inputs = _section_correction_inputs(tx, document=document, section=section, **shared)
         inputs = _observe_correction_inputs(tx, inputs)
         _restore_correction_checks(tx, inputs, tasks)
         model_missing = model_correction_blocks(tx, inputs)
@@ -480,17 +595,19 @@ def reconcile_corrections(tx, book_id):
                     input_generation=generation, manifest=inputs.manifest))
         pending.append(task)
     if not complete:
-        book = tx.books.get(book_id)
-        if book.status in {BookStatus.READY_TO_EXPORT, BookStatus.COMPLETED} or book.export_validation_status is not None:
-            tx.books.save(replace(book, status=BookStatus.PROCESSING, export_validation_status=None))
+        _reset_book_readiness(tx, book_id)
     return tuple(pending)
 
 
-def invalidate_correction(tx, book_id, run_id, block_ids):
+def invalidate_correction(tx, book_id, run_id, block_ids, *, reconcile: bool = True) -> None:
     """Revoke checks and readiness in the transaction that changes source results."""
-    tx.work.delete_correction_checks(run_id, block_ids=tuple(block_ids))
+    block_ids = tuple(block_ids)
+    tx.work.delete_correction_checks(run_id, block_ids=block_ids)
     binding = tx.work.get_binding('run', run_id)
     policy = {} if binding is None else binding['payload_json'].get('correction', {})
     if policy.get('policy_version') == CORRECTION_POLICY_VERSION_V2:
-        tx.work.stale_correction_candidates(run_id, block_ids=tuple(block_ids))
-    reconcile_corrections(tx, book_id)
+        tx.work.stale_correction_candidates(run_id, block_ids=block_ids)
+    if reconcile:
+        reconcile_corrections(tx, book_id)
+    else:
+        _reset_book_readiness(tx, book_id)

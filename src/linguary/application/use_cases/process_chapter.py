@@ -25,9 +25,9 @@ along with its results (P3.T7).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 import threading
 from uuid import uuid4
@@ -123,6 +123,8 @@ class _ChapterWork:
     processed_block_ids: frozenset[str]
     used_note_ids: frozenset[str]
     task_id: str | None = None
+    source_texts: Mapping[str, str] = field(default_factory=dict)
+    pronunciation_help_enabled: bool = False
 
     @property
     def target_language(self) -> str:
@@ -270,12 +272,7 @@ class ProcessChapter:
             or any(a.block_id in unit_block_ids for a in d.anchors)
             for d in plan.difficulties
         ))
-        with self._unit_of_work.transaction() as transaction:
-            conditions = transaction.work.latest_conditions(work.document.id)
-        pronunciation_help_enabled = bool(
-            conditions and conditions.payload.get('pronunciation_help_enabled')
-        )
-        if all_read_as_is and not has_difficulties and not pronunciation_help_enabled:
+        if all_read_as_is and not has_difficulties and not work.pronunciation_help_enabled:
             results = tuple(
                 BlockProcessingResult(
                     block_id=b_id,
@@ -317,7 +314,12 @@ class ProcessChapter:
             with self._unit_of_work.transaction() as transaction:
                 expected = {b_id: transaction.work.get_binding('result', f'{work.run.id}:{b_id}') for b_id in unit.block_ids}
             self._call._expected_bindings.set(expected)
-            saved = self._call.save(book_id=work.document.id, run_id=work.run.id, results=results)
+            saved = self._call.save(
+                book_id=work.document.id,
+                run_id=work.run.id,
+                results=results,
+                reconcile=False,
+            )
             return replace(
                 result,
                 processed_units=result.processed_units + 1,
@@ -355,17 +357,21 @@ class ProcessChapter:
             )
             context = replace(context, request=replace(context.request,
                 input_text=context.request.input_text + '\n\nКонтекст исходной сцены; эти строки не являются дополнительными целями изменения:\n' + readonly))
+        source_texts = work.source_texts or {
+            block.id: block.text
+            for section in work.document.sections
+            for block in section.blocks
+        }
         call = await self._call.request(
             context, unit=unit, target_language=work.target_language, note_ids=note_ids,
             recovery=recovery,
-            source_texts={
-                block.id: block.text
-                for section in work.document.sections
-                for block in section.blocks
-            },
+            source_texts=source_texts,
         )
         saved = self._call.save(
-            book_id=work.document.id, run_id=work.run.id, results=call.results
+            book_id=work.document.id,
+            run_id=work.run.id,
+            results=call.results,
+            reconcile=False,
         )
         return replace(
             result,
@@ -477,6 +483,20 @@ class ProcessChapter:
                 for chapter in tx.analyses.list_for_book(command.book_id)
                 for candidate in chapter.glossary_candidates
             )
+            work_repo = getattr(tx, "work", None)
+            conditions = (
+                work_repo.latest_conditions(command.book_id)
+                if work_repo is not None
+                else None
+            )
+            pronunciation_help_enabled = bool(
+                conditions and conditions.payload.get("pronunciation_help_enabled")
+            )
+            source_texts = {
+                block.id: block.text
+                for doc_section in document.sections
+                for block in doc_section.blocks
+            }
         section_block_ids = {block.id for block in section.ordered_blocks}
         return _ChapterWork(
             document=document,
@@ -496,6 +516,8 @@ class ProcessChapter:
                 if result.block_id in section_block_ids
             ),
             task_id=command.task_id,
+            source_texts=source_texts,
+            pronunciation_help_enabled=pronunciation_help_enabled,
         )
 
 

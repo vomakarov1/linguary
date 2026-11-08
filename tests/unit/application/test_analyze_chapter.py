@@ -1079,4 +1079,270 @@ async def test_sequential_analysis_retains_previous_chapter_candidates() -> None
     assert "мистер Беннет" in request_text
 
 
+async def test_auto_approve_glossary_computes_mention_counter_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-approving glossary computes mention_counter and loads analyses once across both review passes (P1.T2)."""
+    import linguary.application.mention_counter as mention_counter_module
+
+    original_mention_counter = mention_counter_module.mention_counter
+    mention_counter_calls = 0
+
+    def counting_mention_counter(document):
+        nonlocal mention_counter_calls
+        mention_counter_calls += 1
+        return original_mention_counter(document)
+
+    monkeypatch.setattr(
+        mention_counter_module, "mention_counter", counting_mention_counter
+    )
+
+    ch1 = make_analysis_section(
+        section_id="section-1", title="Chapter 1", order=0, texts=("Ch 1 Duskmere",)
+    )
+    ch2 = make_analysis_section(
+        section_id="section-2", title="Chapter 2", order=1, texts=("Ch 2 Duskmere",)
+    )
+    doc = make_analysis_document((ch1, ch2))
+    unit_of_work = FakeUnitOfWork(
+        document=doc, book=make_book_record(BookStatus.ANALYZING)
+    )
+    conditions = SimpleNamespace(
+        id="cond-1",
+        payload={
+            "checks": {
+                "auto_approve_glossary": True,
+                "glossary_confidence_threshold": 0.7,
+                "glossary_review_min_mentions": 1,
+                "glossary_review_min_chapters": 1,
+            }
+        },
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    queue = FakeTaskQueue()
+    reply = analysis_reply(
+        aliases=("b1",),
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    client = FakeLLMClient.always(reply)
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+    )
+
+    tasks = await sequence._enqueue_all(BOOK_ID)
+    await sequence.run_task(tasks[0].start())
+
+    list_for_book_calls = 0
+    original_list_for_book = type(unit_of_work.analyses).list_for_book
+
+    def counting_list_for_book(self, book_id: str):
+        nonlocal list_for_book_calls
+        list_for_book_calls += 1
+        return original_list_for_book(self, book_id)
+
+    monkeypatch.setattr(
+        type(unit_of_work.analyses), "list_for_book", counting_list_for_book
+    )
+
+    await sequence.run_task(tasks[1].start())
+
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
+    assert mention_counter_calls == 1
+    # 1 call inside AnalyzeChapter(command), 1 call for deduplicate_book_before_you_read,
+    # and 1 shared call for both build_glossary_review invocations in auto_approve.
+    assert list_for_book_calls == 3
+
+
+async def test_process_chapter_reuses_source_texts_and_defers_reconcile_until_completion() -> None:
+    """ProcessChapter caches source_texts and pronunciation_help_enabled in _load and passes reconcile=False per unit (P1.T2)."""
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.application.use_cases.process_chapter import (
+        ProcessChapter,
+        ProcessChapterCommand,
+        ProcessChapterResult,
+    )
+    from linguary.domain import GlossarySnapshot, TranslationUnit, TreatmentPlan
+    from processing_fakes import make_validator
+
+    ch1 = make_analysis_section(
+        section_id="section-1",
+        title="Chapter 1",
+        order=0,
+        texts=("Read as is paragraph.", "Paragraph to translate."),
+    )
+    ch2 = make_analysis_section(
+        section_id="section-2",
+        title="Chapter 2",
+        order=1,
+        texts=("Another chapter paragraph.",),
+    )
+    doc = make_analysis_document((ch1, ch2))
+    b1, b2 = ch1.ordered_blocks
+    b3 = ch2.ordered_blocks[0]
+
+    plan = TreatmentPlan.of_treatments(
+        ch1.id,
+        (
+            (b1.id, BlockTreatment.READ_AS_IS),
+            (b2.id, BlockTreatment.TRANSLATE),
+        ),
+    )
+    analysis = make_chapter_analysis(id="analysis-1", section_id=ch1.id)
+    analysis = SimpleNamespace(
+        id=analysis.id,
+        section_id=ch1.id,
+        treatment_plan=plan,
+        content_plan=None,
+        translation_instructions="",
+        chapter_summary="",
+        before_you_read=(),
+        glossary_candidates=(),
+        ensure_ready_for_processing=lambda: None,
+    )
+
+    unit_of_work = FakeUnitOfWork(
+        document=doc, book=make_book_record(BookStatus.PROCESSING)
+    )
+    unit_of_work.analyses.analyses[(BOOK_ID, ch1.id)] = analysis  # type: ignore[assignment]
+    run = SimpleNamespace(
+        id="run-1",
+        book_id=BOOK_ID,
+        glossary_snapshot=GlossarySnapshot(),
+        is_active=True,
+    )
+    unit_of_work.runs.runs["run-1"] = run  # type: ignore[assignment]
+    unit_of_work.results = SimpleNamespace(  # type: ignore[attr-defined]
+        list_for_section=lambda _run_id, _sec_id: (),
+    )
+
+    latest_conditions_calls = 0
+    conditions = SimpleNamespace(
+        id="cond-1",
+        payload={
+            "pronunciation_help_enabled": False,
+            "models": {"processing": "gpt-test"},
+        },
+    )
+    root = SimpleNamespace(
+        id="root-1",
+        conditions_id="cond-1",
+        policy_version=CURRENT_TRANSLATION_POLICY,
+        manifest={"ordered_blocks": (b1.id, b2.id)},
+    )
+
+    class FakeWork:
+        def latest_conditions(self, book_id: str):
+            nonlocal latest_conditions_calls
+            latest_conditions_calls += 1
+            return conditions
+
+        def get_root(self, root_id: str):
+            return root
+
+        def get_conditions(self, conditions_id: str):
+            return conditions
+
+        def begin_recovery_attempt(self, root_id: str, scope_id: str, **kwargs):
+            return SimpleNamespace(
+                attempt_id="att-1",
+                root_id=root_id,
+                scope_id=scope_id,
+                conditions_id="cond-1",
+                policy_version=root.policy_version,
+                prompt_hash="hash",
+            )
+
+        def transition_attempt(self, attempt_id: str, state: str, **kwargs) -> None:
+            return None
+
+        def get_binding(self, kind: str, entity_id: str):
+            return None
+
+    unit_of_work.work = FakeWork()  # type: ignore[attr-defined]
+
+    process_chapter = ProcessChapter(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        llm_client=SimpleNamespace(),  # type: ignore[arg-type]
+        retry_policy= SimpleNamespace(),  # type: ignore[arg-type]
+        validator=make_validator(),
+    )
+
+    work = process_chapter._load(
+        ProcessChapterCommand(book_id=BOOK_ID, section_id=ch1.id, task_id="task-1")
+    )
+
+    assert latest_conditions_calls == 1
+    assert work.pronunciation_help_enabled is False
+    assert dict(work.source_texts) == {
+        b1.id: b1.text,
+        b2.id: b2.text,
+        b3.id: b3.text,
+    }
+
+    save_calls: list[dict[str, object]] = []
+    request_source_texts: list[object] = []
+
+    async def fake_request(context, **kwargs):
+        request_source_texts.append(kwargs.get("source_texts"))
+        return SimpleNamespace(
+            results=(
+                SimpleNamespace(block_id=b2.id),
+            ),
+            attempts=1,
+            usage=None,
+        )
+
+    def fake_save(**kwargs) -> bool:
+        save_calls.append(kwargs)
+        return True
+
+    process_chapter._call.request = fake_request  # type: ignore[method-assign]
+    process_chapter._call.save = fake_save  # type: ignore[method-assign]
+
+    unit_read_as_is = TranslationUnit.of_blocks(
+        id="scope-1", blocks=(b1,), plan=plan
+    )
+    unit_translate = TranslationUnit.of_blocks(
+        id="scope-2", blocks=(b2,), plan=plan
+    )
+
+    initial = ProcessChapterResult(section_id=ch1.id, run_id="run-1", units=2)
+    after_first = await process_chapter._process_unit(
+        unit_read_as_is,
+        work=work,
+        note_ids=lambda: "ln-ch01-001",
+        result=initial,
+        recovery=("root-1", "scope-1"),
+    )
+    after_second = await process_chapter._process_unit(
+        unit_translate,
+        work=work,
+        note_ids=lambda: "ln-ch01-002",
+        result=after_first,
+        recovery=("root-1", "scope-2"),
+    )
+
+    # _process_unit must not call latest_conditions on each unit.
+    assert latest_conditions_calls == 1
+    assert after_second.processed_units == 2
+    assert len(save_calls) == 2
+    assert save_calls[0]["reconcile"] is False
+    assert save_calls[1]["reconcile"] is False
+    assert len(request_source_texts) == 1
+    assert request_source_texts[0] is work.source_texts
+
+
+
 
