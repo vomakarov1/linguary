@@ -404,3 +404,149 @@ def test_pronunciation_unknown_kind_and_fields_rejected(change):
         raw['evidence'].pop('source_uri')
     with pytest.raises(PersistenceError):
         _decode_pronunciation([raw])
+
+
+def test_list_for_section_returns_only_section_results_in_block_order(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    from dataclasses import replace
+    from persistence_factories import make_block
+    from linguary.domain import DocumentSection
+
+    sec1 = DocumentSection(
+        id="section-1",
+        document_id=BOOK_ID,
+        title="Chapter 1",
+        order=0,
+        source_resource_path="OEBPS/ch1.xhtml",
+        blocks=(
+            make_block(block_id="b-1-1", section_id="section-1", order=0),
+            make_block(block_id="b-1-2", section_id="section-1", order=1),
+        ),
+    )
+    sec2 = DocumentSection(
+        id="section-2",
+        document_id=BOOK_ID,
+        title="Chapter 2",
+        order=1,
+        source_resource_path="OEBPS/ch2.xhtml",
+        blocks=(
+            make_block(block_id="b-2-1", section_id="section-2", order=0),
+            make_block(block_id="b-2-2", section_id="section-2", order=1),
+        ),
+    )
+    doc = replace(make_document(), sections=(sec1, sec2))
+    r1_1 = annotated_result("b-1-1", marker="s1b1")
+    r1_2 = annotated_result("b-1-2", marker="s1b2")
+    r2_1 = annotated_result("b-2-1", marker="s2b1")
+    r2_2 = annotated_result("b-2-2", marker="s2b2")
+
+    with unit_of_work.transaction() as uow:
+        uow.books.add(make_book())
+        uow.documents.save(doc)
+        uow.runs.add(make_run())
+        uow.results.replace_results(RUN_ID, [r2_2, r1_2, r2_1, r1_1])
+
+    with unit_of_work.transaction() as uow:
+        assert uow.results.list_for_section(RUN_ID, "section-1") == (r1_1, r1_2)
+        assert uow.results.list_for_section(RUN_ID, "section-2") == (r2_1, r2_2)
+        assert uow.results.list_for_section(RUN_ID, "section-missing") == ()
+
+
+def test_process_chapter_and_correction_inputs_use_section_scoped_results(
+    unit_of_work: SqlAlchemyUnitOfWork,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import uuid4
+    from persistence_factories import CREATED_AT, SECTION_ID, make_analysis
+    from linguary.adapters.db.repositories import SqlAlchemyBlockResultRepository
+    from linguary.application.correction import correction_inputs
+    from linguary.application.correction_dto import CORRECTION_VERSIONS, CorrectionSnapshot
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.use_cases.process_chapter import (
+        ProcessChapter, ProcessChapterCommand,
+    )
+    from linguary.application.use_cases.regenerate_block import (
+        RegenerateBlock, RegenerateBlockCommand,
+    )
+    from linguary.domain.book_conditions import BookConditions
+
+    r1 = annotated_result(BLOCK_ID, marker="first")
+    r2 = annotated_result(SECOND_BLOCK_ID, marker="second")
+    conditions = BookConditions(
+        id=str(uuid4()),
+        book_id=BOOK_ID,
+        revision=1,
+        payload={"schema_version": 1, "versions": {"validators": 1}},
+        created_at=CREATED_AT,
+    )
+    snapshot = CorrectionSnapshot(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1",
+               "proxy": "", "route_id": "route-1"},
+        parameters={"temperature": 0, "max_output_tokens": None, "timeout_seconds": 30,
+                    "max_attempts": 1, "max_unit_source_chars": 1000,
+                    "input_price_per_mtok": 0, "output_price_per_mtok": 0},
+        prompt="Check chapter.",
+        versions=CORRECTION_VERSIONS,
+    )
+    with unit_of_work.transaction() as uow:
+        uow.books.add(make_book())
+        uow.documents.save(make_document())
+        uow.analyses.save(BOOK_ID, make_analysis())
+        uow.runs.add(make_run())
+        uow.results.replace_results(RUN_ID, [r1, r2])
+        uow.work.add_conditions(conditions)
+        uow.work.bind(
+            "run",
+            RUN_ID,
+            book_id=BOOK_ID,
+            conditions_id=conditions.id,
+            payload={"schema_version": 1, "correction": snapshot.to_payload()},
+        )
+
+    section_calls: list[tuple[str, str]] = []
+    orig_list_for_section = SqlAlchemyBlockResultRepository.list_for_section
+
+    def tracked_list_for_section(self, run_id: str, section_id: str):
+        section_calls.append((run_id, section_id))
+        return orig_list_for_section(self, run_id, section_id)
+
+    def forbidden_list_for_run(self, run_id: str):
+        raise AssertionError("list_for_run should not be called in section-scoped loads")
+
+    monkeypatch.setattr(
+        SqlAlchemyBlockResultRepository, "list_for_section", tracked_list_for_section
+    )
+    monkeypatch.setattr(
+        SqlAlchemyBlockResultRepository, "list_for_run", forbidden_list_for_run
+    )
+
+    process_uc = ProcessChapter(
+        unit_of_work=unit_of_work,
+        llm_client=None,  # type: ignore[arg-type]
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=None,  # type: ignore[arg-type]
+    )
+    work = process_uc._load(ProcessChapterCommand(book_id=BOOK_ID, section_id=SECTION_ID))
+    assert work.processed_block_ids == frozenset({BLOCK_ID, SECOND_BLOCK_ID})
+
+    regen_uc = RegenerateBlock(
+        unit_of_work=unit_of_work,
+        llm_client=None,  # type: ignore[arg-type]
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=None,  # type: ignore[arg-type]
+    )
+    block_work = regen_uc._load(RegenerateBlockCommand(book_id=BOOK_ID, block_id=BLOCK_ID))
+    assert "ln-first-1" in block_work.used_note_ids
+
+    with unit_of_work.transaction() as uow:
+        inputs = correction_inputs(uow, BOOK_ID, SECTION_ID)
+    assert inputs is not None
+    assert set(inputs.results) == {BLOCK_ID, SECOND_BLOCK_ID}
+    assert section_calls == [
+        (RUN_ID, SECTION_ID),
+        (RUN_ID, SECTION_ID),
+        (RUN_ID, SECTION_ID),
+    ]
+

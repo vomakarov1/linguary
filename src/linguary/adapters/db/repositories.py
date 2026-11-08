@@ -405,6 +405,30 @@ class SqlAlchemyBlockResultRepository:
             for row in rows
         )
 
+    def list_for_section(
+        self, run_id: str, section_id: str
+    ) -> tuple[BlockProcessingResult, ...]:
+        """List results of a single chapter within a run in source document block order."""
+        rows = self._session.scalars(
+            select(BlockResultRow)
+            .join(DocumentBlockRow, DocumentBlockRow.id == BlockResultRow.block_id)
+            .where(
+                BlockResultRow.run_id == run_id,
+                DocumentBlockRow.section_id == section_id,
+            )
+            .order_by(DocumentBlockRow.order)
+        ).all()
+        notes = _by_block(self._section_notes(run_id, section_id))
+        warnings = _by_block(self._section_warnings(run_id, section_id))
+        return tuple(
+            mapping.to_block_result(
+                row,
+                notes.get(row.block_id, ()),
+                warnings.get(row.block_id, ()),
+            )
+            for row in rows
+        )
+
     def count_for_run(self, run_id: str) -> int:
         """Count how many blocks in the run have already been processed.
 
@@ -451,6 +475,34 @@ class SqlAlchemyBlockResultRepository:
         return self._session.scalars(
             select(ResultWarningRow)
             .where(ResultWarningRow.run_id == run_id)
+            .order_by(ResultWarningRow.id)
+        ).all()
+
+    def _section_notes(
+        self, run_id: str, section_id: str
+    ) -> Sequence[LanguageNoteRow]:
+        """Get language notes for all blocks of a chapter in stable order."""
+        return self._session.scalars(
+            select(LanguageNoteRow)
+            .join(DocumentBlockRow, DocumentBlockRow.id == LanguageNoteRow.block_id)
+            .where(
+                LanguageNoteRow.run_id == run_id,
+                DocumentBlockRow.section_id == section_id,
+            )
+            .order_by(LanguageNoteRow.id)
+        ).all()
+
+    def _section_warnings(
+        self, run_id: str, section_id: str
+    ) -> Sequence[ResultWarningRow]:
+        """Get warnings for all blocks of a chapter in stable order."""
+        return self._session.scalars(
+            select(ResultWarningRow)
+            .join(DocumentBlockRow, DocumentBlockRow.id == ResultWarningRow.block_id)
+            .where(
+                ResultWarningRow.run_id == run_id,
+                DocumentBlockRow.section_id == section_id,
+            )
             .order_by(ResultWarningRow.id)
         ).all()
 

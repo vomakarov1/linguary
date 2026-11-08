@@ -205,6 +205,11 @@ class RegenerateBlock:
                     chapter_number=work.chapter_number, used=work.used_note_ids
                 ),
                 recovery=(root.id, scope.id),
+                source_texts={
+                    block.id: block.text
+                    for section in work.document.sections
+                    for block in section.blocks
+                },
             )
         except RecoverySplit:
             self._recovery.split(root.id, scope.id)
@@ -287,7 +292,12 @@ class RegenerateBlock:
                 for root in transaction.work.list_active_roots(command.book_id, run_id=run.id)
             ):
                 raise RegenerateBlockError('книга ещё обрабатывается: восстановление не завершено')
-            stored = transaction.results.list_for_run(run.id)
+            list_for_section = getattr(transaction.results, "list_for_section", None)
+            stored = (
+                list_for_section(run.id, section.id)
+                if callable(list_for_section)
+                else transaction.results.list_for_run(run.id)
+            )
             book_candidates = tuple(
                 candidate
                 for chapter in transaction.analyses.list_for_book(command.book_id)

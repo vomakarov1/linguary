@@ -12,7 +12,7 @@ nothing if they diverge.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace, asdict
 from contextvars import ContextVar
 from hashlib import sha256
@@ -87,6 +87,7 @@ class TranslationCall:
         pronunciation_source: PronunciationSource | None = None,
         pronunciation_help_enabled: bool = False,
         pronunciation_variant: PronunciationVariant | None = None,
+        source_texts: Mapping[str, str] | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._llm_client = llm_client
@@ -96,6 +97,7 @@ class TranslationCall:
         self._pronunciation_source = pronunciation_source
         self._pronunciation_enabled = pronunciation_help_enabled
         self._pronunciation_variant = pronunciation_variant
+        self._source_texts = source_texts
         self._validated_response = ContextVar(f"validated_response_{id(self)}", default=None)
         self._expected_bindings = ContextVar(f"expected_bindings_{id(self)}", default={})
 
@@ -107,6 +109,7 @@ class TranslationCall:
         target_language: str,
         note_ids: Callable[[], str],
         recovery: tuple[str, str] | None = None,
+        source_texts: Mapping[str, str] | None = None,
     ) -> TranslationCallResult:
         """Calls the model and validates the response, retrying per policy (ALG-04, ALG-05).
 
@@ -242,13 +245,17 @@ class TranslationCall:
                     record_reader_warnings(self._unit_of_work, response,
                         [('translation', result.translated_text or '') for result in results],
                         reader_level=conditions.payload['reader_level'] if conditions else 'b2')
+                resolved_source_texts = source_texts if source_texts is not None else self._source_texts
                 if request.contract_version == 4:
                     from linguary.application.validators.content_plan import resolve_fragment_assistances
                     owners = tuple(r.block_id for r in results)
-                    with self._unit_of_work.transaction() as transaction:
-                        document = transaction.documents.get(request.book_id)
-                    source_texts = {block.id: block.text for section in document.sections for block in section.blocks}
-                    assistance = resolve_fragment_assistances(context.content_plan, mapped, results, source_texts,
+                    if resolved_source_texts is None:
+                        with self._unit_of_work.transaction() as transaction:
+                            document = transaction.documents.get(request.book_id)
+                        call_source_texts = {block.id: block.text for section in document.sections for block in section.blocks}
+                    else:
+                        call_source_texts = resolved_source_texts
+                    assistance = resolve_fragment_assistances(context.content_plan, mapped, results, call_source_texts,
                         owner_block_ids=owners, before_you_read=context.before_you_read,
                         glossary_entries=() if current_run is None else current_run.glossary_snapshot.mandatory_entries,
                         validators_version=validators_version)
@@ -257,15 +264,16 @@ class TranslationCall:
                     owners = tuple(r.block_id for r in results)
                     evidence = resolve_response_evidence(context.content_plan, mapped, results, context.before_you_read, owner_block_ids=owners)
                     results = tuple(explained.without_repeats_v2(r) for r in results)
-                    document = None
                     if a2_v4:
-                        with self._unit_of_work.transaction() as transaction:
-                            document = transaction.documents.get(request.book_id)
-                    if a2_v4:
-                        source_texts = ({block.id: block.text for section in document.sections for block in section.blocks}
-                            if document is not None else {item.block.id: item.block.text for item in unit.items})
+                        if resolved_source_texts is not None:
+                            call_source_texts = resolved_source_texts
+                        else:
+                            with self._unit_of_work.transaction() as transaction:
+                                document = transaction.documents.get(request.book_id)
+                            call_source_texts = ({block.id: block.text for section in document.sections for block in section.blocks}
+                                if document is not None else {item.block.id: item.block.text for item in unit.items})
                         checked, unresolved = resolve_content_coverage(context.content_plan, results,
-                            context.before_you_read, evidence, owner_block_ids=owners, source_texts=source_texts,
+                            context.before_you_read, evidence, owner_block_ids=owners, source_texts=call_source_texts,
                             validators_version=validators_version)
                     else:
                         checked = validate_content_coverage(context.content_plan, results, context.before_you_read, evidence,

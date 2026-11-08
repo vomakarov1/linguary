@@ -166,8 +166,14 @@ def correction_inputs(tx, book_id, section_id):
     if section is None:
         raise WorkStateError('глава исправления отсутствует')
     blocks = textual_blocks(section)
-    results = {r.block_id: r for r in tx.results.list_for_run(run.id)
-               if r.block_id in {b.id for b in blocks}}
+    block_ids = {b.id for b in blocks}
+    list_for_section = getattr(tx.results, 'list_for_section', None)
+    stored_results = (
+        list_for_section(run.id, section.id)
+        if callable(list_for_section)
+        else tx.results.list_for_run(run.id)
+    )
+    results = {r.block_id: r for r in stored_results if r.block_id in block_ids}
     bindings = {b.id: tx.work.get_binding('result', f'{run.id}:{b.id}') for b in blocks}
     generations = tx.work.correction_input_generations(run.id) if isinstance(snapshot, CorrectionSnapshotV2) else {}
     return CorrectionInputs(document, section, tx.analyses.get_for_section(book_id, section_id),
