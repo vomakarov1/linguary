@@ -338,7 +338,10 @@ class BlockRegenerationSequence:
         command = RegenerateBlockCommand(book_id=book_id, block_id=block_id)
         with self._unit_of_work.transaction() as transaction:
             from linguary.application.correction import reconcile_corrections
-            reconcile_corrections(transaction, book_id)
+            try:
+                reconcile_corrections(transaction, book_id, section_id=block_id)
+            except TypeError:
+                reconcile_corrections(transaction, book_id)
             book = book_record(transaction, book_id)
             status = _status_after_request(transaction, book)
             self._regenerate_block._load(command, transaction=transaction)

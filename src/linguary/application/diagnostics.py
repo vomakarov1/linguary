@@ -33,13 +33,19 @@ def bounded_body(body, *, max_bytes=64 * 1024, secrets=()):
                       'original_bytes': None, 'stored_bytes': 0}
     original_bytes = len(body.encode('utf-8'))
     cleaned = body
+    redacted_count = 0
     for secret in sorted((value for value in secrets if value), key=len, reverse=True):
-        cleaned = cleaned.replace(secret, '[REDACTED]')
-    cleaned = re.sub(r'(?i)(https?://)[^/\s@]+@', r'\1[REDACTED]@', cleaned)
-    cleaned = re.sub(r'''(?i)(authorization["']?\s*[:=]\s*["']?\s*(?:bearer|basic)\s+)[^\s"',}]+''', r'\1[REDACTED]', cleaned)
+        count = cleaned.count(secret)
+        if count:
+            redacted_count += count
+            cleaned = cleaned.replace(secret, '[REDACTED]')
+    cleaned, count_url = re.subn(r'(?i)(https?://)[^/\s@]+@', r'\1[REDACTED]@', cleaned)
+    cleaned, count_auth = re.subn(r'''(?i)(authorization["']?\s*[:=]\s*["']?\s*(?:bearer|basic)\s+)[^\s"',}]+''', r'\1[REDACTED]', cleaned)
+    redacted_count += count_url + count_auth
     encoded = cleaned.encode('utf-8')
     result = encoded[:max_bytes].decode('utf-8', errors='ignore')
     return result, {'body_status': 'available', 'redacted': cleaned != body,
+                    'redacted_count': redacted_count,
                     'truncated': len(encoded) > max_bytes, 'original_bytes': original_bytes,
                     'stored_bytes': len(result.encode('utf-8'))}
 
@@ -61,12 +67,15 @@ class Diagnostics:
             raise LLMConfigurationError('Запись наблюдения недоступна; новые вызовы остановлены')
         self.periodic_purge()
 
+    def needs_periodic_purge(self, now=None, *, min_interval_seconds: float = 3600.0) -> bool:
+        if self._failed or self._last_cleanup is None:
+            return True
+        current = now if now is not None else self.clock()
+        return (current - self._last_cleanup).total_seconds() >= min_interval_seconds
+
     def periodic_purge(self, now=None, *, min_interval_seconds: float = 3600.0) -> bool:
         current = now if now is not None else self.clock()
-        if (
-            self._last_cleanup is not None
-            and (current - self._last_cleanup).total_seconds() < min_interval_seconds
-        ):
+        if not self.needs_periodic_purge(current, min_interval_seconds=min_interval_seconds):
             return False
         self.purge_expired(current)
         self._last_cleanup = current
@@ -118,7 +127,7 @@ class Diagnostics:
         elif body is not None:
             encoded_len = len(body.encode('utf-8'))
             if (
-                ('redacted_count' in current_body_meta or 'redacted' in current_body_meta)
+                'redacted_count' in current_body_meta
                 and encoded_len <= self.policy.max_body_bytes
             ):
                 current_body_meta = {
@@ -129,8 +138,15 @@ class Diagnostics:
             else:
                 body, bounded_meta = bounded_body(body, max_bytes=self.policy.max_body_bytes)
                 # Preserve adapter-reported redaction/truncation and original size.
-                current_body_meta = {**bounded_meta, **current_body_meta, 'body_status': 'available',
-                                     'stored_bytes': len(body.encode('utf-8'))}
+                current_body_meta = {
+                    **bounded_meta,
+                    **current_body_meta,
+                    'redacted': bool(current_body_meta.get('redacted')) or bounded_meta['redacted'],
+                    'truncated': bool(current_body_meta.get('truncated')) or bounded_meta['truncated'],
+                    'original_bytes': current_body_meta.get('original_bytes') or bounded_meta['original_bytes'],
+                    'body_status': 'available',
+                    'stored_bytes': len(body.encode('utf-8')),
+                }
         else:
             body = record['body']
             if body is None:

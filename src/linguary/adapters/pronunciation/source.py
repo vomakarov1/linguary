@@ -66,6 +66,9 @@ def _parse_rows(text, variant):
                              for form, items in rows.items()})
 
 
+_LOADED_INDICES: dict[str, MappingProxyType] = {}
+
+
 @cache
 def _load_index(variant):
     filename, size, lines, digest, license_id = _FILES[variant]
@@ -86,7 +89,9 @@ def _load_index(variant):
     text = data.decode('utf-8')
     if len(text.splitlines()) != lines:
         raise ValueError('invalid snapshot length')
-    return _parse_rows(text, variant)
+    index = _parse_rows(text, variant)
+    _LOADED_INDICES[variant] = index
+    return index
 
 
 class IpaDictPronunciationSource:
@@ -95,10 +100,15 @@ class IpaDictPronunciationSource:
     async def lookup(self, form, variant):
         if variant not in _FILES or not valid_lookup_form(form):
             return SourceLookupResult.missing()
-        try:
-            index = await asyncio.to_thread(_load_index, variant)
-        except (OSError, ValueError, TypeError, KeyError, UnicodeError):
-            return SourceLookupResult.unavailable('source_unavailable')
+        if _load_index.cache_info().currsize == 0:
+            _LOADED_INDICES.clear()
+        index = _LOADED_INDICES.get(variant)
+        if index is None:
+            try:
+                index = await asyncio.to_thread(_load_index, variant)
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+                return SourceLookupResult.unavailable('source_unavailable')
+            _LOADED_INDICES[variant] = index
         pronunciations = index.get(form, ())
         if not pronunciations:
             return SourceLookupResult.missing()

@@ -926,3 +926,150 @@ async def test_translation_call_reuses_supplied_source_texts_without_reloading_d
     )
     assert len(res2.results) == 1
 
+
+def test_approve_glossary_single_decision_does_not_recount_book_mentions_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.use_cases.approve_glossary as ag_module
+    from linguary.application.mention_counter import mention_counter as real_mention_counter
+
+    mention_queries: list[tuple[str, ...]] = []
+    load_review_calls = 0
+
+    def spy_mention_counter(document):
+        inner = real_mention_counter(document)
+
+        def counted(spellings):
+            key = tuple(spellings)
+            mention_queries.append(key)
+            return inner(spellings)
+
+        return counted
+
+    orig_load_review = ag_module._load_review
+
+    def spy_load_review(*args, **kwargs):
+        nonlocal load_review_calls
+        load_review_calls += 1
+        return orig_load_review(*args, **kwargs)
+
+    monkeypatch.setattr(ag_module, "mention_counter", spy_mention_counter)
+    monkeypatch.setattr(ag_module, "_load_review", spy_load_review)
+
+    uow = glossary_book(make_analysis_candidate())
+    approve(uow)(command(GlossaryDecision.ACCEPT))
+
+    assert load_review_calls == 1
+    assert len(mention_queries) == 1
+    assert uow.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
+
+    mention_queries.clear()
+    load_review_calls = 0
+    uow2 = glossary_book(
+        make_analysis_candidate(),
+        make_analysis_candidate(
+            source_text="Longbourn",
+            type=ConceptType.PLACE,
+            suggested_translation="Лонгборн",
+        ),
+    )
+    approve(uow2).accept_all_awaiting(BOOK_ID)
+
+    assert load_review_calls == 1
+    assert len(mention_queries) == 2
+    assert uow2.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
+
+
+@pytest.mark.asyncio
+async def test_finalize_attempt_runs_bounded_body_when_redacted_count_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    from contextlib import nullcontext
+    from datetime import UTC, datetime
+    import linguary.adapters.pronunciation.source as pron_source
+    from linguary.application.diagnostics import Diagnostics
+    from linguary.application.task_runner import TaskRunner
+
+    started_at = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
+    stored_bodies: dict[str, str | None] = {}
+    stored_meta: dict[str, dict] = {}
+    record = {
+        "call_id": "call-1",
+        "attempt_id": None,
+        "book_id": BOOK_ID,
+        "started_at": started_at,
+        "metadata": {
+            "schema_version": 1,
+            "decision": "unknown",
+            "body_meta": {
+                "body_status": "available",
+                "redacted": False,
+                "truncated": False,
+                "original_bytes": 42,
+                "stored_bytes": 42,
+            },
+        },
+        "body": None,
+    }
+    tx = SimpleNamespace(
+        llm_calls=SimpleNamespace(
+            diagnostic_record=lambda **kwargs: record,
+            update_diagnostics=lambda cid, *, metadata: stored_meta.__setitem__(cid, metadata),
+            store_diagnostic_body=lambda cid, body: stored_bodies.__setitem__(cid, body),
+            enforce_diagnostics_policy=lambda *args, **kwargs: None,
+        ),
+        work=SimpleNamespace(),
+    )
+    uow = SimpleNamespace(transaction=lambda: nullcontext(tx))
+    diagnostics = Diagnostics(uow, clock=lambda: started_at)
+
+    raw_with_secret = "Authorization: Bearer sk-live-secret-12345"
+    meta = diagnostics.finalize_attempt(
+        None,
+        "rejected",
+        body=raw_with_secret,
+        call_id="call-1",
+        body_meta=record["metadata"]["body_meta"],
+    )
+
+    assert stored_bodies["call-1"] == "Authorization: Bearer [REDACTED]"
+    assert meta["body_meta"]["redacted"] is True
+
+    assert diagnostics.needs_periodic_purge(started_at) is True
+    assert diagnostics.periodic_purge(started_at) is True
+    assert diagnostics.needs_periodic_purge(started_at) is False
+
+    to_thread_calls = 0
+    orig_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func, *args, **kwargs):
+        nonlocal to_thread_calls
+        to_thread_calls += 1
+        return await orig_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy_to_thread)
+
+    def maintain():
+        diagnostics.ensure_available()
+
+    maintain.should_run = diagnostics.needs_periodic_purge
+    queue = SimpleNamespace(
+        claim_next_pending=lambda: asyncio.sleep(0, result=None),
+        list_running=lambda: asyncio.sleep(0, result=()),
+    )
+    runner = TaskRunner(queue=queue, handlers={}, maintenance=maintain)
+    assert await runner.run_next() is None
+    assert to_thread_calls == 0
+
+    pron_source._load_index.cache_clear()
+    source = pron_source.IpaDictPronunciationSource()
+    first_lookup = await source.lookup("cat", "uk")
+    assert first_lookup.status == "found"
+    assert to_thread_calls == 1
+
+    second_lookup = await source.lookup("dog", "uk")
+    assert second_lookup.status == "found"
+    assert to_thread_calls == 1
+
+

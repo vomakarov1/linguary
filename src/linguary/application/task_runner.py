@@ -118,7 +118,12 @@ class TaskRunner:
         result occurred.
         """
         if self._maintenance is not None:
-            await asyncio.to_thread(self._maintenance)
+            should_run = (
+                getattr(self._maintenance, "should_run", None)
+                or getattr(getattr(self._maintenance, "__self__", None), "needs_periodic_purge", None)
+            )
+            if not callable(should_run) or should_run():
+                await asyncio.to_thread(self._maintenance)
         task = await self._queue.claim_next_pending()
         if task is None:
             return None

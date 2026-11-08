@@ -452,6 +452,8 @@ def build_application(
     def maintain_work():
         diagnostics.ensure_available()
 
+    maintain_work.should_run = diagnostics.needs_periodic_purge
+
     runner = TaskRunner(
         queue=task_queue,
         recover_work=recover_work,

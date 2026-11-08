@@ -47,6 +47,7 @@ from linguary.domain import (
     TermStatus,
     TermVariant,
     apply_book_event,
+    glossary_key,
 )
 from linguary.domain.name_translation import NameTranslationPolicy
 
@@ -210,6 +211,8 @@ class ApproveGlossary:
                 analyses=analyses,
                 count_mentions=count_mentions,
                 conditions=conditions,
+                review=review,
+                resolved_keys=(item.source_text,),
             )
         return concept
 
@@ -243,6 +246,7 @@ class ApproveGlossary:
                 count_mentions=count_mentions,
                 conditions=conditions,
             )
+            awaiting_items = review.awaiting_decision
             concepts = tuple(
                 self._decide(
                     item,
@@ -254,7 +258,7 @@ class ApproveGlossary:
                     ),
                     book=book,
                 )
-                for item in review.awaiting_decision
+                for item in awaiting_items
             )
             for concept in concepts:
                 transaction.glossary.save(concept)
@@ -267,6 +271,8 @@ class ApproveGlossary:
                 analyses=analyses,
                 count_mentions=count_mentions,
                 conditions=conditions,
+                review=review,
+                resolved_keys=(item.source_text for item in awaiting_items),
             )
         return concepts
 
@@ -512,21 +518,31 @@ def _complete_review_if_ready(
     analyses: Sequence[ChapterAnalysis] | None = None,
     count_mentions: Callable[[Iterable[str]], int] | None = None,
     conditions=None,
+    review: GlossaryReview | None = None,
+    resolved_keys: Iterable[str] = (),
 ) -> None:
     """Transitions book to ready to process after closing all mandatory decisions."""
     if book.status is not BookStatus.GLOSSARY_REVIEW:
         return
-    review = _load_review(
-        transaction,
-        book.id,
-        confidence_threshold=confidence_threshold,
-        min_mentions=min_mentions,
-        min_chapters=min_chapters,
-        analyses=analyses,
-        count_mentions=count_mentions,
-        conditions=conditions,
-    )
-    if review.is_complete:
+    if review is None:
+        review = _load_review(
+            transaction,
+            book.id,
+            confidence_threshold=confidence_threshold,
+            min_mentions=min_mentions,
+            min_chapters=min_chapters,
+            analyses=analyses,
+            count_mentions=count_mentions,
+            conditions=conditions,
+        )
+        is_complete = review.is_complete
+    else:
+        resolved = {glossary_key(key) for key in resolved_keys}
+        is_complete = all(
+            glossary_key(item.source_text) in resolved
+            for item in review.awaiting_decision
+        )
+    if is_complete:
         transaction.books.save(
             replace(
                 book,

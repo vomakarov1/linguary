@@ -1494,4 +1494,135 @@ def test_to_block_ids_preserves_misordered_blocks_without_duplicating_pure_read_
     ]
 
 
+def test_translation_instructions_preserve_escaped_newline_literal() -> None:
+    from linguary.application.context_builder import (
+        block_regeneration_instructions,
+        translation_unit_instructions,
+    )
+
+    for instructions in (
+        translation_unit_instructions(source_language="en", target_language="ru"),
+        block_regeneration_instructions(source_language="en", target_language="ru"),
+    ):
+        assert r"перенос строки (\n) внутри translated_text допустим" in instructions
+        assert "перенос строки (\n) внутри translated_text допустим" not in instructions
+
+
+def test_translation_context_evaluates_input_without_neighbours_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.context_builder as context_builder_module
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+
+    blocks = make_blocks(3)
+    section = make_section(blocks)
+    document = make_document(section)
+    unit = make_unit((blocks[1],), treatments=(BlockTreatment.TRANSLATE,))
+    analysis = make_analysis(make_unit(blocks))
+    snapshot = make_snapshot()
+    builder = ContextBuilder()
+
+    calls: list[int] = []
+    original_translation_input = builder._translation_input
+
+    def spy_translation_input(**kwargs):
+        calls.append(len(kwargs["neighbours"]))
+        return original_translation_input(**kwargs)
+
+    monkeypatch.setattr(builder, "_translation_input", spy_translation_input)
+
+    context = builder.for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=snapshot,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+    other = builder.for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=snapshot,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+
+    assert calls == [2, 2]
+    assert context.has_optional_neighbours is True
+    assert context == other
+    replaced = replace(context, request=context.request)
+    assert replaced == context
+    assert calls == [2, 2]
+
+    key_calls: list[str] = []
+    original_glossary_key = context_builder_module.glossary_key
+
+    def spy_glossary_key(value: str) -> str:
+        key_calls.append(value)
+        return original_glossary_key(value)
+
+    monkeypatch.setattr(context_builder_module, "glossary_key", spy_glossary_key)
+
+    fallback_text = context.input_without_optional_neighbours
+    assert fallback_text is not None
+    assert "Соседние абзацы главы" not in fallback_text
+    assert calls == [2, 2, 0]
+    assert key_calls.count(blocks[1].text) == 1
+
+    assert context.input_without_optional_neighbours == fallback_text
+    stripped = context.without_optional_neighbours()
+    assert stripped.request.input_text == fallback_text
+    assert stripped.has_optional_neighbours is False
+    assert stripped.input_without_optional_neighbours is None
+    assert calls == [2, 2, 0]
+
+
+def test_all_read_as_is_unit_with_pronunciation_marks_tail_blocks_context_only() -> None:
+    from linguary.application.context_builder import snapshot_prompt_templates
+
+    blocks = make_blocks(3)
+    unit = make_unit(
+        blocks,
+        treatments=(
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.READ_AS_IS,
+        ),
+    )
+    section = make_section(blocks)
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        pronunciation_help_enabled=True,
+    )
+    builder = ContextBuilder(prompt_templates=templates)
+    context = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+    assert context.pure_read_as_is_aliases == frozenset({"b2", "b3"})
+    assert "[b1] режим READ_AS_IS\n" in context.request.input_text
+    assert "[b2] режим READ_AS_IS (только для контекста, в blocks не возвращать)" in context.request.input_text
+    assert "[b3] режим READ_AS_IS (только для контекста, в blocks не возвращать)" in context.request.input_text
+    assert [b.context_only for b in context.expectation.blocks] == [False, True, True]
+
+    payload = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(
+                source_block_id="b1",
+                treatment=BlockTreatment.READ_AS_IS,
+            ),
+        ),
+    )
+    resolved = context.to_block_ids(payload)
+    assert [b.source_block_id for b in resolved.blocks] == [b.id for b in blocks]
+
+
+
 

@@ -364,6 +364,54 @@ class ChapterAnalysisContext(AliasedBlocksContext):
 
 
 @dataclass(frozen=True, slots=True)
+class _LazyTranslationInput:
+    """Deferred evaluation of mandatory translation input without optional neighbours."""
+
+    builder: ContextBuilder
+    document: CanonicalDocument
+    section: DocumentSection
+    unit: TranslationUnit
+    analysis: ChapterAnalysis
+    glossary: GlossarySnapshot
+    candidates: tuple[GlossaryCandidate, ...]
+    recovery_child: bool = False
+    pure_read_as_is_aliases: frozenset[str] = frozenset()
+
+    def __call__(self) -> str:
+        return self.builder._translation_input(
+            document=self.document,
+            section=self.section,
+            unit=self.unit,
+            analysis=self.analysis,
+            glossary=self.glossary,
+            candidates=self.candidates,
+            neighbours=(),
+            recovery_child=self.recovery_child,
+            pure_read_as_is_aliases=self.pure_read_as_is_aliases,
+        )
+
+    def _fields_tuple(self) -> tuple[object, ...]:
+        return (
+            self.builder,
+            self.document,
+            self.section,
+            self.unit,
+            self.analysis,
+            self.glossary,
+            self.candidates,
+            self.recovery_child,
+            self.pure_read_as_is_aliases,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _LazyTranslationInput):
+            return self._fields_tuple() == other._fields_tuple()
+        if isinstance(other, str):
+            return self() == other
+        return NotImplemented
+
+
+@dataclass(frozen=True, slots=True)
 class TranslationContext(AliasedBlocksContext):
     """Ready request for processing a single block group (PRD § 13, ALG-04).
 
@@ -388,16 +436,55 @@ class TranslationContext(AliasedBlocksContext):
     explained_entries: tuple[tuple[str, str], ...] = ()
     content_plan: ContentPlan | None = None
     before_you_read: tuple[BeforeYouReadEntry, ...] = ()
-    input_without_optional_neighbours: str | None = None
+    _input_without_optional_neighbours: str | _LazyTranslationInput | None = None
     pure_read_as_is_aliases: frozenset[str] = frozenset()
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        section_id: str,
+        unit_id: str,
+        request: LLMRequest[TranslationResultResponse],
+        block_ids_by_alias: Mapping[str, str],
+        expectation: ResultExpectation,
+        explained_expressions: tuple[str, ...] = (),
+        explained_entries: tuple[tuple[str, str], ...] = (),
+        content_plan: ContentPlan | None = None,
+        before_you_read: tuple[BeforeYouReadEntry, ...] = (),
+        input_without_optional_neighbours: str | _LazyTranslationInput | None = None,
+        pure_read_as_is_aliases: Iterable[str] = frozenset(),
+        *,
+        _input_without_optional_neighbours: str | _LazyTranslationInput | None = None,
+    ) -> None:
+        object.__setattr__(self, "section_id", section_id)
+        object.__setattr__(self, "unit_id", unit_id)
+        object.__setattr__(self, "request", request)
         object.__setattr__(
-            self, "block_ids_by_alias", MappingProxyType(dict(self.block_ids_by_alias))
+            self, "block_ids_by_alias", MappingProxyType(dict(block_ids_by_alias))
+        )
+        object.__setattr__(self, "expectation", expectation)
+        object.__setattr__(self, "explained_expressions", explained_expressions)
+        object.__setattr__(self, "explained_entries", explained_entries)
+        object.__setattr__(self, "content_plan", content_plan)
+        object.__setattr__(self, "before_you_read", before_you_read)
+        object.__setattr__(
+            self,
+            "_input_without_optional_neighbours",
+            _input_without_optional_neighbours
+            if _input_without_optional_neighbours is not None
+            else input_without_optional_neighbours,
         )
         object.__setattr__(
-            self, "pure_read_as_is_aliases", frozenset(self.pure_read_as_is_aliases)
+            self, "pure_read_as_is_aliases", frozenset(pure_read_as_is_aliases)
         )
+
+    @property
+    def input_without_optional_neighbours(self) -> str | None:
+        value = self._input_without_optional_neighbours
+        if isinstance(value, _LazyTranslationInput) or callable(value):
+            resolved = value()
+            object.__setattr__(self, "_input_without_optional_neighbours", resolved)
+            return resolved
+        return value
 
     def to_aliases(self, message: str) -> str:
         """Validation message with internal block IDs replaced by prompt aliases.
@@ -412,16 +499,17 @@ class TranslationContext(AliasedBlocksContext):
     @property
     def has_optional_neighbours(self) -> bool:
         """Whether source neighbours can be removed after a verified capacity failure."""
-        return self.input_without_optional_neighbours is not None
+        return self._input_without_optional_neighbours is not None
 
     def without_optional_neighbours(self) -> TranslationContext:
         """Keep all mandatory input, instructions, output identities and request metadata."""
-        if self.input_without_optional_neighbours is None:
+        mandatory_input = self.input_without_optional_neighbours
+        if mandatory_input is None:
             return self
         return replace(
             self,
-            request=replace(self.request, input_text=self.input_without_optional_neighbours),
-            input_without_optional_neighbours=None,
+            request=replace(self.request, input_text=mandatory_input),
+            _input_without_optional_neighbours=None,
         )
 
     def to_block_ids(
@@ -533,12 +621,23 @@ _GLOSSARY_STOP_WORDS = frozenset({
 })
 
 
-def _matches_chapter_text(term_source: str, blocks_text: str, word_stems: set[str]) -> bool:
+def _matches_chapter_text(
+    term_source: str,
+    blocks_text: str,
+    word_stems: set[str],
+    *,
+    normalized_blocks_text: str | None = None,
+) -> bool:
     """Checks whether a glossary term or candidate appears in the chapter text (P2.T2, AC-006)."""
     key = glossary_key(term_source)
     if not key:
         return False
-    if key in glossary_key(blocks_text):
+    haystack = (
+        glossary_key(blocks_text)
+        if normalized_blocks_text is None
+        else normalized_blocks_text
+    )
+    if key in haystack:
         return True
     term_words = re.findall(r"[A-Za-zА-Яа-я0-9]+", term_source.casefold())
     if not term_words:
@@ -826,27 +925,44 @@ class ContextBuilder:
             if item.treatment is BlockTreatment.READ_AS_IS
             and item.block.id not in uncovered_owners
         )
-        pure_read_as_is_aliases = (
-            candidate_pure
-            if len(unit.items) > 1
-            and not self._english_help
-            and len(candidate_pure) < len(unit.items)
-            else frozenset()
-        )
+        if len(unit.items) > 1 and not self._english_help:
+            if len(candidate_pure) < len(unit.items):
+                pure_read_as_is_aliases = candidate_pure
+            elif (
+                len(candidate_pure) == len(unit.items)
+                and self._pronunciation_version is not None
+            ):
+                pure_read_as_is_aliases = candidate_pure - {_alias(1)}
+            else:
+                pure_read_as_is_aliases = frozenset()
+        else:
+            pure_read_as_is_aliases = frozenset()
+        candidates = (*analysis.glossary_candidates, *book_candidates)
         input_args = dict(
             document=document,
             section=section,
             unit=unit,
             analysis=analysis,
             glossary=glossary,
-            candidates=(*analysis.glossary_candidates, *book_candidates),
+            candidates=candidates,
             recovery_child=recovery_child,
             pure_read_as_is_aliases=pure_read_as_is_aliases,
         )
         input_text = self._translation_input(**input_args, neighbours=neighbours)
         mandatory_input = (
-            self._translation_input(**input_args, neighbours=())
-            if neighbours and policy_version != LEGACY_TRANSLATION_POLICY else None
+            _LazyTranslationInput(
+                builder=self,
+                document=document,
+                section=section,
+                unit=unit,
+                analysis=analysis,
+                glossary=glossary,
+                candidates=candidates,
+                recovery_child=recovery_child,
+                pure_read_as_is_aliases=pure_read_as_is_aliases,
+            )
+            if neighbours and policy_version != LEGACY_TRANSLATION_POLICY
+            else None
         )
         return TranslationContext(
             section_id=section.id,
@@ -910,13 +1026,22 @@ class ContextBuilder:
             target_blocks.extend(neighbour_group.blocks)
         target_text = " ".join(block.text for block in target_blocks)
         word_stems = _extract_word_stems(target_text)
+        normalized_target_text = glossary_key(target_text)
 
         filtered_mandatory = tuple(
             entry for entry in glossary.mandatory_entries
-            if _matches_chapter_text(entry.source_text, target_text, word_stems)
+            if _matches_chapter_text(
+                entry.source_text,
+                target_text,
+                word_stems,
+                normalized_blocks_text=normalized_target_text,
+            )
         )
         filtered_suggested = self._suggested_entries(
-            glossary, blocks_text=target_text, word_stems=word_stems
+            glossary,
+            blocks_text=target_text,
+            word_stems=word_stems,
+            normalized_blocks_text=normalized_target_text,
         )
 
         parts = [
@@ -1004,6 +1129,7 @@ class ContextBuilder:
         *,
         blocks_text: str | None = None,
         word_stems: set[str] | None = None,
+        normalized_blocks_text: str | None = None,
     ) -> tuple[GlossarySnapshotEntry, ...]:
         """Optional glossary snapshot suggestions within context constraints.
 
@@ -1017,9 +1143,16 @@ class ContextBuilder:
         if blocks_text is not None:
             if word_stems is None:
                 word_stems = _extract_word_stems(blocks_text)
+            if normalized_blocks_text is None:
+                normalized_blocks_text = glossary_key(blocks_text)
             suggested = tuple(
                 entry for entry in suggested
-                if _matches_chapter_text(entry.source_text, blocks_text, word_stems)
+                if _matches_chapter_text(
+                    entry.source_text,
+                    blocks_text,
+                    word_stems,
+                    normalized_blocks_text=normalized_blocks_text,
+                )
             )
         return suggested[: self._max_accumulated_candidates]
 
@@ -1154,17 +1287,34 @@ class ContextBuilder:
         """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
         blocks_text = " ".join(block.text for block in blocks)
         word_stems = _extract_word_stems(blocks_text)
+        normalized_blocks_text = glossary_key(blocks_text)
 
         parts = [_chapter_header(document=document, section=section, fragment_label=fragment_label)]
         if self._name_translation_policy is None:
-            parts.append(_known_decisions(self._selected_candidates(accumulated_candidates, blocks=blocks), target_language=document.target_language))
+            parts.append(
+                _known_decisions(
+                    self._selected_candidates(
+                        accumulated_candidates,
+                        blocks=blocks,
+                        blocks_text=blocks_text,
+                        word_stems=word_stems,
+                        normalized_blocks_text=normalized_blocks_text,
+                    ),
+                    target_language=document.target_language,
+                )
+            )
         else:
             raw_decisions = tuple(self._user_decisions if user_decisions is None else user_decisions)
             raw_suggestions = tuple(self._nonbinding_suggestions if nonbinding_suggestions is None else nonbinding_suggestions)
 
             decisions = tuple(
                 d for d in raw_decisions
-                if _matches_chapter_text(d.canonical_source_text, blocks_text, word_stems)
+                if _matches_chapter_text(
+                    d.canonical_source_text,
+                    blocks_text,
+                    word_stems,
+                    normalized_blocks_text=normalized_blocks_text,
+                )
             )
             suggestions = tuple(
                 s for s in raw_suggestions
@@ -1172,9 +1322,25 @@ class ContextBuilder:
                     s.canonical_source_text if hasattr(s, "canonical_source_text") else s.source_text,
                     blocks_text,
                     word_stems,
+                    normalized_blocks_text=normalized_blocks_text,
                 )
             )
-            parts.extend(_name_context(decisions, (*suggestions, *self._selected_candidates(accumulated_candidates, blocks=blocks)), document.target_language))
+            parts.extend(
+                _name_context(
+                    decisions,
+                    (
+                        *suggestions,
+                        *self._selected_candidates(
+                            accumulated_candidates,
+                            blocks=blocks,
+                            blocks_text=blocks_text,
+                            word_stems=word_stems,
+                            normalized_blocks_text=normalized_blocks_text,
+                        ),
+                    ),
+                    document.target_language,
+                )
+            )
         if findings is not None:
             parts.append(
                 "Уже найдено в предыдущих частях главы:\n"
@@ -1192,6 +1358,9 @@ class ContextBuilder:
         candidates: Iterable[GlossaryCandidate],
         *,
         blocks: Sequence[DocumentBlock] | None = None,
+        blocks_text: str | None = None,
+        word_stems: set[str] | None = None,
+        normalized_blocks_text: str | None = None,
     ) -> tuple[GlossaryCandidate, ...]:
         """Decisions from previous chapters that enter context.
 
@@ -1201,12 +1370,21 @@ class ContextBuilder:
         and places appear early and recur, while a one-off term from the latest chapter adds little.
         """
         filtered_candidates = candidates
-        if blocks is not None:
-            blocks_text = " ".join(block.text for block in blocks)
-            word_stems = _extract_word_stems(blocks_text)
+        if blocks is not None or blocks_text is not None:
+            if blocks_text is None:
+                blocks_text = " ".join(block.text for block in (blocks or ()))
+            if word_stems is None:
+                word_stems = _extract_word_stems(blocks_text)
+            if normalized_blocks_text is None:
+                normalized_blocks_text = glossary_key(blocks_text)
             filtered_candidates = [
                 c for c in candidates
-                if _matches_chapter_text(c.source_text, blocks_text, word_stems)
+                if _matches_chapter_text(
+                    c.source_text,
+                    blocks_text,
+                    word_stems,
+                    normalized_blocks_text=normalized_blocks_text,
+                )
             ]
 
         selected: dict[str, GlossaryCandidate] = {}
@@ -1627,7 +1805,7 @@ note — короткое пояснение, если оно нужно.
 В каждом переводе сохрани ровно исходное число непустых строк: строка здесь — текст \
 между переносами, содержащий хотя бы один непробельный символ. Передай весь собственный текст блока, \
 включая слова рассказчика после реплики и авторское окончание. Не добавляй соседей \
-и не удаляй окончание ради числа строк; перенос строки (\n) внутри translated_text допустим \
+и не удаляй окончание ради числа строк; перенос строки (\\n) внутри translated_text допустим \
 только перед тире новой реплики диалога, в остальных случаях новые переносы не вводи.
 
 Особенности речи персонажа, названные в указаниях главы, передавай средствами языка \

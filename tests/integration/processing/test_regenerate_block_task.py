@@ -354,3 +354,29 @@ async def test_task_of_another_type_is_not_processed_as_a_regeneration(
 
     with pytest.raises(RegenerateBlockError, match="не является повторной генерацией"):
         await sequence.run_task(task)
+
+
+async def test_regenerate_block_start_scopes_reconcile_corrections_to_block(
+    unit_of_work: SqlAlchemyUnitOfWork,
+    task_queue: SqliteTaskQueue,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.correction as correction_module
+
+    scenario = store_processing_book(unit_of_work, status=BookStatus.READY_TO_EXPORT)
+    await process_chapter(unit_of_work)
+    sequence = make_sequence(unit_of_work, task_queue, regenerated_reply())
+    target_block_id = scenario.block_ids()[1]
+
+    recorded_section_ids: list[str | None] = []
+    orig_reconcile = correction_module.reconcile_corrections
+
+    def spy_reconcile(tx, book_id, *, section_id: str | None = None):
+        recorded_section_ids.append(section_id)
+        return orig_reconcile(tx, book_id, section_id=section_id)
+
+    monkeypatch.setattr(correction_module, "reconcile_corrections", spy_reconcile)
+
+    await sequence.start(BOOK_ID, target_block_id)
+    assert recorded_section_ids == [target_block_id]
+
