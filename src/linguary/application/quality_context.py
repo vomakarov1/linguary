@@ -95,9 +95,9 @@ def request_text(manifest: Mapping[str, Any]) -> str:
 
 
 INSTRUCTIONS = (
-    'Review the original and all supplied learning layers. Return source-grounded findings only; '
-    'never rewrite artifacts. Anchor each finding to exact quote in the target block. '
-    'Absence of findings is not a guarantee of semantic correctness.'
+    'Проверь оригинал и все переданные учебные слои. Возвращай только замечания, подтверждённые '
+    'оригиналом; никогда не переписывай артефакты. Привязывай каждое замечание к точной цитате в '
+    'целевом блоке. Отсутствие замечаний не является гарантией смысловой безошибочности.'
 )
 
 

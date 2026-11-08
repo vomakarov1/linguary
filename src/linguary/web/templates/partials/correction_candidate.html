@@ -39,7 +39,7 @@
     {% if not candidate.evidence_valid %}<p>Приложение не подтвердило все приведённые цитаты или признаки отсутствия.</p>{% endif %}
     {% if candidate.review_reason %}<p>Результат перепроверки: {{ candidate.review_reason }}</p>{% endif %}
     {% if candidate.state == 'awaiting_human' %}
-      <p>Пока решение не сохранено, EPUB нельзя собрать.</p>
+      <p>Предложение доступно для добровольного просмотра и не блокирует сборку EPUB.</p>
       <form method="post" action="/books/{{ book_id }}/correction-candidates/{{ candidate.candidate_id }}/resolve">
         <input type="hidden" name="proposal_sha256" value="{{ candidate.proposal_sha256 }}">
         <input type="hidden" name="input_sha256" value="{{ candidate.input_sha256 }}">

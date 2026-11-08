@@ -1,7 +1,7 @@
 """Correction of complete persisted block groups, with atomic stale-safe acceptance."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
@@ -51,6 +51,40 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+def _chunk_correction_blocks(
+    block_ids: Sequence[str],
+    inputs: Any,
+    max_chars: int | None,
+) -> tuple[tuple[str, ...], ...]:
+    ordered = tuple(block_ids)
+    if not ordered:
+        return ()
+    blocks = getattr(inputs, 'blocks', None)
+    if not blocks or max_chars is None or max_chars <= 1:
+        return (ordered,)
+    lengths = {
+        block.id: len(block.text)
+        for block in blocks
+        if hasattr(block, 'id') and hasattr(block, 'text')
+    }
+    if not lengths:
+        return (ordered,)
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_chars = 0
+    for block_id in ordered:
+        block_len = lengths.get(block_id, 0)
+        if current and current_chars + block_len > max_chars:
+            chunks.append(current)
+            current = []
+            current_chars = 0
+        current.append(block_id)
+        current_chars += block_len
+    if current:
+        chunks.append(current)
+    return tuple(tuple(chunk) for chunk in chunks)
+
+
 def _llm_anchor(anchor: Mapping[str, Any], aliases: Mapping[str, str]) -> dict[str, Any]:
     out = {k: v for k, v in anchor.items() if k not in ('start', 'end')}
     if 'block_id' in out and isinstance(out['block_id'], str):
@@ -61,9 +95,16 @@ def _llm_anchor(anchor: Mapping[str, Any], aliases: Mapping[str, str]) -> dict[s
 def _llm_chapter_analysis(
     analysis: Mapping[str, Any] | None,
     aliases: Mapping[str, str],
+    *,
+    allowed_block_ids: set[str] | None = None,
 ) -> dict[str, Any] | None:
     if analysis is None:
         return None
+    allowed = (
+        ({aliases.get(bid, bid) for bid in allowed_block_ids} | set(allowed_block_ids))
+        if allowed_block_ids is not None
+        else None
+    )
     out = {
         k: thaw(v)
         for k, v in analysis.items()
@@ -73,12 +114,18 @@ def _llm_chapter_analysis(
     if isinstance(treatment_plan, Mapping):
         tp = dict(treatment_plan)
         if isinstance(tp.get('items'), (list, tuple)):
-            tp['items'] = [
+            items = [
                 {**item, 'block_id': aliases.get(item['block_id'], item['block_id'])}
                 if isinstance(item, Mapping) and 'block_id' in item
                 else item
                 for item in tp['items']
             ]
+            if allowed is not None:
+                items = [
+                    item for item in items
+                    if not isinstance(item, Mapping) or 'block_id' not in item or item['block_id'] in allowed
+                ]
+            tp['items'] = items
         out['treatment_plan'] = tp
     content_plan = out.get('content_plan')
     if isinstance(content_plan, Mapping):
@@ -95,6 +142,16 @@ def _llm_chapter_analysis(
                             _llm_anchor(a, aliases) if isinstance(a, Mapping) else a
                             for a in diff['anchors']
                         ]
+                    if allowed is not None:
+                        in_window = (
+                            diff.get('owner_block_id') in allowed
+                            or any(
+                                isinstance(a, Mapping) and a.get('block_id') in allowed
+                                for a in diff.get('anchors', ())
+                            )
+                        )
+                        if not in_window:
+                            continue
                     difficulties.append(diff)
                 else:
                     difficulties.append(d)
@@ -111,6 +168,17 @@ def _llm_chapter_analysis(
                         ]
                     if isinstance(fact.get('subject_anchor'), Mapping):
                         fact['subject_anchor'] = _llm_anchor(fact['subject_anchor'], aliases)
+                    if allowed is not None:
+                        subj = fact.get('subject_anchor')
+                        in_window = (
+                            (isinstance(subj, Mapping) and subj.get('block_id') in allowed)
+                            or any(
+                                isinstance(a, Mapping) and a.get('block_id') in allowed
+                                for a in fact.get('anchors', ())
+                            )
+                        )
+                        if not in_window:
+                            continue
                     facts.append(fact)
                 else:
                     facts.append(f)
@@ -199,8 +267,35 @@ class CorrectChapter:
     def _request(self, inputs, task, block_ids):
         context = dict(inputs.context)
         aliases = getattr(inputs, 'block_aliases', {})
+        allowed_block_ids: set[str] | None = None
+        blocks = getattr(inputs, 'blocks', ())
+        if blocks and len(block_ids) < len(blocks):
+            section = getattr(inputs, 'section', None)
+            ordered_blocks = (
+                section.ordered_blocks
+                if section is not None and hasattr(section, 'ordered_blocks')
+                else blocks
+            )
+            ordered_ids = [b.id for b in ordered_blocks]
+            target_set = set(block_ids)
+            allowed_block_ids = set(block_ids)
+            for idx, bid in enumerate(ordered_ids):
+                if bid in target_set:
+                    allowed_block_ids.update(
+                        ordered_ids[max(0, idx - 2) : min(len(ordered_ids), idx + 3)]
+                    )
+            allowed_aliases = {aliases.get(bid, bid) for bid in allowed_block_ids} | allowed_block_ids
+            if isinstance(context.get('chapter_blocks'), (list, tuple)):
+                context['chapter_blocks'] = [
+                    cb for cb in context['chapter_blocks']
+                    if isinstance(cb, Mapping) and cb.get('block_id') in allowed_aliases
+                ]
         if 'chapter_analysis' in context:
-            context['chapter_analysis'] = _llm_chapter_analysis(context['chapter_analysis'], aliases)
+            context['chapter_analysis'] = _llm_chapter_analysis(
+                context['chapter_analysis'],
+                aliases,
+                allowed_block_ids=allowed_block_ids,
+            )
         blocks_payload = []
         for block_id in block_ids:
             alias = aliases.get(block_id, block_id)
@@ -241,9 +336,9 @@ class CorrectChapter:
                 missing = unchecked_blocks(tx, inputs)
             if not missing:
                 return CorrectChapterResult(command.section_id, inputs.run.id, checked)
-            # Source-text limits do not describe a provider's context window.
-            # Preserve the full request and let capacity errors split whole blocks.
-            checked += await self._group(command, missing)
+            max_chars = getattr(self.snapshot, 'parameters', {}).get('max_unit_source_chars')
+            for chunk in _chunk_correction_blocks(missing, inputs, max_chars):
+                checked += await self._group(command, chunk)
 
     async def _group(self, command, block_ids):
         response = None
@@ -475,12 +570,18 @@ class CorrectChapterV2(CorrectChapter):
                 inputs, _, _ = self._load(tx, command)
                 pending = current_correction_candidates(tx, inputs, states={'awaiting_review'})
                 missing = model_correction_blocks(tx, inputs)
+            max_chars = getattr(self.snapshot, 'parameters', {}).get('max_unit_source_chars')
             if pending:
                 group_id = pending[0].group_id
-                checked += await self._review_group(command,
-                    tuple(c.candidate_id for c in pending if c.group_id == group_id))
+                group_pending = tuple(c for c in pending if c.group_id == group_id)
+                by_block = {c.block_id: c.candidate_id for c in group_pending}
+                for chunk in _chunk_correction_blocks(tuple(by_block), inputs, max_chars):
+                    checked += await self._review_group(
+                        command, tuple(by_block[b] for b in chunk)
+                    )
             elif missing:
-                checked += await self._propose_group(command, missing)
+                for chunk in _chunk_correction_blocks(missing, inputs, max_chars):
+                    checked += await self._propose_group(command, chunk)
             else:
                 return CorrectChapterResult(command.section_id, inputs.run.id, checked)
 
@@ -666,6 +767,20 @@ class CorrectChapterV2(CorrectChapter):
                 if any(c is None or c.state != 'awaiting_review' or not candidate_is_current(tx, inputs, c)
                        for c in candidates):
                     raise RecoveryError('interrupted')
+                max_chars = getattr(self.snapshot, 'parameters', {}).get('max_unit_source_chars')
+                by_block = {c.block_id: c.candidate_id for c in candidates}
+                chunks = _chunk_correction_blocks(tuple(by_block), inputs, max_chars)
+            if len(chunks) > 1:
+                total = 0
+                for chunk in chunks:
+                    total += await self._review_group(command, tuple(by_block[b] for b in chunk))
+                return total
+            with self.uow.transaction() as tx:
+                inputs, task, payload = self._load(tx, command)
+                candidates = tuple(tx.work.get_correction_candidate(i) for i in candidate_ids)
+                if any(c is None or c.state != 'awaiting_review' or not candidate_is_current(tx, inputs, c)
+                       for c in candidates):
+                    raise RecoveryError('interrupted')
                 refs = tuple((c.candidate_id, c.proposal_sha256) for c in candidates)
                 request, context = self._call(tx, inputs, task, payload,
                     self._review_request(inputs, task, candidates), ordinal,
@@ -714,14 +829,12 @@ class CorrectChapterV2(CorrectChapter):
                         after.checksums[c.block_id], c.proposal_attempt_id, 'confirmed', c.candidate_id) for c in accepted]
                     for group_id in {c.group_id for c in live}:
                         group = tx.work.get_binding('correction_group', group_id)['payload_json']
-                        members = [tx.work.get_correction_candidate(i) for i in group['candidate_ids']]
-                        if all(c is not None and c.review is not None for c in members):
-                            for block_id in group['unchanged_block_ids']:
-                                if (after.checksums[block_id] != group['manifest']['checksums'][block_id]
-                                        or after.bindings[block_id] != group['manifest']['bindings'][block_id]):
-                                    raise RecoveryError('interrupted')
-                                checks.append(CorrectionCheck(current.run.id, block_id, command.section_id,
-                                    after.checksums[block_id], group_id, 'unchanged'))
+                        for block_id in group['unchanged_block_ids']:
+                            if (after.checksums[block_id] != group['manifest']['checksums'][block_id]
+                                    or after.bindings[block_id] != group['manifest']['bindings'][block_id]):
+                                raise RecoveryError('interrupted')
+                            checks.append(CorrectionCheck(current.run.id, block_id, command.section_id,
+                                after.checksums[block_id], group_id, 'unchanged'))
                     tx.work.replace_correction_checks(current.run.id, command.section_id, tuple(checks))
                     finalize_response(self.uow, response, 'accepted', transaction=tx)
                 return len(candidate_ids)

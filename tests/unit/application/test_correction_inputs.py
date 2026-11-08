@@ -702,3 +702,220 @@ def test_candidates_and_prepare_correction_candidates_use_section_results_withou
     ]
 
 
+@pytest.mark.asyncio
+async def test_correct_chapter_pre_chunks_blocks_by_max_unit_source_chars(monkeypatch):
+    import linguary.application.use_cases.correct_chapter as module
+    from linguary.application.use_cases.correct_chapter import CorrectChapterV2, _chunk_correction_blocks
+
+    section = make_analysis_section(
+        texts=("A" * 60, "B" * 60, "C" * 60, "D" * 60),
+    )
+    b1, b2, b3, b4 = section.blocks
+    inputs = SimpleNamespace(
+        run=SimpleNamespace(id="run-1"),
+        blocks=section.blocks,
+    )
+
+    chunks = _chunk_correction_blocks((b1.id, b2.id, b3.id, b4.id), inputs, 130)
+    assert chunks == ((b1.id, b2.id), (b3.id, b4.id))
+
+    missing_v1 = [(b1.id, b2.id, b3.id, b4.id), ()]
+    monkeypatch.setattr(module, "unchecked_blocks", lambda tx, inp: missing_v1.pop(0))
+    snapshot = SimpleNamespace(parameters={"max_attempts": 1, "max_unit_source_chars": 130})
+    correct_v1 = CorrectChapter(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(None)),
+        llm_client=None,
+        snapshot=snapshot,
+        validator=None,
+    )
+    correct_v1._load = lambda tx, command: (inputs, None, None)
+    v1_groups: list[tuple[str, ...]] = []
+
+    async def fake_group(command, block_ids):
+        v1_groups.append(tuple(block_ids))
+        return len(block_ids)
+
+    correct_v1._group = fake_group
+    res_v1 = await correct_v1(SimpleNamespace(section_id=section.id))
+    assert v1_groups == [(b1.id, b2.id), (b3.id, b4.id)]
+    assert res_v1.checked_blocks == 4
+
+    missing_v2 = [(b1.id, b2.id, b3.id, b4.id), ()]
+    monkeypatch.setattr(module, "model_correction_blocks", lambda tx, inp: missing_v2.pop(0))
+    monkeypatch.setattr(module, "current_correction_candidates", lambda tx, inp, states=None: ())
+    correct_v2 = CorrectChapterV2(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(None)),
+        llm_client=None,
+        snapshot=snapshot,
+        validator=None,
+    )
+    correct_v2._load = lambda tx, command: (inputs, None, None)
+    v2_propose_groups: list[tuple[str, ...]] = []
+
+    async def fake_propose(command, block_ids):
+        v2_propose_groups.append(tuple(block_ids))
+        return len(block_ids)
+
+    correct_v2._propose_group = fake_propose
+    res_v2 = await correct_v2(SimpleNamespace(section_id=section.id))
+    assert v2_propose_groups == [(b1.id, b2.id), (b3.id, b4.id)]
+    assert res_v2.checked_blocks == 4
+
+    pending_candidates = [
+        (
+            SimpleNamespace(candidate_id=f"c-{idx}", block_id=b.id, group_id="g-1")
+            for idx, b in enumerate(section.blocks, start=1)
+        ),
+        (),
+    ]
+    monkeypatch.setattr(module, "model_correction_blocks", lambda tx, inp: ())
+    monkeypatch.setattr(
+        module,
+        "current_correction_candidates",
+        lambda tx, inp, states=None: tuple(pending_candidates.pop(0)),
+    )
+    v2_review_groups: list[tuple[str, ...]] = []
+
+    async def fake_review(command, candidate_ids):
+        v2_review_groups.append(tuple(candidate_ids))
+        return len(candidate_ids)
+
+    correct_v2._review_group = fake_review
+    res_v2_review = await correct_v2(SimpleNamespace(section_id=section.id))
+    assert v2_review_groups == [("c-1", "c-2"), ("c-3", "c-4")]
+    assert res_v2_review.checked_blocks == 4
+
+
+def test_request_filters_chapter_context_for_chunk_without_changing_checksums():
+    from linguary.domain import ChapterAnalysis, TreatmentPlan
+    from linguary.domain.content_plan import (
+        ContentPlan, ContextFact, Difficulty, RequiredPoint, SourceAnchor,
+    )
+
+    section = make_analysis_section(
+        texts=("Block one.", "Block two.", "Block three.", "Block four.", "Block five.", "Block six."),
+    )
+    doc = make_analysis_document((section,))
+    b1, b2, b3, b4, b5, b6 = section.blocks
+
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        tuple((b.id, BlockTreatment.TRANSLATE) for b in section.blocks),
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id="d1",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="Block"),),
+                owner_block_id=b1.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p1", description="meaning 1"),),
+            ),
+            Difficulty(
+                id="d3",
+                anchors=(SourceAnchor(block_id=b3.id, start=0, end=5, quote="Block"),),
+                owner_block_id=b3.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p3", description="meaning 3"),),
+            ),
+            Difficulty(
+                id="d6",
+                anchors=(SourceAnchor(block_id=b6.id, start=0, end=5, quote="Block"),),
+                owner_block_id=b6.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p6", description="meaning 6"),),
+            ),
+        ),
+        context_facts=(
+            ContextFact(
+                id="cf1",
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="Block"),),
+                subject_anchor=SourceAnchor(block_id=b1.id, start=6, end=9, quote="one"),
+                value="Speaker 1",
+                certainty="explicit",
+            ),
+            ContextFact(
+                id="cf3",
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b3.id, start=0, end=5, quote="Block"),),
+                subject_anchor=SourceAnchor(block_id=b3.id, start=6, end=11, quote="three"),
+                value="Speaker 3",
+                certainty="explicit",
+            ),
+            ContextFact(
+                id="cf6",
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b6.id, start=0, end=5, quote="Block"),),
+                subject_anchor=SourceAnchor(block_id=b6.id, start=6, end=9, quote="six"),
+                value="Speaker 6",
+                certainty="explicit",
+            ),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        expected_block_ids=tuple(b.id for b in section.blocks),
+        content_plan=content_plan,
+    )
+    results = {
+        b.id: BlockProcessingResult(
+            block_id=b.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text=f"Перевод {idx}.",
+        )
+        for idx, b in enumerate(section.blocks, start=1)
+    }
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=section.blocks,
+        results=results,
+        bindings={b.id: None for b in section.blocks},
+    )
+    checksums_before = dict(inputs.checksums)
+    context_sha_before = inputs.context_sha256
+    chapter_blocks_before = list(inputs.context["chapter_blocks"])
+
+    snapshot = SimpleNamespace(
+        prompt="Correct the chapter.",
+        parameters={"max_attempts": 1, "max_output_tokens": None},
+    )
+    correct = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+    task = SimpleNamespace(book_id=doc.id, id="task", scope_id=section.id)
+
+    request = correct._request(inputs, task, (b1.id,))
+    body = json.loads(request.input_text)
+
+    assert [cb["block_id"] for cb in body["chapter_blocks"]] == ["b1", "b2", "b3"]
+    assert [item["block_id"] for item in body["chapter_analysis"]["treatment_plan"]["items"]] == [
+        "b1", "b2", "b3"
+    ]
+    assert [d["id"] for d in body["chapter_analysis"]["content_plan"]["difficulties"]] == [
+        "d1", "d3"
+    ]
+    assert [f["id"] for f in body["chapter_analysis"]["content_plan"]["context_facts"]] == [
+        "cf1", "cf3"
+    ]
+    assert inputs.checksums == checksums_before
+    assert inputs.context_sha256 == context_sha_before
+    assert inputs.context["chapter_blocks"] == chapter_blocks_before
+
+
+

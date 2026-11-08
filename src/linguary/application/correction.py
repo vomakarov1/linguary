@@ -393,8 +393,8 @@ def correction_coverage_complete(tx, book_id):
         if document.is_front_matter(section) or section.is_notes_only:
             continue
         inputs = correction_inputs(tx, book_id, section.id)
-        if (not inputs.translated or unchecked_blocks(tx, inputs)
-                or current_correction_candidates(tx, inputs, states={'awaiting_review', 'awaiting_human'})):
+        if (not inputs.translated or model_correction_blocks(tx, inputs)
+                or current_correction_candidates(tx, inputs, states={'awaiting_review'})):
             return False
     return True
 
@@ -428,9 +428,9 @@ def reconcile_corrections(tx, book_id):
         inputs = correction_inputs(tx, book_id, section.id)
         inputs = _observe_correction_inputs(tx, inputs)
         _restore_correction_checks(tx, inputs, tasks)
-        missing = unchecked_blocks(tx, inputs)
         model_missing = model_correction_blocks(tx, inputs)
-        covered = inputs.translated and not missing
+        awaiting_review = current_correction_candidates(tx, inputs, states={'awaiting_review'})
+        covered = inputs.translated and not model_missing and not awaiting_review
         complete = complete and covered
         matching = None
         for task in tasks:
