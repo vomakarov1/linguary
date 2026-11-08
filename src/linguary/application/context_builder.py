@@ -824,6 +824,20 @@ class ContextBuilder:
             budget = 0
         if analysis.content_plan is not None and self._language_notes_per_chapter == 0:
             budget = 0
+        target_blocks = [item.block for item in unit.items]
+        for neighbour_group in neighbours:
+            target_blocks.extend(neighbour_group.blocks)
+        target_text = " ".join(block.text for block in target_blocks)
+        word_stems = _extract_word_stems(target_text)
+
+        filtered_mandatory = tuple(
+            entry for entry in glossary.mandatory_entries
+            if _matches_chapter_text(entry.source_text, target_text, word_stems)
+        )
+        filtered_suggested = self._suggested_entries(
+            glossary, blocks_text=target_text, word_stems=word_stems
+        )
+
         parts = [
             _chapter_header(document=document, section=section),
             (f"Ориентир количества языковых заметок: {budget}. "
@@ -833,12 +847,12 @@ class ContextBuilder:
              if recovery_child else f"В этом запросе — не больше {budget} языковых заметок."),
             _chapter_digest(analysis, glossary, candidates),
             _mandatory_decisions(
-                _with_agreed_notes(glossary.mandatory_entries, glossary, candidates),
+                _with_agreed_notes(filtered_mandatory, glossary, candidates),
                 target_language=document.target_language,
             ),
             _glossary_suggestions(
                 _with_agreed_notes(
-                    self._suggested_entries(glossary), glossary, candidates
+                    filtered_suggested, glossary, candidates
                 ),
                 target_language=document.target_language,
             ),
@@ -904,7 +918,11 @@ class ContextBuilder:
         )
 
     def _suggested_entries(
-        self, glossary: GlossarySnapshot
+        self,
+        glossary: GlossarySnapshot,
+        *,
+        blocks_text: str | None = None,
+        word_stems: set[str] | None = None,
     ) -> tuple[GlossarySnapshotEntry, ...]:
         """Optional glossary snapshot suggestions within context constraints.
 
@@ -915,6 +933,13 @@ class ContextBuilder:
         suggested = tuple(
             entry for entry in glossary.entries if entry not in mandatory
         )
+        if blocks_text is not None:
+            if word_stems is None:
+                word_stems = _extract_word_stems(blocks_text)
+            suggested = tuple(
+                entry for entry in suggested
+                if _matches_chapter_text(entry.source_text, blocks_text, word_stems)
+            )
         return suggested[: self._max_accumulated_candidates]
 
     def _chapter_context(

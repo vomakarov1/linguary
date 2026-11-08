@@ -213,15 +213,31 @@ def _headers(settings: LLMSettings) -> dict[str, str]:
     }
 
 
+def _build_messages(request: LLMRequest[Any]) -> list[dict[str, str]]:
+    """Builds the message list for the completions endpoint including repair turns."""
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": request.instructions},
+        {"role": "user", "content": request.input_text},
+    ]
+    if request.repair_turns:
+        for assistant_content, user_content in request.repair_turns:
+            if assistant_content:
+                messages.append({"role": "assistant", "content": assistant_content})
+            messages.append({"role": "user", "content": user_content})
+    elif request.repair_instructions:
+        for instruction in request.repair_instructions:
+            messages.append({"role": "user", "content": instruction})
+    return messages
+
+
+OpenAICompatibleLLMClient._build_messages = staticmethod(_build_messages)
+
+
 def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
     """Request payload: message list and required structured output schema."""
     body: dict[str, Any] = {
         "model": settings.model,
-        "messages": [
-            {"role": "system", "content": request.instructions},
-            {"role": "user", "content": request.input_text},
-            *[{"role": "user", "content": instruction} for instruction in request.repair_instructions],
-        ],
+        "messages": _build_messages(request),
         "response_format": {
             "type": "json_schema",
             "json_schema": {

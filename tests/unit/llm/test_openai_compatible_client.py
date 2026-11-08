@@ -862,3 +862,35 @@ def test_repair_instructions_sent_as_separate_user_messages() -> None:
         "content": "Add missing translation for b2",
     }
 
+
+def test_openai_client_sends_assistant_message_before_user_repair_instruction() -> None:
+    """When repair turns include an assistant response, assistant message precedes user repair instruction (AC-003)."""
+    settings = LLMSettings(
+        provider="openai",
+        api_key="secret",
+        model="gpt-4o",
+    )
+    request = LLMRequest.for_translation(
+        instructions="System instructions: translate accurately.",
+        input_text="Source text of the chapter.",
+    )
+    request = replace(
+        request,
+        repair_turns=(
+            ('{"broken": true}', "Please fix formatting"),
+            (None, "And ensure all blocks are present"),
+        ),
+    )
+
+    body = openai_compatible._body(request, settings=settings)
+
+    assert body["messages"] == [
+        {"role": "system", "content": "System instructions: translate accurately."},
+        {"role": "user", "content": "Source text of the chapter."},
+        {"role": "assistant", "content": '{"broken": true}'},
+        {"role": "user", "content": "Please fix formatting"},
+        {"role": "user", "content": "And ensure all blocks are present"},
+    ]
+    assert OpenAICompatibleLLMClient._build_messages(request) == body["messages"]
+
+

@@ -481,3 +481,37 @@ async def test_retried_call_carries_the_repair_instruction_to_the_model() -> Non
     assert "block-1" in second.repair_instructions[0]
     assert "TRANSLATE" in second.repair_instructions[0]
     assert TARGET_LANGUAGE in second.repair_instructions[0]
+
+
+def test_retry_decision_records_assistant_raw_content_in_repair_turns() -> None:
+    """Retry decision records assistant raw content in repair turns for format and validation errors (AC-003)."""
+    retry_policy = policy(max_attempts=3)
+    request = translation_request()
+
+    format_error = LLMResponseFormatError("не разобран json", raw_content='{"broken":')
+    decision1 = retry_policy.decide(format_error, attempts=1)
+    assert decision1.action is RetryAction.RETRY_WITH_REPAIR
+    assert decision1.assistant_response == '{"broken":'
+    assert decision1.repair_instruction is not None
+
+    retried1 = decision1.next_request(request)
+    assert retried1.attempt == 2
+    assert retried1.repair_turns == (('{"broken":', decision1.repair_instruction),)
+    assert retried1.repair_instructions == (decision1.repair_instruction,)
+
+    val_error = validation_error()
+    decision2 = retry_policy.decide(val_error, attempts=2, raw_content='{"blocks": []}')
+    assert decision2.action is RetryAction.RETRY_WITH_REPAIR
+    assert decision2.assistant_response == '{"blocks": []}'
+
+    retried2 = decision2.next_request(retried1)
+    assert retried2.attempt == 3
+    assert retried2.repair_turns == (
+        ('{"broken":', decision1.repair_instruction),
+        ('{"blocks": []}', decision2.repair_instruction),
+    )
+    assert retried2.repair_instructions == (
+        decision1.repair_instruction,
+        decision2.repair_instruction,
+    )
+

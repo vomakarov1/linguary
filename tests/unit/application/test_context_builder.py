@@ -21,7 +21,19 @@ from linguary.application.context_builder import (
     textual_blocks,
     snapshot_prompt_templates,
 )
-from linguary.domain import BlockTreatment, BlockType, ConceptType, SupportStatus
+from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+from linguary.domain import (
+    BlockTreatment,
+    BlockType,
+    ChapterAnalysis,
+    ConceptType,
+    GlossarySnapshot,
+    GlossarySnapshotEntry,
+    SupportStatus,
+    TermStatus,
+    TranslationUnit,
+    TreatmentPlan,
+)
 from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
 
 NEIGHBOUR_TEXT = "The neighbouring chapter must never reach the model."
@@ -748,4 +760,144 @@ def test_chapter_context_keeps_instructions_invariant_across_chapters():
     assert "В этом ответе не больше" not in fctx1.request.instructions
     assert "В этом ответе не больше" in fctx1.request.input_text
     assert "В этом ответе не больше" in fctx2.request.input_text
+
+
+def test_translation_input_filters_mandatory_and_suggested_glossary_by_unit_and_neighbours() -> None:
+    """Translation input only includes glossary entries matching unit and neighbour blocks (AC-004)."""
+    sec = make_analysis_section(
+        section_id="sec-1",
+        texts=(
+            "Neighbour block before mentioning Pemberley.",
+            "Unit target block mentioning Netherfield.",
+            "Neighbour block after.",
+        ),
+    )
+    doc = make_analysis_document((sec,))
+    unit_block = sec.blocks[1]
+    plan = TreatmentPlan.of_treatments(sec.id, ((unit_block.id, BlockTreatment.TRANSLATE),))
+    unit = TranslationUnit.of_blocks(id="unit-1", blocks=(unit_block,), plan=plan)
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=sec.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(unit_block.id,),
+    )
+    glossary = GlossarySnapshot(
+        entries=(
+            GlossarySnapshotEntry(
+                source_text="Netherfield",
+                translation="Незерфилд",
+                type=ConceptType.PLACE,
+                status=TermStatus.LOCKED,
+            ),
+            GlossarySnapshotEntry(
+                source_text="Longbourn",
+                translation="Лонгборн",
+                type=ConceptType.PLACE,
+                status=TermStatus.LOCKED,
+            ),
+            GlossarySnapshotEntry(
+                source_text="Pemberley",
+                translation="Пемберли",
+                type=ConceptType.PLACE,
+                status=TermStatus.SUGGESTED,
+            ),
+            GlossarySnapshotEntry(
+                source_text="Rosings",
+                translation="Розингс",
+                type=ConceptType.PLACE,
+                status=TermStatus.SUGGESTED,
+            ),
+        )
+    )
+    builder = ContextBuilder(max_accumulated_candidates=10)
+    context = builder.for_translation_unit(
+        document=doc,
+        section=sec,
+        unit=unit,
+        analysis=analysis,
+        glossary=glossary,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+    input_text = context.request.input_text
+    assert "Netherfield" in input_text
+    assert "Незерфилд" in input_text
+    assert "Longbourn" not in input_text
+    assert "Лонгборн" not in input_text
+    assert "Pemberley" in input_text
+    assert "Пемберли" in input_text
+    assert "Rosings" not in input_text
+    assert "Розингс" not in input_text
+
+
+def test_for_block_regeneration_filters_glossary_by_block_and_neighbours() -> None:
+    """Block regeneration input only includes glossary entries matching block and neighbours (AC-004)."""
+    sec = make_analysis_section(
+        section_id="sec-1",
+        texts=(
+            "Neighbour block before mentioning Pemberley.",
+            "Block to regenerate mentioning Netherfield.",
+            "Neighbour block after.",
+        ),
+    )
+    doc = make_analysis_document((sec,))
+    unit_block = sec.blocks[1]
+    plan = TreatmentPlan.of_treatments(sec.id, ((unit_block.id, BlockTreatment.TRANSLATE),))
+    unit = TranslationUnit.of_blocks(id="unit-1", blocks=(unit_block,), plan=plan)
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=sec.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(unit_block.id,),
+    )
+    glossary = GlossarySnapshot(
+        entries=(
+            GlossarySnapshotEntry(
+                source_text="Netherfield",
+                translation="Незерфилд",
+                type=ConceptType.PLACE,
+                status=TermStatus.LOCKED,
+            ),
+            GlossarySnapshotEntry(
+                source_text="Longbourn",
+                translation="Лонгборн",
+                type=ConceptType.PLACE,
+                status=TermStatus.LOCKED,
+            ),
+            GlossarySnapshotEntry(
+                source_text="Pemberley",
+                translation="Пемберли",
+                type=ConceptType.PLACE,
+                status=TermStatus.SUGGESTED,
+            ),
+            GlossarySnapshotEntry(
+                source_text="Rosings",
+                translation="Розингс",
+                type=ConceptType.PLACE,
+                status=TermStatus.SUGGESTED,
+            ),
+        )
+    )
+    builder = ContextBuilder(max_accumulated_candidates=10)
+    context = builder.for_block_regeneration(
+        document=doc,
+        section=sec,
+        unit=unit,
+        analysis=analysis,
+        glossary=glossary,
+    )
+    input_text = context.request.input_text
+    assert "Netherfield" in input_text
+    assert "Незерфилд" in input_text
+    assert "Longbourn" not in input_text
+    assert "Лонгборн" not in input_text
+    assert "Pemberley" in input_text
+    assert "Пемберли" in input_text
+    assert "Rosings" not in input_text
+    assert "Розингс" not in input_text
+
 

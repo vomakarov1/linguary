@@ -310,7 +310,9 @@ class TranslationCall:
                     request = replace(request, input_text=context.request.input_text, attempt=request.attempt + 1)
                     continue
                 decision = self._retry_policy.decide(
-                    _worded_for_the_model(error, context), attempts=attempts
+                    _worded_for_the_model(error, context),
+                    attempts=attempts,
+                    raw_content=response.raw_content if response is not None else None,
                 )
                 if not decision.should_retry:
                     if recovery is not None:

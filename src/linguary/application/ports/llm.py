@@ -159,9 +159,21 @@ class LLMRequest[PayloadT: LLMPayload]:
     pronunciation_candidates_version: int | None = None
     correction_candidate_refs: tuple[tuple[str, str], ...] = ()
     repair_instructions: tuple[str, ...] = ()
+    repair_turns: tuple[tuple[str | None, str], ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "repair_instructions", tuple(self.repair_instructions))
+        repair_turns = tuple(
+            (turn[0], str(turn[1])) if len(turn) == 2 else (None, str(turn[0]))
+            for turn in self.repair_turns
+        )
+        if not repair_turns and self.repair_instructions:
+            repair_turns = tuple((None, instr) for instr in self.repair_instructions)
+        object.__setattr__(self, "repair_turns", repair_turns)
+        object.__setattr__(
+            self,
+            "repair_instructions",
+            tuple(instr for _, instr in repair_turns) if repair_turns else tuple(self.repair_instructions),
+        )
         if self.kind == LLMResponseKind.CHAPTER_CORRECTION:
             object.__setattr__(self, 'ordered_block_ids', tuple(self.ordered_block_ids))
             if (not self.ordered_block_ids or len(set(self.ordered_block_ids)) != len(self.ordered_block_ids)

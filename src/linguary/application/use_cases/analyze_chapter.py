@@ -513,7 +513,11 @@ class AnalyzeChapter:
                     record_rejection(self._unit_of_work, response, error)
                     if hasattr(self._llm_client, 'reject_last'):
                         self._llm_client.reject_last()
-                decision = self._retry_policy.decide(error, attempts=attempts)
+                decision = self._retry_policy.decide(
+                    error,
+                    attempts=attempts,
+                    raw_content=response.raw_content if response is not None else None,
+                )
                 if not decision.should_retry:
                     raise
                 if decision.backoff_seconds > 0:

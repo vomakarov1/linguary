@@ -150,6 +150,7 @@ class RetryDecision:
     error: TaskError
     backoff_seconds: float = 0.0
     repair_instruction: str | None = None
+    assistant_response: str | None = None
 
     @property
     def should_retry(self) -> bool:
@@ -170,8 +171,10 @@ class RetryDecision:
             )
         if self.repair_instruction is None:
             return replace(request, attempt=request.attempt + 1)
+        next_turns = (*request.repair_turns, (self.assistant_response, self.repair_instruction))
         return replace(
             request,
+            repair_turns=next_turns,
             repair_instructions=(*request.repair_instructions, self.repair_instruction),
             attempt=request.attempt + 1,
         )
@@ -206,7 +209,13 @@ class RetryPolicy:
         """Maximum call attempts permitted before transitioning task to `failed`."""
         return self._max_attempts
 
-    def decide(self, error: Exception, *, attempts: int) -> RetryDecision:
+    def decide(
+        self,
+        error: Exception,
+        *,
+        attempts: int,
+        raw_content: str | None = None,
+    ) -> RetryDecision:
         """Determines the fate of a failed attempt.
 
         `attempts` — number of attempts made so far, including this one. Tracked by the call loop:
@@ -219,6 +228,7 @@ class RetryPolicy:
         if attempts < 1:
             raise RetryPolicyError("попытка вызова модели нумеруется с единицы")
         task_error = classify_error(error)
+        assistant_response = raw_content or getattr(error, "raw_content", None)
         if _truncated_by_output_limit(error):
             return RetryDecision(action=RetryAction.GIVE_UP, error=task_error)
         if not task_error.type.is_retried_automatically:
@@ -232,6 +242,15 @@ class RetryPolicy:
                 backoff_seconds=self._backoff_for(attempts, error),
             )
         if task_error.type is ErrorType.MODEL_OUTPUT:
+            if assistant_response is not None:
+                return RetryDecision(
+                    action=RetryAction.RETRY_WITH_REPAIR,
+                    error=task_error,
+                    repair_instruction=build_repair_instruction(
+                        _expectation_of(error), violation=task_error.message
+                    ),
+                    assistant_response=assistant_response,
+                )
             return RetryDecision(action=RetryAction.RETRY_SAME_REQUEST, error=task_error)
         return RetryDecision(
             action=RetryAction.RETRY_WITH_REPAIR,
@@ -239,6 +258,7 @@ class RetryPolicy:
             repair_instruction=build_repair_instruction(
                 _expectation_of(error), violation=task_error.message
             ),
+            assistant_response=assistant_response,
         )
 
     def _backoff_for(self, attempts: int, error: Exception) -> float:
