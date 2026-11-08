@@ -1,9 +1,11 @@
 """Correction of complete persisted block groups, with atomic stale-safe acceptance."""
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
+from typing import Any
 from uuid import uuid4
 
 from linguary.application.block_processing import chapter_number, complete_processing, note_id_factory
@@ -49,6 +51,123 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+def _llm_anchor(anchor: Mapping[str, Any], aliases: Mapping[str, str]) -> dict[str, Any]:
+    out = {k: v for k, v in anchor.items() if k not in ('start', 'end')}
+    if 'block_id' in out and isinstance(out['block_id'], str):
+        out['block_id'] = aliases.get(out['block_id'], out['block_id'])
+    return out
+
+
+def _llm_chapter_analysis(
+    analysis: Mapping[str, Any] | None,
+    aliases: Mapping[str, str],
+) -> dict[str, Any] | None:
+    if analysis is None:
+        return None
+    out = {
+        k: thaw(v)
+        for k, v in analysis.items()
+        if k not in ('glossary_candidates', 'name_translation_evidence', 'before_you_read_evidence')
+    }
+    treatment_plan = out.get('treatment_plan')
+    if isinstance(treatment_plan, Mapping):
+        tp = dict(treatment_plan)
+        if isinstance(tp.get('items'), (list, tuple)):
+            tp['items'] = [
+                {**item, 'block_id': aliases.get(item['block_id'], item['block_id'])}
+                if isinstance(item, Mapping) and 'block_id' in item
+                else item
+                for item in tp['items']
+            ]
+        out['treatment_plan'] = tp
+    content_plan = out.get('content_plan')
+    if isinstance(content_plan, Mapping):
+        cp = {k: v for k, v in content_plan.items() if k != 'before_you_read_evidence'}
+        if isinstance(cp.get('difficulties'), (list, tuple)):
+            difficulties = []
+            for d in cp['difficulties']:
+                if isinstance(d, Mapping):
+                    diff = dict(d)
+                    if 'owner_block_id' in diff:
+                        diff['owner_block_id'] = aliases.get(diff['owner_block_id'], diff['owner_block_id'])
+                    if isinstance(diff.get('anchors'), (list, tuple)):
+                        diff['anchors'] = [
+                            _llm_anchor(a, aliases) if isinstance(a, Mapping) else a
+                            for a in diff['anchors']
+                        ]
+                    difficulties.append(diff)
+                else:
+                    difficulties.append(d)
+            cp['difficulties'] = difficulties
+        if isinstance(cp.get('context_facts'), (list, tuple)):
+            facts = []
+            for f in cp['context_facts']:
+                if isinstance(f, Mapping):
+                    fact = dict(f)
+                    if isinstance(fact.get('anchors'), (list, tuple)):
+                        fact['anchors'] = [
+                            _llm_anchor(a, aliases) if isinstance(a, Mapping) else a
+                            for a in fact['anchors']
+                        ]
+                    if isinstance(fact.get('subject_anchor'), Mapping):
+                        fact['subject_anchor'] = _llm_anchor(fact['subject_anchor'], aliases)
+                    facts.append(fact)
+                else:
+                    facts.append(f)
+            cp['context_facts'] = facts
+        out['content_plan'] = cp
+    return out
+
+
+_LLM_RESULT_FIELDS = (
+    'treatment',
+    'translated_text',
+    'glossary_hints',
+    'language_notes',
+    'fragment_assistances',
+)
+
+
+def _llm_block_result(
+    result: Mapping[str, Any],
+    aliases: Mapping[str, str],
+) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in _LLM_RESULT_FIELDS:
+        if key not in result:
+            continue
+        value = thaw(result[key])
+        if key == 'language_notes' and isinstance(value, (list, tuple)):
+            notes = []
+            for n in value:
+                if isinstance(n, Mapping):
+                    target = {k: v for k, v in n.items() if k != 'id'}
+                    for bid_key in ('block_id', 'source_block_id'):
+                        if bid_key in target and target[bid_key] in aliases:
+                            target[bid_key] = aliases[target[bid_key]]
+                    notes.append(target)
+                else:
+                    notes.append(n)
+            out[key] = notes
+        elif key == 'fragment_assistances' and isinstance(value, (list, tuple)):
+            assistances = []
+            for fa in value:
+                if isinstance(fa, Mapping):
+                    item = dict(fa)
+                    if isinstance(item.get('anchors'), (list, tuple)):
+                        item['anchors'] = [
+                            _llm_anchor(a, aliases) if isinstance(a, Mapping) else a
+                            for a in item['anchors']
+                        ]
+                    assistances.append(item)
+                else:
+                    assistances.append(fa)
+            out[key] = assistances
+        else:
+            out[key] = value
+    return out
+
+
 class CorrectChapter:
     def __init__(self, *, unit_of_work, llm_client, snapshot, validator: TranslationResultValidator,
                  retry_policy=None, sleep=None):
@@ -78,28 +197,19 @@ class CorrectChapter:
         return inputs, task, payload
 
     def _request(self, inputs, task, block_ids):
-        context = inputs.context
+        context = dict(inputs.context)
         aliases = getattr(inputs, 'block_aliases', {})
+        if 'chapter_analysis' in context:
+            context['chapter_analysis'] = _llm_chapter_analysis(context['chapter_analysis'], aliases)
         blocks_payload = []
         for block_id in block_ids:
             alias = aliases.get(block_id, block_id)
             original_block = next(b for b in inputs.blocks if b.id == block_id)
-            current_result = {}
-            if block_id in inputs.results:
-                for key, value in asdict(inputs.results[block_id]).items():
-                    if key == 'pronunciation_assistances':
-                        continue
-                    if key == 'language_notes' and isinstance(value, (list, tuple)):
-                        notes = []
-                        for n in value:
-                            target = dict(n)
-                            for bid_key in ('block_id', 'source_block_id'):
-                                if bid_key in target and target[bid_key] in aliases:
-                                    target[bid_key] = aliases[target[bid_key]]
-                            notes.append(target)
-                        current_result[key] = notes
-                    else:
-                        current_result[key] = value
+            current_result = (
+                _llm_block_result(asdict(inputs.results[block_id]), aliases)
+                if block_id in inputs.results
+                else {}
+            )
             blocks_payload.append(dict(
                 block_id=alias,
                 original=dict(text=original_block.text),
@@ -512,20 +622,21 @@ class CorrectChapterV2(CorrectChapter):
 
     def _review_request(self, inputs, task, candidates):
         context = inputs.context
-        allowed = ('treatment', 'translated_text', 'glossary_hints', 'language_notes')
+        aliases = getattr(inputs, 'block_aliases', {})
         body = dict(
             source_language=inputs.document.source_language,
             target_language=inputs.document.target_language,
             chapter_blocks=context.get('chapter_blocks'),
-            chapter_analysis=context.get('chapter_analysis'),
+            chapter_analysis=_llm_chapter_analysis(context.get('chapter_analysis'), aliases),
             run_glossary=context.get('run_glossary'),
             candidates=[
                 dict(
                     candidate_id=c.candidate_id,
                     proposal_sha256=c.proposal_sha256,
+                    block_id=aliases.get(c.block_id, c.block_id),
                     original=thaw(c.payload['original']),
-                    current_result={k: thaw(c.payload['current_result'][k]) for k in allowed},
-                    proposed_result={k: thaw(c.payload['result'][k]) for k in allowed},
+                    current_result=_llm_block_result(thaw(c.payload['current_result']), aliases),
+                    proposed_result=_llm_block_result(thaw(c.payload['result']), aliases),
                     issues=thaw(c.payload['proposal']['issues']),
                 )
                 for c in candidates

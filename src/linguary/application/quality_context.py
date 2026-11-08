@@ -54,8 +54,44 @@ def snapshot(tx, book_id, scope):
     return {**value, 'manifest_sha': canonical_sha(value)}
 
 
-def request_text(manifest):
-    return json.dumps(thaw(manifest), ensure_ascii=False, sort_keys=True)
+def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(artifact)
+    kind = out.get('artifact_kind')
+    body = out.get('body')
+    if not isinstance(body, Mapping):
+        return out
+    if kind == 'result':
+        out['body'] = {
+            k: v
+            for k, v in body.items()
+            if k not in ('content_evidence', 'pronunciation_assistances', 'warnings')
+        }
+    elif kind == 'analysis':
+        cleaned = {
+            k: v
+            for k, v in body.items()
+            if k not in ('glossary_candidates', 'name_translation_evidence', 'before_you_read_evidence')
+        }
+        cp = cleaned.get('content_plan')
+        if isinstance(cp, Mapping):
+            cleaned['content_plan'] = {
+                k: v for k, v in cp.items() if k != 'before_you_read_evidence'
+            }
+        out['body'] = cleaned
+    return out
+
+
+def request_text(manifest: Mapping[str, Any]) -> str:
+    payload = thaw(manifest)
+    if isinstance(payload, Mapping) and isinstance(payload.get('artifacts'), (list, tuple)):
+        payload = {
+            **payload,
+            'artifacts': [
+                _llm_artifact(a) if isinstance(a, Mapping) else a
+                for a in payload['artifacts']
+            ],
+        }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 INSTRUCTIONS = (
