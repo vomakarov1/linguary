@@ -41,6 +41,7 @@ from linguary.domain import (
     BookStatus,
     CanonicalDocument,
     DocumentSection,
+    GlossarySnapshot,
     TaskStatus,
     TaskType,
     TokenUsage,
@@ -110,6 +111,7 @@ class TranslationCall:
         note_ids: Callable[[], str],
         recovery: tuple[str, str] | None = None,
         source_texts: Mapping[str, str] | None = None,
+        glossary: GlossarySnapshot | None = None,
     ) -> TranslationCallResult:
         """Calls the model and validates the response, retrying per policy (ALG-04, ALG-05).
 
@@ -141,14 +143,33 @@ class TranslationCall:
                     or explicit_context.scope_id != recovery[1]
                 ):
                     raise RecoveryError('conditions_unavailable', root.id)
+        run = None
+        loaded_conditions = None
+        checked_conditions_id = None
         if self._unit_of_work is not None and unit is not None:
             with self._unit_of_work.transaction() as transaction:
                 run = transaction.runs.active_for_book(context.request.book_id) if context.request.book_id else None
-                self._expected_bindings.set({item.block.id: (
-                    transaction.work.get_binding('result', f'{run.id}:{item.block.id}') if run else None
-                ) for item in unit.items})
+                if run is not None and hasattr(transaction.work, 'result_bindings'):
+                    run_bindings = transaction.work.result_bindings(run.id)
+                    self._expected_bindings.set({
+                        item.block.id: run_bindings.get(item.block.id)
+                        for item in unit.items
+                    })
+                else:
+                    self._expected_bindings.set({item.block.id: (
+                        transaction.work.get_binding('result', f'{run.id}:{item.block.id}') if run else None
+                    ) for item in unit.items})
+                if (
+                    recovery is None
+                    and explicit_context is not None
+                    and explicit_context.conditions_id is not None
+                    and hasattr(transaction.work, 'get_conditions')
+                ):
+                    checked_conditions_id = explicit_context.conditions_id
+                    loaded_conditions = transaction.work.get_conditions(checked_conditions_id)
             request = replace(context.request, scope_id=unit.id,
                 ordered_block_ids=tuple(item.block.id for item in unit.items), run_id=None if run is None else run.id)
+        resolved_glossary = glossary if glossary is not None else (None if run is None else run.glossary_snapshot)
         explained = ExplainedExpressions(
             context.explained_expressions, explanations=context.explained_entries
         )
@@ -167,12 +188,13 @@ class TranslationCall:
                             root = transaction.work.get_root(recovery[0])
                             if root is None or root.policy_version != policy.version:
                                 raise RecoveryError('conditions_unavailable', recovery[0])
-                            conditions = transaction.work.get_conditions(root.conditions_id)
-                            if conditions is None:
+                            checked_conditions_id = root.conditions_id
+                            loaded_conditions = transaction.work.get_conditions(root.conditions_id)
+                            if loaded_conditions is None:
                                 raise RecoveryError('conditions_unavailable', recovery[0])
                             physical_context = transaction.work.begin_recovery_attempt(*recovery,
                                 task_id=request.task_id, run_id=request.run_id, stage=request.stage.value,
-                                assigned_model=conditions.payload['models']['processing'],
+                                assigned_model=loaded_conditions.payload['models']['processing'],
                                 prompt_hash=sha256(request.instructions.encode()).hexdigest(),
                                 policy_version=policy.version)
                     except RecoveryError:
@@ -202,11 +224,15 @@ class TranslationCall:
                     expectation=context.expectation,
                 )
                 conditions = None
-                current_run = None
                 call_context = getattr(response, 'call_context', None) or getattr(request, 'call_context', None)
                 if call_context is not None:
-                    with self._unit_of_work.transaction() as transaction:
-                        conditions = transaction.work.get_conditions(call_context.conditions_id)
+                    if checked_conditions_id == call_context.conditions_id:
+                        conditions = loaded_conditions
+                    else:
+                        with self._unit_of_work.transaction() as transaction:
+                            conditions = transaction.work.get_conditions(call_context.conditions_id)
+                        checked_conditions_id = call_context.conditions_id
+                        loaded_conditions = conditions
                     if conditions is None:
                         raise ConditionsError('conditions_unavailable')
                 validators_version = 1 if conditions is None else conditions.payload.get('versions', {}).get('validators', 1)
@@ -218,10 +244,13 @@ class TranslationCall:
                     raise ConditionsError('conditions_unavailable')
                 if context.content_plan is not None and context.content_plan.version == 3:
                     from linguary.application.analysis_merge import validate_fact_glossary, glossary_context_constraints
-                    with self._unit_of_work.transaction() as transaction:
-                        current_run = transaction.runs.active_for_book(request.book_id)
-                    if current_run is not None:
-                        validate_fact_glossary(context.content_plan, glossary_context_constraints(current_run.glossary_snapshot.mandatory_entries))
+                    if resolved_glossary is None and self._unit_of_work is not None and request.book_id:
+                        with self._unit_of_work.transaction() as transaction:
+                            current_run = transaction.runs.active_for_book(request.book_id)
+                        if current_run is not None:
+                            resolved_glossary = current_run.glossary_snapshot
+                    if resolved_glossary is not None:
+                        validate_fact_glossary(context.content_plan, glossary_context_constraints(resolved_glossary.mandatory_entries))
                     restored = []
                     for result in results:
                         raw = next(block for block in mapped.blocks if block.source_block_id == result.block_id)
@@ -257,7 +286,7 @@ class TranslationCall:
                         call_source_texts = resolved_source_texts
                     assistance = resolve_fragment_assistances(context.content_plan, mapped, results, call_source_texts,
                         owner_block_ids=owners, before_you_read=context.before_you_read,
-                        glossary_entries=() if current_run is None else current_run.glossary_snapshot.mandatory_entries,
+                        glossary_entries=() if resolved_glossary is None else resolved_glossary.mandatory_entries,
                         validators_version=validators_version)
                     results = tuple(replace(r, fragment_assistances=assistance[r.block_id]) for r in results)
                 elif context.content_plan is not None:
@@ -514,9 +543,16 @@ def complete_processing(
 
 def complete_processing_in_transaction(transaction, *, book_id, finished_task_id, task_types):
     """Recompute mandatory coverage and readiness within the caller's transaction."""
-    _record_success(transaction, finished_task_id)
+    finished_task = _record_success(transaction, finished_task_id)
     from linguary.application.correction import reconcile_corrections, correction_coverage_complete
-    reconcile_corrections(transaction, book_id)
+    section_id = finished_task.scope_id if finished_task is not None and finished_task.scope_id else None
+    if section_id is not None:
+        try:
+            reconcile_corrections(transaction, book_id, section_id=section_id)
+        except TypeError:
+            reconcile_corrections(transaction, book_id)
+    else:
+        reconcile_corrections(transaction, book_id)
     book = book_record(transaction, book_id)
     if book.status is not BookStatus.PROCESSING:
         return
@@ -553,16 +589,18 @@ def complete_processing_in_transaction(transaction, *, book_id, finished_task_id
 
 
 
-def _record_success(transaction: UnitOfWork, task_id: str | None) -> None:
+def _record_success(transaction: UnitOfWork, task_id: str | None) -> ProcessingTask | None:
     """Marks running task as successful if it still exists and is running.
 
     Tasks of a cancelled run are deleted along with it, so a missing row is not an error.
     """
     if task_id is None:
-        return
+        return None
     task = transaction.tasks.get(task_id)
     if task is not None and task.status is TaskStatus.RUNNING:
-        transaction.tasks.save(task.succeed())
+        task = task.succeed()
+        transaction.tasks.save(task)
+    return task
 
 
 def book_record(transaction: UnitOfWork, book_id: str) -> BookRecord:

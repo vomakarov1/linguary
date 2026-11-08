@@ -194,13 +194,30 @@ class ChooseBookConditions:
 def _archive_run_results(transaction, book_id, run):
     """Historical projections retain unknown conditions after explicit continuation."""
     from dataclasses import asdict
-    run_binding = transaction.work.get_binding('run', run.id)
+    work = transaction.work
+    run_binding = work.get_binding('run', run.id)
+    bindings_by_block = (
+        work.result_bindings(run.id)
+        if hasattr(work, 'result_bindings')
+        else None
+    )
+    artifacts = []
     for result in transaction.results.list_for_run(run.id):
-        binding = transaction.work.get_binding('result', f'{run.id}:{result.block_id}')
+        binding = (
+            bindings_by_block.get(result.block_id)
+            if bindings_by_block is not None
+            else work.get_binding('result', f'{run.id}:{result.block_id}')
+        )
         provenance = binding or run_binding
         known = provenance is not None and not provenance['payload_json'].get('legacy_partial', False)
-        transaction.work.archive_artifacts([dict(book_id=book_id,
+        artifacts.append(dict(
+            book_id=book_id,
             conditions_id=provenance['conditions_id'] if known else None,
             attempt_id=binding['attempt_id'] if binding else None,
-            run_id=run.id, kind='block_result', scope_id=result.block_id,
-            body={'schema_version': 1, 'result': asdict(result)})])
+            run_id=run.id,
+            kind='block_result',
+            scope_id=result.block_id,
+            body={'schema_version': 1, 'result': asdict(result)},
+        ))
+    if artifacts:
+        work.archive_artifacts(artifacts)

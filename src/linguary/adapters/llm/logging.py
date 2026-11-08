@@ -77,6 +77,7 @@ class LoggingLLMClient(LLMClient):
                 usage=error.usage,
                 cost=self._cost_of(error.usage, provider_cost=error.cost),
                 response_text=error.raw_content,
+                body_meta=error.body_meta,
                 outcome=error,
             )
             raise
@@ -92,6 +93,8 @@ class LoggingLLMClient(LLMClient):
             )
             raise
         call_id = self._new_id()
+        bounded_text, bounded_meta = bounded_body(response.raw_content)
+        resolved_body_meta = response.body_meta or bounded_meta
         self._log(
             request=request,
             started_at=started_at,
@@ -101,15 +104,16 @@ class LoggingLLMClient(LLMClient):
             usage=response.usage,
             cost=self._cost_of(response.usage, provider_cost=response.cost),
             call_id=call_id,
-            response_text=response.raw_content,
+            response_text=bounded_text,
+            body_meta=resolved_body_meta,
             outcome=response,
         )
         return replace(
             response,
             call_id=call_id,
-            raw_content=bounded_body(response.raw_content)[0],
+            raw_content=bounded_text,
             call_context=request.call_context,
-            body_meta={**(response.body_meta or bounded_body(response.raw_content)[1]), 'debug_retained': self.debug_payloads},
+            body_meta={**resolved_body_meta, 'debug_retained': self.debug_payloads},
         )
 
     def _cost_of(
@@ -133,13 +137,17 @@ class LoggingLLMClient(LLMClient):
         cost: Decimal | None = None,
         call_id: str | None = None,
         response_text: str | None = None,
+        body_meta: dict[str, object] | None = None,
         outcome: LLMResponse | Exception | None = None,
     ) -> None:
         """Records a single log entry within a short transaction."""
         if request.book_id is None or request.stage is None:
             return
-        response_text, bounded_meta = bounded_body(response_text)
-        supplied_meta = getattr(outcome, 'body_meta', None) or bounded_meta
+        if body_meta is not None:
+            supplied_meta = getattr(outcome, 'body_meta', None) or body_meta
+        else:
+            response_text, bounded_meta = bounded_body(response_text)
+            supplied_meta = getattr(outcome, 'body_meta', None) or bounded_meta
         context = request.call_context
         metadata = {'schema_version': 1, 'decision': 'unknown', 'body_meta': supplied_meta,
                     'context': None if context is None else context.to_dict()}

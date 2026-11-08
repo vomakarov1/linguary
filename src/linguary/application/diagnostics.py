@@ -59,10 +59,18 @@ class Diagnostics:
     def ensure_available(self):
         if self._failed:
             raise LLMConfigurationError('Запись наблюдения недоступна; новые вызовы остановлены')
-        now = self.clock()
-        if self._last_cleanup is None or now - self._last_cleanup >= timedelta(hours=1):
-            self.purge_expired(now)
-            self._last_cleanup = now
+        self.periodic_purge()
+
+    def periodic_purge(self, now=None, *, min_interval_seconds: float = 3600.0) -> bool:
+        current = now if now is not None else self.clock()
+        if (
+            self._last_cleanup is not None
+            and (current - self._last_cleanup).total_seconds() < min_interval_seconds
+        ):
+            return False
+        self.purge_expired(current)
+        self._last_cleanup = current
+        return True
 
     def fail(self):
         self._failed = True
@@ -108,10 +116,21 @@ class Diagnostics:
         elif status in {'expired', 'deleted', 'disabled'}:
             body = None
         elif body is not None:
-            body, bounded_meta = bounded_body(body, max_bytes=self.policy.max_body_bytes)
-            # Preserve adapter-reported redaction/truncation and original size.
-            current_body_meta = {**bounded_meta, **current_body_meta, 'body_status': 'available',
-                                 'stored_bytes': len(body.encode('utf-8'))}
+            encoded_len = len(body.encode('utf-8'))
+            if (
+                ('redacted_count' in current_body_meta or 'redacted' in current_body_meta)
+                and encoded_len <= self.policy.max_body_bytes
+            ):
+                current_body_meta = {
+                    **current_body_meta,
+                    'body_status': 'available',
+                    'stored_bytes': encoded_len,
+                }
+            else:
+                body, bounded_meta = bounded_body(body, max_bytes=self.policy.max_body_bytes)
+                # Preserve adapter-reported redaction/truncation and original size.
+                current_body_meta = {**bounded_meta, **current_body_meta, 'body_status': 'available',
+                                     'stored_bytes': len(body.encode('utf-8'))}
         else:
             body = record['body']
             if body is None:

@@ -81,16 +81,16 @@ class SqlAlchemyUnitOfWork:
             with session.begin():
                 # Acquire SQLite's writer lock before application work: retries never
                 # replay user code or encompass a physical model request.
-                for attempt in range(3):
+                for attempt in range(10):
                     try:
                         session.connection().exec_driver_sql("BEGIN IMMEDIATE")
                         break
                     except OperationalError as error:
                         if 'locked' not in str(error).lower() and 'busy' not in str(error).lower():
                             raise
-                        if attempt == 2:
+                        if attempt == 9:
                             raise PersistenceError('база данных занята после ограниченного повтора') from None
-                        sleep(0.01 * (attempt + 1))
+                        sleep(min(0.05 * (attempt + 1), 0.25))
                 yield self
         finally:
             self._current.reset(token)

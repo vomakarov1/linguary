@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from sqlalchemy import delete, select, update
 from linguary.adapters.db.models import (
-    BookConditionsRow, WorkBindingRow, ArtifactRevisionRow, RecoveryRootRow,
+    BlockResultRow, BookConditionsRow, WorkBindingRow, ArtifactRevisionRow, RecoveryRootRow,
     RecoveryScopeRow, LLMAttemptRow, QualityReviewRow, QualityReservationRow,
     LLMCallLogRow, ProcessingRunRow, ProcessingTaskRow, CorrectionCheckRow, CorrectionCandidateRow, CorrectionInputRow, DocumentBlockRow,
 )
@@ -107,9 +107,57 @@ class SqlAlchemyWorkRepository:
                 or binding['conditions_id'] != conditions.id
                 or len({check.block_id for check in checks}) != len(checks)):
             raise WorkStateError('условия отметок исправления не совпадают')
+        blocks_by_id = (
+            {
+                row.id: row
+                for row in self._session.scalars(
+                    select(DocumentBlockRow).where(
+                        DocumentBlockRow.book_id == run.book_id,
+                        DocumentBlockRow.section_id == section_id,
+                    )
+                ).all()
+            }
+            if checks
+            else {}
+        )
+        attempt_ids = {check.attempt_id for check in checks if check.attempt_id}
+        attempts_by_id = (
+            {
+                row.id: self._attempt_from_row(row)
+                for row in self._session.scalars(
+                    select(LLMAttemptRow).where(LLMAttemptRow.id.in_(attempt_ids))
+                ).all()
+            }
+            if attempt_ids
+            else {}
+        )
+        is_v2 = binding['payload_json'].get('correction', {}).get('policy_version') == CORRECTION_POLICY_VERSION_V2
+        groups_by_attempt = {}
+        candidates_by_id = {}
+        if is_v2 and checks:
+            if attempt_ids:
+                groups_by_attempt = {
+                    row.entity_id: self._binding_from_row(row)
+                    for row in self._session.scalars(
+                        select(WorkBindingRow).where(
+                            WorkBindingRow.entity_kind == 'correction_group',
+                            WorkBindingRow.entity_id.in_(attempt_ids),
+                        )
+                    ).all()
+                }
+            candidate_ids = {check.candidate_id for check in checks if check.candidate_id}
+            if candidate_ids:
+                candidates_by_id = {
+                    row.candidate_id: self._correction_candidate_from_row(row)
+                    for row in self._session.scalars(
+                        select(CorrectionCandidateRow).where(
+                            CorrectionCandidateRow.candidate_id.in_(candidate_ids)
+                        )
+                    ).all()
+                }
         for check in checks:
-            block = self._session.get(DocumentBlockRow, check.block_id)
-            attempt = self.get_attempt(check.attempt_id)
+            block = blocks_by_id.get(check.block_id)
+            attempt = attempts_by_id.get(check.attempt_id)
             if (check.run_id != run_id or check.section_id != section_id or block is None
                     or block.book_id != run.book_id or block.section_id != section_id
                     or attempt is None or attempt.state != 'accepted'
@@ -118,14 +166,14 @@ class SqlAlchemyWorkRepository:
                     or attempt.context.get('stage') != 'chapter_correction'
                     or check.block_id not in attempt.context.get('ordered_block_ids', ())):
                 raise WorkStateError('отметка не принадлежит принятому исправлению главы')
-            if binding['payload_json'].get('correction', {}).get('policy_version') == CORRECTION_POLICY_VERSION_V2:
+            if is_v2:
                 if check.basis == 'unchanged':
-                    group = self.get_binding('correction_group', check.attempt_id)
+                    group = groups_by_attempt.get(check.attempt_id)
                     if (group is None or group['payload_json'].get('run_id') != run_id
                             or check.block_id not in group['payload_json'].get('unchanged_block_ids', ())):
                         raise WorkStateError('отсутствует квитанция неизменённого блока')
                 else:
-                    candidate = self.get_correction_candidate(check.candidate_id)
+                    candidate = candidates_by_id.get(check.candidate_id)
                     if (candidate is None or candidate.run_id != run_id or candidate.block_id != check.block_id
                             or candidate.proposal_attempt_id != check.attempt_id
                             or (check.basis == 'confirmed' and (candidate.state != 'auto_applied'
@@ -496,18 +544,24 @@ class SqlAlchemyWorkRepository:
             if changed.rowcount != 1:
                 raise WorkStateError('область изменилась до принятия')
             SqlAlchemyBlockResultRepository(self._session).replace_results(attempt.run_id, results)
+            provenance = None if root.policy_version is None else {
+                'schema_version': 1, 'root_id': root.id, 'policy_version': root.policy_version,
+                'prompt_hash': attempt.context['prompt_hash'], 'attempt_id': attempt.id}
+            artifacts = []
+            bindings_to_create = []
             for result in results:
-                provenance = None if root.policy_version is None else {
-                    'schema_version': 1, 'root_id': root.id, 'policy_version': root.policy_version,
-                    'prompt_hash': attempt.context['prompt_hash'], 'attempt_id': attempt.id}
                 body = {'schema_version': 1, 'result': asdict(result)}
                 if provenance is not None:
                     body['provenance'] = provenance
                 artifact_id = str(uuid4())
-                self.archive_artifacts([dict(id=artifact_id, book_id=root.book_id,
+                artifacts.append(dict(id=artifact_id, book_id=root.book_id,
                     conditions_id=root.conditions_id, run_id=attempt.run_id, attempt_id=attempt_id,
-                    kind='block_result', scope_id=result.block_id, body=body)])
-                self.bind('result', f'{attempt.run_id}:{result.block_id}', book_id=root.book_id,
+                    kind='block_result', scope_id=result.block_id, body=body))
+                bindings_to_create.append((result.block_id, artifact_id))
+            if artifacts:
+                self.archive_artifacts(artifacts)
+            for block_id, artifact_id in bindings_to_create:
+                self.bind('result', f'{attempt.run_id}:{block_id}', book_id=root.book_id,
                           conditions_id=root.conditions_id, attempt_id=attempt_id, artifact_revision_id=artifact_id,
                           payload=provenance)
             self.transition_attempt(attempt_id, 'accepted', expected_state='validated')
@@ -1175,10 +1229,20 @@ class SqlAlchemyWorkRepository:
             return False
         from linguary.adapters.db.repositories import SqlAlchemyBlockResultRepository
         results = SqlAlchemyBlockResultRepository(self._session)
+        bindings = self.result_bindings(run_id)
+        attempts_by_id = {}
+
+        def cached_attempt(attempt_id):
+            if attempt_id is None:
+                return None
+            if attempt_id not in attempts_by_id:
+                attempts_by_id[attempt_id] = self.get_attempt(attempt_id)
+            return attempts_by_id[attempt_id]
+
         correction_sources = {}
         for block in blocks:
-            binding = self.get_binding('result', f'{run_id}:{block}')
-            attempt = None if binding is None else self.get_attempt(binding['attempt_id'])
+            binding = bindings.get(block)
+            attempt = None if binding is None else cached_attempt(binding['attempt_id'])
             if attempt is not None and attempt.context.get('stage') == 'chapter_correction':
                 if binding['book_id'] != root.book_id or binding['conditions_id'] != root.conditions_id:
                     return False
@@ -1190,24 +1254,36 @@ class SqlAlchemyWorkRepository:
                 correction_sources[block] = source
         for scope in leaves:
             if root.policy_version is not None:
-                accepted = self.get_attempt(scope.accepted_attempt_id)
+                accepted = cached_attempt(scope.accepted_attempt_id)
                 if (accepted is None or accepted.state != 'accepted' or accepted.root_id != root.id
                         or accepted.context.get('policy_version') != root.policy_version):
                     return False
             for block in scope.ordered_blocks:
-                binding = self.get_binding('result', f'{run_id}:{block}')
+                binding = bindings.get(block)
                 if binding is None:
                     return False
                 source = correction_sources.get(block)
                 current_attempt_id = source.id if source is not None else binding['attempt_id']
                 if current_attempt_id != scope.accepted_attempt_id:
-                    replacement = source if source is not None else self.get_attempt(current_attempt_id)
+                    replacement = source if source is not None else cached_attempt(current_attempt_id)
                     if (replacement is None or replacement.state != 'accepted' or replacement.run_id != run_id
                             or replacement.book_id != root.book_id
                             or replacement.conditions_id != root.conditions_id
                             or replacement.context.get('stage') != 'block_regeneration'):
                         return False
-        if any(results.get(run_id, block) is None for block in blocks):
+        if hasattr(self._session, 'scalars'):
+            if blocks:
+                present_blocks = set(
+                    self._session.scalars(
+                        select(BlockResultRow.block_id).where(
+                            BlockResultRow.run_id == run_id,
+                            BlockResultRow.block_id.in_(blocks),
+                        )
+                    ).all()
+                )
+                if any(block not in present_blocks for block in blocks):
+                    return False
+        elif any(results.get(run_id, block) is None for block in blocks):
             return False
         if update_state:
             self._session.execute(update(RecoveryRootRow).where(RecoveryRootRow.id == root.id,

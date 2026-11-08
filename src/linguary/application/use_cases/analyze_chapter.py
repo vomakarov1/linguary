@@ -156,6 +156,10 @@ class AnalyzeChapter:
         self._conditions_id = conditions_id
         self._id_factory = id_factory or _new_id
         self._sleep = sleep or asyncio.sleep
+        from contextvars import ContextVar
+        self._loaded_concepts: ContextVar[tuple[TermConcept, ...] | None] = ContextVar(
+            f"analyze_chapter_concepts_{id(self)}", default=None
+        )
 
     async def __call__(self, command: AnalyzeChapterCommand) -> AnalyzeChapterResult:
         """Analyzes a chapter and persists the result.
@@ -166,12 +170,14 @@ class AnalyzeChapter:
         """
         token_attempts = None
         token_responses = None
+        token_concepts = self._loaded_concepts.set(None)
         if hasattr(self._llm_client, "_attempts"):
             token_attempts = self._llm_client._attempts.set(())
         if hasattr(self._llm_client, "_responses"):
             token_responses = self._llm_client._responses.set(())
         try:
             document, accumulated, user_decisions, nonbinding_suggestions = self._load(command)
+            concepts = self._loaded_concepts.get()
             section = _section_of(document, command)
             blocks = textual_blocks(section)
             if not blocks:
@@ -193,6 +199,7 @@ class AnalyzeChapter:
                         user_decisions=user_decisions,
                         nonbinding_suggestions=nonbinding_suggestions,
                         command=command,
+                        concepts=concepts,
                     )
                 except LLMResponseFormatError as error:
                     if error.truncated and len(blocks) > 1:
@@ -210,6 +217,7 @@ class AnalyzeChapter:
                             user_decisions=user_decisions,
                             nonbinding_suggestions=nonbinding_suggestions,
                             command=command,
+                            concepts=concepts,
                         )
                     else:
                         raise
@@ -223,10 +231,12 @@ class AnalyzeChapter:
                     user_decisions=user_decisions,
                     nonbinding_suggestions=nonbinding_suggestions,
                     command=command,
+                    concepts=concepts,
                 )
             self._save(command.book_id, analysis, task_id=command.task_id)
             return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
         finally:
+            self._loaded_concepts.reset(token_concepts)
             if token_attempts is not None:
                 self._llm_client._attempts.reset(token_attempts)
             if token_responses is not None:
@@ -269,6 +279,7 @@ class AnalyzeChapter:
         user_decisions: Sequence[TermConcept],
         nonbinding_suggestions: Sequence[TermConcept],
         command: AnalyzeChapterCommand,
+        concepts: Sequence[TermConcept] | None = None,
     ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
         """Main scenario: entire chapter in a single request (PRD § 14)."""
         context = self._context_builder.for_chapter_analysis(
@@ -286,7 +297,10 @@ class AnalyzeChapter:
             ),
         )
         payload, attempts, usage = await self._request_analysis(
-            context, blocks=blocks, source_language=document.source_language
+            context,
+            blocks=blocks,
+            source_language=document.source_language,
+            concepts=concepts,
         )
         analysis = self._to_analysis(
             payload, context=context, section=section, blocks=blocks
@@ -304,6 +318,7 @@ class AnalyzeChapter:
         user_decisions: Sequence[TermConcept],
         nonbinding_suggestions: Sequence[TermConcept],
         command: AnalyzeChapterCommand,
+        concepts: Sequence[TermConcept] | None = None,
     ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
         """Fallback scenario: long chapter processed by fragments (PRD § 14, ALG-03).
 
@@ -363,7 +378,10 @@ class AnalyzeChapter:
             )
             try:
                 payload, fragment_attempts, usage = await self._request_analysis(
-                    context, blocks=fragment.blocks, source_language=document.source_language
+                    context,
+                    blocks=fragment.blocks,
+                    source_language=document.source_language,
+                    concepts=concepts,
                 )
             except LLMResponseFormatError as error:
                 if error.truncated and len(fragment.blocks) > 1:
@@ -421,7 +439,8 @@ class AnalyzeChapter:
             current_order = _section_of(document, command).order
             orders = {section.id: section.order for section in document.sections}
             analyses = transaction.analyses.list_for_book(command.book_id)
-            concepts = transaction.glossary.list_for_book(command.book_id)
+            concepts = tuple(transaction.glossary.list_for_book(command.book_id))
+            self._loaded_concepts.set(concepts)
             tasks_repo = getattr(transaction, "tasks", None)
             parallel_batch = (
                 tasks_repo is not None
@@ -501,6 +520,7 @@ class AnalyzeChapter:
         *,
         blocks: Sequence[DocumentBlock],
         source_language: str,
+        concepts: Sequence[TermConcept] | None = None,
     ) -> tuple[ChapterAnalysisResponse, int, TokenUsage | None]:
         """Executes model call with retries per policy (ALG-05).
 
@@ -508,6 +528,9 @@ class AnalyzeChapter:
         transitioning the task to `failed` is the responsibility of the runner, not this loop.
         """
         request: LLMRequest[ChapterAnalysisResponse] = context.request
+        resolved_concepts = (
+            tuple(concepts) if concepts is not None else self._loaded_concepts.get()
+        )
         attempts = 0
         while True:
             attempts += 1
@@ -552,9 +575,10 @@ class AnalyzeChapter:
                             {b.id: b.text for b in blocks},
                             visible_texts_by_alias=context.visible_texts_by_alias,
                         )
-                        with self._unit_of_work.transaction() as transaction:
-                            decisions = transaction.glossary.list_for_book(request.book_id)
-                        validate_fact_glossary(plan, glossary_context_constraints(decisions))
+                        if resolved_concepts is None:
+                            with self._unit_of_work.transaction() as transaction:
+                                resolved_concepts = tuple(transaction.glossary.list_for_book(request.book_id))
+                        validate_fact_glossary(plan, glossary_context_constraints(resolved_concepts))
                 except (ApplicationError, DomainError) as error:
                     raise ResultValidationError(str(error), expectation=context.expectation) from error
             except Exception as error:

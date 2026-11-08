@@ -61,3 +61,41 @@ def test_accept_reject_updates_one_call(unit_of_work):
     with unit_of_work.transaction() as transaction:
         assert len(transaction.llm_calls.list_for_book('book-1')) == 1
         assert transaction.llm_calls.diagnostic_record(call_id='call-0')['body'] == 'bounded rejected'
+
+
+def test_periodic_purge_throttles_repeated_calls_while_purge_expired_runs_immediately(
+    unit_of_work, monkeypatch
+):
+    seed(unit_of_work)
+    current_time = NOW
+    diagnostics = Diagnostics(
+        unit_of_work,
+        policy=DiagnosticsPolicy(retention_seconds=10),
+        clock=lambda: current_time,
+    )
+    purge_calls: list[datetime | None] = []
+    original_purge = diagnostics.purge_expired
+
+    def tracked_purge(now=None):
+        purge_calls.append(now)
+        return original_purge(now)
+
+    monkeypatch.setattr(diagnostics, 'purge_expired', tracked_purge)
+
+    assert diagnostics.periodic_purge() is True
+    assert len(purge_calls) == 1
+
+    current_time = NOW + timedelta(minutes=15)
+    assert diagnostics.periodic_purge() is False
+    diagnostics.ensure_available()
+    assert len(purge_calls) == 1
+
+    diagnostics.purge_expired()
+    assert len(purge_calls) == 2
+    with unit_of_work.transaction() as transaction:
+        assert transaction.llm_calls.response_text_for('call-0') is None
+
+    current_time = NOW + timedelta(hours=1, seconds=1)
+    assert diagnostics.periodic_purge() is True
+    assert len(purge_calls) == 3
+

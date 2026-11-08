@@ -558,6 +558,9 @@ class WorkBindingRow(Base):
     """Persisted work bindings."""
 
     __tablename__ = 'work_bindings'
+    __table_args__ = (
+        Index('ix_work_bindings_book_id_entity_kind', 'book_id', 'entity_kind'),
+    )
     entity_kind: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     entity_id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
@@ -570,6 +573,9 @@ class ArtifactRevisionRow(Base):
     """Persisted artifact revisions."""
 
     __tablename__ = 'artifact_revisions'
+    __table_args__ = (
+        Index('ix_artifact_revisions_book_id_run_id', 'book_id', 'run_id'),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
     conditions_id: Mapped[str | None] = mapped_column(String, ForeignKey('book_conditions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
@@ -585,7 +591,12 @@ class RecoveryRootRow(Base):
     """Persisted recovery roots."""
 
     __tablename__ = 'recovery_roots'
-    __table_args__ = (CheckConstraint("generation >= 0", name="generation_nonnegative"), CheckConstraint("calls_used >= 0", name="calls_used_nonnegative"), CheckConstraint("extra_calls >= 0", name="extra_calls_nonnegative"),)
+    __table_args__ = (
+        CheckConstraint("generation >= 0", name="generation_nonnegative"),
+        CheckConstraint("calls_used >= 0", name="calls_used_nonnegative"),
+        CheckConstraint("extra_calls >= 0", name="extra_calls_nonnegative"),
+        Index('ix_recovery_roots_book_id', 'book_id'),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
     conditions_id: Mapped[str] = mapped_column(String, ForeignKey('book_conditions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
@@ -607,7 +618,10 @@ class RecoveryScopeRow(Base):
     """Persisted recovery scopes."""
 
     __tablename__ = 'recovery_scopes'
-    __table_args__ = (CheckConstraint("generation >= 0", name="generation_nonnegative"),)
+    __table_args__ = (
+        CheckConstraint("generation >= 0", name="generation_nonnegative"),
+        Index('ix_recovery_scopes_root_id', 'root_id'),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     root_id: Mapped[str] = mapped_column(String, ForeignKey('recovery_roots.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
     parent_id: Mapped[str | None] = mapped_column(String, ForeignKey('recovery_scopes.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
@@ -620,7 +634,14 @@ class LLMAttemptRow(Base):
     """Persisted llm attempts."""
 
     __tablename__ = 'llm_attempts'
-    __table_args__ = (UniqueConstraint('root_id', 'ordinal'), UniqueConstraint('review_id', 'ordinal'), CheckConstraint("generation >= 0", name="generation_nonnegative"), CheckConstraint("ordinal >= 0", name="ordinal_nonnegative"),)
+    __table_args__ = (
+        UniqueConstraint('root_id', 'ordinal'),
+        UniqueConstraint('review_id', 'ordinal'),
+        CheckConstraint("generation >= 0", name="generation_nonnegative"),
+        CheckConstraint("ordinal >= 0", name="ordinal_nonnegative"),
+        Index('ix_llm_attempts_scope_id', 'scope_id'),
+        Index('ix_llm_attempts_task_id', 'task_id'),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
     conditions_id: Mapped[str | None] = mapped_column(String, ForeignKey('book_conditions.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=True)
