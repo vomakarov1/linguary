@@ -504,7 +504,7 @@ def is_front_matter(
             (s.order for s in document.ordered_sections if _is_story_chapter(s)),
             default=None,
         )
-        if first_story_order is not None and section.order < first_story_order:
+        if first_story_order is not None and section.order < first_story_order and len(text_blocks) <= 2:
             return True
 
     return False

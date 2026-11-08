@@ -137,6 +137,7 @@ def processing_payload(story, blocks, plan, *, indices=None, regenerated=False, 
         response['language_notes'].append(dict(source_block_id=aliases[blocks[-1].id], original_excerpt=story['byr'][0]['expression'], translated_excerpt=None, note=story['byr'][0]['explanation']))
     if omit_evidence:
         response['content_evidence'] = []
+        response['language_notes'] = []
     return response
 
 

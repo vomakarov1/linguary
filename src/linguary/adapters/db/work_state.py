@@ -1147,7 +1147,7 @@ class SqlAlchemyWorkRepository:
             raise WorkStateError('область изменилась до принятия')
         if attempt.state == 'validated':
             self.transition_attempt(attempt_id, 'accepted', expected_state='validated',
-                                    outcome={**thaw(attempt.outcome), 'decision': 'accepted'})
+                                    outcome={**(thaw(attempt.outcome) or {}), 'decision': 'accepted'})
 
     def root_coverage_complete(self, root_id, *, update_state=True):
         root = self.get_root(root_id)

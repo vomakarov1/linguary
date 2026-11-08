@@ -92,6 +92,21 @@ def test_late_validated_response_cannot_commit(unit_of_work):
             tx.work.mark_recovery_accepted(ctx.attempt_id)
 
 
+def test_mark_recovery_accepted_handles_none_outcome(unit_of_work):
+    old, scope, task, ctx = owner(unit_of_work)
+    with unit_of_work.transaction() as tx:
+        tx.work.transition_attempt(ctx.attempt_id, 'sent', expected_state='created')
+        tx.work.transition_attempt(ctx.attempt_id, 'validated', expected_state='sent')
+        # Simulate attempt with outcome=None
+        from linguary.adapters.db.models import LLMAttemptRow
+        from sqlalchemy import update
+        tx.work._session.execute(update(LLMAttemptRow).where(LLMAttemptRow.id == ctx.attempt_id).values(outcome_json=None))
+        tx.work.mark_recovery_accepted(ctx.attempt_id)
+        attempt = tx.work.get_attempt(ctx.attempt_id)
+        assert attempt.state == 'accepted'
+        assert attempt.outcome['decision'] == 'accepted'
+
+
 @pytest.mark.parametrize('mismatched_source', [None, 'binding', 'artifact'])
 def test_replace_rooted_result_binding_checks_persisted_prompt_hash(unit_of_work, mismatched_source):
     root, _, _, ctx = owner(unit_of_work)

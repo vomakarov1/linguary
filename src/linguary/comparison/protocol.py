@@ -92,7 +92,7 @@ class ComparisonProtocol(Contract):
     continuation: ContinuationBinding | None = None
     generation: dict[str, float | int | None] = Field(default_factory=lambda: {'temperature': None, 'max_output_tokens': None, 'max_attempts': None})
     splitting: dict[str, int | None] = Field(default_factory=lambda: {'max_fragment_blocks': None, 'max_unit_source_chars': None})
-    checks: dict[str, float | int | None] = Field(default_factory=dict)
+    checks: dict[str, bool | float | int | None] = Field(default_factory=dict)
     requests_per_minute: int | None = Field(default=None, gt=0)
     concurrency: int | None = Field(default=None, gt=0)
     max_total_attempts: int | None = Field(default=None, gt=0)

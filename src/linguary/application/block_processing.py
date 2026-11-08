@@ -279,7 +279,6 @@ class TranslationCall:
                 else:
                     results = tuple(explained.without_repeats(r) for r in results)
             except Exception as error:
-                import traceback; traceback.print_exc()
                 if isinstance(error, RecoveryError):
                     raise
                 if response is not None:

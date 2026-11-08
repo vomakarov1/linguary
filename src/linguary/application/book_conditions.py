@@ -78,20 +78,21 @@ class BookConditionsService:
             payload['profile'] = 'content-plan-v3'
             payload['versions'] = {'runtime': 1, 'context_builder': 3, 'validators': 3,
                 'schemas': 4 if continue_legacy else 5, 'prompts': 4 if continue_legacy else 5}
+        profile = payload.get('profile', 'legacy-v1')
         if payload['reader_level'] == 'a2' and not continue_legacy:
-            if payload['profile'] == 'legacy-v1' and not english_help:
+            if profile == 'legacy-v1' and not english_help:
                 payload['versions'] = dict(A2_CONTENT_PLAN_V5_VERSIONS)
             else:
                 payload['versions'] = {**payload['versions'], 'validators': 4}
         elif continue_legacy and not english_help:
-            if payload['profile'] == 'legacy-v1' and payload['reader_level'] == 'a2':
+            if profile == 'legacy-v1' and payload['reader_level'] == 'a2':
                 payload['versions'] = dict(A2_CONTENT_PLAN_VERSIONS)
-            elif payload['profile'] == 'content-plan-v3':
+            elif profile == 'content-plan-v3':
                 payload['versions'] = {'runtime': 1, 'context_builder': 3,
                     'validators': 4 if payload['reader_level'] == 'a2' else 3,
                     'schemas': 3, 'prompts': 3}
-        effective_v3 = (payload['profile'] == 'content-plan-v3'
-                        or payload['profile'] == 'legacy-v1' and payload['reader_level'] == 'a2'
+        effective_v3 = (profile == 'content-plan-v3'
+                        or profile == 'legacy-v1' and payload['reader_level'] == 'a2'
                         and not english_help)
         analysis_contract_version = 5 if effective_v3 and not continue_legacy else None
         validators_version = payload.get('versions', {}).get('validators', 1)

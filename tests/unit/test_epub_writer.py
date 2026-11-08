@@ -97,6 +97,45 @@ def test_front_matter_classification_in_domain() -> None:
     assert doc.is_front_matter(ch2_section) is False
 
 
+def test_custom_named_story_chapter_before_pattern_chapter_is_not_front_matter() -> None:
+    """A chapter with a custom name and more than 2 paragraphs before Chapter 2 is not front matter."""
+    ch1_section = DocumentSection(
+        id="sec-ch1",
+        document_id="book-1",
+        title="The Boy Who Lived",
+        order=0,
+        source_resource_path="story1.xhtml",
+        blocks=(
+            _block("sec-ch1", "b1", "The Boy Who Lived", BlockType.HEADING, 0),
+            _block("sec-ch1", "b2", "Mr. and Mrs. Dursley were proud to say...", BlockType.PARAGRAPH, 1),
+            _block("sec-ch1", "b3", "They were the last people you'd expect...", BlockType.PARAGRAPH, 2),
+            _block("sec-ch1", "b4", "Mr. Dursley was the director of a firm...", BlockType.PARAGRAPH, 3),
+        ),
+    )
+    ch2_section = DocumentSection(
+        id="sec-ch2",
+        document_id="book-1",
+        title="Chapter 2: The Vanishing Glass",
+        order=1,
+        source_resource_path="story2.xhtml",
+        blocks=(
+            _block("sec-ch2", "b5", "Chapter 2", BlockType.HEADING, 0),
+            _block("sec-ch2", "b6", "Nearly ten years had passed.", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    doc = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="A Magical Story"),
+        source_language="en",
+        target_language="ru",
+        sections=(ch1_section, ch2_section),
+    )
+    assert is_front_matter(ch1_section, doc) is False
+    assert doc.is_front_matter(ch1_section) is False
+    assert is_front_matter(ch2_section, doc) is False
+    assert doc.is_front_matter(ch2_section) is False
+
+
 def test_first_story_chapter_does_not_recap_front_matter() -> None:
     """The first story chapter following front matter does not receive a 'Previously' recap from front matter."""
     title_section = DocumentSection(

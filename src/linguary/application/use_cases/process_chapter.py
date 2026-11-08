@@ -54,6 +54,7 @@ from linguary.application.translation_units import (
     plan_translation_units,
 )
 from linguary.application.validators import TranslationResultValidator
+from linguary.domain.content_plan import ContentEvidence
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
@@ -279,6 +280,7 @@ class ProcessChapter:
                     translated_text=None,
                     glossary_hints=(),
                     language_notes=(),
+                    content_evidence=ContentEvidence(plan.sha256, (), version=plan.version) if plan else (),
                 )
                 for b_id in unit.block_ids
             )
