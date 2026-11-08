@@ -840,12 +840,13 @@ class ContextBuilder:
 
         parts = [
             _chapter_header(document=document, section=section),
+            _chapter_digest(analysis, glossary, candidates),
+            _explained_expressions(analysis, section),
             (f"Ориентир количества языковых заметок: {budget}. "
              "Для необходимого объяснения можно превысить этот ориентир, в том числе дать три заметки одному фрагменту. "
              "Не теряй обязательную помощь из учебного плана ради количества. "
              "Каждая заметка должна быть привязана к исходнику; не повторяй уже объяснённое."
              if recovery_child else f"В этом запросе — не больше {budget} языковых заметок."),
-            _chapter_digest(analysis, glossary, candidates),
             _mandatory_decisions(
                 _with_agreed_notes(filtered_mandatory, glossary, candidates),
                 target_language=document.target_language,
@@ -856,7 +857,6 @@ class ContextBuilder:
                 ),
                 target_language=document.target_language,
             ),
-            _explained_expressions(analysis, section),
             _neighbour_context(neighbours),
             _unit_blocks(unit),
             _owned_content_plan(analysis, unit),
@@ -2039,6 +2039,8 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
             if source_id not in aliases:
                 related.setdefault(source_id, f"related-source-{len(related) + 1}")
             anchor["block_id"] = aliases.get(source_id, related.get(source_id))
+            anchor.pop("start", None)
+            anchor.pop("end", None)
         difficulties.append(value)
     facts = []
     for fact in analysis.content_plan.context_facts:
@@ -2050,10 +2052,11 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
             if source_id not in aliases:
                 related.setdefault(source_id, f'related-source-{len(related) + 1}')
             anchor['block_id'] = aliases.get(source_id, related.get(source_id))
+            anchor.pop("start", None)
+            anchor.pop("end", None)
         facts.append(value)
     return "Обязательные аспекты и точные связанные привязки:\n" + json.dumps({
         "version": analysis.content_plan.version, "difficulties": difficulties,
-        "before_you_read": [dict(expression=e.expression, explanation=e.explanation) for e in analysis.before_you_read],
         **({'context_facts': facts} if analysis.content_plan.version == 3 else {}),
     }, ensure_ascii=False)
 
