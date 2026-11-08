@@ -67,6 +67,32 @@ def _normalize_sorted_keys(value: Any) -> Any:
     return json.loads(_json(value))
 
 
+_STRIPPED_GLOSSARY_KEYS = ('id', 'book_id', 'created_at', 'concept_id')
+
+
+def _clean_glossary_entry(entry: Any) -> Any:
+    if not isinstance(entry, Mapping):
+        return entry
+    return {
+        k: v
+        for k, v in entry.items()
+        if k not in _STRIPPED_GLOSSARY_KEYS
+        and not (k == 'note' and (v is None or (isinstance(v, str) and not v.strip())))
+    }
+
+
+def _llm_run_glossary(glossary: Any) -> Any:
+    raw = thaw(glossary)
+    if isinstance(raw, Mapping):
+        out = {k: v for k, v in raw.items() if k not in _STRIPPED_GLOSSARY_KEYS}
+        if isinstance(out.get('entries'), (list, tuple)):
+            out['entries'] = [_clean_glossary_entry(e) for e in out['entries']]
+        return out
+    if isinstance(raw, (list, tuple)):
+        return [_clean_glossary_entry(e) for e in raw]
+    return raw
+
+
 def _filtered_chapter_context(
     inputs: Any,
     target_block_ids: Sequence[str] | set[str],
@@ -83,6 +109,8 @@ def _filtered_chapter_context(
     section = getattr(inputs, 'section', None)
     if section is not None and 'section_id' not in context and getattr(section, 'id', None) is not None:
         context['section_id'] = section.id
+    if 'run_glossary' in context and context['run_glossary'] is not None:
+        context['run_glossary'] = _llm_run_glossary(context['run_glossary'])
     aliases = getattr(inputs, 'block_aliases', {})
     allowed_block_ids: set[str] | None = None
     blocks = getattr(inputs, 'blocks', ())
@@ -429,7 +457,10 @@ class CorrectChapter:
                 response = await self.client.generate(request)
                 if (response.truncated or not isinstance(response.payload, ChapterCorrectionResponse)
                         or response.call_context != context):
-                    raise LLMResponseFormatError('неполный ответ исправления или неверная попытка')
+                    raise LLMResponseFormatError(
+                        'неполный ответ исправления или неверная попытка',
+                        truncated=response.truncated,
+                    )
                 response.payload.validate_for({b: inputs.results[b].treatment for b in block_ids})
                 with self.uow.transaction() as tx:
                     current, owned_task, current_payload = self._load(tx, command,
@@ -501,6 +532,10 @@ class CorrectChapter:
                         attempt = tx.work.get_attempt(context.attempt_id)
                         if attempt is not None and attempt.state == 'validated':
                             tx.work.transition_attempt(attempt.id, 'rejected', expected_state='validated')
+                if isinstance(error, LLMResponseFormatError) and error.truncated and len(block_ids) > 1:
+                    middle = len(block_ids) // 2
+                    return (await self._group(command, block_ids[:middle])
+                            + await self._group(command, block_ids[middle:]))
                 decision = self.retry.decide(
                     error,
                     attempts=ordinal,
@@ -714,7 +749,10 @@ class CorrectChapterV2(CorrectChapter):
                 response = await self.client.generate(request)
                 if (response.truncated or not isinstance(response.payload, ChapterCorrectionV2Response)
                         or response.call_context != context):
-                    raise LLMResponseFormatError('неполное предложение исправления')
+                    raise LLMResponseFormatError(
+                        'неполное предложение исправления',
+                        truncated=response.truncated,
+                    )
                 response.payload.validate_for({b: inputs.results[b].treatment for b in block_ids})
                 with self.uow.transaction() as tx:
                     current, attempt = self._owned_response(tx, command, task, expected, context,
@@ -793,7 +831,6 @@ class CorrectChapterV2(CorrectChapter):
         candidates_payload = [
             dict(
                 candidate_id=c.candidate_id,
-                proposal_sha256=c.proposal_sha256,
                 block_id=aliases.get(c.block_id, c.block_id),
                 original=thaw(c.payload['original']),
                 current_result=_llm_block_result(thaw(c.payload['current_result']), aliases),
@@ -850,7 +887,10 @@ class CorrectChapterV2(CorrectChapter):
                 response = await self.client.generate(request)
                 if (response.truncated or not isinstance(response.payload, ChapterCorrectionReviewResponse)
                         or response.call_context != context):
-                    raise LLMResponseFormatError('неполная проверка кандидатов')
+                    raise LLMResponseFormatError(
+                        'неполная проверка кандидатов',
+                        truncated=response.truncated,
+                    )
                 resolved_payload = response.payload.with_resolved_proposal_shas(refs)
                 if resolved_payload != response.payload:
                     response = replace(response, payload=resolved_payload)

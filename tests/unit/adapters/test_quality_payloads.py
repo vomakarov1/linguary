@@ -48,19 +48,32 @@ def test_validate_response_populates_checked_artifacts_sha_and_anchor_offsets_fr
     from linguary.application.quality_context import QualityReviewResponse, validate_response
     from linguary.domain.content_plan import canonical_sha
 
-    original_env = dict(artifact_kind="original", block_ids=["b1"], body=dict(text="The quick brown fox jumps."))
+    original_env = dict(
+        artifact_kind="original",
+        block_ids=["block-uuid-1"],
+        body=dict(text="The quick brown fox’s jump."),
+    )
     original_sha = canonical_sha(original_env)
-    analysis_env = dict(artifact_kind="analysis", block_ids=["b1", "b2"], body=dict(summary="fox chapter"))
+    analysis_env = dict(
+        artifact_kind="analysis",
+        block_ids=["block-uuid-1", "block-uuid-2"],
+        body=dict(summary="fox chapter"),
+    )
     analysis_sha = canonical_sha(analysis_env)
-    result_env = dict(artifact_kind="result", block_ids=["b1"], body=dict(translated_text="Быстрая лиса."))
+    result_env = dict(
+        artifact_kind="result",
+        block_ids=["block-uuid-1"],
+        body=dict(translated_text="Быстрая лиса."),
+    )
     result_sha = canonical_sha(result_env)
 
     manifest = dict(
+        scope=["block-uuid-1", "block-uuid-2"],
         artifacts=[
             {**original_env, "artifact_sha": original_sha},
             {**analysis_env, "artifact_sha": analysis_sha},
             {**result_env, "artifact_sha": result_sha},
-        ]
+        ],
     )
 
     model_findings = [
@@ -69,7 +82,7 @@ def test_validate_response_populates_checked_artifacts_sha_and_anchor_offsets_fr
             artifact_kind="original",
             severity="minor",
             issue="Vocabulary note",
-            evidence_anchors=[dict(block_id="b1", quote="brown fox")],
+            evidence_anchors=[dict(block_id="b1", quote="brown fox's")],
             suggestion="Clarify tone",
             uncertainty="low",
         ),
@@ -96,44 +109,54 @@ def test_validate_response_populates_checked_artifacts_sha_and_anchor_offsets_fr
 
     f1 = validated.findings[0]
     assert f1["artifact_sha"] == original_sha
+    assert f1["block_ids"] == ["block-uuid-1"]
     a1 = f1["evidence_anchors"][0]
+    assert a1["block_id"] == "block-uuid-1"
     assert a1["start"] == 10
-    assert a1["end"] == 19
-    assert a1["quote"] == "brown fox"
-    assert "The quick brown fox jumps."[a1["start"]:a1["end"]] == "brown fox"
+    assert a1["end"] == 21
+    assert a1["quote"] == "brown fox’s"
+    assert "The quick brown fox’s jump."[a1["start"]:a1["end"]] == "brown fox’s"
 
     f2 = validated.findings[1]
     assert f2["artifact_sha"] == analysis_sha
+    assert f2["block_ids"] == ["block-uuid-1"]
     a2 = f2["evidence_anchors"][0]
+    assert a2["block_id"] == "block-uuid-1"
     assert a2["start"] == 4
     assert a2["end"] == 9
     assert a2["quote"] == "quick"
-    assert "The quick brown fox jumps."[a2["start"]:a2["end"]] == "quick"
+    assert "The quick brown fox’s jump."[a2["start"]:a2["end"]] == "quick"
 
 
 def test_request_text_strips_internal_evidence_and_warnings_while_preserving_manifest_shas():
     import copy
     from linguary.application.quality_context import (
-        QualityReviewResponse, request_text, validate_response,
+        QualityReviewResponse, _manifest_block_aliases, request_text, validate_response,
     )
     from linguary.domain.content_plan import canonical_sha
 
     original_env = dict(
         artifact_kind="original",
-        block_ids=["b1"],
+        block_ids=["block-uuid-1"],
         body=dict(text="The quick brown fox jumps."),
     )
     original_sha = canonical_sha(original_env)
 
     analysis_env = dict(
         artifact_kind="analysis",
-        block_ids=["b1"],
+        block_ids=["block-uuid-1", "block-uuid-2"],
         body=dict(
             id="analysis-1",
             section_id="section-1",
             coverage_status="complete",
             summary="fox chapter",
-            treatment_plan=dict(section_id="section-1", items=[dict(block_id="b1", treatment="TRANSLATE")]),
+            treatment_plan=dict(
+                section_id="section-1",
+                items=[
+                    dict(block_id="block-uuid-1", treatment="TRANSLATE"),
+                    dict(block_id="block-uuid-2", treatment="READ_AS_IS"),
+                ],
+            ),
             glossary_candidates=[dict(source_text="Fox", suggested_translation="Лис")],
             name_translation_evidence=[dict(source_text="Fox", decision="translate")],
             before_you_read_evidence=[dict(difficulty_id="d1", artifact_key="a" * 64)],
@@ -144,15 +167,15 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
                 difficulties=[
                     dict(
                         id="d1",
-                        owner_block_id="b1",
-                        anchors=[dict(block_id="b1", start=4, end=9, quote="quick")],
+                        owner_block_id="block-uuid-1",
+                        anchors=[dict(block_id="block-uuid-1", start=4, end=9, quote="quick")],
                     )
                 ],
                 context_facts=[
                     dict(
                         id="cf1",
-                        anchors=[dict(block_id="b1", start=10, end=19, quote="brown fox")],
-                        subject_anchor=dict(block_id="b1", start=16, end=19, quote="fox"),
+                        anchors=[dict(block_id="block-uuid-1", start=10, end=19, quote="brown fox")],
+                        subject_anchor=dict(block_id="block-uuid-1", start=16, end=19, quote="fox"),
                     )
                 ],
                 before_you_read_evidence=[dict(difficulty_id="d1", artifact_key="a" * 64)],
@@ -163,15 +186,17 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
 
     result_env = dict(
         artifact_kind="result",
-        block_ids=["b1"],
+        block_ids=["block-uuid-1"],
         body=dict(
-            block_id="b1",
+            block_id="block-uuid-1",
             translated_text="Быстрая рыжая лиса прыгает.",
-            language_notes=[dict(id="ln-ch01-001", block_id="b1", original_excerpt="quick", note="быстрая")],
+            language_notes=[
+                dict(id="ln-ch01-001", block_id="block-uuid-1", original_excerpt="quick", note="быстрая")
+            ],
             fragment_assistances=[
                 dict(
                     difficulty_id="d1",
-                    anchors=[dict(block_id="b1", start=4, end=9, quote="quick")],
+                    anchors=[dict(block_id="block-uuid-1", start=4, end=9, quote="quick")],
                 )
             ],
             content_evidence=dict(plan_sha256="b" * 64, evidence=[dict(artifact_key="c" * 64)]),
@@ -186,7 +211,16 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
         book_id="book-1",
         book_manifest_sha="d" * 64,
         manifest_sha="e" * 64,
-        scope=["b1"],
+        conditions_id="cond-1",
+        conditions_sha="1" * 64,
+        scope=["block-uuid-1", "block-uuid-2"],
+        missing_results=["block-uuid-2"],
+        glossary=dict(
+            entries=[
+                dict(source_text="Brown Fox", translation="Рыжий Лис", type="person", status="approved", note=""),
+                dict(source_text="Unrelated Castle", translation="Замок", type="place", status="approved", note=""),
+            ]
+        ),
         artifacts=[
             {**original_env, "artifact_sha": original_sha},
             {**analysis_env, "artifact_sha": analysis_sha},
@@ -195,17 +229,33 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
     )
     manifest_before = copy.deepcopy(manifest)
 
+    assert _manifest_block_aliases(manifest) == {
+        "block-uuid-1": "b1",
+        "block-uuid-2": "b2",
+    }
+
     serialized = request_text(manifest)
     parsed = json.loads(serialized)
 
     assert manifest == manifest_before
-    assert parsed["manifest_sha"] == "e" * 64
-    assert parsed["book_manifest_sha"] == "d" * 64
-    assert parsed["scope"] == ["b1"]
-    assert [a["artifact_sha"] for a in parsed["artifacts"]] == [
-        original_sha,
-        analysis_sha,
-        result_sha,
+    for stripped_key in (
+        "schema_version",
+        "book_id",
+        "book_manifest_sha",
+        "manifest_sha",
+        "conditions_id",
+        "conditions_sha",
+    ):
+        assert stripped_key not in parsed
+
+    assert parsed["scope"] == ["b1", "b2"]
+    assert parsed["missing_results"] == ["b2"]
+    assert [e["source_text"] for e in parsed["glossary"]["entries"]] == ["Brown Fox"]
+    assert all("artifact_sha" not in a for a in parsed["artifacts"])
+    assert [a["block_ids"] for a in parsed["artifacts"]] == [
+        ["b1"],
+        ["b1", "b2"],
+        ["b1"],
     ]
 
     llm_analysis_body = parsed["artifacts"][1]["body"]
@@ -214,6 +264,10 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
     assert "section_id" not in llm_analysis_body
     assert "coverage_status" not in llm_analysis_body
     assert "section_id" not in llm_analysis_body["treatment_plan"]
+    assert llm_analysis_body["treatment_plan"]["items"] == [
+        dict(block_id="b1", treatment="TRANSLATE"),
+        dict(block_id="b2", treatment="READ_AS_IS"),
+    ]
     assert "glossary_candidates" not in llm_analysis_body
     assert "name_translation_evidence" not in llm_analysis_body
     assert "before_you_read_evidence" not in llm_analysis_body
@@ -266,5 +320,7 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
     )
     validated = validate_response(manifest, raw_response)
     assert validated.findings[0]["artifact_sha"] == result_sha
+    assert validated.findings[0]["block_ids"] == ["block-uuid-1"]
+    assert validated.findings[0]["evidence_anchors"][0]["block_id"] == "block-uuid-1"
     assert set(validated.checked_artifacts) == {original_sha, analysis_sha, result_sha}
 

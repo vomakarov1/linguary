@@ -21,7 +21,7 @@ _CONFLICTS = {'request_key_conflict', 'manifest_changed', 'route_unavailable', '
 
 
 def require_book(application, book_id):
-    with application.unit_of_work.transaction() as tx:
+    with getattr(application.unit_of_work, 'read_transaction', application.unit_of_work.transaction)() as tx:
         if tx.books.get(book_id) is None:
             raise BookNotFoundError('книга не найдена')
 
@@ -88,10 +88,11 @@ def review_response(application, book_id, review_id=None):
         raise operation_error(error) from None
     value['available_routes'] = [dict(route_id=route.route_id, model=route.model)
         for _, route in sorted(application.quality_review.routes.items())]
-    try:
-        value['current_manifest_sha'] = application.quality_review.preview(book_id)['manifest_sha']
-    except WorkStateError:
-        value['current_manifest_sha'] = None
+    if value.get('current_manifest_sha') is None:
+        try:
+            value['current_manifest_sha'] = application.quality_review.preview(book_id)['manifest_sha']
+        except WorkStateError:
+            value['current_manifest_sha'] = None
     return QualityReviewStateResponse.model_validate(value)
 
 
@@ -148,7 +149,7 @@ def quality_page_context(request, application, book_id, *, tasks=None):
         retry_tasks=[], diagnostics=[], diagnostic_list_command=f'linguary diagnostics list {quote(book_id)}')
     if request.headers.get('x-linguary-fragment') == 'result-header':
         return base
-    with application.unit_of_work.transaction() as tx:
+    with getattr(application.unit_of_work, 'read_transaction', application.unit_of_work.transaction)() as tx:
         document = tx.documents.get(book_id)
         calls = tx.llm_calls.list_for_book(book_id)
         if tasks is None:

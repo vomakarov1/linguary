@@ -82,10 +82,10 @@ class SceneFake(FakeLLMClient):
             findings = []
             if self.review_mode == 'finding':
                 artifact = next(a for a in artifacts if a['artifact_kind'] == 'result')
-                findings = [dict(block_ids=artifact['block_ids'], artifact_kind='result', artifact_sha=artifact['artifact_sha'],
+                findings = [dict(block_ids=artifact['block_ids'], artifact_kind='result',
                     severity='major', issue='Проверить род говорящего', evidence_anchors=[dict(block_id=self.blocks[0].id,
                         start=0, end=4, quote='Mara')], suggestion='Проверить по оригиналу', uncertainty='probable')]
-            payload = dict(findings=findings, checked_artifacts=[a['artifact_sha'] for a in artifacts], missing_artifacts=[])
+            payload = dict(findings=findings, checked_artifacts=[], missing_artifacts=[])
             self.default = FakeReply.of_payload(payload, usage=TokenUsage(5, 5))
         elif request.stage == LLMCallStage.CHAPTER_ANALYSIS:
             self.default = FakeReply.of_payload(analysis_for(self.profile, indivisible=self.indivisible))

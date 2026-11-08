@@ -1133,11 +1133,11 @@ def test_llm_chapter_analysis_and_quality_artifact_strip_internal_ids_and_char_o
         ],
     }
     parsed = json.loads(request_text(manifest))
-    assert parsed["manifest_sha"] == "b" * 64
-    assert parsed["book_manifest_sha"] == "a" * 64
-    assert parsed["scope"] == [b1.id]
+    assert "manifest_sha" not in parsed
+    assert "book_manifest_sha" not in parsed
+    assert parsed["scope"] == ["b1"]
     assert parsed["artifacts"][0]["body"] == {"text": b1.text}
-    assert parsed["artifacts"][0]["artifact_sha"] == canonical_sha(orig_env)
+    assert "artifact_sha" not in parsed["artifacts"][0]
 
     qual_analysis = parsed["artifacts"][1]["body"]
     assert "id" not in qual_analysis
@@ -1148,21 +1148,21 @@ def test_llm_chapter_analysis_and_quality_artifact_strip_internal_ids_and_char_o
     assert "profile" not in qual_analysis["content_plan"]
     assert "sha256" not in qual_analysis["content_plan"]
     assert qual_analysis["content_plan"]["difficulties"][0]["anchors"] == [
-        {"block_id": b1.id, "quote": "First"}
+        {"block_id": "b1", "quote": "First"}
     ]
     assert qual_analysis["content_plan"]["context_facts"][0]["anchors"] == [
-        {"block_id": b2.id, "quote": "Second"}
+        {"block_id": "b2", "quote": "Second"}
     ]
     assert qual_analysis["content_plan"]["context_facts"][0]["subject_anchor"] == {
-        "block_id": b2.id,
+        "block_id": "b2",
         "quote": "he",
     }
 
-    qual_result = _llm_artifact(manifest["artifacts"][2])["body"]
+    qual_result = _llm_artifact(manifest["artifacts"][2], aliases)["body"]
     assert "block_id" not in qual_result
     assert "id" not in qual_result["language_notes"][0]
     assert qual_result["fragment_assistances"][0]["anchors"] == [
-        {"block_id": b1.id, "quote": "First"}
+        {"block_id": "b1", "quote": "First"}
     ]
 
 

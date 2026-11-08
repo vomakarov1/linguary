@@ -3,8 +3,19 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import json
 from typing import Any
+from linguary.application.analysis_merge import find_quote_span
+from linguary.domain import glossary_key
 from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.content_plan import canonical_sha
+
+_STRIPPED_MANIFEST_KEYS = (
+    'schema_version',
+    'book_id',
+    'book_manifest_sha',
+    'manifest_sha',
+    'conditions_id',
+    'conditions_sha',
+)
 
 
 @dataclass(frozen=True)
@@ -54,14 +65,49 @@ def snapshot(tx, book_id, scope):
     return {**value, 'manifest_sha': canonical_sha(value)}
 
 
-def _strip_anchor_offsets(anchor: Any) -> Any:
+def _manifest_block_aliases(manifest: Mapping[str, Any]) -> dict[str, str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def add(block_id: Any) -> None:
+        if isinstance(block_id, str) and block_id and block_id not in seen:
+            seen.add(block_id)
+            ordered.append(block_id)
+
+    if isinstance(manifest, Mapping):
+        for artifact in manifest.get('artifacts') or ():
+            if isinstance(artifact, Mapping):
+                for block_id in artifact.get('block_ids') or ():
+                    add(block_id)
+        scope = manifest.get('scope')
+        if isinstance(scope, (list, tuple)):
+            for block_id in scope:
+                add(block_id)
+        for block_id in manifest.get('missing_results') or ():
+            add(block_id)
+    return {block_id: f'b{index}' for index, block_id in enumerate(ordered, start=1)}
+
+
+def _strip_anchor_offsets(anchor: Any, aliases: Mapping[str, str] | None = None) -> Any:
     if isinstance(anchor, Mapping):
-        return {k: v for k, v in anchor.items() if k not in ('start', 'end')}
+        out = {k: v for k, v in anchor.items() if k not in ('start', 'end')}
+        if aliases and isinstance(out.get('block_id'), str):
+            out['block_id'] = aliases.get(out['block_id'], out['block_id'])
+        return out
     return anchor
 
 
-def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
-    out = dict(artifact)
+def _llm_artifact(
+    artifact: Mapping[str, Any],
+    aliases: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    alias_map = aliases or {}
+    out = {k: v for k, v in artifact.items() if k != 'artifact_sha'}
+    if isinstance(out.get('block_ids'), (list, tuple)):
+        out['block_ids'] = [
+            alias_map.get(bid, bid) if isinstance(bid, str) else bid
+            for bid in out['block_ids']
+        ]
     kind = out.get('artifact_kind')
     body = out.get('body')
     if not isinstance(body, Mapping):
@@ -73,17 +119,24 @@ def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
             if k not in ('block_id', 'content_evidence', 'pronunciation_assistances', 'warnings')
         }
         if isinstance(cleaned_result.get('language_notes'), (list, tuple)):
-            cleaned_result['language_notes'] = [
-                {k: v for k, v in n.items() if k != 'id'} if isinstance(n, Mapping) else n
-                for n in cleaned_result['language_notes']
-            ]
+            notes = []
+            for n in cleaned_result['language_notes']:
+                if isinstance(n, Mapping):
+                    note = {k: v for k, v in n.items() if k != 'id'}
+                    for bid_key in ('block_id', 'source_block_id'):
+                        if isinstance(note.get(bid_key), str):
+                            note[bid_key] = alias_map.get(note[bid_key], note[bid_key])
+                    notes.append(note)
+                else:
+                    notes.append(n)
+            cleaned_result['language_notes'] = notes
         if isinstance(cleaned_result.get('fragment_assistances'), (list, tuple)):
             assistances = []
             for fa in cleaned_result['fragment_assistances']:
                 if isinstance(fa, Mapping):
                     item = dict(fa)
                     if isinstance(item.get('anchors'), (list, tuple)):
-                        item['anchors'] = [_strip_anchor_offsets(a) for a in item['anchors']]
+                        item['anchors'] = [_strip_anchor_offsets(a, alias_map) for a in item['anchors']]
                     assistances.append(item)
                 else:
                     assistances.append(fa)
@@ -104,7 +157,18 @@ def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
         }
         tp = cleaned.get('treatment_plan')
         if isinstance(tp, Mapping):
-            cleaned['treatment_plan'] = {k: v for k, v in tp.items() if k != 'section_id'}
+            cleaned_tp = {k: v for k, v in tp.items() if k != 'section_id'}
+            if isinstance(cleaned_tp.get('items'), (list, tuple)):
+                cleaned_tp['items'] = [
+                    {
+                        **item,
+                        'block_id': alias_map.get(item['block_id'], item['block_id']),
+                    }
+                    if isinstance(item, Mapping) and isinstance(item.get('block_id'), str)
+                    else item
+                    for item in cleaned_tp['items']
+                ]
+            cleaned['treatment_plan'] = cleaned_tp
         cp = cleaned.get('content_plan')
         if isinstance(cp, Mapping):
             cleaned_cp = {
@@ -117,8 +181,10 @@ def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
                 for d in cleaned_cp['difficulties']:
                     if isinstance(d, Mapping):
                         diff = dict(d)
+                        if isinstance(diff.get('owner_block_id'), str):
+                            diff['owner_block_id'] = alias_map.get(diff['owner_block_id'], diff['owner_block_id'])
                         if isinstance(diff.get('anchors'), (list, tuple)):
-                            diff['anchors'] = [_strip_anchor_offsets(a) for a in diff['anchors']]
+                            diff['anchors'] = [_strip_anchor_offsets(a, alias_map) for a in diff['anchors']]
                         difficulties.append(diff)
                     else:
                         difficulties.append(d)
@@ -129,9 +195,9 @@ def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
                     if isinstance(f, Mapping):
                         fact = dict(f)
                         if isinstance(fact.get('anchors'), (list, tuple)):
-                            fact['anchors'] = [_strip_anchor_offsets(a) for a in fact['anchors']]
+                            fact['anchors'] = [_strip_anchor_offsets(a, alias_map) for a in fact['anchors']]
                         if isinstance(fact.get('subject_anchor'), Mapping):
-                            fact['subject_anchor'] = _strip_anchor_offsets(fact['subject_anchor'])
+                            fact['subject_anchor'] = _strip_anchor_offsets(fact['subject_anchor'], alias_map)
                         facts.append(fact)
                     else:
                         facts.append(f)
@@ -141,27 +207,95 @@ def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _matches_manifest_text(
+    term_source: str,
+    blocks_text: str,
+    word_stems: set[str],
+    normalized_blocks_text: str,
+) -> bool:
+    from linguary.application.context_builder import _matches_chapter_text
+    try:
+        return _matches_chapter_text(
+            term_source,
+            blocks_text,
+            word_stems,
+            normalized_blocks_text=normalized_blocks_text,
+        )
+    except TypeError:
+        return _matches_chapter_text(term_source, normalized_blocks_text, word_stems)
+
+
+def _filter_glossary_for_manifest(glossary: Any, original_texts: list[str]) -> Any:
+    if not original_texts:
+        return glossary
+    from linguary.application.context_builder import _extract_word_stems
+    blocks_text = ' '.join(original_texts)
+    word_stems = _extract_word_stems(blocks_text)
+    normalized_blocks_text = glossary_key(blocks_text)
+
+    def keep(entry: Any) -> bool:
+        if not isinstance(entry, Mapping):
+            return True
+        source = entry.get('source_text') or entry.get('canonical_source_text') or ''
+        if not isinstance(source, str) or not source:
+            return True
+        return _matches_manifest_text(source, blocks_text, word_stems, normalized_blocks_text)
+
+    if isinstance(glossary, Mapping) and isinstance(glossary.get('entries'), (list, tuple)):
+        return {**glossary, 'entries': [e for e in glossary['entries'] if keep(e)]}
+    if isinstance(glossary, (list, tuple)):
+        return [e for e in glossary if keep(e)]
+    return glossary
+
+
 def request_text(manifest: Mapping[str, Any]) -> str:
     payload = thaw(manifest)
-    if isinstance(payload, Mapping) and isinstance(payload.get('artifacts'), (list, tuple)):
-        payload = {
-            **payload,
-            'artifacts': [
-                _llm_artifact(a) if isinstance(a, Mapping) else a
-                for a in payload['artifacts']
-            ],
+    if isinstance(payload, Mapping):
+        aliases = _manifest_block_aliases(payload)
+        raw_artifacts = payload.get('artifacts')
+        original_texts = [
+            a['body']['text']
+            for a in (raw_artifacts if isinstance(raw_artifacts, (list, tuple)) else ())
+            if isinstance(a, Mapping)
+            and a.get('artifact_kind') == 'original'
+            and isinstance(a.get('body'), Mapping)
+            and isinstance(a['body'].get('text'), str)
+        ]
+        cleaned: dict[str, Any] = {
+            k: v for k, v in payload.items() if k not in _STRIPPED_MANIFEST_KEYS
         }
+        if isinstance(cleaned.get('scope'), (list, tuple)):
+            cleaned['scope'] = [
+                aliases.get(bid, bid) if isinstance(bid, str) else bid
+                for bid in cleaned['scope']
+            ]
+        if isinstance(cleaned.get('missing_results'), (list, tuple)):
+            cleaned['missing_results'] = [
+                aliases.get(bid, bid) if isinstance(bid, str) else bid
+                for bid in cleaned['missing_results']
+            ]
+        if 'glossary' in cleaned:
+            cleaned['glossary'] = _filter_glossary_for_manifest(cleaned['glossary'], original_texts)
+        if isinstance(raw_artifacts, (list, tuple)):
+            cleaned['artifacts'] = [
+                _llm_artifact(a, aliases) if isinstance(a, Mapping) else a
+                for a in raw_artifacts
+            ]
+        payload = cleaned
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 INSTRUCTIONS = (
     'Проверь оригинал и все переданные учебные слои. Возвращай только замечания, подтверждённые '
     'оригиналом; никогда не переписывай артефакты. Привязывай каждое замечание к точной цитате в '
-    'целевом блоке. Отсутствие замечаний не является гарантией смысловой безошибочности.'
+    'целевом блоке, используя короткие идентификаторы block_id вида b1, b2 из запроса. Отсутствие '
+    'замечаний не является гарантией смысловой безошибочности.'
 )
 
 
 def validate_response(manifest: Mapping[str, Any], response: QualityReviewResponse) -> QualityReviewResponse:
+    aliases = _manifest_block_aliases(manifest)
+    reverse_aliases = {alias: block_id for block_id, alias in aliases.items()}
     artifacts = {a['artifact_sha']: a for a in manifest['artifacts']}
     checked = response.checked_artifacts
     missing = response.missing_artifacts
@@ -175,6 +309,11 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
     updated_findings = []
     for finding in response.findings:
         f = dict(finding)
+        if isinstance(f.get('block_ids'), (list, tuple)):
+            f['block_ids'] = [
+                reverse_aliases.get(bid, bid) if isinstance(bid, str) else bid
+                for bid in f['block_ids']
+            ]
         artifact_sha = f.get('artifact_sha')
         if not artifact_sha:
             kind = f.get('artifact_kind')
@@ -201,6 +340,9 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
         for anchor in f['evidence_anchors']:
             anc = dict(anchor)
             block_id = anc.get('block_id')
+            if isinstance(block_id, str):
+                block_id = reverse_aliases.get(block_id, block_id)
+                anc['block_id'] = block_id
             if block_id not in f['block_ids']:
                 raise WorkStateError('неверная привязка замечания к оригиналу')
             text = originals.get(block_id, '')
@@ -208,13 +350,11 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
             end = anc.get('end')
             quote = anc.get('quote', '')
             if start is None or end is None:
-                pos = text.find(quote)
-                if pos == -1:
+                span = find_quote_span(text, quote)
+                if span is None:
                     raise WorkStateError('неверная привязка замечания к оригиналу')
-                start = pos
-                end = pos + len(quote)
-                anc['start'] = start
-                anc['end'] = end
+                start, end, matched = span
+                anc['start'], anc['end'], anc['quote'] = start, end, matched
             elif start < 0 or end <= start or text[start:end] != quote:
                 raise WorkStateError('неверная привязка замечания к оригиналу')
             updated_anchors.append(anc)

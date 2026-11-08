@@ -267,6 +267,9 @@ async def test_review_group_persists_checks_for_unchanged_and_accepted_when_peer
         def advance_correction_input(self, run_id, block_id, **kwargs):
             pass
 
+        def correction_checks(self, run_id, section_id):
+            return tuple(saved_checks)
+
         def replace_correction_checks(self, run_id, section_id, checks):
             saved_checks.extend(checks)
 
@@ -513,6 +516,8 @@ def test_review_request_filters_chapter_context_for_candidate_window():
     request = correct_v2._review_request(inputs, task, (candidate,))
     body = json.loads(request.input_text)
 
+    assert "proposal_sha256" not in body["candidates"][0]
+    assert request.correction_candidate_refs == ((candidate.candidate_id, candidate.proposal_sha256),)
     assert [cb["block_id"] for cb in body["chapter_blocks"]] == ["b1", "b2", "b3"]
     assert [item["block_id"] for item in body["chapter_analysis"]["treatment_plan"]["items"]] == [
         "b1", "b2", "b3"
@@ -526,4 +531,222 @@ def test_review_request_filters_chapter_context_for_candidate_window():
     assert inputs.checksums == checksums_before
     assert inputs.context_sha256 == context_sha_before
     assert inputs.context["chapter_blocks"] == chapter_blocks_before
+
+
+@pytest.mark.asyncio
+async def test_correct_chapter_v1_splits_group_on_truncated_response():
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS,
+        ChapterCorrectionResponse,
+        CorrectionSnapshot,
+        UnchangedBlockResponse,
+    )
+    from linguary.application.use_cases.correct_chapter import (
+        CorrectChapter,
+        _filtered_chapter_context,
+    )
+    from linguary.domain import ConceptType, GlossarySnapshotEntry, TermStatus
+
+    section = make_analysis_section(texts=("Block one.", "Block two."))
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-v1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    snapshot = CorrectionSnapshot(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Correct v1.",
+        versions=CORRECTION_VERSIONS,
+    )
+    res1 = BlockProcessingResult(block_id=b1.id, treatment=BlockTreatment.TRANSLATE, translated_text="Первый.")
+    res2 = BlockProcessingResult(block_id=b2.id, treatment=BlockTreatment.TRANSLATE, translated_text="Второй.")
+    results = {b1.id: res1, b2.id: res2}
+    cond_id = str(uuid4())
+    run_id = str(uuid4())
+    task_id = str(uuid4())
+    bindings = {
+        b.id: {
+            "book_id": doc.id,
+            "conditions_id": cond_id,
+            "attempt_id": str(uuid4()),
+            "artifact_revision_id": str(uuid4()),
+        }
+        for b in section.blocks
+    }
+    glossary_snapshot = GlossarySnapshot(
+        entries=(
+            GlossarySnapshotEntry(
+                source_text="Block",
+                translation="Блок",
+                type=ConceptType.TERM,
+                status=TermStatus.APPROVED,
+                note="",
+            ),
+        )
+    )
+    run = SimpleNamespace(id=run_id, glossary_snapshot=glossary_snapshot)
+    conditions = SimpleNamespace(id=cond_id, payload={"schema_version": 1, "versions": {"validators": 3}})
+
+    def build_inputs():
+        return CorrectionInputs(
+            document=doc,
+            section=section,
+            analysis=analysis,
+            run=run,
+            conditions=conditions,
+            snapshot=snapshot,
+            blocks=section.blocks,
+            results=dict(results),
+            bindings=dict(bindings),
+        )
+
+    initial_inputs = build_inputs()
+    checksums_before = dict(initial_inputs.checksums)
+    orig_glossary = dict(initial_inputs.context["run_glossary"])
+    filtered_ctx = _filtered_chapter_context(initial_inputs, (b1.id,))
+    assert "note" not in filtered_ctx["run_glossary"]["entries"][0]
+    assert initial_inputs.context["run_glossary"] == orig_glossary
+    assert initial_inputs.checksums == checksums_before
+
+    identity = correction_task_identity(
+        book_id=doc.id,
+        run_id=run.id,
+        section_id=section.id,
+        input_generation="gen-v1",
+        policy_version=snapshot.policy_version,
+    )
+    task = SimpleNamespace(
+        id=task_id,
+        book_id=doc.id,
+        task_type=TaskType.CHAPTER_CORRECTION,
+        scope_id=section.id,
+        status=TaskStatus.RUNNING,
+        attempts=1,
+        operation_id=identity.operation_id,
+        identity=identity,
+    )
+    work_bindings = {
+        ("task", task.id): {
+            "book_id": doc.id,
+            "conditions_id": conditions.id,
+            "payload_json": {
+                "run_id": run.id,
+                "section_id": section.id,
+                "input_generation": "gen-v1",
+                "manifest": initial_inputs.manifest,
+            },
+        }
+    }
+    attempts_store: dict[str, SimpleNamespace] = {}
+    saved_checks: list = []
+
+    class FakeWork:
+        def get_binding(self, kind, entity_id):
+            return work_bindings.get((kind, entity_id))
+
+        def bind(self, kind, entity_id, *, book_id, conditions_id, payload, **kwargs):
+            work_bindings[(kind, entity_id)] = {
+                "book_id": book_id,
+                "conditions_id": conditions_id,
+                "payload_json": payload,
+            }
+
+        def get_attempt(self, attempt_id):
+            return attempts_store.get(attempt_id)
+
+        def transition_attempt(self, attempt_id, new_state, *, expected_state):
+            attempts_store[attempt_id].state = new_state
+
+        def correction_checks(self, run_id, section_id):
+            return tuple(saved_checks)
+
+        def replace_correction_checks(self, run_id, section_id, checks):
+            saved_checks.extend(checks)
+
+        def stale_reviews(self, book_id):
+            pass
+
+    fake_tx = SimpleNamespace(
+        tasks=SimpleNamespace(get=lambda tid: task),
+        work=FakeWork(),
+        results=SimpleNamespace(replace_results=lambda *a, **kw: None),
+    )
+
+    import linguary.application.use_cases.correct_chapter as module
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "correction_inputs", lambda tx, bid, sid: build_inputs())
+    monkeypatch.setattr(module, "finalize_response", lambda *a, **kw: None)
+    monkeypatch.setattr(module, "record_rejection", lambda *a, **kw: None)
+
+    requested_groups: list[tuple[str, ...]] = []
+
+    class TruncatingFirstCallClient:
+        async def generate(self, request):
+            ctx = request.call_context
+            requested_groups.append(tuple(request.ordered_block_ids))
+            attempts_store[ctx.attempt_id] = SimpleNamespace(
+                id=ctx.attempt_id,
+                state="validated",
+                task_id=task.id,
+                run_id=run.id,
+                conditions_id=conditions.id,
+                context={
+                    **ctx.to_dict(),
+                    "task_attempt": task.attempts,
+                    "operation_id": task.operation_id,
+                },
+            )
+            payload = ChapterCorrectionResponse(
+                blocks=tuple(UnchangedBlockResponse(block_id=bid) for bid in request.ordered_block_ids)
+            )
+            is_multi = len(request.ordered_block_ids) > 1
+            return LLMResponse(
+                payload=payload,
+                raw_content="{}",
+                provider="test",
+                model="gpt-test",
+                truncated=is_multi,
+                call_context=ctx,
+            )
+
+    try:
+        handler = CorrectChapter(
+            unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(fake_tx)),
+            llm_client=TruncatingFirstCallClient(),
+            snapshot=snapshot,
+            validator=make_validator(),
+        )
+        checked = await handler._group(
+            CorrectChapterCommand(doc.id, section.id, task.id),
+            (b1.id, b2.id),
+        )
+        assert checked == 2
+        assert requested_groups == [
+            (b1.id, b2.id),
+            (b1.id,),
+            (b2.id,),
+        ]
+        assert {c.block_id for c in saved_checks} == {b1.id, b2.id}
+    finally:
+        monkeypatch.undo()
+
 

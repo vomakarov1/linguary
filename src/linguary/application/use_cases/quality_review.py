@@ -24,13 +24,17 @@ class StartQualityReview:
     expected_manifest_sha: str
 
 
+def _read_transaction(uow):
+    return getattr(uow, 'read_transaction', uow.transaction)()
+
+
 class QualityReviewService:
     def __init__(self, unit_of_work, queue, client_for, routes):
         self.uow, self.queue, self.client_for, self.routes = unit_of_work, queue, client_for, dict(routes)
         self.budget = QualityBudget(unit_of_work)
 
     def preview(self, book_id, scope='all'):
-        with self.uow.transaction() as tx:
+        with _read_transaction(self.uow) as tx:
             return snapshot(tx, book_id, scope)
 
     async def start(self, command, *, require_available=False):
@@ -40,6 +44,7 @@ class QualityReviewService:
         settings = dict(schema_version=1, model=command.model, route_id=command.route_id,
             budget_microusd=command.budget_microusd, scope=command.scope,
             expected_manifest_sha=command.expected_manifest_sha)
+        manifest = None
         with self.uow.transaction() as tx:
             existing = tx.work.find_review(command.book_id, command.request_key)
             if existing:
@@ -67,10 +72,11 @@ class QualityReviewService:
                     manifest, settings, command.budget_microusd, manifest['conditions_id'])
                 tx.work.add_review(review)
         await self.queue.enqueue(TaskIdentity(command.book_id, TaskType.QUALITY_REVIEW, review.id))
-        return self.get(command.book_id, review.id)
+        with _read_transaction(self.uow) as tx:
+            return quality_review_state(tx, command.book_id, review.id, current_snapshot=manifest)
 
     def get(self, book_id, review_id=None):
-        with self.uow.transaction() as tx:
+        with _read_transaction(self.uow) as tx:
             return quality_review_state(tx, book_id, review_id)
 
     def _update(self, review_id, state, **kwargs):
@@ -78,13 +84,22 @@ class QualityReviewService:
             tx.work.update_review(review_id, state=state, **kwargs)
 
     async def run_task(self, task):
-        with self.uow.transaction() as tx:
+        with _read_transaction(self.uow) as tx:
             review = tx.work.get_review(task.scope_id)
-        if review is None or review.book_id != task.book_id:
-            raise WorkStateError('вычитка не найдена')
-        if review.state not in ('queued', 'running'):
-            return
-        if self.get(task.book_id, review.id)['state'] == 'stale':
+            if review is None or review.book_id != task.book_id:
+                raise WorkStateError('вычитка не найдена')
+            if review.state not in ('queued', 'running'):
+                return
+            try:
+                manifest = snapshot(tx, task.book_id, tuple(review.manifest['scope']))
+            except WorkStateError:
+                manifest = None
+            initial_state = (
+                'stale'
+                if manifest is None
+                else quality_review_state(tx, task.book_id, review.id, current_snapshot=manifest)['state']
+            )
+        if initial_state == 'stale':
             self._update(review.id, 'stale', reason='manifest_changed')
             return
         route = self.routes.get((review.settings['route_id'], review.settings['model']))
@@ -92,7 +107,7 @@ class QualityReviewService:
             self._update(review.id, 'failed', reason='price_unavailable')
             return
         request = LLMRequest(kind=LLMResponseKind.QUALITY_REVIEW, instructions=INSTRUCTIONS,
-            input_text=request_text(review.manifest), book_id=review.book_id, stage=LLMCallStage.QUALITY_REVIEW,
+            input_text=request_text(manifest), book_id=review.book_id, stage=LLMCallStage.QUALITY_REVIEW,
             task_id=task.id, scope_id=review.id, ordered_block_ids=tuple(review.manifest['scope']),
             max_completion_tokens=route.max_completion_tokens)
         try:
@@ -103,28 +118,34 @@ class QualityReviewService:
             return
         self._update(review.id, 'running')
         previous_error: str | None = None
+        previous_raw: str | None = None
+        prompt_hash = sha256(INSTRUCTIONS.encode()).hexdigest()
         for ordinal in range(1, 4):
-            with self.uow.transaction() as tx:
+            with _read_transaction(self.uow) as tx:
                 current = tx.work.get_review(review.id)
             try:
                 attempt = self.budget.reserve(review.id, estimate, price=route.snapshot(),
                     expected_revision=current.revision, task_id=task.id,
-                    expected_manifest_sha=review.manifest['manifest_sha'])
-            except WorkStateError:
-                if self.get(task.book_id, review.id)['state'] == 'stale':
+                    expected_manifest_sha=None if ordinal == 1 else review.manifest['manifest_sha'])
+            except WorkStateError as error:
+                if str(error) == 'manifest_changed' or self.get(task.book_id, review.id)['state'] == 'stale':
                     self._update(review.id, 'stale', reason='manifest_changed')
                 else:
                     self._update(review.id, 'limit', reason='budget')
                 return
-            instructions = (
-                INSTRUCTIONS
-                if ordinal == 1 or not previous_error
-                else f"{INSTRUCTIONS}\n\nПредыдущий ответ отклонён: {previous_error}. Исправь ошибку и верни корректный JSON."
-            )
+            repair_turns = ((previous_raw, previous_error),) if ordinal > 1 and previous_error else ()
+            repair_instructions = (previous_error,) if ordinal > 1 and previous_error else ()
             context = CallContext(review.conditions_id, 'quality_review', review.id,
                 tuple(review.manifest['scope']), attempt.id, current.revision, route.model,
-                sha256(instructions.encode()).hexdigest(), task_id=task.id)
-            outgoing = replace(request, instructions=instructions, call_context=context, attempt=ordinal)
+                prompt_hash, task_id=task.id)
+            outgoing = replace(
+                request,
+                instructions=INSTRUCTIONS,
+                call_context=context,
+                attempt=ordinal,
+                repair_turns=repair_turns,
+                repair_instructions=repair_instructions,
+            )
             if not self.budget.mark_sent(attempt.id):
                 state = self.get(task.book_id, review.id)['state']
                 if state == 'stale':
@@ -145,6 +166,7 @@ class QualityReviewService:
                 if self._stopped(review.id):
                     return
                 previous_error = str(error)
+                previous_raw = getattr(error, 'raw_content', None)
                 continue
             except Exception:
                 self.budget.settle(attempt.id, None)
@@ -154,7 +176,22 @@ class QualityReviewService:
             if actual is None:
                 self._finish_attempt(attempt.id, 'unknown')
                 return
-            if self.get(task.book_id, review.id)['state'] == 'stale':
+            with _read_transaction(self.uow) as tx:
+                current_review = tx.work.get_review(review.id)
+                try:
+                    after = (
+                        None
+                        if current_review.state == 'stale'
+                        else snapshot(tx, review.book_id, tuple(review.manifest['scope']))
+                    )
+                except WorkStateError:
+                    after = None
+                state_after = (
+                    'stale'
+                    if current_review.state == 'stale' or after is None
+                    else quality_review_state(tx, task.book_id, review.id, current_snapshot=after)['state']
+                )
+            if state_after == 'stale':
                 self._finish_attempt(attempt.id, 'rejected')
                 finalize_response(self.uow, response, 'stale')
                 self._update(review.id, 'stale', reason='manifest_changed')
@@ -169,17 +206,18 @@ class QualityReviewService:
                 if self._stopped(review.id):
                     return
                 previous_error = str(error)
+                previous_raw = getattr(response, 'raw_content', None)
                 continue
             self._finish_attempt(attempt.id, 'validated')
             with self.uow.transaction() as tx:
-                if snapshot(tx, review.book_id, tuple(review.manifest['scope']))['manifest_sha'] != review.manifest['manifest_sha']:
+                current = tx.work.get_review(review.id)
+                if current.state == 'stale' or after['manifest_sha'] != review.manifest['manifest_sha']:
                     tx.work.transition_attempt(attempt.id, 'rejected', expected_state='validated')
                     finalize_response(self.uow, response, 'stale', transaction=tx)
                     tx.work.update_review(review.id, state='stale', reason='manifest_changed')
                 else:
                     tx.work.transition_attempt(attempt.id, 'accepted', expected_state='validated')
                     finalize_response(self.uow, response, 'accepted', transaction=tx)
-                    current = tx.work.get_review(review.id)
                     tx.work.update_review(review.id, state='limit' if current.state == 'limit' else 'completed',
                         findings=payload.findings, checked=payload.checked_artifacts,
                         missing=payload.missing_artifacts,
@@ -197,11 +235,11 @@ class QualityReviewService:
             tx.work.transition_attempt(attempt_id, state, expected_state='sent')
 
     def _stopped(self, review_id):
-        with self.uow.transaction() as tx:
+        with _read_transaction(self.uow) as tx:
             return tx.work.get_review(review_id).state in ('limit', 'unknown', 'stale')
 
 
-def quality_review_state(tx, book_id, review_id=None):
+def quality_review_state(tx, book_id, review_id=None, *, current_snapshot=None):
     reviews = tx.work.list_reviews(book_id) if review_id is None else (tx.work.get_review(review_id),)
     defaults = dict(review_id=None, state='not-requested', manifest_sha=None,
         coverage=dict(checked=[], missing=[]), budget=None, spent=0, reserved=0,
@@ -213,11 +251,19 @@ def quality_review_state(tx, book_id, review_id=None):
     if review is None or review.book_id != book_id:
         raise WorkStateError('вычитка не найдена')
     progress = tx.work.review_progress(review.id)
-    try:
-        stale = snapshot(tx, book_id, tuple(review.manifest['scope']))['manifest_sha'] != review.manifest['manifest_sha']
-    except WorkStateError:
-        stale = True
     state = review.state
+    current_manifest_sha = None if current_snapshot is None else current_snapshot.get('manifest_sha')
+    if state == 'stale':
+        stale = True
+    elif current_snapshot is not None:
+        stale = current_manifest_sha != review.manifest['manifest_sha']
+    else:
+        try:
+            snap = snapshot(tx, book_id, tuple(review.manifest['scope']))
+            current_manifest_sha = snap['manifest_sha']
+            stale = current_manifest_sha != review.manifest['manifest_sha']
+        except WorkStateError:
+            stale = True
     if stale or state == 'stale':
         state = 'stale'
     elif state in ('queued', 'running'):
@@ -231,4 +277,5 @@ def quality_review_state(tx, book_id, review_id=None):
         budget=review.budget_limit, spent=review.spent, reserved=review.reserved,
         findings=thaw(review.findings), coverage=dict(checked=progress.get('checked') or [],
             missing=progress.get('missing') or []), reason=progress.get('reason'),
-        uncertainty='probabilistic', semantic_correctness='not_evaluated')
+        uncertainty='probabilistic', semantic_correctness='not_evaluated',
+        current_manifest_sha=current_manifest_sha)

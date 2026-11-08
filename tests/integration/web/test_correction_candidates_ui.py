@@ -407,8 +407,8 @@ def test_russian_correction_and_quality_prompts_preserve_schema_contracts() -> N
 
     for token in (
         "candidate_id",
-        "proposal_sha256",
         "confirmed",
         "needs_human",
     ):
         assert token in CORRECTION_REVIEW_PROMPT
+    assert "proposal_sha256" not in CORRECTION_REVIEW_PROMPT

@@ -36,17 +36,17 @@ class ReviewFake(FakeLLMClient):
             raise LLMTransportError('unknown send')
         if self.mode == 'schema' and self.review_calls == 1:
             self.requests.append(request)
-            raise LLMResponseFormatError('invalid schema', usage=TokenUsage(5, 5), cost=Decimal('0.0001'))
-        payload = dict(findings=[], checked_artifacts=[a['artifact_sha'] for a in manifest['artifacts']], missing_artifacts=[])
+            raise LLMResponseFormatError('invalid schema', raw_content='{"bad": true}', usage=TokenUsage(5, 5), cost=Decimal('0.0001'))
+        payload = dict(findings=[], checked_artifacts=[], missing_artifacts=[])
         if self.mode == 'missing':
-            payload['missing_artifacts'].append(payload['checked_artifacts'].pop())
+            payload['missing_artifacts'] = ['a' * 64]
         if self.mode == 'omitted':
-            payload['checked_artifacts'].pop()
+            payload['checked_artifacts'] = ['a' * 64]
         if self.mode in ('finding', 'bad-anchor'):
             artifact = next(a for a in manifest['artifacts'] if a['artifact_kind'] == 'result')
             payload['findings'] = [dict(block_ids=artifact['block_ids'], artifact_kind='result',
-                artifact_sha=artifact['artifact_sha'], severity='major', issue='Possible tense error',
-                evidence_anchors=[dict(block_id=artifact['block_ids'][0], start=0, end=2,
+                severity='major', issue='Possible tense error',
+                evidence_anchors=[dict(block_id=artifact['block_ids'][0],
                     quote='XX' if self.mode == 'bad-anchor' else 'He')], suggestion='Check tense', uncertainty='probable')]
         self.default = FakeReply.of_payload(payload)
         response = await super().generate(request)
@@ -140,7 +140,7 @@ async def test_explicit_scope_and_partial_manifest(tmp_path):
         result = app.quality_review.get('book-1', created['review_id'])
         assert result['state'] == 'partial'
         assert result['coverage']['checked']
-        assert json.loads(fake.requests[-1].input_text)['scope'] == [block_id]
+        assert json.loads(fake.requests[-1].input_text)['scope'] == ['b1']
     finally:
         await app.aclose()
 
@@ -331,9 +331,15 @@ async def test_quality_review_passes_previous_validation_error_into_repair_turn(
         assert len(review_requests) == 2
         first_req, second_req = review_requests
         assert first_req.instructions == INSTRUCTIONS
-        assert second_req.instructions != INSTRUCTIONS
-        assert 'invalid schema' in second_req.instructions
-        assert second_req.call_context.prompt_hash == sha256(second_req.instructions.encode()).hexdigest()
+        assert second_req.instructions == INSTRUCTIONS
+        assert first_req.repair_turns == ()
+        assert first_req.repair_instructions == ()
+        assert len(second_req.repair_turns) == 1
+        assert second_req.repair_turns[0][0] == '{"bad": true}'
+        assert 'invalid schema' in second_req.repair_turns[0][1]
+        assert len(second_req.repair_instructions) == 1
+        assert 'invalid schema' in second_req.repair_instructions[0]
+        assert second_req.call_context.prompt_hash == sha256(INSTRUCTIONS.encode()).hexdigest()
         assert json.loads(second_req.input_text) == json.loads(first_req.input_text)
     finally:
         await app.aclose()
