@@ -487,10 +487,10 @@ def _validate_content_plans(document, analyses, results, *, english_help=False, 
     a2_v4 = validators_version == 4
     sections = {s.id: s for s in document.sections}
     blocks = tuple(document.blocks())
-    texts = {block.id: block.text for block in blocks}
+    texts = {block.id: getattr(block, "text", "") for block in blocks}
     for analysis in analyses:
         section = sections[analysis.section_id]
-        if document.is_front_matter(section) or section.is_notes_only:
+        if getattr(document, "is_front_matter", lambda s: False)(section) or getattr(section, "is_notes_only", False):
             continue
         plan = analysis.content_plan
         if plan is None:

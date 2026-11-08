@@ -121,9 +121,10 @@ def route():
         100, lambda request: 100000, 'synthetic-fixture-not-provider-proof', True)
 
 
-def make_app(path, fake, profile='content-plan-v3'):
+def make_app(path, fake, profile='content-plan-v3', reader_level=None):
+    level = reader_level or ('b1' if profile == 'legacy-v1' else 'a2')
     return build_application(settings=AppSettings(llm=LLMSettings(model='fake-source', api_key='nonworking-test-key',
-        proxy_mode='direct', max_attempts=2), reading=ReadingSettings(reader_level='a2'),
+        proxy_mode='direct', max_attempts=2), reading=ReadingSettings(reader_level=level),
         storage=StorageSettings(data_root=str(path))), llm_client=fake, content_plan_profile=profile,
         quality_routes={('synthetic-only', 'fake-review'): route()},
         epubcheck=EpubCheckValidator(settings=EpubCheckSettings(java_executable='missing-quality-test-java')))
@@ -141,7 +142,7 @@ async def prepare(app, fake):
     await app.analysis.start(BOOK)
     await successful(app)
     conditions = app.book_conditions.require(BOOK)
-    assert conditions.payload['reader_level'] == 'a2'
+    assert conditions.payload['reader_level'] in {'a2', 'b1'}
     with app.unit_of_work.transaction() as tx:
         analysis = tx.analyses.get_for_section(BOOK, section.id)
     fake.plan = analysis.content_plan

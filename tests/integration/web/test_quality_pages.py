@@ -85,7 +85,7 @@ def test_production_v3_env_is_explicit_before_http_analysis(settings, monkeypatc
         with app.unit_of_work.transaction() as tx:
             conditions = tx.work.latest_conditions(scenario.book_id)
             assert conditions.payload['profile'] == 'content-plan-v3'
-            assert conditions.payload['versions']['schemas'] == 3
+            assert conditions.payload['versions']['schemas'] == 5
             assert conditions.payload['recovery_policy'] == asdict(app.settings.recovery)
             assert tx.work.get_binding('task', response.json()['id'])['conditions_id'] == conditions.id
     finally:

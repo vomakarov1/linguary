@@ -552,7 +552,7 @@ def meaning_analysis_reply():
     data = json.loads(analysis_reply(profile='content-plan-v3', treatment='TRANSLATE').content)
     data['content_plan']['difficulties'] = [dict(id='d', owner_block_id='b1', kind='vocabulary',
         priority='critical', help_kind='explanation',
-        anchors=[dict(block_id='b1', start=7, end=11, quote='zorp')],
+        anchors=[dict(block_id='b1', quote='zorp')],
         required_points=[dict(id='p', description='Explain the invented object')])]
     return FakeReply.of_payload(data)
 

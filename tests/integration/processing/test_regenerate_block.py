@@ -342,7 +342,7 @@ async def test_repeated_rejection_asks_the_model_again_with_the_alias(
     )
 
     assert (result.saved, result.attempts) == (True, 2)
-    repair = client.last_request.instructions
+    repair = "\n".join(client.last_request.repair_instructions)
     assert "b1: режим обработки TRANSLATE" in repair
     assert scenario.block_ids()[0] not in repair
 

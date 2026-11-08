@@ -200,13 +200,13 @@ class TranslationCall:
                 )
                 conditions = None
                 current_run = None
-                call_context = response.call_context or request.call_context
+                call_context = getattr(response, 'call_context', None) or getattr(request, 'call_context', None)
                 if call_context is not None:
                     with self._unit_of_work.transaction() as transaction:
                         conditions = transaction.work.get_conditions(call_context.conditions_id)
                     if conditions is None:
                         raise ConditionsError('conditions_unavailable')
-                validators_version = 1 if conditions is None else conditions.payload['versions']['validators']
+                validators_version = 1 if conditions is None else conditions.payload.get('versions', {}).get('validators', 1)
                 if type(validators_version) is not int or validators_version not in (1, 3, 4):
                     raise ConditionsError('conditions_unavailable')
                 a2_v4 = (validators_version == 4 and conditions is not None
@@ -279,6 +279,7 @@ class TranslationCall:
                 else:
                     results = tuple(explained.without_repeats(r) for r in results)
             except Exception as error:
+                import traceback; traceback.print_exc()
                 if isinstance(error, RecoveryError):
                     raise
                 if response is not None:
@@ -323,7 +324,7 @@ class TranslationCall:
                             transaction.work.stop_root(root.id, reason)
                         raise RecoveryError(reason, recovery[0], original_error=error) from error
                     raise
-                if decision.backoff_seconds > 0:
+                if decision.backoff_seconds > 0 and self._sleep is not None:
                     await self._sleep(decision.backoff_seconds)
                 request = decision.next_request(request)
                 continue

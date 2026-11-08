@@ -203,6 +203,7 @@ class ContentPlanSchema(_ResponseModel):
     version: Literal[2]
     profile: Literal['content-plan-v2']
     difficulties: list[DifficultySchema]
+    before_you_read_evidence: list[HelpEvidenceSchema] = Field(default_factory=list)
 
 
 class ChapterAnalysisV2Schema(ChapterAnalysisSchema):
@@ -210,7 +211,7 @@ class ChapterAnalysisV2Schema(ChapterAnalysisSchema):
 
 
 class TranslationResultV2Schema(TranslationResultSchema):
-    pass
+    content_evidence: list[HelpEvidenceSchema] = Field(default_factory=list)
 
 
 class ContextFactSchema(_ResponseModel):
@@ -239,6 +240,7 @@ class ChapterAnalysisV3Schema(ChapterAnalysisSchema):
 
 
 class QuotedSourceAnchorSchema(_ResponseModel):
+    model_config = ConfigDict(extra="ignore")
     block_id: str = Field(min_length=1)
     quote: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
 
@@ -268,7 +270,7 @@ class ChapterAnalysisV5Schema(ChapterAnalysisSchema):
 
 
 class TranslationResultV3Schema(TranslationResultSchema):
-    pass
+    content_evidence: list[HelpEvidenceSchema] = Field(default_factory=list)
 
 
 class FragmentAssistanceSchema(_ResponseModel):

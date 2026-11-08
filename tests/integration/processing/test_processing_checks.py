@@ -168,7 +168,7 @@ async def test_repair_instruction_names_blocks_as_the_model_saw_them(
     result = await process(command())
 
     assert (result.attempts, result.saved_blocks) == (2, 2)
-    repair = client.last_request.instructions
+    repair = "\n".join(client.last_request.repair_instructions)
     assert "- b1: режим обработки TRANSLATE" in repair
     assert "- b2: режим обработки TRANSLATE" in repair
     assert "Целевой язык результата — ru." in repair

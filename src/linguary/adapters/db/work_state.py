@@ -1145,6 +1145,9 @@ class SqlAlchemyWorkRepository:
             RecoveryScopeRow.accepted_attempt_id.is_(None)).values(status='accepted', accepted_attempt_id=attempt_id))
         if changed.rowcount != 1:
             raise WorkStateError('область изменилась до принятия')
+        if attempt.state == 'validated':
+            self.transition_attempt(attempt_id, 'accepted', expected_state='validated',
+                                    outcome={**thaw(attempt.outcome), 'decision': 'accepted'})
 
     def root_coverage_complete(self, root_id, *, update_state=True):
         root = self.get_root(root_id)

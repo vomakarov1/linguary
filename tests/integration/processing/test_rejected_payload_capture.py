@@ -100,7 +100,11 @@ async def test_result_correlates_to_accepted_attempt(tmp_path):
     from linguary.adapters.llm import FakeReply
     from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
     from linguary.application.use_cases.approve_glossary import StartProcessingCommand
-    fake = FakeLLMClient([reply(), FakeReply.of_payload({'blocks': [{'source_block_id': 'b1', 'treatment': 'READ_AS_IS', 'translated_text': None, 'glossary_hints': []}], 'language_notes': []})])
+    fake = FakeLLMClient([
+        FakeReply.of_payload({'treatment_plan': [{'source_block_id': 'b1', 'treatment': 'TRANSLATE'}],
+            'glossary_candidates': [], 'translation_instructions': 'Сохраняй смысл.', 'chapter_summary': 'The cat sat.', 'before_you_read': []}),
+        FakeReply.of_payload({'blocks': [{'source_block_id': 'b1', 'treatment': 'TRANSLATE', 'translated_text': 'Кот сидел.', 'glossary_hints': []}], 'language_notes': []})
+    ])
     app = make_app(tmp_path, fake)
     from linguary.composition import drain_tasks
     try:
@@ -196,8 +200,9 @@ async def test_late_result_does_not_replace_accepted_attempt(tmp_path):
     from linguary.application.use_cases.approve_glossary import StartProcessingCommand
     from linguary.composition import drain_tasks
     entered, release = asyncio.Event(), asyncio.Event()
-    analysis = FakeLLMClient([reply()])
-    processing = FakeLLMClient.always(FakeReply.of_payload({'blocks': [{'source_block_id': 'b1', 'treatment': 'READ_AS_IS', 'translated_text': None, 'glossary_hints': []}], 'language_notes': []}))
+    analysis = FakeLLMClient([FakeReply.of_payload({'treatment_plan': [{'source_block_id': 'b1', 'treatment': 'TRANSLATE'}],
+        'glossary_candidates': [], 'translation_instructions': 'Сохраняй смысл.', 'chapter_summary': 'The cat sat.', 'before_you_read': []})])
+    processing = FakeLLMClient.always(FakeReply.of_payload({'blocks': [{'source_block_id': 'b1', 'treatment': 'TRANSLATE', 'translated_text': 'Кот сидел.', 'glossary_hints': []}], 'language_notes': []}))
     count = 0
     class Delayed:
         async def generate(self, request):

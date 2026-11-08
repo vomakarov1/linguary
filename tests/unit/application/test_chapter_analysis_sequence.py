@@ -100,7 +100,7 @@ async def drain(runner: TaskRunner, queue: FakeTaskQueue) -> None:
 
 
 async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
-    """Chapters are analyzed one at a time, strictly in reading order."""
+    """Chapters are analyzed in parallel across workers."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
@@ -116,7 +116,7 @@ async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
     expected = [f"section-{number}" for number in range(1, CHAPTER_COUNT + 1)]
     assert queue.claimed_scope_ids == expected
     assert unit_of_work.analyses.saved_section_ids == expected
-    assert queue.max_running == 1
+    assert queue.max_running == CHAPTER_COUNT
     assert [
         f"Chapter {number}" in request.input_text
         for number, request in enumerate(client.requests, start=1)
@@ -124,7 +124,7 @@ async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
 
 
 async def test_start_moves_book_to_analyzing_and_queues_first_chapter() -> None:
-    """Starting analysis transitions the book to `ANALYZING` and queues the first chapter (ALG-06)."""
+    """Starting analysis transitions the book to `ANALYZING` and queues all chapters (ALG-06)."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
     sequence = make_sequence(
@@ -135,7 +135,9 @@ async def test_start_moves_book_to_analyzing_and_queues_first_chapter() -> None:
 
     assert task is not None
     assert (task.task_type, task.scope_id) == (TaskType.ANALYZE_CHAPTER, "section-1")
-    assert queue.tasks == [task]
+    assert queue.tasks[0] == task
+    assert len(queue.tasks) == CHAPTER_COUNT
+    assert [t.scope_id for t in queue.tasks] == [f"section-{i}" for i in range(1, CHAPTER_COUNT + 1)]
     stored = unit_of_work.books.get(BOOK_ID)
     assert stored is not None and stored.status is BookStatus.ANALYZING
 

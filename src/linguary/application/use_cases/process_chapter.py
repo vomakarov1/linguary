@@ -266,7 +266,12 @@ class ProcessChapter:
             or any(a.block_id in unit_block_ids for a in d.anchors)
             for d in plan.difficulties
         ))
-        if all_read_as_is and not has_difficulties:
+        with self._unit_of_work.transaction() as transaction:
+            conditions = transaction.work.latest_conditions(work.document.id)
+        pronunciation_help_enabled = bool(
+            conditions and conditions.payload.get('pronunciation_help_enabled')
+        )
+        if all_read_as_is and not has_difficulties and not pronunciation_help_enabled:
             results = tuple(
                 BlockProcessingResult(
                     block_id=b_id,

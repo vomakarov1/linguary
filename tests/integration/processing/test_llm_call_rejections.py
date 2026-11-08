@@ -159,7 +159,7 @@ async def test_retry_instruction_uses_alias_and_keeps_rejection_log(
         await application.processing.start(BOOK_ID)
         await drain_tasks(application)
         assert client.call_count == 2
-        retry = client.requests[1].instructions
+        retry = "\n".join(client.requests[1].repair_instructions)
         assert "перевод блока b1 содержит 2 абзацев, а оригинал — 1" in retry
         assert scenario.block_ids()[0] not in retry
         assert "сохрани исходное число непустых строк (1)" in retry

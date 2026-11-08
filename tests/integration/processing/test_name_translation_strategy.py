@@ -68,13 +68,13 @@ async def test_full_book_uses_pinned_policy_after_global_save_restart(tmp_path, 
 
 async def test_first_request_after_reanalysis_contains_saved_decisions(tmp_path):
     fake = FakeLLMClient(replies=(analysis_reply(), analysis_reply(treatment="TRANSLATE"),
-        translation_reply((block_reply("b1", translated_text="Алиса появилась."),)),
-        translation_reply((block_reply("b1", translated_text="Алиса снова появилась."),))))
+        translation_reply((block_reply("b1", translated_text="Алиса и Боб появились."),)),
+        translation_reply((block_reply("b1", translated_text="Алиса и Боб снова появились."),))))
     app = build_application(settings=AppSettings(
         llm=LLMSettings(model="pinned-model", api_key="synthetic-secret", proxy_mode="direct"),
         storage=StorageSettings(data_root=str(tmp_path / "data"))), llm_client=fake)
     try:
-        document = store_imported(app, (("Alice appeared.",),))
+        document = store_imported(app, (("Alice and Bob appeared.",),))
         await app.analysis.start("book-1")
         await drain_tasks(app)
         with app.unit_of_work.transaction() as transaction:

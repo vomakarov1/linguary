@@ -122,7 +122,7 @@ async def test_post_dedup_failure_retries_and_records_rejection(monkeypatch):
         calls.append(request)
         return SimpleNamespace(payload=payload, truncated=False, usage=None)
     monkeypatch.setattr('linguary.application.block_processing.record_rejection', lambda *args:rejected.append(args))
-    processor = TranslationCall(unit_of_work=None, llm_client=SimpleNamespace(generate=generate), retry_policy=RetryPolicy(max_attempts=2), validator=SimpleNamespace(validate=lambda *args, **kwargs:(r,)), sleep=None)
+    processor = TranslationCall(unit_of_work=None, llm_client=SimpleNamespace(generate=generate), retry_policy=RetryPolicy(max_attempts=2), validator=SimpleNamespace(validate=lambda *args, **kwargs:(replace(r, language_notes=()),)), sleep=None)
     with pytest.raises(ResultValidationError):
         await processor.request(context, unit=None, target_language='ru', note_ids=lambda:'n')
     assert len(calls) == len(rejected) == 2

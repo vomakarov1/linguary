@@ -40,9 +40,29 @@ _STRUCTURAL_KEYWORDS = frozenset(
 _SCHEMA_MAPPINGS = frozenset({"properties", "$defs"})
 
 
+#: Properties omitted from provider-facing strict schemas (evidence is resolved algorithmically).
+_OMITTED_STRICT_PROPERTIES = frozenset({"before_you_read_evidence", "content_evidence"})
+
+
 def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
     """Model response schema formatted for strict structured output."""
-    return _strip(model.model_json_schema())
+    schema = model.model_json_schema()
+    _filter_omitted_properties(schema)
+    return _strip(schema)
+
+
+def _filter_omitted_properties(node: Any) -> None:
+    if isinstance(node, dict):
+        if "properties" in node and isinstance(node["properties"], dict):
+            for prop in _OMITTED_STRICT_PROPERTIES:
+                node["properties"].pop(prop, None)
+        if "required" in node and isinstance(node["required"], list):
+            node["required"] = [r for r in node["required"] if r not in _OMITTED_STRICT_PROPERTIES]
+        for v in node.values():
+            _filter_omitted_properties(v)
+    elif isinstance(node, list):
+        for item in node:
+            _filter_omitted_properties(item)
 
 
 def _strip(node: Any) -> Any:
