@@ -342,9 +342,3 @@ def active_run(runs: Iterable[ProcessingRun]) -> ProcessingRun | None:
             f"у книги больше одного активного запуска обработки: {[run.id for run in active]}"
         )
     return active[0] if active else None
-    active = [run for run in runs if run.is_active]
-    if len(active) > 1:
-        raise ActiveRunConflictError(
-            f"у книги больше одного активного запуска обработки: {[run.id for run in active]}"
-        )
-    return active[0] if active else None

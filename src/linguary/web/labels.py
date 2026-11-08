@@ -95,6 +95,7 @@ TASK_TYPE_LABELS: Mapping[TaskType, str] = {
     TaskType.REGENERATE_BLOCK: "Повторная генерация блока",
     TaskType.CHAPTER_CORRECTION: "Исправление главы",
     TaskType.EXPORT_BOOK: "Сборка EPUB",
+    TaskType.QUALITY_REVIEW: "Вычитка качества",
 }
 
 TASK_STATUS_LABELS: Mapping[TaskStatus, str] = {

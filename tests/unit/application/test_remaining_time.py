@@ -11,8 +11,10 @@ import pytest
 
 from linguary.application.book_overview import (
     BookProgress,
+    RunningChapter,
     _remaining_time,
     book_overview,
+    book_result,
     estimate_remaining_seconds,
 )
 from linguary.application.ports.persistence import BookRecord
@@ -293,4 +295,178 @@ def test_book_overview_queries_llm_calls_once_per_transaction() -> None:
 
     assert llm_call_queries == ["book-1"]
     assert overview.ordinary_cost["known_spent_usd"] == "0.05"
+
+
+def test_book_overview_marks_chapter_active_and_estimates_remaining_time_during_chapter_correction() -> None:
+    """When translation units are done and chapter correction is running, overview shows active chapter and estimate."""
+    document = _sample_document(chapters=3)
+    book = BookRecord(
+        id="book-1",
+        metadata=document.metadata,
+        source_language="en",
+        target_language="ru",
+        status=BookStatus.PROCESSING,
+        source_epub_path="/tmp/book.epub",
+        created_at=datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+    )
+    tasks = (
+        ProcessingTask(
+            id="tu-1",
+            book_id="book-1",
+            task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+            scope_id="sec-1",
+            status=TaskStatus.SUCCEEDED,
+        ),
+        ProcessingTask(
+            id="tc-1",
+            book_id="book-1",
+            task_type=TaskType.CHAPTER_CORRECTION,
+            scope_id="sec-1",
+            status=TaskStatus.SUCCEEDED,
+        ),
+        ProcessingTask(
+            id="tc-2",
+            book_id="book-1",
+            task_type=TaskType.CHAPTER_CORRECTION,
+            scope_id="sec-2",
+            status=TaskStatus.RUNNING,
+        ),
+        ProcessingTask(
+            id="tc-3",
+            book_id="book-1",
+            task_type=TaskType.CHAPTER_CORRECTION,
+            scope_id="sec-3",
+            status=TaskStatus.PENDING,
+        ),
+    )
+    calls = (
+        LLMCallLog(
+            id="call-c1",
+            book_id="book-1",
+            stage=LLMCallStage.CHAPTER_CORRECTION,
+            provider="openai",
+            model="gpt-test",
+            started_at=datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+            duration_ms=20_000,
+            attempt=1,
+            success=True,
+            task_id="tc-1",
+            cost=Decimal("0.02"),
+        ),
+        LLMCallLog(
+            id="call-c2",
+            book_id="book-1",
+            stage=LLMCallStage.CHAPTER_CORRECTION_REVIEW,
+            provider="openai",
+            model="gpt-test",
+            started_at=datetime(2026, 11, 8, 12, 1, tzinfo=UTC),
+            duration_ms=20_000,
+            attempt=1,
+            success=True,
+            task_id="tc-1",
+            cost=Decimal("0.01"),
+        ),
+    )
+    tx = SimpleNamespace(
+        books=SimpleNamespace(get=lambda book_id: book),
+        documents=SimpleNamespace(
+            get=lambda book_id: document,
+            import_warnings=lambda book_id: (),
+        ),
+        analyses=SimpleNamespace(list_for_book=lambda book_id: ()),
+        tasks=SimpleNamespace(list_for_book=lambda book_id: tasks),
+        runs=SimpleNamespace(active_for_book=lambda book_id: None),
+        results=SimpleNamespace(
+            count_for_run=lambda run_id: 3,
+            list_for_run=lambda run_id: (),
+        ),
+        llm_calls=SimpleNamespace(list_for_book=lambda book_id: calls),
+        work=SimpleNamespace(
+            latest_conditions=lambda book_id: None,
+            list_roots=lambda book_id, run_id=None: (),
+            list_reviews=lambda book_id: (),
+        ),
+    )
+
+    class _StubUoW:
+        @contextmanager
+        def transaction(self):
+            yield tx
+
+    overview = book_overview(_StubUoW(), "book-1", concurrency=2)  # type: ignore[arg-type]
+
+    assert overview.progress.running_chapters == (
+        RunningChapter(chapter_number=2, title="Chapter 2"),
+    )
+    assert overview.progress.remaining_time is not None
+    assert overview.progress.remaining_time.stage is LLMCallStage.CHAPTER_CORRECTION
+    assert overview.progress.remaining_time.seconds == 40
+
+    fallback = _remaining_time(
+        status=BookStatus.PROCESSING,
+        progress=overview.progress,
+        document=None,
+        tasks=tasks,
+        calls=calls,
+        concurrency=2,
+        requests_per_minute=None,
+    )
+    assert fallback is not None
+    assert fallback.stage is LLMCallStage.CHAPTER_CORRECTION
+    assert fallback.seconds == 40
+
+
+def test_book_result_without_quality_skips_quality_projection_queries() -> None:
+    """`book_result(..., include_quality=False)` and `_result_block_responses` skip quality queries."""
+    from linguary.web.routes.result import _result_block_responses
+
+    document = _sample_document(chapters=1)
+    book = BookRecord(
+        id="book-1",
+        metadata=document.metadata,
+        source_language="en",
+        target_language="ru",
+        status=BookStatus.PROCESSING,
+        source_epub_path="/tmp/book.epub",
+        created_at=datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+    )
+
+    def _unexpected(*args, **kwargs):
+        raise AssertionError("quality projection query should not run when include_quality=False")
+
+    tx = SimpleNamespace(
+        books=SimpleNamespace(get=lambda book_id: book),
+        documents=SimpleNamespace(
+            get=lambda book_id: document,
+            import_warnings=_unexpected,
+        ),
+        analyses=SimpleNamespace(list_for_book=lambda book_id: ()),
+        tasks=SimpleNamespace(list_for_book=lambda book_id: ()),
+        runs=SimpleNamespace(active_for_book=lambda book_id: None),
+        results=SimpleNamespace(list_for_run=lambda run_id: ()),
+        llm_calls=SimpleNamespace(list_for_book=_unexpected),
+        work=SimpleNamespace(
+            latest_conditions=_unexpected,
+            list_roots=_unexpected,
+            list_reviews=_unexpected,
+            get_binding=lambda kind, entity_id: None,
+            result_bindings=lambda run_id: {},
+        ),
+    )
+
+    class _StubUoW:
+        @contextmanager
+        def transaction(self):
+            yield tx
+
+    uow = _StubUoW()
+    summary = book_result(uow, "book-1", include_quality=False)  # type: ignore[arg-type]
+    assert len(summary.chapters) == 1
+    assert summary.warnings.total == 0
+
+    app = SimpleNamespace(unit_of_work=uow)
+    groups = _result_block_responses(app, "book-1", ("blk-1",))  # type: ignore[arg-type]
+    assert len(groups) == 1
+    assert groups[0].block_id == "blk-1"
+
 

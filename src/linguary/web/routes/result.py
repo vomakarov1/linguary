@@ -217,7 +217,10 @@ def _result_block_responses(
     task: ProcessingTask | None = None,
 ) -> tuple[ResultGroupResponse, ...]:
     """Build selected result groups while taking one book snapshot and pronunciation projection."""
-    snapshot = book_result(application.unit_of_work, book_id)
+    try:
+        snapshot = book_result(application.unit_of_work, book_id, include_quality=False)
+    except TypeError:
+        snapshot = book_result(application.unit_of_work, book_id)
     requested_ids = tuple(dict.fromkeys(block_ids))
     requested_set = set(requested_ids)
     selected_groups = []

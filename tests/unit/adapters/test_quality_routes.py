@@ -81,3 +81,70 @@ def test_money_rounds_up_without_decimal_context_loss():
         Decimal('1.0000000000000000000000000000000000001'), Decimal('0'), Decimal('0'),
         1, lambda request: 1, 'synthetic', True)
     assert route.charge(1, 0) == 2
+
+
+def test_quality_monitor_counts_retries_across_all_pipeline_task_types():
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from linguary.domain import ErrorType, ProcessingTask, TaskError, TaskStatus, TaskType
+    from linguary.web.labels import task_type_label
+    from linguary.web.routes.quality import quality_page_context
+
+    assert task_type_label(TaskType.QUALITY_REVIEW) == "Вычитка качества"
+
+    pipeline_types = (
+        TaskType.ANALYZE_CHAPTER,
+        TaskType.PROCESS_TRANSLATION_UNIT,
+        TaskType.REGENERATE_BLOCK,
+        TaskType.CHAPTER_CORRECTION,
+        TaskType.EXPORT_BOOK,
+        TaskType.QUALITY_REVIEW,
+    )
+    tasks = tuple(
+        ProcessingTask(
+            id=f"task-{task_type.value}",
+            book_id="book-1",
+            task_type=task_type,
+            scope_id="scope-1",
+            status=TaskStatus.FAILED,
+            attempts=1,
+            last_error=TaskError(type=ErrorType.TRANSIENT, message="temporary failure"),
+        )
+        for task_type in (*pipeline_types, TaskType.IMPORT_BOOK)
+    )
+
+    tx = SimpleNamespace(
+        documents=SimpleNamespace(get=lambda book_id: None),
+        llm_calls=SimpleNamespace(list_for_book=lambda book_id: ()),
+        tasks=SimpleNamespace(list_for_book=lambda book_id: tasks),
+        work=SimpleNamespace(latest_conditions=lambda book_id: None),
+        analyses=SimpleNamespace(list_for_book=lambda book_id: ()),
+        runs=SimpleNamespace(active_for_book=lambda book_id: None),
+    )
+
+    class _StubUoW:
+        @contextmanager
+        def transaction(self):
+            yield tx
+
+    app = SimpleNamespace(
+        unit_of_work=_StubUoW(),
+        runtime_settings=SimpleNamespace(revision=1),
+        settings=SimpleNamespace(llm=SimpleNamespace(is_ready=True)),
+        quality_review=SimpleNamespace(
+            preview=lambda book_id, scope: None,
+            routes={},
+        ),
+    )
+    request = SimpleNamespace(
+        headers={},
+        query_params={},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    ctx = quality_page_context(request, app, "book-1", tasks=tasks)
+    assert [item["id"] for item in ctx["retry_tasks"]] == [
+        f"task-{task_type.value}" for task_type in pipeline_types
+    ]
+    assert ctx["retry_tasks"][-1]["label"] == "Вычитка качества"
+

@@ -195,7 +195,14 @@ def quality_page_context(request, application, book_id, *, tasks=None):
             command=f'linguary diagnostics show {quote(book_id)} {quote(call.id)}'))
     return dict(base, forms=forms, scope_choices=[dict(value=key, title=title, selected=key == selected[0]) for key, _, title in scopes],
         legacy=legacy, retry_tasks=[dict(id=task.id, label=labels.task_type_label(task.task_type)) for task in tasks
-            if task.is_retryable and task.task_type.value in ('process_translation_unit', 'regenerate_block')],
+            if task.is_retryable and task.task_type.value in (
+                'analyze_chapter',
+                'process_translation_unit',
+                'regenerate_block',
+                'chapter_correction',
+                'export_book',
+                'quality_review',
+            )],
         diagnostics=diagnostics)
 
 

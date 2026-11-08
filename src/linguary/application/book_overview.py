@@ -55,7 +55,11 @@ class ResultBlockNotFoundError(ApplicationError):
 
 #: Task types whose chapter is displayed as active/current (PRD § 21.4).
 #: Import and export are book-level tasks without a specific chapter.
-_CHAPTER_TASK_TYPES = (TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT)
+_CHAPTER_TASK_TYPES = (
+    TaskType.ANALYZE_CHAPTER,
+    TaskType.PROCESS_TRANSLATION_UNIT,
+    TaskType.CHAPTER_CORRECTION,
+)
 
 #: Stage for which time is estimated based on book status, and its associated task type.
 #: Single block regeneration is an ad-hoc action and does not need time estimation.
@@ -515,7 +519,9 @@ def book_warnings(unit_of_work: UnitOfWork, book_id: str) -> BookWarnings:
     )
 
 
-def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
+def book_result(
+    unit_of_work: UnitOfWork, book_id: str, *, include_quality: bool = True
+) -> BookResultSummary:
     """Processing results by block in stable original document order.
 
     Document, plan, and results are read in a single transaction: book warnings are
@@ -525,14 +531,29 @@ def book_result(unit_of_work: UnitOfWork, book_id: str) -> BookResultSummary:
         book = _book(transaction, book_id)
         document = transaction.documents.get(book_id)
         analyses = transaction.analyses.list_for_book(book_id)
-        import_warnings = transaction.documents.import_warnings(book_id)
+        import_warnings = (
+            transaction.documents.import_warnings(book_id)
+            if include_quality
+            else ()
+        )
         run = transaction.runs.active_for_book(book_id)
         tasks = transaction.tasks.list_for_book(book_id)
         stored_results = (
             transaction.results.list_for_run(run.id) if run is not None else ()
         )
-        quality = _quality_projection(transaction, book, document, analyses, run, tasks,
-                                      stored_results=stored_results)
+        quality = (
+            _quality_projection(
+                transaction,
+                book,
+                document,
+                analyses,
+                run,
+                tasks,
+                stored_results=stored_results,
+            )
+            if include_quality
+            else {}
+        )
         reading_support = _saved_reading_support(transaction, run)
         candidates = _correction_candidates_projection(
             transaction, book_id, run, document=document, analyses=analyses,
@@ -870,17 +891,53 @@ def _remaining_time(
         for task in stage_tasks
         if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
     )
+    if active == 0 and status is BookStatus.PROCESSING:
+        stage = LLMCallStage.CHAPTER_CORRECTION
+        task_type = TaskType.CHAPTER_CORRECTION
+        stage_tasks = [task for task in tasks if task.task_type is task_type]
+        active = sum(
+            1
+            for task in stage_tasks
+            if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+        )
     if active == 0:
         return None
     task_ids = {task.id for task in stage_tasks}
+    call_stages = (
+        (LLMCallStage.CHAPTER_CORRECTION, LLMCallStage.CHAPTER_CORRECTION_REVIEW)
+        if stage is LLMCallStage.CHAPTER_CORRECTION
+        else (stage,)
+    )
     durations = [
         call.duration_ms
         for call in calls
-        if call.stage is stage and call.success and call.task_id in task_ids
+        if call.stage in call_stages and call.success and call.task_id in task_ids
     ]
     if stage is LLMCallStage.CHAPTER_ANALYSIS:
         completed = progress.planned_blocks
         remaining = _textual_block_count(document) - completed
+        parallelism = min(concurrency, active)
+    elif stage is LLMCallStage.CHAPTER_CORRECTION:
+        if document is None:
+            completed = sum(
+                1 for task in stage_tasks if task.status is TaskStatus.SUCCEEDED
+            )
+            remaining = active
+        else:
+            blocks_by_section = {
+                section.id: len(textual_blocks(section))
+                for section in document.ordered_sections
+            }
+            completed = sum(
+                blocks_by_section.get(task.scope_id, 0)
+                for task in stage_tasks
+                if task.status is TaskStatus.SUCCEEDED
+            )
+            remaining = sum(
+                blocks_by_section.get(task.scope_id, 0)
+                for task in stage_tasks
+                if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+            )
         parallelism = min(concurrency, active)
     else:
         completed = progress.processed_blocks

@@ -188,7 +188,6 @@ def _status_after_import(existing: BookRecord | None) -> BookStatus:
 def _utc_now() -> datetime:
     """Current UTC timestamp: persistence operates only with timezone-aware datetimes."""
     return datetime.now(UTC)
-    return datetime.now(UTC)
 
 
 __all__ = [
