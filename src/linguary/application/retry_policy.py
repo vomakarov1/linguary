@@ -91,6 +91,7 @@ class ExpectedBlock:
 
     block_id: str
     treatment: BlockTreatment | None = None
+    context_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.block_id.strip():
@@ -350,6 +351,7 @@ def _block_lines(expectation: ResultExpectation) -> list[str]:
         if block.treatment is None
         else f"- {block.block_id}: режим обработки {block.treatment}"
         for block in expectation.blocks
+        if not block.context_only
     ]
 
 

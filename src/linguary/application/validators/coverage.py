@@ -10,6 +10,8 @@ is formulated here as well.
 
 from __future__ import annotations
 
+from collections import Counter
+
 from linguary.application.llm_dto import TranslationResultResponse
 from linguary.domain import TranslationUnit
 
@@ -31,7 +33,8 @@ def coverage_violation(
     missing = sorted(known - set(returned))
     if missing:
         return f"в ответе нет результата для блоков: {missing}"
-    repeated = sorted({block_id for block_id in returned if returned.count(block_id) > 1})
+    counts = Counter(returned)
+    repeated = [block_id for block_id, count in counts.items() if count > 1]
     if repeated:
         return f"результат для блоков возвращён дважды: {repeated}"
     if returned != expected:

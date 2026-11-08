@@ -958,3 +958,56 @@ async def test_verify_candidates_resolves_word_span_from_quote_without_offsets()
     assert len(selection.skipped) == 0
 
 
+def test_result_validator_normalizes_tail_once_per_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.validators.result as result_module
+
+    calls: list[str] = []
+    original = result_module.normalized_tail
+
+    def counting_normalized_tail(text: str) -> str:
+        calls.append(text)
+        return original(text)
+
+    monkeypatch.setattr(result_module, "normalized_tail", counting_normalized_tail)
+
+    block = make_block(order=0, text="He said:")
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text="Он сказал: —  "),)
+    )
+
+    results = validate(payload, unit=unit)
+
+    assert results[0].translated_text == "Он сказал:"
+    assert len(calls) == 1
+
+
+def test_coverage_violation_detects_duplicates_in_linear_time() -> None:
+    import inspect
+    from linguary.application.validators.coverage import coverage_violation
+
+    source = inspect.getsource(coverage_violation)
+    assert "Counter(" in source
+    assert "returned.count(" not in source
+
+    blocks = make_blocks(3)
+    unit = make_unit(blocks)
+    payload = make_response(
+        (
+            make_block_result(blocks[1]),
+            make_block_result(blocks[1]),
+            make_block_result(blocks[0]),
+            make_block_result(blocks[0]),
+            make_block_result(blocks[2]),
+        )
+    )
+
+    violation = coverage_violation(payload, unit=unit)
+    assert violation == (
+        f"результат для блоков возвращён дважды: {[blocks[1].id, blocks[0].id]}"
+    )
+
+
+

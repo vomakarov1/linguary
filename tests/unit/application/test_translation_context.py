@@ -1350,3 +1350,148 @@ def test_mixed_unit_synthesizes_omitted_pure_read_as_is_blocks_and_accepts_full_
     assert [b.source_block_id for b in resolved_full.blocks] == [b.id for b in blocks]
 
 
+def test_mixed_unit_marks_pure_read_as_is_context_only_even_with_pronunciation_enabled() -> None:
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, SourceAnchor
+
+    blocks = make_blocks(3)
+    unit = make_unit(
+        blocks,
+        treatments=(
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.READ_AS_IS,
+        ),
+    )
+    section = make_section(blocks)
+    uncovered_diff = Difficulty(
+        "d-uncovered",
+        (SourceAnchor(blocks[2].id, 0, 4, "Text"),),
+        blocks[2].id,
+        "wordplay",
+        "critical",
+        "explanation",
+        (RequiredPoint("p-1", "Explain"),),
+    )
+    analysis = replace(
+        make_analysis(unit),
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(uncovered_diff,),
+        ),
+    )
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        profile="content-plan-v3",
+        pronunciation_help_enabled=True,
+    )
+    builder = ContextBuilder(
+        prompt_templates=templates,
+        content_plan_profile="content-plan-v3",
+    )
+    context = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+
+    assert context.request.pronunciation_candidates_version == 1
+    assert context.pure_read_as_is_aliases == frozenset({"b1"})
+    assert "[b1] режим READ_AS_IS (только для контекста, в blocks не возвращать)" in context.request.input_text
+    assert "(только для контекста, в blocks не возвращать)" in context.request.instructions
+    assert "тире" in context.request.instructions
+    assert context.expectation.block_ids == ("b1", "b2", "b3")
+    assert [b.context_only for b in context.expectation.blocks] == [True, False, False]
+
+
+def test_to_block_ids_preserves_misordered_blocks_without_duplicating_pure_read_as_is() -> None:
+    from linguary.application.validators.coverage import coverage_violation
+    from linguary.domain import BlockOrderError, BlockProcessingResult
+
+    blocks = make_blocks(3)
+    unit = make_unit(
+        blocks,
+        treatments=(
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.TRANSLATE,
+        ),
+    )
+    section = make_section(blocks)
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+    assert context.pure_read_as_is_aliases == frozenset({"b2"})
+
+    misordered_omitted = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(
+                source_block_id="b3",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Перевод третьего блока.",
+            ),
+            BlockResultResponse(
+                source_block_id="b1",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Перевод первого блока.",
+            ),
+        ),
+    )
+    resolved_omitted = context.to_block_ids(misordered_omitted)
+    assert [b.source_block_id for b in resolved_omitted.blocks] == [
+        blocks[2].id,
+        blocks[1].id,
+        blocks[0].id,
+    ]
+    assert coverage_violation(resolved_omitted, unit=unit) == (
+        "порядок блоков в ответе не совпадает с порядком блоков группы"
+    )
+    with pytest.raises(BlockOrderError):
+        unit.validate_results(
+            tuple(
+                BlockProcessingResult(
+                    block_id=b.source_block_id,
+                    treatment=b.treatment,
+                    translated_text=b.translated_text,
+                )
+                for b in resolved_omitted.blocks
+            )
+        )
+
+    misordered_with_pure = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(
+                source_block_id="b3",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Перевод третьего блока.",
+            ),
+            BlockResultResponse(
+                source_block_id="b1",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Перевод первого блока.",
+            ),
+            BlockResultResponse(
+                source_block_id="b2",
+                treatment=BlockTreatment.READ_AS_IS,
+                translated_text=None,
+            ),
+        ),
+    )
+    resolved_with_pure = context.to_block_ids(misordered_with_pure)
+    assert [b.source_block_id for b in resolved_with_pure.blocks] == [
+        blocks[2].id,
+        blocks[0].id,
+        blocks[1].id,
+    ]
+
+
+

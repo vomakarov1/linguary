@@ -251,3 +251,27 @@ def test_explicit_unknown_policy_fails_closed(route, policy):
     target = make_block(order=0)
     with pytest.raises(TranslationPolicyUnavailable):
         context_for((target,), (target,), route=route, policy_version=policy)
+
+
+def test_retry_policy_omits_context_only_blocks_from_required_return_lines_while_preserving_expectation_block_ids():
+    from linguary.application.retry_policy import (
+        ExpectedBlock,
+        ResultExpectation,
+        build_repair_instruction,
+    )
+
+    expectation = ResultExpectation(
+        target_language="ru",
+        blocks=(
+            ExpectedBlock(block_id="b1", treatment=BlockTreatment.READ_AS_IS, context_only=True),
+            ExpectedBlock(block_id="b2", treatment=BlockTreatment.TRANSLATE, context_only=False),
+            ExpectedBlock(block_id="b3", treatment=BlockTreatment.GLOSSARY_ONLY),
+        ),
+    )
+
+    assert expectation.block_ids == ("b1", "b2", "b3")
+    repair = build_repair_instruction(expectation, violation="отсутствует блок")
+    assert "- b1" not in repair
+    assert "- b2: режим обработки TRANSLATE" in repair
+    assert "- b3: режим обработки GLOSSARY_ONLY" in repair
+

@@ -125,23 +125,23 @@ class TranslationResultValidator:
             raise ResultValidationError(message, expectation=expected, violation=violation)
         self._ensure(
             language_violation(
-                payload,
+                normalized_payload,
                 target_language=target_language,
                 min_share=self._target_language_min_share,
                 min_length=self._language_check_min_length,
             ),
             expected,
         )
-        self._ensure(service_message_violation(payload), expected)
-        self._ensure(mixed_script_violation(payload), expected)
+        self._ensure(service_message_violation(normalized_payload), expected)
+        self._ensure(mixed_script_violation(normalized_payload), expected)
         results = tuple(
             self._result(
                 block,
                 unit=unit,
-                notes=payload.notes_for(block.source_block_id),
+                notes=normalized_payload.notes_for(block.source_block_id),
                 note_id_factory=note_id_factory,
             )
-            for block in payload.blocks
+            for block in normalized_payload.blocks
         )
         self._ensure_domain_rules(results, unit=unit, expectation=expected)
         return results
@@ -167,7 +167,7 @@ class TranslationResultValidator:
             block_id=block.source_block_id,
             treatment=unit.treatment_for(block.source_block_id),
             translated_text=(
-                known_markers_only(normalized_tail(block.translated_text), source)
+                known_markers_only(block.translated_text, source)
                 if block.translated_text is not None
                 else None
             ),
