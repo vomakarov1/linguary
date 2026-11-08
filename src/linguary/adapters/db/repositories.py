@@ -196,7 +196,21 @@ class SqlAlchemyGlossaryRepository:
             .where(TermConceptRow.book_id == book_id)
             .order_by(TermConceptRow.canonical_source_text, TermConceptRow.id)
         ).all()
-        return tuple(mapping.to_concept(row, self._variants(row.id)) for row in rows)
+        if not rows:
+            return ()
+        concept_ids = [row.id for row in rows]
+        variant_rows = self._session.scalars(
+            select(TermVariantRow)
+            .where(TermVariantRow.concept_id.in_(concept_ids))
+            .order_by(TermVariantRow.id)
+        ).all()
+        variants_by_concept: dict[str, list[TermVariantRow]] = {}
+        for variant in variant_rows:
+            variants_by_concept.setdefault(variant.concept_id, []).append(variant)
+        return tuple(
+            mapping.to_concept(row, variants_by_concept.get(row.id, ()))
+            for row in rows
+        )
 
     def delete(self, concept_id: str) -> None:
         """Delete a concept along with its variants."""
@@ -255,7 +269,33 @@ class SqlAlchemyChapterAnalysisRepository:
             .where(ChapterAnalysisRow.book_id == book_id)
             .order_by(SectionRow.order)
         ).all()
-        return tuple(self._to_analysis(row) for row in rows)
+        if not rows:
+            return ()
+        analysis_ids = [row.id for row in rows]
+        plan_rows = self._session.scalars(
+            select(TreatmentPlanItemRow)
+            .where(TreatmentPlanItemRow.analysis_id.in_(analysis_ids))
+            .order_by(TreatmentPlanItemRow.position)
+        ).all()
+        candidate_rows = self._session.scalars(
+            select(GlossaryCandidateRow)
+            .where(GlossaryCandidateRow.analysis_id.in_(analysis_ids))
+            .order_by(GlossaryCandidateRow.id)
+        ).all()
+        plans_by_analysis: dict[str, list[TreatmentPlanItemRow]] = {}
+        for item in plan_rows:
+            plans_by_analysis.setdefault(item.analysis_id, []).append(item)
+        candidates_by_analysis: dict[str, list[GlossaryCandidateRow]] = {}
+        for candidate in candidate_rows:
+            candidates_by_analysis.setdefault(candidate.analysis_id, []).append(candidate)
+        return tuple(
+            mapping.to_analysis(
+                row,
+                plans_by_analysis.get(row.id, ()),
+                candidates_by_analysis.get(row.id, ()),
+            )
+            for row in rows
+        )
 
     def _to_analysis(self, row: ChapterAnalysisRow) -> ChapterAnalysis:
         """Assemble domain analysis along with treatment plan and candidates."""
@@ -716,7 +756,8 @@ class SqlAlchemyLLMCallLogRepository:
         rows = self._session.scalars(query.order_by(LLMCallLogRow.started_at, LLMCallLogRow.id)).all()
         by_book = {}
         for row in rows:
-            status = ((row.diagnostic_meta_json or {}).get('body_meta') or {}).get('body_status')
+            previous = dict((row.diagnostic_meta_json or {}).get('body_meta') or {})
+            status = previous.get('body_status')
             if status in {'unavailable', 'expired', 'deleted', 'disabled'}:
                 self._remove_body(row, status)
                 continue
@@ -727,14 +768,26 @@ class SqlAlchemyLLMCallLogRepository:
             if now >= expires:
                 self._remove_body(row, 'expired')
                 continue
-            body, body_meta = bounded_body(row.response_text, max_bytes=policy.max_body_bytes)
-            metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
-            previous = dict(metadata.get('body_meta') or {})
-            metadata['body_meta'] = {**body_meta, **previous, 'body_status': 'available',
-                'stored_bytes': len(body.encode('utf-8')), 'expires_at': expires.isoformat()}
-            metadata['body_meta']['truncated'] = previous.get('truncated', False) or body_meta['truncated']
-            metadata['body_meta']['redacted'] = previous.get('redacted', False) or body_meta['redacted']
-            row.response_text, row.diagnostic_meta_json = body, metadata
+            expires_at = expires.isoformat()
+            stored_bytes = previous.get('stored_bytes')
+            if (
+                status == 'available'
+                and isinstance(stored_bytes, int)
+                and not isinstance(stored_bytes, bool)
+                and stored_bytes <= policy.max_body_bytes
+            ):
+                if previous.get('expires_at') != expires_at:
+                    metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+                    metadata['body_meta'] = {**previous, 'expires_at': expires_at}
+                    row.diagnostic_meta_json = metadata
+            else:
+                body, body_meta = bounded_body(row.response_text, max_bytes=policy.max_body_bytes)
+                metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+                metadata['body_meta'] = {**body_meta, **previous, 'body_status': 'available',
+                    'stored_bytes': len(body.encode('utf-8')), 'expires_at': expires_at}
+                metadata['body_meta']['truncated'] = previous.get('truncated', False) or body_meta['truncated']
+                metadata['body_meta']['redacted'] = previous.get('redacted', False) or body_meta['redacted']
+                row.response_text, row.diagnostic_meta_json = body, metadata
             by_book.setdefault(row.book_id, []).append(row)
         for items in by_book.values():
             total = sum(len(row.response_text.encode('utf-8')) for row in items)

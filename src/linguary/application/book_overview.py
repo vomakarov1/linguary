@@ -288,7 +288,7 @@ class BookResultSummary:
     reading_support: Mapping = field(default_factory=dict)
 
 
-def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None):
+def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None, stored_calls=None):
     """Current technical coverage and optional review, without accepting or scheduling work."""
     from linguary.application.use_cases.quality_review import quality_review_state
     from linguary.application.use_cases.export_book import _ensure_ready, _validate_content_plans, ExportBookError
@@ -361,7 +361,12 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
             )
         except (ExportBookError, ResultValidationError, DomainError):
             epub_ready = False
-    ordinary = [call for call in transaction.llm_calls.list_for_book(book.id) if call.stage != LLMCallStage.QUALITY_REVIEW]
+    calls = (
+        transaction.llm_calls.list_for_book(book.id)
+        if stored_calls is None
+        else stored_calls
+    )
+    ordinary = [call for call in calls if call.stage != LLMCallStage.QUALITY_REVIEW]
     known_cost = sum((call.cost for call in ordinary if call.cost is not None), Decimal('0'))
     regeneration_cost = sum((call.cost for call in ordinary if call.cost is not None
         and call.stage == LLMCallStage.BLOCK_REGENERATION), Decimal('0'))
@@ -405,13 +410,11 @@ def book_overview(
         processed_blocks = (
             transaction.results.count_for_run(run.id) if run is not None else 0
         )
-        quality = _quality_projection(transaction, book, document, analyses, run, tasks)
-        warning_count = len(transaction.documents.import_warnings(book_id))
-        calls = (
-            transaction.llm_calls.list_for_book(book_id)
-            if book.status in _ESTIMATED_STAGES
-            else ()
+        calls = transaction.llm_calls.list_for_book(book_id)
+        quality = _quality_projection(
+            transaction, book, document, analyses, run, tasks, stored_calls=calls
         )
+        warning_count = len(transaction.documents.import_warnings(book_id))
     progress = _progress(
         document=document,
         analyses=analyses,
@@ -878,7 +881,7 @@ def _remaining_time(
     if stage is LLMCallStage.CHAPTER_ANALYSIS:
         completed = progress.planned_blocks
         remaining = _textual_block_count(document) - completed
-        parallelism = 1
+        parallelism = min(concurrency, active)
     else:
         completed = progress.processed_blocks
         remaining = progress.planned_blocks - completed

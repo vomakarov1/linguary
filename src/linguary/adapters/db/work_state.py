@@ -375,8 +375,8 @@ class SqlAlchemyWorkRepository:
         self._session.flush()
 
     def list_task_attempts(self, task_id):
-        ids = self._session.scalars(select(LLMAttemptRow.id).where(LLMAttemptRow.task_id == task_id)).all()
-        return tuple(self.get_attempt(attempt_id) for attempt_id in ids)
+        rows = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.task_id == task_id)).all()
+        return tuple(self._attempt_from_row(row) for row in rows)
 
     def add_root(self, root):
         self._owned(BookConditionsRow, root.conditions_id, root.book_id)
@@ -450,6 +450,10 @@ class SqlAlchemyWorkRepository:
 
     def get_attempt(self, attempt_id):
         row = self._session.get(LLMAttemptRow, attempt_id)
+        return self._attempt_from_row(row)
+
+    @staticmethod
+    def _attempt_from_row(row):
         if row is None:
             return None
         values = {col.name: getattr(row, col.name) for col in row.__table__.columns}
@@ -999,8 +1003,8 @@ class SqlAlchemyWorkRepository:
         return self.get_root(root_id)
 
     def list_root_attempts(self, root_id):
-        ids = self._session.scalars(select(LLMAttemptRow.id).where(LLMAttemptRow.root_id == root_id)).all()
-        return tuple(self.get_attempt(attempt_id) for attempt_id in ids)
+        rows = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.root_id == root_id)).all()
+        return tuple(self._attempt_from_row(row) for row in rows)
 
     def list_scopes(self, root_id):
         rows = self._session.scalars(select(RecoveryScopeRow).where(RecoveryScopeRow.root_id == root_id)).all()
