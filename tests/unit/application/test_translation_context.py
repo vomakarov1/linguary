@@ -1125,3 +1125,116 @@ def test_translation_aliases_preserve_content_evidence():
     assert context.to_block_ids(payload).content_evidence[0].source_block_id == blocks[0].id
     with pytest.raises(ResultValidationError):
         context.to_block_ids(replace(payload, content_evidence=(replace(e, source_block_id='b2'),)))
+
+
+def test_translation_input_places_chapter_invariant_sections_before_unit_budget() -> None:
+    blocks = (
+        make_block(order=0, text="Mr. Bennet visits Netherfield."),
+        make_block(order=1, text="A much longer second paragraph about Netherfield and Mr. Bennet that changes the unit note budget."),
+    )
+    section = make_section(blocks)
+    document = make_document(section)
+    full_unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE))
+    analysis = replace(
+        make_analysis(full_unit),
+        before_you_read=(
+            BeforeYouReadEntry(expression="on a good day", explanation="если повезёт"),
+        ),
+    )
+    unit_1 = make_unit((blocks[0],), treatments=(BlockTreatment.TRANSLATE,))
+    unit_2 = make_unit((blocks[1],), treatments=(BlockTreatment.TRANSLATE,))
+    builder = ContextBuilder(language_notes_per_chapter=8)
+    snapshot = make_snapshot()
+
+    ctx_1 = builder.for_translation_unit(
+        document=document, section=section, unit=unit_1, analysis=analysis, glossary=snapshot
+    )
+    ctx_2 = builder.for_translation_unit(
+        document=document, section=section, unit=unit_2, analysis=analysis, glossary=snapshot
+    )
+
+    for text in (ctx_1.request.input_text, ctx_2.request.input_text):
+        header_idx = text.index("Книга: Pride and Prejudice")
+        digest_idx = text.index("О чём эта глава:")
+        explained_idx = text.index("Эти выражения главы читателю уже объяснены до начала чтения.")
+        budget_idx = text.index("В этом запросе — не больше ")
+        mandatory_idx = text.index("Обязательные переводческие решения книги")
+        suggestions_idx = text.index("Необязательные подсказки глоссария")
+        blocks_idx = text.index("Блоки для обработки:")
+        assert header_idx < digest_idx < explained_idx < budget_idx < mandatory_idx < suggestions_idx < blocks_idx
+
+    prefix_end_1 = ctx_1.request.input_text.index("В этом запросе — не больше ")
+    prefix_end_2 = ctx_2.request.input_text.index("В этом запросе — не больше ")
+    assert ctx_1.request.input_text[:prefix_end_1] == ctx_2.request.input_text[:prefix_end_2]
+
+
+def test_owned_content_plan_omits_duplicate_before_you_read_and_anchor_offsets() -> None:
+    import json
+    from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, RequiredPoint, SourceAnchor
+
+    blocks = (
+        make_block(order=0, text="Echo calls."),
+        make_block(order=1, text="The answer echoes."),
+    )
+    section = make_section(blocks)
+    unit = make_unit((blocks[0],), treatments=(BlockTreatment.TRANSLATE,))
+    difficulty = Difficulty(
+        "d-1",
+        (
+            SourceAnchor(blocks[0].id, 0, 4, "Echo"),
+            SourceAnchor(blocks[1].id, 4, 10, "answer"),
+        ),
+        blocks[0].id,
+        "semantic_relation",
+        "critical",
+        "explanation",
+        (RequiredPoint("p-1", "Explain the link"),),
+    )
+    fact = ContextFact(
+        id="f-1",
+        kind="speaker",
+        anchors=(
+            SourceAnchor(blocks[0].id, 0, 4, "Echo"),
+            SourceAnchor(blocks[1].id, 4, 10, "answer"),
+        ),
+        subject_anchor=SourceAnchor(blocks[0].id, 0, 4, "Echo"),
+        value="Narrator",
+        certainty="explicit",
+    )
+    analysis = replace(
+        make_analysis(make_unit(blocks)),
+        before_you_read=(
+            BeforeYouReadEntry(expression="on a good day", explanation="если повезёт"),
+        ),
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(difficulty,),
+            context_facts=(fact,),
+        ),
+    )
+    builder = ContextBuilder(content_plan_profile="content-plan-v3")
+    context = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+
+    marker = "Обязательные аспекты и точные связанные привязки:\n"
+    assert marker in context.request.input_text
+    plan_json = context.request.input_text.split(marker, 1)[1]
+    payload = json.loads(plan_json)
+
+    assert "before_you_read" not in payload
+    assert payload["version"] == 3
+    for anchor in payload["difficulties"][0]["anchors"]:
+        assert "start" not in anchor
+        assert "end" not in anchor
+        assert set(anchor.keys()) == {"block_id", "quote"}
+    for anchor in (*payload["context_facts"][0]["anchors"], payload["context_facts"][0]["subject_anchor"]):
+        assert "start" not in anchor
+        assert "end" not in anchor
+        assert set(anchor.keys()) == {"block_id", "quote"}
+

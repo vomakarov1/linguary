@@ -358,6 +358,11 @@ class ProcessChapter:
         call = await self._call.request(
             context, unit=unit, target_language=work.target_language, note_ids=note_ids,
             recovery=recovery,
+            source_texts={
+                block.id: block.text
+                for section in work.document.sections
+                for block in section.blocks
+            },
         )
         saved = self._call.save(
             book_id=work.document.id, run_id=work.run.id, results=call.results
@@ -461,7 +466,12 @@ class ProcessChapter:
                 raise ProcessChapterError(
                     f"у книги {command.book_id} нет активного запуска обработки"
                 )
-            stored = tx.results.list_for_run(run.id)
+            list_for_section = getattr(tx.results, "list_for_section", None)
+            stored = (
+                list_for_section(run.id, section.id)
+                if callable(list_for_section)
+                else tx.results.list_for_run(run.id)
+            )
             book_candidates = tuple(
                 candidate
                 for chapter in tx.analyses.list_for_book(command.book_id)

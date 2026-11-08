@@ -194,6 +194,11 @@ class BlockResultRepository(Protocol):
     def list_for_run(self, run_id: str) -> tuple[BlockProcessingResult, ...]:
         """All results for the run in original document block order."""
 
+    def list_for_section(
+        self, run_id: str, section_id: str
+    ) -> tuple[BlockProcessingResult, ...]:
+        """Results for blocks of a single chapter in original document block order."""
+
     def count_for_run(self, run_id: str) -> int:
         """Number of run blocks already processed.
 

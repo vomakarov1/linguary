@@ -109,3 +109,111 @@ def test_validate_response_populates_checked_artifacts_sha_and_anchor_offsets_fr
     assert a2["end"] == 9
     assert a2["quote"] == "quick"
     assert "The quick brown fox jumps."[a2["start"]:a2["end"]] == "quick"
+
+
+def test_request_text_strips_internal_evidence_and_warnings_while_preserving_manifest_shas():
+    import copy
+    from linguary.application.quality_context import (
+        QualityReviewResponse, request_text, validate_response,
+    )
+    from linguary.domain.content_plan import canonical_sha
+
+    original_env = dict(
+        artifact_kind="original",
+        block_ids=["b1"],
+        body=dict(text="The quick brown fox jumps."),
+    )
+    original_sha = canonical_sha(original_env)
+
+    analysis_env = dict(
+        artifact_kind="analysis",
+        block_ids=["b1"],
+        body=dict(
+            summary="fox chapter",
+            glossary_candidates=[dict(source_text="Fox", suggested_translation="Лис")],
+            name_translation_evidence=[dict(source_text="Fox", decision="translate")],
+            before_you_read_evidence=[dict(difficulty_id="d1", artifact_key="a" * 64)],
+            content_plan=dict(
+                version=3,
+                profile="content-plan-v3",
+                difficulties=[dict(id="d1", owner_block_id="b1")],
+                before_you_read_evidence=[dict(difficulty_id="d1", artifact_key="a" * 64)],
+            ),
+        ),
+    )
+    analysis_sha = canonical_sha(analysis_env)
+
+    result_env = dict(
+        artifact_kind="result",
+        block_ids=["b1"],
+        body=dict(
+            translated_text="Быстрая рыжая лиса прыгает.",
+            content_evidence=dict(plan_sha256="b" * 64, evidence=[dict(artifact_key="c" * 64)]),
+            pronunciation_assistances=[dict(ipa="fɑks")],
+            warnings=[dict(kind="repetition", message="повтор")],
+        ),
+    )
+    result_sha = canonical_sha(result_env)
+
+    manifest = dict(
+        schema_version=1,
+        book_id="book-1",
+        book_manifest_sha="d" * 64,
+        manifest_sha="e" * 64,
+        scope=["b1"],
+        artifacts=[
+            {**original_env, "artifact_sha": original_sha},
+            {**analysis_env, "artifact_sha": analysis_sha},
+            {**result_env, "artifact_sha": result_sha},
+        ],
+    )
+    manifest_before = copy.deepcopy(manifest)
+
+    serialized = request_text(manifest)
+    parsed = json.loads(serialized)
+
+    assert manifest == manifest_before
+    assert parsed["manifest_sha"] == "e" * 64
+    assert parsed["book_manifest_sha"] == "d" * 64
+    assert parsed["scope"] == ["b1"]
+    assert [a["artifact_sha"] for a in parsed["artifacts"]] == [
+        original_sha,
+        analysis_sha,
+        result_sha,
+    ]
+
+    llm_analysis_body = parsed["artifacts"][1]["body"]
+    assert llm_analysis_body["summary"] == "fox chapter"
+    assert "glossary_candidates" not in llm_analysis_body
+    assert "name_translation_evidence" not in llm_analysis_body
+    assert "before_you_read_evidence" not in llm_analysis_body
+    assert "before_you_read_evidence" not in llm_analysis_body["content_plan"]
+    assert llm_analysis_body["content_plan"]["difficulties"] == [
+        dict(id="d1", owner_block_id="b1")
+    ]
+
+    llm_result_body = parsed["artifacts"][2]["body"]
+    assert llm_result_body["translated_text"] == "Быстрая рыжая лиса прыгает."
+    assert "content_evidence" not in llm_result_body
+    assert "pronunciation_assistances" not in llm_result_body
+    assert "warnings" not in llm_result_body
+
+    raw_response = QualityReviewResponse(
+        findings=(
+            dict(
+                block_ids=["b1"],
+                artifact_kind="result",
+                severity="minor",
+                issue="Tone check",
+                evidence_anchors=[dict(block_id="b1", quote="brown fox")],
+                suggestion="Keep",
+                uncertainty="low",
+            ),
+        ),
+        checked_artifacts=(),
+        missing_artifacts=(),
+    )
+    validated = validate_response(manifest, raw_response)
+    assert validated.findings[0]["artifact_sha"] == result_sha
+    assert set(validated.checked_artifacts) == {original_sha, analysis_sha, result_sha}
+

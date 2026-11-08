@@ -19,7 +19,7 @@ while `TranslationUnit` processes in P3.T6.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from uuid import uuid4
@@ -38,6 +38,7 @@ from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
     BookEvent,
     BookStatus,
+    ChapterAnalysis,
     ConceptType,
     LLMSettingsSnapshot,
     ProcessingRun,
@@ -162,12 +163,26 @@ class ApproveGlossary:
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, command.book_id)
             _ensure_editable(book)
+            analyses = transaction.analyses.list_for_book(command.book_id)
+            conditions = (
+                work.latest_conditions(command.book_id)
+                if (work := getattr(transaction, "work", None)) is not None
+                else None
+            )
+            count_mentions = (
+                mention_counter(document)
+                if (document := transaction.documents.get(command.book_id)) is not None
+                else None
+            )
             review = _load_review(
                 transaction,
                 command.book_id,
                 confidence_threshold=self._glossary_confidence_threshold,
                 min_mentions=self._glossary_review_min_mentions,
                 min_chapters=self._glossary_review_min_chapters,
+                analyses=analyses,
+                count_mentions=count_mentions,
+                conditions=conditions,
             )
             item = review.item_for(command.source_text)
             if item is None:
@@ -192,6 +207,9 @@ class ApproveGlossary:
                 confidence_threshold=self._glossary_confidence_threshold,
                 min_mentions=self._glossary_review_min_mentions,
                 min_chapters=self._glossary_review_min_chapters,
+                analyses=analyses,
+                count_mentions=count_mentions,
+                conditions=conditions,
             )
         return concept
 
@@ -204,12 +222,26 @@ class ApproveGlossary:
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, book_id)
             _ensure_editable(book)
+            analyses = transaction.analyses.list_for_book(book_id)
+            conditions = (
+                work.latest_conditions(book_id)
+                if (work := getattr(transaction, "work", None)) is not None
+                else None
+            )
+            count_mentions = (
+                mention_counter(document)
+                if (document := transaction.documents.get(book_id)) is not None
+                else None
+            )
             review = _load_review(
                 transaction,
                 book_id,
                 confidence_threshold=self._glossary_confidence_threshold,
                 min_mentions=self._glossary_review_min_mentions,
                 min_chapters=self._glossary_review_min_chapters,
+                analyses=analyses,
+                count_mentions=count_mentions,
+                conditions=conditions,
             )
             concepts = tuple(
                 self._decide(
@@ -232,6 +264,9 @@ class ApproveGlossary:
                 confidence_threshold=self._glossary_confidence_threshold,
                 min_mentions=self._glossary_review_min_mentions,
                 min_chapters=self._glossary_review_min_chapters,
+                analyses=analyses,
+                count_mentions=count_mentions,
+                conditions=conditions,
             )
         return concepts
 
@@ -421,6 +456,8 @@ class StartProcessing:
 def _load_review(
     transaction: UnitOfWork, book_id: str, *, confidence_threshold: float,
     min_mentions: int = 5, min_chapters: int = 3,
+    analyses: Sequence[ChapterAnalysis] | None = None,
+    count_mentions: Callable[[Iterable[str]], int] | None = None,
     conditions=None,
 ) -> GlossaryReview:
     """Book glossary assembled in open transaction."""
@@ -440,12 +477,16 @@ def _load_review(
                 policy = NameTranslationPolicy(**thaw(payload["name_translation_policy"]))
             except (TypeError, ValueError):
                 raise ConditionsError("conditions_unavailable") from None
+    if analyses is None:
+        analyses = transaction.analyses.list_for_book(book_id)
+    if count_mentions is None and (document := transaction.documents.get(book_id)) is not None:
+        count_mentions = mention_counter(document)
     return build_glossary_review(
         book_id=book_id,
-        analyses=transaction.analyses.list_for_book(book_id),
+        analyses=analyses,
         confidence_threshold=confidence_threshold,
         decisions=transaction.glossary.list_for_book(book_id),
-        count_mentions=mention_counter(document) if (document := transaction.documents.get(book_id)) else None,
+        count_mentions=count_mentions,
         min_mentions=min_mentions,
         min_chapters=min_chapters,
         name_translation_policy=policy,
@@ -468,6 +509,9 @@ def _complete_review_if_ready(
     confidence_threshold: float,
     min_mentions: int = 5,
     min_chapters: int = 3,
+    analyses: Sequence[ChapterAnalysis] | None = None,
+    count_mentions: Callable[[Iterable[str]], int] | None = None,
+    conditions=None,
 ) -> None:
     """Transitions book to ready to process after closing all mandatory decisions."""
     if book.status is not BookStatus.GLOSSARY_REVIEW:
@@ -478,6 +522,9 @@ def _complete_review_if_ready(
         confidence_threshold=confidence_threshold,
         min_mentions=min_mentions,
         min_chapters=min_chapters,
+        analyses=analyses,
+        count_mentions=count_mentions,
+        conditions=conditions,
     )
     if review.is_complete:
         transaction.books.save(

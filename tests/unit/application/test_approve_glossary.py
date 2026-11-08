@@ -745,3 +745,184 @@ def test_decision_replaces_diverging_decisions_of_other_spellings() -> None:
     assert [stored.id for stored in unit_of_work.glossary.list_for_book(BOOK_ID)] == [
         concept.id
     ]
+
+
+def test_approve_glossary_decision_and_accept_all_compute_mention_counter_once_per_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.use_cases.approve_glossary as ag_module
+    from analysis_fakes import FakeChapterAnalysisRepository
+    from linguary.application.mention_counter import mention_counter as real_mention_counter
+
+    counter_calls = 0
+
+    def counting_mention_counter(document):
+        nonlocal counter_calls
+        counter_calls += 1
+        return real_mention_counter(document)
+
+    monkeypatch.setattr(ag_module, "mention_counter", counting_mention_counter)
+
+    analyses_calls = 0
+    orig_list_for_book = FakeChapterAnalysisRepository.list_for_book
+
+    def tracked_list_for_book(self, book_id: str):
+        nonlocal analyses_calls
+        analyses_calls += 1
+        return orig_list_for_book(self, book_id)
+
+    monkeypatch.setattr(FakeChapterAnalysisRepository, "list_for_book", tracked_list_for_book)
+
+    uow1 = glossary_book(make_analysis_candidate())
+    analyses_calls = 0
+    counter_calls = 0
+
+    approve(uow1)(command(GlossaryDecision.ACCEPT))
+    assert counter_calls == 1
+    assert analyses_calls == 1
+    assert uow1.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
+
+    uow2 = glossary_book(
+        make_analysis_candidate(),
+        make_analysis_candidate(
+            source_text="Longbourn",
+            type=ConceptType.PLACE,
+            suggested_translation="Лонгборн",
+        ),
+    )
+    analyses_calls = 0
+    counter_calls = 0
+
+    approve(uow2).accept_all_awaiting(BOOK_ID)
+    assert counter_calls == 1
+    assert analyses_calls == 1
+    assert uow2.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
+
+
+@pytest.mark.asyncio
+async def test_translation_call_reuses_supplied_source_texts_without_reloading_document() -> None:
+    from contextlib import nullcontext
+    from processing_fakes import (
+        SOURCE_TEXT, make_block, make_plan, make_unit, make_validator, note_ids,
+    )
+    from linguary.adapters.llm import FakeLLMClient, FakeReply
+    from linguary.application.block_processing import TranslationCall
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.domain import (
+        BlockTreatment, ChapterAnalysis, GlossarySnapshot,
+    )
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, SourceAnchor
+
+    block = make_block(order=0, text=SOURCE_TEXT)
+    section = make_analysis_section(blocks=(block,))
+    doc = make_analysis_document((section,))
+    plan = make_plan((block,), treatments=(BlockTreatment.READ_AS_IS,))
+    unit = make_unit((block,), treatments=(BlockTreatment.READ_AS_IS,))
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id="d1",
+                anchors=(SourceAnchor(block_id=block.id, start=0, end=2, quote="It"),),
+                owner_block_id=block.id,
+                kind="grammar",
+                priority="useful",
+                help_kind="lexical_hint",
+                required_points=(RequiredPoint(id="p1", description="grammar point"),),
+            ),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(block.id,),
+        content_plan=content_plan,
+    )
+    builder = ContextBuilder(
+        reader_level="a2",
+        content_plan_profile="content-plan-v3",
+        prompt_templates={"english_help": "1", "english_help_processing": "English help prompt."},
+    )
+    ctx = builder.for_translation_unit(
+        document=doc,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=GlossarySnapshot(),
+    )
+
+    def forbidden_doc_get(book_id: str):
+        raise AssertionError("documents.get must not be called when source_texts is supplied")
+
+    fake_tx = SimpleNamespace(
+        runs=SimpleNamespace(active_for_book=lambda book_id: None),
+        work=SimpleNamespace(
+            get_binding=lambda kind, key: None,
+            get_conditions=lambda cid: SimpleNamespace(
+                id=cid,
+                payload={"versions": {"validators": 4}, "reader_level": "a2"},
+            ),
+        ),
+        documents=SimpleNamespace(get=forbidden_doc_get),
+        llm_calls=SimpleNamespace(),
+    )
+    fake_uow = SimpleNamespace(transaction=lambda: nullcontext(fake_tx))
+
+    reply_payload = {
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "treatment": "READ_AS_IS",
+                "translated_text": None,
+                "glossary_hints": [],
+            }
+        ],
+        "language_notes": [],
+        "fragment_assistances": [
+            {
+                "difficulty_id": "d1",
+                "point_ids": ["p1"],
+                "kind": "lexical_hint",
+                "text": "a known fact",
+            }
+        ],
+    }
+    client = FakeLLMClient.always(FakeReply.of_payload(reply_payload))
+    call = TranslationCall(
+        unit_of_work=fake_uow,  # type: ignore[arg-type]
+        llm_client=client,
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=make_validator(),
+        sleep=lambda _: None,  # type: ignore[arg-type]
+    )
+    res = await call.request(
+        ctx,
+        unit=unit,
+        target_language="ru",
+        note_ids=note_ids(),
+        source_texts={block.id: block.text},
+    )
+    assert len(res.results) == 1
+    assert res.results[0].fragment_assistances[0].text == "a known fact"
+
+    call_with_init_texts = TranslationCall(
+        unit_of_work=fake_uow,  # type: ignore[arg-type]
+        llm_client=client,
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=make_validator(),
+        sleep=lambda _: None,  # type: ignore[arg-type]
+        source_texts={block.id: block.text},
+    )
+    res2 = await call_with_init_texts.request(
+        ctx,
+        unit=unit,
+        target_language="ru",
+        note_ids=note_ids(),
+    )
+    assert len(res2.results) == 1
+
