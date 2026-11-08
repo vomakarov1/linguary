@@ -122,6 +122,8 @@ class OpenAICompatibleLLMClient(LLMClient):
                     )
             content = _content(choice)
             payload = parse_payload(request.kind, content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=truncated)
+            if request.kind == LLMResponseKind.CHAPTER_CORRECTION and request.block_aliases:
+                payload = payload.with_resolved_block_ids(dict(request.block_aliases))
             if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
                 try:
                     payload.validate_coverage(request.correction_candidate_refs

@@ -2110,10 +2110,9 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
 ошибочного чтения, учитывая уровень и контекст оригинала; длина и редкость сами
 по себе не служат причиной. Кандидаты допустимы в TRANSLATE, GLOSSARY_ONLY и READ_AS_IS,
 даже если смысл понятен и перевод или смысловая помощь не нужны.
-Каждый кандидат: anchor {{block_id, start, end, quote}}, form, context
+Каждый кандидат: anchor {{block_id, quote}}, form, context
 {{meaning_in_context, part_of_speech, grammatical_form, is_proper_name}}, selection_reason.
-anchor.block_id — псевдоним целевого блока b1..bN, смещения в символах Python [start,end).
-quote и form копируй дословно, form=quote; не выбирай соседние блоки.
+anchor.block_id — псевдоним целевого блока b1..bN; quote и form копируй дословно, form=quote; не выбирай соседние блоки.
 meaning_in_context — значение на языке оригинала; grammatical_form включает время/число.
 Неизвестные текстовые признаки — null; is_proper_name — логическое значение.
 selection_reason: unpredictable_spelling, unpredictable_stress или context_dependent.

@@ -79,19 +79,48 @@ class CorrectChapter:
 
     def _request(self, inputs, task, block_ids):
         context = inputs.context
-        # Dictionary evidence stays local, including in the full input fingerprint.
-        conditions = dict(context['book_conditions'])
-        conditions.pop('pronunciation_versions', None)
-        body = dict(context, book_conditions=conditions, blocks=[dict(block_id=block_id,
-            original=original_block_payload(next(b for b in inputs.blocks if b.id == block_id)),
-            current_result={key: value for key, value in asdict(inputs.results[block_id]).items()
-                            if key != 'pronunciation_assistances'}) for block_id in block_ids])
-        request = LLMRequest.for_chapter_correction(instructions=self.snapshot.prompt,
-            input_text=_json(body), ordered_block_ids=block_ids,
-            contract_version=2 if isinstance(self.snapshot, CorrectionSnapshotV2) else 1).with_logging(
-                book_id=task.book_id, stage=LLMCallStage.CHAPTER_CORRECTION,
-                task_id=task.id, scope_id=task.scope_id, ordered_block_ids=block_ids,
-                run_id=inputs.run.id)
+        aliases = getattr(inputs, 'block_aliases', {})
+        blocks_payload = []
+        for block_id in block_ids:
+            alias = aliases.get(block_id, block_id)
+            original_block = next(b for b in inputs.blocks if b.id == block_id)
+            current_result = {}
+            if block_id in inputs.results:
+                for key, value in asdict(inputs.results[block_id]).items():
+                    if key == 'pronunciation_assistances':
+                        continue
+                    if key == 'language_notes' and isinstance(value, (list, tuple)):
+                        notes = []
+                        for n in value:
+                            target = dict(n)
+                            for bid_key in ('block_id', 'source_block_id'):
+                                if bid_key in target and target[bid_key] in aliases:
+                                    target[bid_key] = aliases[target[bid_key]]
+                            notes.append(target)
+                        current_result[key] = notes
+                    else:
+                        current_result[key] = value
+            blocks_payload.append(dict(
+                block_id=alias,
+                original=dict(text=original_block.text),
+                current_result=current_result,
+            ))
+        body = dict(context, blocks=blocks_payload)
+        block_aliases = tuple((aliases[b], b) for b in block_ids if b in aliases)
+        request = LLMRequest.for_chapter_correction(
+            instructions=self.snapshot.prompt,
+            input_text=_json(body),
+            ordered_block_ids=block_ids,
+            contract_version=2 if isinstance(self.snapshot, CorrectionSnapshotV2) else 1,
+            block_aliases=block_aliases,
+        ).with_logging(
+            book_id=task.book_id,
+            stage=LLMCallStage.CHAPTER_CORRECTION,
+            task_id=task.id,
+            scope_id=task.scope_id,
+            ordered_block_ids=block_ids,
+            run_id=inputs.run.id,
+        )
         return replace(request, max_completion_tokens=self.snapshot.parameters['max_output_tokens'])
 
     async def __call__(self, command):
@@ -108,6 +137,7 @@ class CorrectChapter:
 
     async def _group(self, command, block_ids):
         response = None
+        repair_turns = ()
         for ordinal in range(1, self.retry.max_attempts + 1):
             with self.uow.transaction() as tx:
                 inputs, task, payload = self._load(tx, command)
@@ -119,7 +149,8 @@ class CorrectChapter:
                     prompt_hash=sha256(self.snapshot.prompt.encode()).hexdigest(),
                     run_id=inputs.run.id, task_id=task.id, policy_version=self.snapshot.policy_version)
                 request = replace(request, call_context=context, attempt=ordinal,
-                    max_completion_tokens=self.snapshot.parameters['max_output_tokens'])
+                    max_completion_tokens=self.snapshot.parameters['max_output_tokens'],
+                    repair_turns=repair_turns)
                 expected = inputs.manifest
                 tx.work.bind('correction_request', context.attempt_id, book_id=command.book_id,
                     conditions_id=inputs.conditions.id, payload=dict(schema_version=1,
@@ -202,11 +233,17 @@ class CorrectChapter:
                         attempt = tx.work.get_attempt(context.attempt_id)
                         if attempt is not None and attempt.state == 'validated':
                             tx.work.transition_attempt(attempt.id, 'rejected', expected_state='validated')
-                decision = self.retry.decide(error, attempts=ordinal)
+                decision = self.retry.decide(
+                    error,
+                    attempts=ordinal,
+                    raw_content=response.raw_content if response is not None else None,
+                )
                 if not decision.should_retry:
                     raise
                 if decision.backoff_seconds:
                     await self.sleep(decision.backoff_seconds)
+                next_req = decision.next_request(request)
+                repair_turns = next_req.repair_turns
                 response = None
         raise ResultValidationError('исчерпаны попытки исправления главы')
 
@@ -389,12 +426,15 @@ class CorrectChapterV2(CorrectChapter):
                 tx.work.transition_attempt(attempt.id, 'rejected', expected_state='validated')
 
     async def _propose_group(self, command, block_ids):
+        repair_turns = ()
         for ordinal in range(1, self.retry.max_attempts + 1):
             response = None
             with self.uow.transaction() as tx:
                 inputs, task, payload = self._load(tx, command)
                 request, context = self._call(tx, inputs, task, payload,
                     self._request(inputs, task, block_ids), ordinal, kind='correction_request')
+                if repair_turns:
+                    request = replace(request, repair_turns=repair_turns)
                 expected = inputs.manifest
             try:
                 response = await self.client.generate(request)
@@ -421,7 +461,7 @@ class CorrectChapterV2(CorrectChapter):
                             group_id=attempt.id, proposal_attempt_id=attempt.id,
                             context_sha256=current.context_sha256,
                             source_binding=current.bindings[result.block_id],
-                            original=original_block_payload(next(b for b in current.blocks if b.id == result.block_id)),
+                            original=dict(text=next(b.text for b in current.blocks if b.id == result.block_id)),
                             current_result=asdict(current.results[result.block_id]), result=asdict(result),
                             proposal=asdict(proposal), evidence_valid=all(i.valid_for(
                                 next(b.text for b in current.blocks if b.id == result.block_id),
@@ -456,33 +496,56 @@ class CorrectChapterV2(CorrectChapter):
                 if isinstance(error, LLMResponseFormatError) and error.truncated and len(block_ids) > 1:
                     middle = len(block_ids) // 2
                     return await self._propose_group(command, block_ids[:middle]) + await self._propose_group(command, block_ids[middle:])
-                decision = self.retry.decide(error, attempts=ordinal)
+                decision = self.retry.decide(
+                    error,
+                    attempts=ordinal,
+                    raw_content=response.raw_content if response is not None else None,
+                )
                 if not decision.should_retry:
                     raise
                 if decision.backoff_seconds:
                     await self.sleep(decision.backoff_seconds)
+                next_req = decision.next_request(request)
+                repair_turns = next_req.repair_turns
+                response = None
         raise ResultValidationError('исчерпаны попытки предложения исправления')
 
     def _review_request(self, inputs, task, candidates):
         context = inputs.context
-        conditions = dict(context['book_conditions'])
-        conditions.pop('pronunciation_versions', None)
         allowed = ('treatment', 'translated_text', 'glossary_hints', 'language_notes')
-        body = dict(source_language=inputs.document.source_language, target_language=inputs.document.target_language,
-            chapter_originals=context['chapter_originals'], chapter_analysis=context['chapter_analysis'],
-            book_conditions=conditions, run_glossary=context['run_glossary'], candidates=[dict(
-                candidate_id=c.candidate_id, proposal_sha256=c.proposal_sha256,
-                original=thaw(c.payload['original']),
-                current_result={k: thaw(c.payload['current_result'][k]) for k in allowed},
-                proposed_result={k: thaw(c.payload['result'][k]) for k in allowed},
-                issues=thaw(c.payload['proposal']['issues'])) for c in candidates])
-        return LLMRequest.for_chapter_correction_review(instructions=self.snapshot.review_prompt,
-            input_text=_json(body), ordered_block_ids=tuple(c.block_id for c in candidates),
-            candidate_refs=tuple((c.candidate_id, c.proposal_sha256) for c in candidates)).with_logging(
-                book_id=task.book_id, stage=LLMCallStage.CHAPTER_CORRECTION_REVIEW,
-                task_id=task.id, scope_id=task.scope_id, run_id=inputs.run.id)
+        body = dict(
+            source_language=inputs.document.source_language,
+            target_language=inputs.document.target_language,
+            chapter_blocks=context.get('chapter_blocks'),
+            chapter_analysis=context.get('chapter_analysis'),
+            run_glossary=context.get('run_glossary'),
+            candidates=[
+                dict(
+                    candidate_id=c.candidate_id,
+                    proposal_sha256=c.proposal_sha256,
+                    original=thaw(c.payload['original']),
+                    current_result={k: thaw(c.payload['current_result'][k]) for k in allowed},
+                    proposed_result={k: thaw(c.payload['result'][k]) for k in allowed},
+                    issues=thaw(c.payload['proposal']['issues']),
+                )
+                for c in candidates
+            ],
+        )
+        return LLMRequest.for_chapter_correction_review(
+            instructions=self.snapshot.review_prompt,
+            input_text=_json(body),
+            ordered_block_ids=tuple(c.block_id for c in candidates),
+            candidate_refs=tuple((c.candidate_id, c.proposal_sha256) for c in candidates),
+        ).with_logging(
+            book_id=task.book_id,
+            stage=LLMCallStage.CHAPTER_CORRECTION_REVIEW,
+            task_id=task.id,
+            scope_id=task.scope_id,
+            run_id=inputs.run.id,
+        )
 
     async def _review_group(self, command, candidate_ids):
+        repair_turns = ()
         for ordinal in range(1, self.retry.max_attempts + 1):
             response = None
             with self.uow.transaction() as tx:
@@ -495,6 +558,8 @@ class CorrectChapterV2(CorrectChapter):
                 request, context = self._call(tx, inputs, task, payload,
                     self._review_request(inputs, task, candidates), ordinal,
                     kind='correction_review_request', refs=refs)
+                if repair_turns:
+                    request = replace(request, repair_turns=repair_turns)
                 expected = inputs.manifest
             try:
                 response = await self.client.generate(request)
@@ -560,11 +625,18 @@ class CorrectChapterV2(CorrectChapter):
                 if isinstance(error, LLMResponseFormatError) and error.truncated and len(candidate_ids) > 1:
                     middle = len(candidate_ids) // 2
                     return await self._review_group(command, candidate_ids[:middle]) + await self._review_group(command, candidate_ids[middle:])
-                decision = self.retry.decide(error, attempts=ordinal)
+                decision = self.retry.decide(
+                    error,
+                    attempts=ordinal,
+                    raw_content=response.raw_content if response is not None else None,
+                )
                 if not decision.should_retry:
                     raise
                 if decision.backoff_seconds:
                     await self.sleep(decision.backoff_seconds)
+                next_req = decision.next_request(request)
+                repair_turns = next_req.repair_turns
+                response = None
         raise ResultValidationError('исчерпаны попытки проверки кандидатов')
 
 

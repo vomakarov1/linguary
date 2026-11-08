@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import re
 from typing import Literal
 
@@ -134,6 +134,44 @@ class ChapterCorrectionResponse:
         for block in self.blocks:
             if isinstance(block, CorrectedBlockResponse):
                 block.validate_treatment(treatments[block.block_id])
+
+    def with_resolved_block_ids(self, aliases: Mapping[str, str]) -> ChapterCorrectionResponse:
+        resolved_blocks = []
+        for block in self.blocks:
+            resolved_id = aliases.get(block.block_id, block.block_id)
+            if isinstance(block, UnchangedBlockResponse):
+                resolved_blocks.append(UnchangedBlockResponse(resolved_id))
+            elif isinstance(block, ProposedBlockResponse):
+                new_notes = tuple(
+                    replace(note, source_block_id=aliases.get(note.source_block_id, note.source_block_id))
+                    for note in block.language_notes
+                )
+                resolved_blocks.append(
+                    ProposedBlockResponse(
+                        resolved_id,
+                        block.translated_text,
+                        block.glossary_hints,
+                        new_notes,
+                        block.issues,
+                    )
+                )
+            elif isinstance(block, CorrectedBlockResponse):
+                new_notes = tuple(
+                    replace(note, source_block_id=aliases.get(note.source_block_id, note.source_block_id))
+                    for note in block.language_notes
+                )
+                resolved_blocks.append(
+                    CorrectedBlockResponse(
+                        resolved_id,
+                        block.translated_text,
+                        block.glossary_hints,
+                        new_notes,
+                    )
+                )
+            else:
+                resolved_blocks.append(block)
+        return self.__class__(tuple(resolved_blocks))
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +327,10 @@ class ChapterCorrectionV2Response(ChapterCorrectionResponse):
         if (any(not isinstance(b, UnchangedBlockResponse | ProposedBlockResponse) for b in self.blocks)
                 or len(set(self.block_ids)) != len(self.blocks)):
             raise LLMPayloadError('неверный ответ предложения исправлений')
+
+    def with_resolved_block_ids(self, aliases: Mapping[str, str]) -> ChapterCorrectionV2Response:
+        resolved = ChapterCorrectionResponse.with_resolved_block_ids(self, aliases)
+        return ChapterCorrectionV2Response(resolved.blocks)
 
 
 @dataclass(frozen=True, slots=True)

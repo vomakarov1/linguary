@@ -270,6 +270,9 @@ class CorrectionProvenanceClient:
                 ChapterCorrectionV2Response if isinstance(self.snapshot, CorrectionSnapshotV2) else ChapterCorrectionResponse)
             if response.truncated or type(response.payload) is not expected_type:
                 raise LLMResponseFormatError('ответ исправления неполон', truncated=response.truncated)
+            if not reviewing and request.block_aliases:
+                payload = response.payload.with_resolved_block_ids(dict(request.block_aliases))
+                response = replace(response, payload=payload)
             try:
                 response.payload.validate_coverage(request.correction_candidate_refs if reviewing else request.ordered_block_ids)
             except LLMPayloadError:

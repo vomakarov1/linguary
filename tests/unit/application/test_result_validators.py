@@ -854,3 +854,107 @@ def test_grammar_difficulty_accepts_multiword_construction_in_longer_anchor_and_
     assert _quote_matches_anchor("flat", anchor, "grammar") is False
 
 
+def test_strict_json_schema_omits_start_end_from_pronunciation_anchor_only() -> None:
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    from linguary.adapters.llm.schemas import (
+        DifficultySchema,
+        PronunciationCandidateSchema,
+    )
+
+    p_schema = strict_json_schema(PronunciationCandidateSchema)
+    p_anchor_props = p_schema["$defs"]["PronunciationAnchorSchema"]["properties"]
+    assert "quote" in p_anchor_props
+    assert "block_id" in p_anchor_props
+    assert "start" not in p_anchor_props
+    assert "end" not in p_anchor_props
+
+    diff_schema = strict_json_schema(DifficultySchema)
+    src_anchor_props = diff_schema["$defs"]["SourceAnchorSchema"]["properties"]
+    assert "quote" in src_anchor_props
+    assert "block_id" in src_anchor_props
+    assert "start" in src_anchor_props
+    assert "end" in src_anchor_props
+
+
+@pytest.mark.asyncio
+async def test_verify_candidates_resolves_word_span_from_quote_without_offsets() -> None:
+    from unittest.mock import AsyncMock
+    from linguary.application.llm_dto import (
+        PronunciationAnchorResponse,
+        PronunciationCandidateResponse,
+        PronunciationContextResponse,
+    )
+    from linguary.application.ports.pronunciation import (
+        PronunciationEvidence,
+        PronunciationSource,
+        SourceEntry,
+        SourceLookupResult,
+    )
+    from linguary.application.validators.pronunciation import (
+        resolve_pronunciation_anchor,
+        verify_candidates,
+    )
+
+    texts = {"b1": "A delightful zorp awaits."}
+    anchor = PronunciationAnchorResponse(block_id="b1", quote="zorp")
+    resolved = resolve_pronunciation_anchor(anchor, texts)
+    assert resolved.block_id == "b1"
+    assert resolved.start == 13
+    assert resolved.end == 17
+    assert resolved.quote == "zorp"
+    resolved.validate(texts)
+
+    candidate = PronunciationCandidateResponse(
+        anchor=anchor,
+        form="zorp",
+        context=PronunciationContextResponse(
+            meaning_in_context=None,
+            part_of_speech=None,
+            grammatical_form=None,
+            is_proper_name=False,
+        ),
+        selection_reason="unpredictable_spelling",
+    )
+
+    source = AsyncMock(spec=PronunciationSource)
+    source.configured = True
+    sha = "a" * 40
+    entry = SourceEntry(
+        form="zorp",
+        ipa="zɔːp",
+        variant="uk",
+        sense=None,
+        grammatical_form=None,
+        evidence=PronunciationEvidence(
+            source_id="ipa-dict",
+            source_version=f"ipa-dict@{sha}:parser-1",
+            entry_id="en_UK.txt:1:zorp",
+            sense_id=None,
+            part_of_speech=None,
+            dictionary_form="zorp",
+            dictionary_ipa="zɔːp",
+            attribution="IPA-Dict",
+            kind="lexicon_form",
+            license_id="GPL-3.0",
+            source_uri=f"https://raw.githubusercontent.com/open-dict-data/ipa-dict/{sha}/data/en_UK.txt",
+        ),
+    )
+    source.lookup.return_value = SourceLookupResult.found((entry,))
+
+    selection = await verify_candidates(
+        (candidate,),
+        source=source,
+        texts=texts,
+        variant="uk",
+        scope_id="run-1",
+    )
+    assert len(selection.accepted) == 1
+    accepted = selection.accepted[0]
+    assert accepted.form == "zorp"
+    assert accepted.anchor.start == 13
+    assert accepted.anchor.end == 17
+    assert accepted.anchor.quote == "zorp"
+    assert accepted.ipa == "zɔːp"
+    assert len(selection.skipped) == 0
+
+

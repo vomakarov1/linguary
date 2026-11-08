@@ -1,6 +1,8 @@
 """Immutable review inputs and source-bound response validation."""
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import json
+from typing import Any
 from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.content_plan import canonical_sha
 
@@ -56,29 +58,75 @@ def request_text(manifest):
     return json.dumps(thaw(manifest), ensure_ascii=False, sort_keys=True)
 
 
-INSTRUCTIONS = ('Review the original and all supplied learning layers. Return source-grounded findings only; '
-    'never rewrite artifacts. Enumerate every artifact SHA exactly once in checked_artifacts or missing_artifacts. '
-    'Anchor each finding to exact original text offsets and its checked artifact SHA. '
-    'Absence of findings is not a guarantee of semantic correctness.')
+INSTRUCTIONS = (
+    'Review the original and all supplied learning layers. Return source-grounded findings only; '
+    'never rewrite artifacts. Anchor each finding to exact quote in the target block. '
+    'Absence of findings is not a guarantee of semantic correctness.'
+)
 
 
-def validate_response(manifest, response):
+def validate_response(manifest: Mapping[str, Any], response: QualityReviewResponse) -> QualityReviewResponse:
     artifacts = {a['artifact_sha']: a for a in manifest['artifacts']}
-    checked, missing = response.checked_artifacts, response.missing_artifacts
+    checked = response.checked_artifacts
+    missing = response.missing_artifacts
+    if not checked and not missing:
+        checked = tuple(artifacts.keys())
+        missing = ()
     if (len(set(checked)) != len(checked) or len(set(missing)) != len(missing)
             or set(checked) & set(missing) or set(checked) | set(missing) != artifacts.keys()):
         raise WorkStateError('неполный или чужой охват ответа вычитки')
     originals = {a['block_ids'][0]: a['body']['text'] for a in artifacts.values() if a['artifact_kind'] == 'original'}
+    updated_findings = []
     for finding in response.findings:
-        artifact = artifacts.get(finding['artifact_sha'])
-        if (artifact is None or finding['artifact_sha'] not in checked
-                or artifact['artifact_kind'] != finding['artifact_kind']
-                or not finding['block_ids'] or not set(finding['block_ids']) <= set(artifact['block_ids'])
-                or not finding['evidence_anchors']):
+        f = dict(finding)
+        artifact_sha = f.get('artifact_sha')
+        if not artifact_sha:
+            kind = f.get('artifact_kind')
+            f_bids = set(f.get('block_ids') or ())
+            matching = [
+                a for a in manifest['artifacts']
+                if a['artifact_kind'] == kind and (
+                    f_bids <= set(a['block_ids']) if kind == 'analysis' else set(a['block_ids']) == f_bids
+                )
+            ]
+            if len(matching) != 1:
+                raise WorkStateError('чужой артефакт замечания')
+            artifact_sha = matching[0]['artifact_sha']
+            f['artifact_sha'] = artifact_sha
+
+        artifact = artifacts.get(artifact_sha)
+        if (artifact is None or artifact_sha not in checked
+                or artifact['artifact_kind'] != f.get('artifact_kind')
+                or not f.get('block_ids') or not set(f['block_ids']) <= set(artifact['block_ids'])
+                or not f.get('evidence_anchors')):
             raise WorkStateError('чужой артефакт замечания')
-        for anchor in finding['evidence_anchors']:
-            text = originals.get(anchor['block_id'], '')
-            if (anchor['block_id'] not in finding['block_ids'] or anchor['start'] < 0
-                    or anchor['end'] <= anchor['start'] or text[anchor['start']:anchor['end']] != anchor['quote']):
+
+        updated_anchors = []
+        for anchor in f['evidence_anchors']:
+            anc = dict(anchor)
+            block_id = anc.get('block_id')
+            if block_id not in f['block_ids']:
                 raise WorkStateError('неверная привязка замечания к оригиналу')
-    return response
+            text = originals.get(block_id, '')
+            start = anc.get('start')
+            end = anc.get('end')
+            quote = anc.get('quote', '')
+            if start is None or end is None:
+                pos = text.find(quote)
+                if pos == -1:
+                    raise WorkStateError('неверная привязка замечания к оригиналу')
+                start = pos
+                end = pos + len(quote)
+                anc['start'] = start
+                anc['end'] = end
+            elif start < 0 or end <= start or text[start:end] != quote:
+                raise WorkStateError('неверная привязка замечания к оригиналу')
+            updated_anchors.append(anc)
+        f['evidence_anchors'] = updated_anchors
+        updated_findings.append(f)
+
+    return QualityReviewResponse(
+        findings=tuple(updated_findings),
+        checked_artifacts=tuple(checked),
+        missing_artifacts=tuple(missing),
+    )

@@ -55,6 +55,45 @@ def _filter_omitted_properties(node: Any) -> None:
     if isinstance(node, dict):
         if "$defs" in node and isinstance(node["$defs"], dict):
             node["$defs"].pop("HelpEvidenceSchema", None)
+            for def_name in ("PronunciationAnchorSchema", "ReviewAnchor"):
+                if def_name in node["$defs"] and isinstance(node["$defs"][def_name], dict):
+                    target = node["$defs"][def_name]
+                    if "properties" in target and isinstance(target["properties"], dict):
+                        target["properties"].pop("start", None)
+                        target["properties"].pop("end", None)
+                    if "required" in target and isinstance(target["required"], list):
+                        target["required"] = [r for r in target["required"] if r not in {"start", "end"}]
+            if "QualityReviewSchema" in node["$defs"] and isinstance(node["$defs"]["QualityReviewSchema"], dict):
+                target = node["$defs"]["QualityReviewSchema"]
+                if "properties" in target and isinstance(target["properties"], dict):
+                    target["properties"].pop("checked_artifacts", None)
+                    target["properties"].pop("missing_artifacts", None)
+                if "required" in target and isinstance(target["required"], list):
+                    target["required"] = [r for r in target["required"] if r not in {"checked_artifacts", "missing_artifacts"}]
+            if "ReviewFinding" in node["$defs"] and isinstance(node["$defs"]["ReviewFinding"], dict):
+                target = node["$defs"]["ReviewFinding"]
+                if "properties" in target and isinstance(target["properties"], dict):
+                    target["properties"].pop("artifact_sha", None)
+                if "required" in target and isinstance(target["required"], list):
+                    target["required"] = [r for r in target["required"] if r != "artifact_sha"]
+        title = node.get("title")
+        if title in ("PronunciationAnchorSchema", "ReviewAnchor"):
+            if "properties" in node and isinstance(node["properties"], dict):
+                node["properties"].pop("start", None)
+                node["properties"].pop("end", None)
+            if "required" in node and isinstance(node["required"], list):
+                node["required"] = [r for r in node["required"] if r not in {"start", "end"}]
+        elif title == "QualityReviewSchema":
+            if "properties" in node and isinstance(node["properties"], dict):
+                node["properties"].pop("checked_artifacts", None)
+                node["properties"].pop("missing_artifacts", None)
+            if "required" in node and isinstance(node["required"], list):
+                node["required"] = [r for r in node["required"] if r not in {"checked_artifacts", "missing_artifacts"}]
+        elif title == "ReviewFinding":
+            if "properties" in node and isinstance(node["properties"], dict):
+                node["properties"].pop("artifact_sha", None)
+            if "required" in node and isinstance(node["required"], list):
+                node["required"] = [r for r in node["required"] if r != "artifact_sha"]
         if "properties" in node and isinstance(node["properties"], dict):
             for prop in _OMITTED_STRICT_PROPERTIES:
                 node["properties"].pop(prop, None)

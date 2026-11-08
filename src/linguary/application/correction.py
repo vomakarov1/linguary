@@ -5,10 +5,14 @@ from hashlib import sha256
 import json
 from uuid import uuid4
 
-from linguary.application.context_builder import textual_blocks
+from linguary.application.context_builder import (
+    _extract_word_stems,
+    _matches_chapter_text,
+    textual_blocks,
+)
 from linguary.application.correction_dto import CorrectionSnapshot, CorrectionSnapshotV2, parse_correction_snapshot
 from linguary.domain import (
-    BlockProcessingResult, BookStatus, CanonicalDocument, ChapterAnalysis, DocumentBlock,
+    BlockProcessingResult, BlockTreatment, BookStatus, CanonicalDocument, ChapterAnalysis, DocumentBlock,
     DocumentSection, DomainError, ProcessingRun, ProcessingTask, TaskStatus, TaskType,
 )
 from linguary.domain.book_conditions import BookConditions, WorkStateError, thaw
@@ -39,17 +43,38 @@ class CorrectionInputs:
     _context: dict = field(init=False, repr=False, compare=False)
     _context_sha256: str = field(init=False, repr=False, compare=False)
     _checksums: dict[str, str] = field(init=False, repr=False, compare=False)
+    _block_aliases: dict[str, str] = field(init=False, repr=False, compare=False)
+    _alias_to_block_id: dict[str, str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
-        context = dict(schema_version=1, book_id=self.document.id,
+        block_aliases = {
+            block.id: f"b{index}"
+            for index, block in enumerate(self.section.ordered_blocks, start=1)
+        }
+        alias_to_block_id = {alias: block_id for block_id, alias in block_aliases.items()}
+        chapter_blocks = [
+            {"block_id": block_aliases[block.id], "text": block.text}
+            for block in self.section.ordered_blocks
+        ]
+        chapter_text = " ".join(block.text for block in self.section.ordered_blocks)
+        word_stems = _extract_word_stems(chapter_text)
+        filtered_entries = tuple(
+            entry for entry in self.run.glossary_snapshot.entries
+            if _matches_chapter_text(entry.source_text, chapter_text, word_stems)
+        )
+        filtered_glossary = replace(self.run.glossary_snapshot, entries=filtered_entries)
+
+        context = dict(
+            schema_version=1,
+            book_id=self.document.id,
             source_language=self.document.source_language,
             target_language=self.document.target_language,
             section_id=self.section.id,
-            chapter_originals=[original_block_payload(block) for block in self.section.ordered_blocks],
+            chapter_blocks=chapter_blocks,
             chapter_analysis=None if self.analysis is None else asdict(self.analysis),
-            book_conditions=thaw(self.conditions.payload),
-            run_glossary=asdict(self.run.glossary_snapshot),
-            correction_snapshot=self.snapshot.to_payload())
+            run_glossary=asdict(filtered_glossary),
+        )
+
         def encoded(value):
             return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
 
@@ -68,6 +93,16 @@ class CorrectionInputs:
         object.__setattr__(self, '_context', context)
         object.__setattr__(self, '_context_sha256', sha256(context_bytes).hexdigest())
         object.__setattr__(self, '_checksums', checksums)
+        object.__setattr__(self, '_block_aliases', block_aliases)
+        object.__setattr__(self, '_alias_to_block_id', alias_to_block_id)
+
+    @property
+    def block_aliases(self) -> dict[str, str]:
+        return self._block_aliases
+
+    @property
+    def alias_to_block_id(self) -> dict[str, str]:
+        return self._alias_to_block_id
 
     @property
     def context(self):
@@ -140,6 +175,33 @@ def correction_inputs(tx, book_id, section_id):
                             {b.id: generations.get(b.id, 0) for b in blocks})
 
 
+def _is_pure_read_as_is(block: DocumentBlock, inputs: CorrectionInputs) -> bool:
+    if inputs.section.is_notes_only:
+        return False
+    treatment = None
+    if inputs.analysis is not None and inputs.analysis.treatment_plan is not None:
+        try:
+            treatment = inputs.analysis.treatment_plan.treatment_for(block.id)
+        except Exception:
+            pass
+    if treatment is None and block.id in inputs.results:
+        treatment = inputs.results[block.id].treatment
+    if treatment != BlockTreatment.READ_AS_IS:
+        return False
+    result = inputs.results.get(block.id)
+    if result is not None:
+        if result.language_notes:
+            return False
+        if getattr(result, "fragment_assistances", ()):
+            return False
+    if inputs.analysis is not None and inputs.analysis.content_plan is not None:
+        plan = inputs.analysis.content_plan
+        for d in plan.difficulties:
+            if d.owner_block_id == block.id or any(a.block_id == block.id for a in d.anchors):
+                return False
+    return True
+
+
 def unchecked_blocks(tx, inputs):
     current = inputs.checksums
     checked = {}
@@ -167,7 +229,10 @@ def unchecked_blocks(tx, inputs):
                 else:
                     continue
             checked[check.block_id] = check.input_sha256
-    return tuple(b.id for b in inputs.blocks if checked.get(b.id) != current[b.id])
+    return tuple(
+        b.id for b in inputs.blocks
+        if checked.get(b.id) != current[b.id] and not _is_pure_read_as_is(b, inputs)
+    )
 
 
 def candidate_is_current(tx, inputs, candidate):

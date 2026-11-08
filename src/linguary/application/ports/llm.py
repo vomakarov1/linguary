@@ -160,8 +160,10 @@ class LLMRequest[PayloadT: LLMPayload]:
     correction_candidate_refs: tuple[tuple[str, str], ...] = ()
     repair_instructions: tuple[str, ...] = ()
     repair_turns: tuple[tuple[str | None, str], ...] = ()
+    block_aliases: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "block_aliases", tuple(tuple(item) for item in self.block_aliases))
         repair_turns = tuple(
             (turn[0], str(turn[1])) if len(turn) == 2 else (None, str(turn[0]))
             for turn in self.repair_turns
@@ -234,10 +236,12 @@ class LLMRequest[PayloadT: LLMPayload]:
     @classmethod
     def for_chapter_correction(
         cls, *, instructions: str, input_text: str, ordered_block_ids: tuple[str, ...], contract_version: int = 1,
+        block_aliases: tuple[tuple[str, str], ...] = (),
     ) -> LLMRequest[ChapterCorrectionResponse]:
         return LLMRequest[ChapterCorrectionResponse](
             kind=LLMResponseKind.CHAPTER_CORRECTION, instructions=instructions,
             input_text=input_text, ordered_block_ids=tuple(ordered_block_ids), contract_version=contract_version,
+            block_aliases=block_aliases,
         )
 
     @classmethod

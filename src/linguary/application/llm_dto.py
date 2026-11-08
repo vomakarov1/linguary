@@ -208,12 +208,43 @@ class LanguageNoteResponse:
             raise LLMPayloadError(f"текст заметки блока {self.source_block_id} пуст")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class PronunciationAnchorResponse:
     block_id: str
-    start: int
-    end: int
     quote: str
+    start: int | None = None
+    end: int | None = None
+
+    def __init__(
+        self,
+        block_id: str,
+        quote_or_start: str | int | None = None,
+        end_or_quote: int | str | None = None,
+        quote: str | None = None,
+        *,
+        start: int | None = None,
+        end: int | None = None,
+    ):
+        object.__setattr__(self, "block_id", block_id)
+        if isinstance(quote_or_start, int):
+            actual_start = quote_or_start
+            actual_end = end_or_quote if isinstance(end_or_quote, int) else None
+            actual_quote = quote if quote is not None else ""
+        elif isinstance(quote_or_start, str):
+            actual_quote = quote_or_start
+            if isinstance(end_or_quote, int):
+                actual_start = end_or_quote
+                actual_end = quote if isinstance(quote, int) else end
+            else:
+                actual_start = start
+                actual_end = end
+        else:
+            actual_quote = quote if quote is not None else ""
+            actual_start = start
+            actual_end = end
+        object.__setattr__(self, "quote", actual_quote)
+        object.__setattr__(self, "start", actual_start)
+        object.__setattr__(self, "end", actual_end)
 
 
 @dataclass(frozen=True, slots=True)

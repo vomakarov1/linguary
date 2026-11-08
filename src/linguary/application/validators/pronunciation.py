@@ -1,8 +1,9 @@
 """Conservative local selection, independent of translations and model retries."""
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 import unicodedata
 
-from linguary.application.llm_dto import PronunciationCandidateResponse
+from linguary.application.llm_dto import PronunciationAnchorResponse, PronunciationCandidateResponse
 from linguary.application.ports.pronunciation import PronunciationSource, valid_lookup_form
 from linguary.domain.content_plan import SourceAnchor, canonical_sha
 from linguary.domain.errors import DomainError
@@ -80,21 +81,90 @@ def group_pronunciations(occurrences, *, block_order):
     return tuple(sorted(ordered, key=lambda group: (block_order[group.primary.anchor.block_id], group.primary.anchor.start)))
 
 
+def resolve_pronunciation_anchor(
+    anchor: PronunciationAnchorResponse,
+    texts: Mapping[str, str],
+    *,
+    used_spans: set[tuple[str, int, int]] | None = None,
+) -> SourceAnchor:
+    if anchor.block_id not in texts:
+        raise DomainError(f"неизвестный блок {anchor.block_id}")
+    text = texts[anchor.block_id]
+
+    if anchor.start is not None and anchor.end is not None:
+        source_anchor = SourceAnchor(anchor.block_id, anchor.start, anchor.end, anchor.quote)
+        source_anchor.validate(texts)
+        if used_spans is not None:
+            used_spans.add((anchor.block_id, anchor.start, anchor.end))
+        return source_anchor
+
+    quote = anchor.quote
+    quote_len = len(quote)
+    start_pos = 0
+    while True:
+        pos = text.find(quote, start_pos)
+        if pos == -1:
+            break
+        end_pos = pos + quote_len
+        span = (anchor.block_id, pos, end_pos)
+        if (used_spans is None or span not in used_spans) and is_complete_pronunciation_form(text, pos, end_pos):
+            if used_spans is not None:
+                used_spans.add(span)
+            return SourceAnchor(anchor.block_id, pos, end_pos, quote)
+        start_pos = pos + 1
+
+    raise DomainError(f"не удалось найти целое слово {quote!r} в блоке {anchor.block_id}")
+
+
 async def verify_candidates(candidates, *, source: PronunciationSource, texts, variant, scope_id):
     if not source.configured:
         return PronunciationSelection(unavailable=True)
     accepted, skipped, unavailable = [], [], []
-    by_anchor = {}
+    used_spans: set[tuple[str, int, int]] = set()
+    candidate_cache: dict[tuple, tuple[PronunciationCandidateResponse, SourceAnchor]] = {}
+    resolved_candidates: list[tuple[PronunciationCandidateResponse, SourceAnchor]] = []
+
     for candidate in candidates:
-        raw = candidate.anchor
-        by_anchor.setdefault((raw.block_id, raw.start, raw.end), []).append(candidate)
+        cache_key = (
+            candidate.anchor.block_id,
+            candidate.anchor.start,
+            candidate.anchor.end,
+            candidate.anchor.quote,
+            candidate.form,
+            candidate.selection_reason,
+            (
+                candidate.context.meaning_in_context,
+                candidate.context.part_of_speech,
+                candidate.context.grammatical_form,
+                candidate.context.is_proper_name,
+            ),
+        )
+        if cache_key in candidate_cache:
+            resolved_candidates.append(candidate_cache[cache_key])
+            continue
+
+        try:
+            anchor = resolve_pronunciation_anchor(candidate.anchor, texts, used_spans=used_spans)
+        except DomainError:
+            skipped.append(PronunciationSkip(candidate, 'invalid_anchor'))
+            continue
+
+        updated_candidate = replace(
+            candidate,
+            anchor=replace(candidate.anchor, start=anchor.start, end=anchor.end),
+        )
+        candidate_cache[cache_key] = (updated_candidate, anchor)
+        resolved_candidates.append((updated_candidate, anchor))
+
+    by_anchor = {}
+    for cand, anchor in resolved_candidates:
+        by_anchor.setdefault((anchor.block_id, anchor.start, anchor.end), []).append((cand, anchor))
     for duplicates in by_anchor.values():
-        candidate = duplicates[0]
-        if any(other != candidate for other in duplicates):
+        candidate, anchor = duplicates[0]
+        if any(other[0] != candidate for other in duplicates):
             skipped.append(PronunciationSkip(candidate, 'conflicting_candidates'))
             continue
         try:
-            anchor = SourceAnchor(candidate.anchor.block_id, candidate.anchor.start, candidate.anchor.end, candidate.anchor.quote)
             anchor.validate(texts)
         except DomainError:
             skipped.append(PronunciationSkip(candidate, 'invalid_anchor'))

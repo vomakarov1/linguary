@@ -155,7 +155,7 @@ class QualityReviewService:
             try:
                 if response.truncated:
                     raise WorkStateError('неполный ответ вычитки')
-                validate_response(review.manifest, response.payload)
+                payload = validate_response(review.manifest, response.payload)
             except Exception as error:
                 record_rejection(self.uow, response, error)
                 self._finish_attempt(attempt.id, 'rejected')
@@ -173,9 +173,9 @@ class QualityReviewService:
                     finalize_response(self.uow, response, 'accepted', transaction=tx)
                     current = tx.work.get_review(review.id)
                     tx.work.update_review(review.id, state='limit' if current.state == 'limit' else 'completed',
-                        findings=response.payload.findings, checked=response.payload.checked_artifacts,
-                        missing=response.payload.missing_artifacts,
-                        partial=bool(response.payload.missing_artifacts or review.manifest['missing_results'] or not review.manifest['book_complete']))
+                        findings=payload.findings, checked=payload.checked_artifacts,
+                        missing=payload.missing_artifacts,
+                        partial=bool(payload.missing_artifacts or review.manifest['missing_results'] or not review.manifest['book_complete']))
             return
         self._update(review.id, 'failed', reason='invalid_response')
 

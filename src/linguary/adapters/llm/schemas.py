@@ -157,6 +157,13 @@ class SourceAnchorSchema(_ResponseModel):
     quote: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
 
 
+class PronunciationAnchorSchema(_ResponseModel):
+    block_id: str = Field(min_length=1)
+    quote: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
+    start: int | None = Field(default=None, ge=0, strict=True)
+    end: int | None = Field(default=None, gt=0, strict=True)
+
+
 class PronunciationContextSchema(_ResponseModel):
     meaning_in_context: Annotated[str, StringConstraints(min_length=1)] | None
     part_of_speech: Annotated[str, StringConstraints(min_length=1)] | None
@@ -165,7 +172,7 @@ class PronunciationContextSchema(_ResponseModel):
 
 
 class PronunciationCandidateSchema(_ResponseModel):
-    anchor: SourceAnchorSchema
+    anchor: PronunciationAnchorSchema
     form: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
     context: PronunciationContextSchema
     selection_reason: Literal['unpredictable_spelling', 'unpredictable_stress', 'context_dependent']

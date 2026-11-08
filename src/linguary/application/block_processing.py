@@ -25,7 +25,7 @@ from linguary.application.ports.llm import LLMClient, LLMContextCapacityError
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.validators.pronunciation import (
-    PronunciationSelection, PronunciationSkip, preserve_unavailable, verify_candidates,
+    PronunciationSelection, PronunciationSkip, preserve_unavailable, resolve_pronunciation_anchor, verify_candidates,
 )
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy, violation_of
 from linguary.application.recovery import RecoveryError, RecoverySplit
