@@ -23,6 +23,7 @@ The module is responsible for the inputs to these criteria at the book level and
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 
@@ -43,6 +44,7 @@ from linguary.domain import (
     spellings_by_preference,
     translations_conflict,
 )
+from linguary.domain.glossary import _comparable_translation
 from linguary.domain.name_translation import NameTranslationPolicy
 
 #: Type ordering for review display (PRD § 12, § 21.3). Characters come first:
@@ -352,6 +354,26 @@ def _review_item(
     are unified here.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
+    candidates_with_translation = [
+        candidate
+        for candidate in group
+        if candidate.suggested_translation and candidate.suggested_translation.strip()
+    ]
+    if candidates_with_translation:
+        translation_counts = Counter(
+            _comparable_translation(candidate.suggested_translation)
+            for candidate in candidates_with_translation
+        )
+        best_candidate = max(
+            enumerate(candidates_with_translation),
+            key=lambda pair: (
+                translation_counts[_comparable_translation(pair[1].suggested_translation)],
+                pair[1].confidence,
+                -pair[0],
+            ),
+        )[1]
+    else:
+        best_candidate = leading
     spellings = spellings_by_preference(
         (candidate.source_text, candidate.confidence) for candidate in group
     )
@@ -420,7 +442,7 @@ def _review_item(
         concept_id=decision.id if decision is not None else leading.id,
         source_text=spellings[0],
         type=concept_type,
-        suggested_translation=leading.suggested_translation,
+        suggested_translation=best_candidate.suggested_translation,
         confidence=confidence,
         model_flagged_review=model_flagged,
         has_translation_conflict=conflict,

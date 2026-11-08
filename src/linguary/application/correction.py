@@ -1,9 +1,22 @@
 """Current correction coverage and transactional recovery of required chapter work."""
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, fields, replace
 from hashlib import sha256
 import json
 from uuid import uuid4
+
+_SCOPED_RECONCILE_SECTION_ID: ContextVar[str | None] = ContextVar('_SCOPED_RECONCILE_SECTION_ID', default=None)
+
+
+@contextmanager
+def _scoped_reconcile_section(section_id: str | None):
+    token = _SCOPED_RECONCILE_SECTION_ID.set(section_id)
+    try:
+        yield
+    finally:
+        _SCOPED_RECONCILE_SECTION_ID.reset(token)
 
 from linguary.application.context_builder import (
     _extract_word_stems,
@@ -196,18 +209,30 @@ def _section_correction_inputs(
     )
 
 
-def _load_book_correction_inputs_state(tx, book_id, *, run, binding, policy):
+def _load_book_correction_inputs_state(
+    tx, book_id, *, run, binding, policy, section_id: str | None = None
+):
     conditions = tx.work.latest_conditions(book_id)
     if (binding['book_id'] != book_id or conditions is None
             or binding['conditions_id'] != conditions.id):
         raise WorkStateError('условия исправления больше не активны')
     snapshot = parse_correction_snapshot(policy)
-    list_analyses = getattr(tx.analyses, 'list_for_book', None)
-    analyses_by_section = (
-        {analysis.section_id: analysis for analysis in list_analyses(book_id)}
-        if callable(list_analyses)
-        else None
-    )
+    analyses_by_section = None
+    if section_id is not None:
+        get_for_section = getattr(tx.analyses, 'get_for_section', None)
+        if callable(get_for_section):
+            try:
+                single_analysis = get_for_section(book_id, section_id)
+                analyses_by_section = {section_id: single_analysis} if single_analysis is not None else {}
+            except Exception:
+                analyses_by_section = None
+    if analyses_by_section is None:
+        list_analyses = getattr(tx.analyses, 'list_for_book', None)
+        analyses_by_section = (
+            {analysis.section_id: analysis for analysis in list_analyses(book_id)}
+            if callable(list_analyses)
+            else None
+        )
     list_result_bindings = getattr(tx.work, 'result_bindings', None)
     result_bindings = (
         list_result_bindings(run.id)
@@ -486,6 +511,24 @@ def correction_coverage_complete(tx, book_id):
     shared = _load_book_correction_inputs_state(
         tx, book_id, run=run, binding=binding, policy=policy,
     )
+    result_bindings = shared.get('result_bindings')
+    if result_bindings is not None:
+        expected_blocks = {
+            block.id
+            for section in document.sections
+            for block in textual_blocks(section)
+        }
+        if not all(result_bindings.get(block_id) is not None for block_id in expected_blocks):
+            return False
+    elif shared.get('run_results') is not None:
+        expected_blocks = {
+            block.id
+            for section in document.sections
+            for block in textual_blocks(section)
+        }
+        actual_blocks = {r.block_id for r in shared['run_results']}
+        if not expected_blocks <= actual_blocks:
+            return False
     for section in sections:
         inputs = _section_correction_inputs(tx, document=document, section=section, **shared)
         if (not inputs.translated or model_correction_blocks(tx, inputs)
@@ -517,8 +560,11 @@ def _reset_book_readiness(tx, book_id):
         books.save(replace(book, status=BookStatus.PROCESSING, export_validation_status=None))
 
 
-def reconcile_corrections(tx, book_id):
+def reconcile_corrections(tx, book_id, *, section_id: str | None = None):
     """ALG-03: restore tasks from run policy, preserving explicit retries of FAILED work."""
+    effective_section_id = (
+        section_id if section_id is not None else _SCOPED_RECONCILE_SECTION_ID.get()
+    )
     run = tx.runs.active_for_book(book_id)
     binding = None if run is None else tx.work.get_binding('run', run.id)
     policy = correction_policy({} if binding is None else binding['payload_json'])
@@ -531,10 +577,26 @@ def reconcile_corrections(tx, book_id):
         section for section in document.ordered_sections
         if not document.is_front_matter(section) and not section.is_notes_only
     )
+    if effective_section_id is not None:
+        matched = tuple(section for section in sections if section.id == effective_section_id)
+        if not matched:
+            matched = tuple(
+                section
+                for section in sections
+                if any(block.id == effective_section_id for block in section.blocks)
+            )
+            if matched:
+                effective_section_id = matched[0].id
+        sections = matched
     if not sections:
         return ()
     shared = _load_book_correction_inputs_state(
-        tx, book_id, run=run, binding=binding, policy=policy,
+        tx,
+        book_id,
+        run=run,
+        binding=binding,
+        policy=policy,
+        section_id=effective_section_id,
     )
     tasks = tx.tasks.list_for_book(book_id)
     pending = []

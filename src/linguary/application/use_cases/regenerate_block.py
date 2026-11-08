@@ -207,8 +207,7 @@ class RegenerateBlock:
                 recovery=(root.id, scope.id),
                 source_texts={
                     block.id: block.text
-                    for section in work.document.sections
-                    for block in section.blocks
+                    for block in work.section.blocks
                 },
             )
         except RecoverySplit:

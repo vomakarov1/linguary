@@ -97,7 +97,7 @@ class ChapterCorrectionV2Schema(CorrectionModel):
 
 class CorrectionVerdictSchema(CorrectionModel):
     candidate_id: str = Field(min_length=1)
-    proposal_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    proposal_sha256: str | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
     verdict: Literal['confirmed', 'needs_human']
     error_supported: bool
     evidence_valid: bool

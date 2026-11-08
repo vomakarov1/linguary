@@ -129,14 +129,32 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
         artifact_kind="analysis",
         block_ids=["b1"],
         body=dict(
+            id="analysis-1",
+            section_id="section-1",
+            coverage_status="complete",
             summary="fox chapter",
+            treatment_plan=dict(section_id="section-1", items=[dict(block_id="b1", treatment="TRANSLATE")]),
             glossary_candidates=[dict(source_text="Fox", suggested_translation="Лис")],
             name_translation_evidence=[dict(source_text="Fox", decision="translate")],
             before_you_read_evidence=[dict(difficulty_id="d1", artifact_key="a" * 64)],
             content_plan=dict(
                 version=3,
                 profile="content-plan-v3",
-                difficulties=[dict(id="d1", owner_block_id="b1")],
+                sha256="f" * 64,
+                difficulties=[
+                    dict(
+                        id="d1",
+                        owner_block_id="b1",
+                        anchors=[dict(block_id="b1", start=4, end=9, quote="quick")],
+                    )
+                ],
+                context_facts=[
+                    dict(
+                        id="cf1",
+                        anchors=[dict(block_id="b1", start=10, end=19, quote="brown fox")],
+                        subject_anchor=dict(block_id="b1", start=16, end=19, quote="fox"),
+                    )
+                ],
                 before_you_read_evidence=[dict(difficulty_id="d1", artifact_key="a" * 64)],
             ),
         ),
@@ -147,7 +165,15 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
         artifact_kind="result",
         block_ids=["b1"],
         body=dict(
+            block_id="b1",
             translated_text="Быстрая рыжая лиса прыгает.",
+            language_notes=[dict(id="ln-ch01-001", block_id="b1", original_excerpt="quick", note="быстрая")],
+            fragment_assistances=[
+                dict(
+                    difficulty_id="d1",
+                    anchors=[dict(block_id="b1", start=4, end=9, quote="quick")],
+                )
+            ],
             content_evidence=dict(plan_sha256="b" * 64, evidence=[dict(artifact_key="c" * 64)]),
             pronunciation_assistances=[dict(ipa="fɑks")],
             warnings=[dict(kind="repetition", message="повтор")],
@@ -184,19 +210,44 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
 
     llm_analysis_body = parsed["artifacts"][1]["body"]
     assert llm_analysis_body["summary"] == "fox chapter"
+    assert "id" not in llm_analysis_body
+    assert "section_id" not in llm_analysis_body
+    assert "coverage_status" not in llm_analysis_body
+    assert "section_id" not in llm_analysis_body["treatment_plan"]
     assert "glossary_candidates" not in llm_analysis_body
     assert "name_translation_evidence" not in llm_analysis_body
     assert "before_you_read_evidence" not in llm_analysis_body
     assert "before_you_read_evidence" not in llm_analysis_body["content_plan"]
+    assert "version" not in llm_analysis_body["content_plan"]
+    assert "profile" not in llm_analysis_body["content_plan"]
+    assert "sha256" not in llm_analysis_body["content_plan"]
     assert llm_analysis_body["content_plan"]["difficulties"] == [
-        dict(id="d1", owner_block_id="b1")
+        dict(
+            id="d1",
+            owner_block_id="b1",
+            anchors=[dict(block_id="b1", quote="quick")],
+        )
+    ]
+    assert llm_analysis_body["content_plan"]["context_facts"] == [
+        dict(
+            id="cf1",
+            anchors=[dict(block_id="b1", quote="brown fox")],
+            subject_anchor=dict(block_id="b1", quote="fox"),
+        )
     ]
 
     llm_result_body = parsed["artifacts"][2]["body"]
     assert llm_result_body["translated_text"] == "Быстрая рыжая лиса прыгает."
+    assert "block_id" not in llm_result_body
     assert "content_evidence" not in llm_result_body
     assert "pronunciation_assistances" not in llm_result_body
     assert "warnings" not in llm_result_body
+    assert llm_result_body["language_notes"] == [
+        dict(block_id="b1", original_excerpt="quick", note="быстрая")
+    ]
+    assert llm_result_body["fragment_assistances"] == [
+        dict(difficulty_id="d1", anchors=[dict(block_id="b1", quote="quick")])
+    ]
 
     raw_response = QualityReviewResponse(
         findings=(

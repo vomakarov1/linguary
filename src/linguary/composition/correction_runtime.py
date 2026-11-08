@@ -29,7 +29,7 @@ from linguary.domain.recovery import CallAttempt
 
 
 CORRECTION_PROMPT = """Проверь и при необходимости исправь переданные результаты главы по полному
-оригиналу, анализу главы, плану режимов, условиям книги и словарю запуска из запроса.
+оригиналу, анализу главы, плану режимов и словарю запуска из запроса.
 Верни ровно по одной записи для каждого переданного block_id и никаких других блоков.
 Используй статус unchanged (только block_id и status), если все текущие поля блока верны.
 Иначе используй статус corrected и передай полные значения translated_text, glossary_hints и
@@ -274,7 +274,10 @@ class CorrectionProvenanceClient:
                 ChapterCorrectionV2Response if isinstance(self.snapshot, CorrectionSnapshotV2) else ChapterCorrectionResponse)
             if response.truncated or type(response.payload) is not expected_type:
                 raise LLMResponseFormatError('ответ исправления неполон', truncated=response.truncated)
-            if not reviewing and request.block_aliases:
+            if reviewing and request.correction_candidate_refs:
+                payload = response.payload.with_resolved_proposal_shas(request.correction_candidate_refs)
+                response = replace(response, payload=payload)
+            elif not reviewing and request.block_aliases:
                 payload = response.payload.with_resolved_block_ids(dict(request.block_aliases))
                 response = replace(response, payload=payload)
             try:

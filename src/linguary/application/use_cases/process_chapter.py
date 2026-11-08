@@ -604,7 +604,7 @@ class ChapterProcessingSequence:
                 # saved references so the remaining roots continue under the same task.
                 if current.status is not TaskStatus.RUNNING:
                     raise
-        self._complete_processing(task.book_id, finished_task_id=task.id)
+        self._complete_processing(task.book_id, finished_task_id=task.id, section_id=task.scope_id)
 
     def _existing_dispatcher(self, book_id: str, section_id: str, *, transaction=None) -> ProcessingTask | None:
         """Find a dispatcher for this run; its roots are resolved only by exact refs."""
@@ -646,15 +646,24 @@ class ChapterProcessingSequence:
             if textual_blocks(section)
         )
 
-    def _complete_processing(self, book_id: str, *, finished_task_id: str | None) -> None:
+    def _complete_processing(
+        self,
+        book_id: str,
+        *,
+        finished_task_id: str | None,
+        section_id: str | None = None,
+    ) -> None:
         """Transitions the book to `READY_TO_EXPORT` when all chapters are processed (ALG-06)."""
-        complete_processing(
-            self._unit_of_work,
-            book_id=book_id,
-            finished_task_id=finished_task_id,
-            task_types=(TaskType.PROCESS_TRANSLATION_UNIT, TaskType.CHAPTER_CORRECTION,
-                        TaskType.REGENERATE_BLOCK),
-        )
+        from linguary.application.correction import _scoped_reconcile_section
+
+        with _scoped_reconcile_section(section_id):
+            complete_processing(
+                self._unit_of_work,
+                book_id=book_id,
+                finished_task_id=finished_task_id,
+                task_types=(TaskType.PROCESS_TRANSLATION_UNIT, TaskType.CHAPTER_CORRECTION,
+                            TaskType.REGENERATE_BLOCK),
+            )
 
 
 def _section_of(

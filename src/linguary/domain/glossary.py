@@ -258,8 +258,13 @@ def glossary_key(text: str) -> str:
     ambiguous cases are never merged automatically.
     """
     normalized = unicodedata.normalize("NFKC", text).translate(_STRAIGHT_QUOTES)
-    normalized = _WHITESPACE.sub(" ", normalized).strip().casefold()
+    normalized = _WHITESPACE.sub(" ", normalized).strip().casefold().replace("ё", "е")
     return _WHITESPACE.sub(" ", _TITLE_DOT.sub(r"\1 ", normalized)).strip()
+
+
+def _comparable_translation(text: str) -> str:
+    """Normalized translation string for conflict and frequency comparisons."""
+    return glossary_key(text)
 
 
 def spellings_by_preference(mentions: Iterable[tuple[str, float]]) -> tuple[str, ...]:
@@ -290,4 +295,4 @@ def translations_conflict(translations: Iterable[str]) -> bool:
     Variants are compared using the same normalization key as source spellings: translation
     case and typography alone do not constitute distinct decisions.
     """
-    return len({glossary_key(translation) for translation in translations}) > 1
+    return len({_comparable_translation(translation) for translation in translations}) > 1

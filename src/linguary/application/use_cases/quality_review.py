@@ -102,6 +102,7 @@ class QualityReviewService:
             self._update(review.id, 'failed', reason='price_or_route_unavailable')
             return
         self._update(review.id, 'running')
+        previous_error: str | None = None
         for ordinal in range(1, 4):
             with self.uow.transaction() as tx:
                 current = tx.work.get_review(review.id)
@@ -115,10 +116,15 @@ class QualityReviewService:
                 else:
                     self._update(review.id, 'limit', reason='budget')
                 return
+            instructions = (
+                INSTRUCTIONS
+                if ordinal == 1 or not previous_error
+                else f"{INSTRUCTIONS}\n\nПредыдущий ответ отклонён: {previous_error}. Исправь ошибку и верни корректный JSON."
+            )
             context = CallContext(review.conditions_id, 'quality_review', review.id,
                 tuple(review.manifest['scope']), attempt.id, current.revision, route.model,
-                sha256(INSTRUCTIONS.encode()).hexdigest(), task_id=task.id)
-            outgoing = replace(request, call_context=context, attempt=ordinal)
+                sha256(instructions.encode()).hexdigest(), task_id=task.id)
+            outgoing = replace(request, instructions=instructions, call_context=context, attempt=ordinal)
             if not self.budget.mark_sent(attempt.id):
                 state = self.get(task.book_id, review.id)['state']
                 if state == 'stale':
@@ -138,6 +144,7 @@ class QualityReviewService:
                     return
                 if self._stopped(review.id):
                     return
+                previous_error = str(error)
                 continue
             except Exception:
                 self.budget.settle(attempt.id, None)
@@ -161,6 +168,7 @@ class QualityReviewService:
                 self._finish_attempt(attempt.id, 'rejected')
                 if self._stopped(review.id):
                     return
+                previous_error = str(error)
                 continue
             self._finish_attempt(attempt.id, 'validated')
             with self.uow.transaction() as tx:

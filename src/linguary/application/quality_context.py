@@ -54,6 +54,12 @@ def snapshot(tx, book_id, scope):
     return {**value, 'manifest_sha': canonical_sha(value)}
 
 
+def _strip_anchor_offsets(anchor: Any) -> Any:
+    if isinstance(anchor, Mapping):
+        return {k: v for k, v in anchor.items() if k not in ('start', 'end')}
+    return anchor
+
+
 def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
     out = dict(artifact)
     kind = out.get('artifact_kind')
@@ -61,22 +67,76 @@ def _llm_artifact(artifact: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(body, Mapping):
         return out
     if kind == 'result':
-        out['body'] = {
+        cleaned_result = {
             k: v
             for k, v in body.items()
-            if k not in ('content_evidence', 'pronunciation_assistances', 'warnings')
+            if k not in ('block_id', 'content_evidence', 'pronunciation_assistances', 'warnings')
         }
+        if isinstance(cleaned_result.get('language_notes'), (list, tuple)):
+            cleaned_result['language_notes'] = [
+                {k: v for k, v in n.items() if k != 'id'} if isinstance(n, Mapping) else n
+                for n in cleaned_result['language_notes']
+            ]
+        if isinstance(cleaned_result.get('fragment_assistances'), (list, tuple)):
+            assistances = []
+            for fa in cleaned_result['fragment_assistances']:
+                if isinstance(fa, Mapping):
+                    item = dict(fa)
+                    if isinstance(item.get('anchors'), (list, tuple)):
+                        item['anchors'] = [_strip_anchor_offsets(a) for a in item['anchors']]
+                    assistances.append(item)
+                else:
+                    assistances.append(fa)
+            cleaned_result['fragment_assistances'] = assistances
+        out['body'] = cleaned_result
     elif kind == 'analysis':
         cleaned = {
             k: v
             for k, v in body.items()
-            if k not in ('glossary_candidates', 'name_translation_evidence', 'before_you_read_evidence')
+            if k not in (
+                'id',
+                'section_id',
+                'coverage_status',
+                'glossary_candidates',
+                'name_translation_evidence',
+                'before_you_read_evidence',
+            )
         }
+        tp = cleaned.get('treatment_plan')
+        if isinstance(tp, Mapping):
+            cleaned['treatment_plan'] = {k: v for k, v in tp.items() if k != 'section_id'}
         cp = cleaned.get('content_plan')
         if isinstance(cp, Mapping):
-            cleaned['content_plan'] = {
-                k: v for k, v in cp.items() if k != 'before_you_read_evidence'
+            cleaned_cp = {
+                k: v
+                for k, v in cp.items()
+                if k not in ('version', 'profile', 'sha256', 'before_you_read_evidence')
             }
+            if isinstance(cleaned_cp.get('difficulties'), (list, tuple)):
+                difficulties = []
+                for d in cleaned_cp['difficulties']:
+                    if isinstance(d, Mapping):
+                        diff = dict(d)
+                        if isinstance(diff.get('anchors'), (list, tuple)):
+                            diff['anchors'] = [_strip_anchor_offsets(a) for a in diff['anchors']]
+                        difficulties.append(diff)
+                    else:
+                        difficulties.append(d)
+                cleaned_cp['difficulties'] = difficulties
+            if isinstance(cleaned_cp.get('context_facts'), (list, tuple)):
+                facts = []
+                for f in cleaned_cp['context_facts']:
+                    if isinstance(f, Mapping):
+                        fact = dict(f)
+                        if isinstance(fact.get('anchors'), (list, tuple)):
+                            fact['anchors'] = [_strip_anchor_offsets(a) for a in fact['anchors']]
+                        if isinstance(fact.get('subject_anchor'), Mapping):
+                            fact['subject_anchor'] = _strip_anchor_offsets(fact['subject_anchor'])
+                        facts.append(fact)
+                    else:
+                        facts.append(f)
+                cleaned_cp['context_facts'] = facts
+            cleaned['content_plan'] = cleaned_cp
         out['body'] = cleaned
     return out
 

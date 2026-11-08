@@ -189,11 +189,19 @@ def _llm_chapter_analysis(
     out = {
         k: thaw(v)
         for k, v in analysis.items()
-        if k not in ('glossary_candidates', 'name_translation_evidence', 'before_you_read_evidence')
+        if k
+        not in (
+            'id',
+            'section_id',
+            'coverage_status',
+            'glossary_candidates',
+            'name_translation_evidence',
+            'before_you_read_evidence',
+        )
     }
     treatment_plan = out.get('treatment_plan')
     if isinstance(treatment_plan, Mapping):
-        tp = dict(treatment_plan)
+        tp = {k: v for k, v in treatment_plan.items() if k != 'section_id'}
         if isinstance(tp.get('items'), (list, tuple)):
             items = [
                 {**item, 'block_id': aliases.get(item['block_id'], item['block_id'])}
@@ -210,7 +218,11 @@ def _llm_chapter_analysis(
         out['treatment_plan'] = tp
     content_plan = out.get('content_plan')
     if isinstance(content_plan, Mapping):
-        cp = {k: v for k, v in content_plan.items() if k != 'before_you_read_evidence'}
+        cp = {
+            k: v
+            for k, v in content_plan.items()
+            if k not in ('version', 'profile', 'sha256', 'before_you_read_evidence')
+        }
         if isinstance(cp.get('difficulties'), (list, tuple)):
             difficulties = []
             for d in cp['difficulties']:
@@ -515,12 +527,12 @@ class CorrectChapter:
                 for n in c.payload['result']['language_notes'])
         notes = note_id_factory(chapter_number=chapter_number(inputs.document, inputs.section), used=used_note_ids)
         originals = {b.id: b for b in inputs.blocks}
+        section_quote_fragments = source_quote_fragments(b.text for b in inputs.section.ordered_blocks)
         candidates = []
         for block in response.blocks:
             previous = inputs.results[block.block_id]
             if not isinstance(block, CorrectedBlockResponse):
-                prepared = ReaderTextPolicy().prepare_results((previous,),
-                    source_quote_fragments(b.text for b in inputs.section.ordered_blocks))
+                prepared = ReaderTextPolicy().prepare_results((previous,), section_quote_fragments)
                 if prepared != (previous,):
                     raise ResultValidationError('неизменённый блок содержит неочищенный читательский текст')
                 candidates.append(previous)
@@ -546,10 +558,9 @@ class CorrectChapter:
                 glossary_hints=tuple(replace(h, original=raw.original)
                     for h, raw in zip(validated.glossary_hints, block.glossary_hints, strict=True)),
                 language_notes=tuple(restored_notes))
-            candidate, = ReaderTextPolicy().prepare_results((candidate,),
-                source_quote_fragments(b.text for b in inputs.section.ordered_blocks))
+            candidate, = ReaderTextPolicy().prepare_results((candidate,), section_quote_fragments)
             candidates.append(candidate)
-        validate_note_sources(candidates, {b.id: b.text for b in inputs.blocks})
+        validate_note_sources(candidates, {b.id: b.text for b in inputs.section.ordered_blocks})
         merged = tuple(next((candidate for candidate in candidates if candidate.block_id == r.block_id), r)
                        for r in all_results)
         note_ids = [n.id for r in merged for n in r.language_notes]
@@ -840,6 +851,9 @@ class CorrectChapterV2(CorrectChapter):
                 if (response.truncated or not isinstance(response.payload, ChapterCorrectionReviewResponse)
                         or response.call_context != context):
                     raise LLMResponseFormatError('неполная проверка кандидатов')
+                resolved_payload = response.payload.with_resolved_proposal_shas(refs)
+                if resolved_payload != response.payload:
+                    response = replace(response, payload=resolved_payload)
                 response.payload.validate_coverage(refs)
                 with self.uow.transaction() as tx:
                     current, attempt = self._owned_response(tx, command, task, expected, context,

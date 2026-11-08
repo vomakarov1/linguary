@@ -1019,5 +1019,358 @@ def test_correction_requests_place_static_chapter_prefix_before_blocks_and_candi
     assert review_req.input_text.index('"chapter_blocks":') < review_req.input_text.index('"candidates":')
 
 
+def test_llm_chapter_analysis_and_quality_artifact_strip_internal_ids_and_char_offsets_while_keeping_contracts():
+    from dataclasses import asdict
+    from linguary.application.quality_context import _llm_artifact, request_text
+    from linguary.application.use_cases.correct_chapter import _llm_chapter_analysis
+    from linguary.composition.correction_runtime import CORRECTION_PROMPT, CORRECTION_PROMPT_V2
+    from linguary.domain import ChapterAnalysis, LanguageNote, TreatmentPlan
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        ContextFact,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+        canonical_sha,
+    )
+    from linguary.domain.learning import FragmentAssistance
+
+    assert "условиям книги" not in CORRECTION_PROMPT
+    assert "условия книги" not in CORRECTION_PROMPT
+    assert "условиям книги" not in CORRECTION_PROMPT_V2
+    assert "условия книги" not in CORRECTION_PROMPT_V2
+
+    section = make_analysis_section(texts=("First sentence.", "Second sentence he said."))
+    b1, b2 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id="d1",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="First"),),
+                owner_block_id=b1.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p1", description="meaning"),),
+            ),
+        ),
+        context_facts=(
+            ContextFact(
+                id="cf1",
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b2.id, start=0, end=6, quote="Second"),),
+                subject_anchor=SourceAnchor(block_id=b2.id, start=16, end=18, quote="he"),
+                value="Narrator",
+                certainty="explicit",
+            ),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-internal-id",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        expected_block_ids=(b1.id, b2.id),
+        content_plan=content_plan,
+    )
+    aliases = {b1.id: "b1", b2.id: "b2"}
+    llm_analysis = _llm_chapter_analysis(asdict(analysis), aliases)
+    assert llm_analysis is not None
+    assert "id" not in llm_analysis
+    assert "section_id" not in llm_analysis
+    assert "coverage_status" not in llm_analysis
+    assert "section_id" not in llm_analysis["treatment_plan"]
+    llm_cp = llm_analysis["content_plan"]
+    assert "version" not in llm_cp
+    assert "profile" not in llm_cp
+    assert "sha256" not in llm_cp
+    assert llm_cp["difficulties"][0]["anchors"] == [{"block_id": "b1", "quote": "First"}]
+    assert llm_cp["context_facts"][0]["anchors"] == [{"block_id": "b2", "quote": "Second"}]
+    assert llm_cp["context_facts"][0]["subject_anchor"] == {"block_id": "b2", "quote": "he"}
+
+    result = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text=" Первое предложение.",
+        language_notes=(
+            LanguageNote(
+                id="ln-ch01-001",
+                block_id=b1.id,
+                original_excerpt="First",
+                note="Заметка",
+            ),
+        ),
+        fragment_assistances=(
+            FragmentAssistance(
+                difficulty_id="d1",
+                point_ids=("p1",),
+                kind="russian_explanation",
+                text="Пояснение",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="First"),),
+            ),
+        ),
+    )
+    orig_env = {"artifact_kind": "original", "block_ids": [b1.id], "body": {"text": b1.text}}
+    analysis_env = {"artifact_kind": "analysis", "block_ids": [b1.id, b2.id], "body": asdict(analysis)}
+    result_env = {"artifact_kind": "result", "block_ids": [b1.id], "body": asdict(result)}
+    manifest = {
+        "schema_version": 1,
+        "book_id": "book-1",
+        "book_manifest_sha": "a" * 64,
+        "manifest_sha": "b" * 64,
+        "scope": [b1.id],
+        "artifacts": [
+            {**orig_env, "artifact_sha": canonical_sha(orig_env)},
+            {**analysis_env, "artifact_sha": canonical_sha(analysis_env)},
+            {**result_env, "artifact_sha": canonical_sha(result_env)},
+        ],
+    }
+    parsed = json.loads(request_text(manifest))
+    assert parsed["manifest_sha"] == "b" * 64
+    assert parsed["book_manifest_sha"] == "a" * 64
+    assert parsed["scope"] == [b1.id]
+    assert parsed["artifacts"][0]["body"] == {"text": b1.text}
+    assert parsed["artifacts"][0]["artifact_sha"] == canonical_sha(orig_env)
+
+    qual_analysis = parsed["artifacts"][1]["body"]
+    assert "id" not in qual_analysis
+    assert "section_id" not in qual_analysis
+    assert "coverage_status" not in qual_analysis
+    assert "section_id" not in qual_analysis["treatment_plan"]
+    assert "version" not in qual_analysis["content_plan"]
+    assert "profile" not in qual_analysis["content_plan"]
+    assert "sha256" not in qual_analysis["content_plan"]
+    assert qual_analysis["content_plan"]["difficulties"][0]["anchors"] == [
+        {"block_id": b1.id, "quote": "First"}
+    ]
+    assert qual_analysis["content_plan"]["context_facts"][0]["anchors"] == [
+        {"block_id": b2.id, "quote": "Second"}
+    ]
+    assert qual_analysis["content_plan"]["context_facts"][0]["subject_anchor"] == {
+        "block_id": b2.id,
+        "quote": "he",
+    }
+
+    qual_result = _llm_artifact(manifest["artifacts"][2])["body"]
+    assert "block_id" not in qual_result
+    assert "id" not in qual_result["language_notes"][0]
+    assert qual_result["fragment_assistances"][0]["anchors"] == [
+        {"block_id": b1.id, "quote": "First"}
+    ]
+
+
+def test_correct_chapter_v2_populates_omitted_proposal_sha256_from_candidate_ref():
+    from linguary.adapters.llm.correction_payloads import (
+        ChapterCorrectionReviewSchema,
+        CorrectionVerdictSchema,
+    )
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    from linguary.adapters.llm.payloads import parse_payload
+    from linguary.application.correction_dto import (
+        ChapterCorrectionReviewResponse,
+        CorrectionVerdict,
+    )
+    from linguary.application.llm_dto import LLMPayloadError
+
+    review_schema = strict_json_schema(ChapterCorrectionReviewSchema)
+    verdict_def = review_schema["$defs"]["CorrectionVerdictSchema"]
+    assert "proposal_sha256" not in verdict_def["properties"]
+    assert "proposal_sha256" not in verdict_def.get("required", [])
+
+    direct_verdict_schema = strict_json_schema(CorrectionVerdictSchema)
+    assert "proposal_sha256" not in direct_verdict_schema["properties"]
+    assert "proposal_sha256" not in direct_verdict_schema.get("required", [])
+
+    parsed = parse_payload(
+        LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "candidate_id": "cand-1",
+                        "verdict": "confirmed",
+                        "error_supported": True,
+                        "evidence_valid": True,
+                        "minimal": True,
+                        "no_semantic_loss": True,
+                        "reason": "Подтверждено оригиналом.",
+                    }
+                ]
+            }
+        ),
+    )
+    assert isinstance(parsed, ChapterCorrectionReviewResponse)
+    assert parsed.candidates[0].proposal_sha256 is None
+
+    expected_sha = "a" * 64
+    refs = (("cand-1", expected_sha),)
+    resolved = parsed.with_resolved_proposal_shas(refs)
+    assert resolved.candidates[0].proposal_sha256 == expected_sha
+    resolved.validate_coverage(refs)
+
+    mismatched = ChapterCorrectionReviewResponse(
+        candidates=(
+            CorrectionVerdict(
+                candidate_id="cand-1",
+                proposal_sha256="b" * 64,
+                verdict="confirmed",
+                error_supported=True,
+                evidence_valid=True,
+                minimal=True,
+                no_semantic_loss=True,
+                reason="Неверный хеш.",
+            ),
+        )
+    )
+    kept_mismatch = mismatched.with_resolved_proposal_shas(refs)
+    assert kept_mismatch.candidates[0].proposal_sha256 == "b" * 64
+    with pytest.raises(LLMPayloadError):
+        kept_mismatch.validate_coverage(refs)
+
+
+def test_reconcile_corrections_with_section_id_scopes_work_to_target_chapter():
+    from linguary.application.correction import (
+        correction_coverage_complete,
+        reconcile_corrections,
+    )
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V2,
+        CorrectionSnapshotV2,
+    )
+    from linguary.domain import ChapterAnalysis, TreatmentPlan
+
+    s1 = make_analysis_section(section_id="section-1", order=0, texts=("Chapter 1 text.",))
+    s2 = make_analysis_section(section_id="section-2", order=1, texts=("Chapter 2 text.",))
+    document = make_analysis_document((s1, s2))
+    b1 = s1.blocks[0]
+    b2 = s2.blocks[0]
+
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.1,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 1000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    run = SimpleNamespace(id="run-1", book_id=document.id, glossary_snapshot=GlossarySnapshot())
+    conditions = SimpleNamespace(id="cond-1", payload={"schema_version": 1})
+
+    analyses = {
+        s.id: ChapterAnalysis.create(
+            id=f"analysis-{s.id}",
+            section_id=s.id,
+            treatment_plan=TreatmentPlan.of_treatments(
+                s.id, ((s.blocks[0].id, BlockTreatment.TRANSLATE),)
+            ),
+            translation_instructions="",
+            chapter_summary="",
+            expected_block_ids=(s.blocks[0].id,),
+        )
+        for s in (s1, s2)
+    }
+    queried_sections: list[str] = []
+    added_tasks: list[object] = []
+
+    class FakeResults:
+        def list_for_section(self, run_id: str, section_id: str):
+            queried_sections.append(section_id)
+            if section_id == "section-1":
+                return (
+                    BlockProcessingResult(
+                        block_id=b1.id,
+                        treatment=BlockTreatment.TRANSLATE,
+                        translated_text="Перевод главы 1.",
+                    ),
+                )
+            return ()
+
+    class FakeWork:
+        def get_binding(self, kind: str, entity_id: str):
+            if kind == "run" and entity_id == run.id:
+                return {
+                    "book_id": document.id,
+                    "conditions_id": conditions.id,
+                    "payload_json": {"correction": snapshot.to_payload()},
+                }
+            return None
+
+        def latest_conditions(self, book_id: str):
+            return conditions
+
+        def result_bindings(self, run_id: str):
+            return {
+                b1.id: {
+                    "book_id": document.id,
+                    "conditions_id": conditions.id,
+                    "attempt_id": "att-1",
+                    "artifact_revision_id": "art-1",
+                }
+            }
+
+        def correction_input_generations(self, run_id: str):
+            return {b1.id: 1, b2.id: 0}
+
+        def observe_correction_input(self, run_id: str, block_id: str, fingerprint: str) -> int:
+            if block_id != b1.id:
+                raise AssertionError(f"observe_correction_input called for non-target block {block_id}")
+            return 1
+
+        def list_correction_candidates(self, run_id: str, *, section_id: str | None = None, states=None):
+            if section_id != "section-1":
+                raise AssertionError(f"list_correction_candidates called for {section_id}")
+            return ()
+
+        def correction_checks(self, run_id: str, section_id: str):
+            if section_id != "section-1":
+                raise AssertionError(f"correction_checks called for {section_id}")
+            return ()
+
+        def bind(self, kind: str, entity_id: str, **kwargs):
+            pass
+
+    tx = SimpleNamespace(
+        runs=SimpleNamespace(active_for_book=lambda _bid: run),
+        documents=SimpleNamespace(get=lambda _bid: document),
+        analyses=SimpleNamespace(
+            get_for_section=lambda _bid, sid: analyses[sid],
+            list_for_book=lambda _bid: tuple(analyses.values()),
+        ),
+        results=FakeResults(),
+        work=FakeWork(),
+        tasks=SimpleNamespace(
+            list_for_book=lambda _bid: (),
+            find_by_identity=lambda _id: None,
+            add=lambda task: added_tasks.append(task),
+        ),
+        books=SimpleNamespace(get=lambda _bid: None),
+    )
+
+    pending = reconcile_corrections(tx, document.id, section_id="section-1")
+    assert len(pending) == 1
+    assert pending[0].scope_id == "section-1"
+    assert queried_sections == ["section-1"]
+
+    queried_sections.clear()
+    assert correction_coverage_complete(tx, document.id) is False
+    assert queried_sections == []
+
+
+
 
 

@@ -76,6 +76,12 @@ def _filter_omitted_properties(node: Any) -> None:
                     target["properties"].pop("artifact_sha", None)
                 if "required" in target and isinstance(target["required"], list):
                     target["required"] = [r for r in target["required"] if r != "artifact_sha"]
+            if "CorrectionVerdictSchema" in node["$defs"] and isinstance(node["$defs"]["CorrectionVerdictSchema"], dict):
+                target = node["$defs"]["CorrectionVerdictSchema"]
+                if "properties" in target and isinstance(target["properties"], dict):
+                    target["properties"].pop("proposal_sha256", None)
+                if "required" in target and isinstance(target["required"], list):
+                    target["required"] = [r for r in target["required"] if r != "proposal_sha256"]
         title = node.get("title")
         if title in ("PronunciationAnchorSchema", "ReviewAnchor"):
             if "properties" in node and isinstance(node["properties"], dict):
@@ -94,6 +100,11 @@ def _filter_omitted_properties(node: Any) -> None:
                 node["properties"].pop("artifact_sha", None)
             if "required" in node and isinstance(node["required"], list):
                 node["required"] = [r for r in node["required"] if r != "artifact_sha"]
+        elif title == "CorrectionVerdictSchema":
+            if "properties" in node and isinstance(node["properties"], dict):
+                node["properties"].pop("proposal_sha256", None)
+            if "required" in node and isinstance(node["required"], list):
+                node["required"] = [r for r in node["required"] if r != "proposal_sha256"]
         if "properties" in node and isinstance(node["properties"], dict):
             for prop in _OMITTED_STRICT_PROPERTIES:
                 node["properties"].pop(prop, None)

@@ -333,10 +333,10 @@ class ChapterCorrectionV2Response(ChapterCorrectionResponse):
         return ChapterCorrectionV2Response(resolved.blocks)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class CorrectionVerdict:
     candidate_id: str
-    proposal_sha256: str
+    proposal_sha256: str | None
     verdict: Literal['confirmed', 'needs_human']
     error_supported: bool
     evidence_valid: bool
@@ -344,11 +344,52 @@ class CorrectionVerdict:
     no_semantic_loss: bool
     reason: str
 
+    def __init__(
+        self,
+        candidate_id: str,
+        proposal_sha256: str | None = None,
+        verdict: Literal['confirmed', 'needs_human'] | None = None,
+        error_supported: bool | None = None,
+        evidence_valid: bool | None = None,
+        minimal: bool | None = None,
+        no_semantic_loss: bool | None = None,
+        reason: str = '',
+    ) -> None:
+        if (
+            proposal_sha256 in {'confirmed', 'needs_human'}
+            and type(verdict) is bool
+            and reason == ''
+            and isinstance(no_semantic_loss, str)
+        ):
+            reason = no_semantic_loss
+            no_semantic_loss = minimal
+            minimal = evidence_valid
+            evidence_valid = error_supported
+            error_supported = verdict
+            verdict = proposal_sha256  # type: ignore[assignment]
+            proposal_sha256 = None
+        object.__setattr__(self, 'candidate_id', candidate_id)
+        object.__setattr__(self, 'proposal_sha256', proposal_sha256)
+        object.__setattr__(self, 'verdict', verdict)
+        object.__setattr__(self, 'error_supported', error_supported)
+        object.__setattr__(self, 'evidence_valid', evidence_valid)
+        object.__setattr__(self, 'minimal', minimal)
+        object.__setattr__(self, 'no_semantic_loss', no_semantic_loss)
+        object.__setattr__(self, 'reason', reason)
+        self.__post_init__()
+
     def __post_init__(self):
-        if (not self.candidate_id or len(self.proposal_sha256) != 64
-                or self.verdict not in {'confirmed', 'needs_human'} or not self.reason.strip()
-                or any(type(getattr(self, n)) is not bool for n in
-                       ('error_supported', 'evidence_valid', 'minimal', 'no_semantic_loss'))):
+        if (
+            not self.candidate_id
+            or (self.proposal_sha256 is not None and (not isinstance(self.proposal_sha256, str) or len(self.proposal_sha256) != 64))
+            or self.verdict not in {'confirmed', 'needs_human'}
+            or not isinstance(self.reason, str)
+            or not self.reason.strip()
+            or any(
+                type(getattr(self, n)) is not bool
+                for n in ('error_supported', 'evidence_valid', 'minimal', 'no_semantic_loss')
+            )
+        ):
             raise LLMPayloadError('неполный вердикт проверки кандидата')
 
     @property
@@ -365,6 +406,19 @@ class ChapterCorrectionReviewResponse:
         object.__setattr__(self, 'candidates', tuple(self.candidates))
         if any(not isinstance(v, CorrectionVerdict) for v in self.candidates):
             raise LLMPayloadError('неверный вердикт кандидата')
+
+    def with_resolved_proposal_shas(self, refs) -> ChapterCorrectionReviewResponse:
+        if not refs:
+            return self
+        by_candidate = dict(refs) if isinstance(refs, Mapping) else {cid: sha for cid, sha in refs}
+        return ChapterCorrectionReviewResponse(
+            tuple(
+                replace(v, proposal_sha256=by_candidate[v.candidate_id])
+                if v.proposal_sha256 is None and v.candidate_id in by_candidate
+                else v
+                for v in self.candidates
+            )
+        )
 
     def validate_coverage(self, refs):
         actual = tuple((v.candidate_id, v.proposal_sha256) for v in self.candidates)

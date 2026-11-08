@@ -315,3 +315,25 @@ async def test_repeated_terminal_review_task_does_not_send_or_reserve(tmp_path, 
             assert tx.work.review_attempt_count(created['review_id']) == before_attempts
     finally:
         await app.aclose()
+
+
+async def test_quality_review_passes_previous_validation_error_into_repair_turn(tmp_path):
+    from hashlib import sha256
+    from linguary.application.quality_context import INSTRUCTIONS
+
+    app, fake, doc, run = await make_review_app(tmp_path)
+    try:
+        fake.mode = 'schema'
+        created = await app.quality_review.start(command(app))
+        finished = await drain_tasks(app)
+        assert all(t.status == TaskStatus.SUCCEEDED for t in finished), [t.last_error for t in finished]
+        review_requests = [r for r in fake.requests if r.kind == LLMResponseKind.QUALITY_REVIEW]
+        assert len(review_requests) == 2
+        first_req, second_req = review_requests
+        assert first_req.instructions == INSTRUCTIONS
+        assert second_req.instructions != INSTRUCTIONS
+        assert 'invalid schema' in second_req.instructions
+        assert second_req.call_context.prompt_hash == sha256(second_req.instructions.encode()).hexdigest()
+        assert json.loads(second_req.input_text) == json.loads(first_req.input_text)
+    finally:
+        await app.aclose()

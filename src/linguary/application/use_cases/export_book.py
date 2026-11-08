@@ -486,8 +486,7 @@ def _validate_content_plans(document, analyses, results, *, english_help=False, 
         raise ResultValidationError('неподдерживаемая версия проверки учебной помощи')
     a2_v4 = validators_version == 4
     sections = {s.id: s for s in document.sections}
-    blocks = tuple(document.blocks())
-    texts = {block.id: getattr(block, "text", "") for block in blocks}
+    fallback_blocks: tuple | None = None
     for analysis in analyses:
         section = sections[analysis.section_id]
         if getattr(document, "is_front_matter", lambda s: False)(section) or getattr(section, "is_notes_only", False):
@@ -499,7 +498,13 @@ def _validate_content_plans(document, analyses, results, *, english_help=False, 
             continue
         if english_help and plan.version != 3:
             raise ResultValidationError("английская помощь требует план версии 3")
-        owners = {b.id for b in blocks if b.section_id == analysis.section_id}
+        section_blocks = tuple(getattr(section, "blocks", ()))
+        if not section_blocks:
+            if fallback_blocks is None:
+                fallback_blocks = tuple(document.blocks())
+            section_blocks = tuple(b for b in fallback_blocks if getattr(b, "section_id", None) == analysis.section_id)
+        texts = {block.id: getattr(block, "text", "") for block in section_blocks}
+        owners = set(texts)
         actual = tuple(r for r in results if r.block_id in owners)
         if plan.version == 3:
             _validate_v3_bodies(analysis, actual, texts)
