@@ -216,7 +216,7 @@ async def test_restart_one_root_keeps_other_dispatch_roots_running(tmp_path):
             max_unit_source_chars=15,
         ),
         storage=StorageSettings(data_root=str(tmp_path / "data")),
-    ), llm_client=fake)
+    ), llm_client=fake, content_plan_profile="legacy-v1")
     try:
         document = store_imported(app, (("The cat sat.", "The dog ran."),))
         await app.analysis.start("book-1")

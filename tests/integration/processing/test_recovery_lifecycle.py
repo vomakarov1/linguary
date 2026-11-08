@@ -260,6 +260,7 @@ async def test_late_same_run_revoked_attempt_is_audit_only(tmp_path):
                 await release.wait()
             return await processing.generate(request)
     app = make_app(tmp_path, Delayed())
+    app.rate_limiter.set_max_concurrency(2)
     try:
         doc, run, task = await prepare(app)
         late = asyncio.create_task(app.processing.run_task(task))

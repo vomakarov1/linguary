@@ -215,6 +215,7 @@ async def test_late_result_does_not_replace_accepted_attempt(tmp_path):
                 await release.wait()
             return await processing.generate(request)
     app = make_app(tmp_path, Delayed())
+    app.rate_limiter.set_max_concurrency(2)
     try:
         doc = store_imported(app)
         await app.analysis.start('book-1')
