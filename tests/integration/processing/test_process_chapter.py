@@ -362,3 +362,112 @@ async def test_rejected_variant_from_other_chapter_does_not_reach_the_request(
     assert "Даскмир" not in text
     assert "(Множественное число, склоняется.)" in text
     assert "1. Сохранять иронию рассказчика." in text
+
+
+async def test_process_chapter_executes_independent_roots_concurrently_within_limit(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    import asyncio
+    from linguary.application.ports.llm import LLMClient
+
+    scenario = store_processing_book(
+        unit_of_work,
+        chapters=((SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT),),
+    )
+    max_chars = len(SOURCE_TEXT) + 5
+
+    current_concurrency = 0
+    max_concurrency = 0
+    lock = asyncio.Lock()
+
+    class ConcurrencyTrackingClient(FakeLLMClient):
+        async def generate(self, request):
+            nonlocal current_concurrency, max_concurrency
+            async with lock:
+                current_concurrency += 1
+                if current_concurrency > max_concurrency:
+                    max_concurrency = current_concurrency
+            try:
+                await asyncio.sleep(0.04)
+                return await super().generate(request)
+            finally:
+                async with lock:
+                    current_concurrency -= 1
+
+    client = ConcurrencyTrackingClient(default=translated_reply(("b1",)))
+    process, _ = make_process_chapter(
+        unit_of_work, client, max_unit_source_chars=max_chars
+    )
+    process._max_concurrent_units = 2
+
+    result = await process(command())
+
+    assert result.units == 4
+    assert result.processed_units == 4
+    assert result.saved_blocks == 4
+    assert not result.discarded
+    assert max_concurrency == 2
+
+
+async def test_parallel_roots_isolate_contextvars_and_preserve_recovery_invariants(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    import asyncio
+    from linguary.application.ports.llm import LLMClient
+
+    scenario = store_processing_book(
+        unit_of_work,
+        chapters=((SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT),),
+    )
+    max_chars = len(SOURCE_TEXT) + 5
+
+    observed_contexts = []
+    context_lock = asyncio.Lock()
+
+    class ContextObservingClient(FakeLLMClient):
+        async def generate(self, request):
+            await asyncio.sleep(0.02)
+            async with context_lock:
+                observed_contexts.append(request.call_context)
+            return await super().generate(request)
+
+    client = ContextObservingClient(
+        default=translated_reply(
+            ("b1",),
+            notes=[note_reply("b1", note="Заметка к b1")],
+        )
+    )
+    process, _ = make_process_chapter(
+        unit_of_work, client, max_unit_source_chars=max_chars
+    )
+    process._max_concurrent_units = 3
+
+    result = await process(command())
+
+    assert result.units == 3
+    assert result.processed_units == 3
+    assert result.saved_blocks == 3
+    assert not result.discarded
+
+    attempt_ids = [c.attempt_id for c in observed_contexts]
+    assert len(attempt_ids) == 3
+    assert len(set(attempt_ids)) == 3
+    scope_ids = [c.scope_id for c in observed_contexts]
+    assert len(set(scope_ids)) == 3
+
+    with unit_of_work.transaction() as tx:
+        roots = tx.work.list_roots(scenario.document.id, run_id=scenario.run_id)
+        assert len(roots) == 3
+        for root in roots:
+            assert tx.work.root_coverage_complete(root.id)
+
+    for root in roots:
+        assert not process._recovery.plan_unresolved(root.id)
+
+    stored = stored_results(unit_of_work, scenario.run_id)
+    assert len(stored) == 3
+    all_notes = [note for res in stored for note in res.language_notes]
+    assert len(all_notes) == 3
+    note_ids = [note.id for note in all_notes]
+    assert len(set(note_ids)) == 3
+    assert all(nid.startswith("ln-ch01-") for nid in note_ids)

@@ -29,6 +29,7 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from hashlib import sha256
+import threading
 from uuid import uuid4
 
 from linguary.application.block_processing import (
@@ -145,6 +146,7 @@ class ProcessChapter:
         retry_policy: RetryPolicy,
         validator: TranslationResultValidator,
         max_unit_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS,
+        max_concurrent_units: int = 1,
         context_builder: ContextBuilder | None = None,
         pronunciation_source: PronunciationSource | None = None,
         pronunciation_help_enabled: bool = False,
@@ -165,6 +167,7 @@ class ProcessChapter:
             pronunciation_variant=pronunciation_variant,
         )
         self._max_unit_source_chars = max_unit_source_chars
+        self._max_concurrent_units = max(1, max_concurrent_units)
         self._context_builder = context_builder or ContextBuilder()
         self._id_factory = id_factory or _new_id
         self._recovery = Recovery(unit_of_work, policy=recovery_policy)
@@ -373,23 +376,68 @@ class ProcessChapter:
             before = sum(transaction.work.get_root(root).calls_used for root in roots)
         blocks = {block.id: block for block in work.section.ordered_blocks}
         result = replace(result, units=len(roots))
-        for root_id in roots:
-            while scopes := self._recovery.plan_unresolved(root_id):
-                scope = scopes[0]
-                unit = TranslationUnit.of_blocks(id=scope.id,
-                    blocks=tuple(blocks[block] for block in scope.ordered_blocks), plan=work.analysis.treatment_plan)
-                try:
-                    result = await self._process_unit(unit, work=work, note_ids=note_ids,
-                        result=result, recovery=(root_id, scope.id))
-                except RecoverySplit:
-                    self._recovery.split(root_id, scope.id)
-                    continue
-                if result.discarded:
-                    return result
-            self._recovery.assert_complete(root_id)
+
+        semaphore = asyncio.Semaphore(self._max_concurrent_units)
+        note_id_lock = threading.Lock()
+
+        def safe_note_ids() -> str:
+            with note_id_lock:
+                return note_ids()
+
+        async def _process_single_root(root_id: str) -> ProcessChapterResult:
+            async with semaphore:
+                root_result = ProcessChapterResult(
+                    section_id=work.section.id,
+                    run_id=work.run.id,
+                )
+                while scopes := self._recovery.plan_unresolved(root_id):
+                    scope = scopes[0]
+                    unit = TranslationUnit.of_blocks(
+                        id=scope.id,
+                        blocks=tuple(blocks[block] for block in scope.ordered_blocks),
+                        plan=work.analysis.treatment_plan,
+                    )
+                    try:
+                        root_result = await self._process_unit(
+                            unit,
+                            work=work,
+                            note_ids=safe_note_ids,
+                            result=root_result,
+                            recovery=(root_id, scope.id),
+                        )
+                    except RecoverySplit:
+                        self._recovery.split(root_id, scope.id)
+                        continue
+                    if root_result.discarded:
+                        return root_result
+                self._recovery.assert_complete(root_id)
+                return root_result
+
+        tasks = [asyncio.create_task(_process_single_root(root_id)) for root_id in roots]
+        try:
+            root_results = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        processed_units = sum(r.processed_units for r in root_results)
+        saved_blocks = sum(r.saved_blocks for r in root_results)
+        usages = tuple(r.usage for r in root_results if r.usage is not None)
+        discarded = any(r.discarded for r in root_results)
+
         with self._unit_of_work.transaction() as transaction:
             used = sum(transaction.work.get_root(root).calls_used for root in roots) - before
-        return replace(result, attempts=used)
+        return replace(
+            result,
+            processed_units=processed_units,
+            saved_blocks=saved_blocks,
+            attempts=used,
+            usage=total_usage(usages),
+            discarded=discarded,
+        )
 
     def _load(self, command: ProcessChapterCommand, *, transaction=None) -> _ChapterWork:
         """Loads the book, chapter analysis, and active run in a single transaction."""

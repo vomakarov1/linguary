@@ -585,6 +585,7 @@ def _processing_sequence(
         unit_of_work=unit_of_work,
         queue=task_queue,
         process_chapter=ProcessChapter(
+            max_concurrent_units=settings.worker.concurrency,
             recovery_policy=RecoveryPolicy(**asdict(settings.recovery)),
             unit_of_work=unit_of_work,
             llm_client=model,
