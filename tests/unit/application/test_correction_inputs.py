@@ -918,4 +918,106 @@ def test_request_filters_chapter_context_for_chunk_without_changing_checksums():
     assert inputs.context["chapter_blocks"] == chapter_blocks_before
 
 
+def test_correction_requests_place_static_chapter_prefix_before_blocks_and_candidates():
+    from dataclasses import asdict
+    from linguary.application.use_cases.correct_chapter import CorrectChapterV2
+    from linguary.domain import ChapterAnalysis, TreatmentPlan
+    from linguary.domain.content_plan import canonical_sha
+    from linguary.domain.correction import CorrectionCandidate
+
+    section = make_analysis_section(texts=("First block.", "Second block."))
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    res1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Первый блок.",
+    )
+    res2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Второй блок.",
+    )
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=section.blocks,
+        results={b1.id: res1, b2.id: res2},
+        bindings={b1.id: None, b2.id: None},
+    )
+    candidate_payload = json.loads(json.dumps({
+        "schema_version": 1,
+        "book_id": doc.id,
+        "run_id": "run",
+        "conditions_id": "cond-1",
+        "section_id": section.id,
+        "block_id": b1.id,
+        "input_sha256": inputs.checksums[b1.id],
+        "input_generation": 1,
+        "group_id": "group-1",
+        "proposal_attempt_id": "att-1",
+        "original": {"text": b1.text},
+        "current_result": asdict(res1),
+        "result": asdict(replace(res1, translated_text="Первый блок уточнён.")),
+        "proposal": {"issues": [{"kind": "note", "quote": "First", "explanation": "Уточнить"}]},
+    }))
+    candidate = CorrectionCandidate(
+        candidate_id="cand-1",
+        book_id=doc.id,
+        run_id="run",
+        conditions_id="cond-1",
+        section_id=section.id,
+        block_id=b1.id,
+        input_sha256=inputs.checksums[b1.id],
+        input_generation=1,
+        proposal_sha256=canonical_sha(candidate_payload),
+        payload=candidate_payload,
+        group_id="group-1",
+        proposal_attempt_id="att-1",
+    )
+    snapshot = SimpleNamespace(
+        prompt="Propose.",
+        review_prompt="Review proposals.",
+        parameters={"max_attempts": 1, "max_output_tokens": None},
+    )
+    task = SimpleNamespace(book_id=doc.id, id="task", scope_id=section.id)
+    correct = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+    correct_v2 = CorrectChapterV2(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+
+    propose_req = correct._request(inputs, task, (b1.id, b2.id))
+    review_req = correct_v2._review_request(inputs, task, (candidate,))
+
+    expected_prefix_keys = [
+        "schema_version",
+        "book_id",
+        "section_id",
+        "source_language",
+        "target_language",
+        "run_glossary",
+        "chapter_analysis",
+        "chapter_blocks",
+    ]
+    assert list(json.loads(propose_req.input_text).keys()) == [*expected_prefix_keys, "blocks"]
+    assert list(json.loads(review_req.input_text).keys()) == [*expected_prefix_keys, "candidates"]
+    assert propose_req.input_text.index('"chapter_blocks":') < propose_req.input_text.index('"blocks":')
+    assert review_req.input_text.index('"chapter_blocks":') < review_req.input_text.index('"candidates":')
+
+
+
 

@@ -43,21 +43,27 @@ def _sha(value):
     return sha256(json.dumps(thaw(value), ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def dependency_intervals(ordered_blocks, plan=None, *, indivisible=()):
+def dependency_intervals(ordered_blocks, plan=None, *, indivisible=(), max_difficulty_span: int = 3):
     ordered = tuple(ordered_blocks)
     if len(set(ordered)) != len(ordered):
         raise RecoveryError('unsafe_partition')
     positions = {block: index for index, block in enumerate(ordered)}
-    edges = list(indivisible)
-    if plan is not None:
-        edges.extend((difficulty.owner_block_id, *(a.block_id for a in difficulty.anchors)) for difficulty in plan.difficulties)
     spans = [(index, index) for index in range(len(ordered))]
-    for edge in edges:
+    for edge in indivisible:
         if not set(edge) <= positions.keys():
             raise RecoveryError('unsafe_partition')
         if edge:
             indices = [positions[block] for block in edge]
             spans.append((min(indices), max(indices)))
+    if plan is not None:
+        for difficulty in plan.difficulties:
+            edge = (difficulty.owner_block_id, *(a.block_id for a in difficulty.anchors))
+            if not set(edge) <= positions.keys():
+                raise RecoveryError('unsafe_partition')
+            if edge:
+                indices = [positions[block] for block in edge]
+                if max(indices) - min(indices) <= max_difficulty_span:
+                    spans.append((min(indices), max(indices)))
     merged = []
     for left, right in sorted(spans):
         if merged and left <= merged[-1][1]:

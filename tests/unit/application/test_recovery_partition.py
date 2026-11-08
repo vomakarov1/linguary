@@ -149,3 +149,99 @@ def test_context_facts_do_not_merge_distant_units_into_single_recovery_root():
     assert len(roots) == 2
     assert [tuple(r.manifest['ordered_blocks']) for r in roots] == [('b1', 'b2'), ('b3', 'b4')]
 
+
+def test_distant_difficulty_anchors_do_not_merge_entire_chapter_into_single_recovery_root():
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from linguary.application.recovery import Recovery
+    from linguary.domain import BlockTreatment, BlockType, CoverageStatus, GlossarySnapshot, TreatmentPlan, TreatmentPlanItem
+    from linguary.domain.analysis import ChapterAnalysis
+
+    plan_with_distant_difficulty = ContentPlan(
+        version=3,
+        profile='content-plan-v3',
+        difficulties=(
+            Difficulty(
+                id='d-distant',
+                anchors=(
+                    SourceAnchor('b1', 0, 1, 'a'),
+                    SourceAnchor('b6', 0, 1, 'f'),
+                ),
+                owner_block_id='b1',
+                kind='idiom',
+                priority='critical',
+                help_kind='explanation',
+                required_points=(RequiredPoint('p1', 'Explain idiom'),),
+            ),
+        ),
+    )
+    ids = ('b1', 'b2', 'b3', 'b4', 'b5', 'b6')
+    intervals = dependency_intervals(ids, plan_with_distant_difficulty)
+    assert intervals == (('b1',), ('b2',), ('b3',), ('b4',), ('b5',), ('b6',))
+    assert merge_unit_boundaries((('b1', 'b2'), ('b3', 'b4'), ('b5', 'b6')), intervals) == (
+        ('b1', 'b2'),
+        ('b3', 'b4'),
+        ('b5', 'b6'),
+    )
+    # Explicit structural indivisible edges are still merged unconditionally
+    assert dependency_intervals(ids, None, indivisible=(('b1', 'b6'),)) == (ids,)
+    # Custom max_difficulty_span allows wider spans when explicitly requested
+    assert dependency_intervals(ids, plan_with_distant_difficulty, max_difficulty_span=5) == (ids,)
+
+    roots, scopes = [], []
+
+    class WorkStore:
+        def latest_conditions(self, book_id):
+            return SimpleNamespace(
+                id='00000000-0000-0000-0000-000000000001',
+                payload={'checks': {'language_notes_per_chapter': 2}},
+            )
+
+        def find_root_by_key(self, key):
+            return None
+
+        def add_root(self, root):
+            roots.append(root)
+
+        def list_scopes(self, root_id):
+            return tuple(s for s in scopes if s.root_id == root_id)
+
+        def add_scope(self, scope):
+            scopes.append(scope)
+
+    class Uow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=store)
+
+    store = WorkStore()
+    treatment = TreatmentPlan('section', tuple(TreatmentPlanItem(b, BlockTreatment.TRANSLATE) for b in ids))
+    analysis = ChapterAnalysis(
+        id='analysis',
+        section_id='section',
+        coverage_status=CoverageStatus.COMPLETE,
+        treatment_plan=treatment,
+        translation_instructions='Translate.',
+        chapter_summary='Scene.',
+        content_plan=plan_with_distant_difficulty,
+    )
+    blocks = {
+        b: SimpleNamespace(id=b, text='abcd', parent_id=None, type=BlockType.PARAGRAPH, attributes={})
+        for b in ids
+    }
+    units = (
+        SimpleNamespace(block_ids=('b1', 'b2'), items=tuple(SimpleNamespace(block=blocks[b]) for b in ('b1', 'b2'))),
+        SimpleNamespace(block_ids=('b3', 'b4'), items=tuple(SimpleNamespace(block=blocks[b]) for b in ('b3', 'b4'))),
+        SimpleNamespace(block_ids=('b5', 'b6'), items=tuple(SimpleNamespace(block=blocks[b]) for b in ('b5', 'b6'))),
+    )
+    work = SimpleNamespace(
+        document=SimpleNamespace(id='book'),
+        analysis=analysis,
+        run=SimpleNamespace(id='run', glossary_snapshot=GlossarySnapshot()),
+        processed_block_ids=set(),
+    )
+    Recovery(Uow()).prepare_roots(work, units, max_source_chars=100, validator=None)
+    assert len(roots) == 3
+    assert [tuple(r.manifest['ordered_blocks']) for r in roots] == [('b1', 'b2'), ('b3', 'b4'), ('b5', 'b6')]
+
+

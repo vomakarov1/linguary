@@ -51,6 +51,87 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+_STATIC_CHAPTER_PREFIX_KEYS = (
+    'schema_version',
+    'book_id',
+    'section_id',
+    'source_language',
+    'target_language',
+    'run_glossary',
+    'chapter_analysis',
+    'chapter_blocks',
+)
+
+
+def _normalize_sorted_keys(value: Any) -> Any:
+    return json.loads(_json(value))
+
+
+def _filtered_chapter_context(
+    inputs: Any,
+    target_block_ids: Sequence[str] | set[str],
+) -> dict[str, Any]:
+    context = dict(getattr(inputs, 'context', None) or {})
+    document = getattr(inputs, 'document', None)
+    if document is not None:
+        if 'book_id' not in context and getattr(document, 'id', None) is not None:
+            context['book_id'] = document.id
+        if 'source_language' not in context and getattr(document, 'source_language', None) is not None:
+            context['source_language'] = document.source_language
+        if 'target_language' not in context and getattr(document, 'target_language', None) is not None:
+            context['target_language'] = document.target_language
+    section = getattr(inputs, 'section', None)
+    if section is not None and 'section_id' not in context and getattr(section, 'id', None) is not None:
+        context['section_id'] = section.id
+    aliases = getattr(inputs, 'block_aliases', {})
+    allowed_block_ids: set[str] | None = None
+    blocks = getattr(inputs, 'blocks', ())
+    target_set = set(target_block_ids)
+    if blocks and 0 < len(target_set) < len(blocks):
+        ordered_blocks = (
+            section.ordered_blocks
+            if section is not None and hasattr(section, 'ordered_blocks')
+            else blocks
+        )
+        ordered_ids = [b.id for b in ordered_blocks]
+        allowed_block_ids = set(target_set)
+        for idx, bid in enumerate(ordered_ids):
+            if bid in target_set:
+                allowed_block_ids.update(
+                    ordered_ids[max(0, idx - 2) : min(len(ordered_ids), idx + 3)]
+                )
+        allowed_aliases = {aliases.get(bid, bid) for bid in allowed_block_ids} | allowed_block_ids
+        if isinstance(context.get('chapter_blocks'), (list, tuple)):
+            context['chapter_blocks'] = [
+                cb for cb in context['chapter_blocks']
+                if isinstance(cb, Mapping) and cb.get('block_id') in allowed_aliases
+            ]
+    if 'chapter_analysis' in context:
+        context['chapter_analysis'] = _llm_chapter_analysis(
+            context['chapter_analysis'],
+            aliases,
+            allowed_block_ids=allowed_block_ids,
+        )
+    return context
+
+
+def _request_input_json(
+    context: Mapping[str, Any],
+    *,
+    payload_key: str,
+    payload_value: Any,
+) -> str:
+    ordered_body: dict[str, Any] = {}
+    for key in _STATIC_CHAPTER_PREFIX_KEYS:
+        if key in context:
+            ordered_body[key] = _normalize_sorted_keys(context[key])
+    for key in sorted(context):
+        if key not in ordered_body and key != payload_key:
+            ordered_body[key] = _normalize_sorted_keys(context[key])
+    ordered_body[payload_key] = _normalize_sorted_keys(payload_value)
+    return json.dumps(ordered_body, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+
+
 def _chunk_correction_blocks(
     block_ids: Sequence[str],
     inputs: Any,
@@ -265,37 +346,8 @@ class CorrectChapter:
         return inputs, task, payload
 
     def _request(self, inputs, task, block_ids):
-        context = dict(inputs.context)
+        context = _filtered_chapter_context(inputs, block_ids)
         aliases = getattr(inputs, 'block_aliases', {})
-        allowed_block_ids: set[str] | None = None
-        blocks = getattr(inputs, 'blocks', ())
-        if blocks and len(block_ids) < len(blocks):
-            section = getattr(inputs, 'section', None)
-            ordered_blocks = (
-                section.ordered_blocks
-                if section is not None and hasattr(section, 'ordered_blocks')
-                else blocks
-            )
-            ordered_ids = [b.id for b in ordered_blocks]
-            target_set = set(block_ids)
-            allowed_block_ids = set(block_ids)
-            for idx, bid in enumerate(ordered_ids):
-                if bid in target_set:
-                    allowed_block_ids.update(
-                        ordered_ids[max(0, idx - 2) : min(len(ordered_ids), idx + 3)]
-                    )
-            allowed_aliases = {aliases.get(bid, bid) for bid in allowed_block_ids} | allowed_block_ids
-            if isinstance(context.get('chapter_blocks'), (list, tuple)):
-                context['chapter_blocks'] = [
-                    cb for cb in context['chapter_blocks']
-                    if isinstance(cb, Mapping) and cb.get('block_id') in allowed_aliases
-                ]
-        if 'chapter_analysis' in context:
-            context['chapter_analysis'] = _llm_chapter_analysis(
-                context['chapter_analysis'],
-                aliases,
-                allowed_block_ids=allowed_block_ids,
-            )
         blocks_payload = []
         for block_id in block_ids:
             alias = aliases.get(block_id, block_id)
@@ -310,11 +362,10 @@ class CorrectChapter:
                 original=dict(text=original_block.text),
                 current_result=current_result,
             ))
-        body = dict(context, blocks=blocks_payload)
         block_aliases = tuple((aliases[b], b) for b in block_ids if b in aliases)
         request = LLMRequest.for_chapter_correction(
             instructions=self.snapshot.prompt,
-            input_text=_json(body),
+            input_text=_request_input_json(context, payload_key='blocks', payload_value=blocks_payload),
             ordered_block_ids=block_ids,
             contract_version=2 if isinstance(self.snapshot, CorrectionSnapshotV2) else 1,
             block_aliases=block_aliases,
@@ -723,30 +774,26 @@ class CorrectChapterV2(CorrectChapter):
         raise ResultValidationError('исчерпаны попытки предложения исправления')
 
     def _review_request(self, inputs, task, candidates):
-        context = inputs.context
+        target_block_ids = {c.block_id for c in candidates}
+        context = _filtered_chapter_context(inputs, target_block_ids)
+        for key in ('run_glossary', 'chapter_analysis', 'chapter_blocks'):
+            context.setdefault(key, None)
         aliases = getattr(inputs, 'block_aliases', {})
-        body = dict(
-            source_language=inputs.document.source_language,
-            target_language=inputs.document.target_language,
-            chapter_blocks=context.get('chapter_blocks'),
-            chapter_analysis=_llm_chapter_analysis(context.get('chapter_analysis'), aliases),
-            run_glossary=context.get('run_glossary'),
-            candidates=[
-                dict(
-                    candidate_id=c.candidate_id,
-                    proposal_sha256=c.proposal_sha256,
-                    block_id=aliases.get(c.block_id, c.block_id),
-                    original=thaw(c.payload['original']),
-                    current_result=_llm_block_result(thaw(c.payload['current_result']), aliases),
-                    proposed_result=_llm_block_result(thaw(c.payload['result']), aliases),
-                    issues=thaw(c.payload['proposal']['issues']),
-                )
-                for c in candidates
-            ],
-        )
+        candidates_payload = [
+            dict(
+                candidate_id=c.candidate_id,
+                proposal_sha256=c.proposal_sha256,
+                block_id=aliases.get(c.block_id, c.block_id),
+                original=thaw(c.payload['original']),
+                current_result=_llm_block_result(thaw(c.payload['current_result']), aliases),
+                proposed_result=_llm_block_result(thaw(c.payload['result']), aliases),
+                issues=thaw(c.payload['proposal']['issues']),
+            )
+            for c in candidates
+        ]
         return LLMRequest.for_chapter_correction_review(
             instructions=self.snapshot.review_prompt,
-            input_text=_json(body),
+            input_text=_request_input_json(context, payload_key='candidates', payload_value=candidates_payload),
             ordered_block_ids=tuple(c.block_id for c in candidates),
             candidate_refs=tuple((c.candidate_id, c.proposal_sha256) for c in candidates),
         ).with_logging(

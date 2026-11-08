@@ -360,3 +360,170 @@ async def test_review_group_persists_checks_for_unchanged_and_accepted_when_peer
         assert check_by_block[b2.id].candidate_id == cand2.candidate_id
     finally:
         monkeypatch.undo()
+
+
+def test_review_request_filters_chapter_context_for_candidate_window():
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        ContextFact,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
+
+    section = make_analysis_section(
+        texts=("Block one.", "Block two.", "Block three.", "Block four.", "Block five.", "Block six."),
+    )
+    doc = make_analysis_document((section,))
+    b1, b2, b3, b4, b5, b6 = section.blocks
+
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        tuple((b.id, BlockTreatment.TRANSLATE) for b in section.blocks),
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id="d1",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="Block"),),
+                owner_block_id=b1.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p1", description="meaning 1"),),
+            ),
+            Difficulty(
+                id="d3",
+                anchors=(SourceAnchor(block_id=b3.id, start=0, end=5, quote="Block"),),
+                owner_block_id=b3.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p3", description="meaning 3"),),
+            ),
+            Difficulty(
+                id="d6",
+                anchors=(SourceAnchor(block_id=b6.id, start=0, end=5, quote="Block"),),
+                owner_block_id=b6.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p6", description="meaning 6"),),
+            ),
+        ),
+        context_facts=(
+            ContextFact(
+                id="cf1",
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="Block"),),
+                subject_anchor=SourceAnchor(block_id=b1.id, start=6, end=9, quote="one"),
+                value="Speaker 1",
+                certainty="explicit",
+            ),
+            ContextFact(
+                id="cf3",
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b3.id, start=0, end=5, quote="Block"),),
+                subject_anchor=SourceAnchor(block_id=b3.id, start=6, end=11, quote="three"),
+                value="Speaker 3",
+                certainty="explicit",
+            ),
+            ContextFact(
+                id="cf6",
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b6.id, start=0, end=5, quote="Block"),),
+                subject_anchor=SourceAnchor(block_id=b6.id, start=6, end=9, quote="six"),
+                value="Speaker 6",
+                certainty="explicit",
+            ),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        expected_block_ids=tuple(b.id for b in section.blocks),
+        content_plan=content_plan,
+    )
+    results = {
+        b.id: BlockProcessingResult(
+            block_id=b.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text=f"Перевод {idx}.",
+        )
+        for idx, b in enumerate(section.blocks, start=1)
+    }
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=section.blocks,
+        results=results,
+        bindings={b.id: None for b in section.blocks},
+    )
+    checksums_before = dict(inputs.checksums)
+    context_sha_before = inputs.context_sha256
+    chapter_blocks_before = list(inputs.context["chapter_blocks"])
+
+    candidate_payload = json.loads(json.dumps({
+        "schema_version": 1,
+        "book_id": doc.id,
+        "run_id": "run",
+        "conditions_id": "cond-1",
+        "section_id": section.id,
+        "block_id": b1.id,
+        "input_sha256": inputs.checksums[b1.id],
+        "input_generation": 1,
+        "group_id": "group-1",
+        "proposal_attempt_id": "att-1",
+        "original": {"text": b1.text},
+        "current_result": asdict(results[b1.id]),
+        "result": asdict(replace(results[b1.id], translated_text="Перевод 1 уточнён.")),
+        "proposal": {"issues": [{"kind": "note", "quote": "Block", "explanation": "Уточнить"}]},
+    }))
+    candidate = CorrectionCandidate(
+        candidate_id="cand-1",
+        book_id=doc.id,
+        run_id="run",
+        conditions_id="cond-1",
+        section_id=section.id,
+        block_id=b1.id,
+        input_sha256=inputs.checksums[b1.id],
+        input_generation=1,
+        proposal_sha256=canonical_sha(candidate_payload),
+        payload=candidate_payload,
+        group_id="group-1",
+        proposal_attempt_id="att-1",
+    )
+    snapshot = SimpleNamespace(
+        prompt="Propose.",
+        review_prompt="Review proposals.",
+        parameters={"max_attempts": 1, "max_output_tokens": None},
+    )
+    correct_v2 = CorrectChapterV2(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+    task = SimpleNamespace(book_id=doc.id, id="task", scope_id=section.id)
+
+    request = correct_v2._review_request(inputs, task, (candidate,))
+    body = json.loads(request.input_text)
+
+    assert [cb["block_id"] for cb in body["chapter_blocks"]] == ["b1", "b2", "b3"]
+    assert [item["block_id"] for item in body["chapter_analysis"]["treatment_plan"]["items"]] == [
+        "b1", "b2", "b3"
+    ]
+    assert [d["id"] for d in body["chapter_analysis"]["content_plan"]["difficulties"]] == [
+        "d1", "d3"
+    ]
+    assert [f["id"] for f in body["chapter_analysis"]["content_plan"]["context_facts"]] == [
+        "cf1", "cf3"
+    ]
+    assert inputs.checksums == checksums_before
+    assert inputs.context_sha256 == context_sha_before
+    assert inputs.context["chapter_blocks"] == chapter_blocks_before
+
