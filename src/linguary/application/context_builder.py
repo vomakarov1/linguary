@@ -51,7 +51,11 @@ from linguary.application.chapter_instructions import (
 )
 from linguary.application.errors import ApplicationError
 from linguary.application.reader_text import learner_instructions
-from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
+from linguary.application.llm_dto import (
+    BlockResultResponse,
+    ChapterAnalysisResponse,
+    TranslationResultResponse,
+)
 from linguary.application.ports.llm import LLMRequest
 from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY, require_policy
 from linguary.domain.content_plan import ContentPlan, artifact_key
@@ -62,6 +66,7 @@ from linguary.application.retry_policy import (
     ResultValidationError,
 )
 from linguary.domain import (
+    BlockTreatment,
     BlockType,
     CanonicalDocument,
     ChapterAnalysis,
@@ -237,6 +242,7 @@ _ENGLISH_HELP_READER_LEVEL_GUIDANCE = {
     'a2': 'Для A2 используй частотные слова и короткие простые конструкции.',
     'b1': 'Для B1 используй знакомую лексику и короткие понятные предложения.',
     'b2': 'Для B2 используй естественный английский и точную, но не излишне редкую лексику.',
+    'c1': 'Для C1 используй естественный английский и точные пояснения только к действительно редким, архаичным или неочевидным местам.',
 }
 
 _ENGLISH_HELP_BEFORE_YOU_READ = """\
@@ -382,10 +388,14 @@ class TranslationContext(AliasedBlocksContext):
     content_plan: ContentPlan | None = None
     before_you_read: tuple[BeforeYouReadEntry, ...] = ()
     input_without_optional_neighbours: str | None = None
+    pure_read_as_is_aliases: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "block_ids_by_alias", MappingProxyType(dict(self.block_ids_by_alias))
+        )
+        object.__setattr__(
+            self, "pure_read_as_is_aliases", frozenset(self.pure_read_as_is_aliases)
         )
 
     def to_aliases(self, message: str) -> str:
@@ -437,16 +447,52 @@ class TranslationContext(AliasedBlocksContext):
                 f"ответ группы {self.unit_id} относится к блокам вне запроса: {unknown}",
                 expectation=self.expectation,
             )
+        returned_aliases = {block.source_block_id for block in payload.blocks}
+        omitted_pure = self.pure_read_as_is_aliases - returned_aliases
+        if omitted_pure:
+            blocks_iter = iter(payload.blocks)
+            next_block = next(blocks_iter, None)
+            merged_blocks: list[BlockResultResponse] = []
+            for alias in self.block_ids_by_alias:
+                if alias in omitted_pure:
+                    merged_blocks.append(
+                        BlockResultResponse(
+                            source_block_id=self.block_id_for(alias),
+                            treatment=BlockTreatment.READ_AS_IS,
+                            translated_text=None,
+                            glossary_hints=(),
+                        )
+                    )
+                elif next_block is not None and next_block.source_block_id == alias:
+                    while next_block is not None and next_block.source_block_id == alias:
+                        merged_blocks.append(
+                            replace(
+                                next_block,
+                                source_block_id=self.block_id_for(next_block.source_block_id),
+                            )
+                        )
+                        next_block = next(blocks_iter, None)
+            while next_block is not None:
+                merged_blocks.append(
+                    replace(
+                        next_block,
+                        source_block_id=self.block_id_for(next_block.source_block_id),
+                    )
+                )
+                next_block = next(blocks_iter, None)
+            resolved_blocks = tuple(merged_blocks)
+        else:
+            resolved_blocks = tuple(
+                replace(block, source_block_id=self.block_id_for(block.source_block_id))
+                for block in payload.blocks
+            )
         return TranslationResultResponse(
             pronunciation_candidates=tuple(replace(candidate, anchor=replace(candidate.anchor,
                 block_id=self.block_ids_by_alias.get(candidate.anchor.block_id, '')))
                 for candidate in payload.pronunciation_candidates),
             fragment_assistances=payload.fragment_assistances,
             content_evidence=tuple(replace(e, source_block_id=self.block_id_for(e.source_block_id)) for e in payload.content_evidence),
-            blocks=tuple(
-                replace(block, source_block_id=self.block_id_for(block.source_block_id))
-                for block in payload.blocks
-            ),
+            blocks=resolved_blocks,
             language_notes=tuple(
                 replace(note, source_block_id=self.block_id_for(note.source_block_id))
                 for note in payload.language_notes
@@ -484,6 +530,12 @@ def _extract_word_stems(text: str) -> set[str]:
     return stems
 
 
+_GLOSSARY_STOP_WORDS = frozenset({
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "by", "with", "from",
+    "mr", "mrs", "ms", "miss", "dr", "sir", "st", "lady", "lord",
+})
+
+
 def _matches_chapter_text(term_source: str, blocks_text: str, word_stems: set[str]) -> bool:
     """Checks whether a glossary term or candidate appears in the chapter text (P2.T2, AC-006)."""
     key = glossary_key(term_source)
@@ -494,11 +546,11 @@ def _matches_chapter_text(term_source: str, blocks_text: str, word_stems: set[st
     term_words = re.findall(r"[A-Za-zА-Яа-я0-9]+", term_source.casefold())
     if not term_words:
         return False
-    for w in term_words:
-        for stem in _stem_word(w):
-            if stem in word_stems:
-                return True
-    return False
+    significant_words = [w for w in term_words if w not in _GLOSSARY_STOP_WORDS] or term_words
+    return all(
+        any(stem in word_stems for stem in _stem_word(w))
+        for w in significant_words
+    )
 
 
 class ContextBuilder:
@@ -759,6 +811,32 @@ class ContextBuilder:
             _alias(index): item.block.id
             for index, item in enumerate(unit.items, start=1)
         }
+        uncovered_owners: set[str] = set()
+        if analysis.content_plan is not None:
+            covered_points = {
+                (e.difficulty_id, e.point_id)
+                for e in analysis.content_plan.before_you_read_evidence
+            }
+            for difficulty in analysis.content_plan.difficulties:
+                if not difficulty.required_points or any(
+                    (difficulty.id, point.id) not in covered_points
+                    for point in difficulty.required_points
+                ):
+                    uncovered_owners.add(difficulty.owner_block_id)
+        candidate_pure = frozenset(
+            alias
+            for alias, item in zip(aliases, unit.items, strict=True)
+            if item.treatment is BlockTreatment.READ_AS_IS
+            and item.block.id not in uncovered_owners
+        )
+        pure_read_as_is_aliases = (
+            candidate_pure
+            if len(unit.items) > 1
+            and pronunciation_version is None
+            and not self._english_help
+            and len(candidate_pure) < len(unit.items)
+            else frozenset()
+        )
         input_args = dict(
             document=document,
             section=section,
@@ -767,6 +845,7 @@ class ContextBuilder:
             glossary=glossary,
             candidates=(*analysis.glossary_candidates, *book_candidates),
             recovery_child=recovery_child,
+            pure_read_as_is_aliases=pure_read_as_is_aliases,
         )
         input_text = self._translation_input(**input_args, neighbours=neighbours)
         mandatory_input = (
@@ -796,6 +875,7 @@ class ContextBuilder:
             content_plan=analysis.content_plan,
             before_you_read=() if section.is_notes_only else analysis.before_you_read,
             input_without_optional_neighbours=mandatory_input,
+            pure_read_as_is_aliases=pure_read_as_is_aliases,
         )
 
     def _translation_input(
@@ -809,6 +889,7 @@ class ContextBuilder:
         candidates: Sequence[GlossaryCandidate],
         neighbours: Sequence[_NeighbourBlocks],
         recovery_child: bool = False,
+        pure_read_as_is_aliases: frozenset[str] = frozenset(),
     ) -> str:
         """Processing request prompt text: header, chapter digest, glossary, and blocks.
 
@@ -858,7 +939,7 @@ class ContextBuilder:
                 target_language=document.target_language,
             ),
             _neighbour_context(neighbours),
-            _unit_blocks(unit),
+            _unit_blocks(unit, pure_read_as_is_aliases=pure_read_as_is_aliases),
             _owned_content_plan(analysis, unit),
         ]
         return "\n\n".join(part for part in parts if part)
@@ -1844,12 +1925,20 @@ def _points_to_book_anchor(target: str | None) -> bool:
     return bool(separator and fragment)
 
 
-def _unit_blocks(unit: TranslationUnit) -> str:
+def _unit_blocks(
+    unit: TranslationUnit,
+    pure_read_as_is_aliases: frozenset[str] = frozenset(),
+) -> str:
     """Group blocks with aliases along with their treatment modes."""
     lines = ["Блоки для обработки:"]
     lines.extend(
-        f"[{_alias(index)}] режим {item.treatment}\n"
-        f"{source_text_for_model(item.block, footnote_markers=True)}"
+        f"[{_alias(index)}] режим {item.treatment}"
+        + (
+            " (только для контекста, в blocks не возвращать)"
+            if _alias(index) in pure_read_as_is_aliases
+            else ""
+        )
+        + f"\n{source_text_for_model(item.block, footnote_markers=True)}"
         for index, item in enumerate(unit.items, start=1)
     )
     return "\n\n".join(lines)

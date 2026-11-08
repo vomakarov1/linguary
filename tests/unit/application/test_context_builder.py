@@ -650,7 +650,7 @@ def test_analysis_checks_real_processing_group_notes_budget():
         validate_content_plan(payload, context.block_ids_by_alias, {b.id: b.text for b in section.blocks}, language_notes_per_chapter=context.language_notes_per_chapter, note_limits_by_block=context.note_limits_by_block, note_group_limits=context.note_group_limits)
 
 
-@pytest.mark.parametrize('level', ['a2', 'b1', 'b2'])
+@pytest.mark.parametrize('level', ['a2', 'b1', 'b2', 'c1'])
 def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     from linguary.application.context_builder import snapshot_prompt_templates
     templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=level, profile='content-plan-v3', english_help=True)
@@ -679,7 +679,7 @@ def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     assert 'content_evidence' not in processing
     assert 'Верни content_evidence' not in processing
     assert f'Для {level.upper()}' in processing
-    assert not any(f'Для {other.upper()}' in processing for other in {'a2', 'b1', 'b2'} - {level})
+    assert not any(f'Для {other.upper()}' in processing for other in {'a2', 'b1', 'b2', 'c1'} - {level})
     assert 'english_help' not in snapshot_prompt_templates(source_language='en', target_language='ru', reader_level=level)
 
 
@@ -899,5 +899,25 @@ def test_for_block_regeneration_filters_glossary_by_block_and_neighbours() -> No
     assert "Пемберли" in input_text
     assert "Rosings" not in input_text
     assert "Розингс" not in input_text
+
+
+def test_matches_chapter_text_requires_all_significant_words_and_ignores_honorifics() -> None:
+    from linguary.application.context_builder import _extract_word_stems, _matches_chapter_text
+
+    jane_text = "Jane Bennet smiled at the news."
+    jane_stems = _extract_word_stems(jane_text)
+    assert not _matches_chapter_text("Elizabeth Bennet", jane_text, jane_stems)
+    assert _matches_chapter_text("Jane Bennet", jane_text, jane_stems)
+    assert _matches_chapter_text("Mr. Bennet", jane_text, jane_stems)
+    assert _matches_chapter_text("Mrs. Bennet", jane_text, jane_stems)
+
+    battle_text = "During the great battles around Hogwarts, nobody slept."
+    battle_stems = _extract_word_stems(battle_text)
+    assert _matches_chapter_text("The Battle of Hogwarts", battle_text, battle_stems)
+
+    hogwarts_only_text = "The Hogwarts express left from the station."
+    hogwarts_only_stems = _extract_word_stems(hogwarts_only_text)
+    assert not _matches_chapter_text("The Battle of Hogwarts", hogwarts_only_text, hogwarts_only_stems)
+
 
 

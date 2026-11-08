@@ -360,3 +360,77 @@ def test_pronunciation_candidate_dto_error_is_isolated(monkeypatch):
         pronunciation_candidates_version=1)
     assert result.blocks[0].translated_text
     assert len(result.pronunciation_candidates) == 1
+
+
+def test_parse_payload_validates_parsed_dict_without_reserializing(monkeypatch):
+    from linguary.adapters.llm import payloads
+
+    translation_json = as_content(
+        pronunciation_payload(2, [pronunciation_candidate()])
+        | {
+            "content_evidence": [
+                {
+                    "difficulty_id": "d-1",
+                    "point_id": "p-1",
+                    "artifact_kind": "language_note.note",
+                    "source_block_id": "b1",
+                    "artifact_index": 0,
+                    "body_excerpt": "Explanation excerpt",
+                }
+            ]
+        }
+    )
+    analysis_data = analysis_payload() | {
+        "content_plan": {
+            "version": 3,
+            "profile": "content-plan-v3",
+            "difficulties": [],
+            "before_you_read_evidence": [
+                {
+                    "difficulty_id": "d-1",
+                    "point_id": "p-1",
+                    "artifact_kind": "before_you_read.explanation",
+                    "source_block_id": "b1",
+                    "artifact_index": 0,
+                    "body_excerpt": "BYR excerpt",
+                }
+            ],
+            "context_facts": [],
+        }
+    }
+    analysis_json = as_content(analysis_data)
+
+    real_loads = payloads.json.loads
+    loads_calls = 0
+
+    def counting_loads(*args, **kwargs):
+        nonlocal loads_calls
+        loads_calls += 1
+        return real_loads(*args, **kwargs)
+
+    def forbidden_dumps(*args, **kwargs):
+        raise AssertionError("json.dumps must not be called in parse_payload")
+
+    monkeypatch.setattr(payloads.json, "loads", counting_loads)
+    monkeypatch.setattr(payloads.json, "dumps", forbidden_dumps)
+
+    tr_res = parse_payload(
+        LLMResponseKind.TRANSLATION_RESULT,
+        translation_json,
+        contract_version=2,
+        pronunciation_candidates_version=1,
+    )
+    assert loads_calls == 1
+    assert len(tr_res.pronunciation_candidates) == 1
+    assert len(tr_res.content_evidence) == 1
+
+    loads_calls = 0
+    an_res = parse_payload(
+        LLMResponseKind.CHAPTER_ANALYSIS,
+        analysis_json,
+        contract_version=3,
+        name_translation_policy_version=1,
+    )
+    assert loads_calls == 1
+    assert len(an_res.content_plan.before_you_read_evidence) == 1
+

@@ -1033,6 +1033,107 @@ def test_deduplicate_book_before_you_read_preserves_card_required_by_chapter_pla
     assert res2.content_plan.before_you_read_evidence[0].artifact_key == "byr:0"
 
 
+def test_before_you_read_keeps_distinct_phrasal_verbs_with_same_verb() -> None:
+    from analysis_fakes import make_analysis_document, make_analysis_section
+    from linguary.application.analysis_merge import (
+        _before_you_read_key,
+        before_you_read_entries,
+        deduplicate_book_before_you_read,
+    )
+    from linguary.domain import BeforeYouReadEntry, BlockTreatment, TreatmentPlan
+
+    entries = (
+        BeforeYouReadEntryResponse("take off", "взлететь или снять одежду"),
+        BeforeYouReadEntryResponse("take place", "происходить, иметь место"),
+        BeforeYouReadEntryResponse("taken off", "дубль первого выражения"),
+    )
+    selected = before_you_read_entries(entries)
+    assert [e.expression for e in selected] == ["take off", "take place"]
+
+    assert _before_you_read_key("president") != _before_you_read_key("present")
+    assert _before_you_read_key("take off") != _before_you_read_key("take place")
+
+    s1 = make_analysis_section(section_id="sec-1", order=0, texts=("First text.",))
+    s2 = make_analysis_section(section_id="sec-2", order=1, texts=("Second text.",))
+    b1, b2 = s1.blocks[0], s2.blocks[0]
+    a1 = ChapterAnalysis.create(
+        id="a1",
+        section_id="sec-1",
+        treatment_plan=TreatmentPlan.of_treatments(s1.id, ((b1.id, BlockTreatment.TRANSLATE),)),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id,),
+        before_you_read=(
+            BeforeYouReadEntry("take off", "взлететь"),
+            BeforeYouReadEntry("president", "президент"),
+        ),
+    )
+    a2 = ChapterAnalysis.create(
+        id="a2",
+        section_id="sec-2",
+        treatment_plan=TreatmentPlan.of_treatments(s2.id, ((b2.id, BlockTreatment.TRANSLATE),)),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b2.id,),
+        before_you_read=(
+            BeforeYouReadEntry("take place", "происходить"),
+            BeforeYouReadEntry("present", "подарок"),
+            BeforeYouReadEntry("taken off", "взлететь снова"),
+        ),
+    )
+    doc = make_analysis_document((s1, s2))
+    _, res2 = deduplicate_book_before_you_read(doc, (a1, a2))
+    assert [e.expression for e in res2.before_you_read] == ["take place", "present"]
+
+
+def test_resolve_quoted_anchor_resolves_repeated_quote_in_block() -> None:
+    from linguary.application.analysis_merge import _resolve_quoted_anchor, content_plan_from_response
+    from linguary.application.llm_dto import (
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    block_text = "Wait for him. Wait until dark."
+    aliases = {"b1": "block-1"}
+    texts = {"block-1": block_text}
+    visible = {"b1": block_text}
+
+    anchor = _resolve_quoted_anchor("b1", "Wait", aliases, texts, visible)
+    assert anchor is not None
+    assert anchor.block_id == "block-1"
+    assert anchor.start == 0
+    assert anchor.end == 4
+    assert anchor.quote == "Wait"
+
+    payload = ChapterAnalysisResponse(
+        translation_instructions="Сохраняй смысл.",
+        chapter_summary="Сводка.",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(
+                QuotedDifficultyResponse(
+                    id="d1",
+                    anchors=(QuotedSourceAnchorResponse(block_id="b1", quote="Wait"),),
+                    owner_block_id="b1",
+                    kind="idiom",
+                    priority="critical",
+                    help_kind="explanation",
+                    required_points=(RequiredPoint("p1", "Explain wait"),),
+                ),
+            ),
+        ),
+    )
+    plan = content_plan_from_response(payload, aliases, texts, visible_texts_by_alias=visible)
+    assert plan is not None
+    assert len(plan.difficulties) == 1
+    assert plan.difficulties[0].anchors[0].quote == "Wait"
+
+
+
 
 
 

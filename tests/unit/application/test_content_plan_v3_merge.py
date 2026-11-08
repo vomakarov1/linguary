@@ -117,3 +117,55 @@ def test_unknown_plan_version_not_legacy():
 def test_v3_does_not_relocate_inexact_anchor():
     with pytest.raises((DomainError, AnalysisMergeError)):
         content_plan_from_response(response(), {'b1': 'stable'}, {'stable': 'x Mara said hello.'})
+
+
+def test_fragment_merge_keeps_distinct_phrasal_verbs_and_their_evidence():
+    def fragment(order, block_id, expression, explanation, point_id):
+        difficulty = Difficulty(
+            f'd-{order}',
+            (SourceAnchor(block_id, 0, len(expression), expression),),
+            block_id,
+            'idiom',
+            'critical',
+            'explanation',
+            (RequiredPoint(point_id, 'Объяснить значение выражения'),),
+        )
+        evidence = HelpEvidence(
+            difficulty.id,
+            point_id,
+            'before_you_read.explanation',
+            block_id,
+            artifact_key(
+                'before_you_read.explanation',
+                block_id,
+                {'expression': expression, 'explanation': explanation},
+            ),
+            explanation,
+        )
+        return FragmentAnalysis(
+            order,
+            '',
+            '',
+            before_you_read=(BeforeYouReadEntryResponse(expression, explanation),),
+            content_plan=ContentPlan(
+                version=3,
+                profile='content-plan-v3',
+                difficulties=(difficulty,),
+                before_you_read_evidence=(evidence,),
+            ),
+        )
+
+    plan = _merged_content_plan(
+        (
+            fragment(0, 'first', 'take off', 'Снять одежду или взлететь.', 'point-first'),
+            fragment(1, 'second', 'take place', 'Происходить, состояться.', 'point-second'),
+        )
+    )
+
+    assert plan is not None
+    assert len(plan.before_you_read_evidence) == 2
+    assert {item.body_excerpt for item in plan.before_you_read_evidence} == {
+        'Снять одежду или взлететь.',
+        'Происходить, состояться.',
+    }
+

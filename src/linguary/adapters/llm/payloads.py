@@ -165,51 +165,45 @@ def parse_payload(
             'ответ исправления оборван по лимиту токенов', truncated=True, raw_content=content,
             violation=Violation('provider_truncated', kind.value, safe_message='Ответ исправления оборван'),
         )
+    try:
+        raw_object = json.loads(content)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        reason = "обрыв ответа по лимиту токенов" if truncated else "ответ не оборван"
+        raise LLMResponseFormatError(
+            f"ответ модели ({kind.value}) не соответствует схеме: 1 нарушений (json_invalid); {reason}",
+            truncated=truncated,
+            raw_content=content,
+            violation=Violation(
+                'provider_truncated' if truncated else 'response_parse',
+                kind.value,
+                safe_message='Ответ не соответствует формату',
+            ),
+        ) from None
     candidate_items = ()
-    validation_content = content
     if pronunciation_candidates_version == 1:
-        try:
-            document = json.loads(content)
-        except (ValueError, TypeError):
-            document = None
-        if isinstance(document, dict) and isinstance(document.get('pronunciation_candidates'), list):
-            candidate_items = document.pop('pronunciation_candidates')
+        if isinstance(raw_object, dict) and isinstance(raw_object.get('pronunciation_candidates'), list):
+            candidate_items = raw_object.pop('pronunciation_candidates')
             schema = schema_for(kind, contract_version=contract_version,
                                 name_translation_policy_version=name_translation_policy_version)
-            validation_content = json.dumps(document, ensure_ascii=False)
     if kind == LLMResponseKind.CHAPTER_ANALYSIS and name_translation_policy_version == 1:
-        try:
-            document = json.loads(content)
-        except (ValueError, TypeError):
-            document = None
-        if isinstance(document, dict) and isinstance(document.get("glossary_candidates"), list):
-            for candidate in document["glossary_candidates"]:
+        if isinstance(raw_object, dict) and isinstance(raw_object.get("glossary_candidates"), list):
+            for candidate in raw_object["glossary_candidates"]:
                 if isinstance(candidate, dict):
                     candidate.setdefault("name_translation_assessment", None)
-            validation_content = json.dumps(document, ensure_ascii=False)
     byr_evidence_items = ()
     content_evidence_items = ()
-    try:
-        doc = json.loads(validation_content)
-    except (ValueError, TypeError):
-        doc = None
-    if isinstance(doc, dict):
-        modified = False
-        if kind == LLMResponseKind.TRANSLATION_RESULT and "content_evidence" in doc:
-            raw_ev = doc.pop("content_evidence")
+    if isinstance(raw_object, dict):
+        if kind == LLMResponseKind.TRANSLATION_RESULT and "content_evidence" in raw_object:
+            raw_ev = raw_object.pop("content_evidence")
             if isinstance(raw_ev, list):
                 content_evidence_items = raw_ev
-            modified = True
-        elif kind == LLMResponseKind.CHAPTER_ANALYSIS and isinstance(doc.get("content_plan"), dict):
-            if "before_you_read_evidence" in doc["content_plan"]:
-                raw_byr = doc["content_plan"].pop("before_you_read_evidence")
+        elif kind == LLMResponseKind.CHAPTER_ANALYSIS and isinstance(raw_object.get("content_plan"), dict):
+            if "before_you_read_evidence" in raw_object["content_plan"]:
+                raw_byr = raw_object["content_plan"].pop("before_you_read_evidence")
                 if isinstance(raw_byr, list):
                     byr_evidence_items = raw_byr
-                modified = True
-        if modified:
-            validation_content = json.dumps(doc, ensure_ascii=False)
     try:
-        validated = schema.model_validate_json(validation_content)
+        validated = schema.model_validate(raw_object)
     except ValidationError as error:
         raise LLMResponseFormatError(
             _format_error(kind, error=error, truncated=truncated),

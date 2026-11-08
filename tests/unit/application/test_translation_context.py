@@ -1238,3 +1238,115 @@ def test_owned_content_plan_omits_duplicate_before_you_read_and_anchor_offsets()
         assert "end" not in anchor
         assert set(anchor.keys()) == {"block_id", "quote"}
 
+
+def test_mixed_unit_synthesizes_omitted_pure_read_as_is_blocks_and_accepts_full_stub_replies() -> None:
+    from linguary.domain.content_plan import ContentPlan, Difficulty, HelpEvidence, RequiredPoint, SourceAnchor
+
+    blocks = make_blocks(4)
+    unit = make_unit(
+        blocks,
+        treatments=(
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.TRANSLATE,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.READ_AS_IS,
+        ),
+    )
+    section = make_section(blocks)
+    uncovered_diff = Difficulty(
+        "d-uncovered",
+        (SourceAnchor(blocks[2].id, 0, 4, "Text"),),
+        blocks[2].id,
+        "wordplay",
+        "critical",
+        "explanation",
+        (RequiredPoint("p-1", "Explain"),),
+    )
+    covered_diff = Difficulty(
+        "d-covered",
+        (SourceAnchor(blocks[3].id, 0, 4, "Text"),),
+        blocks[3].id,
+        "idiom",
+        "useful",
+        "explanation",
+        (RequiredPoint("p-2", "Covered by BYR"),),
+    )
+    analysis = replace(
+        make_analysis(unit),
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(uncovered_diff, covered_diff),
+            before_you_read_evidence=(
+                HelpEvidence(
+                    difficulty_id="d-covered",
+                    point_id="p-2",
+                    artifact_kind="before_you_read.explanation",
+                    artifact_key="before_you_read:0",
+                    block_id=blocks[3].id,
+                    body_excerpt="Covered by BYR",
+                ),
+            ),
+        ),
+    )
+    builder = ContextBuilder(content_plan_profile="content-plan-v3")
+    context = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+
+    assert context.aliases == ("b1", "b2", "b3", "b4")
+    assert context.pure_read_as_is_aliases == frozenset({"b1", "b4"})
+    assert "[b1] режим READ_AS_IS (только для контекста, в blocks не возвращать)" in context.request.input_text
+    assert "[b4] режим READ_AS_IS (только для контекста, в blocks не возвращать)" in context.request.input_text
+    assert "[b3] режим READ_AS_IS\n" in context.request.input_text
+
+    partial_payload = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(
+                source_block_id="b2",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Перевод второго блока.",
+            ),
+            BlockResultResponse(
+                source_block_id="b3",
+                treatment=BlockTreatment.READ_AS_IS,
+            ),
+        ),
+        language_notes=(),
+    )
+    resolved_partial = context.to_block_ids(partial_payload)
+    assert [b.source_block_id for b in resolved_partial.blocks] == [b.id for b in blocks]
+    assert resolved_partial.blocks[0] == BlockResultResponse(
+        source_block_id=blocks[0].id,
+        treatment=BlockTreatment.READ_AS_IS,
+        translated_text=None,
+        glossary_hints=(),
+    )
+    assert resolved_partial.blocks[3] == BlockResultResponse(
+        source_block_id=blocks[3].id,
+        treatment=BlockTreatment.READ_AS_IS,
+        translated_text=None,
+        glossary_hints=(),
+    )
+
+    full_stub_payload = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(source_block_id="b1", treatment=BlockTreatment.READ_AS_IS),
+            BlockResultResponse(
+                source_block_id="b2",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Перевод второго блока.",
+            ),
+            BlockResultResponse(source_block_id="b3", treatment=BlockTreatment.READ_AS_IS),
+            BlockResultResponse(source_block_id="b4", treatment=BlockTreatment.READ_AS_IS),
+        ),
+        language_notes=(),
+    )
+    resolved_full = context.to_block_ids(full_stub_payload)
+    assert [b.source_block_id for b in resolved_full.blocks] == [b.id for b in blocks]
+
+

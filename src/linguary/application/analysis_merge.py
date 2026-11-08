@@ -507,31 +507,67 @@ def sanitize_before_you_read_explanation(text: str) -> str:
     return result
 
 
+_BYR_IRREGULAR_STEMS = {
+    "made": "make",
+    "making": "make",
+    "taken": "take",
+    "took": "take",
+    "taking": "take",
+}
+
+
+def _stem_byr_word(word: str) -> str:
+    word = word.casefold()
+    if word in _BYR_IRREGULAR_STEMS:
+        return _BYR_IRREGULAR_STEMS[word]
+    for suffix in ("'s", "ies", "ing", "ed", "es", "s"):
+        if word.endswith(suffix) and len(word) > len(suffix) + 2:
+            base = word[: -len(suffix)]
+            if suffix == "ies":
+                return base + "y"
+            if (
+                suffix in ("ing", "ed")
+                and len(base) >= 3
+                and base[-1] == base[-2]
+                and base[-1] not in "lsz"
+            ):
+                return base[:-1]
+            return base
+    return word
+
+
+def _same_byr_prefix(words_a: Sequence[str], words_b: Sequence[str]) -> bool:
+    if not words_a or not words_b:
+        return False
+    return all(
+        _stem_byr_word(words_a[i]) == _stem_byr_word(words_b[i])
+        for i in range(min(len(words_a), len(words_b)))
+    )
+
+
 def before_you_read_entries(
     entries: Iterable[BeforeYouReadEntryResponse], *, strict: bool = False,
 ) -> tuple[BeforeYouReadEntry, ...]:
-    """Retains the first entry for each first-word stem, up to ten chapter expressions."""
-    selected: list[tuple[str, BeforeYouReadEntry]] = []
+    """Retains the first entry for each expression stem/prefix, up to ten chapter expressions."""
+    selected: list[BeforeYouReadEntry] = []
     for entry in entries:
         words = expression_words(entry.expression)
-        if not words or any(_same_word(words[0], first_word) for first_word, _ in selected):
+        if not words or _before_you_read_stem_duplicate(entry, selected) is not None:
             continue
         selected.append(
-            (
-                words[0],
-                BeforeYouReadEntry(
-                    expression=entry.expression,
-                    explanation=entry.explanation if strict else sanitize_before_you_read_explanation(entry.explanation),
-                ),
+            BeforeYouReadEntry(
+                expression=entry.expression,
+                explanation=entry.explanation if strict else sanitize_before_you_read_explanation(entry.explanation),
             )
         )
         if len(selected) >= MAX_BEFORE_YOU_READ:
             break
-    return tuple(entry for _, entry in selected)
+    return tuple(selected)
 
 
 def _before_you_read_stem_duplicate(
-    entry: BeforeYouReadEntryResponse, selected: Sequence[BeforeYouReadEntry]
+    entry: BeforeYouReadEntryResponse | BeforeYouReadEntry,
+    selected: Sequence[BeforeYouReadEntry],
 ) -> BeforeYouReadEntry | None:
     words = expression_words(entry.expression)
     if not words:
@@ -541,7 +577,7 @@ def _before_you_read_stem_duplicate(
             candidate
             for candidate in selected
             if (candidate_words := expression_words(candidate.expression))
-            and _same_word(words[0], candidate_words[0])
+            and _same_byr_prefix(words, candidate_words)
         ),
         None,
     )
@@ -570,10 +606,7 @@ def _before_you_read_key(expression: str) -> str:
     words = expression_words(expression)
     if not words:
         return ""
-    word = {"made": "make"}.get(words[0], words[0])
-    if len(word) >= 4:
-        return word[:4]
-    return word
+    return " ".join(_stem_byr_word(word) for word in words)
 
 
 def _card_index_for_evidence(
@@ -655,7 +688,12 @@ def deduplicate_book_before_you_read(
             if not key:
                 kept_cards.append((i, card))
                 continue
-            if key in seen_byr_keys:
+            key_words = key.split()
+            is_seen = key in seen_byr_keys or any(
+                _same_byr_prefix(key_words, seen_key.split())
+                for seen_key in seen_byr_keys
+            )
+            if is_seen:
                 if i in required_card_indices:
                     kept_cards.append((i, card))
                     seen_byr_keys.add(key)
@@ -974,16 +1012,16 @@ def content_plan_from_response(
 
 
 def _resolve_quoted_anchor(block_alias, quote, aliases, texts, visible_texts_by_alias):
-    """Resolve a quote only when it is unique in both views of its source block."""
+    """Resolve a quote in both views of its source block."""
     block_id = aliases.get(block_alias)
     if block_id is None or texts is None or block_id not in texts or block_alias not in visible_texts_by_alias:
         return None
-    visible_span = _unique_exact_span(visible_texts_by_alias[block_alias], quote)
-    source_span = _unique_exact_span(texts[block_id], quote)
+    visible_span = find_quote_span(visible_texts_by_alias[block_alias], quote)
+    source_span = find_quote_span(texts[block_id], quote)
     if visible_span is None or source_span is None:
         return None
-    start, end = source_span
-    return SourceAnchor(block_id=block_id, start=start, end=end, quote=quote)
+    start, end, actual_quote = source_span
+    return SourceAnchor(block_id=block_id, start=start, end=end, quote=actual_quote)
 
 
 def _unique_exact_span(text, quote):
