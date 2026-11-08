@@ -75,7 +75,10 @@ def application(
 ) -> Iterator[Application]:
     """Assembled application over a temporary data directory."""
     built = build_application(
-        settings=settings, llm_client=llm_client, task_id_factory=web_task_ids
+        settings=settings,
+        llm_client=llm_client,
+        task_id_factory=web_task_ids,
+        content_plan_profile="legacy-v1",
     )
     try:
         yield built
@@ -93,7 +96,10 @@ def configured_application(
         llm=LLMSettings(model="fake-model", api_key="test-key"),
     )
     built = build_application(
-        settings=configured, llm_client=llm_client, task_id_factory=web_task_ids
+        settings=configured,
+        llm_client=llm_client,
+        task_id_factory=web_task_ids,
+        content_plan_profile="legacy-v1",
     )
     try:
         yield built

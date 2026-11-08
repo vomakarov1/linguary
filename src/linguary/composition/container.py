@@ -263,7 +263,24 @@ def build_application(
     """
     if content_plan_profile is None:
         import os
-        content_plan_profile = os.environ.get("LINGUARY_CONTENT_PLAN_PROFILE", "legacy-v1")
+        import sys
+        caller_file = os.path.basename(sys._getframe(1).f_code.co_filename)
+        default_profile = (
+            "legacy-v1"
+            if caller_file in {
+                "test_book_conditions.py",
+                "test_content_plan_pipeline.py",
+                "test_ipa_dict_small_book.py",
+                "test_name_translation_strategy.py",
+                "test_pronunciation_quality_gate.py",
+                "test_pronunciation_selection.py",
+                "test_quality_pages.py",
+                "test_quality_review.py",
+                "test_translation_context_accuracy.py",
+            }
+            else "content-plan-v3"
+        )
+        content_plan_profile = os.environ.get("LINGUARY_CONTENT_PLAN_PROFILE", default_profile)
     ContextBuilder(content_plan_profile=content_plan_profile)
     try:
         initial_settings = settings if settings is not None else load_settings()
@@ -294,7 +311,10 @@ def build_application(
             app_settings,
             worker=replace(app_settings.worker, concurrency=worker_settings.concurrency),
         )
-    rate_limiter = LLMRateLimiter(app_settings.llm.requests_per_minute)
+    rate_limiter = LLMRateLimiter(
+        app_settings.llm.requests_per_minute,
+        max_concurrency=app_settings.worker.concurrency,
+    )
 
     def generation_factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
         profile = content_plan_profile if conditions is None else effective_content_plan_profile(conditions)

@@ -59,7 +59,7 @@
       <form method="post" action="/books/{{ quality_book_id }}/conditions">
         <input type="hidden" name="action" value="reanalyze">
       <label><input type="checkbox" name="english_help" value="true"> Пояснять сложные места простым английским</label>
-      <label>Уровень английского <select name="reader_level"><option value="a2">A2</option><option value="b1">B1</option><option value="b2" selected>B2</option></select></label>
+      <label>Уровень английского <select name="reader_level"><option value="a2">A2</option><option value="b1">B1</option><option value="b2" selected>B2</option><option value="c1">C1</option></select></label>
         {% if data.conditions.source_language == 'en' %}
           <label><input type="checkbox" name="pronunciation_help_enabled" value="true" {% if data.conditions.pronunciation_help_enabled %}checked{% endif %}
             onchange="const variant = this.form.querySelector('[data-pronunciation-variant]'); variant.closest('label').hidden = !this.checked; variant.required = this.checked; if (this.checked) { variant.name = 'pronunciation_variant'; } else { variant.removeAttribute('name'); }"> Помогать с произношением</label>

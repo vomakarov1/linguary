@@ -95,7 +95,7 @@ async def choose_conditions(request: Request, application: CurrentApplication, b
         settings_revision: int = Field(ge=0)
         confirmed: bool
         english_help: bool = False
-        reader_level: Literal["a2", "b1", "b2"] | None = None
+        reader_level: Literal["a2", "b1", "b2", "c1"] | None = None
         pronunciation_help_enabled: bool = False
         pronunciation_variant: Literal['uk', 'us'] | None = None
 

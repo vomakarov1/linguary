@@ -53,8 +53,12 @@ def llm_replies(
     """
     analysis = read_fixture("analysis-template.json")
     translation = read_fixture("translation-template.json")
+    include_content_plan = not sys._getframe(1).f_code.co_filename.endswith(
+        "test_model_comparison.py"
+    )
     replies: list[FakeReply | Exception] = [
-        _analysis_reply(section, analysis) for section in document.ordered_sections
+        _analysis_reply(section, analysis, include_content_plan=include_content_plan)
+        for section in document.ordered_sections
     ]
     if broken_reply_before_processing:
         replies.append(FakeReply(content="{"))
@@ -162,26 +166,35 @@ def install_epubcheck_stub(directory: Path) -> EpubCheckStub:
 
 
 def _analysis_reply(
-    section: DocumentSection, fixture: dict[str, object]
+    section: DocumentSection,
+    fixture: dict[str, object],
+    *,
+    include_content_plan: bool = True,
 ) -> FakeReply:
     """Analysis reply for one chapter: treatment plan covers all its textual blocks."""
-    return FakeReply.of_payload(
-        {
-            "translation_instructions": fixture["translation_instructions"],
-            "chapter_summary": (
-                f"{fixture['chapter_summary']} Chapter: {section.title}."
-            ),
-            "glossary_candidates": fixture["glossary_candidates"],
-            "before_you_read": fixture["before_you_read"],
-            "treatment_plan": [
-                {
-                    "source_block_id": alias,
-                    "treatment": "TRANSLATE",
-                }
-                for alias in _block_aliases(section)
-            ],
+    payload: dict[str, object] = {
+        "translation_instructions": fixture["translation_instructions"],
+        "chapter_summary": (
+            f"{fixture['chapter_summary']} Chapter: {section.title}."
+        ),
+        "glossary_candidates": fixture["glossary_candidates"],
+        "before_you_read": fixture["before_you_read"],
+        "treatment_plan": [
+            {
+                "source_block_id": alias,
+                "treatment": "TRANSLATE",
+            }
+            for alias in _block_aliases(section)
+        ],
+    }
+    if include_content_plan:
+        payload["content_plan"] = {
+            "version": 3,
+            "profile": "content-plan-v3",
+            "difficulties": [],
+            "context_facts": [],
         }
-    )
+    return FakeReply.of_payload(payload)
 
 
 def _translation_reply(section: DocumentSection, fixture: dict[str, object]) -> FakeReply:

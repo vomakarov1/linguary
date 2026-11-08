@@ -59,10 +59,10 @@ class BookConditionsService:
                 validators_version=payload.get('versions', {}).get('validators', 1),
             )
             payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
-        if reader_level is not None and reader_level not in {'a2', 'b1', 'b2'}:
+        if reader_level is not None and reader_level not in {'a2', 'b1', 'b2', 'c1'}:
             raise ConditionsError('invalid_reader_level')
         payload['reader_level'] = reader_level or payload['reader_level']
-        if english_help and payload['reader_level'] not in {'a2', 'b1', 'b2'}:
+        if english_help and payload['reader_level'] not in {'a2', 'b1', 'b2', 'c1'}:
             raise ConditionsError('invalid_reader_level')
         if type(pronunciation_help_enabled) is not bool:
             raise ConditionsError('invalid_pronunciation_choice')
@@ -88,9 +88,10 @@ class BookConditionsService:
             if profile == 'legacy-v1' and payload['reader_level'] == 'a2':
                 payload['versions'] = dict(A2_CONTENT_PLAN_VERSIONS)
             elif profile == 'content-plan-v3':
+                contract_v5 = payload.get('prompt_templates', {}).get('analysis_contract_version') == 5
                 payload['versions'] = {'runtime': 1, 'context_builder': 3,
                     'validators': 4 if payload['reader_level'] == 'a2' else 3,
-                    'schemas': 3, 'prompts': 3}
+                    'schemas': 5 if contract_v5 else 3, 'prompts': 5 if contract_v5 else 3}
         effective_v3 = (profile == 'content-plan-v3'
                         or profile == 'legacy-v1' and payload['reader_level'] == 'a2'
                         and not english_help)

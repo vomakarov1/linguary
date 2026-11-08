@@ -53,6 +53,7 @@ class ComparisonWorkspace:
             raise WorkspaceError('Настройки нарушают изоляцию или включают сырые ответы')
         if 'settings' in kwargs:
             raise WorkspaceError('Настройки задаются каталогом сравнения')
+        kwargs.setdefault('content_plan_profile', 'legacy-v1')
         application = build_application(settings=self.settings, **kwargs)
         if settings_projection(application.settings) != settings_projection(self.settings):
             application.dispose()

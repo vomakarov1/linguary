@@ -242,7 +242,7 @@ def test_pronunciation_form_keeps_existing_conditions(configured_client, configu
     confirmation = form.xpath('.//input[@name="confirmed"]')[0]
     assert confirmation.get('required') is not None and confirmation.get('checked') is None
     assert 'Архив версий сохранится' in form.getparent().text_content()
-    assert [option.get('value') for option in form.xpath('.//select[@name="reader_level"]/option')] == ['a2', 'b1', 'b2']
+    assert [option.get('value') for option in form.xpath('.//select[@name="reader_level"]/option')] == ['a2', 'b1', 'b2', 'c1']
     values.update(confirmed='true', english_help='true', reader_level='a2',
                   pronunciation_help_enabled='true', pronunciation_variant='us')
     response = configured_client.post(form.get('action'), data=values,
@@ -265,3 +265,72 @@ def test_pronunciation_form_keeps_existing_conditions(configured_client, configu
         assert saved.revision == 3
         assert saved.pronunciation_help_enabled is False
         assert saved.pronunciation_variant is None
+
+
+def test_c1_reader_level_supported_in_conditions_and_english_help(configured_client, configured_application):
+    from linguary.application.reader_text import learner_instructions
+
+    assert "C1" in learner_instructions("c1")
+
+    scenario = legacy_book(configured_application)
+    form = reanalyze_form(configured_client, scenario)
+    assert [option.get('value') for option in form.xpath('.//select[@name="reader_level"]/option')] == ['a2', 'b1', 'b2', 'c1']
+
+    response = configured_client.post(
+        f'/books/{scenario.book_id}/conditions',
+        json=dict(
+            action='reanalyze',
+            expected_revision=0,
+            settings_revision=0,
+            confirmed=True,
+            reader_level='c1',
+            english_help=False,
+        ),
+    )
+    assert response.status_code == 201, response.text
+    with configured_application.unit_of_work.transaction() as transaction:
+        saved = transaction.work.latest_conditions(scenario.book_id)
+        assert saved.payload['reader_level'] == 'c1'
+        assert saved.payload['english_help'] is False
+
+    response_eh = configured_client.post(
+        f'/books/{scenario.book_id}/conditions',
+        json=dict(
+            action='reanalyze',
+            expected_revision=1,
+            settings_revision=0,
+            confirmed=True,
+            reader_level='c1',
+            english_help=True,
+        ),
+    )
+    assert response_eh.status_code == 201, response_eh.text
+    with configured_application.unit_of_work.transaction() as transaction:
+        saved_eh = transaction.work.latest_conditions(scenario.book_id)
+        assert saved_eh.payload['reader_level'] == 'c1'
+        assert saved_eh.payload['english_help'] is True
+        assert 'Для C1' in saved_eh.payload['prompt_templates']['english_help_processing']
+
+
+def test_build_application_defaults_to_content_plan_v3(tmp_path, monkeypatch):
+    from linguary.adapters.config import AppSettings, CheckSettings, LLMSettings, ServerSettings, StorageSettings
+    from linguary.adapters.llm import FakeLLMClient
+    from linguary.composition import build_application
+
+    monkeypatch.delenv("LINGUARY_CONTENT_PLAN_PROFILE", raising=False)
+    app_settings = AppSettings(
+        llm=LLMSettings(model="fake-model", api_key="test-key"),
+        checks=CheckSettings(),
+        storage=StorageSettings(data_root=str(tmp_path / "default-v3-data")),
+        server=ServerSettings(),
+    )
+    app = build_application(settings=app_settings, llm_client=FakeLLMClient())
+    try:
+        scenario = legacy_book(app)
+        with app.unit_of_work.transaction() as transaction:
+            book = transaction.books.get(scenario.book_id)
+            conditions = app.book_conditions.create(transaction, book, app.runtime_settings.revision)
+            assert conditions.payload["profile"] == "content-plan-v3"
+    finally:
+        app.dispose()
+
