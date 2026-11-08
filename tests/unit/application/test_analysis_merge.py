@@ -943,5 +943,97 @@ def test_content_plan_schemas_do_not_contain_evidence_in_strict_json_schema() ->
     assert "content_evidence" not in t_v3_schema.get("properties", {})
 
 
+def test_deduplicate_book_before_you_read_removes_later_duplicates_and_updates_artifact_keys() -> None:
+    from analysis_fakes import make_analysis_document, make_analysis_section
+    from linguary.application.analysis_merge import deduplicate_book_before_you_read
+    from linguary.domain import BeforeYouReadEntry, BlockTreatment, TreatmentPlan
+    from linguary.domain.content_plan import ContentPlan, Difficulty, HelpEvidence, RequiredPoint, SourceAnchor
+
+    s1 = make_analysis_section(section_id="sec-1", order=0, texts=("First text.",))
+    b1 = s1.blocks[0]
+    a1 = ChapterAnalysis.create(
+        id="a1",
+        section_id="sec-1",
+        treatment_plan=TreatmentPlan.of_treatments(s1.id, ((b1.id, BlockTreatment.TRANSLATE),)),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id,),
+        before_you_read=(BeforeYouReadEntry("make a grab at", "резко схватить"),),
+    )
+
+    s2 = make_analysis_section(section_id="sec-2", order=1, texts=("Second text.",))
+    b2 = s2.blocks[0]
+    card_dup = BeforeYouReadEntry("make a grab", "схватить")
+    card_novel = BeforeYouReadEntry("iron curtain", "железный занавес")
+    d = Difficulty("d1", (SourceAnchor(b2.id, 0, 5, "start"),), b2.id, "idiom", "critical", "explanation", (RequiredPoint("p1", "desc"),))
+    ev = HelpEvidence("d1", "p1", "before_you_read.explanation", b2.id, "byr:1", "железный занавес")
+    plan2 = ContentPlan(version=3, profile="content-plan-v3", difficulties=(d,), before_you_read_evidence=(ev,))
+    a2 = ChapterAnalysis.create(
+        id="a2",
+        section_id="sec-2",
+        treatment_plan=TreatmentPlan.of_treatments(s2.id, ((b2.id, BlockTreatment.TRANSLATE),)),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b2.id,),
+        before_you_read=(card_dup, card_novel),
+        content_plan=plan2,
+    )
+
+    doc = make_analysis_document((s1, s2))
+    res1, res2 = deduplicate_book_before_you_read(doc, (a1, a2))
+
+    assert res1.before_you_read == a1.before_you_read
+    assert len(res2.before_you_read) == 1
+    assert res2.before_you_read[0].expression == "iron curtain"
+    assert len(res2.content_plan.before_you_read_evidence) == 1
+    assert res2.content_plan.before_you_read_evidence[0].artifact_key == "byr:0"
+
+
+def test_deduplicate_book_before_you_read_preserves_card_required_by_chapter_plan() -> None:
+    from analysis_fakes import make_analysis_document, make_analysis_section
+    from linguary.application.analysis_merge import deduplicate_book_before_you_read
+    from linguary.domain import BeforeYouReadEntry, BlockTreatment, TreatmentPlan
+    from linguary.domain.content_plan import ContentPlan, Difficulty, HelpEvidence, RequiredPoint, SourceAnchor
+
+    s1 = make_analysis_section(section_id="sec-1", order=0, texts=("First text.",))
+    b1 = s1.blocks[0]
+    a1 = ChapterAnalysis.create(
+        id="a1",
+        section_id="sec-1",
+        treatment_plan=TreatmentPlan.of_treatments(s1.id, ((b1.id, BlockTreatment.TRANSLATE),)),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id,),
+        before_you_read=(BeforeYouReadEntry("make a grab at", "резко схватить"),),
+    )
+
+    s2 = make_analysis_section(section_id="sec-2", order=1, texts=("Second text.",))
+    b2 = s2.blocks[0]
+    card_dup = BeforeYouReadEntry("make a grab", "схватить")
+    d = Difficulty("d1", (SourceAnchor(b2.id, 0, 5, "start"),), b2.id, "idiom", "critical", "explanation", (RequiredPoint("p1", "desc"),))
+    ev = HelpEvidence("d1", "p1", "before_you_read.explanation", b2.id, "byr:0", "схватить")
+    plan2 = ContentPlan(version=3, profile="content-plan-v3", difficulties=(d,), before_you_read_evidence=(ev,))
+    a2 = ChapterAnalysis.create(
+        id="a2",
+        section_id="sec-2",
+        treatment_plan=TreatmentPlan.of_treatments(s2.id, ((b2.id, BlockTreatment.TRANSLATE),)),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b2.id,),
+        before_you_read=(card_dup,),
+        content_plan=plan2,
+    )
+
+    doc = make_analysis_document((s1, s2))
+    res1, res2 = deduplicate_book_before_you_read(doc, (a1, a2))
+
+    assert len(res2.before_you_read) == 1
+    assert res2.before_you_read[0].expression == "make a grab"
+    assert len(res2.content_plan.before_you_read_evidence) == 1
+    assert res2.content_plan.before_you_read_evidence[0].artifact_key == "byr:0"
+
+
+
+
 
 

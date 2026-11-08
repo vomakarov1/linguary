@@ -762,12 +762,20 @@ class ChapterAnalysisSequence:
 
             document = transaction.documents.get(book_id)
             if document is not None:
+                analyses = transaction.analyses.list_for_book(book_id)
                 analyzed = {
                     analysis.section_id
-                    for analysis in transaction.analyses.list_for_book(book_id)
+                    for analysis in analyses
                 }
                 if any(section.id not in analyzed for section in document.ordered_sections):
                     return
+
+                from linguary.application.analysis_merge import deduplicate_book_before_you_read
+                updated_analyses = deduplicate_book_before_you_read(document, analyses)
+                original_by_id = {a.id: a for a in analyses}
+                for updated in updated_analyses:
+                    if updated != original_by_id.get(updated.id):
+                        transaction.analyses.save(book_id, updated)
 
             book = _with_status(
                 book, apply_book_event(book.status, BookEvent.ANALYSIS_COMPLETED)

@@ -654,7 +654,8 @@ def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     assert 'пять-десять ключевых понятий' not in analysis
     assert '65–80% блоков главы' not in analysis
     assert 'fragment_assistances' not in analysis
-    assert 'before_you_read_evidence всегда должны быть пустыми' in content_analysis
+    assert 'before_you_read' in content_analysis and 'всегда должен быть пустым' in content_analysis
+    assert 'before_you_read_evidence' not in content_analysis
     assert 'Определи только конкретные слова, выражения или конструкции' in normalized_content_analysis
     assert 'которые могут помешать читателю уровня' in normalized_content_analysis
     assert 'не ограничивай их число' not in normalized_content_analysis
@@ -662,7 +663,8 @@ def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     assert 'даже если общий смысл можно вывести из контекста' not in normalized_content_analysis
     assert 'GLOSSARY_ONLY или при полном покрытии в BYR' not in content_analysis
     assert 'fragment_assistances' in processing
-    assert 'content_evidence верни пустыми списками' in processing
+    assert 'language_notes' in processing and 'верни пустыми списками' in processing
+    assert 'content_evidence' not in processing
     assert 'Верни content_evidence' not in processing
     assert f'Для {level.upper()}' in processing
     assert not any(f'Для {other.upper()}' in processing for other in {'a2', 'b1', 'b2'} - {level})
@@ -689,3 +691,61 @@ def test_cross_chapter_neighbours_pulls_blocks_from_previous_story_chapter() -> 
     before_texts = [b.text for b in before_group.blocks]
     assert "Ch1 End block 2." in before_texts
     assert "Pride and Prejudice" not in before_texts
+
+
+def test_snapshot_prompt_templates_defaults_content_plan_v3_to_contract_v5():
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b1",
+        profile="content-plan-v3",
+    )
+    assert templates.get("analysis_contract_version") == 5
+    assert "CHAPTER_ANALYSIS v5" in templates["content_analysis"]
+
+
+def test_english_help_prompts_omit_evidence_fields():
+    from linguary.application.context_builder import (
+        _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS,
+        _ENGLISH_HELP_CONTENT_PLAN_PROCESSING,
+    )
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b1",
+        profile="content-plan-v3",
+        english_help=True,
+    )
+    assert "before_you_read_evidence" not in templates["content_analysis"]
+    assert "content_evidence" not in templates["content_processing"]
+    assert "content_evidence" not in templates["english_help_processing"]
+    assert "before_you_read_evidence" not in _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS
+    assert "content_evidence" not in _ENGLISH_HELP_CONTENT_PLAN_PROCESSING
+
+
+def test_chapter_context_keeps_instructions_invariant_across_chapters():
+    sec1 = make_analysis_section(section_id="sec-1", title="Chapter 1", order=0, texts=("First line.", "Second line."))
+    sec2 = make_analysis_section(section_id="sec-2", title="Chapter 2", order=1, texts=("Another chapter line.", "And another one.", "Third line."))
+    doc = make_analysis_document((sec1, sec2))
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", language_notes_per_chapter=5)
+    ctx1 = builder.for_chapter_analysis(document=doc, section=sec1)
+    ctx2 = builder.for_chapter_analysis(document=doc, section=sec2)
+    assert ctx1.request.instructions == ctx2.request.instructions
+    assert "В этом ответе не больше" not in ctx1.request.instructions
+    assert "Бюджет обязательных заметок" not in ctx1.request.instructions
+    assert "Пределы обязательных заметок" not in ctx1.request.instructions
+    assert "В этом ответе не больше" in ctx1.request.input_text
+    assert "Бюджет обязательных заметок" in ctx1.request.input_text
+    assert "Пределы обязательных заметок" in ctx1.request.input_text
+    assert "В этом ответе не больше" in ctx2.request.input_text
+    assert "Бюджет обязательных заметок" in ctx2.request.input_text
+    assert "Пределы обязательных заметок" in ctx2.request.input_text
+
+    fragments = plan_fragments(textual_blocks(sec2), max_blocks=1)
+    fctx1 = builder.for_chapter_fragment(document=doc, section=sec2, fragment=fragments[0], fragment_count=len(fragments))
+    fctx2 = builder.for_chapter_fragment(document=doc, section=sec2, fragment=fragments[1], fragment_count=len(fragments))
+    assert fctx1.request.instructions == fctx2.request.instructions
+    assert "В этом ответе не больше" not in fctx1.request.instructions
+    assert "В этом ответе не больше" in fctx1.request.input_text
+    assert "В этом ответе не больше" in fctx2.request.input_text
+

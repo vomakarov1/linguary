@@ -192,7 +192,7 @@ start, end и quote, owner_block_id, kind, priority, help_kind и required_point
 объяснить короткой подсказкой; используй help_kind=explanation для грамматики,
 игры слов и смысловой связи. Объедини аспекты одной трудности в required_points,
 не создавай дублирующие или пересекающиеся трудности для того же места.
-before_you_read и before_you_read_evidence всегда должны быть пустыми: помощь
+before_you_read всегда должен быть пустым: помощь
 появляется рядом с исходным английским фрагментом при чтении. Не добавляй русские
 объяснения, BYR, языковые заметки или словарные подсказки в анализ.
 Верни context_facts в формате content-plan-v3. Сохраняй точные привязки и степень
@@ -216,8 +216,8 @@ _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS_V5 = (
 
 _ENGLISH_HELP_CONTENT_PLAN_PROCESSING = """\
 Режим чтения на английском с помощью к трудным местам. Все блоки обрабатываются
-как READ_AS_IS: translated_text оставь пустым, glossary_hints, language_notes и
-content_evidence верни пустыми списками.
+как READ_AS_IS: translated_text оставь пустым, glossary_hints и language_notes
+верни пустыми списками.
 Верни fragment_assistances с полями difficulty_id, point_ids, kind и text: по одному
 элементу на каждую трудность плана, владелец
 которой входит в текущий запрос. difficulty_id и полный набор point_ids копируй из
@@ -948,6 +948,7 @@ class ContextBuilder:
             note_groups = ()
         if candidate and section.is_notes_only:
             before_you_read_limit = 0
+        limit_lines = ()
         if candidate:
             default_analysis = (_CONTENT_PLAN_ANALYSIS_V5 if self._analysis_contract_version == 5
                                 else _CONTENT_PLAN_ANALYSIS_V3) if version == 3 else _CONTENT_PLAN_ANALYSIS
@@ -955,10 +956,13 @@ class ContextBuilder:
             if version == 3 and not self._english_help:
                 instructions += "\n" + self._prompt_templates.get("learner_quality", learner_instructions(self._reader_level))
             if not self._english_help:
-                instructions += f"\nВ этом ответе не больше {before_you_read_limit} BYR."
-                instructions += f"\nБюджет обязательных заметок этого анализа: {note_limit}."
-                instructions += "\nПределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False)
+                instructions += "\nСоблюдай лимиты BYR и обязательных заметок, указанные в запросе."
                 instructions += "\nСначала используй существующий BYR или допустимый hint.note; READ_AS_IS требует отдельной заметки, если BYR не покрывает все аспекты."
+                limit_lines = (
+                    f"В этом ответе не больше {before_you_read_limit} BYR.",
+                    f"Бюджет обязательных заметок этого анализа: {note_limit}.",
+                    "Пределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False),
+                )
         return ChapterAnalysisContext(
             before_you_read_limit=before_you_read_limit,
             note_group_limits=note_groups,
@@ -979,6 +983,7 @@ class ContextBuilder:
                     fragment_label=fragment_label,
                     findings=findings,
                     visible_texts_by_alias=visible_texts_by_alias,
+                    limit_lines=limit_lines,
                 ),
             ),
             block_ids_by_alias=aliases,
@@ -1038,6 +1043,7 @@ class ContextBuilder:
         fragment_label: str | None,
         findings: FragmentFindings | None = None,
         visible_texts_by_alias: Mapping[str, str] | None = None,
+        limit_lines: Sequence[str] = (),
     ) -> str:
         """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
         blocks_text = " ".join(block.text for block in blocks)
@@ -1071,6 +1077,8 @@ class ContextBuilder:
                 f"Выражения: {', '.join(findings.expressions)}"
             )
         parts.append(_chapter_blocks(blocks, visible_texts_by_alias))
+        if limit_lines:
+            parts.append("\n".join(limit_lines))
         return "\n\n".join(parts)
 
     def _selected_candidates(
@@ -2027,6 +2035,8 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
 
 def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None, pronunciation_help_enabled=False, validators_version=1, analysis_contract_version=None):
     """Render immutable instruction templates without book text or secrets."""
+    if analysis_contract_version is None and profile == "content-plan-v3":
+        analysis_contract_version = 5
     if analysis_contract_version is not None and (
         type(analysis_contract_version) is not int or analysis_contract_version != 5
         or not (profile == 'content-plan-v3' or

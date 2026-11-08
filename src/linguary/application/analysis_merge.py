@@ -38,6 +38,7 @@ from linguary.application.llm_dto import (
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockTreatment,
+    CanonicalDocument,
     ChapterAnalysis,
     DocumentBlock,
     GlossaryCandidate,
@@ -565,11 +566,144 @@ def _align_byr_evidence_excerpt(
     return body_excerpt
 
 
+def _before_you_read_key(expression: str) -> str:
+    words = expression_words(expression)
+    if not words:
+        return ""
+    word = {"made": "make"}.get(words[0], words[0])
+    if len(word) >= 4:
+        return word[:4]
+    return word
+
+
+def _card_index_for_evidence(
+    evidence: HelpEvidence, cards: Sequence[BeforeYouReadEntry]
+) -> int | None:
+    if evidence.artifact_key.startswith("byr:"):
+        try:
+            idx = int(evidence.artifact_key.split(":", 1)[1])
+            if 0 <= idx < len(cards):
+                return idx
+        except ValueError:
+            pass
+    for idx, card in enumerate(cards):
+        expected_key = artifact_key(
+            evidence.artifact_kind,
+            evidence.block_id,
+            {"expression": card.expression, "explanation": card.explanation},
+        )
+        if evidence.artifact_key == expected_key:
+            return idx
+    for idx, card in enumerate(cards):
+        if (
+            evidence.body_excerpt == card.explanation
+            or evidence.body_excerpt in card.explanation
+        ):
+            return idx
+    return None
+
+
+def deduplicate_book_before_you_read(
+    document: CanonicalDocument, analyses: Sequence[ChapterAnalysis]
+) -> tuple[ChapterAnalysis, ...]:
+    """Deduplicates Before You Read cards across chapters in document section order (AC-007).
+
+    Earlier chapters take precedence. In later chapters, duplicate cards by
+    _before_you_read_key are removed unless a card provides the only evidence
+    covering a required point or difficulty in that chapter's content plan.
+    HelpEvidence.artifact_key is updated to reflect new card indices.
+    """
+    analyses_by_section = {a.section_id: a for a in analyses}
+    ordered_section_ids = [
+        s.id for s in document.ordered_sections if s.id in analyses_by_section
+    ]
+
+    seen_byr_keys: set[str] = set()
+    updated_by_section: dict[str, ChapterAnalysis] = {}
+
+    for section_id in ordered_section_ids:
+        analysis = analyses_by_section[section_id]
+        cards = analysis.before_you_read
+        plan = analysis.content_plan
+
+        if not cards:
+            updated_by_section[section_id] = analysis
+            continue
+
+        required_card_indices: set[int] = set()
+        if plan is not None and plan.before_you_read_evidence:
+            point_cards: dict[tuple[str, str], set[int]] = {}
+            difficulty_cards: dict[str, set[int]] = {}
+            for e in plan.before_you_read_evidence:
+                c_idx = _card_index_for_evidence(e, cards)
+                if c_idx is not None:
+                    point_cards.setdefault((e.difficulty_id, e.point_id), set()).add(
+                        c_idx
+                    )
+                    difficulty_cards.setdefault(e.difficulty_id, set()).add(c_idx)
+
+            for c_indices in point_cards.values():
+                if len(c_indices) == 1:
+                    required_card_indices.update(c_indices)
+            for c_indices in difficulty_cards.values():
+                if len(c_indices) == 1:
+                    required_card_indices.update(c_indices)
+
+        kept_cards: list[tuple[int, BeforeYouReadEntry]] = []
+        for i, card in enumerate(cards):
+            key = _before_you_read_key(card.expression)
+            if not key:
+                kept_cards.append((i, card))
+                continue
+            if key in seen_byr_keys:
+                if i in required_card_indices:
+                    kept_cards.append((i, card))
+                    seen_byr_keys.add(key)
+                else:
+                    pass
+            else:
+                kept_cards.append((i, card))
+                seen_byr_keys.add(key)
+
+        if len(kept_cards) == len(cards):
+            updated_by_section[section_id] = analysis
+            continue
+
+        new_cards = tuple(card for _, card in kept_cards)
+        old_to_new = {old_i: new_i for new_i, (old_i, _) in enumerate(kept_cards)}
+
+        new_plan = plan
+        if plan is not None:
+            new_evidences = []
+            for e in plan.before_you_read_evidence:
+                old_i = _card_index_for_evidence(e, cards)
+                if old_i is not None and old_i in old_to_new:
+                    new_i = old_to_new[old_i]
+                    card = new_cards[new_i]
+                    if e.artifact_key.startswith("byr:"):
+                        new_key = f"byr:{new_i}"
+                    else:
+                        new_key = artifact_key(
+                            e.artifact_kind,
+                            e.block_id,
+                            {"expression": card.expression, "explanation": card.explanation},
+                        )
+                    new_evidences.append(replace(e, artifact_key=new_key))
+            new_plan = replace(plan, before_you_read_evidence=tuple(new_evidences))
+
+        updated_by_section[section_id] = replace(
+            analysis, before_you_read=new_cards, content_plan=new_plan
+        )
+
+    return tuple(updated_by_section.get(a.section_id, a) for a in analyses)
+
+
 __all__ = [
     "DEFAULT_MAX_FRAGMENT_BLOCKS",
     "MAX_BEFORE_YOU_READ",
     "TOKENS_PER_ANALYSED_BLOCK",
     "before_you_read_entries",
+    "deduplicate_book_before_you_read",
     "content_plan_from_response",
     "find_quote_span",
     "sanitize_before_you_read_explanation",
