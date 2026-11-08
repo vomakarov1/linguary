@@ -742,16 +742,38 @@ def content_plan_from_response(
     if not payload.content_plan.before_you_read_evidence:
         seen_points = set()
         for difficulty in difficulties:
+            anchor_substances = {_substance(a.quote) for a in difficulty.anchors}
             for anchor in difficulty.anchors:
+                quote = without_footnote_markers(anchor.quote).strip() if is_v3 else anchor.quote.strip()
                 for entry in selected:
-                    expr = entry.expression.strip()
-                    quote = anchor.quote.strip()
-                    matched = (
-                        _same_word(expr, quote)
-                        or find_quote_span(quote, expr) is not None
-                        or find_quote_span(expr, quote) is not None
-                    )
-                    if matched and _substance(entry.explanation) != _substance(anchor.quote):
+                    expr = without_footnote_markers(entry.expression).strip() if is_v3 else entry.expression.strip()
+                    if is_v3:
+                        matched = (
+                            bool(expr and quote)
+                            and (
+                                quote in expr
+                                or (
+                                    expr in quote
+                                    and (
+                                        difficulty.kind != "grammar"
+                                        or len(quote.split()) <= 1
+                                        or len(expr.split()) >= 2
+                                    )
+                                )
+                            )
+                            and (
+                                texts is None
+                                or expr in without_footnote_markers(texts.get(anchor.block_id, ""))
+                            )
+                        )
+                    else:
+                        matched = (
+                            _same_word(expr, quote)
+                            or find_quote_span(quote, expr) is not None
+                            or find_quote_span(expr, quote) is not None
+                        )
+                    forbidden = anchor_substances | {_substance(entry.expression)}
+                    if matched and _substance(entry.explanation) and _substance(entry.explanation) not in forbidden:
                         key = artifact_key(
                             "before_you_read.explanation",
                             difficulty.owner_block_id,

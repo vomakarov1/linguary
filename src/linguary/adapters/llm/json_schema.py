@@ -53,9 +53,12 @@ def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
 
 def _filter_omitted_properties(node: Any) -> None:
     if isinstance(node, dict):
+        if "$defs" in node and isinstance(node["$defs"], dict):
+            node["$defs"].pop("HelpEvidenceSchema", None)
         if "properties" in node and isinstance(node["properties"], dict):
             for prop in _OMITTED_STRICT_PROPERTIES:
                 node["properties"].pop(prop, None)
+            node.setdefault("additionalProperties", False)
         if "required" in node and isinstance(node["required"], list):
             node["required"] = [r for r in node["required"] if r not in _OMITTED_STRICT_PROPERTIES]
         for v in node.values():

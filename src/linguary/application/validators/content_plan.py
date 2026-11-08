@@ -66,13 +66,24 @@ def _validate_difficulties(plan, owners, source_texts=None):
                     raise ResultValidationError(str(error)) from error
 
 
+def _quote_matches_anchor(quote: str, anchor_quote: str, difficulty_kind: str) -> bool:
+    if not quote or not anchor_quote:
+        return False
+    if anchor_quote in quote:
+        return True
+    if quote in anchor_quote:
+        if difficulty_kind == 'grammar' and len(anchor_quote.split()) > 1 and len(quote.split()) < 2:
+            return False
+        return True
+    return False
+
+
 def _validate_artifact_source(artifact, difficulty, source_texts=None):
     quote = without_footnote_markers(artifact.quotes[0]).strip()
     anchors = tuple(anchor for anchor in difficulty.anchors
         if artifact.kind == 'before_you_read.explanation' or anchor.block_id == artifact.block_id)
     anchor_quotes = tuple(without_footnote_markers(anchor.quote).strip() for anchor in anchors)
-    if not quote or not any(anchor in quote if difficulty.kind == 'grammar'
-            else anchor in quote or quote in anchor for anchor in anchor_quotes):
+    if not quote or not any(_quote_matches_anchor(quote, anchor, difficulty.kind) for anchor in anchor_quotes):
         raise ResultValidationError('помощь не относится к исходной цитате трудности')
     if source_texts is not None and not any(quote in without_footnote_markers(source_texts.get(anchor.block_id, ''))
             for anchor in anchors):
@@ -259,33 +270,40 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
         for difficulty in plan.difficulties:
             if difficulty.owner_block_id not in owner_block_ids:
                 continue
+            anchor_substances = {_substance(a.quote) for a in difficulty.anchors}
             for point in difficulty.required_points:
                 if (difficulty.id, point.id) in covered:
                     continue
                 matched = False
                 for anchor in difficulty.anchors:
-                    r = by_owner.get(anchor.block_id) or by_owner.get(difficulty.owner_block_id)
+                    r = by_owner.get(anchor.block_id) if plan.version == 3 else (by_owner.get(anchor.block_id) or by_owner.get(difficulty.owner_block_id))
                     if r is None:
                         continue
                     anchor_quote = without_footnote_markers(anchor.quote).strip()
                     for note in r.language_notes:
                         note_quote = without_footnote_markers(note.original_excerpt).strip()
-                        if (
-                            anchor_quote in note_quote
-                            or note_quote in anchor_quote
-                            or _same_word(anchor_quote, note_quote)
-                            or find_quote_span(note_quote, anchor_quote) is not None
-                            or find_quote_span(anchor_quote, note_quote) is not None
-                        ):
+                        quote_ok = (
+                            _quote_matches_anchor(note_quote, anchor_quote, difficulty.kind)
+                            if plan.version == 3
+                            else (
+                                anchor_quote in note_quote
+                                or note_quote in anchor_quote
+                                or _same_word(anchor_quote, note_quote)
+                                or find_quote_span(note_quote, anchor_quote) is not None
+                                or find_quote_span(anchor_quote, note_quote) is not None
+                            )
+                        )
+                        if quote_ok:
                             body_excerpt = note.note
-                            if body_excerpt and _substance(body_excerpt) != _substance(anchor.quote):
+                            forbidden = anchor_substances | {_substance(note.original_excerpt), _substance(note.translated_excerpt or '')}
+                            if body_excerpt and _substance(body_excerpt) not in forbidden:
                                 excerpt = body_excerpt if plan.version == 3 else without_footnote_markers(body_excerpt)
                                 if plan.version == 3:
                                     from linguary.application.reader_text import ReaderTextPolicy
                                     excerpt = ReaderTextPolicy().prepare('language_note.note', excerpt, (note.original_excerpt,))
                                 elif excerpt != body_excerpt:
                                     excerpt = excerpt.strip()
-                                if excerpt:
+                                if excerpt and _substance(excerpt) not in forbidden:
                                     content = dict(original_excerpt=note.original_excerpt, note=note.note, translated_excerpt=note.translated_excerpt)
                                     key = artifact_key('language_note.note', r.block_id, content)
                                     evidence.append(HelpEvidence(difficulty.id, point.id, 'language_note.note', r.block_id, key, excerpt))
@@ -297,27 +315,36 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
 
                     for hint in r.glossary_hints:
                         hint_quote = without_footnote_markers(hint.original).strip()
-                        if (
-                            anchor_quote in hint_quote
-                            or hint_quote in anchor_quote
-                            or _same_word(anchor_quote, hint_quote)
-                            or find_quote_span(hint_quote, anchor_quote) is not None
-                            or find_quote_span(anchor_quote, hint_quote) is not None
-                        ):
+                        quote_ok = (
+                            _quote_matches_anchor(hint_quote, anchor_quote, difficulty.kind)
+                            if plan.version == 3
+                            else (
+                                anchor_quote in hint_quote
+                                or hint_quote in anchor_quote
+                                or _same_word(anchor_quote, hint_quote)
+                                or find_quote_span(hint_quote, anchor_quote) is not None
+                                or find_quote_span(anchor_quote, hint_quote) is not None
+                            )
+                        )
+                        if quote_ok:
                             if difficulty.help_kind == 'lexical_hint':
+                                if plan.version == 3 and difficulty.kind == 'grammar':
+                                    continue
                                 kind = 'glossary_hint.translation'
                                 body_excerpt = hint.translation
+                                forbidden = anchor_substances
                             else:
                                 kind = 'glossary_hint.note'
                                 body_excerpt = hint.note
-                            if body_excerpt and _substance(body_excerpt) != _substance(anchor.quote):
+                                forbidden = anchor_substances | {_substance(hint.original), _substance(hint.translation)}
+                            if body_excerpt and _substance(body_excerpt) not in forbidden:
                                 excerpt = body_excerpt if plan.version == 3 else without_footnote_markers(body_excerpt)
                                 if plan.version == 3:
                                     from linguary.application.reader_text import ReaderTextPolicy
                                     excerpt = ReaderTextPolicy().prepare(kind, excerpt, (hint.original,))
                                 elif excerpt != body_excerpt:
                                     excerpt = excerpt.strip()
-                                if excerpt:
+                                if excerpt and _substance(excerpt) not in forbidden:
                                     content = dict(original=hint.original, translation=hint.translation, note=hint.note)
                                     key = artifact_key(kind, r.block_id, content)
                                     evidence.append(HelpEvidence(difficulty.id, point.id, kind, r.block_id, key, excerpt))

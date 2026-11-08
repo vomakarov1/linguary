@@ -844,3 +844,13 @@ def test_resolve_response_evidence_algorithmically_binds_when_content_evidence_i
     assert by_diff["d2"].artifact_kind == "glossary_hint.translation"
     assert by_diff["d2"].body_excerpt == "подсказка"
 
+
+def test_grammar_difficulty_accepts_multiword_construction_in_longer_anchor_and_rejects_single_word_hint() -> None:
+    """Multi-word grammar construction inside a full-sentence v5 anchor passes validation while 1-word hint does not."""
+    from linguary.application.validators.content_plan import _quote_matches_anchor
+
+    anchor = "Had the queen of Sheba lived in the flat across the airshaft"
+    assert _quote_matches_anchor("Had the queen of Sheba lived", anchor, "grammar") is True
+    assert _quote_matches_anchor("flat", anchor, "grammar") is False
+
+
