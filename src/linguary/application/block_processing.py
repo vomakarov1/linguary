@@ -312,7 +312,7 @@ class TranslationCall:
                 decision = self._retry_policy.decide(
                     _worded_for_the_model(error, context),
                     attempts=attempts,
-                    raw_content=response.raw_content if response is not None else None,
+                    raw_content=getattr(response, "raw_content", None) if response is not None else None,
                 )
                 if not decision.should_retry:
                     if recovery is not None:

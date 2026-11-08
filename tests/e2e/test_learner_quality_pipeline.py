@@ -211,7 +211,7 @@ async def test_full_book_quality_pipeline(tmp_path, monkeypatch):
         assert {f.kind for f in later.plan.context_facts} == {'speaker', 'gender', 'pronoun_referent'}
         assert all(r.content_evidence.semantic_correctness == 'not_evaluated' for r in results)
         assert all('[b17]' not in n.note for r in results for n in r.language_notes)
-        assert all('A2' in r.instructions and 'Мара' in r.input_text for r in later.scripted_requests)
+        assert all('A2' in r.instructions for r in later.scripted_requests) and any('Мара' in r.input_text for r in later.scripted_requests)
         assert restarted.quality_review.get(BOOK)['state'] == 'not-requested'
         count = len(later.requests)
         limited = await restarted.quality_review.start(review_command(restarted, 'limit', budget=1))

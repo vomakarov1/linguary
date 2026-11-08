@@ -142,11 +142,6 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   font-style: italic;
 }
 
-.linguary-support-status {
-  margin: 1em 0;
-  font-size: 0.88em;
-}
-
 .linguary-paragraph-fragment {
   margin: 1.2em 0;
   padding: 0.6em 0.8em;
@@ -542,7 +537,6 @@ class _ChapterRenderer:
         else:
             container = _sub(body, "section", {f"{{{_EPUB_NAMESPACE}}}type": "chapter"})
             self._append_previously(container, previous)
-            self._append_support_status(container, section)
             self._append_before_you_read(container, section)
             self._append_blocks(
                 container, section, href=href, number=number, is_front_matter=False
@@ -570,22 +564,6 @@ class _ChapterRenderer:
                 else None
             )
             _append_text(_sub(block, "p", attributes), paragraph)
-
-    def _append_support_status(
-        self, container: etree._Element, section: DocumentSection
-    ) -> None:
-        """Describe saved support without evaluating or generating explanations."""
-        results = tuple(result for block in section.ordered_blocks
-            if (result := self._request.block_results.get(block.id)) is not None)
-        unresolved = sum(assistance.kind == 'unresolved' for result in results
-            for assistance in result.fragment_assistances)
-        if unresolved:
-            text = f"Есть трудности без пояснения: {unresolved}."
-        elif results and all(result.content_evidence or result.fragment_assistances for result in results):
-            text = "Сохранённые пояснения доступны."
-        else:
-            text = "Поддержка не оценена."
-        _sub(container, "p", {"class": "linguary-support-status"}).text = text
 
     def _append_before_you_read(
         self, container: etree._Element, section: DocumentSection
@@ -945,7 +923,7 @@ class _ChapterRenderer:
                     "class": f"linguary-assistance linguary-{assistance.kind}",
                 })
                 _sub(aside, "p").text = (
-                    assistance.text if assistance.resolved else "Трудность пока не объяснена."
+                    assistance.text if assistance.resolved else "Помощь пока не подготовлена."
                 )
                 for reference in references:
                     _sub(aside, "a", {"href": f"#{reference}",

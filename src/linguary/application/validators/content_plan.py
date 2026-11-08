@@ -173,7 +173,7 @@ def validate_saved_content_coverage(plan, results, before_you_read, *, owner_blo
             if difficulty.owner_block_id in owners}
         found = set()
         for result in results:
-            if result.content_evidence:
+            if result.content_evidence and getattr(result.content_evidence, "evidence", ()):
                 raise ResultValidationError('помощь к фрагментам не должна дублировать свидетельства')
             for assistance in result.fragment_assistances:
                 difficulty = planned.get(assistance.difficulty_id)

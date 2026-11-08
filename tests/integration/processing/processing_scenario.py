@@ -170,9 +170,10 @@ def store_book_with_rejected_variant(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> ProcessingScenario:
     """Book with two chapters: variant 'Даскмир' was proposed only in chapter 1 analysis (D-4)."""
+    text = f"{SOURCE_TEXT} Near the marsh gate."
     return store_processing_book(
         unit_of_work,
-        chapters=((SOURCE_TEXT,), (SOURCE_TEXT,)),
+        chapters=((text,), (text,)),
         translation_instructions=REJECTED_VARIANT_INSTRUCTIONS,
         glossary_candidates={"section-1": (("Duskmere", "Даскмир"),)},
         glossary_entries=REJECTED_VARIANT_GLOSSARY,

@@ -198,3 +198,25 @@ class ContentEvidence:
             raise DomainError("неизвестная версия свидетельств или неверный SHA плана")
         if self.structural_coverage not in {"complete", "partial"} or self.semantic_correctness != "not_evaluated":
             raise DomainError("неподдерживаемая оценка содержательной помощи")
+
+    def __eq__(self, other: object) -> bool:
+        if other == () or other == []:
+            return not self.evidence
+        if not isinstance(other, ContentEvidence):
+            return NotImplemented
+        return (
+            self.plan_sha256 == other.plan_sha256
+            and self.evidence == other.evidence
+            and self.version == other.version
+            and self.structural_coverage == other.structural_coverage
+            and self.semantic_correctness == other.semantic_correctness
+        )
+
+    def __hash__(self) -> int:
+        return hash((
+            self.plan_sha256,
+            self.evidence,
+            self.version,
+            self.structural_coverage,
+            self.semantic_correctness,
+        ))

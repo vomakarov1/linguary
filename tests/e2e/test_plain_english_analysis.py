@@ -72,7 +72,7 @@ def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, lev
         finish(app)
         processing_instructions = client.requests[1].instructions
         assert 'fragment_assistances' in processing_instructions
-        assert 'content_evidence верни пустыми списками' in processing_instructions
+        assert 'content_evidence' not in processing_instructions
         assert {
             'a2': 'Для A2 используй частотные слова',
             'b1': 'Для B1 используй знакомую лексику',
@@ -80,7 +80,7 @@ def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, lev
         }[level] in processing_instructions
         assert 'Служебные context_facts применяй' not in processing_instructions
         assert [(request.kind, request.contract_version) for request in client.requests] == [
-            (LLMResponseKind.CHAPTER_ANALYSIS, 3),
+            (LLMResponseKind.CHAPTER_ANALYSIS, 5),
             (LLMResponseKind.TRANSLATION_RESULT, 4),
             (LLMResponseKind.CHAPTER_CORRECTION, 2),
         ]

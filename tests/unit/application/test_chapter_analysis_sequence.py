@@ -103,7 +103,7 @@ async def test_analysis_tasks_run_in_reading_order_one_at_a_time() -> None:
     """Chapters are analyzed in parallel across workers."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
-    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",), before_you_read=[]))
     sequence = make_sequence(unit_of_work, queue, YieldingLLMClient(client))
     runner = TaskRunner(
         queue=queue,  # type: ignore[arg-type]  # queue port double
@@ -146,7 +146,7 @@ async def test_completed_analysis_moves_book_to_glossary_review() -> None:
     """After the last chapter, the book advances to glossary review (ALG-06)."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
-    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",), before_you_read=[]))
     sequence = make_sequence(unit_of_work, queue, client)
     runner = TaskRunner(
         queue=queue,  # type: ignore[arg-type]  # queue port double
@@ -165,7 +165,7 @@ async def test_start_resumes_from_first_unanalysed_chapter() -> None:
     """Restarting resumes from the first unanalyzed chapter (PRD § 18)."""
     unit_of_work = make_book()
     queue = FakeTaskQueue()
-    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",), before_you_read=[]))
     sequence = make_sequence(unit_of_work, queue, client)
     await sequence.start(BOOK_ID)
     first = queue.tasks[0]
@@ -227,7 +227,7 @@ async def test_repeated_start_retries_analysis_stopped_by_llm_configuration() ->
     queue = FakeTaskQueue()
     client = FakeLLMClient(
         replies=(LLMConfigurationError("провайдер не принял ключ: 401"),),
-        default=analysis_reply(aliases=("b1",)),
+        default=analysis_reply(aliases=("b1",), before_you_read=[]),
     )
     sequence = make_sequence(unit_of_work, queue, client)
     runner = TaskRunner(

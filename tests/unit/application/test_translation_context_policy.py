@@ -118,7 +118,7 @@ def test_context_keeps_whole_targets_modes_and_order():
 
 @pytest.mark.parametrize("route", ROUTES)
 def test_unknown_fact_stays_unknown_and_glossary_wins(route):
-    target = make_block(order=1, text="She waited.")
+    target = make_block(order=1, text="She waited at Netherfield.")
     neighbour = make_block(order=0, text="Someone was waiting.")
     anchor = SourceAnchor(target.id, 0, 3, "She")
     other = SourceAnchor(neighbour.id, 0, 7, "Someone")

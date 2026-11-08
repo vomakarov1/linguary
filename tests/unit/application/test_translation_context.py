@@ -8,6 +8,7 @@ import pytest
 from processing_fakes import (
     BOOK_ID,
     SECTION_ID,
+    SOURCE_TEXT,
     TARGET_LANGUAGE,
     make_block,
     make_blocks,
@@ -130,9 +131,10 @@ def build_context(
     ),
     snapshot: GlossarySnapshot | None = None,
     builder: ContextBuilder | None = None,
+    text: str | None = None,
 ):
     """Processing context for a two-block chapter."""
-    blocks = make_blocks(len(treatments))
+    blocks = make_blocks(len(treatments), text=text or ("Mr. Bennet visits Netherfield. " + SOURCE_TEXT))
     unit = make_unit(blocks, treatments=treatments)
     section = make_section(blocks)
     return (builder or ContextBuilder()).for_translation_unit(
@@ -300,12 +302,14 @@ def test_suggestions_are_limited_but_mandatory_entries_are_not() -> None:
     )
 
     context, _ = build_context(
-        snapshot=snapshot, builder=ContextBuilder(max_accumulated_candidates=2)
+        snapshot=snapshot, builder=ContextBuilder(max_accumulated_candidates=2),
+        text=" ".join(f"Term {i}" for i in range(5)) + " Netherfield.",
     )
 
     text = context.request.input_text
-    assert "Term 0" in text and "Term 1" in text
-    assert "Term 2" not in text
+    suggestions_text = text[text.index("Необязательные подсказки глоссария"):text.index("Блоки для обработки:")]
+    assert "Term 0" in suggestions_text and "Term 1" in suggestions_text
+    assert "Term 2" not in suggestions_text
     assert "Netherfield" in text
 
 
@@ -426,7 +430,7 @@ def test_glossary_note_reaches_the_model_with_its_decision() -> None:
         )
     )
 
-    context, _ = build_context(snapshot=snapshot)
+    context, _ = build_context(snapshot=snapshot, text="Wren Calder.")
 
     assert "Рен Колдер (женский род)" in context.request.input_text
     assert "принято для всей книги" in context.request.input_text
@@ -791,7 +795,7 @@ def context_with_instructions(
     instructions: str, snapshot: GlossarySnapshot
 ) -> str:
     """Processing request text for a chapter with instructions and analysis candidates."""
-    blocks = make_blocks(1)
+    blocks = make_blocks(1, text="Duskmere and Wren Calder at the marsh gate on the boardwalk.")
     unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
     section = make_section(blocks)
     analysis = make_analysis(unit)
@@ -948,7 +952,7 @@ def test_rejected_variant_is_known_from_other_chapters_of_the_book() -> None:
     was already in chapter 1 decisions), and chapter 2 request received the entire note for
     `the marsh gate` with the rejected form and the chapter instruction mentioning it without quotes.
     """
-    blocks = make_blocks(1)
+    blocks = make_blocks(1, text="The marsh gate.")
     unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE,))
     section = make_section(blocks, title="Chapter 2", order=1)
     analysis = replace(

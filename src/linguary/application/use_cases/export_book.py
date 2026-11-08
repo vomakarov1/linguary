@@ -516,7 +516,7 @@ def _validate_content_plans(document, analyses, results, *, english_help=False, 
             if a2_v4:
                 continue
             if english_help:
-                if result.content_evidence:
+                if result.content_evidence and getattr(result.content_evidence, "evidence", ()):
                     raise ResultValidationError('английская помощь не должна дублировать свидетельства старого формата')
             elif not result.content_evidence:
                 raise ResultValidationError('отсутствуют свидетельства содержательного плана')

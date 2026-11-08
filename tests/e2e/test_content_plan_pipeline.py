@@ -192,7 +192,15 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
         replies = [FakeReply.of_payload(good)]
         if retry:
             replies.insert(0, FakeReply.of_payload(processing_payload(story, blocks, plan, omit_evidence=True)))
-        replies.append(FakeReply.of_payload(correction_payload(blocks)))
+        checked_blocks = [
+            b for b in blocks
+            if not (story['treatments'][blocks.index(b)] == 'READ_AS_IS' and not any(
+                d['owner'] == blocks.index(b) or any(a['block'] == blocks.index(b) for a in d['anchors'])
+                for d in story.get('difficulties', [])
+            ))
+        ]
+        if checked_blocks:
+            replies.append(FakeReply.of_payload(correction_payload(checked_blocks)))
         # FakeLLMClient consumes a single cursor across stages.
         client.replies = (*client.replies, *replies)
         run(app.processing.start(BOOK))
@@ -216,7 +224,10 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
             assert len(client.requests) == len(groups) + 3
         correction_requests = [request for request in client.requests
                                if request.kind is LLMResponseKind.CHAPTER_CORRECTION]
-        assert correction_requests and all(request.contract_version == 2 for request in correction_requests)
+        if checked_blocks:
+            assert correction_requests and all(request.contract_version == 2 for request in correction_requests)
+        else:
+            assert not correction_requests
         assert all(request.contract_version == 2 for request in client.requests
                    if request.kind is not LLMResponseKind.CHAPTER_CORRECTION)
         if regenerate:
