@@ -360,10 +360,11 @@ class CorrectChapter:
     def _candidates(self, tx, inputs, response):
         from linguary.application.use_cases.export_book import _validate_content_plans
         ids = response.block_ids
-        all_results = tx.results.list_for_run(inputs.run.id)
+        all_results = tuple(inputs.results.values())
         used_note_ids = {note.id for result in all_results for note in result.language_notes}
         if isinstance(inputs.snapshot, CorrectionSnapshotV2):
             used_note_ids.update(n['id'] for c in tx.work.list_correction_candidates(inputs.run.id,
+                section_id=inputs.section.id,
                 states={'awaiting_review', 'awaiting_human', 'auto_applied', 'accepted', 'kept'})
                 for n in c.payload['result']['language_notes'])
         notes = note_id_factory(chapter_number=chapter_number(inputs.document, inputs.section), used=used_note_ids)
@@ -439,7 +440,7 @@ def prepare_correction_candidates(tx, inputs, candidates, validator):
             raise ResultValidationError('результат не совпадает с неизменяемым предложением')
         results.append(result)
     ids = {r.block_id for r in results}
-    all_results = [r for r in tx.results.list_for_run(inputs.run.id) if r.block_id not in ids] + results
+    all_results = [r for r in tuple(inputs.results.values()) if r.block_id not in ids] + results
     notes = [n.id for r in all_results for n in r.language_notes]
     if len(notes) != len(set(notes)):
         raise ResultValidationError('идентификаторы заметок кандидата заняты')

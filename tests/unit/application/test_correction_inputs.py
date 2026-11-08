@@ -547,3 +547,158 @@ def test_correct_chapter_v2_review_request_includes_block_alias_and_aliases_note
     assert b1.id not in request.input_text
     assert b2.id not in request.input_text
 
+
+def test_candidates_and_prepare_correction_candidates_use_section_results_without_list_for_run():
+    from dataclasses import asdict
+    from processing_fakes import make_validator
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V2, ChapterCorrectionV2Response, CorrectionSnapshotV2, UnchangedBlockResponse,
+    )
+    from linguary.application.use_cases.correct_chapter import CorrectChapter, prepare_correction_candidates
+    from linguary.domain import ChapterAnalysis, LanguageNote, TreatmentPlan
+    from linguary.domain.content_plan import canonical_sha
+    from linguary.domain.correction import CorrectionCandidate
+
+    section = make_analysis_section(texts=("First block.", "Second block."))
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    res1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Первый блок.",
+        language_notes=(
+            LanguageNote(id="ln-ch01-001", block_id=b1.id, original_excerpt="First", note="Заметка."),
+        ),
+    )
+    res2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Второй блок.",
+    )
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.2,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 1000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1, "versions": {"validators": 3}}),
+        snapshot=snapshot,
+        blocks=section.blocks,
+        results={b1.id: res1, b2.id: res2},
+        bindings={b1.id: None, b2.id: None},
+    )
+
+    list_candidates_calls: list[tuple[str, str | None, set[str] | None]] = []
+
+    def forbidden_list_for_run(run_id: str):
+        raise AssertionError("tx.results.list_for_run must not be called when inputs.results is available")
+
+    def fake_list_correction_candidates(run_id: str, *, section_id: str | None = None, states=None):
+        list_candidates_calls.append((run_id, section_id, set(states) if states is not None else None))
+        return ()
+
+    tx = SimpleNamespace(
+        results=SimpleNamespace(list_for_run=forbidden_list_for_run),
+        work=SimpleNamespace(list_correction_candidates=fake_list_correction_candidates),
+    )
+
+    validator = make_validator()
+    correct = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=validator)
+    response = ChapterCorrectionV2Response(blocks=(UnchangedBlockResponse(block_id=b1.id),))
+    validated = correct._candidates(tx, inputs, response)
+    assert validated == (res1,)
+    assert list_candidates_calls == [
+        ("run-1", section.id, {"awaiting_review", "awaiting_human", "auto_applied", "accepted", "kept"})
+    ]
+
+    proposed_res = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Первый блок уточнён.",
+        language_notes=(
+            LanguageNote(id="ln-ch01-001", block_id=b1.id, original_excerpt="First", note="Заметка."),
+        ),
+    )
+    candidate_payload = json.loads(json.dumps({
+        "schema_version": 1,
+        "book_id": doc.id,
+        "run_id": "run-1",
+        "conditions_id": "cond-1",
+        "section_id": section.id,
+        "block_id": b1.id,
+        "input_sha256": inputs.checksums[b1.id],
+        "input_generation": 1,
+        "group_id": "group-1",
+        "proposal_attempt_id": "att-1",
+        "original": {"text": b1.text},
+        "current_result": asdict(res1),
+        "result": asdict(proposed_res),
+        "proposal": {
+            "block_id": b1.id,
+            "status": "corrected",
+            "translated_text": "Первый блок уточнён.",
+            "glossary_hints": [],
+            "language_notes": [
+                {"source_block_id": b1.id, "original_excerpt": "First", "note": "Заметка.", "translated_excerpt": None}
+            ],
+            "issues": [
+                {
+                    "field_path": "translated_text",
+                    "source_quote": "First",
+                    "current_evidence": {"kind": "quote", "field_path": "translated_text", "quote": "Первый"},
+                    "problem": "Неточность",
+                    "minimal_fix_reason": "Уточнить",
+                }
+            ],
+        },
+    }))
+    candidate = CorrectionCandidate(
+        candidate_id="cand-1",
+        book_id=doc.id,
+        run_id="run-1",
+        conditions_id="cond-1",
+        section_id=section.id,
+        block_id=b1.id,
+        input_sha256=inputs.checksums[b1.id],
+        input_generation=1,
+        proposal_sha256=canonical_sha(candidate_payload),
+        payload=candidate_payload,
+        group_id="group-1",
+        proposal_attempt_id="att-1",
+    )
+    list_candidates_calls.clear()
+    prepared = prepare_correction_candidates(tx, inputs, (candidate,), validator)
+    assert prepared == (proposed_res,)
+    assert list_candidates_calls == [
+        ("run-1", section.id, {"awaiting_review", "awaiting_human", "auto_applied", "accepted", "kept"})
+    ]
+
+
