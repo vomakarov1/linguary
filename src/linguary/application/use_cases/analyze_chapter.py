@@ -89,6 +89,7 @@ from linguary.domain import (
     TreatmentPlan,
     TermConcept,
     apply_book_event,
+    glossary_key,
 )
 
 #: Sleep between model call attempts. The application layer does not own the event loop,
@@ -421,29 +422,77 @@ class AnalyzeChapter:
             orders = {section.id: section.order for section in document.sections}
             analyses = transaction.analyses.list_for_book(command.book_id)
             concepts = transaction.glossary.list_for_book(command.book_id)
+            tasks_repo = getattr(transaction, "tasks", None)
+            parallel_batch = (
+                tasks_repo is not None
+                and any(
+                    task.task_type is TaskType.ANALYZE_CHAPTER
+                    and task.scope_id != command.section_id
+                    and task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+                    for task in tasks_repo.list_for_book(command.book_id)
+                )
+            )
             if self._context_builder.name_translation_policy is not None:
-                accumulated = tuple(candidate for analysis in analyses
-                    if orders.get(analysis.section_id, current_order) < current_order
-                    for candidate in analysis.glossary_candidates)
+                accumulated = (
+                    ()
+                    if parallel_batch
+                    else tuple(
+                        candidate
+                        for analysis in analyses
+                        if orders.get(analysis.section_id, current_order) < current_order
+                        for candidate in analysis.glossary_candidates
+                    )
+                )
                 decisions = tuple(concept for concept in concepts if concept.status.is_user_decision)
                 suggestions = tuple(concept for concept in concepts if not concept.status.is_user_decision)
                 return document, accumulated, decisions, suggestions
-            accumulated = candidates_with_decisions(
-                (
+            if parallel_batch:
+                all_candidates = tuple(
                     candidate
                     for analysis in analyses
-                    if orders.get(analysis.section_id, current_order) < current_order
                     for candidate in analysis.glossary_candidates
-                ),
-                concepts,
-                language=document.target_language,
-                decided_only=(
-                    candidate
-                    for analysis in analyses
-                    if orders.get(analysis.section_id, current_order) >= current_order
-                    for candidate in analysis.glossary_candidates
-                ),
-            )
+                )
+                known_keys = {glossary_key(c.source_text) for c in all_candidates}
+                concept_candidates = tuple(
+                    GlossaryCandidate.create(
+                        id=concept.id,
+                        analysis_id="user-decision",
+                        source_text=concept.canonical_source_text,
+                        type=concept.type,
+                        suggested_translation=variant.text,
+                        confidence=1.0,
+                        model_flagged_review=False,
+                        confidence_threshold=self._glossary_confidence_threshold,
+                        note=concept.note,
+                    )
+                    for concept in concepts
+                    if concept.status.is_user_decision
+                    and glossary_key(concept.canonical_source_text) not in known_keys
+                    and (variant := concept.variant_for(document.target_language)) is not None
+                )
+                accumulated = candidates_with_decisions(
+                    (),
+                    concepts,
+                    language=document.target_language,
+                    decided_only=(*all_candidates, *concept_candidates),
+                )
+            else:
+                accumulated = candidates_with_decisions(
+                    (
+                        candidate
+                        for analysis in analyses
+                        if orders.get(analysis.section_id, current_order) < current_order
+                        for candidate in analysis.glossary_candidates
+                    ),
+                    concepts,
+                    language=document.target_language,
+                    decided_only=(
+                        candidate
+                        for analysis in analyses
+                        if orders.get(analysis.section_id, current_order) >= current_order
+                        for candidate in analysis.glossary_candidates
+                    ),
+                )
         return document, accumulated, (), ()
 
     async def _request_analysis(

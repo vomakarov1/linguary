@@ -51,7 +51,6 @@ def dependency_intervals(ordered_blocks, plan=None, *, indivisible=()):
     edges = list(indivisible)
     if plan is not None:
         edges.extend((difficulty.owner_block_id, *(a.block_id for a in difficulty.anchors)) for difficulty in plan.difficulties)
-        edges.extend((fact.subject_anchor.block_id, *(a.block_id for a in fact.anchors)) for fact in plan.context_facts)
     spans = [(index, index) for index in range(len(ordered))]
     for edge in edges:
         if not set(edge) <= positions.keys():

@@ -35,6 +35,9 @@ from linguary.domain import (
     BookStatus,
     ConceptType,
     CoverageStatus,
+    ProcessingTask,
+    TaskStatus,
+    TaskType,
     TermConcept,
     TermStatus,
     TermVariant,
@@ -944,5 +947,136 @@ async def test_truncated_single_block_analysis_raises_give_up() -> None:
         await scenario(command())
 
     assert exc_info.value.truncated is True
+
+
+async def test_parallel_batch_analysis_ignores_unfinished_peer_chapter_candidates() -> None:
+    """Parallel batch analysis ignores unconfirmed model candidates when peer chapter tasks are active, keeping user decisions."""
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Chapter {number} text with Mr. Bennet and Duskmere.",),
+        )
+        for number in (1, 2, 3)
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    unit_of_work.analyses.save(
+        BOOK_ID,
+        make_chapter_analysis(
+            id="analysis-1",
+            section_id="section-1",
+            candidates=(
+                make_analysis_candidate(
+                    analysis_id="analysis-1",
+                    source_text="Mr. Bennet",
+                    suggested_translation="мистер Беннет",
+                ),
+                make_analysis_candidate(
+                    analysis_id="analysis-1",
+                    source_text="Duskmere",
+                    suggested_translation="Даскмир",
+                    type=ConceptType.PLACE,
+                ),
+            ),
+        ),
+    )
+    unit_of_work.glossary.save(
+        _decision("concept-1", "Duskmere", "Даскмер", TermStatus.APPROVED)
+    )
+    tasks = (
+        ProcessingTask(
+            id="task-1",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-1",
+            status=TaskStatus.SUCCEEDED,
+            attempts=1,
+        ),
+        ProcessingTask(
+            id="task-2",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-2",
+            status=TaskStatus.RUNNING,
+            attempts=1,
+        ),
+        ProcessingTask(
+            id="task-3",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-3",
+            status=TaskStatus.PENDING,
+            attempts=0,
+        ),
+    )
+    unit_of_work.tasks = SimpleNamespace(list_for_book=lambda _: tasks)  # type: ignore[attr-defined]
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    await scenario(
+        AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-2", task_id="task-2")
+    )
+
+    request_text = client.requests[0].input_text
+    assert "мистер Беннет" not in request_text
+    assert "Даскмер" in request_text
+
+
+async def test_sequential_analysis_retains_previous_chapter_candidates() -> None:
+    """When no other ANALYZE_CHAPTER tasks are pending or running, previous chapter candidates are retained."""
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Chapter {number} text with Mr. Bennet.",),
+        )
+        for number in (1, 2)
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    unit_of_work.analyses.save(
+        BOOK_ID,
+        make_chapter_analysis(
+            id="analysis-1",
+            section_id="section-1",
+            candidates=(
+                make_analysis_candidate(
+                    analysis_id="analysis-1",
+                    source_text="Mr. Bennet",
+                    suggested_translation="мистер Беннет",
+                ),
+            ),
+        ),
+    )
+    tasks = (
+        ProcessingTask(
+            id="task-1",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-1",
+            status=TaskStatus.SUCCEEDED,
+            attempts=1,
+        ),
+        ProcessingTask(
+            id="task-2",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-2",
+            status=TaskStatus.RUNNING,
+            attempts=1,
+        ),
+    )
+    unit_of_work.tasks = SimpleNamespace(list_for_book=lambda _: tasks)  # type: ignore[attr-defined]
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    await scenario(
+        AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-2", task_id="task-2")
+    )
+
+    request_text = client.requests[0].input_text
+    assert "мистер Беннет" in request_text
+
 
 

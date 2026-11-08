@@ -32,6 +32,7 @@ class SystemSettingsService:
         self._runtime = runtime
         self._store = store
         self._limiter = limiter
+        self._rate_limiter = limiter
         self._worker_pool = worker_pool
         self._lock = asyncio.Lock()
         self._closing = False
@@ -123,6 +124,7 @@ class SystemSettingsService:
                 raise SettingsNotAppliedError('Изменения не применены') from None
             self._runtime.publish(generation, result.revision)
             self._limiter.set_limit(candidate.llm.requests_per_minute)
+            self._rate_limiter.set_max_concurrency(candidate.worker.concurrency)
             self._worker_pool.set_concurrency(candidate.worker.concurrency)
 
     @staticmethod

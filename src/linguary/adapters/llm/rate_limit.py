@@ -20,9 +20,11 @@ lifecycle matches the application process and must not depend on which event loo
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 import threading
 import time
-from collections.abc import Awaitable, Callable
 
 from linguary.application.ports.llm import (
     LLMClient,
@@ -40,12 +42,13 @@ _SECONDS_PER_MINUTE = 60
 
 
 class LLMRateLimiter:
-    """Shared request reservations and independent provider cool-down delay."""
+    """Shared request reservations, concurrency cap, and independent provider cool-down delay."""
 
     def __init__(
         self,
-        requests_per_minute: int | None,
+        requests_per_minute: int | None = None,
         *,
+        max_concurrency: int | None = None,
         clock: Clock | None = None,
         sleep: Sleep | None = None,
     ) -> None:
@@ -55,12 +58,21 @@ class LLMRateLimiter:
         self._last_numeric_slot: float | None = None
         self._last_unlimited_call: float | None = None
         self._provider_blocked_until = 0.0
+        self._max_concurrency: int | None = None
+        self._in_flight = 0
+        self._concurrency_waiters: deque[list[object]] = deque()
         self.set_limit(requests_per_minute)
+        self.set_max_concurrency(max_concurrency)
 
     @property
     def requests_per_minute(self) -> int | None:
         with self._lock:
             return self._requests_per_minute
+
+    @property
+    def max_concurrency(self) -> int | None:
+        with self._lock:
+            return self._max_concurrency
 
     def set_limit(self, value: int | None) -> None:
         if value is not None and (type(value) is not int or value < 1):
@@ -70,6 +82,74 @@ class LLMRateLimiter:
         with self._lock:
             self._requests_per_minute = value
             self._interval = interval
+
+    def set_max_concurrency(self, value: int | None) -> None:
+        if value is not None and (type(value) is not int or value < 1):
+            raise ValueError("предел параллельных запросов должен быть положительным целым числом")
+        with self._lock:
+            self._max_concurrency = value
+            self._wake_waiters_locked()
+
+    async def acquire_concurrency(self) -> None:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if not self._concurrency_waiters and (
+                self._max_concurrency is None or self._in_flight < self._max_concurrency
+            ):
+                self._in_flight += 1
+                return
+            waiter: asyncio.Future[None] = loop.create_future()
+            entry: list[object] = [waiter, False]
+            self._concurrency_waiters.append(entry)
+        try:
+            await waiter
+        except BaseException:
+            with self._lock:
+                if entry in self._concurrency_waiters:
+                    self._concurrency_waiters.remove(entry)
+                elif entry[1]:
+                    self._in_flight -= 1
+                    self._wake_waiters_locked()
+            raise
+
+    def release_concurrency(self) -> None:
+        with self._lock:
+            if self._in_flight > 0:
+                self._in_flight -= 1
+            self._wake_waiters_locked()
+
+    @asynccontextmanager
+    async def concurrency_slot(self) -> AsyncIterator[None]:
+        await self.acquire_concurrency()
+        try:
+            yield
+        finally:
+            self.release_concurrency()
+
+    def _wake_waiters_locked(self) -> None:
+        while self._concurrency_waiters and (
+            self._max_concurrency is None or self._in_flight < self._max_concurrency
+        ):
+            entry = self._concurrency_waiters.popleft()
+            waiter = entry[0]
+            assert isinstance(waiter, asyncio.Future)
+            if waiter.done():
+                continue
+            entry[1] = True
+            self._in_flight += 1
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is waiter.get_loop():
+                waiter.set_result(None)
+            else:
+                waiter.get_loop().call_soon_threadsafe(self._resolve_waiter, waiter)
+
+    @staticmethod
+    def _resolve_waiter(waiter: asyncio.Future[None]) -> None:
+        if not waiter.done():
+            waiter.set_result(None)
 
     async def acquire(self) -> None:
         with self._lock:
@@ -110,29 +190,41 @@ class RateLimitedLLMClient(LLMClient):
         *,
         inner: LLMClient,
         requests_per_minute: int | None = None,
+        max_concurrency: int | None = None,
         limiter: LLMRateLimiter | None = None,
         clock: Clock | None = None,
         sleep: Sleep | None = None,
     ) -> None:
         self._inner = inner
         self._limiter = limiter if limiter is not None else LLMRateLimiter(
-            requests_per_minute, clock=clock, sleep=sleep
+            requests_per_minute,
+            max_concurrency=max_concurrency,
+            clock=clock,
+            sleep=sleep,
         )
 
     @property
     def requests_per_minute(self) -> int | None:
         return self._limiter.requests_per_minute
 
+    @property
+    def max_concurrency(self) -> int | None:
+        return self._limiter.max_concurrency
+
     async def generate[PayloadT: LLMPayload](
         self, request: LLMRequest[PayloadT]
     ) -> LLMResponse[PayloadT]:
-        await self._limiter.acquire()
+        await self._limiter.acquire_concurrency()
         try:
-            return await self._inner.generate(request)
-        except LLMTransportError as error:
-            if error.retry_after_seconds is not None:
-                self._limiter.hold(error.retry_after_seconds)
-            raise
+            await self._limiter.acquire()
+            try:
+                return await self._inner.generate(request)
+            except LLMTransportError as error:
+                if error.retry_after_seconds is not None:
+                    self._limiter.hold(error.retry_after_seconds)
+                raise
+        finally:
+            self._limiter.release_concurrency()
 
 
 __all__ = ["LLMRateLimiter", "RateLimitedLLMClient"]

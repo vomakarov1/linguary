@@ -1,7 +1,7 @@
 from dataclasses import replace
 import pytest
 from linguary.application.recovery import dependency_intervals, merge_unit_boundaries, local_failure_signature, root_manifest
-from linguary.domain.content_plan import ContentPlan, Difficulty, SourceAnchor, RequiredPoint
+from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, SourceAnchor, RequiredPoint
 from linguary.domain.llm_log import Violation
 
 
@@ -75,3 +75,77 @@ def test_prepare_roots_splits_technical_group_only_between_plan_dependencies(cro
     assert atoms == ((('b1', 'b2', 'b3'), ('b4',)) if cross_block else tuple((b,) for b in ids))
     assert scopes[0].ordered_blocks == ids
     assert tuple(b.attributes['split_group'] for b in blocks) == ('original-paragraph',) * 4
+
+
+def test_context_facts_do_not_merge_distant_units_into_single_recovery_root():
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from linguary.application.recovery import Recovery
+    from linguary.domain import BlockTreatment, BlockType, CoverageStatus, GlossarySnapshot, TreatmentPlan, TreatmentPlanItem
+    from linguary.domain.analysis import ChapterAnalysis
+
+    plan_with_fact = ContentPlan(
+        version=3,
+        profile='content-plan-v3',
+        context_facts=(
+            ContextFact(
+                id='f1',
+                kind='pronoun_referent',
+                anchors=(SourceAnchor('b1', 0, 1, 'a'),),
+                subject_anchor=SourceAnchor('b4', 0, 1, 'd'),
+                value='Alice',
+                certainty='explicit',
+            ),
+        ),
+    )
+    ids = ('b1', 'b2', 'b3', 'b4')
+    intervals = dependency_intervals(ids, plan_with_fact)
+    assert intervals == (('b1',), ('b2',), ('b3',), ('b4',))
+    assert merge_unit_boundaries((('b1', 'b2'), ('b3', 'b4')), intervals) == (('b1', 'b2'), ('b3', 'b4'))
+
+    roots, scopes = [], []
+    class WorkStore:
+        def latest_conditions(self, book_id):
+            return SimpleNamespace(id='00000000-0000-0000-0000-000000000001', payload={'checks': {'language_notes_per_chapter': 2}})
+        def find_root_by_key(self, key):
+            return None
+        def add_root(self, root):
+            roots.append(root)
+        def list_scopes(self, root_id):
+            return tuple(s for s in scopes if s.root_id == root_id)
+        def add_scope(self, scope):
+            scopes.append(scope)
+    class Uow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=store)
+    store = WorkStore()
+
+    treatment = TreatmentPlan('section', tuple(TreatmentPlanItem(b, BlockTreatment.TRANSLATE) for b in ids))
+    analysis = ChapterAnalysis(
+        id='analysis',
+        section_id='section',
+        coverage_status=CoverageStatus.COMPLETE,
+        treatment_plan=treatment,
+        translation_instructions='Translate.',
+        chapter_summary='Scene.',
+        content_plan=plan_with_fact,
+    )
+    blocks = {
+        b: SimpleNamespace(id=b, text='abcd', parent_id=None, type=BlockType.PARAGRAPH, attributes={})
+        for b in ids
+    }
+    units = (
+        SimpleNamespace(block_ids=('b1', 'b2'), items=tuple(SimpleNamespace(block=blocks[b]) for b in ('b1', 'b2'))),
+        SimpleNamespace(block_ids=('b3', 'b4'), items=tuple(SimpleNamespace(block=blocks[b]) for b in ('b3', 'b4'))),
+    )
+    work = SimpleNamespace(
+        document=SimpleNamespace(id='book'),
+        analysis=analysis,
+        run=SimpleNamespace(id='run', glossary_snapshot=GlossarySnapshot()),
+        processed_block_ids=set(),
+    )
+    Recovery(Uow()).prepare_roots(work, units, max_source_chars=100, validator=None)
+    assert len(roots) == 2
+    assert [tuple(r.manifest['ordered_blocks']) for r in roots] == [('b1', 'b2'), ('b3', 'b4')]
+

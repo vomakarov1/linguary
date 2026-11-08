@@ -285,3 +285,178 @@ async def test_invalid_limit_preserves_state(invalid):
     await limiter.acquire()
     await limiter.acquire()
     assert clock.sleeps == [3, 1]
+
+
+async def test_rate_limited_client_caps_concurrent_in_flight_requests() -> None:
+    """Total concurrent in-flight inner.generate calls across shared limiter never exceed max_concurrency."""
+    from linguary.adapters.llm.rate_limit import LLMRateLimiter
+
+    limiter = LLMRateLimiter(None, max_concurrency=2)
+    in_flight = 0
+    max_observed = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingInnerClient:
+        def __init__(self) -> None:
+            self.completed = 0
+
+        async def generate(self, req):
+            nonlocal in_flight, max_observed
+            in_flight += 1
+            max_observed = max(max_observed, in_flight)
+            if in_flight == 2:
+                started.set()
+            try:
+                await release.wait()
+                return await FakeLLMClient.always(reply()).generate(req)
+            finally:
+                in_flight -= 1
+                self.completed += 1
+
+    inner_a = BlockingInnerClient()
+    inner_b = BlockingInnerClient()
+    client_a = RateLimitedLLMClient(inner=inner_a, limiter=limiter)  # type: ignore[arg-type]
+    client_b = RateLimitedLLMClient(inner=inner_b, limiter=limiter)  # type: ignore[arg-type]
+
+    tasks = [
+        asyncio.create_task(client_a.generate(request())),
+        asyncio.create_task(client_b.generate(request())),
+        asyncio.create_task(client_a.generate(request())),
+        asyncio.create_task(client_b.generate(request())),
+        asyncio.create_task(client_a.generate(request())),
+    ]
+    await started.wait()
+    await asyncio.sleep(0)
+    assert in_flight == 2
+    assert max_observed == 2
+    assert inner_a.completed + inner_b.completed == 0
+
+    release.set()
+    await asyncio.gather(*tasks)
+    assert max_observed == 2
+    assert in_flight == 0
+    assert inner_a.completed + inner_b.completed == 5
+
+
+async def test_concurrency_slot_acquired_before_rpm_reservation() -> None:
+    """Waiting for a concurrency slot must not reserve an RPM slot in the past."""
+    from linguary.adapters.llm.rate_limit import LLMRateLimiter
+
+    clock = ControlledClock()
+    limiter = LLMRateLimiter(60, max_concurrency=1, clock=clock, sleep=clock.sleep)
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    call_times: list[float] = []
+
+    class SlowInnerClient:
+        async def generate(self, req):
+            call_times.append(clock())
+            if len(call_times) == 1:
+                first_entered.set()
+                await release_first.wait()
+            return await FakeLLMClient.always(reply()).generate(req)
+
+    client = RateLimitedLLMClient(inner=SlowInnerClient(), limiter=limiter)  # type: ignore[arg-type]
+
+    first = asyncio.create_task(client.generate(request()))
+    await first_entered.wait()
+    assert call_times == [0.0]
+
+    # Second and third requests arrive at t=0.0 while first is still in flight.
+    second = asyncio.create_task(client.generate(request()))
+    third = asyncio.create_task(client.generate(request()))
+    await asyncio.sleep(0)
+
+    # Neither second nor third has entered acquire() yet, so no RPM sleep has been scheduled.
+    assert clock.waiting.empty()
+
+    # First finishes at t=5.0.
+    clock.advance(5.0)
+    release_first.set()
+    await first
+    await second
+    assert call_times == [0.0, 5.0]
+
+    # Third acquires concurrency slot at t=5.0 and reserves RPM slot at 5.0 + 1.0 = 6.0 (not 2.0).
+    deadline = await clock.waiting.get()
+    assert deadline == 6.0
+    clock.advance(6.0)
+    await third
+    assert call_times == [0.0, 5.0, 6.0]
+
+
+async def test_system_settings_updates_max_concurrency() -> None:
+    """SystemSettingsService._apply updates max_concurrency on the shared LLMRateLimiter."""
+    from types import SimpleNamespace
+    from linguary.adapters.config.settings import AppSettings, LLMSettings, WorkerPoolSettings
+    from linguary.adapters.config.system_settings import SystemSettingsUpdate
+    from linguary.adapters.llm.rate_limit import LLMRateLimiter
+    from linguary.composition.system_settings import SystemSettingsService
+
+    initial = AppSettings(
+        llm=LLMSettings(model="gpt-4o", api_key="secret"),
+        worker=WorkerPoolSettings(concurrency=1),
+    )
+    generation = SimpleNamespace(
+        settings=initial,
+        configured_client=SimpleNamespace(aclose=lambda: asyncio.sleep(0)),
+    )
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.revision = 0
+            self.initial_settings = initial
+            self.current = generation
+
+        def prepare(self, candidate: AppSettings):
+            return SimpleNamespace(
+                settings=candidate,
+                configured_client=SimpleNamespace(aclose=lambda: asyncio.sleep(0)),
+            )
+
+        def publish(self, gen, revision: int) -> None:
+            self.current = gen
+            self.revision = revision
+
+    class FakeStore:
+        def load(self):
+            return None
+
+        def save(self, overrides, api_key, *, expected_revision: int, proxy_url=None):
+            return SimpleNamespace(revision=expected_revision + 1)
+
+        def reset(self, *, expected_revision: int):
+            return SimpleNamespace(revision=expected_revision + 1)
+
+    class FakeWorkerPool:
+        def __init__(self) -> None:
+            self.concurrency: int | None = None
+
+        def set_concurrency(self, value: int) -> None:
+            self.concurrency = value
+
+    limiter = LLMRateLimiter(60, max_concurrency=1)
+    worker_pool = FakeWorkerPool()
+    service = SystemSettingsService(
+        runtime=FakeRuntime(),  # type: ignore[arg-type]
+        store=FakeStore(),  # type: ignore[arg-type]
+        limiter=limiter,
+        worker_pool=worker_pool,  # type: ignore[arg-type]
+    )
+
+    await service.save(
+        SystemSettingsUpdate(
+            provider="openai_compatible",
+            model="gpt-4o",
+            base_url="https://api.openai.com/v1",
+            requests_per_minute=120,
+            concurrency=4,
+        ),
+        expected_revision=0,
+    )
+
+    assert limiter.requests_per_minute == 120
+    assert limiter.max_concurrency == 4
+    assert worker_pool.concurrency == 4
+
