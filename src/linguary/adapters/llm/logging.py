@@ -60,13 +60,16 @@ class LoggingLLMClient(LLMClient):
                 prompt_hash=sha256(request.instructions.encode()).hexdigest()))
         if request.book_id is None or request.stage is None:
             return await self.inner.generate(request)
-        diagnostics_for(self.unit_of_work).ensure_available()
+        diagnostics = diagnostics_for(self.unit_of_work)
+        diagnostics.ensure_available()
+        policy = diagnostics.policy
         started_at = self._now()
         try:
             response = await self.inner.generate(request)
         except LLMResponseFormatError as error:
-            error.raw_content, temporary_meta = bounded_body(error.raw_content)
-            error.body_meta = error.body_meta or temporary_meta
+            error.raw_content, error.body_meta = _bound_if_needed(
+                error.raw_content, error.body_meta, max_bytes=policy.max_body_bytes
+            )
             self._log(
                 request=request,
                 started_at=started_at,
@@ -93,8 +96,9 @@ class LoggingLLMClient(LLMClient):
             )
             raise
         call_id = self._new_id()
-        bounded_text, bounded_meta = bounded_body(response.raw_content)
-        resolved_body_meta = response.body_meta or bounded_meta
+        bounded_text, resolved_body_meta = _bound_if_needed(
+            response.raw_content, response.body_meta, max_bytes=policy.max_body_bytes
+        )
         self._log(
             request=request,
             started_at=started_at,
@@ -143,18 +147,24 @@ class LoggingLLMClient(LLMClient):
         """Records a single log entry within a short transaction."""
         if request.book_id is None or request.stage is None:
             return
+        diagnostics = diagnostics_for(self.unit_of_work)
+        policy = diagnostics.policy
         if body_meta is not None:
             supplied_meta = getattr(outcome, 'body_meta', None) or body_meta
         else:
-            response_text, bounded_meta = bounded_body(response_text)
+            response_text, bounded_meta = bounded_body(
+                response_text, max_bytes=policy.max_body_bytes
+            )
             supplied_meta = getattr(outcome, 'body_meta', None) or bounded_meta
         context = request.call_context
         metadata = {'schema_version': 1, 'decision': 'unknown', 'body_meta': supplied_meta,
                     'context': None if context is None else context.to_dict()}
         if request.repair_instructions:
             metadata['repair_instructions'] = list(request.repair_instructions)
-            if request.attempt > 1:
-                metadata['input_text'] = request.input_text + "\n\n" + "\n\n".join(request.repair_instructions)
+            if request.attempt > 1 and self.debug_payloads and policy.bodies_enabled:
+                raw_input = request.input_text + "\n\n" + "\n\n".join(request.repair_instructions)
+                bounded_input, _ = bounded_body(raw_input, max_bytes=policy.max_body_bytes)
+                metadata['input_text'] = bounded_input
         entry = LLMCallLog(
             id=call_id or self._new_id(),
             book_id=request.book_id,
@@ -172,21 +182,31 @@ class LoggingLLMClient(LLMClient):
             attempt_id=None if context is None else context.attempt_id,
             diagnostic_meta=metadata,
         )
+        finalize_error: Exception | None = None
         try:
             with self.unit_of_work.transaction() as transaction:
                 transaction.llm_calls.add(entry)
-            diagnostics_for(self.unit_of_work).finalize_attempt(
-                entry.attempt_id, 'unknown' if success else ('rejected' if isinstance(error, LLMResponseFormatError) else 'unknown'),
-                violation=None if error is None else violation_of(error, context=context),
-                body=response_text, call_id=entry.id, body_meta=supplied_meta,
-                retain_accepted=self.debug_payloads,
-            )
+                try:
+                    diagnostics.finalize_attempt(
+                        entry.attempt_id,
+                        'unknown' if success else ('rejected' if isinstance(error, LLMResponseFormatError) else 'unknown'),
+                        violation=None if error is None else violation_of(error, context=context),
+                        body=response_text,
+                        call_id=entry.id,
+                        body_meta=supplied_meta,
+                        retain_accepted=self.debug_payloads,
+                        transaction=transaction,
+                    )
+                except Exception as exc:
+                    finalize_error = exc
+            if finalize_error is not None:
+                raise finalize_error
             if isinstance(error, LLMResponseFormatError):
                 error.call_id = entry.id
                 error.call_context = context
         except Exception:
             self._observation_failed = True
-            diagnostics_for(self.unit_of_work).fail()
+            diagnostics.fail()
         if self.on_logged is not None and outcome is not None:
             try:
                 self.on_logged(entry, request, outcome)
@@ -205,6 +225,32 @@ class LoggingLLMClient(LLMClient):
     def _now(self) -> datetime:
         """Current time in UTC."""
         return (self.clock or _utc_now)()
+
+
+def _bound_if_needed(
+    raw_content: str | None,
+    body_meta: dict[str, object] | None,
+    *,
+    max_bytes: int,
+) -> tuple[str | None, dict[str, object]]:
+    """Skips redundant `bounded_body` when the adapter already bounded and scrubbed `raw_content`."""
+    if (
+        body_meta is not None
+        and "redacted_count" in body_meta
+        and (raw_content is None or len(raw_content.encode("utf-8")) <= max_bytes)
+    ):
+        return raw_content, dict(body_meta)
+    bounded_text, bounded_meta = bounded_body(raw_content, max_bytes=max_bytes)
+    if body_meta is None:
+        return bounded_text, bounded_meta
+    return bounded_text, {
+        **bounded_meta,
+        **body_meta,
+        "redacted": bool(body_meta.get("redacted")) or bounded_meta["redacted"],
+        "truncated": bool(body_meta.get("truncated")) or bounded_meta["truncated"],
+        "original_bytes": body_meta.get("original_bytes") or bounded_meta["original_bytes"],
+        "stored_bytes": bounded_meta["stored_bytes"],
+    }
 
 
 def _uuid() -> str:

@@ -114,7 +114,7 @@ def test_unit_of_work_retries_transient_sqlite_locks(monkeypatch: pytest.MonkeyP
         pass
 
     assert attempts == 7
-    assert sleeps == [0.05, 0.1, 0.15, 0.2, 0.25, 0.25]
+    assert sleeps == [0.005, 0.01, 0.015, 0.02, 0.02, 0.02]
 
     sleeps.clear()
     attempts = 0
@@ -140,7 +140,7 @@ def test_unit_of_work_retries_transient_sqlite_locks(monkeypatch: pytest.MonkeyP
 
     assert attempts == 10
     assert len(sleeps) == 9
-    assert max(sleeps) == 0.25
+    assert max(sleeps) == 0.02
 
 
 async def test_logging_llm_client_and_diagnostics_deduplicate_bounded_body(

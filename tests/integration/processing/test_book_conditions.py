@@ -418,3 +418,101 @@ async def test_pronunciation_conditions_http_contract(tmp_path, encoding):
             assert (await submit(expected_revision=1)).status_code == 422
     finally:
         await app.aclose()
+
+
+async def test_source_digest_uses_stat_cache_across_calls_and_invalidates_on_file_change(tmp_path, monkeypatch):
+    from pathlib import Path
+    import linguary.composition.container as container_module
+
+    app = make_app(tmp_path)
+    try:
+        store_imported(app)
+        source = app.paths.source_epub('book-1').resolve()
+        cache = getattr(container_module, '_FILE_SHA256_CACHE', None)
+        if cache is not None:
+            cache.clear()
+
+        read_count = 0
+        real_read_bytes = Path.read_bytes
+
+        def counting_read_bytes(self):
+            nonlocal read_count
+            if self.resolve() == source:
+                read_count += 1
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, 'read_bytes', counting_read_bytes)
+
+        write_tx_entered = 0
+        in_write_tx = False
+        real_transaction = app.unit_of_work.transaction
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def tracking_transaction():
+            nonlocal write_tx_entered, in_write_tx
+            write_tx_entered += 1
+            in_write_tx = True
+            try:
+                with real_transaction() as tx:
+                    yield tx
+            finally:
+                in_write_tx = False
+
+        digest_in_write_tx = []
+        real_source_digest = app.book_conditions.source_digest
+
+        def tracking_source_digest(book):
+            digest_in_write_tx.append(in_write_tx)
+            return real_source_digest(book)
+
+        monkeypatch.setattr(app.unit_of_work, 'transaction', tracking_transaction)
+        monkeypatch.setattr(app.book_conditions, 'source_digest', tracking_source_digest)
+
+        conditions_id = app.book_conditions.freeze_before_analysis('book-1', 0)
+        assert read_count == 1
+        assert digest_in_write_tx == [False]
+
+        tx_before_checks = write_tx_entered
+        assert app.book_conditions.require('book-1').id == conditions_id
+        assert app.book_conditions.require('book-1').id == conditions_id
+        assert app.book_conditions.freeze_before_analysis('book-1', 0) == conditions_id
+        assert write_tx_entered == tx_before_checks
+        assert read_count == 1
+
+        with app.unit_of_work.transaction() as tx:
+            book = tx.books.get('book-1')
+            pinned = app.book_conditions.create(
+                tx,
+                book,
+                0,
+                source_sha256=app.book_conditions.require('book-1', transaction=tx).payload['source_sha256'],
+                seed_first_chapter=True,
+            )
+            assert pinned.payload['checks']['seed_first_chapter'] is True
+        assert read_count == 1
+
+        source.write_bytes(b'changed synthetic source bytes')
+        with pytest.raises(ConditionsError, match='source_digest_mismatch'):
+            app.book_conditions.require('book-1')
+        assert read_count == 2
+
+        from types import SimpleNamespace
+        from linguary.composition.book_runtime import ProvenanceClient
+
+        def fail_lookup(_id):
+            raise AssertionError('unexpected duplicate lookup')
+
+        dummy_tx = SimpleNamespace(work=SimpleNamespace(get_root=fail_lookup, get_scope=fail_lookup))
+        dummy_root = SimpleNamespace(superseded_by=None, status='running', generation=1)
+        dummy_scope = SimpleNamespace(generation=2, status='claimed')
+        dummy_ctx = SimpleNamespace(root_id='r1', scope_id='s1', generation=2)
+        dummy_attempt = SimpleNamespace(context={'root_generation': 1})
+        provenance = ProvenanceClient(FakeLLMClient(), app.book_conditions, conditions_id)
+        assert provenance._has_operation_ownership(
+            dummy_tx, dummy_ctx, dummy_attempt, root=dummy_root, scope=dummy_scope
+        ) is True
+    finally:
+        await app.aclose()
+

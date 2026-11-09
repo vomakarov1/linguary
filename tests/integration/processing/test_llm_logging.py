@@ -721,3 +721,195 @@ async def test_failed_capacity_call_keeps_operation_provenance(application):
     assert entry.diagnostic_meta['context']['policy_version'] == request.call_context.policy_version
     assert entry.diagnostic_meta['context']['prompt_hash'] == sha256(request.instructions.encode()).hexdigest()
     assert inner.call_count == 1
+
+
+async def test_input_text_respects_debug_policy_and_is_purged_even_when_response_text_is_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+    from linguary.adapters.llm import logging as logging_module
+    from linguary.application.block_processing import _worded_for_the_model
+    from linguary.application.context_builder import TranslationContext
+    from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy, bounded_body
+    from linguary.application.ports.llm import LLMTransportError
+    from linguary.application.retry_policy import (
+        ExpectedBlock,
+        ResultExpectation,
+        ResultValidationError,
+    )
+    from linguary.domain import BlockTreatment
+    from linguary.domain.llm_log import Violation
+
+    built = build_application(
+        settings=AppSettings(
+            llm=LLMSettings(model="fake-model", api_key="test-key"),
+            storage=StorageSettings(data_root=str(tmp_path / "data")),
+        ),
+        llm_client=FakeLLMClient.replying([]),
+    )
+    try:
+        store_processing_book(built.unit_of_work)
+        base_request = replace(
+            LLMRequest.for_translation(
+                instructions="Переведи",
+                input_text="Секрет https://alice:topsecret@example.com/v1 " + ("текст " * 20),
+            ).with_logging(book_id=BOOK_ID, stage=LLMCallStage.TRANSLATION_UNIT),
+            attempt=2,
+            repair_instructions=("Исправь блок b1",),
+        )
+
+        # 1. debug_payloads=False -> input_text must not be persisted.
+        diagnostics = Diagnostics(
+            built.unit_of_work,
+            policy=DiagnosticsPolicy(bodies_enabled=True, max_body_bytes=96),
+        )
+        inner_no_debug = AsyncMock()
+        inner_no_debug.generate.return_value = LLMResponse(
+            payload=object(),
+            provider="fake",
+            model="fake-model",
+            raw_content='{"ok": true}',
+            body_meta={
+                "body_status": "available",
+                "redacted": False,
+                "redacted_count": 0,
+                "truncated": False,
+                "original_bytes": 12,
+                "stored_bytes": 12,
+            },
+        )
+        logger_no_debug = LoggingLLMClient(
+            inner=inner_no_debug,
+            unit_of_work=built.unit_of_work,
+            provider="fake",
+            model="fake-model",
+            debug_payloads=False,
+        )
+        resp_no_debug = await logger_no_debug.generate(base_request)
+        with built.unit_of_work.transaction() as tx:
+            rec_no_debug = tx.llm_calls.diagnostic_record(call_id=resp_no_debug.call_id)
+        assert "input_text" not in rec_no_debug["metadata"]
+        assert rec_no_debug["metadata"]["repair_instructions"] == ["Исправь блок b1"]
+
+        # 2. debug_payloads=True, bodies_enabled=False -> input_text must not be persisted.
+        Diagnostics(
+            built.unit_of_work,
+            policy=DiagnosticsPolicy(bodies_enabled=False, max_body_bytes=96),
+        )
+        logger_disabled = LoggingLLMClient(
+            inner=inner_no_debug,
+            unit_of_work=built.unit_of_work,
+            provider="fake",
+            model="fake-model",
+            debug_payloads=True,
+        )
+        resp_disabled = await logger_disabled.generate(base_request)
+        with built.unit_of_work.transaction() as tx:
+            rec_disabled = tx.llm_calls.diagnostic_record(call_id=resp_disabled.call_id)
+        assert "input_text" not in rec_disabled["metadata"]
+
+        # 3. debug_payloads=True, bodies_enabled=True -> input_text bounded & redacted;
+        #    response.raw_content with redacted_count is not re-bounded; single write tx.
+        diagnostics = Diagnostics(
+            built.unit_of_work,
+            policy=DiagnosticsPolicy(bodies_enabled=True, max_body_bytes=96),
+        )
+        diagnostics.periodic_purge()  # warm periodic_purge before counting write transactions
+        bounded_inputs: list[str | None] = []
+        orig_bounded = bounded_body
+
+        def spy_bounded(body, *, max_bytes=64 * 1024, secrets=()):
+            bounded_inputs.append(body)
+            return orig_bounded(body, max_bytes=max_bytes, secrets=secrets)
+
+        monkeypatch.setattr(logging_module, "bounded_body", spy_bounded)
+
+        tx_openings = 0
+        orig_tx = built.unit_of_work.transaction
+
+        @contextmanager
+        def counting_tx():
+            nonlocal tx_openings
+            tx_openings += 1
+            with orig_tx() as active:
+                yield active
+
+        monkeypatch.setattr(built.unit_of_work, "transaction", counting_tx)
+        resp_debug = await logger_disabled.generate(base_request)
+        monkeypatch.setattr(built.unit_of_work, "transaction", orig_tx)
+        monkeypatch.setattr(logging_module, "bounded_body", orig_bounded)
+
+        assert tx_openings == 1
+        assert '{"ok": true}' not in bounded_inputs
+        with built.unit_of_work.transaction() as tx:
+            rec_debug = tx.llm_calls.diagnostic_record(call_id=resp_debug.call_id)
+        stored_input = rec_debug["metadata"].get("input_text")
+        assert isinstance(stored_input, str)
+        assert "topsecret" not in stored_input
+        assert "[REDACTED]" in stored_input
+        assert len(stored_input.encode("utf-8")) <= 96
+
+        # 4. Retry failing with transport error -> response_text IS NULL, input_text IS present,
+        #    and both diagnostics.purge and work.purge_diagnostics clean input_text.
+        transport_calls: list[str] = []
+        for idx in range(2):
+            logger_fail = LoggingLLMClient(
+                inner=FakeLLMClient.replying([LLMTransportError("offline")]),
+                unit_of_work=built.unit_of_work,
+                provider="fake",
+                model="fake-model",
+                id_factory=lambda idx=idx: f"transport-retry-{idx}",
+                debug_payloads=True,
+            )
+            with pytest.raises(LLMTransportError):
+                await logger_fail.generate(base_request)
+            transport_calls.append(f"transport-retry-{idx}")
+
+        with built.unit_of_work.transaction() as tx:
+            for cid in transport_calls:
+                rec = tx.llm_calls.diagnostic_record(call_id=cid)
+                assert rec["body"] is None
+                assert "input_text" in rec["metadata"]
+
+        assert diagnostics.purge(BOOK_ID, call_id=transport_calls[0]) == 1
+        assert diagnostics.purge(BOOK_ID, call_id=transport_calls[0]) == 0
+        with built.unit_of_work.transaction() as tx:
+            rec_purged_1 = tx.llm_calls.diagnostic_record(call_id=transport_calls[0])
+            assert "input_text" not in rec_purged_1["metadata"]
+            assert tx.work.purge_diagnostics(BOOK_ID, call_id=transport_calls[1]) == 1
+            assert tx.work.purge_diagnostics(BOOK_ID, call_id=transport_calls[1]) == 0
+            rec_purged_2 = tx.llm_calls.diagnostic_record(call_id=transport_calls[1])
+            assert "input_text" not in rec_purged_2["metadata"]
+
+        # 5. _worded_for_the_model translates violation.block_ids without mutating original error.
+        ctx = TranslationContext(
+            section_id="sec-1",
+            unit_id="unit-1",
+            request=LLMRequest.for_translation(instructions="i", input_text="[b1]\nText"),
+            block_ids_by_alias={"b1": "sec-1:p-1"},
+            expectation=ResultExpectation(
+                target_language="ru",
+                blocks=(ExpectedBlock("b1", BlockTreatment.TRANSLATE),),
+            ),
+        )
+        original_violation = Violation(
+            rule_code="reader_text",
+            stage="translation_unit",
+            scope="local",
+            block_ids=("sec-1:p-1",),
+            safe_message="Ошибка в блоке sec-1:p-1",
+        )
+        original_error = ResultValidationError(
+            "Ошибка в блоке sec-1:p-1",
+            expectation=ctx.expectation,
+            violation=original_violation,
+        )
+        reworded = _worded_for_the_model(original_error, ctx)
+        assert isinstance(reworded, ResultValidationError)
+        assert reworded.violation is not None
+        assert reworded.violation.block_ids == ("b1",)
+        assert original_error.violation is not None
+        assert original_error.violation.block_ids == ("sec-1:p-1",)
+    finally:
+        built.dispose()
+

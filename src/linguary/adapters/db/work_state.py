@@ -6,7 +6,7 @@ from hashlib import sha256
 import json
 from uuid import uuid4
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, or_, select, update
 from linguary.adapters.db.models import (
     BlockResultRow, BookConditionsRow, WorkBindingRow, ArtifactRevisionRow, RecoveryRootRow,
     RecoveryScopeRow, LLMAttemptRow, QualityReviewRow, QualityReservationRow,
@@ -88,6 +88,55 @@ class SqlAlchemyWorkRepository:
             WorkBindingRow.entity_kind == 'result', WorkBindingRow.entity_id >= prefix,
             WorkBindingRow.entity_id < f'{run_id};')).all()
         return {row.entity_id[len(prefix):]: self._binding_from_row(row) for row in rows}
+
+    def set_book_paused(
+        self, book_id: str, conditions_id: str | None, paused: bool
+    ) -> None:
+        if type(paused) is not bool:
+            raise WorkStateError('некорректный признак паузы книги')
+        if not paused:
+            if conditions_id is not None:
+                self._owned(BookConditionsRow, conditions_id, book_id)
+            self._session.execute(
+                delete(WorkBindingRow).where(
+                    WorkBindingRow.entity_kind == 'book_queue',
+                    WorkBindingRow.entity_id == book_id,
+                    WorkBindingRow.book_id == book_id,
+                )
+            )
+            self._session.flush()
+            return
+        if not conditions_id:
+            raise WorkStateError('ссылка на отсутствующую или чужую работу')
+        self._owned(BookConditionsRow, conditions_id, book_id)
+        payload = {'schema_version': 1, 'paused': True}
+        existing = self._session.get(WorkBindingRow, ('book_queue', book_id))
+        if existing is None:
+            self._add(
+                WorkBindingRow(
+                    entity_kind='book_queue',
+                    entity_id=book_id,
+                    book_id=book_id,
+                    conditions_id=conditions_id,
+                    attempt_id=None,
+                    artifact_revision_id=None,
+                    payload_json=payload,
+                )
+            )
+            return
+        if existing.book_id != book_id:
+            raise WorkStateError('ссылка на отсутствующую или чужую работу')
+        existing.conditions_id = conditions_id
+        existing.payload_json = payload
+        self._session.flush()
+
+    def is_book_paused(self, book_id: str) -> bool:
+        row = self._session.get(WorkBindingRow, ('book_queue', book_id))
+        if row is None or row.book_id != book_id:
+            return False
+        payload = row.payload_json or {}
+        version(payload.get('schema_version'))
+        return bool(payload.get('paused', True))
 
     def correction_checks(self, run_id, section_id):
         rows = self._session.scalars(select(CorrectionCheckRow).join(
@@ -584,12 +633,20 @@ class SqlAlchemyWorkRepository:
             self.transition_attempt(attempt_id, 'accepted', expected_state='validated')
 
     def archive_artifacts(self, artifacts):
+        artifacts = tuple(artifacts)
+        if not artifacts:
+            return ()
         ids = []
+        seen_ids = set()
+        rows_to_add = []
+        checked_owned = set()
+        now = datetime.now(UTC)
         for artifact in artifacts:
             artifact_id = artifact.get('id') or str(uuid4())
             identifier(artifact_id)
-            if self._session.get(ArtifactRevisionRow, artifact_id) is not None:
+            if artifact_id in seen_ids or self._session.get(ArtifactRevisionRow, artifact_id) is not None:
                 raise WorkStateError('архивная версия неизменяема')
+            seen_ids.add(artifact_id)
             body = _json(artifact['body'])
             encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
             digest = sha256(encoded.encode()).hexdigest()
@@ -597,12 +654,17 @@ class SqlAlchemyWorkRepository:
                 raise WorkStateError('контрольная сумма артефакта не совпадает')
             for model, key in ((BookConditionsRow, 'conditions_id'), (LLMAttemptRow, 'attempt_id')):
                 if artifact.get(key):
-                    self._owned(model, artifact[key], artifact['book_id'])
-            self._add(ArtifactRevisionRow(id=artifact_id, book_id=artifact['book_id'],
+                    own_key = (model, artifact[key], artifact['book_id'])
+                    if own_key not in checked_owned:
+                        self._owned(model, artifact[key], artifact['book_id'])
+                        checked_owned.add(own_key)
+            rows_to_add.append(ArtifactRevisionRow(id=artifact_id, book_id=artifact['book_id'],
                 conditions_id=artifact.get('conditions_id'), run_id=artifact.get('run_id'),
                 kind=artifact['kind'], scope_id=artifact['scope_id'], body_json=body,
-                sha256=digest, attempt_id=artifact.get('attempt_id'), created_at=datetime.now(UTC)))
+                sha256=digest, attempt_id=artifact.get('attempt_id'), created_at=now))
             ids.append(artifact_id)
+        self._session.add_all(rows_to_add)
+        self._session.flush()
         return tuple(ids)
 
     def get_artifact(self, artifact_id):
@@ -768,15 +830,25 @@ class SqlAlchemyWorkRepository:
         self._session.flush()
 
     def purge_diagnostics(self, book_id, *, call_id=None, before=None):
-        query = update(LLMCallLogRow).where(LLMCallLogRow.book_id == book_id, LLMCallLogRow.response_text.is_not(None))
+        has_body = or_(
+            LLMCallLogRow.response_text.is_not(None),
+            func.json_type(LLMCallLogRow.diagnostic_meta_json, '$.input_text').is_not(None),
+        )
+        query = select(LLMCallLogRow).where(LLMCallLogRow.book_id == book_id, has_body)
         if call_id is not None:
             query = query.where(LLMCallLogRow.id == call_id)
         if before is not None:
             query = query.where(LLMCallLogRow.started_at < before)
-        rows = self._session.scalars(select(LLMCallLogRow).where(*query._where_criteria)).all()
+        rows = self._session.scalars(query).all()
+        status = 'expired' if before is not None else 'deleted'
         for row in rows:
             meta = dict(row.diagnostic_meta_json or {'schema_version': 1})
-            meta['body_status'] = 'expired' if before is not None else 'deleted'
+            meta.pop('input_text', None)
+            meta['body_status'] = status
+            if isinstance(meta.get('body_meta'), dict):
+                body_meta = dict(meta['body_meta'])
+                body_meta.update(body_status=status, stored_bytes=0)
+                meta['body_meta'] = body_meta
             row.diagnostic_meta_json = meta
             row.response_text = None
         self._session.flush()

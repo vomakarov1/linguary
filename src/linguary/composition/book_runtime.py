@@ -1,7 +1,7 @@
 """Resolve pinned work using saved parameters and locally available credentials."""
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from hashlib import sha256
 import os
 from urllib.parse import urlsplit, urlunsplit
@@ -158,14 +158,17 @@ class ProvenanceClient:
                 if transaction.work.get_attempt(self.attempts[-1]).state == 'validated':
                     transaction.work.transition_attempt(self.attempts[-1], 'rejected', expected_state='validated')
 
-    def _require_operation_context(self, transaction, request, context):
+    def _require_operation_context(self, transaction, request, context, root=None, scope=None, *, attempt=None):
         try:
             require_policy(context.policy_version)
         except TranslationPolicyUnavailable:
             raise ConditionsError('conditions_unavailable') from None
-        attempt = transaction.work.get_attempt(context.attempt_id)
-        root = transaction.work.get_root(context.root_id)
-        scope = transaction.work.get_scope(context.scope_id)
+        if attempt is None:
+            attempt = transaction.work.get_attempt(context.attempt_id)
+        if root is None:
+            root = transaction.work.get_root(context.root_id)
+        if scope is None:
+            scope = transaction.work.get_scope(context.scope_id)
         expected = thaw(context.to_dict())
         if (attempt is None or root is None or scope is None
                 or root.policy_version != context.policy_version
@@ -183,9 +186,13 @@ class ProvenanceClient:
             raise ConditionsError('conditions_unavailable')
         return attempt
 
-    def _has_operation_ownership(self, transaction, context, attempt):
-        root = transaction.work.get_root(context.root_id)
-        scope = transaction.work.get_scope(context.scope_id)
+    def _has_operation_ownership(self, transaction, context, attempt, root=None, scope=None):
+        if root is None:
+            root = transaction.work.get_root(context.root_id)
+        if scope is None:
+            scope = transaction.work.get_scope(context.scope_id)
+        if root is None or scope is None:
+            return False
         return (root.superseded_by is None and root.status in {'pending', 'running'}
             and root.generation == attempt.context.get('root_generation')
             and scope.generation == context.generation and scope.status == 'claimed')
@@ -197,8 +204,14 @@ class ProvenanceClient:
                 raise ConditionsError('conditions_revision_conflict')
             if request.call_context is not None and request.call_context.root_id is not None:
                 context = request.call_context
-                attempt = self._require_operation_context(transaction, request, context)
-                if attempt.state != 'created' or not self._has_operation_ownership(transaction, context, attempt):
+                root = transaction.work.get_root(context.root_id)
+                scope = transaction.work.get_scope(context.scope_id)
+                attempt = self._require_operation_context(
+                    transaction, request, context, root=root, scope=scope
+                )
+                if attempt.state != 'created' or not self._has_operation_ownership(
+                    transaction, context, attempt, root=root, scope=scope
+                ):
                     raise RecoveryError('interrupted', context.root_id)
                 transaction.work.transition_attempt(attempt.id, 'sent', expected_state='created')
             else:
@@ -224,10 +237,21 @@ class ProvenanceClient:
             current_attempt = transaction.work.get_attempt(attempt.id)
             valid = current_attempt is not None and current_attempt.state == 'sent'
             if context.root_id is not None:
-                current_attempt = self._require_operation_context(transaction, request, context)
+                root = transaction.work.get_root(context.root_id)
+                scope = transaction.work.get_scope(context.scope_id)
+                current_attempt = self._require_operation_context(
+                    transaction,
+                    request,
+                    context,
+                    root=root,
+                    scope=scope,
+                    attempt=current_attempt if context.attempt_id == attempt.id else None,
+                )
                 if response.call_context != context:
                     raise ConditionsError('conditions_unavailable')
-                valid = valid and self._has_operation_ownership(transaction, context, current_attempt)
+                valid = valid and self._has_operation_ownership(
+                    transaction, context, current_attempt, root=root, scope=scope
+                )
             if valid:
                 transaction.work.transition_attempt(attempt.id, 'validated', expected_state='sent',
                     outcome={'schema_version': 1, 'provider': response.provider, 'model': response.model,
@@ -370,9 +394,13 @@ class BookRuntimeResolver:
             'api_key': current.llm.api_key,
             'debug_llm_payloads': getattr(current.llm, 'debug_llm_payloads', False),
         })
+        raw_checks = thaw(payload['checks'])
+        check_field_names = {f.name for f in fields(CheckSettings)}
+        if 'seed_first_chapter' in raw_checks and 'seed_first_chapter' not in check_field_names:
+            raw_checks = {k: v for k, v in raw_checks.items() if k != 'seed_first_chapter'}
         return replace(current, llm=llm, reading=ReadingSettings(reader_level=payload['reader_level'],
                        name_translation_strategy=policy.strategy.value if policy is not None else 'sound'),
-                       checks=CheckSettings(**thaw(payload['checks'])),
+                       checks=CheckSettings(**raw_checks),
                        recovery=RecoverySettings(**thaw(payload.get('recovery_policy', asdict(RecoverySettings())))))
 
     @asynccontextmanager

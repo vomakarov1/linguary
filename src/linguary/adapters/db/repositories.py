@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import LargeBinary, cast, delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from linguary.adapters.db import mapping
@@ -420,6 +420,51 @@ class SqlAlchemyBlockResultRepository:
             row, self._notes(run_id, block_id), self._warnings(run_id, block_id)
         )
 
+    def get_many(
+        self, run_id: str, block_ids: Sequence[str]
+    ) -> dict[str, BlockProcessingResult]:
+        """Get processing results for multiple blocks within a run in a single batch."""
+        unique_ids = tuple(dict.fromkeys(block_ids))
+        if not unique_ids:
+            return {}
+        rows = self._session.scalars(
+            select(BlockResultRow).where(
+                BlockResultRow.run_id == run_id,
+                BlockResultRow.block_id.in_(unique_ids),
+            )
+        ).all()
+        if not rows:
+            return {}
+        found_ids = tuple(row.block_id for row in rows)
+        notes = _by_block(
+            self._session.scalars(
+                select(LanguageNoteRow)
+                .where(
+                    LanguageNoteRow.run_id == run_id,
+                    LanguageNoteRow.block_id.in_(found_ids),
+                )
+                .order_by(LanguageNoteRow.id)
+            ).all()
+        )
+        warnings = _by_block(
+            self._session.scalars(
+                select(ResultWarningRow)
+                .where(
+                    ResultWarningRow.run_id == run_id,
+                    ResultWarningRow.block_id.in_(found_ids),
+                )
+                .order_by(ResultWarningRow.id)
+            ).all()
+        )
+        return {
+            row.block_id: mapping.to_block_result(
+                row,
+                notes.get(row.block_id, ()),
+                warnings.get(row.block_id, ()),
+            )
+            for row in rows
+        }
+
     def list_for_run(self, run_id: str) -> tuple[BlockProcessingResult, ...]:
         """List all results of a run in source document block order.
 
@@ -738,7 +783,11 @@ class SqlAlchemyLLMCallLogRepository:
             self._session.flush()
 
     def purge_diagnostic_bodies(self, book_id, *, call_id=None):
-        query = select(LLMCallLogRow).where(LLMCallLogRow.book_id == book_id, LLMCallLogRow.response_text.is_not(None))
+        has_body = or_(
+            LLMCallLogRow.response_text.is_not(None),
+            func.json_type(LLMCallLogRow.diagnostic_meta_json, '$.input_text').is_not(None),
+        )
+        query = select(LLMCallLogRow).where(LLMCallLogRow.book_id == book_id, has_body)
         if call_id is not None:
             query = query.where(LLMCallLogRow.id == call_id)
         rows = self._session.scalars(query).all()
@@ -749,6 +798,7 @@ class SqlAlchemyLLMCallLogRepository:
 
     def _remove_body(self, row, status):
         metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+        metadata.pop('input_text', None)
         body_meta = dict(metadata.get('body_meta') or {})
         body_meta.update(body_status=status, stored_bytes=0)
         metadata['body_meta'] = body_meta
@@ -758,53 +808,168 @@ class SqlAlchemyLLMCallLogRepository:
     def enforce_diagnostics_policy(self, policy, now, *, book_id=None):
         from datetime import timedelta
         from linguary.application.diagnostics import bounded_body
-        query = select(LLMCallLogRow).where(LLMCallLogRow.response_text.is_not(None))
+
+        has_response_expr = LLMCallLogRow.response_text.is_not(None)
+        has_input_expr = func.json_type(
+            LLMCallLogRow.diagnostic_meta_json, '$.input_text'
+        ).is_not(None)
+        has_body = or_(has_response_expr, has_input_expr)
+        response_bytes_expr = func.coalesce(
+            func.length(cast(LLMCallLogRow.response_text, LargeBinary)), 0
+        )
+        input_bytes_expr = func.coalesce(
+            func.length(
+                cast(
+                    func.json_extract(
+                        LLMCallLogRow.diagnostic_meta_json, '$.input_text'
+                    ),
+                    LargeBinary,
+                )
+            ),
+            0,
+        )
+        query = select(
+            LLMCallLogRow.id,
+            LLMCallLogRow.book_id,
+            LLMCallLogRow.started_at,
+            has_response_expr.label('has_response'),
+            has_input_expr.label('has_input'),
+            response_bytes_expr.label('response_bytes'),
+            input_bytes_expr.label('input_bytes'),
+            func.json_extract(
+                LLMCallLogRow.diagnostic_meta_json, '$.body_meta.body_status'
+            ).label('body_status'),
+            func.json_extract(
+                LLMCallLogRow.diagnostic_meta_json, '$.body_meta.stored_bytes'
+            ).label('stored_bytes'),
+            func.json_type(
+                LLMCallLogRow.diagnostic_meta_json, '$.body_meta.stored_bytes'
+            ).label('stored_bytes_type'),
+            func.json_extract(
+                LLMCallLogRow.diagnostic_meta_json, '$.body_meta.expires_at'
+            ).label('expires_at'),
+        ).where(has_body)
         if book_id is not None:
             query = query.where(LLMCallLogRow.book_id == book_id)
-        rows = self._session.scalars(query.order_by(LLMCallLogRow.started_at, LLMCallLogRow.id)).all()
-        by_book = {}
-        for row in rows:
-            previous = dict((row.diagnostic_meta_json or {}).get('body_meta') or {})
-            status = previous.get('body_status')
-            if status in {'unavailable', 'expired', 'deleted', 'disabled'}:
-                self._remove_body(row, status)
+        projected = self._session.execute(
+            query.order_by(LLMCallLogRow.started_at, LLMCallLogRow.id)
+        ).all()
+        if not projected:
+            return
+
+        remove_reasons: dict[str, str] = {}
+        need_process: list[tuple[object, str, bool, list[object]]] = []
+        surviving_by_book: dict[str, list[list[object]]] = {}
+        for item in projected:
+            status = item.body_status
+            if status in {'expired', 'deleted', 'disabled'} or (
+                status == 'unavailable' and bool(item.has_response)
+            ):
+                remove_reasons[item.id] = status
                 continue
             if not policy.bodies_enabled:
-                self._remove_body(row, 'disabled')
+                remove_reasons[item.id] = 'disabled'
                 continue
-            expires = row.started_at + timedelta(seconds=policy.retention_seconds)
+            expires = item.started_at + timedelta(seconds=policy.retention_seconds)
             if now >= expires:
-                self._remove_body(row, 'expired')
+                remove_reasons[item.id] = 'expired'
                 continue
             expires_at = expires.isoformat()
-            stored_bytes = previous.get('stored_bytes')
-            if (
-                status == 'available'
-                and isinstance(stored_bytes, int)
-                and not isinstance(stored_bytes, bool)
-                and stored_bytes <= policy.max_body_bytes
-            ):
-                if previous.get('expires_at') != expires_at:
-                    metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+            has_resp = bool(item.has_response)
+            has_inp = bool(item.has_input)
+            resp_bytes = int(item.response_bytes or 0)
+            inp_bytes = int(item.input_bytes or 0)
+            if has_resp:
+                already_bounded = (
+                    status == 'available'
+                    and item.stored_bytes_type == 'integer'
+                    and isinstance(item.stored_bytes, int)
+                    and not isinstance(item.stored_bytes, bool)
+                    and item.stored_bytes <= policy.max_body_bytes
+                    and (not has_inp or inp_bytes <= policy.max_body_bytes)
+                )
+            else:
+                already_bounded = inp_bytes <= policy.max_body_bytes
+            slot: list[object] = [item.id, (resp_bytes if has_resp else 0) + inp_bytes]
+            surviving_by_book.setdefault(item.book_id, []).append(slot)
+            if not already_bounded or item.expires_at != expires_at:
+                need_process.append((item, expires_at, already_bounded, slot))
+
+        rows_by_id: dict[str, LLMCallLogRow] = {}
+        if need_process:
+            process_ids = [item.id for item, _, _, _ in need_process]
+            for row in self._session.scalars(
+                select(LLMCallLogRow).where(LLMCallLogRow.id.in_(process_ids))
+            ).all():
+                rows_by_id[row.id] = row
+            for item, expires_at, already_bounded, slot in need_process:
+                row = rows_by_id.get(item.id)
+                if row is None:
+                    continue
+                metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+                previous = dict(metadata.get('body_meta') or {})
+                if isinstance(metadata.get('input_text'), str):
+                    if len(metadata['input_text'].encode('utf-8')) > policy.max_body_bytes:
+                        metadata['input_text'], _ = bounded_body(
+                            metadata['input_text'], max_bytes=policy.max_body_bytes
+                        )
+                new_inp_bytes = (
+                    len(metadata['input_text'].encode('utf-8'))
+                    if isinstance(metadata.get('input_text'), str)
+                    else 0
+                )
+                if row.response_text is not None:
+                    if already_bounded:
+                        metadata['body_meta'] = {**previous, 'expires_at': expires_at}
+                        row.diagnostic_meta_json = metadata
+                        slot[1] = len(row.response_text.encode('utf-8')) + new_inp_bytes
+                    else:
+                        body, body_meta = bounded_body(
+                            row.response_text, max_bytes=policy.max_body_bytes
+                        )
+                        new_resp_bytes = len(body.encode('utf-8'))
+                        metadata['body_meta'] = {
+                            **body_meta,
+                            **previous,
+                            'body_status': 'available',
+                            'stored_bytes': new_resp_bytes,
+                            'expires_at': expires_at,
+                        }
+                        metadata['body_meta']['truncated'] = (
+                            previous.get('truncated', False) or body_meta['truncated']
+                        )
+                        metadata['body_meta']['redacted'] = (
+                            previous.get('redacted', False) or body_meta['redacted']
+                        )
+                        row.response_text, row.diagnostic_meta_json = body, metadata
+                        slot[1] = new_resp_bytes + new_inp_bytes
+                else:
                     metadata['body_meta'] = {**previous, 'expires_at': expires_at}
                     row.diagnostic_meta_json = metadata
-            else:
-                body, body_meta = bounded_body(row.response_text, max_bytes=policy.max_body_bytes)
-                metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
-                metadata['body_meta'] = {**body_meta, **previous, 'body_status': 'available',
-                    'stored_bytes': len(body.encode('utf-8')), 'expires_at': expires_at}
-                metadata['body_meta']['truncated'] = previous.get('truncated', False) or body_meta['truncated']
-                metadata['body_meta']['redacted'] = previous.get('redacted', False) or body_meta['redacted']
-                row.response_text, row.diagnostic_meta_json = body, metadata
-            by_book.setdefault(row.book_id, []).append(row)
-        for items in by_book.values():
-            total = sum(len(row.response_text.encode('utf-8')) for row in items)
-            for row in items:
+                    slot[1] = new_inp_bytes
+
+        for slots in surviving_by_book.values():
+            total = sum(int(weight) for _, weight in slots)
+            for call_id, weight in slots:
                 if total <= policy.max_book_bytes:
                     break
-                total -= len(row.response_text.encode('utf-8'))
-                self._remove_body(row, 'deleted')
-        self._session.flush()
+                total -= int(weight)
+                remove_reasons[str(call_id)] = 'deleted'
+
+        if remove_reasons:
+            missing_ids = [cid for cid in remove_reasons if cid not in rows_by_id]
+            if missing_ids:
+                for row in self._session.scalars(
+                    select(LLMCallLogRow).where(LLMCallLogRow.id.in_(missing_ids))
+                ).all():
+                    rows_by_id[row.id] = row
+            for cid, reason in remove_reasons.items():
+                row = rows_by_id.get(cid)
+                if row is not None:
+                    self._remove_body(row, reason)
+
+        if need_process or remove_reasons:
+            self._session.flush()
 
     def _now(self):
         return self.clock() if self.clock is not None else datetime.now(UTC)

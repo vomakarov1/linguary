@@ -419,9 +419,17 @@ class TranslationCall:
             return results, (), None
         texts = {item.block.id: item.block.text for item in unit.items}
         with self._unit_of_work.transaction() as transaction:
-            previous = tuple(assistance for result in results
-                if (stored := transaction.results.get(run_id, result.block_id)) is not None
-                for assistance in stored.pronunciation_assistances)
+            stored_by_id = _load_results_by_block_id(
+                transaction.results,
+                run_id,
+                tuple(result.block_id for result in results),
+            )
+            previous = tuple(
+                assistance
+                for result in results
+                if (stored := stored_by_id.get(result.block_id)) is not None
+                for assistance in stored.pronunciation_assistances
+            )
         reason = None
         if context.request.pronunciation_candidates_version is None:
             reason = 'candidate_contract_unavailable'
@@ -450,54 +458,98 @@ class TranslationCall:
         response = self._validated_response.get()
         context = None if response is None else response.call_context
         saved = False
+        block_ids = tuple(result.block_id for result in results)
+        expected_bindings = self._expected_bindings.get()
         with self._unit_of_work.transaction() as transaction:
             run = transaction.runs.active_for_book(book_id)
             conditions = transaction.work.latest_conditions(book_id) if context else None
             pointers_match = True
-            if context is not None:
+            if context is not None and results:
+                result_bindings_fn = getattr(transaction.work, 'result_bindings', None)
+                if callable(result_bindings_fn):
+                    current_bindings = result_bindings_fn(run_id)
+                else:
+                    current_bindings = {
+                        block_id: transaction.work.get_binding('result', f'{run_id}:{block_id}')
+                        for block_id in block_ids
+                    }
                 for result in results:
-                    previous = self._expected_bindings.get().get(result.block_id)
-                    current = transaction.work.get_binding('result', f'{run_id}:{result.block_id}')
-                    if (None if previous is None else previous['attempt_id']) != (None if current is None else current['attempt_id']):
+                    previous = expected_bindings.get(result.block_id)
+                    current = current_bindings.get(result.block_id)
+                    if (None if previous is None else previous['attempt_id']) != (
+                        None if current is None else current['attempt_id']
+                    ):
                         pointers_match = False
             owns_scope = context is None or context.root_id is None or transaction.work.owns_recovery_attempt(context.attempt_id)
             if run is not None and run.id == run_id and pointers_match and owns_scope and (context is None or (conditions is not None and conditions.id == context.conditions_id)):
+                previous_results = (
+                    _load_results_by_block_id(transaction.results, run_id, block_ids)
+                    if results
+                    else {}
+                )
                 if context is not None:
-                    for result in results:
-                        previous_result = transaction.results.get(run_id, result.block_id)
-                        previous_binding = self._expected_bindings.get().get(result.block_id)
-                        if previous_result is not None and previous_binding is None:
-                            transaction.work.archive_artifacts([dict(book_id=book_id, run_id=run_id,
-                                kind='block_result', scope_id=result.block_id,
-                                body={'schema_version': 1, 'result': asdict(previous_result)})])
+                    legacy_artifacts = [
+                        dict(
+                            book_id=book_id,
+                            run_id=run_id,
+                            kind='block_result',
+                            scope_id=result.block_id,
+                            body={'schema_version': 1, 'result': asdict(previous_result)},
+                        )
+                        for result in results
+                        if (previous_result := previous_results.get(result.block_id)) is not None
+                        and expected_bindings.get(result.block_id) is None
+                    ]
+                    if legacy_artifacts:
+                        transaction.work.archive_artifacts(legacy_artifacts)
                 if pronunciation_unavailable:
-                    preserved = []
-                    for result in results:
-                        previous = transaction.results.get(run_id, result.block_id)
-                        preserved.append(replace(result, pronunciation_assistances=previous.pronunciation_assistances)
-                                         if previous is not None else result)
-                    results = tuple(preserved)
-                text_changed = any(transaction.results.get(run_id, result.block_id) != result for result in results)
+                    results = tuple(
+                        replace(result, pronunciation_assistances=previous.pronunciation_assistances)
+                        if (previous := previous_results.get(result.block_id)) is not None
+                        else result
+                        for result in results
+                    )
+                text_changed = any(
+                    previous_results.get(result.block_id) != result
+                    for result in results
+                )
                 transaction.results.replace_results(run_id, results)
                 if context is not None and context.root_id is not None:
                     scope = transaction.work.get_scope(context.scope_id)
                     if tuple(result.block_id for result in results) != scope.ordered_blocks:
                         raise RecoveryError('unsafe_partition', context.root_id)
-                if context is not None:
+                if context is not None and results:
                     provenance = None if context.root_id is None else {
                         'schema_version': 1, 'root_id': context.root_id, 'policy_version': context.policy_version,
                         'prompt_hash': context.prompt_hash, 'attempt_id': context.attempt_id}
-                    for result in results:
-                        artifact_id, = transaction.work.archive_artifacts([dict(book_id=book_id,
-                            conditions_id=context.conditions_id, attempt_id=context.attempt_id, run_id=run_id,
-                            kind='block_result', scope_id=result.block_id,
-                            body={'schema_version': 1, 'result': asdict(result),
-                                  **({'provenance': provenance} if provenance is not None else {})})])
-                        previous_binding = self._expected_bindings.get().get(result.block_id)
-                        transaction.work.replace_result_binding(f'{run_id}:{result.block_id}', book_id=book_id,
-                            conditions_id=context.conditions_id, attempt_id=context.attempt_id,
-                            artifact_revision_id=artifact_id, provenance=provenance,
-                            expected_attempt_id=None if previous_binding is None else previous_binding['attempt_id'])
+                    new_artifacts = [
+                        dict(
+                            book_id=book_id,
+                            conditions_id=context.conditions_id,
+                            attempt_id=context.attempt_id,
+                            run_id=run_id,
+                            kind='block_result',
+                            scope_id=result.block_id,
+                            body={
+                                'schema_version': 1,
+                                'result': asdict(result),
+                                **({'provenance': provenance} if provenance is not None else {}),
+                            },
+                        )
+                        for result in results
+                    ]
+                    artifact_ids = transaction.work.archive_artifacts(new_artifacts)
+                    for result, artifact_id in zip(results, artifact_ids, strict=True):
+                        previous_binding = expected_bindings.get(result.block_id)
+                        transaction.work.replace_result_binding(
+                            f'{run_id}:{result.block_id}',
+                            book_id=book_id,
+                            conditions_id=context.conditions_id,
+                            attempt_id=context.attempt_id,
+                            artifact_revision_id=artifact_id,
+                            provenance=provenance,
+                            expected_attempt_id=None if previous_binding is None else previous_binding['attempt_id'],
+                        )
                 if context is not None and context.root_id is not None:
                     transaction.work.mark_recovery_accepted(context.attempt_id)
                 finalize_response(self._unit_of_work, response, 'accepted', transaction=transaction)
@@ -708,6 +760,21 @@ def _can_split_truncated_scope(
     return True
 
 
+def _load_results_by_block_id(
+    results_repo, run_id: str, block_ids: Sequence[str]
+) -> dict[str, BlockProcessingResult]:
+    """Loads existing block results in a single batch when supported by the repository."""
+    get_many = getattr(results_repo, "get_many", None)
+    if callable(get_many):
+        return dict(get_many(run_id, block_ids))
+    loaded: dict[str, BlockProcessingResult] = {}
+    for block_id in dict.fromkeys(block_ids):
+        stored = results_repo.get(run_id, block_id)
+        if stored is not None:
+            loaded[block_id] = stored
+    return loaded
+
+
 def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exception:
     """Same error rephrased using block aliases seen by the model (ALG-05).
 
@@ -718,10 +785,19 @@ def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exce
     """
     if not isinstance(error, ResultValidationError):
         return error
+    violation = getattr(error, "violation", None)
+    if violation is not None and violation.block_ids:
+        aliases_by_block_id = {
+            block_id: alias
+            for alias, block_id in (getattr(context, "block_ids_by_alias", None) or {}).items()
+        }
+        aliased_ids = tuple(aliases_by_block_id.get(b, b) for b in violation.block_ids)
+        if aliased_ids != violation.block_ids:
+            violation = replace(violation, block_ids=aliased_ids)
     return ResultValidationError(
         context.to_aliases(str(error)),
         expectation=error.expectation or getattr(context, "expectation", None),
-        violation=getattr(error, "violation", None),
+        violation=violation,
     )
 
 

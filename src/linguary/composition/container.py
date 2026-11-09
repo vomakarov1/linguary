@@ -25,12 +25,13 @@ EPUB parsing and SQLite operations block the event loop and cannot run directly 
 from __future__ import annotations
 
 import asyncio
-
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
 from hashlib import sha256
+import threading
 
 from linguary.adapters.config import AppSettings, load_settings
 from linguary.adapters.config.settings import SettingsError
@@ -120,6 +121,29 @@ from linguary.domain import (
 #: How many neighboring blocks the model sees during regeneration (PRD § 13). The value
 #: was justified in P3.T7 and is intentionally not exposed to the settings file.
 DEFAULT_REGENERATION_CONTEXT_BLOCKS = 2
+
+_FILE_SHA256_CACHE_MAX = 256
+_FILE_SHA256_CACHE: OrderedDict[tuple[str, int, int, int, int, int], str] = OrderedDict()
+_FILE_SHA256_LOCK = threading.Lock()
+
+
+def _cached_file_sha256(path: str | Path) -> str:
+    """Return SHA-256 hex digest of a file, cached by stat metadata."""
+    resolved = Path(path).resolve()
+    st = resolved.stat()
+    key = (str(resolved), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    with _FILE_SHA256_LOCK:
+        cached = _FILE_SHA256_CACHE.get(key)
+        if cached is not None:
+            _FILE_SHA256_CACHE.move_to_end(key)
+            return cached
+    digest = sha256(resolved.read_bytes()).hexdigest()
+    with _FILE_SHA256_LOCK:
+        _FILE_SHA256_CACHE[key] = digest
+        _FILE_SHA256_CACHE.move_to_end(key)
+        while len(_FILE_SHA256_CACHE) > _FILE_SHA256_CACHE_MAX:
+            _FILE_SHA256_CACHE.popitem(last=False)
+    return digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,7 +452,7 @@ def build_application(
     book_conditions = BookConditionsService(unit_of_work,
         lambda book, revision: conditions_payload(book, runtime_settings.current.settings, revision, content_plan_profile),
         lambda: runtime_settings.revision,
-        lambda path: sha256(Path(path).read_bytes()).hexdigest())
+        _cached_file_sha256)
     book_runtime = BookRuntimeResolver(book_conditions, runtime_settings, generation_factory)
     diagnostics = Diagnostics(unit_of_work, policy=DiagnosticsPolicy(**asdict(app_settings.diagnostics)))
     diagnostics.ensure_available()

@@ -30,6 +30,50 @@ class BookConditionsService:
         self._source_digest = source_digest
 
     def freeze_before_analysis(self, book_id, expected_settings_revision):
+        read_tx = getattr(self.uow, 'read_transaction', None)
+        if read_tx is not None:
+            with read_tx() as transaction:
+                book = transaction.books.get(book_id)
+                if book is None:
+                    raise ConditionsError('book_not_found')
+                existing = transaction.work.latest_conditions(book_id)
+                if existing is None and (
+                    book.status != BookStatus.IMPORTED
+                    or transaction.analyses.list_for_book(book_id)
+                    or transaction.runs.active_for_book(book_id)
+                ):
+                    raise ConditionsError('legacy_choice_required')
+            digest = self.source_digest(book)
+            if existing is not None:
+                if digest != existing.payload.get('source_sha256'):
+                    raise ConditionsError('source_digest_mismatch')
+                return existing.id
+            with self.uow.transaction() as transaction:
+                current_book = transaction.books.get(book_id)
+                if current_book is None:
+                    raise ConditionsError('book_not_found')
+                effective_digest = (
+                    digest
+                    if current_book.source_epub_path == book.source_epub_path
+                    else self.source_digest(current_book)
+                )
+                existing = transaction.work.latest_conditions(book_id)
+                if existing is not None:
+                    if effective_digest != existing.payload.get('source_sha256'):
+                        raise ConditionsError('source_digest_mismatch')
+                    return existing.id
+                if (
+                    current_book.status != BookStatus.IMPORTED
+                    or transaction.analyses.list_for_book(book_id)
+                    or transaction.runs.active_for_book(book_id)
+                ):
+                    raise ConditionsError('legacy_choice_required')
+                return self.create(
+                    transaction,
+                    current_book,
+                    expected_settings_revision,
+                    source_sha256=effective_digest,
+                ).id
         with self.uow.transaction() as transaction:
             book = transaction.books.get(book_id)
             if book is None:
@@ -42,14 +86,35 @@ class BookConditionsService:
                 raise ConditionsError('legacy_choice_required')
             return self.create(transaction, book, expected_settings_revision).id
 
-    def create(self, transaction, book, settings_revision, *, reproducibility='complete', english_help=False, reader_level=None, continue_legacy=False, pronunciation_help_enabled=False, pronunciation_variant=None):
+    def create(
+        self,
+        transaction,
+        book,
+        settings_revision,
+        *,
+        reproducibility='complete',
+        english_help=False,
+        reader_level=None,
+        continue_legacy=False,
+        pronunciation_help_enabled=False,
+        pronunciation_variant=None,
+        source_sha256: str | None = None,
+        seed_first_chapter: bool | None = None,
+    ):
         if settings_revision != self._settings_revision():
             raise ConditionsError('settings_revision_conflict')
         previous = transaction.work.latest_conditions(book.id)
         if previous is not None:
-            self.verify_source(book, previous)
+            if source_sha256 is None:
+                self.verify_source(book, previous)
+            elif source_sha256 != previous.payload.get('source_sha256'):
+                raise ConditionsError('source_digest_mismatch')
         payload = self._snapshot_factory(book, settings_revision)
         payload.setdefault('checks', {}).setdefault('auto_approve_glossary', False)
+        if seed_first_chapter is not None:
+            if type(seed_first_chapter) is not bool:
+                raise ConditionsError('invalid_conditions_choice')
+            payload.setdefault('checks', {})['seed_first_chapter'] = seed_first_chapter
         from linguary.application.context_builder import snapshot_prompt_templates
         if continue_legacy:
             payload.pop('name_translation_policy', None)
@@ -106,7 +171,7 @@ class BookConditionsService:
                 name_translation_policy=payload.get('name_translation_policy'),
                 analysis_contract_version=analysis_contract_version)
             payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
-        payload['source_sha256'] = self.source_digest(book)
+        payload['source_sha256'] = self.source_digest(book) if source_sha256 is None else source_sha256
         conditions = BookConditions(str(uuid4()), book.id, 1 if previous is None else previous.revision + 1,
             payload, datetime.now(UTC), reproducibility=reproducibility)
         transaction.work.add_conditions(conditions)
@@ -114,7 +179,8 @@ class BookConditionsService:
 
     def require(self, book_id, *, transaction=None):
         if transaction is None:
-            with self.uow.transaction() as current:
+            open_tx = getattr(self.uow, 'read_transaction', self.uow.transaction)
+            with open_tx() as current:
                 return self.require(book_id, transaction=current)
         book = transaction.books.get(book_id)
         if book is None:

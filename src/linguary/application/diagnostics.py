@@ -118,11 +118,14 @@ class Diagnostics:
         keep = decision == 'rejected' or retain_accepted
         if not self.policy.bodies_enabled:
             current_body_meta.update(body_status='disabled', stored_bytes=0)
+            metadata.pop('input_text', None)
             body = None
         elif not keep:
             current_body_meta.update(body_status='unavailable', stored_bytes=0)
+            metadata.pop('input_text', None)
             body = None
         elif status in {'expired', 'deleted', 'disabled'}:
+            metadata.pop('input_text', None)
             body = None
         elif body is not None:
             encoded_len = len(body.encode('utf-8'))
@@ -151,6 +154,11 @@ class Diagnostics:
             body = record['body']
             if body is None:
                 current_body_meta.update(body_status='unavailable', stored_bytes=0)
+        if 'input_text' in metadata and isinstance(metadata['input_text'], str):
+            if len(metadata['input_text'].encode('utf-8')) > self.policy.max_body_bytes:
+                metadata['input_text'], _ = bounded_body(
+                    metadata['input_text'], max_bytes=self.policy.max_body_bytes
+                )
         current_body_meta['expires_at'] = (record['started_at'] + timedelta(seconds=self.policy.retention_seconds)).isoformat()
         metadata['body_meta'] = current_body_meta
         transaction.llm_calls.update_diagnostics(record['call_id'], metadata=metadata)
