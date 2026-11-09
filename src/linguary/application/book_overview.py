@@ -410,11 +410,24 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
         try:
             from linguary.application.correction import correction_coverage_complete
             _ensure_ready(book, tasks)
-            if not correction_coverage_complete(transaction, book.id):
+            if results is None:
+                results = transaction.results.list_for_run(run.id)
+            try:
+                coverage_complete = correction_coverage_complete(
+                    transaction,
+                    book.id,
+                    document=document,
+                    analyses=analyses,
+                    run=run,
+                    conditions=conditions,
+                    result_bindings=bindings,
+                    run_results=results,
+                )
+            except TypeError:
+                coverage_complete = correction_coverage_complete(transaction, book.id)
+            if not coverage_complete:
                 epub_ready = False
             else:
-                if results is None:
-                    results = transaction.results.list_for_run(run.id)
                 _validate_content_plans(
                     document,
                     analyses,

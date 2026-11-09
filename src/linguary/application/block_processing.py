@@ -354,6 +354,7 @@ class TranslationCall:
                             not split
                             and violation is not None
                             and violation.rule_code == "provider_truncated"
+                            and not callable(getattr(transaction.work, "get_attempt", None))
                         ):
                             current_root = transaction.work.get_root(recovery[0])
                             split = _can_split_truncated_scope(
@@ -673,7 +674,12 @@ def _can_split_truncated_scope(
     scope_id: str,
     unit: TranslationUnit | None,
 ) -> bool:
-    if unit is None or len(unit.items) <= 1:
+    if (
+        root is None
+        or getattr(root, "superseded_by", None) is not None
+        or unit is None
+        or len(unit.items) <= 1
+    ):
         return False
     manifest = getattr(root, "manifest", None) or {}
     if "atomic_intervals" in manifest:

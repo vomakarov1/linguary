@@ -1720,6 +1720,299 @@ def test_section_correction_inputs_uses_batch_result_bindings_and_incremental_st
     assert projection["epub_ready"] is False
 
 
+def test_quality_projection_reuses_preloaded_inputs_in_correction_coverage_complete():
+    from uuid import uuid4
+    from linguary.application.book_overview import _quality_projection
+    from linguary.application.correction import CorrectionInputs
+    from linguary.application.correction_dto import CORRECTION_VERSIONS_V2, CorrectionSnapshotV2
+    from linguary.domain import BookStatus, ChapterAnalysis, TreatmentPlan
+    from linguary.domain.correction import CorrectionCheck
+    from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
+
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"00000000-0000-0000-0000-00000000010{idx}",
+            title=f"Chapter {idx}",
+            order=idx - 1,
+            texts=(f"Chapter {idx} line one.", f"Chapter {idx} line two."),
+        )
+        for idx in (1, 2)
+    )
+    doc = make_analysis_document(sections)
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    cond_id = "00000000-0000-0000-0000-000000000001"
+    run_id = "00000000-0000-0000-0000-000000000002"
+    conditions = SimpleNamespace(
+        id=cond_id,
+        revision=1,
+        payload={"schema_version": 1, "versions": {"validators": 3}},
+        pronunciation_help_enabled=False,
+        pronunciation_variant=None,
+        reproducibility="strict",
+    )
+    run = SimpleNamespace(id=run_id, glossary_snapshot=GlossarySnapshot())
+    book_record = SimpleNamespace(id=doc.id, status=BookStatus.READY_TO_EXPORT, source_language="en")
+
+    analyses = []
+    all_results = []
+    bindings_by_block = {}
+    generations_by_block = {}
+    attempts_by_id = {}
+    checks_by_section = {}
+    correction_groups = {}
+
+    for section in sections:
+        block_ids = tuple(b.id for b in section.ordered_blocks)
+        plan = TreatmentPlan.of_treatments(
+            section.id,
+            tuple((b_id, BlockTreatment.TRANSLATE) for b_id in block_ids),
+        )
+        analysis = ChapterAnalysis.create(
+            id=str(uuid4()),
+            section_id=section.id,
+            treatment_plan=plan,
+            translation_instructions="",
+            chapter_summary="",
+            expected_block_ids=block_ids,
+        )
+        analyses.append(analysis)
+        sec_results = {}
+        sec_bindings = {}
+        for b in section.ordered_blocks:
+            res = BlockProcessingResult(
+                block_id=b.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=f"Перевод {b.id}.",
+            )
+            all_results.append(res)
+            sec_results[b.id] = res
+            binding = {
+                "book_id": doc.id,
+                "conditions_id": conditions.id,
+                "attempt_id": str(uuid4()),
+                "artifact_revision_id": str(uuid4()),
+            }
+            bindings_by_block[b.id] = binding
+            sec_bindings[b.id] = binding
+            generations_by_block[b.id] = 1
+        sec_inputs = CorrectionInputs(
+            document=doc,
+            section=section,
+            analysis=analysis,
+            run=run,
+            conditions=conditions,
+            snapshot=snapshot,
+            blocks=section.ordered_blocks,
+            results=sec_results,
+            bindings=sec_bindings,
+            input_generations={b.id: 1 for b in section.ordered_blocks},
+        )
+        corr_attempt_id = str(uuid4())
+        attempts_by_id[corr_attempt_id] = CallAttempt(
+            id=corr_attempt_id,
+            book_id=doc.id,
+            state="accepted",
+            generation=1,
+            ordinal=1,
+            conditions_id=conditions.id,
+            run_id=run.id,
+            context={
+                "schema_version": 1,
+                "stage": "chapter_correction",
+                "ordered_block_ids": list(block_ids),
+            },
+        )
+        correction_groups[corr_attempt_id] = {
+            "payload_json": {
+                "unchanged_block_ids": list(block_ids),
+                "manifest": sec_inputs.manifest,
+            }
+        }
+        checks_by_section[section.id] = tuple(
+            CorrectionCheck(
+                run_id=run.id,
+                block_id=b.id,
+                section_id=section.id,
+                input_sha256=sec_inputs.checksums[b.id],
+                attempt_id=corr_attempt_id,
+                basis="unchanged",
+            )
+            for b in section.ordered_blocks
+        )
+
+    all_block_ids = tuple(r.block_id for r in all_results)
+    root = RecoveryRoot(
+        id=str(uuid4()),
+        book_id=doc.id,
+        conditions_id=conditions.id,
+        root_key="rk-1",
+        manifest={
+            "schema_version": 1,
+            "ordered_blocks": list(all_block_ids),
+            "atomic_intervals": [[b_id] for b_id in all_block_ids],
+            "policy": {"max_calls": 10, "max_scope_calls": 3},
+        },
+        status="complete",
+    )
+    scope = RecoveryScope(
+        id=str(uuid4()),
+        root_id=root.id,
+        ordered_blocks=all_block_ids,
+        status="accepted",
+        accepted_attempt_id=str(uuid4()),
+    )
+
+    counts = {
+        "latest_conditions": 0,
+        "result_bindings": 0,
+        "list_for_run": 0,
+    }
+
+    class GuardedDocuments:
+        def get(self, _book_id: str):
+            raise AssertionError("documents.get must not be called when document is preloaded")
+
+    class GuardedAnalyses:
+        def list_for_book(self, _book_id: str):
+            raise AssertionError("analyses.list_for_book must not be called when analyses are preloaded")
+
+        def get_for_section(self, _book_id: str, _section_id: str):
+            raise AssertionError("analyses.get_for_section must not be called when analyses are preloaded")
+
+    class GuardedRuns:
+        def active_for_book(self, _book_id: str):
+            raise AssertionError("runs.active_for_book must not be called when run is preloaded")
+
+    class GuardedResults:
+        def block_ids_for_run(self, _run_id: str):
+            return frozenset(all_block_ids)
+
+        def list_for_run(self, _run_id: str):
+            counts["list_for_run"] += 1
+            return tuple(all_results)
+
+        def list_for_section(self, _run_id: str, _section_id: str):
+            raise AssertionError("results.list_for_section must not be called when run_results is preloaded")
+
+    class GuardedWork:
+        def latest_conditions(self, _book_id: str):
+            counts["latest_conditions"] += 1
+            return conditions
+
+        def list_roots(self, _book_id: str, run_id=None):
+            return (root,)
+
+        def list_scopes_for_roots(self, _root_ids):
+            return {root.id: (scope,)}
+
+        def list_attempts_for_roots(self, _root_ids):
+            return {root.id: ()}
+
+        def result_bindings(self, _run_id: str):
+            counts["result_bindings"] += 1
+            return dict(bindings_by_block)
+
+        def root_coverage_complete(self, _root_id: str, **_kwargs):
+            return True
+
+        def get_binding(self, kind: str, entity_id: str):
+            if kind == "run" and entity_id == run.id:
+                return {
+                    "book_id": doc.id,
+                    "conditions_id": conditions.id,
+                    "payload_json": {"correction": snapshot.to_payload()},
+                }
+            if kind == "correction_group":
+                return correction_groups.get(entity_id)
+            if kind == "result":
+                raise AssertionError("per-block get_binding('result', ...) must not be called")
+            return None
+
+        def correction_input_generations(self, _run_id: str):
+            return dict(generations_by_block)
+
+        def correction_checks(self, _run_id: str, section_id: str):
+            return checks_by_section.get(section_id, ())
+
+        def get_attempt(self, attempt_id: str):
+            return attempts_by_id.get(attempt_id)
+
+        def list_correction_candidates(self, _run_id: str, *, section_id=None, states=None):
+            return ()
+
+        def list_reviews(self, _book_id: str):
+            return ()
+
+    tx = SimpleNamespace(
+        documents=GuardedDocuments(),
+        analyses=GuardedAnalyses(),
+        runs=GuardedRuns(),
+        results=GuardedResults(),
+        work=GuardedWork(),
+        llm_calls=SimpleNamespace(list_for_book=lambda _bid: ()),
+    )
+
+    # Case 1: book_overview path (stored_results=None -> loads list_for_run once, 0 list_for_section)
+    projection_overview = _quality_projection(
+        tx,
+        book_record,
+        doc,
+        tuple(analyses),
+        run,
+        (),
+        stored_results=None,
+        stored_calls=(),
+    )
+    assert projection_overview["epub_ready"] is True
+    assert counts == {"latest_conditions": 1, "result_bindings": 1, "list_for_run": 1}
+
+    # Case 2: book_result path (stored_results provided -> 0 list_for_run, 0 list_for_section)
+    counts = {"latest_conditions": 0, "result_bindings": 0, "list_for_run": 0}
+    projection_result = _quality_projection(
+        tx,
+        book_record,
+        doc,
+        tuple(analyses),
+        run,
+        (),
+        stored_results=tuple(all_results),
+        stored_calls=(),
+    )
+    assert projection_result["epub_ready"] is True
+    assert counts == {"latest_conditions": 1, "result_bindings": 1, "list_for_run": 0}
+
+    # Case 3: missing check on second chapter -> epub_ready is False without extra queries
+    checks_by_section[sections[1].id] = ()
+    counts = {"latest_conditions": 0, "result_bindings": 0, "list_for_run": 0}
+    projection_incomplete = _quality_projection(
+        tx,
+        book_record,
+        doc,
+        tuple(analyses),
+        run,
+        (),
+        stored_results=tuple(all_results),
+        stored_calls=(),
+    )
+    assert projection_incomplete["epub_ready"] is False
+    assert counts == {"latest_conditions": 1, "result_bindings": 1, "list_for_run": 0}
+
+
 
 
 

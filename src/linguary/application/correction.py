@@ -245,13 +245,19 @@ def _section_correction_inputs(
 ):
     blocks = textual_blocks(section)
     block_ids = {b.id for b in blocks}
-    list_for_section = getattr(tx.results, 'list_for_section', None)
-    stored_results = (
-        list_for_section(run.id, section.id)
-        if callable(list_for_section)
-        else (run_results if run_results is not None else tx.results.list_for_run(run.id))
-    )
-    results = {r.block_id: r for r in stored_results if r.block_id in block_ids}
+    if run_results is not None:
+        if isinstance(run_results, Mapping):
+            results = {b.id: run_results[b.id] for b in blocks if b.id in run_results}
+        else:
+            results = {r.block_id: r for r in run_results if r.block_id in block_ids}
+    else:
+        list_for_section = getattr(tx.results, 'list_for_section', None)
+        stored_results = (
+            list_for_section(run.id, section.id)
+            if callable(list_for_section)
+            else tx.results.list_for_run(run.id)
+        )
+        results = {r.block_id: r for r in stored_results if r.block_id in block_ids}
     if result_bindings is not None:
         bindings = {b.id: result_bindings.get(b.id) for b in blocks}
     else:
@@ -287,15 +293,32 @@ def _section_correction_inputs(
 
 
 def _load_book_correction_inputs_state(
-    tx, book_id, *, run, binding, policy, section_id: str | None = None
+    tx,
+    book_id,
+    *,
+    run,
+    binding,
+    policy,
+    section_id: str | None = None,
+    conditions=None,
+    analyses=None,
+    result_bindings=None,
+    run_results=None,
 ):
-    conditions = tx.work.latest_conditions(book_id)
+    if conditions is None:
+        conditions = tx.work.latest_conditions(book_id)
     if (binding['book_id'] != book_id or conditions is None
             or binding['conditions_id'] != conditions.id):
         raise WorkStateError('условия исправления больше не активны')
     snapshot = parse_correction_snapshot(policy)
     analyses_by_section = None
-    if section_id is not None:
+    if analyses is not None:
+        analyses_by_section = (
+            dict(analyses)
+            if isinstance(analyses, Mapping)
+            else {analysis.section_id: analysis for analysis in analyses}
+        )
+    elif section_id is not None:
         get_for_section = getattr(tx.analyses, 'get_for_section', None)
         if callable(get_for_section):
             try:
@@ -310,23 +333,25 @@ def _load_book_correction_inputs_state(
             if callable(list_analyses)
             else None
         )
-    list_result_bindings = getattr(tx.work, 'result_bindings', None)
-    result_bindings = (
-        list_result_bindings(run.id)
-        if callable(list_result_bindings)
-        else None
-    )
+    if result_bindings is None:
+        list_result_bindings = getattr(tx.work, 'result_bindings', None)
+        result_bindings = (
+            list_result_bindings(run.id)
+            if callable(list_result_bindings)
+            else None
+        )
     generations = (
         tx.work.correction_input_generations(run.id)
         if isinstance(snapshot, CorrectionSnapshotV2)
         else {}
     )
-    list_for_section = getattr(tx.results, 'list_for_section', None)
-    run_results = (
-        None
-        if callable(list_for_section)
-        else tx.results.list_for_run(run.id)
-    )
+    if run_results is not None:
+        if not isinstance(run_results, Mapping):
+            run_results = {r.block_id: r for r in run_results}
+    else:
+        list_for_section = getattr(tx.results, 'list_for_section', None)
+        if not callable(list_for_section):
+            run_results = {r.block_id: r for r in tx.results.list_for_run(run.id)}
     return dict(
         run=run,
         conditions=conditions,
@@ -569,15 +594,27 @@ def task_matches_inputs(tx, task, payload, inputs):
     return True
 
 
-def correction_coverage_complete(tx, book_id):
+def correction_coverage_complete(
+    tx,
+    book_id,
+    *,
+    document=None,
+    analyses=None,
+    run=None,
+    conditions=None,
+    result_bindings=None,
+    run_results=None,
+):
     """Legacy runs retain their prior export semantics; required runs need current checks."""
-    run = tx.runs.active_for_book(book_id)
+    if run is None:
+        run = tx.runs.active_for_book(book_id)
     get_binding = getattr(tx.work, 'get_binding', None)
     binding = None if run is None or not callable(get_binding) else get_binding('run', run.id)
     policy = correction_policy({} if binding is None else binding['payload_json'])
     if policy is None:
         return True
-    document = tx.documents.get(book_id)
+    if document is None:
+        document = tx.documents.get(book_id)
     if document is None:
         return False
     sections = tuple(
@@ -587,16 +624,24 @@ def correction_coverage_complete(tx, book_id):
     if not sections:
         return True
     shared = _load_book_correction_inputs_state(
-        tx, book_id, run=run, binding=binding, policy=policy,
+        tx,
+        book_id,
+        run=run,
+        binding=binding,
+        policy=policy,
+        conditions=conditions,
+        analyses=analyses,
+        result_bindings=result_bindings,
+        run_results=run_results,
     )
-    result_bindings = shared.get('result_bindings')
-    if result_bindings is not None:
+    loaded_bindings = shared.get('result_bindings')
+    if loaded_bindings is not None:
         expected_blocks = {
             block.id
             for section in document.sections
             for block in textual_blocks(section)
         }
-        if not all(result_bindings.get(block_id) is not None for block_id in expected_blocks):
+        if not all(loaded_bindings.get(block_id) is not None for block_id in expected_blocks):
             return False
     elif shared.get('run_results') is not None:
         expected_blocks = {
@@ -604,7 +649,12 @@ def correction_coverage_complete(tx, book_id):
             for section in document.sections
             for block in textual_blocks(section)
         }
-        actual_blocks = {r.block_id for r in shared['run_results']}
+        shared_results = shared['run_results']
+        actual_blocks = (
+            set(shared_results.keys())
+            if isinstance(shared_results, Mapping)
+            else {r.block_id for r in shared_results}
+        )
         if not expected_blocks <= actual_blocks:
             return False
     for section in sections:

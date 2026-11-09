@@ -1349,3 +1349,281 @@ async def test_provider_truncated_indivisible_atomic_interval_does_not_trigger_r
     assert block_work.book_candidates == (cand_ch2,)
 
 
+@pytest.mark.asyncio
+async def test_provider_truncated_skips_fallback_split_for_attempt_tracked_repo_and_stale_roots(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    import linguary.application.block_processing as block_processing_module
+    from processing_fakes import (
+        BOOK_ID,
+        SECTION_ID,
+        TARGET_LANGUAGE,
+        make_blocks,
+        make_unit,
+        make_validator,
+        note_ids,
+    )
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.models import Base
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+    from linguary.adapters.db.work_state import SqlAlchemyWorkRepository
+    from linguary.application.block_processing import (
+        TranslationCall,
+        _can_split_truncated_scope,
+    )
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.ports.llm import LLMResponseFormatError
+    from linguary.application.ports.persistence import BookRecord
+    from linguary.application.recovery import RecoveryError, RecoverySplit, root_manifest
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.domain import (
+        BookMetadata,
+        BookStatus,
+        CanonicalDocument,
+        ChapterAnalysis,
+        DocumentSection,
+        GlossarySnapshot,
+        LLMSettingsSnapshot,
+        ProcessingRun,
+        ProcessingRunStatus,
+        TreatmentPlan,
+    )
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.recovery import RecoveryRoot, RecoveryScope
+
+    monkeypatch.setattr(
+        block_processing_module,
+        "record_rejection",
+        lambda uow_arg, response, error: None,
+    )
+
+    blocks = make_blocks(2)
+    unit = make_unit(blocks)
+
+    assert _can_split_truncated_scope(SimpleNamespace(), None, "scope-1", unit) is False
+    superseded_root = SimpleNamespace(
+        id="root-1",
+        superseded_by="root-2",
+        manifest={},
+    )
+    assert _can_split_truncated_scope(SimpleNamespace(), superseded_root, "scope-1", unit) is False
+
+    section = DocumentSection(
+        id=SECTION_ID,
+        document_id=BOOK_ID,
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=blocks,
+    )
+    document = CanonicalDocument(
+        id=BOOK_ID,
+        metadata=BookMetadata(title="Book", authors=("Author",)),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=(section,),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=TreatmentPlan.of_treatments(
+            section.id, ((item.block.id, item.treatment) for item in unit.items)
+        ),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=unit.block_ids,
+    )
+    context = ContextBuilder().for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=GlossarySnapshot(),
+    )
+    context = replace(
+        context,
+        request=replace(
+            context.request,
+            book_id=BOOK_ID,
+            run_id="run-1",
+            stage=SimpleNamespace(value="translation_unit"),
+        ),
+    )
+
+    engine = create_database_engine(tmp_path / "stale_truncated_split.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    try:
+        cond_id = "00000000-0000-0000-0000-000000000001"
+        root_rebind_id = "00000000-0000-0000-0000-000000000031"
+        scope_rebind_id = "00000000-0000-0000-0000-000000000041"
+        root_atom_id = "00000000-0000-0000-0000-000000000032"
+        scope_atom_id = "00000000-0000-0000-0000-000000000042"
+        with uow.transaction() as tx:
+            tx.books.add(
+                BookRecord(
+                    id=BOOK_ID,
+                    metadata=document.metadata,
+                    source_language="en",
+                    target_language="ru",
+                    status=BookStatus.PROCESSING,
+                    source_epub_path="book.epub",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            tx.documents.save(document)
+            tx.work.add_conditions(
+                BookConditions(
+                    id=cond_id,
+                    book_id=BOOK_ID,
+                    revision=1,
+                    payload={
+                        "schema_version": 1,
+                        "models": {"processing": "gpt-test"},
+                        "versions": {"validators": 1},
+                    },
+                    created_at=datetime.now(UTC),
+                )
+            )
+            tx.runs.add(
+                ProcessingRun(
+                    id="run-1",
+                    book_id=BOOK_ID,
+                    status=ProcessingRunStatus.ACTIVE,
+                    glossary_snapshot=GlossarySnapshot(),
+                    llm_settings_snapshot=LLMSettingsSnapshot(
+                        provider="fake", model="gpt-test"
+                    ),
+                )
+            )
+            divisible_manifest = {
+                **root_manifest(
+                    book_id=BOOK_ID,
+                    conditions_id=cond_id,
+                    glossary_sha="g",
+                    analysis_sha="a",
+                    plan_sha=None,
+                    ordered_blocks=unit.block_ids,
+                    treatments=("TRANSLATE", "TRANSLATE"),
+                    boundaries=(unit.block_ids,),
+                    atomic_intervals=tuple((b,) for b in unit.block_ids),
+                    max_source_chars=100,
+                ),
+                "active_run_id": "run-1",
+            }
+            tx.work.add_root(
+                RecoveryRoot(
+                    root_rebind_id,
+                    BOOK_ID,
+                    cond_id,
+                    "key-rebind",
+                    divisible_manifest,
+                    policy_version=CURRENT_TRANSLATION_POLICY,
+                )
+            )
+            tx.work.add_scope(
+                RecoveryScope(scope_rebind_id, root_rebind_id, unit.block_ids)
+            )
+
+            atom_manifest = {
+                **root_manifest(
+                    book_id=BOOK_ID,
+                    conditions_id=cond_id,
+                    glossary_sha="g",
+                    analysis_sha="a",
+                    plan_sha=None,
+                    ordered_blocks=unit.block_ids,
+                    treatments=("TRANSLATE", "TRANSLATE"),
+                    boundaries=(unit.block_ids,),
+                    atomic_intervals=(unit.block_ids,),
+                    max_source_chars=100,
+                ),
+                "active_run_id": "run-1",
+            }
+            tx.work.add_root(
+                RecoveryRoot(
+                    root_atom_id,
+                    BOOK_ID,
+                    cond_id,
+                    "key-atom-sql",
+                    atom_manifest,
+                    policy_version=CURRENT_TRANSLATION_POLICY,
+                )
+            )
+            tx.work.add_scope(
+                RecoveryScope(scope_atom_id, root_atom_id, unit.block_ids)
+            )
+
+        class RebindingTruncatedLLM:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def generate(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    with uow.transaction() as concurrent_tx:
+                        concurrent_tx.work.rebind_root(
+                            root_rebind_id, run_id="run-1"
+                        )
+                raise LLMResponseFormatError("truncated JSON", truncated=True)
+
+        rebind_llm = RebindingTruncatedLLM()
+        rebind_call = TranslationCall(
+            unit_of_work=uow,
+            llm_client=rebind_llm,  # type: ignore[arg-type]
+            retry_policy=RetryPolicy(max_attempts=1),
+            validator=make_validator(),
+            sleep=None,
+        )
+
+        with pytest.raises(RecoveryError) as rebind_exc:
+            await rebind_call.request(
+                context,
+                unit=unit,
+                target_language=TARGET_LANGUAGE,
+                note_ids=note_ids(),
+                recovery=(root_rebind_id, scope_rebind_id),
+            )
+        assert not isinstance(rebind_exc.value, RecoverySplit)
+        assert isinstance(rebind_exc.value.original_error, LLMResponseFormatError)
+
+        list_scopes_calls = 0
+        orig_list_scopes = SqlAlchemyWorkRepository.list_scopes
+
+        def spy_list_scopes(self, r_id):
+            nonlocal list_scopes_calls
+            list_scopes_calls += 1
+            return orig_list_scopes(self, r_id)
+
+        monkeypatch.setattr(SqlAlchemyWorkRepository, "list_scopes", spy_list_scopes)
+
+        class TruncatedLLM:
+            async def generate(self, request):
+                raise LLMResponseFormatError("truncated JSON", truncated=True)
+
+        atom_call = TranslationCall(
+            unit_of_work=uow,
+            llm_client=TruncatedLLM(),  # type: ignore[arg-type]
+            retry_policy=RetryPolicy(max_attempts=1),
+            validator=make_validator(),
+            sleep=None,
+        )
+        with pytest.raises(RecoveryError) as atom_exc:
+            await atom_call.request(
+                context,
+                unit=unit,
+                target_language=TARGET_LANGUAGE,
+                note_ids=note_ids(),
+                recovery=(root_atom_id, scope_atom_id),
+            )
+        assert not isinstance(atom_exc.value, RecoverySplit)
+        assert list_scopes_calls == 1
+    finally:
+        engine.dispose()
+
+
+
