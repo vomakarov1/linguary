@@ -1140,20 +1140,35 @@ def test_llm_chapter_analysis_and_quality_artifact_strip_internal_ids_and_char_o
     assert "artifact_sha" not in parsed["artifacts"][0]
 
     qual_analysis = parsed["artifacts"][1]["body"]
+    assert parsed["artifacts"][1]["block_ids"] == ["b1"]
     assert "id" not in qual_analysis
     assert "section_id" not in qual_analysis
     assert "coverage_status" not in qual_analysis
     assert "section_id" not in qual_analysis["treatment_plan"]
+    assert [item["block_id"] for item in qual_analysis["treatment_plan"]["items"]] == ["b1"]
     assert "version" not in qual_analysis["content_plan"]
     assert "profile" not in qual_analysis["content_plan"]
     assert "sha256" not in qual_analysis["content_plan"]
     assert qual_analysis["content_plan"]["difficulties"][0]["anchors"] == [
         {"block_id": "b1", "quote": "First"}
     ]
-    assert qual_analysis["content_plan"]["context_facts"][0]["anchors"] == [
+    assert qual_analysis["content_plan"]["context_facts"] == []
+
+    full_scope_parsed = json.loads(request_text({**manifest, "scope": [b1.id, b2.id]}))
+    assert full_scope_parsed["scope"] == ["b1", "b2"]
+    assert full_scope_parsed["artifacts"][1]["block_ids"] == ["b1", "b2"]
+    full_qual_analysis = full_scope_parsed["artifacts"][1]["body"]
+    assert [item["block_id"] for item in full_qual_analysis["treatment_plan"]["items"]] == [
+        "b1",
+        "b2",
+    ]
+    assert full_qual_analysis["content_plan"]["difficulties"][0]["anchors"] == [
+        {"block_id": "b1", "quote": "First"}
+    ]
+    assert full_qual_analysis["content_plan"]["context_facts"][0]["anchors"] == [
         {"block_id": "b2", "quote": "Second"}
     ]
-    assert qual_analysis["content_plan"]["context_facts"][0]["subject_anchor"] == {
+    assert full_qual_analysis["content_plan"]["context_facts"][0]["subject_anchor"] == {
         "block_id": "b2",
         "quote": "he",
     }
