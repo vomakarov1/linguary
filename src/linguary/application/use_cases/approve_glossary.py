@@ -38,6 +38,7 @@ from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
     BookEvent,
     BookStatus,
+    CanonicalDocument,
     ChapterAnalysis,
     ConceptType,
     LLMSettingsSnapshot,
@@ -170,9 +171,10 @@ class ApproveGlossary:
                 if (work := getattr(transaction, "work", None)) is not None
                 else None
             )
+            document = transaction.documents.get(command.book_id)
             count_mentions = (
                 mention_counter(document)
-                if (document := transaction.documents.get(command.book_id)) is not None
+                if document is not None
                 else None
             )
             review = _load_review(
@@ -184,6 +186,7 @@ class ApproveGlossary:
                 analyses=analyses,
                 count_mentions=count_mentions,
                 conditions=conditions,
+                document=document,
             )
             item = review.item_for(command.source_text)
             if item is None:
@@ -211,6 +214,7 @@ class ApproveGlossary:
                 analyses=analyses,
                 count_mentions=count_mentions,
                 conditions=conditions,
+                document=document,
                 review=review,
                 resolved_keys=(item.source_text,),
             )
@@ -231,9 +235,10 @@ class ApproveGlossary:
                 if (work := getattr(transaction, "work", None)) is not None
                 else None
             )
+            document = transaction.documents.get(book_id)
             count_mentions = (
                 mention_counter(document)
-                if (document := transaction.documents.get(book_id)) is not None
+                if document is not None
                 else None
             )
             review = _load_review(
@@ -245,6 +250,7 @@ class ApproveGlossary:
                 analyses=analyses,
                 count_mentions=count_mentions,
                 conditions=conditions,
+                document=document,
             )
             awaiting_items = review.awaiting_decision
             concepts = tuple(
@@ -271,6 +277,7 @@ class ApproveGlossary:
                 analyses=analyses,
                 count_mentions=count_mentions,
                 conditions=conditions,
+                document=document,
                 review=review,
                 resolved_keys=(item.source_text for item in awaiting_items),
             )
@@ -465,6 +472,7 @@ def _load_review(
     analyses: Sequence[ChapterAnalysis] | None = None,
     count_mentions: Callable[[Iterable[str]], int] | None = None,
     conditions=None,
+    document: CanonicalDocument | None = None,
 ) -> GlossaryReview:
     """Book glossary assembled in open transaction."""
     if conditions is None and (work := getattr(transaction, "work", None)) is not None:
@@ -485,7 +493,9 @@ def _load_review(
                 raise ConditionsError("conditions_unavailable") from None
     if analyses is None:
         analyses = transaction.analyses.list_for_book(book_id)
-    if count_mentions is None and (document := transaction.documents.get(book_id)) is not None:
+    if document is None:
+        document = transaction.documents.get(book_id)
+    if count_mentions is None and document is not None:
         count_mentions = mention_counter(document)
     return build_glossary_review(
         book_id=book_id,
@@ -497,6 +507,7 @@ def _load_review(
         min_chapters=min_chapters,
         name_translation_policy=policy,
         conditions_id=conditions.id if conditions is not None else None,
+        document=document,
     )
 
 
@@ -518,6 +529,7 @@ def _complete_review_if_ready(
     analyses: Sequence[ChapterAnalysis] | None = None,
     count_mentions: Callable[[Iterable[str]], int] | None = None,
     conditions=None,
+    document: CanonicalDocument | None = None,
     review: GlossaryReview | None = None,
     resolved_keys: Iterable[str] = (),
 ) -> None:
@@ -534,6 +546,7 @@ def _complete_review_if_ready(
             analyses=analyses,
             count_mentions=count_mentions,
             conditions=conditions,
+            document=document,
         )
         is_complete = review.is_complete
     else:

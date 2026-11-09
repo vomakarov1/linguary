@@ -255,12 +255,15 @@ class CheckSettings:
     language_notes_per_chapter: int = 8
     auto_approve_glossary: bool = False
     auto_start_processing: bool = False
+    seed_first_chapter: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.auto_approve_glossary, bool):
             raise SettingsError("auto_approve_glossary должен быть булевым значением")
         if not isinstance(self.auto_start_processing, bool):
             raise SettingsError("auto_start_processing должен быть булевым значением")
+        if not isinstance(self.seed_first_chapter, bool):
+            raise SettingsError("seed_first_chapter должен быть булевым значением")
         for name in ("glossary_confidence_threshold", "target_language_min_share"):
             value: float = getattr(self, name)
             if not 0.0 <= value <= 1.0:
@@ -345,9 +348,11 @@ class ServerSettings:
 class WorkerPoolSettings:
     """Background worker: how many queue tasks are executed concurrently (PRD § 25).
 
-    Concurrency speeds up chapter processing, which has independent data. Chapter analysis
-    does not speed up: the next chapter is queued only after persisting the previous one (PRD § 13).
-    Higher values may trigger provider rate limits — protected by `LLMSettings.requests_per_minute`.
+    Concurrency speeds up both chapter analysis and chapter processing. By default all
+    unanalyzed chapters are queued in parallel; enabling `CheckSettings.seed_first_chapter`
+    analyzes the first story chapter in an initial wave so subsequent chapters run in parallel
+    with its glossary candidates in context. Higher values may trigger provider rate limits —
+    protected by `LLMSettings.requests_per_minute`.
     """
 
     concurrency: int = DEFAULT_WORKER_CONCURRENCY

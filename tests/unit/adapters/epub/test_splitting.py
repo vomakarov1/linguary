@@ -6,9 +6,11 @@ import pytest
 
 from linguary.adapters.epub.inline import InlineContent
 from linguary.adapters.epub.splitting import (
+    SPLIT_MAX_PART_CHARS,
     SPLIT_MIN_CHARS,
     SPLIT_MIN_SENTENCES,
     split_inline_content,
+    split_paragraph,
     split_sentences,
 )
 from linguary.domain import InlineAnnotation, InlineAnnotationType
@@ -479,5 +481,106 @@ def test_long_paragraph_window_performance() -> None:
     assert "".join(text[start:end] for start, end in slices) == text
 
 
+def test_split_paragraph_keeps_unequal_sentences_intact_without_mid_sentence_cuts() -> None:
+    """Unequal sentences within max(SPLIT_MAX_PART_CHARS, min_chars - 50) are grouped whole without mid-sentence cuts."""
+    s1 = (
+        "At the far end of the gallery hung an enormous portrait whose tarnished gilt frame "
+        "caught the pale winter light filtering through the tall lancet windows, casting faint "
+        "geometric shadows across the polished oak floorboards where generations of silent visitors "
+        "had paused to admire the brushstroke details and quiet dignity of the subject, while the "
+        "curator softly recounted how the canvas survived three perilous voyages across the stormy "
+        "northern sea before reaching this peaceful coastal manor. "
+    )
+    s2 = "Nobody spoke for a moment. "
+    s3 = (
+        "Then Margaret stepped closer to inspect the signature tucked into the lower corner "
+        "beneath a thin layer of darkened varnish and whispered the painter's name aloud. "
+    )
+    s4 = (
+        "Outside in the courtyard, the evening bell began to chime slowly through the mist "
+        "as the heavy iron gate closed behind the last carriage of the afternoon."
+    )
+    max_part = max(SPLIT_MAX_PART_CHARS, SPLIT_MIN_CHARS - 50)
+    assert 450 <= len(s1) <= max_part
+    assert len(s2) < 60
+    assert len(s3) <= max_part
+    assert len(s4) <= max_part
 
+    text = s1 + s2 + s3 + s4
+    assert len(text) > SPLIT_MIN_CHARS
+
+    slices = split_paragraph(text)
+    assert len(slices) >= 2
+    assert "".join(text[start:end] for start, end in slices) == text
+
+    sentence_slices = split_sentences(text)
+    valid_boundaries = {0, *(end for _, end in sentence_slices)}
+    for start, end in slices:
+        assert start in valid_boundaries
+        assert end in valid_boundaries
+
+
+def test_split_paragraph_splits_oversized_single_sentence_at_word_boundaries() -> None:
+    """Oversized single sentences (> max_sentence_part) fall back to word boundaries while preserving text, markup, and normal sentences."""
+    max_part = max(SPLIT_MAX_PART_CHARS, SPLIT_MIN_CHARS - 50)
+    oversized_single = (
+        "Throughout the remarkably intricate parliamentary debate concerning maritime navigation "
+        + "and regional customs regulations across all distant coastal provinces, " * 9
+        + "every delegate listened attentively without interrupting the speaker."
+    )
+    assert len(oversized_single) > max(SPLIT_MIN_CHARS, max_part)
+    assert len(split_sentences(oversized_single)) == 1
+
+    single_slices = split_paragraph(oversized_single)
+    assert len(single_slices) >= 2
+    assert "".join(oversized_single[start:end] for start, end in single_slices) == oversized_single
+    for start, _ in single_slices[1:]:
+        assert oversized_single[start - 1].isspace()
+        assert not oversized_single[start].isspace()
+
+    italic_phrase = "regional customs regulations"
+    italic_start = oversized_single.rindex(italic_phrase)
+    italic_end = italic_start + len(italic_phrase)
+    annotated = InlineContent(
+        text=oversized_single,
+        annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.ITALIC,
+                start=italic_start,
+                end=italic_end,
+            ),
+        ),
+        anchor_ids=("para-oversized",),
+    )
+    fragments = split_inline_content(annotated)
+    assert len(fragments) == len(single_slices)
+    assert "".join(f.text for f in fragments) == oversized_single
+    assert fragments[0].anchor_ids == ("para-oversized",)
+    recovered_italic = "".join(
+        frag.text[ann.start : ann.end]
+        for frag in fragments
+        for ann in frag.annotations
+        if ann.type is InlineAnnotationType.ITALIC
+    )
+    assert recovered_italic == italic_phrase
+
+    normal_second = (
+        " Nevertheless, when the final bell rang across the chamber, the exhausted clerk "
+        "gathered the parchment rolls neatly into his leather portfolio, bowed politely toward "
+        "the gallery, extinguished the tall brass lamps beside the lectern, and walked out into "
+        "the quiet moonlit square where fresh snow had begun to settle upon the cobblestones and "
+        "narrow stone steps leading down toward the old harbor wall."
+    )
+    compound = oversized_single + " " + normal_second.lstrip()
+    second_sentence_text = normal_second.lstrip()
+    assert len(second_sentence_text) <= max_part
+    assert len(second_sentence_text) > 380
+
+    compound_slices = split_paragraph(compound)
+    compound_parts = [compound[start:end] for start, end in compound_slices]
+    assert "".join(compound_parts) == compound
+    assert any(second_sentence_text in part for part in compound_parts)
+    for start, _ in compound_slices[1:]:
+        assert compound[start - 1].isspace()
+        assert not compound[start].isspace()
 

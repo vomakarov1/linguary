@@ -554,5 +554,223 @@ async def test_try_complete_analysis_avoids_duplicate_queries_and_only_approves_
     assert stored_book is not None and stored_book.status is BookStatus.PROCESSING
 
 
+async def test_chapter_analysis_sequence_seed_first_chapter_passes_only_seed_candidates_and_ignores_front_matter_race() -> None:
+    """With seed_first_chapter enabled, wave 1 runs front matter + first content chapter, ignores front matter completion race, and passes only seed chapter candidates to wave 2."""
+    from types import SimpleNamespace
+    from linguary.adapters.config.loader import load_settings
+    from linguary.adapters.config.settings import CheckSettings, SettingsError
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.application.use_cases.analyze_chapter import _worded_for_the_model
+    from linguary.domain.llm_log import Violation
+
+    assert CheckSettings().seed_first_chapter is False
+    assert CheckSettings(seed_first_chapter=True).seed_first_chapter is True
+    with pytest.raises(SettingsError):
+        CheckSettings(seed_first_chapter="yes")  # type: ignore[arg-type]
+    loaded = load_settings(
+        environ={"LINGUARY_CHECKS_SEED_FIRST_CHAPTER": "true"},
+        config_path=None,
+    )
+    assert loaded.checks.seed_first_chapter is True
+
+    cover = make_analysis_section(
+        section_id="titlepage",
+        title="Title Page",
+        order=0,
+        texts=("Pride and Prejudice",),
+    )
+    ch1 = make_analysis_section(
+        section_id="section-1",
+        title="Chapter 1",
+        order=1,
+        texts=("Arrival in Duskmere during chapter 1.",),
+    )
+    ch2 = make_analysis_section(
+        section_id="section-2",
+        title="Chapter 2",
+        order=2,
+        texts=("Road between Duskmere and Silverbrook in chapter 2.",),
+    )
+    ch3 = make_analysis_section(
+        section_id="section-3",
+        title="Chapter 3",
+        order=3,
+        texts=("Letters from Duskmere and Silverbrook in chapter 3.",),
+    )
+    ch4 = make_analysis_section(
+        section_id="section-4",
+        title="Chapter 4",
+        order=4,
+        texts=("Return to Duskmere and Silverbrook in chapter 4.",),
+    )
+    document = make_analysis_document((cover, ch1, ch2, ch3, ch4))
+    assert document.is_front_matter(cover) is True
+    assert document.is_front_matter(ch1) is False
+
+    unit_of_work = FakeUnitOfWork(document=document, book=make_book_record())
+    conditions = SimpleNamespace(
+        id="cond-seed",
+        payload={"checks": {"seed_first_chapter": True}},
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+
+    reply_seed = analysis_reply(
+        aliases=("b1",),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.92,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    reply_ch2 = analysis_reply(
+        aliases=("b1",),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Silverbrook",
+                "type": "place",
+                "suggested_translation": "Силвербрук",
+                "confidence": 0.91,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    reply_other = analysis_reply(aliases=("b1",), before_you_read=[], candidates=[])
+    client = FakeLLMClient.replying((reply_seed, reply_ch2, reply_other, reply_other))
+
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    analyze_chapter._max_concurrency = 2
+    queue = FakeTaskQueue()
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+        seed_first_chapter=True,
+    )
+
+    await sequence.start(BOOK_ID)
+    assert [t.scope_id for t in queue.tasks] == ["titlepage", "section-1"]
+
+    # Front matter finishes first while section-1 is still pending/running: must NOT release wave 2!
+    cover_task = await queue.claim_next_pending()
+    assert cover_task is not None and cover_task.scope_id == "titlepage"
+    await sequence.run_task(cover_task)
+    await queue.save(cover_task.succeed())
+    assert [t.scope_id for t in queue.tasks] == ["titlepage", "section-1"]
+
+    # Seed chapter finishes and saves analysis: must release wave 2 (sections 2..4)
+    seed_task = await queue.claim_next_pending()
+    assert seed_task is not None and seed_task.scope_id == "section-1"
+    await sequence.run_task(seed_task)
+    await queue.save(seed_task.succeed())
+    assert [t.scope_id for t in queue.tasks] == [
+        "titlepage",
+        "section-1",
+        "section-2",
+        "section-3",
+        "section-4",
+    ]
+
+    # Run section-2 and section-3 first, then section-4 after section-2 has already saved Silverbrook
+    for expected_scope in ("section-2", "section-3", "section-4"):
+        next_task = await queue.claim_next_pending()
+        assert next_task is not None and next_task.scope_id == expected_scope
+        await sequence.run_task(next_task)
+        await queue.save(next_task.succeed())
+
+    stored_book = unit_of_work.books.get(BOOK_ID)
+    assert stored_book is not None and stored_book.status is BookStatus.GLOSSARY_REVIEW
+    assert len(client.requests) == 4
+    # Wave 2 chapters receive seed candidate "Duskmere -> Даскмер" from section-1,
+    # but NOT "Silverbrook -> Силвербрук" from sibling section-2
+    for req in client.requests[1:]:
+        assert "Даскмер" in req.input_text
+        assert "Силвербрук" not in req.input_text
+
+    # When seed_first_chapter=False, parallel_batch keeps accumulated empty even when chapter_count > concurrency
+    uow_no_seed = FakeUnitOfWork(
+        document=make_analysis_document((ch1, ch2, ch3, ch4)),
+        book=make_book_record(),
+    )
+    queue_no_seed = FakeTaskQueue()
+    client_no_seed = FakeLLMClient.replying((reply_seed, reply_ch2, reply_other, reply_other))
+    analyze_no_seed, _ = make_analyze_chapter(uow_no_seed, client_no_seed)
+    analyze_no_seed._max_concurrency = 2
+    seq_no_seed = ChapterAnalysisSequence(
+        unit_of_work=uow_no_seed,  # type: ignore[arg-type]
+        queue=queue_no_seed,  # type: ignore[arg-type]
+        analyze_chapter=analyze_no_seed,
+        seed_first_chapter=False,
+    )
+    await seq_no_seed.start(BOOK_ID)
+    assert len(queue_no_seed.tasks) == 4
+    for _ in range(4):
+        t = await queue_no_seed.claim_next_pending()
+        assert t is not None
+        await seq_no_seed.run_task(t)
+        await queue_no_seed.save(t.succeed())
+    for req in client_no_seed.requests[1:]:
+        assert "Даскмер" not in req.input_text
+        assert "Силвербрук" not in req.input_text
+
+    # Also verify _load with name_translation_policy != None under seed_first_chapter True vs False
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapterCommand
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+    policy = NameTranslationPolicy(version=1, strategy=NameTranslationStrategy.SOUND)
+    analyze_with_policy, _ = make_analyze_chapter(unit_of_work, client)
+    analyze_with_policy._context_builder = ContextBuilder(name_translation_policy=policy)
+    analyze_with_policy._name_translation_policy = policy
+    analyze_with_policy._max_concurrency = 2
+    _, acc_seed, _, _ = analyze_with_policy._load(
+        AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-4")
+    )
+    assert [c.source_text for c in acc_seed] == ["Duskmere"]
+
+    conditions_off = SimpleNamespace(
+        id="cond-off",
+        payload={"checks": {"seed_first_chapter": False}},
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions_off)  # type: ignore[attr-defined]
+    _, acc_off, _, _ = analyze_with_policy._load(
+        AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-4")
+    )
+    assert acc_off == ()
+
+    # _worded_for_the_model aliases violation.block_ids without mutating original error
+    canonical_block_id = ch1.blocks[0].id
+    ctx = analyze_chapter._context_builder.for_chapter_analysis(
+        document=document,
+        section=ch1,
+        accumulated_candidates=(),
+    )
+    original_violation = Violation(
+        "unresolved_quote",
+        "chapter_analysis",
+        scope="local",
+        block_ids=(canonical_block_id,),
+        safe_message="bad quote",
+    )
+    original_error = ResultValidationError(
+        f"ошибка в блоке {canonical_block_id}",
+        expectation=ctx.expectation,
+        violation=original_violation,
+    )
+    reworded = _worded_for_the_model(original_error, ctx)
+    assert isinstance(reworded, ResultValidationError)
+    assert reworded is not original_error
+    assert reworded.violation.block_ids == ("b1",)
+    assert original_error.violation.block_ids == (canonical_block_id,)
+
+
+
 
 

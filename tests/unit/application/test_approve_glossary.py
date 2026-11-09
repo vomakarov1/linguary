@@ -1073,3 +1073,67 @@ async def test_finalize_attempt_runs_bounded_body_when_redacted_count_absent(
     assert to_thread_calls == 1
 
 
+def test_approve_glossary_reuses_or_loads_document_and_passes_to_build_glossary_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.use_cases.approve_glossary as ag_module
+
+    passed_documents: list[object] = []
+    orig_build_review = ag_module.build_glossary_review
+
+    def spy_build_review(*args, **kwargs):
+        passed_documents.append(kwargs.get("document"))
+        return orig_build_review(*args, **kwargs)
+
+    monkeypatch.setattr(ag_module, "build_glossary_review", spy_build_review)
+
+    def wrap_documents_repo(uow: FakeUnitOfWork) -> list[str]:
+        calls: list[str] = []
+        backing = uow._documents
+
+        class CountingDocuments:
+            def get(self, book_id: str):
+                calls.append(book_id)
+                return backing.get(book_id)
+
+        uow._documents = CountingDocuments()  # type: ignore[assignment]
+        return calls
+
+    # 1. review() loads document when document=None and passes it to build_glossary_review
+    uow1 = glossary_book(make_analysis_candidate())
+    expected_doc1 = uow1.documents.get(BOOK_ID)
+    doc_calls1 = wrap_documents_repo(uow1)
+    passed_documents.clear()
+
+    approve(uow1).review(BOOK_ID)
+    assert doc_calls1 == [BOOK_ID]
+    assert passed_documents == [expected_doc1]
+
+    # 2. __call__() reuses preloaded document (1 read per transaction) and passes it to build_glossary_review
+    doc_calls1.clear()
+    passed_documents.clear()
+
+    approve(uow1)(command(GlossaryDecision.ACCEPT))
+    assert doc_calls1 == [BOOK_ID]
+    assert passed_documents == [expected_doc1]
+
+    # 3. accept_all_awaiting() reuses preloaded document (1 read per transaction) and passes it to build_glossary_review
+    uow2 = glossary_book(
+        make_analysis_candidate(),
+        make_analysis_candidate(
+            source_text="Longbourn",
+            type=ConceptType.PLACE,
+            suggested_translation="Лонгборн",
+        ),
+    )
+    expected_doc2 = uow2.documents.get(BOOK_ID)
+    doc_calls2 = wrap_documents_repo(uow2)
+    passed_documents.clear()
+
+    approve(uow2).accept_all_awaiting(BOOK_ID)
+    assert doc_calls2 == [BOOK_ID]
+    assert passed_documents == [expected_doc2]
+
+
+
+

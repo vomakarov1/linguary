@@ -77,15 +77,18 @@ docker run -d \
 
 Paths to local data, the LLM provider endpoint and API key, and processing limits are read from environment variables or a local configuration file (`~/.linguary/config.toml`) and are never stored in the repository code. Configuration sections:
 - `[llm]` — provider, model, API key, and limits;
-- `[checks]` — thresholds for automated checks;
+- `[checks]` — thresholds for automated checks and optional seed-first chapter analysis (`seed_first_chapter`);
 - `[storage]` — data directory and database file path;
 - `[server]` — address and port for the local Web UI;
-- `[worker]` — background task concurrency.
+- `[worker]` — background task concurrency;
+- `[reading]` — target CEFR reader level and name translation strategy;
+- `[diagnostics]` — retention and size limits for diagnostic call bodies;
+- `[recovery]` — automatic translation recovery limits.
 Any value can be overridden with an environment variable formatted as `LINGUARY_<SECTION>_<SETTING>`.
 
 Processing throughput is configured via two settings:
 
-- `[worker] concurrency` (`LINGUARY_WORKER_CONCURRENCY`) — the number of tasks executed concurrently (default: `1`). This speeds up chapter processing, as chapters are independent of one another. Chapter analysis is not accelerated by this setting: chapters are analyzed strictly sequentially because each chapter needs to see glossary candidates from preceding ones;
+- `[worker] concurrency` (`LINGUARY_WORKER_CONCURRENCY`) — the number of tasks executed concurrently (default: `1`). Increasing concurrency speeds up both chapter analysis and chapter processing. By default, all unanalyzed chapters are queued in parallel; enabling `[checks] seed_first_chapter = true` (`LINGUARY_CHECKS_SEED_FIRST_CHAPTER=true`) analyzes the first story chapter first and then runs the remaining chapters in parallel with its glossary candidates in context;
 - `[llm] requests_per_minute` (`LINGUARY_LLM_REQUESTS_PER_MINUTE`) — how many requests per minute the application sends to the provider across all workers combined. Unset by default, meaning request rate is not limited. Set this according to your provider rate limits if `concurrency` greater than 1 results in `429` rate-limit errors. The application always respects the delay specified by the provider in the `Retry-After` header for `429` and `503` responses before retrying.
 
 ```toml

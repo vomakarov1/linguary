@@ -9,6 +9,7 @@ boundaries.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from math import ceil
 
 from linguary.adapters.epub.inline import InlineContent
@@ -287,6 +288,133 @@ def split_sentences(
     return tuple((boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1))
 
 
+def _split_span_by_words(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    target_chars: int,
+) -> list[tuple[int, int]]:
+    span_len = end - start
+    if span_len <= 1:
+        return [(start, end)]
+
+    max_part = (
+        SPLIT_MAX_PART_CHARS
+        if target_chars == SPLIT_TARGET_CHARS
+        else max(1, round(target_chars * SPLIT_MAX_PART_CHARS / SPLIT_TARGET_CHARS))
+    )
+    min_part = (
+        SPLIT_MIN_PART_CHARS
+        if target_chars == SPLIT_TARGET_CHARS
+        else max(1, round(target_chars * SPLIT_MIN_PART_CHARS / SPLIT_TARGET_CHARS))
+    )
+    min_count = max(2, ceil(span_len / max_part))
+    max_count = max(2, span_len // min_part)
+    counts = (
+        range(min_count, max_count + 1)
+        if min_count <= max_count
+        else {min_count, max_count}
+    )
+    part_count = min(
+        counts,
+        key=lambda count: (abs(span_len / count - target_chars), -count),
+    )
+    part_count = min(part_count, span_len)
+    if part_count <= 1:
+        return [(start, end)]
+
+    word_boundaries = [
+        start + match.end()
+        for match in re.finditer(r"\s+", text[start:end])
+        if 0 < match.end() < span_len
+    ]
+
+    if len(word_boundaries) >= part_count - 1:
+        chosen = [start]
+        prev_idx = -1
+        total_wb = len(word_boundaries)
+        for part_index in range(1, part_count):
+            remaining_cuts = part_count - 1 - part_index
+            hi = total_wb - remaining_cuts
+            lo = prev_idx + 1
+            target_boundary = start + round(span_len * part_index / part_count)
+            pos = bisect_left(word_boundaries, target_boundary, lo, hi)
+            if pos == lo:
+                best_idx = lo
+            elif pos == hi:
+                best_idx = hi - 1
+            elif (
+                abs(word_boundaries[pos] - target_boundary)
+                < abs(word_boundaries[pos - 1] - target_boundary)
+            ):
+                best_idx = pos
+            else:
+                best_idx = pos - 1
+            chosen.append(word_boundaries[best_idx])
+            prev_idx = best_idx
+        chosen.append(end)
+        return [(chosen[index], chosen[index + 1]) for index in range(part_count)]
+
+    candidates = sorted(set(word_boundaries) | set(range(start + 1, end)))
+    chosen = [start]
+    for part_index in range(1, part_count):
+        remaining_parts = part_count - part_index
+        latest_boundary = end - remaining_parts
+        available = [
+            boundary
+            for boundary in candidates
+            if chosen[-1] < boundary <= latest_boundary
+        ]
+        target_boundary = start + round(span_len * part_index / part_count)
+        if not available:
+            chosen.append(min(max(chosen[-1] + 1, target_boundary), latest_boundary))
+        else:
+            chosen.append(min(available, key=lambda item: abs(item - target_boundary)))
+    chosen.append(end)
+    return [(chosen[index], chosen[index + 1]) for index in range(part_count)]
+
+
+def _group_atoms_dp(
+    atoms: list[tuple[int, int]],
+    *,
+    target_chars: int,
+    max_sentence_part: int,
+) -> tuple[tuple[int, int], ...]:
+    atom_count = len(atoms)
+    if atom_count <= 1:
+        return tuple(atoms)
+
+    dp: list[int] = [0] * (atom_count + 1)
+    next_idx: list[int] = [atom_count] * (atom_count + 1)
+
+    for i in range(atom_count - 1, -1, -1):
+        best_cost: int | None = None
+        best_j = i + 1
+        start_pos = atoms[i][0]
+        for j in range(i + 1, atom_count + 1):
+            group_len = atoms[j - 1][1] - start_pos
+            if j > i + 1 and group_len > max_sentence_part:
+                break
+            if i == 0 and j == atom_count:
+                continue
+            cost = (group_len - target_chars) ** 2 + dp[j]
+            if best_cost is None or cost < best_cost or (cost == best_cost and j > best_j):
+                best_cost = cost
+                best_j = j
+        assert best_cost is not None
+        dp[i] = best_cost
+        next_idx[i] = best_j
+
+    result: list[tuple[int, int]] = []
+    cur = 0
+    while cur < atom_count:
+        nxt = next_idx[cur]
+        result.append((atoms[cur][0], atoms[nxt - 1][1]))
+        cur = nxt
+    return tuple(result)
+
+
 def split_paragraph(
     text: str,
     *,
@@ -296,65 +424,43 @@ def split_paragraph(
 ) -> tuple[tuple[int, int], ...]:
     """Divides long paragraphs into balanced pieces near 300 characters.
 
-    Sentence boundaries are preferred when they are close to the target. Otherwise, a piece
-    ends after a word, with a character boundary as a final fallback for unspaced text. The
-    returned intervals preserve every source character exactly.
+    Whole sentences up to `max(SPLIT_MAX_PART_CHARS, min_chars - 50)` are kept intact and grouped
+    around `target_chars`. Oversized single sentences fall back to word boundaries, with a
+    character boundary as a final fallback for unspaced text. The returned intervals preserve
+    every source character exactly.
     """
     if min_chars < 1 or target_chars < 1 or min_sentences < 1:
         raise ValueError("параметры разбиения абзаца должны быть положительными")
     if len(text) <= min_chars:
         return ((0, len(text)),)
 
-    min_count = max(2, ceil(len(text) / SPLIT_MAX_PART_CHARS))
-    max_count = max(2, len(text) // SPLIT_MIN_PART_CHARS)
-    counts = (
-        range(min_count, max_count + 1)
-        if min_count <= max_count
-        else {min_count, max_count}
-    )
-    part_count = min(
-        counts, key=lambda count: (abs(len(text) / count - target_chars), -count)
-    )
-
+    max_sentence_part = max(SPLIT_MAX_PART_CHARS, min_chars - 50)
     sentence_points = _find_split_points(text)
     if len(sentence_points) + 1 < min_sentences:
-        sentence_points = []
-    sentence_boundaries = set(sentence_points)
-    word_boundaries = {
-        match.end()
-        for match in re.finditer(r"\s+", text)
-        if 0 < match.end() < len(text)
-    }
-    candidates = sentence_boundaries | word_boundaries
-    if len(candidates) < part_count - 1:
-        candidates.update(range(1, len(text)))
+        return tuple(_split_span_by_words(text, 0, len(text), target_chars=target_chars))
 
-    chosen = [0]
-    preferred_distance = max(35, target_chars // 7)
-    for part_index in range(1, part_count):
-        remaining_parts = part_count - part_index
-        latest_boundary = len(text) - remaining_parts
-        available = [
-            boundary
-            for boundary in candidates
-            if chosen[-1] < boundary <= latest_boundary
-        ]
-        target_boundary = round(len(text) * part_index / part_count)
-        if not available:
-            chosen.append(min(max(chosen[-1] + 1, target_boundary), latest_boundary))
-            continue
-        nearby_sentence_boundaries = [
-            boundary
-            for boundary in available
-            if boundary in sentence_boundaries
-            and abs(boundary - target_boundary) <= preferred_distance
-        ]
-        choices = nearby_sentence_boundaries or available
-        boundary = min(choices, key=lambda item: abs(item - target_boundary))
-        chosen.append(boundary)
+    boundaries = [0, *sentence_points, len(text)]
+    atoms: list[tuple[int, int]] = []
+    for index in range(len(boundaries) - 1):
+        sent_start = boundaries[index]
+        sent_end = boundaries[index + 1]
+        if sent_end - sent_start <= max_sentence_part:
+            atoms.append((sent_start, sent_end))
+        else:
+            atoms.extend(
+                _split_span_by_words(
+                    text,
+                    sent_start,
+                    sent_end,
+                    target_chars=target_chars,
+                )
+            )
 
-    chosen.append(len(text))
-    return tuple((chosen[index], chosen[index + 1]) for index in range(part_count))
+    return _group_atoms_dp(
+        atoms,
+        target_chars=target_chars,
+        max_sentence_part=max_sentence_part,
+    )
 
 
 def split_inline_content(

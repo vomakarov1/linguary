@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
@@ -146,6 +146,7 @@ class AnalyzeChapter:
         name_translation_policy: NameTranslationPolicy | None = None,
         conditions_id: str | None = None,
         max_concurrency: int = 1,
+        seed_first_chapter: bool = False,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._llm_client = llm_client
@@ -157,6 +158,7 @@ class AnalyzeChapter:
         self._name_translation_policy = name_translation_policy or self._context_builder.name_translation_policy
         self._conditions_id = conditions_id
         self._max_concurrency = max_concurrency
+        self._seed_first_chapter = seed_first_chapter
         self._id_factory = id_factory or _new_id
         self._sleep = sleep or asyncio.sleep
         from contextvars import ContextVar
@@ -470,9 +472,39 @@ class AnalyzeChapter:
                     for task in tasks_repo.list_for_book(command.book_id)
                 )
             )
+            work_repo = getattr(transaction, "work", None)
+            conditions = (
+                work_repo.latest_conditions(command.book_id)
+                if work_repo is not None
+                else None
+            )
+            if conditions is not None and isinstance(getattr(conditions, "payload", None), Mapping):
+                seed_active = bool(
+                    (conditions.payload.get("checks") or {}).get(
+                        "seed_first_chapter", self._seed_first_chapter
+                    )
+                )
+            else:
+                seed_active = bool(self._seed_first_chapter)
+            seed_section = _first_content_section(document) if (parallel_batch and seed_active) else None
+            seed_section_id = (
+                seed_section.id
+                if seed_section is not None and seed_section.order < current_order
+                else None
+            )
+            seed_candidates = (
+                tuple(
+                    candidate
+                    for analysis in analyses
+                    if analysis.section_id == seed_section_id
+                    for candidate in analysis.glossary_candidates
+                )
+                if seed_section_id is not None
+                else ()
+            )
             if self._context_builder.name_translation_policy is not None:
                 accumulated = (
-                    ()
+                    seed_candidates
                     if parallel_batch
                     else tuple(
                         candidate
@@ -489,6 +521,16 @@ class AnalyzeChapter:
                     candidate
                     for analysis in analyses
                     for candidate in analysis.glossary_candidates
+                )
+                non_seed_candidates = (
+                    tuple(
+                        candidate
+                        for analysis in analyses
+                        if analysis.section_id != seed_section_id
+                        for candidate in analysis.glossary_candidates
+                    )
+                    if seed_section_id is not None
+                    else all_candidates
                 )
                 known_keys = {glossary_key(c.source_text) for c in all_candidates}
                 concept_candidates = tuple(
@@ -509,10 +551,10 @@ class AnalyzeChapter:
                     and (variant := concept.variant_for(document.target_language)) is not None
                 )
                 accumulated = candidates_with_decisions(
-                    (),
+                    seed_candidates,
                     concepts,
                     language=document.target_language,
-                    decided_only=(*all_candidates, *concept_candidates),
+                    decided_only=(*non_seed_candidates, *concept_candidates),
                 )
             else:
                 accumulated = candidates_with_decisions(
@@ -753,12 +795,18 @@ class ChapterAnalysisSequence:
         analyze_chapter: AnalyzeChapter,
         auto_start_processing: bool = False,
         start_processing: Callable[[str], Awaitable[object]] | None = None,
+        seed_first_chapter: bool = False,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._queue = queue
         self._analyze_chapter = analyze_chapter
         self._auto_start_processing = auto_start_processing
         self._start_processing = start_processing
+        self._seed_first_chapter = bool(
+            seed_first_chapter or getattr(analyze_chapter, "_seed_first_chapter", False)
+        )
+        if self._seed_first_chapter and hasattr(analyze_chapter, "_seed_first_chapter"):
+            analyze_chapter._seed_first_chapter = True
 
     async def start(self, book_id: str) -> ProcessingTask | None:
         """Starts book analysis: transitions book to `ANALYZING` and enqueues all chapters.
@@ -791,13 +839,15 @@ class ChapterAnalysisSequence:
                 task_id=task.id,
             )
         )
+        if self._should_enqueue_remaining_wave(task.book_id, task.scope_id):
+            await self._enqueue_all(task.book_id)
         if self._try_complete_analysis(task.book_id, finished_task_id=task.id):
             assert self._start_processing is not None
             await self._start_processing(task.book_id)
 
     async def _enqueue_all(self, book_id: str) -> list[ProcessingTask]:
-        """Enqueues tasks for all unanalyzed chapters in parallel."""
-        section_ids = self._unanalyzed_section_ids(book_id)
+        """Enqueues tasks for all unanalyzed chapters in parallel (or seed wave first)."""
+        section_ids = self._section_ids_for_wave(book_id)
         if not section_ids:
             if self._try_complete_analysis(book_id):
                 assert self._start_processing is not None
@@ -814,6 +864,81 @@ class ChapterAnalysisSequence:
             )
             tasks.append(task)
         return tasks
+
+    def _is_seed_active(self, transaction: UnitOfWork, book_id: str) -> bool:
+        work_repo = getattr(transaction, "work", None)
+        conditions = (
+            work_repo.latest_conditions(book_id)
+            if work_repo is not None
+            else None
+        )
+        if conditions is not None and isinstance(getattr(conditions, "payload", None), Mapping):
+            return bool(
+                (conditions.payload.get("checks") or {}).get(
+                    "seed_first_chapter", self._seed_first_chapter
+                )
+            )
+        return bool(self._seed_first_chapter)
+
+    def _section_ids_for_wave(self, book_id: str) -> list[str]:
+        """Chapters in reading order to enqueue in the current wave."""
+        with self._unit_of_work.transaction() as transaction:
+            document = transaction.documents.get(book_id)
+            if document is None:
+                raise AnalyzeChapterError(f"книги {book_id} нет в хранилище")
+            analyzed = {
+                analysis.section_id
+                for analysis in transaction.analyses.list_for_book(book_id)
+            }
+            seed_active = self._is_seed_active(transaction, book_id)
+        ordered = document.ordered_sections
+        unanalyzed = [section for section in ordered if section.id not in analyzed]
+        if not seed_active or len(unanalyzed) <= 1:
+            return [section.id for section in unanalyzed]
+        has_analyzed_content = any(
+            section.id in analyzed and _is_content_section(document, section)
+            for section in ordered
+        )
+        if has_analyzed_content:
+            return [section.id for section in unanalyzed]
+        first_content = next(
+            (section for section in unanalyzed if _is_content_section(document, section)),
+            None,
+        )
+        if first_content is None:
+            return [section.id for section in unanalyzed]
+        return [
+            section.id
+            for section in unanalyzed
+            if section.id == first_content.id
+            or (
+                section.order < first_content.order
+                and document.is_front_matter(section)
+            )
+        ]
+
+    def _should_enqueue_remaining_wave(
+        self, book_id: str, finished_section_id: str
+    ) -> bool:
+        with self._unit_of_work.transaction() as transaction:
+            if not self._is_seed_active(transaction, book_id):
+                return False
+            document = transaction.documents.get(book_id)
+            if document is None:
+                return False
+            seed_section = _first_content_section(document)
+            if seed_section is None or finished_section_id != seed_section.id:
+                return False
+            analyzed = {
+                analysis.section_id
+                for analysis in transaction.analyses.list_for_book(book_id)
+            }
+            if seed_section.id not in analyzed:
+                return False
+            return any(
+                section.id not in analyzed
+                for section in document.ordered_sections
+            )
 
     def _unanalyzed_section_ids(self, book_id: str) -> list[str]:
         """Chapters in reading order for which no analysis exists yet."""
@@ -1011,6 +1136,21 @@ class ChapterAnalysisSequence:
         return book
 
 
+def _is_content_section(
+    document: CanonicalDocument, section: DocumentSection
+) -> bool:
+    is_front_matter = getattr(document, "is_front_matter", lambda _s: False)
+    return not is_front_matter(section) and not getattr(section, "is_notes_only", False)
+
+
+def _first_content_section(document: CanonicalDocument) -> DocumentSection | None:
+    sections = getattr(document, "ordered_sections", document.sections)
+    return next(
+        (section for section in sections if _is_content_section(document, section)),
+        None,
+    )
+
+
 def _section_of(
     document: CanonicalDocument, command: AnalyzeChapterCommand
 ) -> DocumentSection:
@@ -1087,10 +1227,23 @@ def _worded_for_the_model(
     """Same error rephrased using block aliases seen by the model (ALG-05)."""
     if not isinstance(error, ResultValidationError):
         return error
+    violation = getattr(error, "violation", None)
+    if violation is not None and getattr(violation, "block_ids", ()):
+        aliases_by_block_id = {
+            block_id: alias
+            for alias, block_id in getattr(context, "block_ids_by_alias", {}).items()
+            if block_id
+        }
+        aliased_block_ids = tuple(
+            aliases_by_block_id.get(block_id, block_id)
+            for block_id in violation.block_ids
+        )
+        if aliased_block_ids != violation.block_ids:
+            violation = replace(violation, block_ids=aliased_block_ids)
     return ResultValidationError(
         _to_aliases(context, str(error)),
         expectation=error.expectation or context.expectation,
-        violation=getattr(error, "violation", None),
+        violation=violation,
     )
 
 

@@ -76,7 +76,10 @@ def test_pipeline_import_process_and_export_split_paragraphs(tmp_path: Path) -> 
     blocks = sections[0].ordered_blocks
 
     split_blocks = [b for b in blocks if "split_group" in b.attributes]
-    assert len(split_blocks) >= 3
+    assert len(split_blocks) == 3
+    assert split_blocks[0].text.endswith("opening words. ")
+    assert split_blocks[1].text.endswith("squeaky chalk. ")
+    assert split_blocks[2].text.endswith("sit down.")
 
     base_path = split_blocks[0].attributes["split_group"]
     total = split_blocks[0].attributes["split_total"]

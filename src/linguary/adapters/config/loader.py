@@ -119,6 +119,7 @@ _CHECK_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "language_notes_per_chapter": _as_int,
     "auto_approve_glossary": _as_bool,
     "auto_start_processing": _as_bool,
+    "seed_first_chapter": _as_bool,
 }
 
 #: Parsers for the [storage] section.
