@@ -53,6 +53,8 @@ _OMITTED_SCHEMA_PROPERTIES: dict[str, frozenset[str]] = {
     "QualityReviewSchema": frozenset({"checked_artifacts", "missing_artifacts"}),
     "ReviewFinding": frozenset({"artifact_sha"}),
     "CorrectionVerdictSchema": frozenset({"proposal_sha256"}),
+    "QuotedContentPlanSchema": frozenset({"version", "profile"}),
+    "QuotedContextFactSchema": frozenset({"id"}),
 }
 
 

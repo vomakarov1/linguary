@@ -22,6 +22,7 @@ call attempt, while task state is finalized by `TaskRunner` (ALG-02).
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -242,13 +243,22 @@ class RetryPolicy:
                 error=task_error,
                 backoff_seconds=self._backoff_for(attempts, error),
             )
+        structured = getattr(error, "violation", None)
+        is_local_turn = (
+            assistant_response is not None
+            and structured is not None
+            and getattr(structured, "scope", None) == "local"
+        )
         if task_error.type is ErrorType.MODEL_OUTPUT:
             if assistant_response is not None:
                 return RetryDecision(
                     action=RetryAction.RETRY_WITH_REPAIR,
                     error=task_error,
                     repair_instruction=build_repair_instruction(
-                        _expectation_of(error), violation=task_error.message
+                        _expectation_of(error),
+                        violation=task_error.message,
+                        local_block_ids=structured.block_ids if is_local_turn else None,
+                        has_conversation_turns=is_local_turn,
                     ),
                     assistant_response=assistant_response,
                 )
@@ -257,7 +267,10 @@ class RetryPolicy:
             action=RetryAction.RETRY_WITH_REPAIR,
             error=task_error,
             repair_instruction=build_repair_instruction(
-                _expectation_of(error), violation=task_error.message
+                _expectation_of(error),
+                violation=task_error.message,
+                local_block_ids=structured.block_ids if is_local_turn else None,
+                has_conversation_turns=is_local_turn,
             ),
             assistant_response=assistant_response,
         )
@@ -322,7 +335,11 @@ def classify_error(error: Exception) -> TaskError:
 
 
 def build_repair_instruction(
-    expectation: ResultExpectation | None, *, violation: str | None = None
+    expectation: ResultExpectation | None,
+    *,
+    violation: str | None = None,
+    local_block_ids: Iterable[str] | None = None,
+    has_conversation_turns: bool = False,
 ) -> str:
     """Refining instruction for retry (ALG-05).
 
@@ -335,24 +352,45 @@ def build_repair_instruction(
     if expectation is None:
         return "\n".join(lines)
     if expectation.blocks:
-        lines.append(
-            "Верни результат ровно для этих блоков, в том же порядке, без пропущенных "
-            "и без посторонних:"
+        local_set = set(local_block_ids or ())
+        matched = (
+            [
+                block
+                for block in expectation.blocks
+                if block.block_id in local_set and not block.context_only
+            ]
+            if has_conversation_turns and len(expectation.blocks) > 4 and local_set
+            else []
         )
-        lines.extend(_block_lines(expectation))
+        if matched:
+            lines.append(
+                "Исправь затронутые блоки и верни полный массив всех блоков из исходного "
+                "запроса в том же порядке, оставив остальные блоки без изменений:"
+            )
+            lines.extend(_format_block_lines(matched))
+        else:
+            lines.append(
+                "Верни результат ровно для этих блоков, в том же порядке, без пропущенных "
+                "и без посторонних:"
+            )
+            lines.extend(_block_lines(expectation))
     lines.append(f"Целевой язык результата — {expectation.target_language}.")
     return "\n".join(lines)
 
 
-def _block_lines(expectation: ResultExpectation) -> list[str]:
-    """Lines enumerating expected blocks along with treatment modes."""
+def _format_block_lines(blocks: Sequence[ExpectedBlock]) -> list[str]:
     return [
         f"- {block.block_id}"
         if block.treatment is None
         else f"- {block.block_id}: режим обработки {block.treatment}"
-        for block in expectation.blocks
+        for block in blocks
         if not block.context_only
     ]
+
+
+def _block_lines(expectation: ResultExpectation) -> list[str]:
+    """Lines enumerating expected blocks along with treatment modes."""
+    return _format_block_lines(expectation.blocks)
 
 
 def _truncated_by_output_limit(error: Exception) -> bool:

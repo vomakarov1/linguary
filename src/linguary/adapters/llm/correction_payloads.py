@@ -78,8 +78,8 @@ class ProposedBlockSchema(CorrectionModel):
     block_id: str = Field(min_length=1)
     status: Literal['proposed']
     translated_text: str | None
-    glossary_hints: list[GlossaryHintSchema]
-    language_notes: list[LanguageNoteSchema]
+    glossary_hints: list[GlossaryHintSchema] | None = None
+    language_notes: list[LanguageNoteSchema] | None = None
     issues: list[CorrectionIssueSchema] = Field(min_length=1)
 
 
@@ -89,10 +89,13 @@ class ChapterCorrectionV2Schema(CorrectionModel):
     def to_dto(self):
         return ChapterCorrectionV2Response(tuple(
             UnchangedBlockResponse(b.block_id) if isinstance(b, UnchangedBlockSchema) else
-            ProposedBlockResponse(b.block_id, b.translated_text,
-                tuple(GlossaryHintResponse(**h.model_dump()) for h in b.glossary_hints),
-                tuple(LanguageNoteResponse(**n.model_dump()) for n in b.language_notes),
-                tuple(i.to_dto() for i in b.issues)) for b in self.blocks))
+            ProposedBlockResponse(
+                b.block_id,
+                b.translated_text,
+                None if b.glossary_hints is None else tuple(GlossaryHintResponse(**h.model_dump()) for h in b.glossary_hints),
+                None if b.language_notes is None else tuple(LanguageNoteResponse(**n.model_dump()) for n in b.language_notes),
+                tuple(i.to_dto() for i in b.issues),
+            ) for b in self.blocks))
 
 
 class CorrectionVerdictSchema(CorrectionModel):

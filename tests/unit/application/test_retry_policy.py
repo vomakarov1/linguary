@@ -515,3 +515,78 @@ def test_retry_decision_records_assistant_raw_content_in_repair_turns() -> None:
         decision2.repair_instruction,
     )
 
+
+def test_retry_policy_uses_compact_local_repair_instruction_with_conversation_turns() -> None:
+    from linguary.domain.llm_log import Violation
+
+    six_blocks = expectation(
+        blocks=tuple(
+            ExpectedBlock(
+                block_id=f"b{idx}",
+                treatment=BlockTreatment.TRANSLATE if idx % 2 else BlockTreatment.READ_AS_IS,
+            )
+            for idx in range(1, 7)
+        )
+    )
+    local_err = ResultValidationError(
+        "цитата языковой заметки отсутствует в исходном блоке (b3)",
+        expectation=six_blocks,
+        violation=Violation(
+            "note_quote_missing",
+            "translation_unit",
+            scope="local",
+            block_ids=("b3",),
+            safe_message="цитата языковой заметки отсутствует в исходном блоке (b3)",
+        ),
+    )
+
+    decision_compact = policy(max_attempts=3).decide(
+        local_err, attempts=1, raw_content='{"blocks": []}'
+    )
+    assert decision_compact.action is RetryAction.RETRY_WITH_REPAIR
+    assert decision_compact.assistant_response == '{"blocks": []}'
+    assert decision_compact.repair_instruction is not None
+    assert "- b3: режим обработки TRANSLATE" in decision_compact.repair_instruction
+    assert "полный массив всех блоков" in decision_compact.repair_instruction
+    assert "без изменений" in decision_compact.repair_instruction
+    for untouched in ("- b1:", "- b2:", "- b4:", "- b5:", "- b6:"):
+        assert untouched not in decision_compact.repair_instruction
+
+    decision_no_turn = policy(max_attempts=3).decide(local_err, attempts=1)
+    assert decision_no_turn.repair_instruction is not None
+    for idx in range(1, 7):
+        assert f"- b{idx}:" in decision_no_turn.repair_instruction
+
+    unmatched_instruction = build_repair_instruction(
+        six_blocks,
+        violation="локальная ошибка с каноническим ID",
+        local_block_ids=("canonical-uuid-3",),
+        has_conversation_turns=True,
+    )
+    for idx in range(1, 7):
+        assert f"- b{idx}:" in unmatched_instruction
+
+    small_blocks = expectation(
+        blocks=tuple(
+            ExpectedBlock(block_id=f"b{idx}", treatment=BlockTreatment.TRANSLATE)
+            for idx in range(1, 4)
+        )
+    )
+    small_err = ResultValidationError(
+        "ошибка в b2",
+        expectation=small_blocks,
+        violation=Violation(
+            "note_quote_missing",
+            "translation_unit",
+            scope="local",
+            block_ids=("b2",),
+        ),
+    )
+    decision_small = policy(max_attempts=3).decide(
+        small_err, attempts=1, raw_content='{"blocks": []}'
+    )
+    assert decision_small.repair_instruction is not None
+    for idx in range(1, 4):
+        assert f"- b{idx}:" in decision_small.repair_instruction
+
+

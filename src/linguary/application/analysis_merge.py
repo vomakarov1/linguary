@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, SourceAnchor, artifact_key
+from linguary.domain.llm_log import Violation
 
 from linguary.application.block_labels import without_block_labels
 from linguary.application.errors import ApplicationError
@@ -69,6 +70,36 @@ def fragment_blocks_for(max_output_tokens: int | None) -> int:
 
 class AnalysisMergeError(ApplicationError):
     """Chapter analysis fragments cannot be parsed or merged."""
+
+    def __init__(self, message: str = "", *, violation: Violation | None = None) -> None:
+        super().__init__(message)
+        self.violation = violation
+
+
+def _analysis_error(
+    message: str,
+    *,
+    rule_code: str = "content_plan",
+    block_ids: Iterable[str] = (),
+) -> AnalysisMergeError:
+    local_blocks = tuple(dict.fromkeys(b for b in block_ids if b))
+    violation = (
+        Violation(
+            rule_code,
+            "chapter_analysis",
+            scope="local",
+            block_ids=local_blocks,
+            safe_message=message,
+        )
+        if local_blocks
+        else None
+    )
+    return AnalysisMergeError(message, violation=violation)
+
+
+def _preview_quote(quote: str) -> str:
+    compact = " ".join(quote.split())
+    return compact[:77] + "..." if len(compact) > 80 else compact
 
 
 @dataclass(frozen=True, slots=True)
@@ -749,8 +780,10 @@ __all__ = [
     "deduplicate_book_before_you_read",
     "content_plan_from_response",
     "find_quote_span",
+    "glossary_context_constraints",
     "sanitize_before_you_read_explanation",
     "validate_content_plan",
+    "validate_fact_glossary",
     "fragment_blocks_for",
     "AnalysisMergeError",
     "ChapterFragment",
@@ -1144,6 +1177,81 @@ def _merged_content_plan(fragments: Sequence[FragmentAnalysis]) -> ContentPlan |
         context_facts=tuple(facts.values()))
 
 
+def _diagnose_quoted_anchor(
+    block_alias: str,
+    quote: str,
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str] | None,
+    visible_texts_by_alias: Mapping[str, str] | None,
+    aliases_by_block_id: Mapping[str, str],
+) -> tuple[str, str, str, tuple[str, ...]] | None:
+    block_id = aliases.get(block_alias)
+    label = aliases_by_block_id.get(block_id, block_alias) if block_id else block_alias
+    preview = _preview_quote(quote)
+    if visible_texts_by_alias is None:
+        return (label, preview, "нет видимого представления блока", (block_id,) if block_id else ())
+    if block_id is None:
+        return (block_alias, preview, "неизвестный блок", ())
+    if texts is None or block_id not in texts:
+        return (label, preview, "нет текста исходного блока", ())
+    if block_alias not in visible_texts_by_alias:
+        return (label, preview, "блок отсутствует в видимом фрагменте", (block_id,))
+    visible_span = find_quote_span(visible_texts_by_alias[block_alias], quote)
+    source_span = find_quote_span(texts[block_id], quote)
+    if visible_span is None and source_span is None:
+        return (label, preview, "цитата не найдена в тексте блока", (block_id,))
+    if visible_span is None:
+        return (label, preview, "цитата не найдена в видимом тексте блока", (block_id,))
+    if source_span is None:
+        return (label, preview, "цитата не найдена в исходном тексте блока", (block_id,))
+    return None
+
+
+def _unresolved_quote_error(
+    payload: ChapterAnalysisResponse,
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str] | None,
+    visible_texts_by_alias: Mapping[str, str] | None,
+    aliases_by_block_id: Mapping[str, str],
+) -> AnalysisMergeError:
+    prefix = "цитата не разрешается однозначно в тексте блока"
+    plan = payload.content_plan
+    if isinstance(plan, QuotedContentPlanResponse):
+        for difficulty in plan.difficulties:
+            if aliases.get(difficulty.owner_block_id) is None:
+                sample = difficulty.anchors[0].quote if difficulty.anchors else difficulty.id
+                msg = f"{prefix} ({difficulty.owner_block_id}: «{_preview_quote(sample)}» — неизвестный блок-владелец трудности)"
+                return _analysis_error(msg, rule_code="unresolved_quote")
+            for anchor in difficulty.anchors:
+                diag = _diagnose_quoted_anchor(
+                    anchor.block_id,
+                    anchor.quote,
+                    aliases,
+                    texts,
+                    visible_texts_by_alias,
+                    aliases_by_block_id,
+                )
+                if diag is not None:
+                    block_label, preview, reason, canonical = diag
+                    msg = f"{prefix} ({block_label}: «{preview}» — {reason})"
+                    return _analysis_error(msg, rule_code="unresolved_quote", block_ids=canonical)
+        for fact in plan.context_facts:
+            for anchor in (fact.subject_anchor, *fact.anchors):
+                diag = _diagnose_quoted_anchor(
+                    anchor.block_id,
+                    anchor.quote,
+                    aliases,
+                    texts,
+                    visible_texts_by_alias,
+                    aliases_by_block_id,
+                )
+                if diag is not None:
+                    block_label, preview, reason, canonical = diag
+                    msg = f"{prefix} ({block_label}: «{preview}» — {reason})"
+                    return _analysis_error(msg, rule_code="unresolved_quote", block_ids=canonical)
+    return AnalysisMergeError(prefix)
+
+
 def validate_content_plan(
     payload: ChapterAnalysisResponse,
     aliases: Mapping[str, str],
@@ -1155,13 +1263,21 @@ def validate_content_plan(
     note_limits_by_block: Mapping[str, int] | None = None,
     note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
     visible_texts_by_alias: Mapping[str, str] | None = None,
+    mandatory_facts: Mapping[str, Mapping[str, str]] | None = None,
 ) -> ContentPlan | None:
     """Validates source anchors and channel eligibility prior to accepting the response."""
-    plan = content_plan_from_response(payload, aliases, texts=texts,
-                                      visible_texts_by_alias=visible_texts_by_alias)
+    aliases_by_block_id = {bid: alias for alias, bid in (aliases or {}).items() if bid}
+    plan = content_plan_from_response(
+        payload,
+        aliases,
+        texts=texts,
+        visible_texts_by_alias=visible_texts_by_alias,
+    )
     if plan is None:
         if payload.content_plan is not None:
-            raise AnalysisMergeError("цитата не разрешается однозначно в тексте блока")
+            raise _unresolved_quote_error(
+                payload, aliases, texts, visible_texts_by_alias, aliases_by_block_id
+            )
         if english_help:
             raise AnalysisMergeError("режиму английской помощи нужен содержательный план")
         return None
@@ -1172,9 +1288,21 @@ def validate_content_plan(
             raise AnalysisMergeError("режим английской помощи не использует материалы BYR")
     if len(payload.before_you_read) > before_you_read_limit:
         raise AnalysisMergeError("BYR превышает согласованный бюджет фрагмента")
-    treatments = {aliases[i.source_block_id]: i.treatment for i in payload.treatment_plan}
-    if english_help and any(treatment is not BlockTreatment.READ_AS_IS for treatment in treatments.values()):
-        raise AnalysisMergeError("режим английской помощи требует чтение блоков в оригинале")
+    try:
+        treatments = {aliases[i.source_block_id]: i.treatment for i in payload.treatment_plan}
+    except KeyError as error:
+        raise AnalysisMergeError("привязка к невидимому блоку") from error
+    bad_english_blocks = [
+        block_id
+        for block_id, treatment in treatments.items()
+        if treatment is not BlockTreatment.READ_AS_IS
+    ]
+    if english_help and bad_english_blocks:
+        labels = ", ".join(aliases_by_block_id.get(b, b) for b in bad_english_blocks)
+        msg = f"режим английской помощи требует чтение блоков в оригинале ({labels})"
+        raise _analysis_error(
+            msg, rule_code="english_help_treatment", block_ids=bad_english_blocks
+        )
     note_owners = set()
     english_help_anchors = set()
     for difficulty in plan.difficulties:
@@ -1182,32 +1310,101 @@ def validate_content_plan(
             anchor.validate(texts)
             occurrence = (anchor.block_id, anchor.start, anchor.end)
             if english_help and occurrence in english_help_anchors:
-                raise AnalysisMergeError("несколько трудностей английской помощи ссылаются на одно место")
+                label = aliases_by_block_id.get(anchor.block_id, anchor.block_id)
+                msg = (
+                    "несколько трудностей английской помощи ссылаются на одно место "
+                    f"({label}, {difficulty.id})"
+                )
+                raise _analysis_error(
+                    msg,
+                    rule_code="duplicate_english_help_anchor",
+                    block_ids=(anchor.block_id,),
+                )
             english_help_anchors.add(occurrence)
-        covered = {e.point_id for e in plan.before_you_read_evidence if e.difficulty_id == difficulty.id}
+        covered = {
+            e.point_id
+            for e in plan.before_you_read_evidence
+            if e.difficulty_id == difficulty.id
+        }
         fragment_help = (
-            english_help and plan.version == 3
+            english_help
+            and plan.version == 3
             and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
         )
-        if (difficulty.help_kind == "lexical_hint" and not fragment_help
-                and treatments.get(difficulty.owner_block_id) is not BlockTreatment.GLOSSARY_ONLY
-                and covered != {p.id for p in difficulty.required_points}):
-            raise AnalysisMergeError("лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR")
-        if (difficulty.help_kind == "explanation"
-                and covered != {p.id for p in difficulty.required_points}
-                and not fragment_help
-                and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS):
+        if (
+            difficulty.help_kind == "lexical_hint"
+            and not fragment_help
+            and treatments.get(difficulty.owner_block_id) is not BlockTreatment.GLOSSARY_ONLY
+            and covered != {p.id for p in difficulty.required_points}
+        ):
+            label = aliases_by_block_id.get(
+                difficulty.owner_block_id, difficulty.owner_block_id
+            )
+            msg = (
+                "лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR "
+                f"({label}, {difficulty.id})"
+            )
+            raise _analysis_error(
+                msg,
+                rule_code="lexical_help_channel",
+                block_ids=(difficulty.owner_block_id,),
+            )
+        if (
+            difficulty.help_kind == "explanation"
+            and covered != {p.id for p in difficulty.required_points}
+            and not fragment_help
+            and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
+        ):
             note_owners.add(difficulty.owner_block_id)
         for item in plan.before_you_read_evidence:
-            if item.difficulty_id == difficulty.id and any(_quotation_key(item.body_excerpt) == _quotation_key(a.quote) for a in difficulty.anchors):
-                raise AnalysisMergeError("цитата оригинала не является объяснением")
-    if any(len(note_owners.intersection(ids)) > limit for ids, limit in note_group_limits):
-        raise AnalysisMergeError("обязательные заметки не помещаются в реальную группу обработки")
-    if len(note_owners) > language_notes_per_chapter or any(
-        note_limits_by_block is not None and note_limits_by_block.get(owner, 0) < 1
-        for owner in note_owners
-    ):
-        raise AnalysisMergeError("содержательный план не помещается в бюджет языковых заметок")
+            if item.difficulty_id == difficulty.id and any(
+                _quotation_key(item.body_excerpt) == _quotation_key(a.quote)
+                for a in difficulty.anchors
+            ):
+                label = aliases_by_block_id.get(
+                    difficulty.owner_block_id, difficulty.owner_block_id
+                )
+                msg = f"цитата оригинала не является объяснением ({label}, {difficulty.id})"
+                raise _analysis_error(
+                    msg,
+                    rule_code="quote_as_explanation",
+                    block_ids=(difficulty.owner_block_id,),
+                )
+    for ids, limit in note_group_limits:
+        group_owners = [owner for owner in ids if owner in note_owners]
+        if len(group_owners) > limit:
+            labels = ", ".join(aliases_by_block_id.get(b, b) for b in group_owners)
+            msg = f"обязательные заметки не помещаются в реальную группу обработки ({labels})"
+            raise _analysis_error(
+                msg, rule_code="note_group_budget", block_ids=group_owners
+            )
+    over_block_owners = [
+        owner
+        for owner in aliases.values()
+        if owner in note_owners
+        and note_limits_by_block is not None
+        and note_limits_by_block.get(owner, 0) < 1
+    ] or [
+        owner
+        for owner in sorted(note_owners)
+        if note_limits_by_block is not None and note_limits_by_block.get(owner, 0) < 1
+    ]
+    if len(note_owners) > language_notes_per_chapter or over_block_owners:
+        target_owners = (
+            over_block_owners
+            or [b for b in aliases.values() if b in note_owners]
+            or sorted(note_owners)
+        )
+        labels = ", ".join(aliases_by_block_id.get(b, b) for b in target_owners)
+        suffix = f" ({labels})" if labels else ""
+        msg = f"содержательный план не помещается в бюджет языковых заметок{suffix}"
+        raise _analysis_error(
+            msg, rule_code="note_chapter_budget", block_ids=target_owners
+        )
+    if mandatory_facts is not None:
+        validate_fact_glossary(
+            plan, mandatory_facts, aliases_by_block_id=aliases_by_block_id
+        )
     return plan
 
 
@@ -1221,28 +1418,74 @@ def _quotation_key(text: str) -> str:
     return text[start:end]
 
 
+_GENDER_NOTE_PATTERN = re.compile(
+    r"\b(мужск\w*\s+род\w*|женск\w*\s+род\w*|средн\w*\s+род\w*|male|female|neuter)\b",
+    re.IGNORECASE,
+)
 
-def validate_fact_glossary(plan, mandatory_facts):
+
+def _extract_gender(note: str | None) -> str | None:
+    if not note:
+        return None
+    match = _GENDER_NOTE_PATTERN.search(note)
+    if match is None:
+        return None
+    token = match.group(1).casefold()
+    if token.startswith("мужск") or token == "male":
+        return "male"
+    if token.startswith("женск") or token == "female":
+        return "female"
+    if token.startswith("средн") or token == "neuter":
+        return "neuter"
+    return None
+
+
+def validate_fact_glossary(
+    plan,
+    mandatory_facts,
+    aliases_by_block_id: Mapping[str, str] | None = None,
+):
     """Reject explicit contradictions with structured mandatory glossary decisions."""
     if plan is None or plan.version != 3:
         return
+    normalized_mandatory = {
+        glossary_key(k): v for k, v in mandatory_facts.items()
+    }
+    alias_map = aliases_by_block_id or {}
     for fact in plan.context_facts:
-        expected = mandatory_facts.get(fact.subject_anchor.quote, {}).get(fact.kind)
-        if expected is not None and fact.certainty != 'unknown' and fact.value != expected:
-            raise AnalysisMergeError('контекстная атрибуция противоречит обязательному решению глоссария')
+        expected = normalized_mandatory.get(
+            glossary_key(fact.subject_anchor.quote), {}
+        ).get(fact.kind)
+        if expected is None or fact.certainty == "unknown":
+            continue
+        if fact.kind == "gender":
+            expected_gender = _extract_gender(expected) or expected
+            actual_gender = _extract_gender(fact.value) or fact.value
+            has_conflict = actual_gender != expected_gender
+        else:
+            has_conflict = fact.value != expected
+        if has_conflict:
+            block_id = fact.subject_anchor.block_id
+            label = alias_map.get(block_id, block_id)
+            msg = (
+                "контекстная атрибуция противоречит обязательному решению глоссария "
+                f"({label}: «{_preview_quote(fact.subject_anchor.quote)}»)"
+            )
+            raise _analysis_error(
+                msg,
+                rule_code="glossary_fact_conflict",
+                block_ids=(block_id,),
+            )
 
 
 def glossary_context_constraints(concepts):
-    """Only exact supported gender notes become machine-checkable constraints."""
-    genders = {'мужской род': 'male', 'женский род': 'female', 'средний род': 'neuter',
-               'male': 'male', 'female': 'female', 'neuter': 'neuter'}
+    """Supported gender notes (including composite notes) become machine-checkable constraints."""
     result = {}
     for concept in concepts:
         if not concept.status.is_user_decision:
             continue
-        note = concept.note.strip().casefold().rstrip('.')
-        gender = genders.get(note)
+        gender = _extract_gender(getattr(concept, "note", ""))
         if gender is not None:
-            source = getattr(concept, 'canonical_source_text', None) or concept.source_text
-            result[source] = {'gender': gender}
+            source = getattr(concept, "canonical_source_text", None) or concept.source_text
+            result[glossary_key(source)] = {"gender": gender}
     return result

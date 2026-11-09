@@ -1716,6 +1716,838 @@ async def test_correct_chapter_v2_counts_unchanged_blocks_and_skips_reload_in_re
     assert propose_checked + review_checked == 3
 
 
+def test_correct_chapter_v2_rebinds_content_evidence_per_block_and_matches_prepare_candidates_sha():
+    from linguary.application.correction_dto import (
+        ChapterCorrectionV2Response,
+        CorrectionIssue,
+        CurrentQuoteEvidence,
+        ProposedBlockResponse,
+        UnchangedBlockResponse,
+    )
+    from linguary.application.llm_dto import LanguageNoteResponse
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.application.use_cases.correct_chapter import (
+        CorrectChapter,
+        _alias_error_for_retry,
+        prepare_correction_candidates,
+    )
+    from linguary.domain import LanguageNote
+    from linguary.domain.book_conditions import thaw
+    from linguary.domain.content_plan import (
+        ContentEvidence,
+        ContentPlan,
+        Difficulty,
+        HelpEvidence,
+        RequiredPoint,
+        SourceAnchor,
+        artifact_key,
+    )
+    from linguary.domain.llm_log import Violation
+
+    section = make_analysis_section(
+        texts=(
+            "Plain opening.",
+            "Second idiom appears here.",
+            "Third idiom appears here.",
+        ),
+    )
+    doc = make_analysis_document((section,))
+    b1, b2, b3 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        (
+            (b1.id, BlockTreatment.TRANSLATE),
+            (b2.id, BlockTreatment.TRANSLATE),
+            (b3.id, BlockTreatment.TRANSLATE),
+        ),
+    )
+    anchor2 = SourceAnchor(block_id=b2.id, start=0, end=12, quote="Second idiom")
+    anchor3 = SourceAnchor(block_id=b3.id, start=0, end=11, quote="Third idiom")
+    diff2 = Difficulty(
+        id="df-" + "2" * 64,
+        anchors=(anchor2,),
+        owner_block_id=b2.id,
+        kind="idiom",
+        priority="critical",
+        help_kind="explanation",
+        required_points=(RequiredPoint(id="p2", description="explain second idiom"),),
+    )
+    diff3 = Difficulty(
+        id="df-" + "3" * 64,
+        anchors=(anchor3,),
+        owner_block_id=b3.id,
+        kind="idiom",
+        priority="critical",
+        help_kind="explanation",
+        required_points=(RequiredPoint(id="p3", description="explain third idiom"),),
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(diff2, diff3),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-ev",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id, b3.id),
+        content_plan=content_plan,
+    )
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+
+    old_note2 = LanguageNote(
+        id="n-1-1",
+        block_id=b2.id,
+        original_excerpt="Second idiom",
+        note="Старое объяснение второй идиомы.",
+        translated_excerpt=None,
+    )
+    old_note3 = LanguageNote(
+        id="n-1-2",
+        block_id=b3.id,
+        original_excerpt="Third idiom",
+        note="Старое объяснение третьей идиомы.",
+        translated_excerpt=None,
+    )
+    ev1 = ContentEvidence(plan_sha256=content_plan.sha256, evidence=(), version=3)
+    ev2 = ContentEvidence(
+        plan_sha256=content_plan.sha256,
+        evidence=(
+            HelpEvidence(
+                difficulty_id=diff2.id,
+                point_id="p2",
+                artifact_kind="language_note.note",
+                block_id=b2.id,
+                artifact_key=artifact_key(
+                    "language_note.note",
+                    b2.id,
+                    {"original_excerpt": old_note2.original_excerpt, "note": old_note2.note, "translated_excerpt": None},
+                ),
+                body_excerpt=old_note2.note,
+            ),
+        ),
+        version=3,
+    )
+    ev3 = ContentEvidence(
+        plan_sha256=content_plan.sha256,
+        evidence=(
+            HelpEvidence(
+                difficulty_id=diff3.id,
+                point_id="p3",
+                artifact_kind="language_note.note",
+                block_id=b3.id,
+                artifact_key=artifact_key(
+                    "language_note.note",
+                    b3.id,
+                    {"original_excerpt": old_note3.original_excerpt, "note": old_note3.note, "translated_excerpt": None},
+                ),
+                body_excerpt=old_note3.note,
+            ),
+        ),
+        version=3,
+    )
+    res1 = BlockProcessingResult(block_id=b1.id, treatment=BlockTreatment.TRANSLATE, translated_text="Простое начало.", content_evidence=ev1)
+    res2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Вторая идиома здесь.",
+        language_notes=(old_note2,),
+        content_evidence=ev2,
+    )
+    res3 = BlockProcessingResult(
+        block_id=b3.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Третья идиома здесь.",
+        language_notes=(old_note3,),
+        content_evidence=ev3,
+    )
+    results = {b1.id: res1, b2.id: res2, b3.id: res3}
+    bindings = {
+        b.id: {"book_id": doc.id, "conditions_id": "cond-1", "attempt_id": "att-0", "artifact_revision_id": f"art-{idx}"}
+        for idx, b in enumerate(section.blocks, start=1)
+    }
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(id="cond-1", payload={"schema_version": 1, "versions": {"validators": 3}}),
+        snapshot=snapshot,
+        blocks=section.blocks,
+        results=results,
+        bindings=bindings,
+        input_generations={b1.id: 1, b2.id: 1, b3.id: 1},
+    )
+    fake_tx = SimpleNamespace(
+        work=SimpleNamespace(list_correction_candidates=lambda *a, **kw: ()),
+    )
+
+    prop2 = ProposedBlockResponse(
+        block_id=b2.id,
+        translated_text="Вторая идиома здесь.",
+        glossary_hints=(),
+        language_notes=(
+            LanguageNoteResponse(
+                source_block_id=b2.id,
+                original_excerpt="Second idiom",
+                note="Уточнённое объяснение второй идиомы.",
+                translated_excerpt=None,
+            ),
+        ),
+        issues=(
+            CorrectionIssue(
+                field_path="language_notes[0].note",
+                source_quote="Second idiom",
+                current_evidence=CurrentQuoteEvidence(field_path="language_notes[0].note", quote="Старое"),
+                problem="Неточное пояснение",
+                minimal_fix_reason="Уточнить смысл идиомы",
+            ),
+        ),
+    )
+    prop3 = ProposedBlockResponse(
+        block_id=b3.id,
+        translated_text="Третья идиома здесь.",
+        glossary_hints=(),
+        language_notes=(
+            LanguageNoteResponse(
+                source_block_id=b3.id,
+                original_excerpt="here",
+                note="Дополнительная заметка о наречии.",
+                translated_excerpt=None,
+            ),
+            LanguageNoteResponse(
+                source_block_id=b3.id,
+                original_excerpt="Third idiom",
+                note="Уточнённое объяснение третьей идиомы.",
+                translated_excerpt=None,
+            ),
+        ),
+        issues=(
+            CorrectionIssue(
+                field_path="language_notes[0].note",
+                source_quote="Third idiom",
+                current_evidence=CurrentQuoteEvidence(field_path="language_notes[0].note", quote="Старое"),
+                problem="Неточное пояснение",
+                minimal_fix_reason="Уточнить смысл третьей идиомы",
+            ),
+        ),
+    )
+    validator = make_validator()
+    handler = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=validator)
+    response = ChapterCorrectionV2Response((UnchangedBlockResponse(b1.id), prop2, prop3))
+    cand_results = handler._candidates(fake_tx, inputs, response)
+
+    assert cand_results[1].content_evidence.evidence[0].body_excerpt == "Уточнённое объяснение второй идиомы."
+    assert cand_results[2].content_evidence.evidence[0].body_excerpt == "Уточнённое объяснение третьей идиомы."
+
+    immutable_b3 = json.loads(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "book_id": doc.id,
+                "run_id": "run-1",
+                "conditions_id": "cond-1",
+                "section_id": section.id,
+                "block_id": b3.id,
+                "input_sha256": inputs.checksums[b3.id],
+                "input_generation": 1,
+                "group_id": "grp-1",
+                "proposal_attempt_id": "att-1",
+                "context_sha256": inputs.context_sha256,
+                "source_binding": bindings[b3.id],
+                "original": {"text": b3.text},
+                "current_result": asdict(res3),
+                "result": asdict(cand_results[2]),
+                "proposal": asdict(prop3),
+                "evidence_valid": True,
+            }
+        )
+    )
+    cand_b3 = CorrectionCandidate(
+        candidate_id="cand-b3",
+        book_id=doc.id,
+        run_id="run-1",
+        conditions_id="cond-1",
+        section_id=section.id,
+        block_id=b3.id,
+        input_sha256=inputs.checksums[b3.id],
+        input_generation=1,
+        proposal_sha256=canonical_sha(immutable_b3),
+        payload=immutable_b3,
+        group_id="grp-1",
+        proposal_attempt_id="att-1",
+    )
+    fake_tx_with_cand = SimpleNamespace(
+        work=SimpleNamespace(list_correction_candidates=lambda *a, **kw: (cand_b3,)),
+    )
+    reprepared, = prepare_correction_candidates(fake_tx_with_cand, inputs, (cand_b3,), validator)
+    assert canonical_sha(asdict(reprepared)) == canonical_sha(thaw(cand_b3.payload["result"]))
+
+    # Missing coverage raises ResultValidationError with canonical violation; _alias_error_for_retry aliases on a copy only.
+    broken_prop2 = replace(prop2, language_notes=())
+    with pytest.raises(ResultValidationError) as exc_info:
+        handler._candidates(
+            fake_tx,
+            inputs,
+            ChapterCorrectionV2Response((UnchangedBlockResponse(b1.id), broken_prop2, UnchangedBlockResponse(b3.id))),
+        )
+    err = exc_info.value
+    assert err.violation is not None
+    assert err.violation.block_ids == (b2.id,)
+
+    violation_only_err = ResultValidationError(
+        "Ошибка без идентификатора в тексте",
+        violation=Violation("content_plan", "chapter_correction", scope="local", block_ids=(b2.id,), safe_message="msg"),
+    )
+    aliased_err = _alias_error_for_retry(violation_only_err, {b2.id: "b2"})
+    assert aliased_err is not violation_only_err
+    assert aliased_err.violation.block_ids == ("b2",)
+    assert violation_only_err.violation.block_ids == (b2.id,)
+
+    # A2 with validators v4 resolves uncovered difficulty into partial coverage + unresolved fragment_assistances.
+    a2_inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(
+            id="cond-a2",
+            payload={"schema_version": 1, "reader_level": "a2", "versions": {"validators": 4}},
+        ),
+        snapshot=snapshot,
+        blocks=section.blocks,
+        results=results,
+        bindings=bindings,
+        input_generations={b1.id: 1, b2.id: 1, b3.id: 1},
+    )
+    a2_results = handler._candidates(
+        fake_tx,
+        a2_inputs,
+        ChapterCorrectionV2Response((UnchangedBlockResponse(b1.id), broken_prop2, UnchangedBlockResponse(b3.id))),
+    )
+    assert a2_results[1].content_evidence.structural_coverage == "partial"
+    assert len(a2_results[1].fragment_assistances) == 1
+    assert a2_results[1].fragment_assistances[0].difficulty_id == diff2.id
+    assert a2_results[1].fragment_assistances[0].kind == "unresolved"
+
+
+@pytest.mark.asyncio
+async def test_correct_chapter_v2_materializes_null_lists_and_compacts_archive_preserving_confirmed_candidate(
+    tmp_path,
+    monkeypatch,
+):
+    from datetime import UTC, datetime
+    from hashlib import sha256
+
+    import linguary.application.use_cases.correct_chapter as module
+    from linguary.adapters.db import Base, SqlAlchemyUnitOfWork, create_database_engine
+    from linguary.adapters.db.models import (
+        BookConditionsRow,
+        BookRow,
+        CorrectionInputRow,
+        LLMAttemptRow,
+        ProcessingRunRow,
+    )
+    from linguary.adapters.llm.correction_payloads import ChapterCorrectionV2Schema
+    from linguary.application.correction_dto import (
+        LLMPayloadError,
+        proposed_block_from_payload,
+    )
+    from linguary.application.use_cases.correct_chapter import _filtered_chapter_context
+    from linguary.domain import (
+        ConceptType,
+        GlossaryHint,
+        GlossarySnapshotEntry,
+        LanguageNote,
+        TermStatus,
+    )
+    from linguary.domain.book_conditions import thaw
+
+    section = make_analysis_section(
+        texts=(
+            "Lantern shines brightly.",
+            "Second quiet sentence.",
+            "Third quiet sentence.",
+            "Fourth quiet sentence.",
+            "Fifth quiet sentence.",
+            "Harbor appears far away.",
+        ),
+    )
+    doc = make_analysis_document((section,))
+    b1, b2, b3, b4, b5, b6 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        (
+            (b1.id, BlockTreatment.GLOSSARY_ONLY),
+            *((b.id, BlockTreatment.TRANSLATE) for b in (b2, b3, b4, b5, b6)),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-null",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=tuple(b.id for b in section.blocks),
+    )
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    glossary_snapshot = GlossarySnapshot(
+        entries=(
+            GlossarySnapshotEntry(
+                source_text="Lantern",
+                translation="Фонарь",
+                type=ConceptType.TERM,
+                status=TermStatus.APPROVED,
+            ),
+            GlossarySnapshotEntry(
+                source_text="Harbor",
+                translation="Гавань",
+                type=ConceptType.PLACE,
+                status=TermStatus.APPROVED,
+            ),
+        )
+    )
+    existing_hint = GlossaryHint(original="Lantern", translation="фонарь", note="светильник")
+    existing_note = LanguageNote(
+        id="n-1-1",
+        block_id=b2.id,
+        original_excerpt="Second quiet",
+        note="Спокойная интонация.",
+        translated_excerpt="Второе тихое",
+    )
+    results = {
+        b1.id: BlockProcessingResult(
+            block_id=b1.id,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            translated_text=None,
+            glossary_hints=(existing_hint,),
+        ),
+        b2.id: BlockProcessingResult(
+            block_id=b2.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Второе старое предложение.",
+            language_notes=(existing_note,),
+        ),
+        **{
+            b.id: BlockProcessingResult(
+                block_id=b.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=f"Перевод {idx}.",
+            )
+            for idx, b in enumerate((b3, b4, b5, b6), start=3)
+        },
+    }
+    cond_id = str(uuid4())
+    run_id = str(uuid4())
+    task_id = str(uuid4())
+    bindings = {
+        b.id: {
+            "book_id": doc.id,
+            "conditions_id": cond_id,
+            "attempt_id": str(uuid4()),
+            "artifact_revision_id": str(uuid4()),
+            "payload_json": {"schema_version": 1},
+        }
+        for b in section.blocks
+    }
+    generations = {b.id: 1 for b in section.blocks}
+    run = SimpleNamespace(id=run_id, glossary_snapshot=glossary_snapshot)
+    conditions = SimpleNamespace(id=cond_id, payload={"schema_version": 1, "versions": {"validators": 3}})
+
+    def build_inputs():
+        return CorrectionInputs(
+            document=doc,
+            section=section,
+            analysis=analysis,
+            run=run,
+            conditions=conditions,
+            snapshot=snapshot,
+            blocks=section.blocks,
+            results=dict(results),
+            bindings=dict(bindings),
+            input_generations=dict(generations),
+        )
+
+    initial_inputs = build_inputs()
+
+    # Window around b1 includes b1..b3, so "Lantern" stays and "Harbor" (only in b6) is filtered out.
+    filtered = _filtered_chapter_context(initial_inputs, (b1.id,))
+    assert [e["source_text"] for e in filtered["run_glossary"]["entries"]] == ["Lantern"]
+
+    # Schema -> DTO -> alias resolution -> proposed_block_from_payload preserves None before materialization.
+    parsed_schema = ChapterCorrectionV2Schema.model_validate(
+        {
+            "blocks": [
+                {"block_id": "b1", "status": "unchanged"},
+                {
+                    "block_id": "b2",
+                    "status": "proposed",
+                    "translated_text": "Второе тихое предложение.",
+                    "glossary_hints": None,
+                    "language_notes": None,
+                    "issues": [
+                        {
+                            "field_path": "translated_text",
+                            "source_quote": "Second quiet",
+                            "current_evidence": {
+                                "kind": "quote",
+                                "field_path": "translated_text",
+                                "quote": "старое",
+                            },
+                            "problem": "Неточный перевод",
+                            "minimal_fix_reason": "Передать quiet точно",
+                        }
+                    ],
+                },
+                *[{"block_id": f"b{i}", "status": "unchanged"} for i in range(3, 7)],
+            ]
+        }
+    )
+    dto_with_aliases = parsed_schema.to_dto()
+    resolved_dto = dto_with_aliases.with_resolved_block_ids(initial_inputs.alias_to_block_id)
+    raw_b2 = resolved_dto.blocks[1]
+    assert raw_b2.glossary_hints is None
+    assert raw_b2.language_notes is None
+    with pytest.raises(LLMPayloadError):
+        raw_b2.validate_treatment(BlockTreatment.TRANSLATE)
+    roundtrip_partial = proposed_block_from_payload(asdict(raw_b2))
+    assert roundtrip_partial.glossary_hints is None
+    assert roundtrip_partial.language_notes is None
+
+    # Full _propose_group + _review_group and SQLite _confirmed_candidate check.
+    engine = create_database_engine(tmp_path / "compact_archive.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    now = datetime.now(UTC)
+
+    identity = correction_task_identity(
+        book_id=doc.id,
+        run_id=run.id,
+        section_id=section.id,
+        input_generation="gen-1",
+        policy_version=snapshot.policy_version,
+    )
+    task = SimpleNamespace(
+        id=task_id,
+        book_id=doc.id,
+        task_type=TaskType.CHAPTER_CORRECTION,
+        scope_id=section.id,
+        status=TaskStatus.RUNNING,
+        attempts=1,
+        operation_id=identity.operation_id,
+        identity=identity,
+    )
+    work_bindings = {
+        ("task", task.id): {
+            "book_id": doc.id,
+            "conditions_id": conditions.id,
+            "payload_json": {
+                "run_id": run.id,
+                "section_id": section.id,
+                "input_generation": "gen-1",
+                "manifest": initial_inputs.manifest,
+            },
+        },
+    }
+    attempts_store: dict[str, SimpleNamespace] = {}
+    candidates_store: dict[str, CorrectionCandidate] = {}
+    archived_items: list[dict] = []
+    saved_checks: dict[str, object] = {}
+    captured_requests: list = []
+
+    class FakeWork:
+        def get_binding(self, kind, entity_id):
+            return work_bindings.get((kind, entity_id))
+
+        def bind(self, kind, entity_id, *, book_id, conditions_id, payload, **kwargs):
+            work_bindings[(kind, entity_id)] = {
+                "book_id": book_id,
+                "conditions_id": conditions_id,
+                "payload_json": payload,
+            }
+
+        def add_correction_candidates(self, candidates):
+            for c in candidates:
+                candidates_store[c.candidate_id] = c
+
+        def get_correction_candidate(self, cid):
+            return candidates_store.get(cid)
+
+        def list_correction_candidates(self, run_id, *, section_id=None, states=None):
+            return tuple(
+                c for c in candidates_store.values()
+                if states is None or c.state in states
+            )
+
+        def correction_checks(self, run_id, section_id):
+            return tuple(saved_checks.values())
+
+        def replace_correction_checks(self, run_id, section_id, checks):
+            for c in checks:
+                saved_checks[c.block_id] = c
+
+        def get_attempt(self, attempt_id):
+            return attempts_store.get(attempt_id)
+
+        def transition_attempt(self, attempt_id, new_state, *, expected_state):
+            attempts_store[attempt_id].state = new_state
+
+        def archive_artifacts(self, items):
+            ids = []
+            for item in items:
+                art_id = str(uuid4())
+                archived_items.append({"id": art_id, **item})
+                ids.append(art_id)
+            return tuple(ids)
+
+        def record_correction_verdict(self, candidate_id, *, state, review, review_attempt_id, **kwargs):
+            old = candidates_store[candidate_id]
+            candidates_store[candidate_id] = replace(
+                old, state=state, review=review, review_attempt_id=review_attempt_id
+            )
+
+        def replace_result_binding(self, key, *, book_id, conditions_id, attempt_id, artifact_revision_id, **kwargs):
+            block_id = key.split(":", 1)[1]
+            bindings[block_id] = {
+                **bindings[block_id],
+                "book_id": book_id,
+                "conditions_id": conditions_id,
+                "attempt_id": attempt_id,
+                "artifact_revision_id": artifact_revision_id,
+                "payload_json": {"schema_version": 1},
+            }
+
+        def advance_correction_input(self, run_id, block_id, *, expected_generation, fingerprint):
+            pass
+
+        def stale_reviews(self, book_id):
+            pass
+
+    class FakeResults:
+        def replace_results(self, run_id, updated):
+            for r in updated:
+                results[r.block_id] = r
+
+    fake_tx = SimpleNamespace(
+        tasks=SimpleNamespace(get=lambda tid: task),
+        work=FakeWork(),
+        results=FakeResults(),
+    )
+
+    monkeypatch.setattr(module, "correction_inputs", lambda tx, bid, sid: build_inputs())
+    monkeypatch.setattr(module, "finalize_response", lambda *a, **kw: None)
+
+    class FakeClient:
+        async def generate(self, request):
+            captured_requests.append(request)
+            ctx = request.call_context
+            attempts_store[ctx.attempt_id] = SimpleNamespace(
+                id=ctx.attempt_id,
+                book_id=doc.id,
+                state="validated",
+                task_id=task.id,
+                run_id=run.id,
+                conditions_id=conditions.id,
+                context={
+                    **ctx.to_dict(),
+                    "task_attempt": task.attempts,
+                    "operation_id": task.operation_id,
+                },
+            )
+            if request.kind is LLMResponseKind.CHAPTER_CORRECTION:
+                return LLMResponse(
+                    payload=resolved_dto,
+                    raw_content='{"huge_raw_response": true}',
+                    provider="test",
+                    model="gpt-test",
+                    call_context=ctx,
+                )
+            cand_id, prop_sha = request.correction_candidate_refs[0]
+            return LLMResponse(
+                payload=ChapterCorrectionReviewResponse(
+                    candidates=(
+                        CorrectionVerdict(
+                            candidate_id=cand_id,
+                            proposal_sha256=prop_sha,
+                            verdict="confirmed",
+                            error_supported=True,
+                            evidence_valid=True,
+                            minimal=True,
+                            no_semantic_loss=True,
+                            reason="Подтверждено.",
+                        ),
+                    )
+                ),
+                raw_content='{"huge_review_raw": true}',
+                provider="test",
+                model="gpt-test",
+                call_context=ctx,
+            )
+
+    handler = CorrectChapterV2(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(fake_tx)),
+        llm_client=FakeClient(),
+        snapshot=snapshot,
+        validator=make_validator(),
+    )
+    all_block_ids = tuple(b.id for b in section.blocks)
+    await handler._propose_group(CorrectChapterCommand(doc.id, section.id, task.id), all_block_ids)
+
+    cand, = candidates_store.values()
+    thawed_proposal = thaw(cand.payload["proposal"])
+    assert thawed_proposal["glossary_hints"] == []
+    assert len(thawed_proposal["language_notes"]) == 1
+    assert thawed_proposal["language_notes"][0]["original_excerpt"] == "Second quiet"
+    assert len(cand.payload["result"]["language_notes"]) == 1
+    assert cand.payload["result"]["language_notes"][0]["id"] == "n-1-1"
+
+    await handler._review_group(CorrectChapterCommand(doc.id, section.id, task.id), (cand.candidate_id,))
+    reviewed_cand = candidates_store[cand.candidate_id]
+    assert reviewed_cand.state == "auto_applied"
+
+    # Review request filtered run_glossary to window around b2 (b1..b4) and preserved original.
+    review_req = captured_requests[1]
+    review_input = json.loads(review_req.input_text)
+    assert [e["source_text"] for e in review_input["run_glossary"]["entries"]] == ["Lantern"]
+    assert review_input["candidates"][0]["original"] == thaw(cand.payload["original"])
+
+    # Verify compact archive structure for both proposal and review artifacts.
+    proposal_art = next(a for a in archived_items if a["kind"] == "correction_proposal")
+    review_art = next(a for a in archived_items if a["kind"] == "correction_review")
+    expected_keys = {
+        "schema_version",
+        "response",
+        "context_sha256",
+        "input_checksums",
+        "request_sha256",
+        "ordered_block_ids",
+        "candidate_refs",
+    }
+    for art, req in ((proposal_art, captured_requests[0]), (review_art, review_req)):
+        assert set(art["body"].keys()) == expected_keys
+        assert art["body"]["context_sha256"] == initial_inputs.context_sha256
+        assert art["body"]["request_sha256"] == sha256(
+            (req.instructions + "\n" + req.input_text).encode("utf-8")
+        ).hexdigest()
+
+    # Persist into real SQLite and verify SqlAlchemyWorkRepository._confirmed_candidate returns True.
+    with uow.transaction() as tx:
+        session = tx.work._session
+        session.add(
+            BookRow(
+                id=doc.id,
+                title="Book",
+                authors_json=["Author"],
+                identifier=None,
+                publisher=None,
+                source_language="en",
+                target_language="ru",
+                status="processing",
+                source_epub_path="book.epub",
+                export_validation_status=None,
+                created_at=now,
+            )
+        )
+        session.flush()
+        tx.documents.save(doc)
+        session.add(
+            BookConditionsRow(
+                id=conditions.id,
+                book_id=doc.id,
+                revision=1,
+                schema_version=1,
+                payload_json=conditions.payload,
+                reproducibility="complete",
+                created_at=now,
+            )
+        )
+        session.add(
+            ProcessingRunRow(
+                id=run.id,
+                book_id=doc.id,
+                status="active",
+                glossary_snapshot_json=[],
+                llm_settings_json={},
+                created_at=now,
+            )
+        )
+        session.flush()
+        for att in attempts_store.values():
+            session.add(
+                LLMAttemptRow(
+                    id=att.id,
+                    book_id=doc.id,
+                    conditions_id=conditions.id,
+                    task_id=task.id,
+                    run_id=run.id,
+                    generation=1,
+                    ordinal=1,
+                    state="accepted",
+                    context_json=att.context,
+                    outcome_json={},
+                )
+            )
+        session.add(
+            CorrectionInputRow(
+                run_id=run.id,
+                block_id=b2.id,
+                generation=1,
+                fingerprint=canonical_sha(
+                    dict(
+                        input_sha256=cand.input_sha256,
+                        source_result_binding=thaw(cand.payload["source_binding"]),
+                    )
+                ),
+            )
+        )
+        session.flush()
+        tx.work.archive_artifacts([review_art])
+        tx.work.add_correction_candidates((cand,))
+        tx.work.record_correction_verdict(
+            cand.candidate_id,
+            proposal_sha256=cand.proposal_sha256,
+            input_sha256=cand.input_sha256,
+            review_attempt_id=reviewed_cand.review_attempt_id,
+            review=reviewed_cand.review,
+            state="auto_applied",
+        )
+        persisted = tx.work.get_correction_candidate(cand.candidate_id)
+        assert tx.work._confirmed_candidate(persisted) is True
+
+
+
 
 
 

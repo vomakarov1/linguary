@@ -15,11 +15,19 @@ _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
 
 
 class ReaderTextError(ResultValidationError):
-    def __init__(self, reason_code, *, kind=None, block_id=None):
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        kind: str | None = None,
+        block_id: str | None = None,
+        detail: str | None = None,
+    ) -> None:
         self.reason_code = reason_code
         self.kind = kind
         self.block_id = block_id
-        details = tuple(item for item in (kind, block_id) if item)
+        self.detail = detail
+        details = tuple(item for item in (kind, block_id, detail) if item)
         suffix = f" ({', '.join(details)})" if details else ''
         super().__init__(
             'Учебный текст требует повторной генерации: ' + reason_code + suffix,
@@ -87,11 +95,30 @@ def validate_a2_summary(
     """Require an original-language paragraph followed by a Russian translation."""
     paragraphs = [part.strip() for part in re.split(r'\r?\n[ \t]*\r?\n+', body.strip())]
     if len(paragraphs) != 2 or not all(paragraphs):
-        raise ReaderTextError('a2_summary_requires_parallel_russian')
+        bad_idx = (
+            1
+            if not paragraphs or not paragraphs[0]
+            else (2 if len(paragraphs) < 2 or not paragraphs[1] else 3)
+        )
+        non_empty = len([part for part in paragraphs if part])
+        raise ReaderTextError(
+            'a2_summary_requires_parallel_russian',
+            detail=(
+                f'абзац {bad_idx}: получено абзацев — {non_empty}, '
+                r'требуется двухабзацный формат EN\nRU через пустую строку '
+                '(абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+            ),
+        )
     source_script = _dominant_script(' '.join(source_texts))
     summary_script = _dominant_script(paragraphs[0])
     if source_script is not None and summary_script != source_script:
-        raise ReaderTextError('a2_summary_requires_parallel_russian')
+        raise ReaderTextError(
+            'a2_summary_requires_parallel_russian',
+            detail=(
+                'абзац 1: алфавит не совпадает с языком оригинала; '
+                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+            ),
+        )
     source_language_probability = language_detector.probability_for_language(
         paragraphs[0], source_language
     )
@@ -99,11 +126,23 @@ def validate_a2_summary(
         source_language_probability is not None
         and source_language_probability < _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY
     ):
-        raise ReaderTextError('a2_summary_requires_parallel_russian')
+        raise ReaderTextError(
+            'a2_summary_requires_parallel_russian',
+            detail=(
+                f'абзац 1: текст не распознан как язык оригинала ({source_language}); '
+                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+            ),
+        )
     letters = [char for char in paragraphs[1] if char.isalpha()]
     cyrillic = [char for char in letters if unicodedata.name(char, '').startswith('CYRILLIC ')]
     if not letters or len(cyrillic) / len(letters) < 0.5:
-        raise ReaderTextError('a2_summary_requires_parallel_russian')
+        raise ReaderTextError(
+            'a2_summary_requires_parallel_russian',
+            detail=(
+                'абзац 2: ожидается перевод на русский язык; '
+                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+            ),
+        )
 
 
 class ReaderTextPolicy:

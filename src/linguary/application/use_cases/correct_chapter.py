@@ -7,10 +7,12 @@ from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
 import re
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from linguary.application.block_processing import chapter_number, complete_processing, note_id_factory
+from linguary.application.context_builder import _extract_word_stems, _matches_chapter_text
 from linguary.application.correction import (
     correction_inputs, original_block_payload, reconcile_corrections, task_matches_inputs, unchecked_blocks,
     current_correction_candidates, candidate_is_current, model_correction_blocks,
@@ -18,7 +20,8 @@ from linguary.application.correction import (
 )
 from linguary.application.correction_dto import (
     ChapterCorrectionResponse, CorrectedBlockResponse, ChapterCorrectionV2Response,
-    ChapterCorrectionReviewResponse, CorrectionSnapshotV2, proposed_block_from_payload,
+    ChapterCorrectionReviewResponse, CorrectionSnapshotV2, ProposedBlockResponse,
+    proposed_block_from_payload,
 )
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
 from linguary.application.llm_rejections import finalize_response, record_rejection
@@ -27,10 +30,15 @@ from linguary.application.reader_text import ReaderTextPolicy, source_quote_frag
 from linguary.application.recovery import RecoveryError
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators import TranslationResultValidator
-from linguary.application.validators.content_plan import validate_note_sources
-from linguary.domain import BlockTreatment, LLMCallStage, TaskStatus, TaskType, TranslationUnit
+from linguary.application.validators.content_plan import (
+    resolve_content_coverage,
+    resolve_response_evidence,
+    validate_content_coverage,
+    validate_note_sources,
+)
+from linguary.domain import BlockTreatment, LLMCallStage, TaskStatus, TaskType, TranslationUnit, glossary_key
 from linguary.domain.book_conditions import WorkStateError, thaw
-from linguary.domain.content_plan import canonical_sha
+from linguary.domain.content_plan import ContentEvidence, canonical_sha
 from linguary.domain.correction import CorrectionCheck, CorrectionCandidate, correction_task_identity
 from linguary.domain.llm_log import CallContext
 
@@ -96,10 +104,64 @@ def _llm_run_glossary(glossary: Any) -> Any:
     return raw
 
 
+def _entry_candidate_terms(entry: Mapping[str, Any]) -> list[str]:
+    terms: list[str] = []
+    for key in ('source_text', 'canonical_source_text', 'term', 'original'):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            terms.append(value.strip())
+    for list_key in ('surface_forms', 'source_variants', 'variants', 'spellings', 'aliases'):
+        values = entry.get(list_key)
+        if isinstance(values, (list, tuple)):
+            for item in values:
+                if isinstance(item, str) and item.strip():
+                    terms.append(item.strip())
+                elif isinstance(item, Mapping):
+                    for subkey in ('source_text', 'text', 'form'):
+                        subval = item.get(subkey)
+                        if isinstance(subval, str) and subval.strip():
+                            terms.append(subval.strip())
+    return terms
+
+
+def _filter_llm_run_glossary(glossary: Any, window_text: str) -> Any:
+    window_folded = window_text.casefold()
+    word_stems = _extract_word_stems(window_text)
+    normalized_window = glossary_key(window_text)
+
+    def _matches(entry: Any) -> bool:
+        if not isinstance(entry, Mapping):
+            return True
+        terms = _entry_candidate_terms(entry)
+        if not terms:
+            return True
+        return any(
+            term.casefold() in window_folded
+            or _matches_chapter_text(
+                term,
+                window_text,
+                word_stems,
+                normalized_blocks_text=normalized_window,
+            )
+            for term in terms
+        )
+
+    if isinstance(glossary, Mapping):
+        if isinstance(glossary.get('entries'), (list, tuple)):
+            return {**glossary, 'entries': [e for e in glossary['entries'] if _matches(e)]}
+        return glossary
+    if isinstance(glossary, (list, tuple)):
+        return [e for e in glossary if _matches(e)]
+    return glossary
+
+
 def _filtered_chapter_context(
     inputs: Any,
-    target_block_ids: Sequence[str] | set[str],
+    allowed_block_ids: Sequence[str] | set[str] | None = None,
+    *,
+    target_block_ids: Sequence[str] | set[str] | None = None,
 ) -> dict[str, Any]:
+    requested_ids = target_block_ids if allowed_block_ids is None else allowed_block_ids
     context = dict(getattr(inputs, 'context', None) or {})
     document = getattr(inputs, 'document', None)
     if document is not None:
@@ -115,33 +177,76 @@ def _filtered_chapter_context(
     if 'run_glossary' in context and context['run_glossary'] is not None:
         context['run_glossary'] = _llm_run_glossary(context['run_glossary'])
     aliases = getattr(inputs, 'block_aliases', {})
-    allowed_block_ids: set[str] | None = None
+    window_block_ids: set[str] | None = None
     blocks = getattr(inputs, 'blocks', ())
-    target_set = set(target_block_ids)
+    target_set = set(requested_ids) if requested_ids is not None else set()
+    ordered_blocks = (
+        section.ordered_blocks
+        if section is not None and hasattr(section, 'ordered_blocks')
+        else blocks
+    )
     if blocks and 0 < len(target_set) < len(blocks):
-        ordered_blocks = (
-            section.ordered_blocks
-            if section is not None and hasattr(section, 'ordered_blocks')
-            else blocks
-        )
         ordered_ids = [b.id for b in ordered_blocks]
-        allowed_block_ids = set(target_set)
+        window_block_ids = set(target_set)
         for idx, bid in enumerate(ordered_ids):
             if bid in target_set:
-                allowed_block_ids.update(
+                window_block_ids.update(
                     ordered_ids[max(0, idx - 2) : min(len(ordered_ids), idx + 3)]
                 )
-        allowed_aliases = {aliases.get(bid, bid) for bid in allowed_block_ids} | allowed_block_ids
+        allowed_aliases = {aliases.get(bid, bid) for bid in window_block_ids} | window_block_ids
         if isinstance(context.get('chapter_blocks'), (list, tuple)):
             context['chapter_blocks'] = [
                 cb for cb in context['chapter_blocks']
                 if isinstance(cb, Mapping) and cb.get('block_id') in allowed_aliases
             ]
+    elif not blocks and target_set and isinstance(context.get('chapter_blocks'), (list, tuple)):
+        cb_ids = [
+            cb.get('block_id')
+            for cb in context['chapter_blocks']
+            if isinstance(cb, Mapping) and isinstance(cb.get('block_id'), str)
+        ]
+        target_aliases = {aliases.get(bid, bid) for bid in target_set} | target_set
+        if 0 < len(target_aliases & set(cb_ids)) < len(cb_ids):
+            window_aliases = set(target_aliases)
+            for idx, cid in enumerate(cb_ids):
+                if cid in target_aliases:
+                    window_aliases.update(cb_ids[max(0, idx - 2) : min(len(cb_ids), idx + 3)])
+            window_block_ids = window_aliases
+            context['chapter_blocks'] = [
+                cb for cb in context['chapter_blocks']
+                if isinstance(cb, Mapping) and cb.get('block_id') in window_aliases
+            ]
+    if target_set and 'run_glossary' in context and context['run_glossary'] is not None:
+        if isinstance(context.get('chapter_blocks'), (list, tuple)):
+            window_texts = [
+                cb['text']
+                for cb in context['chapter_blocks']
+                if isinstance(cb, Mapping) and isinstance(cb.get('text'), str)
+            ]
+            context['run_glossary'] = _filter_llm_run_glossary(
+                context['run_glossary'],
+                ' '.join(window_texts),
+            )
+        elif ordered_blocks:
+            active_ids = (
+                window_block_ids
+                if window_block_ids is not None
+                else ({b.id for b in ordered_blocks} & target_set or {b.id for b in ordered_blocks})
+            )
+            window_texts = [
+                b.text
+                for b in ordered_blocks
+                if getattr(b, 'id', None) in active_ids and isinstance(getattr(b, 'text', None), str)
+            ]
+            context['run_glossary'] = _filter_llm_run_glossary(
+                context['run_glossary'],
+                ' '.join(window_texts),
+            )
     if 'chapter_analysis' in context:
         context['chapter_analysis'] = _llm_chapter_analysis(
             context['chapter_analysis'],
             aliases,
-            allowed_block_ids=allowed_block_ids,
+            allowed_block_ids=window_block_ids,
         )
     return context
 
@@ -300,13 +405,23 @@ def _alias_error_for_retry(
         )
         if aliased_blocks != expectation.blocks:
             new_expectation = replace(expectation, blocks=aliased_blocks)
-    if message == raw_message and new_expectation is expectation:
+    violation = getattr(error, 'violation', None)
+    new_violation = violation
+    if violation is not None and getattr(violation, 'block_ids', None):
+        aliased_block_ids = tuple(
+            replacements.get(b, b) for b in violation.block_ids
+        )
+        if aliased_block_ids != violation.block_ids:
+            new_violation = replace(violation, block_ids=aliased_block_ids)
+    if message == raw_message and new_expectation is expectation and new_violation is violation:
         return error
     copied = copy.copy(error)
     if message != raw_message:
         copied.args = (message, *error.args[1:])
     if new_expectation is not expectation:
         copied.expectation = new_expectation
+    if new_violation is not violation:
+        copied.violation = new_violation
     return copied
 
 
@@ -737,10 +852,28 @@ class CorrectChapter:
                 for n in c.payload['result']['language_notes'])
         notes = note_id_factory(chapter_number=chapter_number(inputs.document, inputs.section), used=used_note_ids)
         originals = {b.id: b for b in inputs.blocks}
+        is_body_section = (
+            not getattr(inputs.document, 'is_front_matter', lambda s: False)(inputs.section)
+            and not getattr(inputs.section, 'is_notes_only', False)
+        )
+        plan = (
+            getattr(inputs.analysis, 'content_plan', None)
+            if (is_body_section and getattr(inputs, 'analysis', None) is not None)
+            else None
+        )
+        english_help = bool(inputs.conditions.payload.get('english_help', False))
+        validators_version = inputs.conditions.payload['versions']['validators']
+        a2_v4 = (
+            validators_version == 4
+            and inputs.conditions.payload.get('reader_level') == 'a2'
+        )
+        source_texts = {b.id: b.text for b in inputs.section.ordered_blocks}
         section_quote_fragments = None
         candidates = []
         for block in response.blocks:
             previous = inputs.results[block.block_id]
+            if isinstance(block, ProposedBlockResponse):
+                block = block.materialize_for(previous)
             if not isinstance(block, CorrectedBlockResponse):
                 candidates.append(previous)
                 continue
@@ -768,6 +901,54 @@ class CorrectChapter:
                     for h, raw in zip(validated.glossary_hints, block.glossary_hints, strict=True)),
                 language_notes=tuple(restored_notes))
             candidate, = ReaderTextPolicy().prepare_results((candidate,), section_quote_fragments)
+            if plan is not None and not english_help and candidate.treatment.is_textual:
+                byr = () if inputs.section.is_notes_only else inputs.analysis.before_you_read
+                raw_evidence = resolve_response_evidence(
+                    plan,
+                    SimpleNamespace(content_evidence=(), language_notes=()),
+                    (candidate,),
+                    byr,
+                    owner_block_ids=(candidate.block_id,),
+                )
+                if a2_v4:
+                    checked, unresolved = resolve_content_coverage(
+                        plan,
+                        (candidate,),
+                        byr,
+                        raw_evidence,
+                        owner_block_ids=(candidate.block_id,),
+                        source_texts=source_texts,
+                        validators_version=validators_version,
+                    )
+                    candidate = replace(
+                        candidate,
+                        content_evidence=ContentEvidence(
+                            plan.sha256,
+                            tuple(e for e in checked if e.block_id == candidate.block_id),
+                            version=plan.version,
+                            structural_coverage='partial' if unresolved[candidate.block_id] else 'complete',
+                        ),
+                        fragment_assistances=unresolved[candidate.block_id],
+                    )
+                else:
+                    checked = validate_content_coverage(
+                        plan,
+                        (candidate,),
+                        byr,
+                        raw_evidence,
+                        owner_block_ids=(candidate.block_id,),
+                        source_texts=source_texts,
+                        validators_version=validators_version,
+                    )
+                    candidate = replace(
+                        candidate,
+                        content_evidence=ContentEvidence(
+                            plan.sha256,
+                            tuple(e for e in checked if e.block_id == candidate.block_id),
+                            version=plan.version,
+                            structural_coverage='complete',
+                        ),
+                    )
             candidates.append(candidate)
         has_v3_content_plan = (
             getattr(inputs, 'analysis', None) is not None
@@ -911,12 +1092,21 @@ class CorrectChapterV2(CorrectChapter):
         return current, attempt
 
     def _archive_response(self, tx, inputs, context, response, kind, request):
-        body = dict(schema_version=1, response=asdict(response.payload), raw_response=response.raw_content,
-            manifest=inputs.manifest, request=dict(instructions=request.instructions,
-                input_text=request.input_text, contract_version=request.contract_version,
-                ordered_block_ids=list(request.ordered_block_ids),
-                candidate_refs=[list(r) for r in request.correction_candidate_refs],
-                repair_instructions=list(request.repair_instructions)))
+        body = {
+            'schema_version': 1,
+            'response': asdict(response.payload),
+            'context_sha256': inputs.context_sha256,
+            'input_checksums': {
+                bid: inputs.checksums[bid]
+                for bid in request.ordered_block_ids
+                if bid in inputs.checksums
+            },
+            'request_sha256': sha256(
+                (request.instructions + '\n' + request.input_text).encode('utf-8')
+            ).hexdigest(),
+            'ordered_block_ids': list(request.ordered_block_ids),
+            'candidate_refs': [list(ref) for ref in request.correction_candidate_refs],
+        }
         artifact, = tx.work.archive_artifacts([dict(book_id=inputs.document.id,
             conditions_id=inputs.conditions.id, run_id=inputs.run.id, attempt_id=context.attempt_id,
             kind=kind, scope_id=inputs.section.id, body=body)])
@@ -965,10 +1155,16 @@ class CorrectChapterV2(CorrectChapter):
                         model=response.model,
                         call_context=response.call_context,
                     )
+                materialized_payload = response.payload.materialize_for(inputs.results)
+                if materialized_payload != response.payload:
+                    response = replace(response, payload=materialized_payload)
                 response.payload.validate_for({b: inputs.results[b].treatment for b in block_ids})
                 with self.uow.transaction() as tx:
                     current, attempt = self._owned_response(tx, command, task, expected, context,
                                                            kind='correction_request')
+                    current_materialized = response.payload.materialize_for(current.results)
+                    if current_materialized != response.payload:
+                        response = replace(response, payload=current_materialized)
                     prepared = self._candidates(tx, current, response.payload)
                     raw = {b.block_id: b for b in response.payload.blocks}
                     candidates, unchanged = [], []
@@ -1076,8 +1272,8 @@ class CorrectChapterV2(CorrectChapter):
             or (inputs.context.get('chapter_analysis') if isinstance(getattr(inputs, 'context', None), Mapping) else None)
         )
         difficulty_aliases = _difficulty_aliases(raw_analysis)
-        target_block_ids = {c.block_id for c in candidates}
-        context = _filtered_chapter_context(inputs, target_block_ids)
+        allowed_block_ids = {c.block_id for c in candidates}
+        context = _filtered_chapter_context(inputs, allowed_block_ids)
         for key in ('run_glossary', 'chapter_analysis', 'chapter_blocks'):
             context.setdefault(key, None)
         aliases = getattr(inputs, 'block_aliases', {})

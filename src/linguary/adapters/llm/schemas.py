@@ -269,11 +269,14 @@ class QuotedDifficultySchema(DifficultySchema):
 
 
 class QuotedContextFactSchema(ContextFactSchema):
+    id: str = Field(default="")
     anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)
     subject_anchor: QuotedSourceAnchorSchema
 
 
 class QuotedContentPlanSchema(ContentPlanV3Schema):
+    version: Literal[3] = 3
+    profile: Literal['content-plan-v3'] = 'content-plan-v3'
     difficulties: list[QuotedDifficultySchema]
     context_facts: list[QuotedContextFactSchema]
 

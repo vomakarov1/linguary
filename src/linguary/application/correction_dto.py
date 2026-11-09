@@ -97,6 +97,8 @@ class CorrectedBlockResponse:
 
     def validate_treatment(self, treatment: BlockTreatment) -> None:
         """Use the saved treatment; the model cannot select one."""
+        if not isinstance(self.glossary_hints, tuple) or not isinstance(self.language_notes, tuple):
+            raise LLMPayloadError('частичное предложение исправления должно быть материализовано до проверки режима')
         if treatment.is_textual:
             BlockResultResponse(self.block_id, treatment, self.translated_text, self.glossary_hints)
         elif self.translated_text is not None or self.glossary_hints:
@@ -142,9 +144,13 @@ class ChapterCorrectionResponse:
             if isinstance(block, UnchangedBlockResponse):
                 resolved_blocks.append(UnchangedBlockResponse(resolved_id))
             elif isinstance(block, ProposedBlockResponse):
-                new_notes = tuple(
-                    replace(note, source_block_id=aliases.get(note.source_block_id, note.source_block_id))
-                    for note in block.language_notes
+                new_notes = (
+                    None
+                    if block.language_notes is None
+                    else tuple(
+                        replace(note, source_block_id=aliases.get(note.source_block_id, note.source_block_id))
+                        for note in block.language_notes
+                    )
                 )
                 resolved_blocks.append(
                     ProposedBlockResponse(
@@ -310,14 +316,67 @@ class CorrectionIssue:
 
 @dataclass(frozen=True, slots=True)
 class ProposedBlockResponse(CorrectedBlockResponse):
-    issues: tuple[CorrectionIssue, ...]
+    glossary_hints: tuple[GlossaryHintResponse, ...] | None = ()
+    language_notes: tuple[LanguageNoteResponse, ...] | None = ()
+    issues: tuple[CorrectionIssue, ...] = ()
     status: Literal['proposed'] = field(default='proposed', init=False)
 
     def __post_init__(self):
-        super(ProposedBlockResponse, self).__post_init__()
+        if not isinstance(self.block_id, str) or not self.block_id.strip():
+            raise LLMPayloadError('исправление не привязано к блоку')
+        if self.translated_text is not None and (
+            not isinstance(self.translated_text, str) or not self.translated_text.strip()
+        ):
+            raise LLMPayloadError('исправленный перевод должен быть непустым текстом или null')
+        if self.glossary_hints is not None:
+            object.__setattr__(self, 'glossary_hints', tuple(self.glossary_hints))
+            if any(not isinstance(hint, GlossaryHintResponse) for hint in self.glossary_hints):
+                raise LLMPayloadError('неверный тип исправленной словарной подсказки')
+        if self.language_notes is not None:
+            object.__setattr__(self, 'language_notes', tuple(self.language_notes))
+            if any(
+                not isinstance(note, LanguageNoteResponse) or note.source_block_id != self.block_id
+                for note in self.language_notes
+            ):
+                raise LLMPayloadError('исправленная заметка относится к чужому блоку')
         object.__setattr__(self, 'issues', tuple(self.issues))
         if not self.issues or any(not isinstance(i, CorrectionIssue) for i in self.issues):
             raise LLMPayloadError('предложение исправления требует основания')
+
+    def materialize_for(self, previous) -> ProposedBlockResponse:
+        translated_text = (
+            previous.translated_text
+            if (self.translated_text is None and previous.treatment is BlockTreatment.TRANSLATE)
+            else self.translated_text
+        )
+        glossary_hints = (
+            tuple(
+                GlossaryHintResponse(original=h.original, translation=h.translation, note=h.note)
+                for h in previous.glossary_hints
+            )
+            if self.glossary_hints is None
+            else self.glossary_hints
+        )
+        language_notes = (
+            tuple(
+                LanguageNoteResponse(
+                    source_block_id=n.block_id,
+                    original_excerpt=n.original_excerpt,
+                    note=n.note,
+                    translated_excerpt=n.translated_excerpt,
+                )
+                for n in previous.language_notes
+            )
+            if self.language_notes is None
+            else self.language_notes
+        )
+        return ProposedBlockResponse(
+            self.block_id,
+            translated_text,
+            glossary_hints,
+            language_notes,
+            self.issues,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +390,15 @@ class ChapterCorrectionV2Response(ChapterCorrectionResponse):
     def with_resolved_block_ids(self, aliases: Mapping[str, str]) -> ChapterCorrectionV2Response:
         resolved = ChapterCorrectionResponse.with_resolved_block_ids(self, aliases)
         return ChapterCorrectionV2Response(resolved.blocks)
+
+    def materialize_for(self, results: Mapping) -> ChapterCorrectionV2Response:
+        blocks = tuple(
+            b.materialize_for(results[b.block_id])
+            if isinstance(b, ProposedBlockResponse) and b.block_id in results
+            else b
+            for b in self.blocks
+        )
+        return self if blocks == self.blocks else ChapterCorrectionV2Response(blocks)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -457,6 +525,12 @@ def proposed_block_from_payload(payload):
         current = CurrentQuoteEvidence(**evidence) if kind == 'quote' else CurrentAbsenceEvidence(**evidence)
         issues.append(CorrectionIssue(item['field_path'], item['source_quote'], current,
                                       item['problem'], item['minimal_fix_reason']))
-    return ProposedBlockResponse(payload['block_id'], payload['translated_text'],
-        tuple(GlossaryHintResponse(**h) for h in payload['glossary_hints']),
-        tuple(LanguageNoteResponse(**n) for n in payload['language_notes']), tuple(issues))
+    raw_hints = payload.get('glossary_hints')
+    raw_notes = payload.get('language_notes')
+    return ProposedBlockResponse(
+        payload['block_id'],
+        payload.get('translated_text'),
+        None if raw_hints is None else tuple(GlossaryHintResponse(**h) for h in raw_hints),
+        None if raw_notes is None else tuple(LanguageNoteResponse(**n) for n in raw_notes),
+        tuple(issues),
+    )

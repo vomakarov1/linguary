@@ -447,12 +447,12 @@ def _quoted_content_plan(schema: QuotedContentPlanSchema) -> QuotedContentPlanRe
         before_you_read_evidence=tuple(HelpEvidenceResponse(**item.model_dump())
                                        for item in getattr(schema, 'before_you_read_evidence', ())),
         context_facts=tuple(QuotedContextFactResponse(
-            id=fact.id,
-            kind=fact.kind,
+            id=item.id.strip() or f"cf-{index}",
+            kind=item.kind,
             anchors=tuple(QuotedSourceAnchorResponse(**anchor.model_dump())
-                          for anchor in fact.anchors),
-            subject_anchor=QuotedSourceAnchorResponse(**fact.subject_anchor.model_dump()),
-            value=fact.value,
-            certainty=fact.certainty,
-        ) for fact in schema.context_facts),
+                          for anchor in item.anchors),
+            subject_anchor=QuotedSourceAnchorResponse(**item.subject_anchor.model_dump()),
+            value=item.value,
+            certainty=item.certainty,
+        ) for index, item in enumerate(schema.context_facts, start=1)),
     )

@@ -1133,6 +1133,251 @@ def test_resolve_quoted_anchor_resolves_repeated_quote_in_block() -> None:
     assert plan.difficulties[0].anchors[0].quote == "Wait"
 
 
+def test_validate_content_plan_attaches_local_canonical_violation_and_parses_composite_gender_notes() -> None:
+    from linguary.adapters.validation import Py3LangidDetector
+    from linguary.application.analysis_merge import (
+        content_plan_from_response,
+        glossary_context_constraints,
+        validate_content_plan,
+        validate_fact_glossary,
+    )
+    from linguary.application.llm_dto import (
+        QuotedContentPlanResponse,
+        QuotedContextFactResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+    )
+    from linguary.application.reader_text import ReaderTextError, validate_a2_summary
+    from linguary.domain import TermConcept, TermStatus, TermVariant
+    from linguary.domain.content_plan import ContextFact, RequiredPoint, SourceAnchor
+    from linguary.domain.llm_log import CallContext
+
+    aliases = {"b1": "block-uuid-1", "b2": "block-uuid-2"}
+    texts = {
+        "block-uuid-1": "First paragraph.",
+        "block-uuid-2": "Mr Wonka smiled politely.",
+    }
+    visible = {
+        "b1": "First paragraph.",
+        "b2": "Mr Wonka smiled politely.",
+    }
+    call_context = CallContext(
+        conditions_id="00000000-0000-0000-0000-000000000001",
+        stage="chapter_analysis",
+        scope_id="section-1",
+        ordered_block_ids=("block-uuid-1", "block-uuid-2"),
+        attempt_id="00000000-0000-0000-0000-000000000002",
+        generation=0,
+        assigned_model="gpt-test",
+        prompt_hash="a" * 64,
+    )
+
+    unresolved_payload = ChapterAnalysisResponse(
+        translation_instructions="Сохраняй смысл.",
+        chapter_summary="Сводка.",
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+        ),
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(
+                QuotedDifficultyResponse(
+                    id="d1",
+                    anchors=(
+                        QuotedSourceAnchorResponse(block_id="b2", quote="missing phrase"),
+                    ),
+                    owner_block_id="b2",
+                    kind="idiom",
+                    priority="critical",
+                    help_kind="explanation",
+                    required_points=(RequiredPoint("p1", "Explain phrase"),),
+                ),
+            ),
+        ),
+    )
+
+    assert (
+        content_plan_from_response(
+            unresolved_payload, aliases, texts, visible_texts_by_alias=visible
+        )
+        is None
+    )
+
+    with pytest.raises(AnalysisMergeError) as unresolved_exc:
+        validate_content_plan(
+            unresolved_payload, aliases, texts, visible_texts_by_alias=visible
+        )
+    unresolved_err = unresolved_exc.value
+    assert str(unresolved_err).startswith("цитата не разрешается однозначно в тексте блока")
+    assert "b2" in str(unresolved_err)
+    assert "«missing phrase»" in str(unresolved_err)
+    assert "—" in str(unresolved_err)
+    assert "block-uuid-2" not in str(unresolved_err)
+    assert unresolved_err.violation is not None
+    assert unresolved_err.violation.stage == "chapter_analysis"
+    assert unresolved_err.violation.scope == "local"
+    assert unresolved_err.violation.block_ids == ("block-uuid-2",)
+    verified_unresolved = unresolved_err.violation.verified(call_context)
+    assert verified_unresolved.scope == "local"
+    assert verified_unresolved.block_ids == ("block-uuid-2",)
+
+    lexical_payload = ChapterAnalysisResponse(
+        translation_instructions="Сохраняй смысл.",
+        chapter_summary="Сводка.",
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.READ_AS_IS),
+        ),
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(
+                QuotedDifficultyResponse(
+                    id="d1",
+                    anchors=(
+                        QuotedSourceAnchorResponse(block_id="b2", quote="politely"),
+                    ),
+                    owner_block_id="b2",
+                    kind="vocabulary",
+                    priority="useful",
+                    help_kind="lexical_hint",
+                    required_points=(RequiredPoint("p1", "Explain word"),),
+                ),
+            ),
+            context_facts=(
+                QuotedContextFactResponse(
+                    id="cf-1",
+                    kind="gender",
+                    anchors=(QuotedSourceAnchorResponse(block_id="b2", quote="Mr Wonka"),),
+                    subject_anchor=QuotedSourceAnchorResponse(block_id="b2", quote="Mr Wonka"),
+                    value="female",
+                    certainty="inferred",
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(AnalysisMergeError) as lexical_exc:
+        validate_content_plan(
+            lexical_payload, aliases, texts, visible_texts_by_alias=visible
+        )
+    lexical_err = lexical_exc.value
+    assert str(lexical_err).startswith(
+        "лексическая помощь требует GLOSSARY_ONLY или подтверждённый BYR"
+    )
+    assert "b2" in str(lexical_err)
+    assert "block-uuid-2" not in str(lexical_err)
+    assert lexical_err.violation is not None
+    assert lexical_err.violation.verified(call_context).scope == "local"
+    assert lexical_err.violation.verified(call_context).block_ids == ("block-uuid-2",)
+
+    concepts = (
+        TermConcept(
+            id="c1",
+            book_id="book-1",
+            type=ConceptType.PERSON,
+            canonical_source_text="Mara",
+            status=TermStatus.APPROVED,
+            note="имя собств., женский род, не склоняется",
+            variants=(TermVariant("c1", "ru", "Мара", TermStatus.APPROVED),),
+        ),
+        TermConcept(
+            id="c2",
+            book_id="book-1",
+            type=ConceptType.PERSON,
+            canonical_source_text="MR. WONKA",
+            status=TermStatus.LOCKED,
+            note="титул и фамилия, мужского рода",
+            variants=(TermVariant("c2", "ru", "мистер Вонка", TermStatus.LOCKED),),
+        ),
+        TermConcept(
+            id="c3",
+            book_id="book-1",
+            type=ConceptType.TERM,
+            canonical_source_text="It-Entity",
+            status=TermStatus.APPROVED,
+            note="сущ., средний род",
+            variants=(TermVariant("c3", "ru", "Существо", TermStatus.APPROVED),),
+        ),
+        TermConcept(
+            id="c4",
+            book_id="book-1",
+            type=ConceptType.PERSON,
+            canonical_source_text="SuggestedHero",
+            status=TermStatus.SUGGESTED,
+            note="female",
+            variants=(TermVariant("c4", "ru", "Героиня", TermStatus.SUGGESTED),),
+        ),
+    )
+    constraints = glossary_context_constraints(concepts)
+    assert constraints == {
+        "mara": {"gender": "female"},
+        "mr wonka": {"gender": "male"},
+        "it-entity": {"gender": "neuter"},
+    }
+
+    valid_plan_payload = replace(
+        lexical_payload,
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.GLOSSARY_ONLY),
+        ),
+    )
+    resolved_plan = validate_content_plan(
+        valid_plan_payload, aliases, texts, visible_texts_by_alias=visible
+    )
+    assert resolved_plan is not None
+
+    with pytest.raises(AnalysisMergeError) as fact_exc:
+        validate_fact_glossary(
+            resolved_plan,
+            {"MR. WONKA": {"gender": "male"}},
+            aliases_by_block_id={"block-uuid-2": "b2"},
+        )
+    fact_err = fact_exc.value
+    assert str(fact_err).startswith(
+        "контекстная атрибуция противоречит обязательному решению глоссария"
+    )
+    assert "b2" in str(fact_err)
+    assert "block-uuid-2" not in str(fact_err)
+    assert fact_err.violation is not None
+    assert fact_err.violation.verified(call_context).scope == "local"
+    assert fact_err.violation.verified(call_context).block_ids == ("block-uuid-2",)
+
+    matching_russian_gender_plan = replace(
+        resolved_plan,
+        context_facts=(
+            ContextFact(
+                id="cf-ok",
+                kind="gender",
+                anchors=(SourceAnchor("block-uuid-2", 0, 8, "Mr Wonka"),),
+                subject_anchor=SourceAnchor("block-uuid-2", 0, 8, "Mr Wonka"),
+                value="мужской род",
+                certainty="explicit",
+            ),
+        ),
+    )
+    validate_fact_glossary(matching_russian_gender_plan, {"MR. WONKA": {"gender": "male"}})
+
+    detector = Py3LangidDetector()
+    with pytest.raises(ReaderTextError) as a2_exc:
+        validate_a2_summary(
+            "Mr Wonka smiled politely.\n\nStill in English instead of Russian.",
+            source_texts=("Mr Wonka smiled politely.",),
+            source_language="en",
+            language_detector=detector,
+        )
+    a2_err = a2_exc.value
+    assert a2_err.reason_code == "a2_summary_requires_parallel_russian"
+    assert a2_err.violation is not None
+    assert a2_err.violation.rule_code == "a2_summary_requires_parallel_russian"
+    assert "абзац 2" in str(a2_err)
+    assert "EN\\nRU" in str(a2_err)
+
+
+
 
 
 

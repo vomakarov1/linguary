@@ -364,3 +364,104 @@ def test_pronunciation_candidate_schema_omits_form_and_falls_back_to_anchor_quot
     with pytest.raises(ValidationError):
         PronunciationCandidateSchema.model_validate(raw_candidate | {'form': 'other'})
 
+
+def test_v5_schema_omits_constant_fields_while_v1_schema_unchanged() -> None:
+    import hashlib
+    import json
+    from linguary.adapters.llm.payloads import parse_payload
+
+    for name_policy_version in (None, 1):
+        v5_model = schema_for(
+            LLMResponseKind.CHAPTER_ANALYSIS,
+            contract_version=5,
+            name_translation_policy_version=name_policy_version,
+        )
+        v5_schema = strict_json_schema(v5_model)
+        objects = [
+            node
+            for node in _walk(v5_schema)
+            if isinstance(node, dict) and node.get("type") == "object"
+        ]
+        assert objects
+        assert all(node.get("additionalProperties") is False for node in objects)
+        assert all(set(node["required"]) == set(node["properties"]) for node in objects)
+
+        plan_def = v5_schema["$defs"]["QuotedContentPlanSchema"]
+        assert "version" not in plan_def["properties"]
+        assert "profile" not in plan_def["properties"]
+        assert "version" not in plan_def["required"]
+        assert "profile" not in plan_def["required"]
+        assert set(plan_def["properties"]) == {"difficulties", "context_facts"}
+
+        fact_def = v5_schema["$defs"]["QuotedContextFactSchema"]
+        assert "id" not in fact_def["properties"]
+        assert "id" not in fact_def["required"]
+        assert set(fact_def["properties"]) == {
+            "kind",
+            "anchors",
+            "subject_anchor",
+            "value",
+            "certainty",
+        }
+
+    v3_schema = strict_json_schema(
+        schema_for(LLMResponseKind.CHAPTER_ANALYSIS, contract_version=3)
+    )
+    assert {"version", "profile"} <= set(v3_schema["$defs"]["ContentPlanV3Schema"]["properties"])
+    assert "id" in v3_schema["$defs"]["ContextFactSchema"]["properties"]
+
+    raw_v5 = analysis_payload(
+        content_plan={
+            "difficulties": [
+                {
+                    "id": "d1",
+                    "anchors": [{"block_id": "block-1", "quote": "truth"}],
+                    "owner_block_id": "block-1",
+                    "kind": "vocabulary",
+                    "priority": "useful",
+                    "help_kind": "explanation",
+                    "required_points": [{"id": "p1", "description": "Explain word"}],
+                }
+            ],
+            "context_facts": [
+                {
+                    "kind": "speaker",
+                    "anchors": [{"block_id": "block-1", "quote": "Mr. Bennet"}],
+                    "subject_anchor": {"block_id": "block-1", "quote": "Mr. Bennet"},
+                    "value": "Mr. Bennet",
+                    "certainty": "explicit",
+                },
+                {
+                    "id": "   ",
+                    "kind": "gender",
+                    "anchors": [{"block_id": "block-2", "quote": "Mr. Bennet"}],
+                    "subject_anchor": {"block_id": "block-2", "quote": "Mr. Bennet"},
+                    "value": "male",
+                    "certainty": "inferred",
+                },
+            ],
+        }
+    )
+    parsed = parse_payload(
+        LLMResponseKind.CHAPTER_ANALYSIS,
+        as_content(raw_v5),
+        contract_version=5,
+    )
+    assert parsed.content_plan is not None
+    assert parsed.content_plan.version == 3
+    assert parsed.content_plan.profile == "content-plan-v3"
+    assert [f.id for f in parsed.content_plan.context_facts] == ["cf-1", "cf-2"]
+
+    expected_v1 = {
+        "chapter_analysis": "9c354997070f86d64b9ec7fb9ef3d741b76f7f2a08c84bf6bb8eccf9c9622b88",
+        "translation_result": "85cdddc508275c54c92f92cc5e39b7f9a5cbb0a0388051c093d7ad5329ba25f9",
+        "quality_review": "c84bbec81eb8da5eef55c2ea704d74d116253b2557d9a93d78e03c856934f22e",
+    }
+    for kind_name, expected_sha in expected_v1.items():
+        wire = strict_json_schema(schema_for(LLMResponseKind(kind_name)))
+        actual_sha = hashlib.sha256(
+            json.dumps(wire, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        assert actual_sha == expected_sha
+
+
