@@ -124,6 +124,8 @@ class OpenAICompatibleLLMClient(LLMClient):
             payload = parse_payload(request.kind, content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=truncated)
             if request.kind == LLMResponseKind.CHAPTER_CORRECTION and request.block_aliases:
                 payload = payload.with_resolved_block_ids(dict(request.block_aliases))
+            if request.kind == LLMResponseKind.CHAPTER_CORRECTION_REVIEW and request.correction_candidate_refs:
+                payload = payload.with_resolved_proposal_shas(request.correction_candidate_refs)
             if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
                 try:
                     payload.validate_coverage(request.correction_candidate_refs
@@ -131,6 +133,7 @@ class OpenAICompatibleLLMClient(LLMClient):
                 except LLMPayloadError:
                     raise LLMResponseFormatError(
                         'ответ исправления не покрывает переданные блоки',
+                        truncated=truncated,
                         violation=Violation('response_coverage', request.kind.value,
                                             safe_message='Ответ исправления не покрывает переданные блоки'),
                     ) from None
@@ -254,7 +257,7 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
             raise LLMConfigurationError('неверный общий предел выходных токенов')
         body['max_completion_tokens'] = request.max_completion_tokens
     elif settings.max_output_tokens is not None:
-        body["max_tokens"] = settings.max_output_tokens
+        body["max_completion_tokens"] = settings.max_output_tokens
     if settings.temperature is not None:
         body["temperature"] = settings.temperature
     return body

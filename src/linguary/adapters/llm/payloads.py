@@ -259,8 +259,9 @@ def parse_payload(
 
 
 def _pronunciation_candidate(item: PronunciationCandidateSchema) -> PronunciationCandidateResponse:
+    form = item.form if item.form is not None else item.anchor.quote
     return PronunciationCandidateResponse(
-        anchor=PronunciationAnchorResponse(**item.anchor.model_dump()), form=item.form,
+        anchor=PronunciationAnchorResponse(**item.anchor.model_dump()), form=form,
         context=PronunciationContextResponse(**item.context.model_dump()), selection_reason=item.selection_reason,
     )
 

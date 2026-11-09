@@ -279,7 +279,8 @@ async def test_request_asks_provider_for_structured_output() -> None:
     assert [message["role"] for message in body["messages"]] == ["system", "user"]
     assert body["messages"][0]["content"] == "Переводи"
     assert body["messages"][1]["content"] == "block-1: text"
-    assert body["max_tokens"] == 4096
+    assert body["max_completion_tokens"] == 4096
+    assert "max_tokens" not in body
     assert body["temperature"] == 0.2
     schema = body["response_format"]["json_schema"]
     assert body["response_format"]["type"] == "json_schema"
@@ -892,5 +893,85 @@ def test_openai_client_sends_assistant_message_before_user_repair_instruction() 
         {"role": "user", "content": "And ensure all blocks are present"},
     ]
     assert OpenAICompatibleLLMClient._build_messages(request) == body["messages"]
+
+
+def test_global_max_output_tokens_sent_as_max_completion_tokens() -> None:
+    cfg = LLMSettings(
+        provider="openai",
+        api_key="secret",
+        model="gpt-4o",
+        max_output_tokens=2048,
+    )
+    request = LLMRequest.for_translation(
+        instructions="Translate.",
+        input_text="b1: text",
+    )
+
+    body = openai_compatible._body(request, settings=cfg)
+
+    assert body["max_completion_tokens"] == 2048
+    assert "max_tokens" not in body
+
+
+async def test_response_coverage_error_preserves_truncated_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linguary.application.correction_dto import ChapterCorrectionResponse, UnchangedBlockResponse
+    from linguary.application.ports.llm import LLMResponseKind
+
+    sha = "a" * 64
+    review_content = json.dumps({
+        "candidates": [{
+            "candidate_id": "c1",
+            "verdict": "confirmed",
+            "error_supported": True,
+            "evidence_valid": True,
+            "minimal": True,
+            "no_semantic_loss": True,
+            "reason": "Supported",
+        }]
+    })
+    review_client = client_over(responding(completion(review_content)))
+    try:
+        review_res = await review_client.generate(
+            LLMRequest(
+                kind=LLMResponseKind.CHAPTER_CORRECTION_REVIEW,
+                instructions="Review",
+                input_text="c1",
+                ordered_block_ids=("c1",),
+                correction_candidate_refs=(("c1", sha),),
+            )
+        )
+        assert review_res.payload.candidates[0].proposal_sha256 == sha
+    finally:
+        await review_client.aclose()
+
+    monkeypatch.setattr(
+        openai_compatible,
+        "parse_payload",
+        lambda *args, **kwargs: ChapterCorrectionResponse((UnchangedBlockResponse("b1"),)),
+    )
+    truncated_doc = completion(
+        '{"blocks": [{"block_id": "b1", "status": "unchanged"}]}',
+        choices=[{
+            "message": {"content": '{"blocks": [{"block_id": "b1", "status": "unchanged"}]}'},
+            "finish_reason": "length",
+        }],
+    )
+    client = client_over(responding(truncated_doc))
+    try:
+        with pytest.raises(LLMResponseFormatError) as caught:
+            await client.generate(
+                LLMRequest(
+                    kind=LLMResponseKind.CHAPTER_CORRECTION,
+                    instructions="Correct",
+                    input_text="b1, b2",
+                    ordered_block_ids=("b1", "b2"),
+                )
+            )
+        assert caught.value.truncated is True
+        assert caught.value.violation is not None
+        assert caught.value.violation.rule_code == "response_coverage"
+    finally:
+        await client.aclose()
+
 
 
