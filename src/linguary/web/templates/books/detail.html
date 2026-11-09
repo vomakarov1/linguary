@@ -31,7 +31,29 @@
   {% elif data.book.status == "IMPORTED" %}
     <p>Импорт завершён. Следующий шаг — анализ глав через LLM.</p>
     {% if llm_ready %}
+      {% set init_level = data.conditions.reader_level or default_reader_level|default('b2') %}
       <form class="actions" method="post" action="/books/{{ data.book.id }}/analyze">
+        <label>Уровень английского
+          <select name="reader_level">
+            <option value="a2" {% if init_level == 'a2' %}selected{% endif %}>A2</option>
+            <option value="b1" {% if init_level == 'b1' %}selected{% endif %}>B1</option>
+            <option value="b2" {% if init_level == 'b2' %}selected{% endif %}>B2</option>
+            <option value="c1" {% if init_level == 'c1' %}selected{% endif %}>C1</option>
+          </select>
+        </label>
+        <label><input type="checkbox" name="english_help" value="true" {% if data.conditions.english_help %}checked{% endif %}> Пояснять сложные места простым английским</label>
+        {% if data.book.source_language == 'en' %}
+          <label><input type="checkbox" name="pronunciation_help_enabled" value="true" {% if data.conditions.pronunciation_help_enabled %}checked{% endif %}
+            onchange="const variant = this.form.querySelector('[data-pronunciation-variant]'); variant.closest('label').hidden = !this.checked; variant.required = this.checked; if (this.checked) { variant.name = 'pronunciation_variant'; } else { variant.removeAttribute('name'); }"> Помогать с произношением</label>
+          <label {% if not data.conditions.pronunciation_help_enabled %}hidden{% endif %}>Вариант английского
+            <select data-pronunciation-variant {% if data.conditions.pronunciation_help_enabled %}name="pronunciation_variant" required{% endif %}>
+              <option value="" {% if not data.conditions.pronunciation_variant %}selected{% endif %}>Выберите вариант</option>
+              <option value="uk" {% if data.conditions.pronunciation_variant == 'uk' %}selected{% endif %}>Британский (UK)</option>
+              <option value="us" {% if data.conditions.pronunciation_variant == 'us' %}selected{% endif %}>Американский (US)</option>
+            </select>
+          </label>
+        {% endif %}
+        <label><input type="checkbox" name="seed_first_chapter" value="true" {% if data.conditions.seed_first_chapter or default_seed_first_chapter|default(false) %}checked{% endif %}> Сначала проанализировать первую главу</label>
         <button type="submit">Начать анализ</button>
       </form>
     {% else %}
@@ -42,7 +64,9 @@
       </div>
     {% endif %}
   {% elif data.book.status == "ANALYZING" %}
-    {% if stalled %}
+    {% if data.is_paused %}
+      <p role="status">Анализ поставлен на паузу. Новые задачи не берутся из очереди до возобновления.</p>
+    {% elif stalled %}
       <p>Анализ остановлен ошибкой. Устраните причину и повторите задачу: анализ продолжится с той же главы.</p>
     {% else %}
       <p>Анализ глав выполняется в фоне, страница обновится автоматически.</p>
@@ -56,7 +80,9 @@
       <button type="submit">Начать обработку</button>
     </form>
   {% elif data.book.status == "PROCESSING" %}
-    {% if stalled %}
+    {% if data.is_paused %}
+      <p role="status">Обработка поставлена на паузу. Ожидающие задачи сохранены и продолжат выполнение после возобновления.</p>
+    {% elif stalled %}
       <p>Обработка остановлена ошибкой. Устраните причину и повторите неуспешные задачи.</p>
     {% else %}
       <p>Обработка выполняется в фоне, страница обновится автоматически.</p>
@@ -68,6 +94,24 @@
   {% elif data.book.status == "FAILED" %}
     <p>Импорт не удался: книгу из этого файла обработать нельзя. Причина указана ниже.</p>
     <a class="button-link" href="/books">Загрузить другой файл</a>
+  {% endif %}
+  {% if data.pause_requested %}
+    {% if not data.is_paused %}
+      <p role="status">Запрошена пауза: текущие обращения завершатся штатно, новые задачи не запускаются.</p>
+    {% endif %}
+    <form class="actions" method="post" action="/books/{{ data.book.id }}/resume">
+      <button type="submit">Возобновить очередь</button>
+    </form>
+  {% elif data.conditions.conditions_id and data.book.status in ("IMPORTED", "ANALYZING", "GLOSSARY_REVIEW", "READY_TO_PROCESS", "PROCESSING") %}
+    <form class="actions" method="post" action="/books/{{ data.book.id }}/pause">
+      <button type="submit">Поставить на паузу</button>
+    </form>
+  {% endif %}
+  {% if data.stage_estimate and data.stage_estimate.blocks_count %}
+    <p>Оценка этапа: глав — {{ data.stage_estimate.sections_count }}, блоков — {{ data.stage_estimate.blocks_count }}, ~{{ data.stage_estimate.input_tokens }} входных / ~{{ data.stage_estimate.output_tokens }} выходных токенов{% if data.stage_estimate.estimated_cost_usd %} (~{{ data.stage_estimate.estimated_cost_usd }} USD){% endif %}.</p>
+  {% endif %}
+  {% if data.pending_corrections %}
+    <p role="status">Доступны предложения исправлений для добровольного просмотра: {{ data.pending_corrections }}. <a href="/books/{{ data.book.id }}/result?filter=pending_corrections">Показать блоки с предложениями</a></p>
   {% endif %}
   {% if data.progress.running_chapters | length == 1 %}
     {% set chapter = data.progress.running_chapters[0] %}
@@ -91,7 +135,7 @@
   {% if data.progress.failures %}
     <h3>Ошибки</h3>
     {% for failure in data.progress.failures %}
-      {% if failure.is_retryable and data.recovery.reason != 'unknown' %}
+      {% if failure.is_retryable and data.recovery.reason not in ('unknown', 'limit') %}
         <form class="failure" method="post" action="/tasks/{{ failure.task_id }}/retry">
           <span>{{ failure.task_type_label }}: {{ failure.message }}</span>
           {% if failure.error_type == "ConfigurationError" %}

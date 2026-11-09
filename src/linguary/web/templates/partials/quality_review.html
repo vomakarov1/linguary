@@ -56,10 +56,11 @@
   <details><summary>{% if quality_ui.llm_ready %}Начать анализ заново{% else %}Повторный анализ недоступен{% endif %}</summary>
     <p>Новый анализ заменит текущий анализ и текущие результаты обработки. Архив версий сохранится. Будут закреплены новые условия; новые запросы оплачиваются отдельно.</p>
     {% if quality_ui.llm_ready %}
+      {% set reanalyze_level = data.conditions.reader_level or default_reader_level|default('b2') %}
       <form method="post" action="/books/{{ quality_book_id }}/conditions">
         <input type="hidden" name="action" value="reanalyze">
-      <label><input type="checkbox" name="english_help" value="true"> Пояснять сложные места простым английским</label>
-      <label>Уровень английского <select name="reader_level"><option value="a2">A2</option><option value="b1">B1</option><option value="b2" selected>B2</option><option value="c1">C1</option></select></label>
+      <label><input type="checkbox" name="english_help" value="true" {% if data.conditions.english_help %}checked{% endif %}> Пояснять сложные места простым английским</label>
+      <label>Уровень английского <select name="reader_level"><option value="a2" {% if reanalyze_level == 'a2' %}selected{% endif %}>A2</option><option value="b1" {% if reanalyze_level == 'b1' %}selected{% endif %}>B1</option><option value="b2" {% if reanalyze_level == 'b2' %}selected{% endif %}>B2</option><option value="c1" {% if reanalyze_level == 'c1' %}selected{% endif %}>C1</option></select></label>
         {% if data.conditions.source_language == 'en' %}
           <label><input type="checkbox" name="pronunciation_help_enabled" value="true" {% if data.conditions.pronunciation_help_enabled %}checked{% endif %}
             onchange="const variant = this.form.querySelector('[data-pronunciation-variant]'); variant.closest('label').hidden = !this.checked; variant.required = this.checked; if (this.checked) { variant.name = 'pronunciation_variant'; } else { variant.removeAttribute('name'); }"> Помогать с произношением</label>
@@ -71,6 +72,7 @@
             </select>
           </label>
         {% endif %}
+        <label><input type="checkbox" name="seed_first_chapter" value="true" {% if data.conditions.seed_first_chapter %}checked{% endif %}> Сначала проанализировать первую главу</label>
         <input type="hidden" name="expected_revision" value="{{ data.conditions.revision or 0 }}">
         <input type="hidden" name="settings_revision" value="{{ quality_ui.settings_revision }}">
         <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю новый анализ</label>
@@ -91,7 +93,17 @@
       </form>
     </details>
   {% endfor %}
-  {% if data.recovery.can_retry and data.recovery.reason != 'unknown' %}
+  {% for root in data.recovery.roots|default([]) if root.can_restart %}
+    <details><summary>Перезапустить незавершённую часть главы</summary>
+      <p>Принятые блоки сохранятся; новый запуск обработает только оставшиеся области.</p>
+      <form method="post" action="/books/{{ quality_book_id }}/recovery/{{ root.root_id }}/restart">
+        <input type="hidden" name="expected_generation" value="{{ root.generation }}">
+        <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю перезапуск незавершённой части</label>
+        <button type="submit">Перезапустить перевод области</button>
+      </form>
+    </details>
+  {% endfor %}
+  {% if data.recovery.can_retry and data.recovery.reason not in ('unknown', 'limit') %}
     {% for task in quality_ui.retry_tasks %}<form method="post" action="/tasks/{{ task.id }}/retry"><button type="submit">Повторить: {{ task.label }}</button></form>{% endfor %}
   {% endif %}
   {% if quality_ui.forms and quality_ui.forms[0].routes %}

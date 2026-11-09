@@ -37,9 +37,15 @@ def pronunciation_sources(application: CurrentApplication) -> PlainTextResponse:
 
 @router.get("/books/{book_id}/result", response_model=BookResultResponse)
 def get_book_result(
-    request: Request, application: CurrentApplication, book_id: str
+    request: Request,
+    application: CurrentApplication,
+    book_id: str,
+    filter_param: str | None = Query(default=None, alias="filter"),
 ) -> BookResultResponse | object:
     """Original text and saved model aids by book blocks."""
+    result_filter = (
+        "pending_corrections" if filter_param == "pending_corrections" else None
+    )
     summary = book_result(application.unit_of_work, book_id)
     response = BookResultResponse.of_result(summary)
     header_only = _wants_result_header_fragment(request)
@@ -51,6 +57,41 @@ def get_book_result(
                     current = tasks.get(member.block_id)
                     if current is not None:
                         member.regeneration_task = TaskResponse.of_task(current)
+        if result_filter == "pending_corrections":
+            filtered_chapters = []
+            for chapter in response.chapters:
+                filtered_groups = tuple(
+                    group
+                    for group in chapter.groups
+                    if any(
+                        candidate.get("state") == "awaiting_human"
+                        for member in group.member_blocks
+                        for candidate in member.correction_candidates
+                    )
+                )
+                if not filtered_groups:
+                    continue
+                kept_member_ids = {
+                    member_id
+                    for group in filtered_groups
+                    for member_id in group.member_block_ids
+                }
+                filtered_blocks = tuple(
+                    block
+                    for block in chapter.blocks
+                    if block.block_id in kept_member_ids
+                )
+                filtered_chapters.append(
+                    chapter.model_copy(
+                        update={
+                            "groups": filtered_groups,
+                            "blocks": filtered_blocks,
+                        }
+                    )
+                )
+            response = response.model_copy(
+                update={"chapters": tuple(filtered_chapters)}
+            )
     export_task = next((task for task in summary.tasks
                         if task.task_type is TaskType.EXPORT_BOOK
                         and task.status is not TaskStatus.SUCCEEDED), None)
@@ -64,12 +105,18 @@ def get_book_result(
             data=response,
             export_task=export_task_response,
             quality_ui=quality_page_context(request, application, book_id, tasks=summary.tasks),
+            result_filter=result_filter,
         )
     if (
         wants_html(request)
         and request.headers.get("x-linguary-fragment", "").lower() == "result-groups"
     ):
-        return render(request, "partials/result_groups.html", data=response)
+        return render(
+            request,
+            "partials/result_groups.html",
+            data=response,
+            result_filter=result_filter,
+        )
     if wants_html(request):
         return render(
             request,
@@ -78,6 +125,7 @@ def get_book_result(
             data=response,
             export_task=export_task_response,
             quality_ui=quality_page_context(request, application, book_id, tasks=summary.tasks),
+            result_filter=result_filter,
         )
     return response
 
@@ -217,11 +265,21 @@ def _result_block_responses(
     task: ProcessingTask | None = None,
 ) -> tuple[ResultGroupResponse, ...]:
     """Build selected result groups while taking one book snapshot and pronunciation projection."""
-    try:
-        snapshot = book_result(application.unit_of_work, book_id, include_quality=False)
-    except TypeError:
-        snapshot = book_result(application.unit_of_work, book_id)
     requested_ids = tuple(dict.fromkeys(block_ids))
+    try:
+        snapshot = book_result(
+            application.unit_of_work,
+            book_id,
+            include_quality=False,
+            block_ids=requested_ids,
+        )
+    except TypeError:
+        try:
+            snapshot = book_result(
+                application.unit_of_work, book_id, include_quality=False
+            )
+        except TypeError:
+            snapshot = book_result(application.unit_of_work, book_id)
     requested_set = set(requested_ids)
     selected_groups = []
     found_ids: set[str] = set()
@@ -241,10 +299,20 @@ def _result_block_responses(
     if task is not None and task.status is not TaskStatus.SUCCEEDED:
         tasks[task.scope_id] = task
     summaries = tuple(block for chapter in snapshot.chapters for block in chapter.blocks)
-    pronunciations = project_pronunciations(
-        tuple(summary.block for summary in summaries),
-        {summary.block.id: summary.result for summary in summaries if summary.result is not None},
-    )
+    blocks_seq = tuple(summary.block for summary in summaries)
+    results_map = {
+        summary.block.id: summary.result
+        for summary in summaries
+        if summary.result is not None
+    }
+    try:
+        pronunciations = project_pronunciations(
+            blocks_seq,
+            results_map,
+            initial_seen=getattr(snapshot, "prior_pronunciation_hints", None),
+        )
+    except TypeError:
+        pronunciations = project_pronunciations(blocks_seq, results_map)
     return tuple(
         ResultGroupResponse.of_group(group, tasks=tasks, block_id=block_id,
                                       source_language=snapshot.book.source_language,

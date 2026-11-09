@@ -148,3 +148,208 @@ def test_quality_monitor_counts_retries_across_all_pipeline_task_types():
     ]
     assert ctx["retry_tasks"][-1]["label"] == "Вычитка качества"
 
+
+def test_quality_page_context_skips_preview_when_no_routes_and_pause_preserves_pending_tasks(tmp_path):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+    from linguary.adapters.runtime.task_store import SqliteTaskStore
+    from linguary.application.book_overview import book_overview
+    from linguary.application.ports.persistence import BookRecord
+    from linguary.application.use_cases.pause_book import PauseBook, PauseBookCommand, ResumeBook, ResumeBookCommand
+    from linguary.application.use_cases.reset_processing import ResetProcessing, ResetProcessingCommand
+    from linguary.composition.migrations import apply_migrations
+    from linguary.domain import (
+        BookMetadata,
+        BookStatus,
+        CanonicalDocument,
+        DocumentBlock,
+        DocumentSection,
+        BlockType,
+        SourceReference,
+        SupportStatus,
+        TaskIdentity,
+        TaskStatus,
+        TaskType,
+    )
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.web.routes.books import _needs_refresh
+    from linguary.web.routes.quality import quality_page_context
+    from linguary.web.schemas import BookDetailResponse
+
+    db_path = tmp_path / "pause_and_quality.db"
+    apply_migrations(db_path)
+    engine = create_database_engine(db_path)
+    try:
+        uow = SqlAlchemyUnitOfWork.for_engine(engine)
+        store = SqliteTaskStore.for_engine(engine)
+
+        now = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+        for bid in ("book-paused", "book-other"):
+            epub_path = tmp_path / f"{bid}.epub"
+            epub_path.write_bytes(b"synthetic")
+            section = DocumentSection(
+                id=f"{bid}:s1",
+                document_id=bid,
+                order=0,
+                title="Chapter 1",
+                source_resource_path=f"{bid}-ch1.xhtml",
+                blocks=(
+                    DocumentBlock.create(
+                        document_id=bid,
+                        section_id=f"{bid}:s1",
+                        order=0,
+                        type=BlockType.PARAGRAPH,
+                        text="Hello world paragraph text for estimation.",
+                        source_reference=SourceReference(
+                            resource_path=f"{bid}-ch1.xhtml",
+                            structural_path="/body/p[1]",
+                        ),
+                        support_status=SupportStatus.SUPPORTED,
+                    ),
+                ),
+            )
+            doc = CanonicalDocument(
+                id=bid,
+                source_language="en",
+                target_language="ru",
+                metadata=BookMetadata(title=f"Title {bid}", authors=("Author",)),
+                sections=(section,),
+            )
+            with uow.transaction() as tx:
+                tx.books.add(
+                    BookRecord(
+                        id=bid,
+                        source_epub_path=str(epub_path),
+                        source_language="en",
+                        target_language="ru",
+                        status=BookStatus.PROCESSING,
+                        metadata=doc.metadata,
+                        created_at=now,
+                    )
+                )
+                tx.documents.save(doc)
+                tx.work.add_conditions(
+                    BookConditions(
+                        id=str(uuid4()),
+                        book_id=bid,
+                        revision=1,
+                        schema_version=1,
+                        payload={
+                            "schema_version": 1,
+                            "reader_level": "b2",
+                            "english_help": False,
+                            "profile": "legacy-v1",
+                            "models": {"analysis": "m1", "processing": "m1"},
+                            "versions": {"validators": 1},
+                        },
+                        reproducibility="complete",
+                        created_at=now,
+                    )
+                )
+
+        paused_task = store.enqueue(
+            TaskIdentity(
+                book_id="book-paused",
+                task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+                scope_id="book-paused:s1",
+            )
+        )
+        other_task = store.enqueue(
+            TaskIdentity(
+                book_id="book-other",
+                task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+                scope_id="book-other:s1",
+            )
+        )
+
+        pause_uc = PauseBook(unit_of_work=uow)
+        resume_uc = ResumeBook(unit_of_work=uow)
+        pause_result = pause_uc(PauseBookCommand(book_id="book-paused"))
+        assert pause_result.pause_requested is True
+        assert pause_result.is_paused is True
+
+        # Claiming skips the paused book while preserving its PENDING status, and claims the other book.
+        claimed = store.claim_next_pending()
+        assert claimed is not None and claimed.id == other_task.id
+        assert store.claim_next_pending() is None
+        with uow.read_transaction() as tx:
+            stored_paused = tx.tasks.get(paused_task.id)
+            assert stored_paused is not None and stored_paused.status is TaskStatus.PENDING
+
+        overview = book_overview(
+            uow,
+            "book-paused",
+            input_price_per_mtok=1.0,
+            output_price_per_mtok=2.0,
+        )
+        assert overview.pause_requested is True
+        assert overview.is_paused is True
+        assert set(overview.stage_estimate) == {
+            "stage",
+            "sections_count",
+            "blocks_count",
+            "characters_count",
+            "input_tokens",
+            "output_tokens",
+            "estimated_cost_usd",
+        }
+        assert overview.stage_estimate["estimated_cost_usd"] is not None
+        detail_response = BookDetailResponse.of_overview(overview)
+        assert detail_response.is_paused is True
+        assert _needs_refresh(detail_response) is False
+
+        preview_called = False
+
+        def fail_preview(book_id, scope="all"):
+            nonlocal preview_called
+            preview_called = True
+            raise AssertionError("preview must not be called when routes is empty")
+
+        tx_opened = 0
+
+        class _CountingUoW:
+            def read_transaction(self):
+                nonlocal tx_opened
+                tx_opened += 1
+                return uow.read_transaction()
+
+            def transaction(self):
+                nonlocal tx_opened
+                tx_opened += 1
+                return uow.transaction()
+
+        app = SimpleNamespace(
+            unit_of_work=_CountingUoW(),
+            runtime_settings=SimpleNamespace(revision=1),
+            settings=SimpleNamespace(llm=SimpleNamespace(is_ready=True)),
+            quality_review=SimpleNamespace(preview=fail_preview, routes={}),
+        )
+        request = SimpleNamespace(
+            headers={},
+            query_params={},
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+        ctx = quality_page_context(request, app, "book-paused", overview=overview)
+        assert preview_called is False
+        assert tx_opened == 0
+        assert ctx["forms"] == []
+
+        # Resume unblocks claiming the preserved pending task.
+        resume_result = resume_uc(ResumeBookCommand(book_id="book-paused"))
+        assert resume_result.pause_requested is False
+        assert resume_result.is_paused is False
+        claimed_after_resume = store.claim_next_pending()
+        assert claimed_after_resume is not None and claimed_after_resume.id == paused_task.id
+
+        # Pause again and verify ResetProcessing clears the pause binding.
+        pause_uc(PauseBookCommand(book_id="book-paused"))
+        ResetProcessing(unit_of_work=uow)(ResetProcessingCommand(book_id="book-paused"))
+        with uow.read_transaction() as tx:
+            assert tx.work.is_book_paused("book-paused") is False
+    finally:
+        engine.dispose()
+
+

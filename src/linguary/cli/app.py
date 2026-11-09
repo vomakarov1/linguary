@@ -27,12 +27,18 @@ from linguary.adapters.config import (
     SettingsError,
     load_settings,
 )
+from linguary.application.book_conditions import ConditionsError
+from linguary.application.book_overview import BookNotFoundError, book_overview
 from linguary.application.errors import ApplicationError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.export_book import ExportBookCommand, ExportMode
+from linguary.application.use_cases.pause_book import PauseBookCommand, ResumeBookCommand
 from linguary.application.use_cases.register_book import RegisterBookCommand
+from linguary.application.use_cases.restart_translation import RestartTranslationCommand
 from linguary.application.use_cases.retry_task import RetryTaskCommand
 from linguary.composition import build_application, drain_tasks, run_worker
+from linguary.domain import BookStatus, TaskStatus, TaskType
+from linguary.domain.book_conditions import WorkStateError
 from linguary.web.schemas import EpubCheckConfigResponse, LLMConfigResponse
 
 
@@ -88,6 +94,30 @@ def _parser() -> argparse.ArgumentParser:
         "analyze", parents=[reader_parent], help="enqueue book analysis tasks"
     )
     analyze.add_argument("book_id")
+    analyze.add_argument(
+        "--english-help",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable or disable simple English explanations",
+    )
+    analyze.add_argument(
+        "--pronunciation-help",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable or disable pronunciation hints",
+    )
+    analyze.add_argument(
+        "--pronunciation-variant",
+        choices=["uk", "us"],
+        default=None,
+        help="pronunciation variant when pronunciation help is enabled (uk or us)",
+    )
+    analyze.add_argument(
+        "--seed-first-chapter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="analyze the first substantive chapter before enqueuing remaining chapters",
+    )
     analyze.set_defaults(handler=_analyze)
 
     process = subparsers.add_parser(
@@ -95,6 +125,33 @@ def _parser() -> argparse.ArgumentParser:
     )
     process.add_argument("book_id")
     process.set_defaults(handler=_process)
+
+    pause = subparsers.add_parser(
+        "pause", parents=[reader_parent], help="pause claiming queued tasks for a book"
+    )
+    pause.add_argument("book_id")
+    pause.set_defaults(handler=_pause)
+
+    resume = subparsers.add_parser(
+        "resume", parents=[reader_parent], help="resume claiming queued tasks for a book"
+    )
+    resume.add_argument("book_id")
+    resume.set_defaults(handler=_resume)
+
+    restart_translation = subparsers.add_parser(
+        "restart-translation",
+        parents=[reader_parent],
+        help="restart unfinished scopes of a translation recovery root",
+    )
+    restart_translation.add_argument("book_id")
+    restart_translation.add_argument("root_id")
+    restart_translation.add_argument(
+        "--expected-generation",
+        type=int,
+        required=True,
+        help="expected generation of the recovery root",
+    )
+    restart_translation.set_defaults(handler=_restart_translation)
 
     worker = subparsers.add_parser(
         "worker", parents=[reader_parent], help="execute local task queue"
@@ -217,13 +274,145 @@ def _import(args: argparse.Namespace) -> int:
 
 
 def _analyze(args: argparse.Namespace) -> int:
-    """Verify LLM settings and enqueue the initial analysis task."""
+    """Verify LLM settings, optionally pin initial conditions, and enqueue analysis."""
     application = _application(args)
     try:
         application.settings.llm.ensure_ready()
+        reader_level = getattr(args, "reader_level", None)
+        english_help = getattr(args, "english_help", None)
+        pronunciation_help = getattr(args, "pronunciation_help", None)
+        pronunciation_variant = getattr(args, "pronunciation_variant", None)
+        seed_first_chapter = getattr(args, "seed_first_chapter", None)
+        if any(
+            value is not None
+            for value in (
+                reader_level,
+                english_help,
+                pronunciation_help,
+                pronunciation_variant,
+                seed_first_chapter,
+            )
+        ):
+            try:
+                with application.unit_of_work.transaction() as tx:
+                    book = tx.books.get(args.book_id)
+                    if book is None:
+                        raise BookNotFoundError(f"книги {args.book_id} нет в хранилище")
+                    if tx.work.latest_conditions(args.book_id) is None:
+                        if (
+                            book.status is not BookStatus.IMPORTED
+                            or tx.analyses.list_for_book(args.book_id)
+                            or tx.runs.active_for_book(args.book_id)
+                        ):
+                            raise ConditionsError("legacy_choice_required")
+                        pron_enabled = bool(pronunciation_help)
+                        conditions = application.book_conditions.create(
+                            tx,
+                            book,
+                            application.runtime_settings.revision,
+                            reader_level=reader_level,
+                            english_help=bool(english_help),
+                            pronunciation_help_enabled=pron_enabled,
+                            pronunciation_variant=(
+                                pronunciation_variant if pron_enabled else None
+                            ),
+                            seed_first_chapter=seed_first_chapter,
+                        )
+                        application.book_runtime.settings_for(conditions)
+            except (ConditionsError, WorkStateError) as error:
+                raise ApplicationError(str(error)) from error
         task = asyncio.run(application.analysis.start(args.book_id))
         print(f"Book: {args.book_id}")
         print(f"Task: {task.id if task is not None else 'none'}")
+        return 0
+    finally:
+        asyncio.run(application.aclose())
+
+
+def _pause(args: argparse.Namespace) -> int:
+    """Pause claiming pending tasks for a book."""
+    application = _application(args)
+    try:
+        if application.pause_book is None:
+            raise ApplicationError("пауза очереди недоступна")
+        result = application.pause_book(PauseBookCommand(book_id=args.book_id))
+        print(f"Book: {result.book_id}")
+        print(f"Pause requested: {result.pause_requested}")
+        print(f"Paused: {result.is_paused}")
+        return 0
+    finally:
+        asyncio.run(application.aclose())
+
+
+def _resume(args: argparse.Namespace) -> int:
+    """Resume claiming pending tasks for a book."""
+    application = _application(args)
+    try:
+        if application.resume_book is None:
+            raise ApplicationError("возобновление очереди недоступно")
+        result = application.resume_book(ResumeBookCommand(book_id=args.book_id))
+        if application.settings.llm.is_ready:
+            with application.unit_of_work.read_transaction() as tx:
+                book = tx.books.get(args.book_id)
+                tasks = tx.tasks.list_for_book(args.book_id)
+                run = tx.runs.active_for_book(args.book_id)
+                stopped_roots = (
+                    any(
+                        getattr(root, "superseded_by", None) is None
+                        and root.status == "stopped"
+                        for root in tx.work.list_roots(args.book_id, run_id=run.id)
+                    )
+                    if run is not None
+                    else False
+                )
+            try:
+                if book is not None and book.status is BookStatus.ANALYZING:
+                    if not any(
+                        task.task_type is TaskType.ANALYZE_CHAPTER
+                        and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.FAILED)
+                        for task in tasks
+                    ):
+                        asyncio.run(application.analysis.start(args.book_id))
+                elif (
+                    book is not None
+                    and book.status is BookStatus.PROCESSING
+                    and run is not None
+                    and not stopped_roots
+                ):
+                    if not any(
+                        task.task_type
+                        in (
+                            TaskType.PROCESS_TRANSLATION_UNIT,
+                            TaskType.CHAPTER_CORRECTION,
+                            TaskType.REGENERATE_BLOCK,
+                        )
+                        and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.FAILED)
+                        for task in tasks
+                    ):
+                        asyncio.run(application.processing.start(args.book_id))
+            except (ApplicationError, WorkStateError):
+                pass
+        print(f"Book: {result.book_id}")
+        print(f"Paused: {result.is_paused}")
+        return 0
+    finally:
+        asyncio.run(application.aclose())
+
+
+def _restart_translation(args: argparse.Namespace) -> int:
+    """Restart unfinished scopes of a translation recovery root."""
+    application = _application(args)
+    try:
+        result = application.restart_translation(
+            RestartTranslationCommand(
+                book_id=args.book_id,
+                root_id=args.root_id,
+                expected_generation=args.expected_generation,
+            )
+        )
+        print(f"Book: {args.book_id}")
+        print(f"Successor root: {result.successor_root_id}")
+        print(f"Task: {result.task_id}")
         return 0
     finally:
         asyncio.run(application.aclose())
@@ -285,6 +474,12 @@ def _export(args: argparse.Namespace) -> int:
                 mode=ExportMode(args.mode),
             )
         )
+        overview = book_overview(application.unit_of_work, args.book_id)
+        if overview.pending_corrections > 0:
+            print(
+                f"Warning: книга содержит непросмотренные предложения исправлений ({overview.pending_corrections}).",
+                file=sys.stderr,
+            )
         print(f"Book: {result.book_id}")
         print(f"Export: {result.path}")
         print(

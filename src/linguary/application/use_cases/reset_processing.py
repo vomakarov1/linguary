@@ -85,6 +85,9 @@ class ResetProcessing:
                 transaction.work.stale_reviews(book.id)
                 transaction.work.delete_correction_checks(run.id)
                 transaction.runs.delete(run.id)
+            set_book_paused = getattr(transaction.work, "set_book_paused", None)
+            if set_book_paused is not None:
+                set_book_paused(book.id, None, False)
             transaction.books.save(replace(book, status=status, export_validation_status=None))
         return ResetProcessingResult(
             book_id=book.id,
@@ -135,7 +138,7 @@ class ChooseBookConditions:
     def __init__(self, service, resolver):
         self.service, self.resolver = service, resolver
 
-    def __call__(self, book_id, *, action, expected_revision, settings_revision, confirmed, english_help=False, reader_level=None, pronunciation_help_enabled=False, pronunciation_variant=None):
+    def __call__(self, book_id, *, action, expected_revision, settings_revision, confirmed, english_help=False, reader_level=None, pronunciation_help_enabled=False, pronunciation_variant=None, seed_first_chapter=None):
         from dataclasses import asdict
         from linguary.application.book_conditions import ConditionsError, BookConditionsService
         if confirmed is not True or action not in {'continue_legacy', 'reanalyze'}:
@@ -156,7 +159,8 @@ class ChooseBookConditions:
                 english_help=english_help if action == 'reanalyze' else False, reader_level=reader_level,
                 continue_legacy=action == 'continue_legacy',
                 pronunciation_help_enabled=pronunciation_help_enabled if action == 'reanalyze' else False,
-                pronunciation_variant=pronunciation_variant if action == 'reanalyze' else None)
+                pronunciation_variant=pronunciation_variant if action == 'reanalyze' else None,
+                seed_first_chapter=seed_first_chapter if action == 'reanalyze' else None)
             # Validate the complete executable route before committing any revision.
             self.resolver.settings_for(conditions)
             run = transaction.runs.active_for_book(book_id)
@@ -187,6 +191,9 @@ class ChooseBookConditions:
                     if task.task_type in {TaskType.ANALYZE_CHAPTER, TaskType.PROCESS_TRANSLATION_UNIT, TaskType.REGENERATE_BLOCK}:
                         transaction.work.bind('task', task.id, book_id=book_id, conditions_id=conditions.id,
                             payload={'schema_version': 1, 'legacy_partial': True})
+            set_book_paused = getattr(transaction.work, 'set_book_paused', None)
+            if set_book_paused is not None:
+                set_book_paused(book_id, conditions.id, False)
             return conditions
 
 

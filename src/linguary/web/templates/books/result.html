@@ -27,5 +27,10 @@
   </section>
 {% endif %}
 
+{% if result_filter == 'pending_corrections' %}
+  <section class="panel">
+    <p>Показаны только блоки с ожидающими предложениями исправлений. <a href="/books/{{ data.book_id }}/result">Показать все блоки</a></p>
+  </section>
+{% endif %}
 {% include "partials/result_groups.html" %}
 {% endblock %}

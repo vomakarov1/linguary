@@ -428,6 +428,10 @@ class BookDetailResponse(BaseModel):
     quality_review: dict = Field(default_factory=lambda: {'state': 'not-requested'})
     epub_ready: bool = False
     ordinary_cost: dict = Field(default_factory=dict)
+    pending_corrections: int = 0
+    pause_requested: bool = False
+    is_paused: bool = False
+    stage_estimate: dict = Field(default_factory=dict)
 
     @classmethod
     def of_overview(cls, overview: BookOverview) -> BookDetailResponse:
@@ -444,6 +448,10 @@ class BookDetailResponse(BaseModel):
             conditions=dict(overview.conditions), reproducibility=overview.reproducibility,
             recovery=dict(overview.recovery), quality_review=dict(overview.quality_review),
             epub_ready=overview.epub_ready, ordinary_cost=dict(overview.ordinary_cost),
+            pending_corrections=overview.pending_corrections,
+            pause_requested=overview.pause_requested,
+            is_paused=overview.is_paused,
+            stage_estimate=dict(overview.stage_estimate),
         )
 
 

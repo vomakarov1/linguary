@@ -3,7 +3,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from linguary.application.validators.pronunciation import group_pronunciations, is_complete_pronunciation_form
+from linguary.application.validators.pronunciation import (
+    group_pronunciations,
+    is_complete_pronunciation_form,
+    pronunciation_identity,
+)
 from linguary.domain import BlockProcessingResult, DocumentBlock
 from linguary.domain.errors import DomainError
 
@@ -23,7 +27,10 @@ class PronunciationOccurrence:
 
 
 def project_pronunciations(
-    blocks: Sequence[DocumentBlock], results: Mapping[str, BlockProcessingResult],
+    blocks: Sequence[DocumentBlock],
+    results: Mapping[str, BlockProcessingResult],
+    *,
+    initial_seen: Mapping[tuple[str, str, str], str] | None = None,
 ) -> tuple[PronunciationOccurrence, ...]:
     """Reject foreign/stale anchors and choose first occurrences in source order."""
     texts = {block.id: block.text for block in blocks}
@@ -45,11 +52,18 @@ def project_pronunciations(
             accepted.append(item)
     projected = []
     for group in group_pronunciations(accepted, block_order=order):
+        norm_form, norm_ipa, variant = pronunciation_identity(group.primary)
+        prior_hint_id = None
+        if initial_seen:
+            prior_hint_id = initial_seen.get((norm_form, variant, norm_ipa)) or initial_seen.get(
+                (norm_form, norm_ipa, variant)
+            )
+        hint_id = prior_hint_id if prior_hint_id is not None else group.hint_id
         for item in group.occurrences:
             anchor = item.anchor
             projected.append(PronunciationOccurrence(
-                group.hint_id, anchor.block_id, anchor.start, anchor.end, anchor.quote,
+                hint_id, anchor.block_id, anchor.start, anchor.end, anchor.quote,
                 item.ipa, item.variant, item.evidence.attribution, item.evidence.entry_id,
-                item is group.primary,
+                prior_hint_id is None and item is group.primary,
             ))
     return tuple(sorted(projected, key=lambda item: (order[item.block_id], item.start, item.end)))

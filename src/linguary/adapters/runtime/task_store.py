@@ -14,13 +14,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from uuid import uuid4
 
-from sqlalchemy import Engine, select, update
+from sqlalchemy import Engine, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from linguary.adapters.db import mapping
 from linguary.adapters.db.engine import create_session_factory
-from linguary.adapters.db.models import ProcessingTaskRow
+from linguary.adapters.db.models import ProcessingTaskRow, WorkBindingRow
 from linguary.adapters.db.repositories import SqlAlchemyTaskRepository
 from linguary.application.ports.persistence import PersistenceError
 from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus
@@ -139,9 +139,20 @@ class SqliteTaskStore:
         The identifier in ordering serves as a stable tie-breaker: timestamps of tasks
         enqueued in a single batch may be identical down to database precision.
         """
+        paused_book = exists(
+            select(1).where(
+                WorkBindingRow.entity_kind == "book_queue",
+                WorkBindingRow.entity_id == ProcessingTaskRow.book_id,
+                WorkBindingRow.book_id == ProcessingTaskRow.book_id,
+                func.coalesce(func.json_extract(WorkBindingRow.payload_json, "$.paused"), 1) != 0,
+            )
+        )
         row = session.scalars(
             select(ProcessingTaskRow)
-            .where(ProcessingTaskRow.status == TaskStatus.PENDING.value)
+            .where(
+                ProcessingTaskRow.status == TaskStatus.PENDING.value,
+                ~paused_book,
+            )
             .order_by(ProcessingTaskRow.created_at, ProcessingTaskRow.id)
             .limit(1)
         ).first()

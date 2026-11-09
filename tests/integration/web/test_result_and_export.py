@@ -1081,3 +1081,375 @@ def test_result_groups_fragment_empty_and_legacy(client, application, empty):
     assert not tree.xpath('.//*[@class="pronunciation"]')
     assert not tree.xpath('.//*[@data-result-header] | .//*[@class="book-tabs"]')
     assert '<!doctype' not in client.get(f'/books/{scenario.book_id}/result', headers=GROUPS_HEADERS).text
+
+
+def test_analyze_initial_conditions_pause_resume_and_restart_routes_and_pending_filter_polling(
+    client: TestClient, application: Application
+) -> None:
+    from dataclasses import asdict
+    import json
+    from uuid import uuid4
+    from lxml import html
+    from linguary.application.book_conditions import payload_digest
+    from linguary.domain.book_conditions import thaw
+    from linguary.application.correction import CorrectionInputs, correction_input_fingerprint
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V2,
+        CorrectionSnapshotV2,
+        parse_correction_snapshot,
+    )
+    from linguary.application.recovery import NOTES_POLICY, RecoveryPolicy, root_manifest
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.domain.content_plan import canonical_sha
+    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2, CorrectionCandidate
+    from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
+
+    # 1. Initial conditions form on IMPORTED book & POST /books/{book_id}/analyze with options + empty body compatibility
+    imported = store_book(
+        application,
+        book_id="book-imported-init",
+        status=BookStatus.IMPORTED,
+        analysed_chapters=(),
+        chapters=((SOURCE_TEXT, "Second sentence."),),
+    )
+    source_path = application.paths.source_epub(imported.book_id)
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"synthetic epub bytes")
+    with application.unit_of_work.transaction() as tx:
+        book_rec = tx.books.get(imported.book_id)
+        tx.books.save(replace(book_rec, source_epub_path=str(source_path)))
+
+    detail_html = client.get(
+        f"/books/{imported.book_id}", headers={"accept": "text/html"}
+    ).text
+    assert 'name="reader_level"' in detail_html
+    assert 'name="english_help"' in detail_html
+    assert 'name="pronunciation_help_enabled"' in detail_html
+    assert 'name="seed_first_chapter"' in detail_html
+
+    analyzed_resp = client.post(
+        f"/books/{imported.book_id}/analyze",
+        json={
+            "reader_level": "a2",
+            "english_help": True,
+            "pronunciation_help_enabled": True,
+            "pronunciation_variant": "uk",
+            "seed_first_chapter": True,
+        },
+    )
+    assert analyzed_resp.status_code == 202, analyzed_resp.text
+    with application.unit_of_work.transaction() as tx:
+        cond = tx.work.latest_conditions(imported.book_id)
+        assert cond is not None
+        assert cond.payload["reader_level"] == "a2"
+        assert cond.payload["english_help"] is True
+        assert cond.pronunciation_help_enabled is True
+        assert cond.pronunciation_variant == "uk"
+        assert cond.payload["checks"]["seed_first_chapter"] is True
+
+    empty_imported = store_book(
+        application,
+        book_id="book-imported-empty",
+        status=BookStatus.IMPORTED,
+        analysed_chapters=(),
+        chapters=((SOURCE_TEXT,),),
+    )
+    empty_path = application.paths.source_epub(empty_imported.book_id)
+    empty_path.parent.mkdir(parents=True, exist_ok=True)
+    empty_path.write_bytes(b"synthetic empty body epub")
+    with application.unit_of_work.transaction() as tx:
+        book_rec2 = tx.books.get(empty_imported.book_id)
+        tx.books.save(replace(book_rec2, source_epub_path=str(empty_path)))
+    assert client.post(f"/books/{empty_imported.book_id}/analyze").status_code == 202
+
+    # 2. Pause & resume routes and detail/quality_review template states
+    pause_resp = client.post(f"/books/{imported.book_id}/pause")
+    assert pause_resp.status_code == 200, pause_resp.text
+    assert pause_resp.json()["pause_requested"] is True
+    assert pause_resp.json()["is_paused"] is True
+
+    paused_html = client.get(
+        f"/books/{imported.book_id}", headers={"accept": "text/html"}
+    ).text
+    assert f'/books/{imported.book_id}/resume' in paused_html
+    # Prefilled reanalyze form reflects saved conditions (a2, english_help, seed_first_chapter)
+    paused_tree = html.fromstring(paused_html)
+    reanalyze_form = paused_tree.xpath(
+        f'//form[@action="/books/{imported.book_id}/conditions"][.//input[@name="action" and @value="reanalyze"]]'
+    )[0]
+    assert reanalyze_form.xpath('.//select[@name="reader_level"]/option[@value="a2" and @selected]')
+    assert reanalyze_form.xpath('.//input[@name="english_help" and @checked]')
+    assert reanalyze_form.xpath('.//input[@name="seed_first_chapter" and @checked]')
+
+    resume_resp = client.post(f"/books/{imported.book_id}/resume")
+    assert resume_resp.status_code == 200, resume_resp.text
+    assert resume_resp.json()["is_paused"] is False
+
+    # 3. RestartTranslation route (200/202, 409 on generation conflict, 404 on missing root/book)
+    restart_scenario = store_book(
+        application,
+        book_id="book-restart-web",
+        status=BookStatus.PROCESSING,
+        chapters=((SOURCE_TEXT, "Another block to translate."),),
+    )
+    restart_source = application.paths.source_epub(restart_scenario.book_id)
+    restart_source.parent.mkdir(parents=True, exist_ok=True)
+    restart_source.write_bytes(b"synthetic restart epub")
+    with application.unit_of_work.transaction() as tx:
+        b_rec = tx.books.get(restart_scenario.book_id)
+        tx.books.save(replace(b_rec, source_epub_path=str(restart_source)))
+    continue_legacy(application, restart_scenario.book_id)
+    start_run(application, restart_scenario)
+
+    ordered_blocks = tuple(restart_scenario.block_ids(0))
+    with application.unit_of_work.transaction() as tx:
+        r_cond = tx.work.latest_conditions(restart_scenario.book_id)
+        r_run = tx.runs.active_for_book(restart_scenario.book_id)
+        r_analysis = tx.analyses.get_for_section(
+            restart_scenario.book_id, restart_scenario.section(0).id
+        )
+        policy = RecoveryPolicy(**asdict(application.settings.recovery))
+        manifest = root_manifest(
+            book_id=restart_scenario.book_id,
+            conditions_id=r_cond.id,
+            glossary_sha=payload_digest(asdict(r_run.glossary_snapshot)),
+            analysis_sha=payload_digest(asdict(r_analysis)),
+            plan_sha=None,
+            ordered_blocks=ordered_blocks,
+            treatments=tuple("TRANSLATE" for _ in ordered_blocks),
+            boundaries=tuple((bid,) for bid in ordered_blocks),
+            atomic_intervals=tuple((bid,) for bid in ordered_blocks),
+            max_source_chars=4000,
+            policy=policy,
+            block_chars={bid: 20 for bid in ordered_blocks},
+        )
+        manifest.update(
+            notes_policy=NOTES_POLICY,
+            active_run_id=r_run.id,
+            historical_coverage=[],
+        )
+        root = RecoveryRoot(
+            str(uuid4()),
+            restart_scenario.book_id,
+            r_cond.id,
+            str(uuid4()),
+            manifest,
+            calls_used=policy.max_calls,
+            status="stopped",
+            reason="limit",
+            operation_kind="translation",
+            policy_version=CURRENT_TRANSLATION_POLICY,
+        )
+        tx.work.add_root(root)
+        for bid in ordered_blocks:
+            tx.work.add_scope(
+                RecoveryScope(str(uuid4()), root.id, (bid,))
+            )
+    store_task(application, task=failed_task(restart_scenario))
+
+    limit_detail_html = client.get(
+        f"/books/{restart_scenario.book_id}", headers={"accept": "text/html"}
+    ).text
+    assert f"/books/{restart_scenario.book_id}/recovery/{root.id}/restart" in limit_detail_html
+    # Retry forms are suppressed when recovery stopped due to limit
+    assert f"/tasks/" not in limit_detail_html
+
+    assert (
+        client.post(
+            f"/books/missing/recovery/{root.id}/restart",
+            json={"expected_generation": 0, "confirmed": True},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/books/{restart_scenario.book_id}/recovery/{uuid4()}/restart",
+            json={"expected_generation": 0, "confirmed": True},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/books/{restart_scenario.book_id}/recovery/{root.id}/restart",
+            json={"expected_generation": 99, "confirmed": True},
+        ).status_code
+        == 409
+    )
+    restarted = client.post(
+        f"/books/{restart_scenario.book_id}/recovery/{root.id}/restart",
+        json={"expected_generation": 0, "confirmed": True},
+    )
+    assert restarted.status_code in (200, 202), restarted.text
+    assert restarted.json()["successor_root_id"]
+    # Second restart on superseded root conflicts with 409
+    assert (
+        client.post(
+            f"/books/{restart_scenario.book_id}/recovery/{root.id}/restart",
+            json={"expected_generation": 0, "confirmed": True},
+        ).status_code
+        == 409
+    )
+
+    # 4. Pending corrections filter on result page and ?filter=pending_corrections in data-result-url
+    corr_scenario = store_book(
+        application,
+        book_id="book-pending-filter",
+        status=BookStatus.READY_TO_EXPORT,
+        chapters=(("First chapter block.",), ("Second chapter clean block.",)),
+    )
+    corr_source = application.paths.source_epub(corr_scenario.book_id)
+    corr_source.parent.mkdir(parents=True, exist_ok=True)
+    corr_source.write_bytes(b"synthetic corr epub")
+    b1 = corr_scenario.block_ids(0)[0]
+    b2 = corr_scenario.block_ids(1)[0]
+    with application.unit_of_work.transaction() as tx:
+        c_rec = tx.books.get(corr_scenario.book_id)
+        tx.books.save(replace(c_rec, source_epub_path=str(corr_source)))
+    continue_legacy(application, corr_scenario.book_id)
+    start_run(
+        application,
+        corr_scenario,
+        results=(translated_result(b1), translated_result(b2)),
+    )
+    with application.unit_of_work.transaction() as tx:
+        c_cond = tx.work.latest_conditions(corr_scenario.book_id)
+        c_run = tx.runs.active_for_book(corr_scenario.book_id)
+        c_doc = tx.documents.get(corr_scenario.book_id)
+        c_sec = corr_scenario.section(0)
+        c_analysis = tx.analyses.get_for_section(corr_scenario.book_id, c_sec.id)
+        corr_policy = CorrectionSnapshotV2(
+            model="fake",
+            route={"provider": "fake", "base_url": "http://fake", "proxy": None, "route_id": "fake"},
+            parameters={
+                "temperature": 0.0,
+                "max_output_tokens": 1000,
+                "timeout_seconds": 30,
+                "max_attempts": 1,
+                "max_unit_source_chars": 4000,
+                "input_price_per_mtok": 0.0,
+                "output_price_per_mtok": 0.0,
+            },
+            prompt="Correct chapter.",
+            review_prompt="Review candidate.",
+            versions=CORRECTION_VERSIONS_V2,
+        ).to_payload()
+        tx.work.bind(
+            "run",
+            c_run.id,
+            book_id=corr_scenario.book_id,
+            conditions_id=c_cond.id,
+            payload={"schema_version": 1, "correction": corr_policy},
+        )
+        res_b1 = tx.results.get(c_run.id, b1)
+        tx.work.bind(
+            "result",
+            f"{c_run.id}:{b1}",
+            book_id=corr_scenario.book_id,
+            conditions_id=c_cond.id,
+            payload={"schema_version": 1},
+        )
+        bindings = tx.work.result_bindings(c_run.id)
+        snapshot = parse_correction_snapshot(corr_policy)
+        inputs = CorrectionInputs(
+            c_doc,
+            c_sec,
+            c_analysis,
+            c_run,
+            c_cond,
+            snapshot,
+            tuple(c_sec.ordered_blocks),
+            {b1: res_b1},
+            {b1: bindings.get(b1)},
+            {},
+        )
+        gen = tx.work.observe_correction_input(
+            c_run.id, b1, correction_input_fingerprint(inputs, b1)
+        )
+        inputs = inputs.with_updated_state(input_generations={b1: gen})
+        proposed = replace(res_b1, translated_text="Исправленный вариант перевода.")
+        cand_id = str(uuid4())
+        attempt_id = str(uuid4())
+        tx.work.add_attempt(
+            CallAttempt(
+                attempt_id,
+                corr_scenario.book_id,
+                state="accepted",
+                conditions_id=c_cond.id,
+                run_id=c_run.id,
+                context={
+                    "schema_version": 1,
+                    "stage": "chapter_correction",
+                    "policy_version": CORRECTION_POLICY_VERSION_V2,
+                    "ordered_block_ids": [b1],
+                },
+            )
+        )
+        cand_payload = {
+            "schema_version": 1,
+            "book_id": corr_scenario.book_id,
+            "run_id": c_run.id,
+            "conditions_id": c_cond.id,
+            "section_id": c_sec.id,
+            "block_id": b1,
+            "input_sha256": inputs.checksums[b1],
+            "input_generation": gen,
+            "group_id": attempt_id,
+            "proposal_attempt_id": attempt_id,
+            "context_sha256": inputs.context_sha256,
+            "source_binding": thaw(bindings.get(b1)),
+            "original": {"text": c_sec.ordered_blocks[0].text},
+            "current_result": json.loads(json.dumps(asdict(res_b1))),
+            "result": json.loads(json.dumps(asdict(proposed))),
+            "proposal": {
+                "issues": [
+                    {
+                        "source_quote": "First chapter",
+                        "current_evidence": {"kind": "quote", "quote": "Перевод"},
+                        "problem": "Неточность смысла.",
+                        "minimal_fix_reason": "Уточнение по контексту.",
+                    }
+                ]
+            },
+            "evidence_valid": False,
+        }
+        tx.work.add_correction_candidates(
+            (
+                CorrectionCandidate(
+                    candidate_id=cand_id,
+                    run_id=c_run.id,
+                    book_id=corr_scenario.book_id,
+                    section_id=c_sec.id,
+                    block_id=b1,
+                    conditions_id=c_cond.id,
+                    group_id=attempt_id,
+                    proposal_attempt_id=attempt_id,
+                    input_generation=gen,
+                    input_sha256=inputs.checksums[b1],
+                    proposal_sha256=canonical_sha(cand_payload),
+                    state="awaiting_human",
+                    payload=cand_payload,
+                    review={"verdict": "uncertain", "reason": "Нужна проверка человеком"},
+                ),
+            )
+        )
+
+    filtered_page = client.get(
+        f"/books/{corr_scenario.book_id}/result?filter=pending_corrections",
+        headers={"accept": "text/html"},
+    )
+    assert filtered_page.status_code == 200
+    assert "First chapter block." in filtered_page.text
+    assert "Second chapter clean block." not in filtered_page.text
+
+    filtered_groups = client.get(
+        f"/books/{corr_scenario.book_id}/result?filter=pending_corrections",
+        headers=GROUPS_HEADERS,
+    )
+    assert filtered_groups.status_code == 200
+    fg_tree = html.fromstring(filtered_groups.text)
+    assert (
+        fg_tree.get("data-result-url")
+        == f"/books/{corr_scenario.book_id}/result?filter=pending_corrections"
+    )
+    assert len(fg_tree.xpath(".//*[@data-result-block]")) == 1
+

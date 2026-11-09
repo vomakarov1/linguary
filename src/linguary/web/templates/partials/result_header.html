@@ -11,7 +11,9 @@
       <p>EPUB можно собрать после завершения обработки книги.</p>
     {% endif %}
     {% if data.pending_corrections %}
-      <p role="status">Доступны предложения исправлений для добровольного просмотра: {{ data.pending_corrections }}.</p>
+      <p role="status">Доступны предложения исправлений для добровольного просмотра: {{ data.pending_corrections }}. {% if result_filter == 'pending_corrections' %}<a href="/books/{{ data.book_id }}/result">Показать все блоки</a>{% else %}<a href="/books/{{ data.book_id }}/result?filter=pending_corrections">Показать только с предложениями</a>{% endif %}</p>
+    {% elif result_filter == 'pending_corrections' %}
+      <p role="status">Ожидающих предложений исправлений не осталось. <a href="/books/{{ data.book_id }}/result">Показать все блоки</a></p>
     {% endif %}
     {% if data.epubcheck_hint %}<p>{{ data.epubcheck_hint }}</p>{% endif %}
   </div>

@@ -232,3 +232,98 @@ def test_html_uploaded_budget_is_rejected_without_queue(configured_client, confi
     with configured_application.unit_of_work.transaction() as tx:
         assert tx.work.list_reviews(scenario.book_id) == ()
         assert tx.tasks.list_for_book(scenario.book_id) == ()
+
+
+def test_partial_book_result_preserves_primary_pronunciation_hint_id_across_chapters(client, application):
+    from linguary.application.book_overview import book_result
+    from linguary.domain import BlockProcessingResult, BlockTreatment
+    from linguary.domain.content_plan import SourceAnchor
+    from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
+
+    ch1_text = "The colonel arrived early."
+    ch2_text = "Later the colonel spoke softly."
+    ch3_text = "Everyone listened quietly."
+    scenario = store_book(
+        application,
+        status=BookStatus.READY_TO_EXPORT,
+        chapters=((ch1_text,), (ch2_text,), (ch3_text,)),
+    )
+    b_ch1 = scenario.block_ids(0)[0]
+    b_ch2 = scenario.block_ids(1)[0]
+    b_ch3 = scenario.block_ids(2)[0]
+
+    evidence = PronunciationEvidence(
+        source_id="synthetic-dict",
+        source_version="v1",
+        entry_id="entry-colonel",
+        sense_id="sense-1",
+        part_of_speech="noun",
+        dictionary_form="colonel",
+        dictionary_ipa="ˈkɜː.nəl",
+        attribution="Synthetic Dictionary",
+    )
+    occ_ch1 = PronunciationAssistance(
+        anchor=SourceAnchor(b_ch1, ch1_text.index("colonel"), ch1_text.index("colonel") + len("colonel"), "colonel"),
+        form="colonel",
+        ipa="ˈkɜː.nəl",
+        variant="uk",
+        hint_id="ph-primary-chapter-1",
+        evidence=evidence,
+    )
+    occ_ch2 = PronunciationAssistance(
+        anchor=SourceAnchor(b_ch2, ch2_text.index("colonel"), ch2_text.index("colonel") + len("colonel"), "colonel"),
+        form="colonel",
+        ipa="ˈkɜː.nəl",
+        variant="uk",
+        hint_id="ph-secondary-chapter-2",
+        evidence=evidence,
+    )
+
+    start_run(
+        application,
+        scenario,
+        results=[
+            BlockProcessingResult(
+                block_id=b_ch1,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Полковник прибыл рано.",
+                pronunciation_assistances=(occ_ch1,),
+            ),
+            BlockProcessingResult(
+                block_id=b_ch2,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Позже полковник заговорил тихо.",
+                pronunciation_assistances=(occ_ch2,),
+            ),
+            BlockProcessingResult(
+                block_id=b_ch3,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Все слушали молча.",
+            ),
+        ],
+    )
+
+    partial = book_result(
+        application.unit_of_work,
+        scenario.book_id,
+        include_quality=False,
+        block_ids=(b_ch2,),
+    )
+    assert [chapter.section_id for chapter in partial.chapters] == [scenario.section(1).id]
+    assert partial.prior_pronunciation_hints[("colonel", "uk", "ˈkɜː.nəl")] == "ph-primary-chapter-1"
+
+    single = client.get(f"/books/{scenario.book_id}/blocks/{b_ch2}")
+    assert single.status_code == 200
+    payload = single.json()
+    assert len(payload["pronunciation_assistances"]) == 1
+    assert payload["pronunciation_assistances"][0]["hint_id"] == "ph-primary-chapter-1"
+    assert payload["pronunciation_assistances"][0]["is_primary"] is False
+
+    fragment = client.get(
+        f"/books/{scenario.book_id}/blocks/{b_ch2}",
+        headers={**HTML, "X-Linguary-Fragment": "result-block"},
+    )
+    assert fragment.status_code == 200
+    assert 'href="#ph-primary-chapter-1"' in fragment.text
+    assert 'id="ph-secondary-chapter-2"' not in fragment.text
+

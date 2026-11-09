@@ -137,7 +137,7 @@ async def extend_limit(request: Request, application: CurrentApplication, book_i
         limit=root.manifest['policy']['max_calls'] + root.extra_calls)
 
 
-def quality_page_context(request, application, book_id, *, tasks=None):
+def quality_page_context(request, application, book_id, *, tasks=None, overview=None):
     """Read-only form inputs and local estimates; no clients, calls, tasks, or bodies."""
     from linguary.application.ports.llm import LLMRequest, LLMResponseKind
     from linguary.application.quality_context import INSTRUCTIONS, request_text
@@ -149,12 +149,19 @@ def quality_page_context(request, application, book_id, *, tasks=None):
         retry_tasks=[], diagnostics=[], diagnostic_list_command=f'linguary diagnostics list {quote(book_id)}')
     if request.headers.get('x-linguary-fragment') == 'result-header':
         return base
-    with getattr(application.unit_of_work, 'read_transaction', application.unit_of_work.transaction)() as tx:
-        document = tx.documents.get(book_id)
-        calls = tx.llm_calls.list_for_book(book_id)
+    if overview is not None and getattr(overview, '_tasks', None) is not None:
+        document = getattr(overview, '_document', None)
+        calls = getattr(overview, '_calls', ()) or ()
         if tasks is None:
-            tasks = tx.tasks.list_for_book(book_id)
-        legacy = tx.work.latest_conditions(book_id) is None and bool(tx.analyses.list_for_book(book_id) or tx.runs.active_for_book(book_id))
+            tasks = overview._tasks
+        legacy = bool(getattr(overview, '_legacy', False))
+    else:
+        with getattr(application.unit_of_work, 'read_transaction', application.unit_of_work.transaction)() as tx:
+            document = tx.documents.get(book_id)
+            calls = tx.llm_calls.list_for_book(book_id)
+            if tasks is None:
+                tasks = tx.tasks.list_for_book(book_id)
+            legacy = tx.work.latest_conditions(book_id) is None and bool(tx.analyses.list_for_book(book_id) or tx.runs.active_for_book(book_id))
     try:
         require_local(request)
         local_diagnostics = True
@@ -168,19 +175,30 @@ def quality_page_context(request, application, book_id, *, tasks=None):
     selected = next((item for item in scopes if item[0] == request.query_params.get('review_scope')), scopes[0])
     _, scope, title = selected
     forms = []
-    try:
-        manifest = application.quality_review.preview(book_id, scope)
-    except WorkStateError:
-        manifest = None
+    manifest = None
+    if application.quality_review.routes:
+        try:
+            manifest = application.quality_review.preview(book_id, scope)
+        except WorkStateError:
+            manifest = None
     if manifest is not None:
         routes = []
+        route_estimates = manifest.get('route_estimates') or {}
         for _, route in sorted(application.quality_review.routes.items()):
-            try:
-                amount = route.estimate(LLMRequest(kind=LLMResponseKind.QUALITY_REVIEW, instructions=INSTRUCTIONS,
-                    input_text=request_text(manifest), max_completion_tokens=route.max_completion_tokens))
-                estimate = usd_amount(amount)
-            except Exception:
-                estimate = None
+            route_key = f'{route.route_id}:{route.model}'
+            if route_key in route_estimates:
+                amount = route_estimates[route_key]
+                estimate = None if amount is None else usd_amount(amount)
+            else:
+                try:
+                    if hasattr(application.quality_review, 'estimate'):
+                        amount = application.quality_review.estimate(manifest, route)
+                    else:
+                        amount = route.estimate(LLMRequest(kind=LLMResponseKind.QUALITY_REVIEW, instructions=INSTRUCTIONS,
+                            input_text=request_text(manifest), max_completion_tokens=route.max_completion_tokens))
+                    estimate = usd_amount(amount)
+                except Exception:
+                    estimate = None
             routes.append(dict(model=route.model, route_id=route.route_id,
                 selection=json.dumps([route.route_id, route.model]), estimate_usd=estimate))
         forms.append(dict(title=title, scope='all' if scope == 'all' else json.dumps(scope),

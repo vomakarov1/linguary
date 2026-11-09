@@ -114,25 +114,30 @@ def get_book(
     request: Request, application: CurrentApplication, book_id: str
 ) -> BookDetailResponse | object:
     """Book details: state, progress, treatment counters, and errors (PRD § 21.4)."""
-    response = BookDetailResponse.of_overview(
-        book_overview(
-            application.unit_of_work,
-            book_id,
-            concurrency=application.worker_pool.concurrency,
-            requests_per_minute=application.settings.llm.requests_per_minute,
-        )
+    overview = book_overview(
+        application.unit_of_work,
+        book_id,
+        concurrency=application.worker_pool.concurrency,
+        requests_per_minute=application.settings.llm.requests_per_minute,
+        input_price_per_mtok=application.settings.llm.input_price_per_mtok,
+        output_price_per_mtok=application.settings.llm.output_price_per_mtok,
     )
+    response = BookDetailResponse.of_overview(overview)
     if wants_html(request):
         return render(
             request,
             "books/detail.html",
             page="detail",
             data=response,
-            quality_ui=quality_page_context(request, application, book_id),
+            quality_ui=quality_page_context(
+                request, application, book_id, overview=overview
+            ),
             auto_refresh=_needs_refresh(response),
             stalled=_is_stalled(response),
             llm_ready=application.settings.llm.is_ready,
             llm_hint=labels.LLM_NOT_CONFIGURED_HINT,
+            default_reader_level=application.settings.reading.normalized_level,
+            default_seed_first_chapter=application.settings.checks.seed_first_chapter,
         )
     return response
 
@@ -196,6 +201,8 @@ def _needs_refresh(response: BookDetailResponse) -> bool:
     A book whose progress was stopped by an error will not advance on its own:
     a page with an error is not refreshed so that the user has time to read it.
     """
+    if response.is_paused:
+        return False
     if _has_active_tasks(response):
         return True
     return response.book.status in {"IMPORTING", "ANALYZING", "PROCESSING"} and not (

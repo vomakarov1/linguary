@@ -1,4 +1,4 @@
-<div data-result-groups data-result-url="/books/{{ data.book_id }}/result" data-blocks-url="/books/{{ data.book_id }}/blocks">
+<div data-result-groups data-result-url="/books/{{ data.book_id }}/result{% if result_filter == 'pending_corrections' %}?filter=pending_corrections{% endif %}" data-blocks-url="/books/{{ data.book_id }}/blocks">
 {% for chapter in data.chapters %}
   <section class="chapter">
     <h2>{% if chapter.is_notes %}Сноски - {{ chapter.title }}{% else %}Глава {{ chapter.chapter_number }} - {{ chapter.title }}{% endif %}</h2>

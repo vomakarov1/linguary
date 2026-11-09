@@ -107,6 +107,7 @@ from linguary.application.use_cases.register_book import RegisterBook
 from linguary.application.use_cases.reset_processing import ResetProcessing
 from linguary.application.use_cases.retry_task import RetryTask
 from linguary.application.use_cases.restart_translation import RestartTranslation
+from linguary.application.use_cases.pause_book import PauseBook, ResumeBook
 from linguary.application.validators import TranslationResultValidator
 from linguary.composition.llm import ConfiguredLLMClient
 from linguary.composition.migrations import apply_migrations
@@ -183,6 +184,8 @@ class Application:
     _close_quality: Callable
     _dispose: Callable[[], None]
     resolve_correction_candidate: ResolveCorrectionCandidate | None = None
+    pause_book: PauseBook | None = None
+    resume_book: ResumeBook | None = None
     _close_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
@@ -570,6 +573,8 @@ def build_application(
         resolve_correction_candidate=ResolveCorrectionCandidate(unit_of_work=unit_of_work,
             validator_factory=lambda conditions: _validator(replace(runtime_settings.current.settings,
                 checks=type(runtime_settings.current.settings.checks)(**thaw(conditions.payload['checks']))))),
+        pause_book=PauseBook(unit_of_work=unit_of_work),
+        resume_book=ResumeBook(unit_of_work=unit_of_work),
         quality_review=quality_review,
         _close_quality=quality_configured.aclose,
         _dispose=engine.dispose,
@@ -626,6 +631,7 @@ def _analysis_sequence(
         queue=task_queue,
         auto_start_processing=settings.checks.auto_start_processing,
         start_processing=start_processing,
+        seed_first_chapter=settings.checks.seed_first_chapter,
         analyze_chapter=AnalyzeChapter(
             unit_of_work=unit_of_work,
             llm_client=model,
@@ -637,6 +643,7 @@ def _analysis_sequence(
             name_translation_policy=name_translation_policy,
             conditions_id=conditions_id,
             max_concurrency=settings.worker.concurrency,
+            seed_first_chapter=settings.checks.seed_first_chapter,
         ),
     )
 

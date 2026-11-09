@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import statistics
 from decimal import Decimal
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from linguary.application.context_builder import textual_blocks
@@ -39,6 +39,7 @@ from linguary.domain import (
     TaskStatus,
     TaskType,
 )
+from linguary.domain.llm_log import TokenPricing, TokenUsage
 
 
 class BookNotFoundError(ApplicationError):
@@ -164,6 +165,14 @@ class BookOverview:
     quality_review: Mapping = field(default_factory=lambda: {'state': 'not-requested'})
     epub_ready: bool = False
     ordinary_cost: Mapping = field(default_factory=dict)
+    pending_corrections: int = 0
+    pause_requested: bool = False
+    is_paused: bool = False
+    stage_estimate: Mapping[str, object] = field(default_factory=dict)
+    _document: CanonicalDocument | None = field(default=None, repr=False, compare=False)
+    _tasks: tuple[ProcessingTask, ...] | None = field(default=None, repr=False, compare=False)
+    _calls: tuple[LLMCallLog, ...] | None = field(default=None, repr=False, compare=False)
+    _legacy: bool | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +299,7 @@ class BookResultSummary:
     tasks: tuple[ProcessingTask, ...] = ()
     pending_corrections: int = 0
     reading_support: Mapping = field(default_factory=dict)
+    prior_pronunciation_hints: Mapping[tuple[str, str, str], str] = field(default_factory=dict)
 
 
 def _read_transaction(unit_of_work: UnitOfWork):
@@ -297,15 +307,16 @@ def _read_transaction(unit_of_work: UnitOfWork):
     return getattr(unit_of_work, "read_transaction", unit_of_work.transaction)()
 
 
-def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None, stored_calls=None):
+def _quality_projection(transaction, book, document, analyses, run, tasks, *, stored_results=None, stored_calls=None, result_block_ids=None):
     """Current technical coverage and optional review, without accepting or scheduling work."""
     from linguary.application.use_cases.quality_review import quality_review_state
     from linguary.application.use_cases.export_book import _ensure_ready, _validate_content_plans, ExportBookError
     from linguary.application.retry_policy import ResultValidationError
+    from linguary.application.translation_policy import require_policy
     from linguary.domain.book_conditions import thaw
     conditions = transaction.work.latest_conditions(book.id)
     summary = dict(conditions_id=None, revision=None, reader_level=None, english_help=None, profile=None, models={}, state='unknown', name_translation_state='not_saved', name_translation_policy=None,
-        source_language=book.source_language, pronunciation_help_enabled=False, pronunciation_variant=None)
+        source_language=book.source_language, pronunciation_help_enabled=False, pronunciation_variant=None, seed_first_chapter=False)
     if conditions is not None:
         policy = conditions.payload.get('name_translation_policy')
         summary.update(conditions_id=conditions.id, revision=conditions.revision,
@@ -314,9 +325,12 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
             name_translation_state='configured' if policy is not None else 'legacy',
             name_translation_policy=thaw(policy) if policy is not None else None,
             pronunciation_help_enabled=conditions.pronunciation_help_enabled,
-            pronunciation_variant=conditions.pronunciation_variant)
+            pronunciation_variant=conditions.pronunciation_variant,
+            seed_first_chapter=bool((conditions.payload.get('checks') or {}).get('seed_first_chapter', False)))
     results = stored_results
-    if results is not None:
+    if result_block_ids is not None:
+        result_ids = set(result_block_ids)
+    elif results is not None:
         result_ids = {result.block_id for result in results}
     elif run is None:
         result_ids = set()
@@ -328,7 +342,15 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
             results = transaction.results.list_for_run(run.id)
             result_ids = {result.block_id for result in results}
     textual = {block.id for section in document.sections for block in textual_blocks(section)} if document else set()
-    roots = () if run is None else transaction.work.list_roots(book.id, run_id=run.id)
+    roots = (
+        ()
+        if run is None
+        else tuple(
+            root
+            for root in transaction.work.list_roots(book.id, run_id=run.id)
+            if getattr(root, "superseded_by", None) is None
+        )
+    )
     root_summaries = []
     durable_coverage = set()
     if roots:
@@ -390,20 +412,41 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
             )
         except TypeError:
             complete = transaction.work.root_coverage_complete(root.id, update_state=False)
+        ordered_blocks = root.manifest['ordered_blocks']
+        policy_ok = True
+        try:
+            require_policy(getattr(root, 'policy_version', None))
+        except Exception:
+            policy_ok = False
+        can_restart = bool(
+            current
+            and not unknown
+            and not busy
+            and not complete
+            and getattr(root, 'superseded_by', None) is None
+            and getattr(root, 'operation_kind', 'translation') == 'translation'
+            and policy_ok
+            and root.status in ('pending', 'running', 'stopped')
+            and (root.status != 'stopped' or root.reason == 'limit')
+            and ordered_blocks
+            and len(covered) < len(ordered_blocks)
+        )
         root_summaries.append(dict(root_id=root.id, generation=root.generation,
-            covered=len(covered), total=len(root.manifest['ordered_blocks']), calls_used=root.calls_used,
+            covered=len(covered), total=len(ordered_blocks), calls_used=root.calls_used,
             limit=limit, reason='conditions_unavailable' if not current else 'unknown' if unknown else root.reason,
             can_retry=bool(current and not unknown and not busy and retryable and root.calls_used < limit
                 and root.status in ('pending', 'running')),
             can_extend=bool(current and not unknown and not busy and retryable
-                and root.status == 'stopped' and root.reason == 'limit'), complete=complete))
+                and root.status == 'stopped' and root.reason == 'limit'),
+            can_restart=can_restart, complete=complete))
     recovery = dict(covered=len(durable_coverage) if roots else len(result_ids & textual), total=len(textual),
         calls_used=sum(item['calls_used'] for item in root_summaries),
         limit=sum(item['limit'] for item in root_summaries),
         reason=next((item['reason'] for item in root_summaries if item['reason'] == 'unknown'),
             next((item['reason'] for item in root_summaries if item['reason']), None)),
         can_retry=any(item['can_retry'] for item in root_summaries),
-        can_extend=any(item['can_extend'] for item in root_summaries), roots=root_summaries)
+        can_extend=any(item['can_extend'] for item in root_summaries),
+        can_restart=any(item['can_restart'] for item in root_summaries), roots=root_summaries)
     epub_ready = bool(document and document.sections and run is not None and textual <= result_ids
         and all(item['complete'] for item in root_summaries))
     if epub_ready:
@@ -472,12 +515,16 @@ def book_overview(
     *,
     concurrency: int = 1,
     requests_per_minute: int | None = None,
+    input_price_per_mtok: float | None = None,
+    output_price_per_mtok: float | None = None,
 ) -> BookOverview:
     """Book card: status, progress, treatment counters, and failed tasks.
 
     `concurrency` and `requests_per_minute` — worker concurrency and rate limits:
     without them, remaining time estimation cannot determine how many calls run in parallel.
     """
+    from linguary.domain.book_conditions import WorkStateError
+
     with _read_transaction(unit_of_work) as transaction:
         book = _book(transaction, book_id)
         document = transaction.documents.get(book_id)
@@ -487,16 +534,55 @@ def book_overview(
         processed_blocks = (
             transaction.results.count_for_run(run.id) if run is not None else 0
         )
+        stored_results = None
+        done_block_ids: set[str] = set()
+        if run is not None:
+            block_ids_for_run = getattr(transaction.results, "block_ids_for_run", None)
+            if block_ids_for_run is not None:
+                done_block_ids = set(block_ids_for_run(run.id))
+            else:
+                stored_results = transaction.results.list_for_run(run.id)
+                done_block_ids = {r.block_id for r in stored_results}
         calls = transaction.llm_calls.list_for_book(book_id)
         quality = _quality_projection(
-            transaction, book, document, analyses, run, tasks, stored_calls=calls
+            transaction,
+            book,
+            document,
+            analyses,
+            run,
+            tasks,
+            stored_results=stored_results,
+            stored_calls=calls,
+            result_block_ids=done_block_ids,
         )
         warning_count = len(transaction.documents.import_warnings(book_id))
+        is_book_paused_fn = getattr(transaction.work, "is_book_paused", None)
+        pause_requested = bool(is_book_paused_fn(book_id)) if is_book_paused_fn is not None else False
+        legacy = quality["conditions"].get("conditions_id") is None and bool(analyses or run is not None)
+        pending_corrections = 0
+        if run is not None and hasattr(transaction.work, "list_correction_candidates"):
+            try:
+                candidates = _correction_candidates_projection(
+                    transaction, book_id, run, document=document, analyses=analyses
+                )
+                pending_corrections = sum(c["state"] == "awaiting_human" for c in candidates)
+            except WorkStateError:
+                pending_corrections = 0
     progress = _progress(
         document=document,
         analyses=analyses,
         tasks=tasks,
         processed_blocks=processed_blocks,
+    )
+    is_paused = bool(pause_requested and progress.running_tasks == 0)
+    stage_estimate = _stage_estimate(
+        status=book.status,
+        document=document,
+        analyses=analyses,
+        tasks=tasks,
+        done_block_ids=done_block_ids,
+        input_price_per_mtok=input_price_per_mtok,
+        output_price_per_mtok=output_price_per_mtok,
     )
     return BookOverview(
         book=book,
@@ -513,8 +599,113 @@ def book_overview(
             ),
         ),
         warning_count=warning_count,
+        pending_corrections=pending_corrections,
+        pause_requested=pause_requested,
+        is_paused=is_paused,
+        stage_estimate=stage_estimate,
+        _document=document,
+        _tasks=tuple(tasks),
+        _calls=tuple(calls),
+        _legacy=legacy,
         **quality,
     )
+
+
+def _stage_estimate(
+    *,
+    status: BookStatus,
+    document: CanonicalDocument | None,
+    analyses: Sequence[ChapterAnalysis],
+    tasks: Sequence[ProcessingTask],
+    done_block_ids: set[str],
+    input_price_per_mtok: float | None,
+    output_price_per_mtok: float | None,
+) -> Mapping[str, object]:
+    """Local pre-run or remaining-work token and cost estimate without external calls."""
+    if document is None or status not in {
+        BookStatus.IMPORTED,
+        BookStatus.ANALYZING,
+        BookStatus.GLOSSARY_REVIEW,
+        BookStatus.READY_TO_PROCESS,
+        BookStatus.PROCESSING,
+    }:
+        return {}
+    if status in {BookStatus.IMPORTED, BookStatus.ANALYZING}:
+        stage = LLMCallStage.CHAPTER_ANALYSIS.value
+        analyzed_ids = {analysis.section_id for analysis in analyses}
+        remaining_sections = [
+            section
+            for section in document.ordered_sections
+            if section.id not in analyzed_ids
+            and textual_blocks(section)
+            and not document.is_front_matter(section)
+            and not section.is_notes_only
+        ]
+        section_blocks = [(section, textual_blocks(section)) for section in remaining_sections]
+    else:
+        active_translation = any(
+            task.task_type is TaskType.PROCESS_TRANSLATION_UNIT
+            and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+            for task in tasks
+        )
+        active_correction_scopes = {
+            task.scope_id
+            for task in tasks
+            if task.task_type is TaskType.CHAPTER_CORRECTION
+            and task.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+        }
+        if status is BookStatus.PROCESSING and not active_translation and active_correction_scopes:
+            stage = LLMCallStage.CHAPTER_CORRECTION.value
+            section_blocks = [
+                (section, textual_blocks(section))
+                for section in document.ordered_sections
+                if section.id in active_correction_scopes and textual_blocks(section)
+            ]
+        else:
+            stage = LLMCallStage.TRANSLATION_UNIT.value
+            analyses_by_section = {analysis.section_id: analysis for analysis in analyses}
+            section_blocks = []
+            for section in document.ordered_sections:
+                if section.id in analyses_by_section or not analyses:
+                    blocks = tuple(
+                        block
+                        for block in textual_blocks(section)
+                        if block.id not in done_block_ids
+                    )
+                else:
+                    blocks = ()
+                if blocks:
+                    section_blocks.append((section, blocks))
+    sections_count = len(section_blocks)
+    remaining_blocks = [block for _, blocks in section_blocks for block in blocks]
+    blocks_count = len(remaining_blocks)
+    characters_count = sum(len(block.text) for block in remaining_blocks)
+    if blocks_count > 0:
+        input_tokens = sections_count * 600 + blocks_count * 40 + math.ceil(characters_count / 3.8)
+        output_tokens = blocks_count * 35 + math.ceil(characters_count / 3.2)
+    else:
+        input_tokens = 0
+        output_tokens = 0
+    estimated_cost_usd: str | None = None
+    if input_price_per_mtok is not None and output_price_per_mtok is not None:
+        pricing = TokenPricing(
+            input_per_mtok=Decimal(str(input_price_per_mtok)),
+            output_per_mtok=Decimal(str(output_price_per_mtok)),
+        )
+        cost = pricing.cost_of(
+            TokenUsage(prompt_tokens=input_tokens, completion_tokens=output_tokens)
+        )
+        if cost is not None:
+            estimated_cost_usd = f"{cost.quantize(Decimal('0.000001')):f}"
+    return {
+        "stage": stage,
+        "sections_count": sections_count,
+        "blocks_count": blocks_count,
+        "characters_count": characters_count,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated_cost_usd": estimated_cost_usd,
+    }
 
 
 def estimate_remaining_seconds(
@@ -593,17 +784,22 @@ def book_warnings(unit_of_work: UnitOfWork, book_id: str) -> BookWarnings:
 
 
 def book_result(
-    unit_of_work: UnitOfWork, book_id: str, *, include_quality: bool = True
+    unit_of_work: UnitOfWork,
+    book_id: str,
+    *,
+    include_quality: bool = True,
+    block_ids: Collection[str] | None = None,
 ) -> BookResultSummary:
     """Processing results by block in stable original document order.
 
     Document, plan, and results are read in a single transaction: book warnings are
     derived from the same dataset without a secondary query.
     """
+    requested_set = None if block_ids is None else set(block_ids)
+    prior_pronunciation_hints: dict[tuple[str, str, str], str] = {}
     with _read_transaction(unit_of_work) as transaction:
         book = _book(transaction, book_id)
         document = transaction.documents.get(book_id)
-        analyses = transaction.analyses.list_for_book(book_id)
         import_warnings = (
             transaction.documents.import_warnings(book_id)
             if include_quality
@@ -611,27 +807,128 @@ def book_result(
         )
         run = transaction.runs.active_for_book(book_id)
         tasks = transaction.tasks.list_for_book(book_id)
-        stored_results = (
-            transaction.results.list_for_run(run.id) if run is not None else ()
-        )
-        quality = (
-            _quality_projection(
-                transaction,
-                book,
-                document,
-                analyses,
-                run,
-                tasks,
+        if requested_set is None:
+            analyses = transaction.analyses.list_for_book(book_id)
+            stored_results = (
+                transaction.results.list_for_run(run.id) if run is not None else ()
+            )
+            quality = (
+                _quality_projection(
+                    transaction,
+                    book,
+                    document,
+                    analyses,
+                    run,
+                    tasks,
+                    stored_results=stored_results,
+                )
+                if include_quality
+                else {}
+            )
+            reading_support = _saved_reading_support(transaction, run)
+            candidates = _correction_candidates_projection(
+                transaction, book_id, run, document=document, analyses=analyses,
                 stored_results=stored_results,
             )
-            if include_quality
-            else {}
-        )
-        reading_support = _saved_reading_support(transaction, run)
-        candidates = _correction_candidates_projection(
-            transaction, book_id, run, document=document, analyses=analyses,
-            stored_results=stored_results,
-        )
+            selected_sections = (
+                tuple(enumerate(document.ordered_sections, start=1))
+                if document is not None
+                else ()
+            )
+        else:
+            ordered_sections = document.ordered_sections if document is not None else ()
+            selected_sections = tuple(
+                (number, section)
+                for number, section in enumerate(ordered_sections, start=1)
+                if any(block.id in requested_set for block in section.ordered_blocks)
+            )
+            target_section_ids = {section.id for _, section in selected_sections}
+            get_for_section = getattr(transaction.analyses, "get_for_section", None)
+            if get_for_section is not None and not include_quality:
+                analyses = tuple(
+                    analysis
+                    for _, section in selected_sections
+                    if (analysis := get_for_section(book_id, section.id)) is not None
+                )
+            else:
+                all_analyses = transaction.analyses.list_for_book(book_id)
+                analyses = (
+                    all_analyses
+                    if include_quality
+                    else tuple(a for a in all_analyses if a.section_id in target_section_ids)
+                )
+            max_target_number = max((number for number, _ in selected_sections), default=0)
+            needed_block_ids = tuple(
+                block.id
+                for number, section in enumerate(ordered_sections, start=1)
+                if number <= max_target_number
+                for block in section.ordered_blocks
+            )
+            loaded_by_id: dict[str, BlockProcessingResult] = {}
+            if run is not None and needed_block_ids:
+                get_many = getattr(transaction.results, "get_many", None)
+                if get_many is not None and not include_quality:
+                    for offset in range(0, len(needed_block_ids), 500):
+                        loaded_by_id.update(
+                            get_many(run.id, needed_block_ids[offset : offset + 500])
+                        )
+                else:
+                    for item in transaction.results.list_for_run(run.id):
+                        loaded_by_id[item.block_id] = item
+            target_block_ids = {
+                block.id for _, section in selected_sections for block in section.ordered_blocks
+            }
+            stored_results = tuple(
+                result
+                for block_id, result in loaded_by_id.items()
+                if block_id in target_block_ids
+            )
+            prior_pronunciation_hints = _prior_pronunciation_hints(
+                ordered_sections=ordered_sections,
+                max_target_number=max_target_number,
+                target_section_ids=target_section_ids,
+                results_by_block=loaded_by_id,
+            )
+            quality = (
+                _quality_projection(
+                    transaction,
+                    book,
+                    document,
+                    analyses,
+                    run,
+                    tasks,
+                )
+                if include_quality
+                else {}
+            )
+            reading_support = _saved_reading_support(transaction, run)
+            if len(selected_sections) == 1:
+                candidates = _correction_candidates_projection(
+                    transaction,
+                    book_id,
+                    run,
+                    document=document,
+                    analyses=analyses,
+                    stored_results=stored_results,
+                    section_id=selected_sections[0][1].id,
+                )
+            elif selected_sections:
+                collected_candidates = []
+                for _, section in selected_sections:
+                    collected_candidates.extend(
+                        _correction_candidates_projection(
+                            transaction,
+                            book_id,
+                            run,
+                            document=document,
+                            analyses=analyses,
+                            stored_results=stored_results,
+                            section_id=section.id,
+                        )
+                    )
+                candidates = tuple(collected_candidates)
+            else:
+                candidates = ()
     treatments = {
         item.block_id: item.treatment
         for analysis in analyses
@@ -644,7 +941,7 @@ def book_result(
         candidates_by_block.setdefault(candidate['block_id'], []).append(candidate)
     chapters = []
     if document is not None:
-        for number, section in enumerate(document.ordered_sections, start=1):
+        for number, section in selected_sections:
             analysis = analyses_by_section.get(section.id)
             is_front = document.is_front_matter(section)
             is_notes_or_front = section.is_notes_only or is_front
@@ -679,12 +976,60 @@ def book_result(
         **quality,
         chapters=tuple(chapters),
         reading_support=reading_support,
+        prior_pronunciation_hints=prior_pronunciation_hints,
         warnings=_warnings_of(
             document=document,
             import_warnings=import_warnings,
             results=stored_results,
         ),
     )
+
+
+def _prior_pronunciation_hints(
+    *,
+    ordered_sections: Sequence[DocumentSection],
+    max_target_number: int,
+    target_section_ids: set[str],
+    results_by_block: Mapping[str, BlockProcessingResult],
+) -> dict[tuple[str, str, str], str]:
+    """Map `(normalized_form, variant, ipa) -> first hint_id` from preceding non-target sections."""
+    from linguary.application.validators.pronunciation import (
+        is_complete_pronunciation_form,
+        pronunciation_identity,
+    )
+
+    prior: dict[tuple[str, str, str], str] = {}
+    seen_any: set[tuple[str, str, str]] = set()
+    for number, section in enumerate(ordered_sections, start=1):
+        if number > max_target_number:
+            break
+        in_target = section.id in target_section_ids
+        for block in section.ordered_blocks:
+            result = results_by_block.get(block.id)
+            if result is None or result.block_id != block.id or not result.pronunciation_assistances:
+                continue
+            texts = {block.id: block.text}
+            valid_items = []
+            for item in result.pronunciation_assistances:
+                if item.anchor.block_id != block.id:
+                    continue
+                try:
+                    item.anchor.validate(texts)
+                except DomainError:
+                    continue
+                if not is_complete_pronunciation_form(block.text, item.anchor.start, item.anchor.end):
+                    continue
+                valid_items.append(item)
+            valid_items.sort(key=lambda item: (item.anchor.start, item.anchor.end))
+            for item in valid_items:
+                norm_form, norm_ipa, variant = pronunciation_identity(item)
+                key = (norm_form, variant, norm_ipa)
+                if in_target:
+                    seen_any.add(key)
+                elif key not in seen_any:
+                    seen_any.add(key)
+                    prior[key] = item.hint_id
+    return prior
 
 
 def _saved_reading_support(transaction, run):
