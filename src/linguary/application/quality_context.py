@@ -88,6 +88,31 @@ def _manifest_block_aliases(manifest: Mapping[str, Any]) -> dict[str, str]:
     return {block_id: f'b{index}' for index, block_id in enumerate(ordered, start=1)}
 
 
+def _needs_plan_id_alias(raw_id: Any, prefix: str) -> bool:
+    return isinstance(raw_id, str) and (raw_id.startswith(prefix) or len(raw_id) > 16)
+
+
+def _manifest_difficulty_aliases(manifest: Mapping[str, Any]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    if not isinstance(manifest, Mapping):
+        return aliases
+    for artifact in manifest.get('artifacts') or ():
+        if not isinstance(artifact, Mapping) or artifact.get('artifact_kind') != 'analysis':
+            continue
+        body = artifact.get('body')
+        if not isinstance(body, Mapping):
+            continue
+        cp = body.get('content_plan')
+        if not isinstance(cp, Mapping) or not isinstance(cp.get('difficulties'), (list, tuple)):
+            continue
+        for idx, d in enumerate(cp['difficulties'], start=1):
+            if isinstance(d, Mapping):
+                diff_id = d.get('id')
+                if _needs_plan_id_alias(diff_id, 'df-'):
+                    aliases[diff_id] = f'd{idx}'
+    return aliases
+
+
 def _strip_anchor_offsets(anchor: Any, aliases: Mapping[str, str] | None = None) -> Any:
     if isinstance(anchor, Mapping):
         out = {k: v for k, v in anchor.items() if k not in ('start', 'end')}
@@ -100,8 +125,10 @@ def _strip_anchor_offsets(anchor: Any, aliases: Mapping[str, str] | None = None)
 def _llm_artifact(
     artifact: Mapping[str, Any],
     aliases: Mapping[str, str] | None = None,
+    difficulty_aliases: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     alias_map = aliases or {}
+    diff_alias_map = difficulty_aliases or {}
     out = {k: v for k, v in artifact.items() if k != 'artifact_sha'}
     if isinstance(out.get('block_ids'), (list, tuple)):
         out['block_ids'] = [
@@ -132,9 +159,20 @@ def _llm_artifact(
             cleaned_result['language_notes'] = notes
         if isinstance(cleaned_result.get('fragment_assistances'), (list, tuple)):
             assistances = []
+            fallback_diff_aliases: dict[str, str] = {}
             for fa in cleaned_result['fragment_assistances']:
                 if isinstance(fa, Mapping):
                     item = dict(fa)
+                    diff_id = item.get('difficulty_id')
+                    if isinstance(diff_id, str):
+                        if diff_id in diff_alias_map:
+                            item['difficulty_id'] = diff_alias_map[diff_id]
+                        elif diff_id in alias_map:
+                            item['difficulty_id'] = alias_map[diff_id]
+                        elif _needs_plan_id_alias(diff_id, 'df-'):
+                            if diff_id not in fallback_diff_aliases:
+                                fallback_diff_aliases[diff_id] = f'd{len(fallback_diff_aliases) + 1}'
+                            item['difficulty_id'] = fallback_diff_aliases[diff_id]
                     if isinstance(item.get('anchors'), (list, tuple)):
                         item['anchors'] = [_strip_anchor_offsets(a, alias_map) for a in item['anchors']]
                     assistances.append(item)
@@ -178,9 +216,15 @@ def _llm_artifact(
             }
             if isinstance(cleaned_cp.get('difficulties'), (list, tuple)):
                 difficulties = []
-                for d in cleaned_cp['difficulties']:
+                for idx, d in enumerate(cleaned_cp['difficulties'], start=1):
                     if isinstance(d, Mapping):
                         diff = dict(d)
+                        diff_id = diff.get('id')
+                        if isinstance(diff_id, str):
+                            if diff_id in diff_alias_map:
+                                diff['id'] = diff_alias_map[diff_id]
+                            elif _needs_plan_id_alias(diff_id, 'df-'):
+                                diff['id'] = f'd{idx}'
                         if isinstance(diff.get('owner_block_id'), str):
                             diff['owner_block_id'] = alias_map.get(diff['owner_block_id'], diff['owner_block_id'])
                         if isinstance(diff.get('anchors'), (list, tuple)):
@@ -191,9 +235,12 @@ def _llm_artifact(
                 cleaned_cp['difficulties'] = difficulties
             if isinstance(cleaned_cp.get('context_facts'), (list, tuple)):
                 facts = []
-                for f in cleaned_cp['context_facts']:
+                for idx, f in enumerate(cleaned_cp['context_facts'], start=1):
                     if isinstance(f, Mapping):
                         fact = dict(f)
+                        fact_id = fact.get('id')
+                        if _needs_plan_id_alias(fact_id, 'cf-'):
+                            fact['id'] = f'f{idx}'
                         if isinstance(fact.get('anchors'), (list, tuple)):
                             fact['anchors'] = [_strip_anchor_offsets(a, alias_map) for a in fact['anchors']]
                         if isinstance(fact.get('subject_anchor'), Mapping):
@@ -225,33 +272,61 @@ def _matches_manifest_text(
         return _matches_chapter_text(term_source, normalized_blocks_text, word_stems)
 
 
-def _filter_glossary_for_manifest(glossary: Any, original_texts: list[str]) -> Any:
-    if not original_texts:
-        return glossary
-    from linguary.application.context_builder import _extract_word_stems
-    blocks_text = ' '.join(original_texts)
-    word_stems = _extract_word_stems(blocks_text)
-    normalized_blocks_text = glossary_key(blocks_text)
+_ALLOWED_GLOSSARY_ENTRY_KEYS = ('source_text', 'translation', 'type', 'status')
 
-    def keep(entry: Any) -> bool:
-        if not isinstance(entry, Mapping):
+
+def _clean_glossary_entry(entry: Any) -> Any:
+    if not isinstance(entry, Mapping):
+        return entry
+    cleaned = {k: entry[k] for k in _ALLOWED_GLOSSARY_ENTRY_KEYS if k in entry}
+    note = entry.get('note')
+    if isinstance(note, str) and note.strip():
+        cleaned['note'] = note
+    return cleaned
+
+
+def _filter_glossary_for_manifest(glossary: Any, original_texts: list[str]) -> Any:
+    if original_texts:
+        from linguary.application.context_builder import _extract_word_stems
+        blocks_text = ' '.join(original_texts)
+        word_stems = _extract_word_stems(blocks_text)
+        normalized_blocks_text = glossary_key(blocks_text)
+
+        def keep(entry: Any) -> bool:
+            if not isinstance(entry, Mapping):
+                return True
+            source = entry.get('source_text') or entry.get('canonical_source_text') or ''
+            if not isinstance(source, str) or not source:
+                return True
+            return _matches_manifest_text(source, blocks_text, word_stems, normalized_blocks_text)
+    else:
+        def keep(entry: Any) -> bool:
             return True
-        source = entry.get('source_text') or entry.get('canonical_source_text') or ''
-        if not isinstance(source, str) or not source:
-            return True
-        return _matches_manifest_text(source, blocks_text, word_stems, normalized_blocks_text)
 
     if isinstance(glossary, Mapping) and isinstance(glossary.get('entries'), (list, tuple)):
-        return {**glossary, 'entries': [e for e in glossary['entries'] if keep(e)]}
+        return {'entries': [_clean_glossary_entry(e) for e in glossary['entries'] if keep(e)]}
     if isinstance(glossary, (list, tuple)):
-        return [e for e in glossary if keep(e)]
+        return [_clean_glossary_entry(e) for e in glossary if keep(e)]
     return glossary
+
+
+_QUALITY_REQUEST_PREFIX_KEYS = (
+    'scope',
+    'book_complete',
+    'missing_results',
+    'glossary',
+)
+
+
+def _normalize_sorted_keys(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
 
 
 def request_text(manifest: Mapping[str, Any]) -> str:
     payload = thaw(manifest)
     if isinstance(payload, Mapping):
         aliases = _manifest_block_aliases(payload)
+        difficulty_aliases = _manifest_difficulty_aliases(payload)
         raw_artifacts = payload.get('artifacts')
         original_texts = [
             a['body']['text']
@@ -278,10 +353,21 @@ def request_text(manifest: Mapping[str, Any]) -> str:
             cleaned['glossary'] = _filter_glossary_for_manifest(cleaned['glossary'], original_texts)
         if isinstance(raw_artifacts, (list, tuple)):
             cleaned['artifacts'] = [
-                _llm_artifact(a, aliases) if isinstance(a, Mapping) else a
+                _llm_artifact(a, aliases, difficulty_aliases=difficulty_aliases)
+                if isinstance(a, Mapping)
+                else a
                 for a in raw_artifacts
             ]
-        payload = cleaned
+        ordered_payload: dict[str, Any] = {}
+        for key in _QUALITY_REQUEST_PREFIX_KEYS:
+            if key in cleaned:
+                ordered_payload[key] = _normalize_sorted_keys(cleaned[key])
+        for key in sorted(cleaned):
+            if key not in ordered_payload and key != 'artifacts':
+                ordered_payload[key] = _normalize_sorted_keys(cleaned[key])
+        if 'artifacts' in cleaned:
+            ordered_payload['artifacts'] = _normalize_sorted_keys(cleaned['artifacts'])
+        return json.dumps(ordered_payload, ensure_ascii=False, sort_keys=False)
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
@@ -315,24 +401,46 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
                 for bid in f['block_ids']
             ]
         artifact_sha = f.get('artifact_sha')
+        ordered_bids = list(f.get('block_ids') or ())
+        f_bids = set(ordered_bids)
+        kind = f.get('artifact_kind')
         if not artifact_sha:
-            kind = f.get('artifact_kind')
-            f_bids = set(f.get('block_ids') or ())
-            matching = [
-                a for a in manifest['artifacts']
-                if a['artifact_kind'] == kind and (
-                    f_bids <= set(a['block_ids']) if kind == 'analysis' else set(a['block_ids']) == f_bids
-                )
-            ]
-            if len(matching) != 1:
+            if not ordered_bids:
                 raise WorkStateError('чужой артефакт замечания')
-            artifact_sha = matching[0]['artifact_sha']
-            f['artifact_sha'] = artifact_sha
+            if kind in {'result', 'original'} and len(f_bids) > 1:
+                per_block = []
+                for bid in ordered_bids:
+                    matches = [
+                        a for a in manifest['artifacts']
+                        if (a.get('artifact_kind') or a.get('kind')) == kind and a['block_ids'] == [bid]
+                    ]
+                    if len(matches) != 1 or matches[0]['artifact_sha'] not in checked:
+                        raise WorkStateError('чужой артефакт замечания')
+                    per_block.append(matches[0])
+                artifact_sha = per_block[0]['artifact_sha']
+                f['artifact_sha'] = artifact_sha
+            else:
+                matching = [
+                    a for a in manifest['artifacts']
+                    if (a.get('artifact_kind') or a.get('kind')) == kind and (
+                        f_bids <= set(a['block_ids']) if kind == 'analysis' else set(a['block_ids']) == f_bids
+                    )
+                ]
+                if len(matching) != 1:
+                    raise WorkStateError('чужой артефакт замечания')
+                artifact_sha = matching[0]['artifact_sha']
+                f['artifact_sha'] = artifact_sha
 
         artifact = artifacts.get(artifact_sha)
+        multi_block_single_artifact = kind in {'result', 'original'} and len(f_bids) > 1
         if (artifact is None or artifact_sha not in checked
-                or artifact['artifact_kind'] != f.get('artifact_kind')
-                or not f.get('block_ids') or not set(f['block_ids']) <= set(artifact['block_ids'])
+                or artifact['artifact_kind'] != kind
+                or not ordered_bids
+                or (
+                    artifact['block_ids'] != [ordered_bids[0]]
+                    if multi_block_single_artifact
+                    else not f_bids <= set(artifact['block_ids'])
+                )
                 or not f.get('evidence_anchors')):
             raise WorkStateError('чужой артефакт замечания')
 

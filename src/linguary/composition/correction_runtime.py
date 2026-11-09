@@ -273,17 +273,22 @@ class CorrectionProvenanceClient:
             expected_type = (ChapterCorrectionReviewResponse if reviewing else
                 ChapterCorrectionV2Response if isinstance(self.snapshot, CorrectionSnapshotV2) else ChapterCorrectionResponse)
             if response.truncated or type(response.payload) is not expected_type:
-                raise LLMResponseFormatError('ответ исправления неполон', truncated=response.truncated)
+                raise LLMResponseFormatError(
+                    'ответ исправления неполон',
+                    truncated=response.truncated,
+                    raw_content=response.raw_content,
+                    usage=response.usage,
+                    cost=response.cost,
+                    provider=response.provider,
+                    model=response.model,
+                    call_context=response.call_context,
+                )
             if reviewing and request.correction_candidate_refs:
                 payload = response.payload.with_resolved_proposal_shas(request.correction_candidate_refs)
                 response = replace(response, payload=payload)
             elif not reviewing and request.block_aliases:
                 payload = response.payload.with_resolved_block_ids(dict(request.block_aliases))
                 response = replace(response, payload=payload)
-            try:
-                response.payload.validate_coverage(request.correction_candidate_refs if reviewing else request.ordered_block_ids)
-            except LLMPayloadError:
-                raise LLMResponseFormatError('ответ исправления не покрывает переданные блоки') from None
             if response.call_context != context:
                 raise ConditionsError('correction_policy_unavailable')
             with self.service.uow.transaction() as transaction:

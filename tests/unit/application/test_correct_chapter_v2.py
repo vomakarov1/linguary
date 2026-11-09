@@ -750,3 +750,356 @@ async def test_correct_chapter_v1_splits_group_on_truncated_response():
         monkeypatch.undo()
 
 
+def test_review_request_aliases_candidate_ids_and_resolves_verdicts():
+    section = make_analysis_section(texts=("First block.", "Second block."))
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    res1 = BlockProcessingResult(block_id=b1.id, treatment=BlockTreatment.TRANSLATE, translated_text="Первый старый.")
+    res2 = BlockProcessingResult(block_id=b2.id, treatment=BlockTreatment.TRANSLATE, translated_text="Второй старый.")
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(id="cond-1", payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=section.blocks,
+        results={b1.id: res1, b2.id: res2},
+        bindings={b1.id: None, b2.id: None},
+        input_generations={b1.id: 1, b2.id: 1},
+    )
+
+    def make_candidate(cid: str, block, res, new_text: str):
+        payload = json.loads(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "book_id": doc.id,
+                    "run_id": "run",
+                    "conditions_id": "cond-1",
+                    "section_id": section.id,
+                    "block_id": block.id,
+                    "input_sha256": inputs.checksums[block.id],
+                    "input_generation": 1,
+                    "group_id": "group-1",
+                    "proposal_attempt_id": "att-1",
+                    "original": {"text": block.text},
+                    "current_result": asdict(res),
+                    "result": asdict(replace(res, translated_text=new_text)),
+                    "proposal": {"issues": [{"kind": "note", "quote": "First", "explanation": "Уточнить"}]},
+                }
+            )
+        )
+        return CorrectionCandidate(
+            candidate_id=cid,
+            book_id=doc.id,
+            run_id="run",
+            conditions_id="cond-1",
+            section_id=section.id,
+            block_id=block.id,
+            input_sha256=inputs.checksums[block.id],
+            input_generation=1,
+            proposal_sha256=canonical_sha(payload),
+            payload=payload,
+            group_id="group-1",
+            proposal_attempt_id="att-1",
+        )
+
+    c1 = make_candidate("cand-uuid-1", b1, res1, "Первый новый.")
+    c2 = make_candidate("cand-uuid-2", b2, res2, "Второй новый.")
+    snapshot = SimpleNamespace(
+        prompt="Propose.",
+        review_prompt="Review proposals.",
+        parameters={"max_attempts": 1, "max_output_tokens": None},
+    )
+    correct_v2 = CorrectChapterV2(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+    task = SimpleNamespace(book_id=doc.id, id="task", scope_id=section.id)
+
+    request = correct_v2._review_request(inputs, task, (c1, c2))
+    body = json.loads(request.input_text)
+
+    assert [item["candidate_id"] for item in body["candidates"]] == ["c1", "c2"]
+    assert "cand-uuid-1" not in request.input_text
+    assert "cand-uuid-2" not in request.input_text
+    assert request.correction_candidate_refs == (
+        (c1.candidate_id, c1.proposal_sha256),
+        (c2.candidate_id, c2.proposal_sha256),
+    )
+
+    raw_review = ChapterCorrectionReviewResponse(
+        candidates=(
+            CorrectionVerdict(
+                candidate_id="c1",
+                verdict="confirmed",
+                error_supported=True,
+                evidence_valid=True,
+                minimal=True,
+                no_semantic_loss=True,
+                reason="Подтверждено.",
+            ),
+            CorrectionVerdict(
+                candidate_id="c2",
+                verdict="needs_human",
+                error_supported=False,
+                evidence_valid=True,
+                minimal=True,
+                no_semantic_loss=True,
+                reason="Спорно.",
+            ),
+        )
+    )
+    resolved = raw_review.with_resolved_proposal_shas(request.correction_candidate_refs)
+    assert [(v.candidate_id, v.proposal_sha256) for v in resolved.candidates] == [
+        (c1.candidate_id, c1.proposal_sha256),
+        (c2.candidate_id, c2.proposal_sha256),
+    ]
+    resolved.validate_coverage(request.correction_candidate_refs)
+
+
+@pytest.mark.asyncio
+async def test_propose_group_skips_review_group_for_invalid_evidence_candidates():
+    from linguary.application.correction_dto import (
+        ChapterCorrectionV2Response,
+        CorrectionIssue,
+        CurrentQuoteEvidence,
+        ProposedBlockResponse,
+        UnchangedBlockResponse,
+    )
+
+    section = make_analysis_section(
+        texts=("First unchanged.", "Second with invalid evidence."),
+    )
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    res1 = BlockProcessingResult(block_id=b1.id, treatment=BlockTreatment.TRANSLATE, translated_text="Первый.")
+    res2 = BlockProcessingResult(block_id=b2.id, treatment=BlockTreatment.TRANSLATE, translated_text="Второй старый.")
+    results = {b1.id: res1, b2.id: res2}
+    cond_id = str(uuid4())
+    run_id = str(uuid4())
+    task_id = str(uuid4())
+    bindings = {
+        b.id: {
+            "book_id": doc.id,
+            "conditions_id": cond_id,
+            "attempt_id": str(uuid4()),
+            "artifact_revision_id": str(uuid4()),
+        }
+        for b in section.blocks
+    }
+    generations = {b1.id: 1, b2.id: 1}
+    run = SimpleNamespace(id=run_id, glossary_snapshot=GlossarySnapshot())
+    conditions = SimpleNamespace(id=cond_id, payload={"schema_version": 1, "versions": {"validators": 3}})
+
+    def build_inputs():
+        return CorrectionInputs(
+            document=doc,
+            section=section,
+            analysis=analysis,
+            run=run,
+            conditions=conditions,
+            snapshot=snapshot,
+            blocks=section.blocks,
+            results=dict(results),
+            bindings=dict(bindings),
+            input_generations=dict(generations),
+        )
+
+    initial_inputs = build_inputs()
+    identity = correction_task_identity(
+        book_id=doc.id,
+        run_id=run.id,
+        section_id=section.id,
+        input_generation="gen-1",
+        policy_version=snapshot.policy_version,
+    )
+    task = SimpleNamespace(
+        id=task_id,
+        book_id=doc.id,
+        task_type=TaskType.CHAPTER_CORRECTION,
+        scope_id=section.id,
+        status=TaskStatus.RUNNING,
+        attempts=1,
+        operation_id=identity.operation_id,
+        identity=identity,
+    )
+    work_bindings = {
+        ("task", task.id): {
+            "book_id": doc.id,
+            "conditions_id": conditions.id,
+            "payload_json": {
+                "run_id": run.id,
+                "section_id": section.id,
+                "input_generation": "gen-1",
+                "manifest": initial_inputs.manifest,
+            },
+        },
+    }
+    attempts_store: dict[str, SimpleNamespace] = {}
+    candidates_store: dict[str, CorrectionCandidate] = {}
+    saved_checks: list = []
+
+    class FakeWork:
+        def get_binding(self, kind, entity_id):
+            return work_bindings.get((kind, entity_id))
+
+        def bind(self, kind, entity_id, *, book_id, conditions_id, payload, **kwargs):
+            work_bindings[(kind, entity_id)] = {
+                "book_id": book_id,
+                "conditions_id": conditions_id,
+                "payload_json": payload,
+            }
+
+        def add_correction_candidates(self, candidates):
+            for c in candidates:
+                candidates_store[c.candidate_id] = c
+
+        def get_correction_candidate(self, cid):
+            return candidates_store.get(cid)
+
+        def list_correction_candidates(self, run_id, *, section_id=None, states=None):
+            return tuple(
+                c for c in candidates_store.values()
+                if states is None or c.state in states
+            )
+
+        def correction_checks(self, run_id, section_id):
+            return tuple(saved_checks)
+
+        def replace_correction_checks(self, run_id, section_id, checks):
+            saved_checks.extend(checks)
+
+        def get_attempt(self, attempt_id):
+            return attempts_store.get(attempt_id)
+
+        def transition_attempt(self, attempt_id, new_state, *, expected_state):
+            attempts_store[attempt_id].state = new_state
+
+        def archive_artifacts(self, items):
+            return tuple(f"art-{i}" for i in range(len(items)))
+
+    fake_tx = SimpleNamespace(
+        document=doc,
+        tasks=SimpleNamespace(get=lambda tid: task),
+        work=FakeWork(),
+        results=SimpleNamespace(replace_results=lambda *a, **kw: None),
+    )
+
+    import linguary.application.use_cases.correct_chapter as module
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "correction_inputs", lambda tx, bid, sid: build_inputs())
+    monkeypatch.setattr(module, "finalize_response", lambda *a, **kw: None)
+
+    class FakeClient:
+        async def generate(self, request):
+            if request.kind is LLMResponseKind.CHAPTER_CORRECTION_REVIEW:
+                raise AssertionError("_review_group must not be called when all candidates have invalid evidence")
+            ctx = request.call_context
+            attempts_store[ctx.attempt_id] = SimpleNamespace(
+                id=ctx.attempt_id,
+                book_id=doc.id,
+                state="validated",
+                task_id=task.id,
+                run_id=run.id,
+                conditions_id=conditions.id,
+                context={
+                    **ctx.to_dict(),
+                    "task_attempt": task.attempts,
+                    "operation_id": task.operation_id,
+                },
+            )
+            payload = ChapterCorrectionV2Response(
+                blocks=(
+                    UnchangedBlockResponse(block_id=b1.id),
+                    ProposedBlockResponse(
+                        block_id=b2.id,
+                        translated_text="Второй новый.",
+                        glossary_hints=(),
+                        language_notes=(),
+                        issues=(
+                            CorrectionIssue(
+                                field_path="translated_text",
+                                source_quote="NonExistentSourceQuote",
+                                current_evidence=CurrentQuoteEvidence(
+                                    field_path="translated_text",
+                                    quote="Второй",
+                                ),
+                                problem="Ошибка",
+                                minimal_fix_reason="Правка",
+                            ),
+                        ),
+                    ),
+                )
+            )
+            return LLMResponse(
+                payload=payload,
+                raw_content="{}",
+                provider="test",
+                model="gpt-test",
+                call_context=ctx,
+            )
+
+    try:
+        handler = CorrectChapterV2(
+            unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(fake_tx)),
+            llm_client=FakeClient(),
+            snapshot=snapshot,
+            validator=make_validator(),
+        )
+        result = await handler(CorrectChapterCommand(doc.id, section.id, task.id))
+        assert result.checked_blocks == 2
+        assert len(candidates_store) == 1
+        saved_candidate, = candidates_store.values()
+        assert saved_candidate.block_id == b2.id
+        assert saved_candidate.state == "awaiting_human"
+        assert saved_candidate.review is not None
+        assert saved_candidate.review["verdict"] == "needs_human"
+        assert saved_candidate.review["evidence_valid"] is False
+        assert saved_candidate.review["reason"] == "Цитата или доказательство в предложении не подтверждены текстом блока."
+        assert len(saved_checks) == 1
+        assert saved_checks[0].block_id == b1.id
+        assert saved_checks[0].basis == "unchanged"
+    finally:
+        monkeypatch.undo()
+
+
+

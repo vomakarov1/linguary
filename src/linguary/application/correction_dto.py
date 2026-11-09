@@ -410,15 +410,37 @@ class ChapterCorrectionReviewResponse:
     def with_resolved_proposal_shas(self, refs) -> ChapterCorrectionReviewResponse:
         if not refs:
             return self
-        by_candidate = dict(refs) if isinstance(refs, Mapping) else {cid: sha for cid, sha in refs}
-        return ChapterCorrectionReviewResponse(
-            tuple(
-                replace(v, proposal_sha256=by_candidate[v.candidate_id])
-                if v.proposal_sha256 is None and v.candidate_id in by_candidate
-                else v
-                for v in self.candidates
-            )
+        ordered_refs = (
+            tuple(refs.items())
+            if isinstance(refs, Mapping)
+            else tuple((cid, sha) for cid, sha in refs)
         )
+        by_candidate = dict(ordered_refs)
+        by_alias = {
+            f'c{idx}': (cid, sha)
+            for idx, (cid, sha) in enumerate(ordered_refs, start=1)
+        }
+        resolved: list[CorrectionVerdict] = []
+        for v in self.candidates:
+            if v.candidate_id in by_candidate:
+                sha = by_candidate[v.candidate_id]
+                resolved.append(
+                    replace(v, proposal_sha256=sha)
+                    if v.proposal_sha256 is None
+                    else v
+                )
+            elif v.candidate_id in by_alias:
+                canonical_cid, sha = by_alias[v.candidate_id]
+                resolved.append(
+                    replace(
+                        v,
+                        candidate_id=canonical_cid,
+                        proposal_sha256=sha if v.proposal_sha256 is None else v.proposal_sha256,
+                    )
+                )
+            else:
+                resolved.append(v)
+        return ChapterCorrectionReviewResponse(tuple(resolved))
 
     def validate_coverage(self, refs):
         actual = tuple((v.candidate_id, v.proposal_sha256) for v in self.candidates)

@@ -349,8 +349,15 @@ class ExportBookSequence:
 
     async def start(self, book_id: str) -> ProcessingTask:
         """Enqueues export after checks, replacing only a completed old task."""
-        self._export_book.ensure_ready(book_id)
         identity = TaskIdentity(book_id=book_id, task_type=TaskType.EXPORT_BOOK)
+        with self._unit_of_work.transaction() as transaction:
+            existing = transaction.tasks.find_by_identity(identity)
+            if (
+                existing is not None
+                and existing.status in _ACTIVE_EXPORT_TASK_STATUSES
+            ):
+                return existing
+        self._export_book.ensure_ready(book_id)
         with self._unit_of_work.transaction() as transaction:
             existing = transaction.tasks.find_by_identity(identity)
             if (
