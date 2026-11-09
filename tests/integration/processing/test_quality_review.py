@@ -343,3 +343,132 @@ async def test_quality_review_passes_previous_validation_error_into_repair_turn(
         assert json.loads(second_req.input_text) == json.loads(first_req.input_text)
     finally:
         await app.aclose()
+
+
+async def test_quality_review_executes_chunked_manifest_and_keeps_succeeded_task_with_unknown_state_on_transport_error(tmp_path):
+    from linguary.application.use_cases.approve_glossary import StartProcessingCommand
+    from test_book_conditions import store_imported
+
+    class ChunkAwareReviewFake(ReviewFake):
+        fail_transport_on_review_call: int | None = None
+
+        async def generate(self, request):
+            if (
+                request.kind == LLMResponseKind.QUALITY_REVIEW
+                and self.fail_transport_on_review_call is not None
+                and self.review_calls + 1 == self.fail_transport_on_review_call
+            ):
+                self.review_calls += 1
+                self.requests.append(request)
+                raise LLMTransportError('network dropped on second chunk')
+            return await super().generate(request)
+
+    def bounded_tokens(request):
+        parsed = json.loads(request.input_text)
+        if len(parsed.get('scope') or ()) > 1:
+            raise WorkStateError('полный запрос превышает подтверждённую границу')
+        return 1000
+
+    small_route = QualityRoute(
+        'review-model',
+        'test-route',
+        'fixture-v1',
+        Decimal('1'),
+        Decimal('2'),
+        Decimal('0'),
+        100,
+        bounded_tokens,
+        'fixture-verification-v1',
+        True,
+    )
+
+    fake = ChunkAwareReviewFake(
+        [
+            analysis_reply(2),
+            analysis_reply(1),
+            translation_reply(2),
+            translation_reply(1),
+        ]
+    )
+    app = build_application(
+        settings=AppSettings(
+            llm=LLMSettings(model='source-model', api_key='synthetic-secret'),
+            storage=StorageSettings(data_root=str(tmp_path / 'data')),
+        ),
+        llm_client=fake,
+        quality_routes={('test-route', 'review-model'): small_route},
+    )
+    try:
+        store_imported(
+            app,
+            (
+                ('He returned home.', 'He waited outside.'),
+                ('He opened the door.',),
+            ),
+        )
+        await app.analysis.start('book-1')
+        analysed = await drain_tasks(app)
+        assert all(t.status == TaskStatus.SUCCEEDED for t in analysed)
+        app.start_processing()(StartProcessingCommand('book-1'))
+        await app.processing.start('book-1')
+        translated = await drain_tasks(app)
+        assert all(t.status == TaskStatus.SUCCEEDED for t in translated)
+
+        manifest = app.quality_review.preview('book-1')
+        chunks = app.quality_review._chunks_for_route(manifest, small_route)
+        assert len(chunks) == 3
+        assert sum(len(c['scope']) for c in chunks) == 3
+
+        impossible_route = replace(
+            small_route,
+            input_token_bound=lambda _req: (_ for _ in ()).throw(
+                WorkStateError('полный запрос превышает подтверждённую границу')
+            ),
+        )
+        with pytest.raises(WorkStateError, match='полный запрос превышает подтверждённую границу'):
+            app.quality_review._chunks_for_route(manifest, impossible_route)
+
+        # Sum of 3 chunks (each 1000 in @ $1/M + 100 out @ $2/M = 1200 microusd -> 3 * 1200 = 3600 microusd)
+        assert manifest['route_estimates']['test-route:review-model'] == 3600
+        with pytest.raises(WorkStateError, match='budget'):
+            await app.quality_review.start(
+                command(app, key='too-small-budget', budget=3599),
+                require_available=True,
+            )
+
+        # Successful chunked execution deduplicates shared chapter analysis artifact_sha
+        fake.mode = 'finding'
+        created = await app.quality_review.start(
+            command(app, key='chunked-ok', budget=10000),
+            require_available=True,
+        )
+        finished = await drain_tasks(app)
+        assert all(t.status == TaskStatus.SUCCEEDED for t in finished), [t.last_error for t in finished]
+        assert fake.review_calls == 3
+
+        result = app.quality_review.get('book-1', created['review_id'])
+        assert result['state'] == 'completed-with-findings'
+        assert result['spent'] == 300 and result['reserved'] == 0
+        assert len(result['findings']) == 3
+        checked = result['coverage']['checked']
+        assert len(checked) == len(set(checked)) == len(manifest['artifacts'])
+
+        # Transport error after mark_sent on chunk 2 finishes task as SUCCEEDED with 'unknown' review state
+        fake.review_calls = 0
+        fake.fail_transport_on_review_call = 2
+        created_unknown = await app.quality_review.start(
+            command(app, key='chunked-transport', budget=10000),
+            require_available=True,
+        )
+        finished_unknown = await drain_tasks(app)
+        assert len(finished_unknown) == 1
+        assert finished_unknown[0].status == TaskStatus.SUCCEEDED
+        assert finished_unknown[0].last_error is None
+        assert fake.review_calls == 2
+
+        unknown_state = app.quality_review.get('book-1', created_unknown['review_id'])
+        assert unknown_state['state'] == 'unknown'
+        assert unknown_state['spent'] == 100
+        assert unknown_state['reserved'] > 0
+    finally:
+        await app.aclose()

@@ -757,5 +757,251 @@ def test_quality_context_validates_multi_block_artifact_sha_and_filters_scoped_a
         qc_mod.snapshot = orig_snapshot
 
 
+def test_partition_manifest_keeps_single_chapter_order_and_splits_multi_chapter_scope():
+    from linguary.application.quality_context import (
+        MAX_QUALITY_CHUNK_BLOCKS,
+        QualityReviewResponse,
+        partition_manifest,
+        request_text,
+        validate_response,
+    )
+    from linguary.domain.book_conditions import WorkStateError
+    from linguary.domain.content_plan import canonical_sha
 
+    assert MAX_QUALITY_CHUNK_BLOCKS == 80
+
+    def make_orig(bid: str, text: str) -> dict:
+        env = dict(artifact_kind="original", block_ids=[bid], body=dict(text=text))
+        return {**env, "artifact_sha": canonical_sha(env)}
+
+    def make_res(bid: str, tr: str) -> dict:
+        env = dict(
+            artifact_kind="result",
+            block_ids=[bid],
+            body=dict(block_id=bid, translated_text=tr),
+        )
+        return {**env, "artifact_sha": canonical_sha(env)}
+
+    def make_analysis(bids: list[str], summary: str) -> dict:
+        env = dict(
+            artifact_kind="analysis",
+            block_ids=list(bids),
+            body=dict(
+                summary=summary,
+                treatment_plan=dict(
+                    section_id=f"sec-{summary}",
+                    items=[dict(block_id=b, treatment="TRANSLATE") for b in bids],
+                ),
+                content_plan=dict(
+                    version=3,
+                    profile="content-plan-v3",
+                    sha256="a" * 64,
+                    difficulties=[
+                        dict(
+                            id=f"df-{idx:062d}",
+                            owner_block_id=b,
+                            anchors=[dict(block_id=b, start=0, end=5, quote="Block")],
+                        )
+                        for idx, b in enumerate(bids, start=1)
+                    ],
+                    context_facts=[
+                        dict(
+                            id=f"cf-{idx:062d}",
+                            anchors=[dict(block_id=b, start=0, end=5, quote="Block")],
+                            subject_anchor=dict(block_id=b, start=0, end=5, quote="Block"),
+                        )
+                        for idx, b in enumerate(bids, start=1)
+                    ],
+                ),
+            ),
+        )
+        return {**env, "artifact_sha": canonical_sha(env)}
+
+    # 1. Single-chapter manifest within max_blocks_per_chunk keeps exact positional order
+    orig_1 = make_orig("ch1-b1", "Block one alpha text.")
+    res_1 = make_res("ch1-b1", "Блок один.")
+    orig_2 = make_orig("ch1-b2", "Block two beta text.")
+    res_2 = make_res("ch1-b2", "Блок два.")
+    analysis_ch1_short = make_analysis(["ch1-b1", "ch1-b2"], "ch1")
+
+    single_manifest = dict(
+        schema_version=1,
+        book_id="book-1",
+        scope=["ch1-b1", "ch1-b2"],
+        missing_results=[],
+        glossary=dict(
+            entries=[
+                dict(source_text="Alpha", translation="Альфа", type="term", status="approved"),
+            ]
+        ),
+        artifacts=[orig_1, res_1, orig_2, res_2, analysis_ch1_short],
+    )
+    single_chunks = partition_manifest(single_manifest)
+    assert len(single_chunks) == 1
+    assert single_chunks[0] == single_manifest
+    assert single_chunks[0] is not single_manifest
+
+    single_parsed = json.loads(request_text(single_manifest))
+    assert [a["artifact_kind"] for a in single_parsed["artifacts"]] == [
+        "original",
+        "result",
+        "original",
+        "result",
+        "analysis",
+    ]
+
+    # 2. Multi-chapter manifest: grouped by chapter in request_text when >1 analysis,
+    #    and partitioned by chapters + windows of max_blocks_per_chunk when scope > limit.
+    orig_3 = make_orig("ch1-b3", "Block three gamma text.")
+    analysis_ch1 = make_analysis(["ch1-b1", "ch1-b2", "ch1-b3"], "ch1-long")
+
+    orig_4 = make_orig("ch2-b1", "Block four delta text.")
+    res_4 = make_res("ch2-b1", "Блок четыре.")
+    orig_5 = make_orig("ch2-b2", "Block five epsilon text.")
+    res_5 = make_res("ch2-b2", "Блок пять.")
+    analysis_ch2 = make_analysis(["ch2-b1", "ch2-b2"], "ch2")
+
+    multi_manifest = dict(
+        schema_version=1,
+        book_id="book-1",
+        scope=["ch1-b1", "ch1-b2", "ch1-b3", "ch2-b1", "ch2-b2"],
+        missing_results=["ch1-b3"],
+        glossary=dict(
+            entries=[
+                dict(source_text="Gamma", translation="Гамма", type="term", status="approved"),
+                dict(source_text="Delta", translation="Дельта", type="term", status="approved"),
+            ]
+        ),
+        artifacts=[
+            orig_1,
+            res_1,
+            orig_2,
+            res_2,
+            orig_3,
+            orig_4,
+            res_4,
+            orig_5,
+            res_5,
+            analysis_ch1,
+            analysis_ch2,
+        ],
+    )
+
+    multi_parsed = json.loads(request_text(multi_manifest))
+    assert [a["artifact_kind"] for a in multi_parsed["artifacts"]] == [
+        "analysis",
+        "original",
+        "original",
+        "original",
+        "result",
+        "result",
+        "analysis",
+        "original",
+        "original",
+        "result",
+        "result",
+    ]
+
+    chunks = partition_manifest(multi_manifest, max_blocks_per_chunk=2)
+    assert len(chunks) == 3
+    assert [c["scope"] for c in chunks] == [
+        ["ch1-b1", "ch1-b2"],
+        ["ch1-b3"],
+        ["ch2-b1", "ch2-b2"],
+    ]
+    assert [c["missing_results"] for c in chunks] == [
+        [],
+        ["ch1-b3"],
+        [],
+    ]
+    assert [a["artifact_sha"] for a in chunks[0]["artifacts"]] == [
+        orig_1["artifact_sha"],
+        res_1["artifact_sha"],
+        orig_2["artifact_sha"],
+        res_2["artifact_sha"],
+        analysis_ch1["artifact_sha"],
+    ]
+    assert [a["artifact_sha"] for a in chunks[1]["artifacts"]] == [
+        orig_3["artifact_sha"],
+        analysis_ch1["artifact_sha"],
+    ]
+    assert [a["artifact_sha"] for a in chunks[2]["artifacts"]] == [
+        orig_4["artifact_sha"],
+        res_4["artifact_sha"],
+        orig_5["artifact_sha"],
+        res_5["artifact_sha"],
+        analysis_ch2["artifact_sha"],
+    ]
+
+    # Window 2 of long chapter 1 serializes only its window slice of the content/treatment plan
+    chunk2_parsed = json.loads(request_text(chunks[1]))
+    assert chunk2_parsed["scope"] == ["b1"]
+    assert chunk2_parsed["missing_results"] == ["b1"]
+    assert [e["source_text"] for e in chunk2_parsed["glossary"]["entries"]] == ["Gamma"]
+    chunk2_analysis = next(
+        a["body"] for a in chunk2_parsed["artifacts"] if a["artifact_kind"] == "analysis"
+    )
+    assert chunk2_analysis["treatment_plan"]["items"] == [
+        dict(block_id="b1", treatment="TRANSLATE"),
+    ]
+    assert len(chunk2_analysis["content_plan"]["difficulties"]) == 1
+    assert chunk2_analysis["content_plan"]["difficulties"][0]["owner_block_id"] == "b1"
+    assert len(chunk2_analysis["content_plan"]["context_facts"]) == 1
+    assert chunk2_analysis["content_plan"]["context_facts"][0]["subject_anchor"]["block_id"] == "b1"
+
+    # 3. Actionable error messages in validate_response preserve prefixes and include index, bN, quote
+    bad_quote_response = QualityReviewResponse(
+        findings=(
+            dict(
+                block_ids=["b1"],
+                artifact_kind="result",
+                severity="minor",
+                issue="Valid first finding",
+                evidence_anchors=[dict(block_id="b1", quote="Block one")],
+                suggestion="Keep",
+                uncertainty="low",
+            ),
+            dict(
+                block_ids=["b2"],
+                artifact_kind="result",
+                severity="major",
+                issue="Broken second finding",
+                evidence_anchors=[dict(block_id="b2", quote="nonexistent phrase")],
+                suggestion="Fix",
+                uncertainty="low",
+            ),
+        ),
+        checked_artifacts=(),
+        missing_artifacts=(),
+    )
+    with pytest.raises(WorkStateError) as exc_info:
+        validate_response(single_manifest, bad_quote_response)
+    msg = str(exc_info.value)
+    assert msg.startswith("неверная привязка замечания к оригиналу (")
+    assert "2" in msg
+    assert "b2" in msg
+    assert "nonexistent phrase" in msg
+
+    foreign_artifact_response = QualityReviewResponse(
+        findings=(
+            dict(
+                block_ids=["b9"],
+                artifact_kind="result",
+                severity="minor",
+                issue="Unknown block",
+                evidence_anchors=[dict(block_id="b9", quote="Block two")],
+                suggestion="Fix",
+                uncertainty="low",
+            ),
+        ),
+        checked_artifacts=(),
+        missing_artifacts=(),
+    )
+    with pytest.raises(WorkStateError) as foreign_exc:
+        validate_response(single_manifest, foreign_artifact_response)
+    foreign_msg = str(foreign_exc.value)
+    assert foreign_msg.startswith("чужой артефакт замечания (")
+    assert "1" in foreign_msg
+    assert "b9" in foreign_msg
+    assert "Block two" in foreign_msg
 

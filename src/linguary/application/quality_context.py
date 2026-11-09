@@ -1,13 +1,16 @@
 """Immutable review inputs and source-bound response validation."""
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
+import re
 from typing import Any
 from linguary.application.analysis_merge import find_quote_span
 from linguary.domain import glossary_key
 from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.content_plan import canonical_sha
+
+MAX_QUALITY_CHUNK_BLOCKS = 80
 
 _STRIPPED_MANIFEST_KEYS = (
     'schema_version',
@@ -16,6 +19,7 @@ _STRIPPED_MANIFEST_KEYS = (
     'manifest_sha',
     'conditions_id',
     'conditions_sha',
+    'route_estimates',
 )
 
 
@@ -76,17 +80,90 @@ def _manifest_block_aliases(manifest: Mapping[str, Any]) -> dict[str, str]:
             ordered.append(block_id)
 
     if isinstance(manifest, Mapping):
-        for artifact in manifest.get('artifacts') or ():
-            if isinstance(artifact, Mapping):
-                for block_id in artifact.get('block_ids') or ():
-                    add(block_id)
         scope = manifest.get('scope')
         if isinstance(scope, (list, tuple)):
             for block_id in scope:
                 add(block_id)
+        for artifact in manifest.get('artifacts') or ():
+            if isinstance(artifact, Mapping):
+                for block_id in artifact.get('block_ids') or ():
+                    add(block_id)
         for block_id in manifest.get('missing_results') or ():
             add(block_id)
     return {block_id: f'b{index}' for index, block_id in enumerate(ordered, start=1)}
+
+
+def submanifest_for_scope(
+    manifest: Mapping[str, Any], window_scope: Sequence[str]
+) -> dict[str, Any]:
+    scope_list = [bid for bid in window_scope if isinstance(bid, str)]
+    window_set = set(scope_list)
+    sub: dict[str, Any] = dict(manifest)
+    sub['scope'] = scope_list
+    sub['missing_results'] = [
+        bid
+        for bid in (manifest.get('missing_results') or ())
+        if isinstance(bid, str) and bid in window_set
+    ]
+    raw_artifacts = manifest.get('artifacts') or ()
+    sub['artifacts'] = [
+        dict(a)
+        for a in raw_artifacts
+        if isinstance(a, Mapping)
+        and (a.get('artifact_kind') or a.get('kind')) in ('analysis', 'original', 'result')
+        and bool(set(a.get('block_ids') or ()) & window_set)
+    ]
+    return sub
+
+
+def partition_manifest(
+    manifest: Mapping[str, Any],
+    *,
+    max_blocks_per_chunk: int = MAX_QUALITY_CHUNK_BLOCKS,
+) -> tuple[dict[str, Any], ...]:
+    if max_blocks_per_chunk < 1:
+        raise WorkStateError('неверный размер пакета вычитки')
+    raw_scope = manifest.get('scope') or ()
+    scope = [bid for bid in raw_scope if isinstance(bid, str)]
+    if len(scope) <= max_blocks_per_chunk:
+        out = dict(manifest)
+        if 'scope' in out:
+            out['scope'] = list(scope)
+        return (out,)
+
+    raw_artifacts = manifest.get('artifacts') or ()
+    block_to_analysis_idx: dict[str, int] = {}
+    for idx, artifact in enumerate(raw_artifacts):
+        if isinstance(artifact, Mapping) and artifact.get('artifact_kind') == 'analysis':
+            for bid in artifact.get('block_ids') or ():
+                if isinstance(bid, str) and bid not in block_to_analysis_idx:
+                    block_to_analysis_idx[bid] = idx
+
+    chapter_groups: list[list[str]] = []
+    analysis_groups: dict[int, list[str]] = {}
+    current_unassigned: list[str] | None = None
+    for bid in scope:
+        a_idx = block_to_analysis_idx.get(bid)
+        if a_idx is not None:
+            current_unassigned = None
+            group = analysis_groups.get(a_idx)
+            if group is None:
+                group = []
+                analysis_groups[a_idx] = group
+                chapter_groups.append(group)
+            group.append(bid)
+        else:
+            if current_unassigned is None:
+                current_unassigned = []
+                chapter_groups.append(current_unassigned)
+            current_unassigned.append(bid)
+
+    windows: list[dict[str, Any]] = []
+    for group in chapter_groups:
+        for start in range(0, len(group), max_blocks_per_chunk):
+            window_scope = group[start : start + max_blocks_per_chunk]
+            windows.append(submanifest_for_scope(manifest, window_scope))
+    return tuple(windows)
 
 
 def _needs_plan_id_alias(raw_id: Any, prefix: str) -> bool:
@@ -130,6 +207,7 @@ def _llm_artifact(
     scope_block_ids: Any = None,
 ) -> dict[str, Any]:
     alias_map = aliases or {}
+    reverse_alias_map = {alias: bid for bid, alias in alias_map.items()}
     diff_alias_map = difficulty_aliases or {}
     artifact_bids = [
         bid for bid in (artifact.get('block_ids') or ()) if isinstance(bid, str)
@@ -140,17 +218,27 @@ def _llm_artifact(
         else set(artifact_bids)
     )
     allowed_scope = (
-        ({alias_map.get(bid, bid) for bid in raw_scope} | raw_scope)
+        (
+            {alias_map.get(bid, bid) for bid in raw_scope}
+            | {reverse_alias_map.get(bid, bid) for bid in raw_scope}
+            | raw_scope
+        )
         if raw_scope
         else None
     )
     out = {k: v for k, v in artifact.items() if k != 'artifact_sha'}
+    kind = out.get('artifact_kind')
     if isinstance(out.get('block_ids'), (list, tuple)):
-        out['block_ids'] = [
+        aliased_bids = [
             alias_map.get(bid, bid) if isinstance(bid, str) else bid
             for bid in out['block_ids']
         ]
-    kind = out.get('artifact_kind')
+        if kind == 'analysis' and allowed_scope is not None:
+            aliased_bids = [
+                bid for bid in aliased_bids
+                if not isinstance(bid, str) or bid in allowed_scope
+            ]
+        out['block_ids'] = aliased_bids
     body = out.get('body')
     if not isinstance(body, Mapping):
         return out
@@ -369,12 +457,105 @@ def _normalize_sorted_keys(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, sort_keys=True))
 
 
+def _order_artifacts_for_request(
+    raw_artifacts: Sequence[Any],
+    scope: Sequence[Any],
+) -> list[Any]:
+    analysis_indices = [
+        idx
+        for idx, a in enumerate(raw_artifacts)
+        if isinstance(a, Mapping) and a.get('artifact_kind') == 'analysis'
+    ]
+    if len(analysis_indices) <= 1:
+        return list(raw_artifacts)
+
+    scope_pos = {
+        bid: pos
+        for pos, bid in enumerate(scope)
+        if isinstance(bid, str)
+    }
+    block_to_analysis: dict[str, int] = {}
+    for a_idx in analysis_indices:
+        for bid in raw_artifacts[a_idx].get('block_ids') or ():
+            if isinstance(bid, str) and bid not in block_to_analysis:
+                block_to_analysis[bid] = a_idx
+
+    ordered_groups: list[tuple[int | None, list[str]]] = []
+    seen_analyses: dict[int, list[str]] = {}
+    current_unassigned: list[str] | None = None
+    for bid in scope:
+        if not isinstance(bid, str):
+            continue
+        a_idx = block_to_analysis.get(bid)
+        if a_idx is not None:
+            current_unassigned = None
+            grp = seen_analyses.get(a_idx)
+            if grp is None:
+                grp = []
+                seen_analyses[a_idx] = grp
+                ordered_groups.append((a_idx, grp))
+            grp.append(bid)
+        else:
+            if current_unassigned is None:
+                current_unassigned = []
+                ordered_groups.append((None, current_unassigned))
+            current_unassigned.append(bid)
+
+    for a_idx in analysis_indices:
+        if a_idx not in seen_analyses:
+            grp_bids = [
+                bid
+                for bid in (raw_artifacts[a_idx].get('block_ids') or ())
+                if isinstance(bid, str)
+            ]
+            ordered_groups.append((a_idx, grp_bids))
+
+    used: set[int] = set()
+    ordered: list[Any] = []
+    for a_idx, grp_bids in ordered_groups:
+        grp_set = set(grp_bids)
+        if a_idx is not None and a_idx not in used:
+            ordered.append(raw_artifacts[a_idx])
+            used.add(a_idx)
+        for target_kind in ('original', 'result'):
+            matching_indices = [
+                idx
+                for idx, art in enumerate(raw_artifacts)
+                if idx not in used
+                and isinstance(art, Mapping)
+                and art.get('artifact_kind') == target_kind
+                and bool(set(art.get('block_ids') or ()) & grp_set)
+            ]
+            matching_indices.sort(
+                key=lambda idx: (
+                    min(
+                        (
+                            scope_pos[b]
+                            for b in (raw_artifacts[idx].get('block_ids') or ())
+                            if isinstance(b, str) and b in scope_pos
+                        ),
+                        default=len(scope_pos) + idx,
+                    ),
+                    idx,
+                )
+            )
+            for idx in matching_indices:
+                ordered.append(raw_artifacts[idx])
+                used.add(idx)
+
+    for idx, art in enumerate(raw_artifacts):
+        if idx not in used:
+            ordered.append(art)
+    return ordered
+
+
 def request_text(manifest: Mapping[str, Any]) -> str:
     payload = thaw(manifest)
     if isinstance(payload, Mapping):
         aliases = _manifest_block_aliases(payload)
         difficulty_aliases = _manifest_difficulty_aliases(payload)
         raw_artifacts = payload.get('artifacts')
+        raw_scope = payload.get('scope') if isinstance(payload.get('scope'), (list, tuple)) else ()
         original_texts = [
             a['body']['text']
             for a in (raw_artifacts if isinstance(raw_artifacts, (list, tuple)) else ())
@@ -399,11 +580,17 @@ def request_text(manifest: Mapping[str, Any]) -> str:
         if 'glossary' in cleaned:
             cleaned['glossary'] = _filter_glossary_for_manifest(cleaned['glossary'], original_texts)
         if isinstance(raw_artifacts, (list, tuple)):
+            ordered_raw = _order_artifacts_for_request(raw_artifacts, raw_scope)
             cleaned['artifacts'] = [
-                _llm_artifact(a, aliases, difficulty_aliases=difficulty_aliases)
+                _llm_artifact(
+                    a,
+                    aliases,
+                    difficulty_aliases=difficulty_aliases,
+                    scope_block_ids=cleaned.get('scope'),
+                )
                 if isinstance(a, Mapping)
                 else a
-                for a in raw_artifacts
+                for a in ordered_raw
             ]
         ordered_payload: dict[str, Any] = {}
         for key in _QUALITY_REQUEST_PREFIX_KEYS:
@@ -429,6 +616,31 @@ INSTRUCTIONS = (
     'целевом блоке, используя короткие идентификаторы block_id вида b1, b2 из запроса. Отсутствие '
     'замечаний не является гарантией смысловой безошибочности.'
 )
+
+
+def _preview_quote(quote: Any, limit: int = 80) -> str:
+    if not isinstance(quote, str):
+        return ''
+    compact = re.sub(r'\s+', ' ', quote).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1] + '…'
+
+
+def _finding_error(
+    prefix: str,
+    finding_index: int,
+    *,
+    block_label: str = '',
+    quote: Any = None,
+) -> WorkStateError:
+    parts = [f'замечание {finding_index}']
+    if block_label:
+        parts.append(f'блок {block_label}')
+    preview = _preview_quote(quote)
+    if preview:
+        parts.append(f'цитата «{preview}»')
+    return WorkStateError(f"{prefix} ({', '.join(parts)})")
 
 
 def validate_response(manifest: Mapping[str, Any], response: QualityReviewResponse) -> QualityReviewResponse:
@@ -459,7 +671,7 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
         by_kind_block.pop(key, None)
 
     updated_findings = []
-    for finding in response.findings:
+    for finding_index, finding in enumerate(response.findings, start=1):
         f = dict(finding)
         if isinstance(f.get('block_ids'), (list, tuple)):
             f['block_ids'] = [
@@ -470,27 +682,60 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
         ordered_bids = list(f.get('block_ids') or ())
         f_bids = set(ordered_bids)
         kind = f.get('artifact_kind')
+        raw_anchors = f.get('evidence_anchors')
+        first_quote = (
+            raw_anchors[0].get('quote', '')
+            if isinstance(raw_anchors, (list, tuple))
+            and raw_anchors
+            and isinstance(raw_anchors[0], Mapping)
+            else ''
+        )
+        finding_block_label = ', '.join(
+            aliases.get(b, str(b)) if isinstance(b, str) else str(b)
+            for b in ordered_bids
+            if b
+        )
         multi_block_single_artifact = kind in {'result', 'original'} and len(f_bids) > 1
         if multi_block_single_artifact:
             if not ordered_bids:
-                raise WorkStateError('чужой артефакт замечания')
+                raise _finding_error(
+                    'чужой артефакт замечания',
+                    finding_index,
+                    block_label=finding_block_label,
+                    quote=first_quote,
+                )
             per_block = []
             for bid in ordered_bids:
                 matched_art = by_kind_block.get((kind, bid))
                 if matched_art is None or matched_art['artifact_sha'] not in checked:
-                    raise WorkStateError('чужой артефакт замечания')
+                    raise _finding_error(
+                        'чужой артефакт замечания',
+                        finding_index,
+                        block_label=aliases.get(bid, str(bid)) if isinstance(bid, str) else str(bid),
+                        quote=first_quote,
+                    )
                 per_block.append(matched_art)
             first_art = per_block[0]
             allowed_shas = {art['artifact_sha'] for art in per_block}
             if artifact_sha:
                 if artifact_sha not in allowed_shas:
-                    raise WorkStateError('чужой артефакт замечания')
+                    raise _finding_error(
+                        'чужой артефакт замечания',
+                        finding_index,
+                        block_label=finding_block_label,
+                        quote=first_quote,
+                    )
             else:
                 artifact_sha = first_art['artifact_sha']
                 f['artifact_sha'] = artifact_sha
         elif not artifact_sha:
             if not ordered_bids:
-                raise WorkStateError('чужой артефакт замечания')
+                raise _finding_error(
+                    'чужой артефакт замечания',
+                    finding_index,
+                    block_label=finding_block_label,
+                    quote=first_quote,
+                )
             matching = [
                 a for a in manifest['artifacts']
                 if (a.get('artifact_kind') or a.get('kind')) == kind and (
@@ -498,7 +743,12 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
                 )
             ]
             if len(matching) != 1:
-                raise WorkStateError('чужой артефакт замечания')
+                raise _finding_error(
+                    'чужой артефакт замечания',
+                    finding_index,
+                    block_label=finding_block_label,
+                    quote=first_quote,
+                )
             artifact_sha = matching[0]['artifact_sha']
             f['artifact_sha'] = artifact_sha
 
@@ -512,29 +762,55 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
                     else not f_bids <= set(artifact['block_ids'])
                 )
                 or not f.get('evidence_anchors')):
-            raise WorkStateError('чужой артефакт замечания')
+            raise _finding_error(
+                'чужой артефакт замечания',
+                finding_index,
+                block_label=finding_block_label,
+                quote=first_quote,
+            )
 
         updated_anchors = []
         for anchor in f['evidence_anchors']:
             anc = dict(anchor)
-            block_id = anc.get('block_id')
+            raw_bid = anc.get('block_id')
+            block_id = raw_bid
             if isinstance(block_id, str):
                 block_id = reverse_aliases.get(block_id, block_id)
                 anc['block_id'] = block_id
+            anchor_label = (
+                aliases.get(block_id, block_id)
+                if isinstance(block_id, str) and block_id
+                else (str(raw_bid) if raw_bid else finding_block_label)
+            )
+            quote = anc.get('quote', '')
             if block_id not in f['block_ids']:
-                raise WorkStateError('неверная привязка замечания к оригиналу')
+                raise _finding_error(
+                    'неверная привязка замечания к оригиналу',
+                    finding_index,
+                    block_label=anchor_label,
+                    quote=quote,
+                )
             text = originals.get(block_id, '')
             start = anc.get('start')
             end = anc.get('end')
-            quote = anc.get('quote', '')
             if start is None or end is None:
                 span = find_quote_span(text, quote)
                 if span is None:
-                    raise WorkStateError('неверная привязка замечания к оригиналу')
+                    raise _finding_error(
+                        'неверная привязка замечания к оригиналу',
+                        finding_index,
+                        block_label=anchor_label,
+                        quote=quote,
+                    )
                 start, end, matched = span
                 anc['start'], anc['end'], anc['quote'] = start, end, matched
             elif start < 0 or end <= start or text[start:end] != quote:
-                raise WorkStateError('неверная привязка замечания к оригиналу')
+                raise _finding_error(
+                    'неверная привязка замечания к оригиналу',
+                    finding_index,
+                    block_label=anchor_label,
+                    quote=quote,
+                )
             updated_anchors.append(anc)
         f['evidence_anchors'] = updated_anchors
         updated_findings.append(f)

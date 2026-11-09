@@ -5,7 +5,15 @@ from uuid import uuid4
 
 from linguary.application.ports.llm import LLMRequest, LLMResponseKind, LLMResponseFormatError
 from linguary.application.quality_budget import QualityBudget
-from linguary.application.quality_context import INSTRUCTIONS, snapshot, request_text, validate_response
+from linguary.application.quality_context import (
+    INSTRUCTIONS,
+    MAX_QUALITY_CHUNK_BLOCKS,
+    partition_manifest,
+    request_text,
+    snapshot,
+    submanifest_for_scope,
+    validate_response,
+)
 from linguary.application.llm_rejections import finalize_response, record_rejection
 from linguary.domain import TaskIdentity, TaskType, LLMCallStage
 from linguary.domain.book_conditions import WorkStateError, thaw
@@ -28,14 +36,74 @@ def _read_transaction(uow):
     return getattr(uow, 'read_transaction', uow.transaction)()
 
 
+def _chunk_request(chunk, route, *, book_id=None, task_id=None, scope_id=None):
+    if book_id is None:
+        return LLMRequest(
+            kind=LLMResponseKind.QUALITY_REVIEW,
+            instructions=INSTRUCTIONS,
+            input_text=request_text(chunk),
+            max_completion_tokens=route.max_completion_tokens,
+        )
+    return LLMRequest(
+        kind=LLMResponseKind.QUALITY_REVIEW,
+        instructions=INSTRUCTIONS,
+        input_text=request_text(chunk),
+        book_id=book_id,
+        stage=LLMCallStage.QUALITY_REVIEW,
+        task_id=task_id,
+        scope_id=scope_id,
+        ordered_block_ids=tuple(chunk['scope']),
+        max_completion_tokens=route.max_completion_tokens,
+    )
+
+
+def _split_chunk_for_route(chunk, route):
+    req = _chunk_request(chunk, route)
+    try:
+        route.estimate(req)
+        return [chunk]
+    except WorkStateError:
+        scope = list(chunk.get('scope') or ())
+        if len(scope) <= 1:
+            raise
+        mid = len(scope) // 2
+        left = submanifest_for_scope(chunk, scope[:mid])
+        right = submanifest_for_scope(chunk, scope[mid:])
+        return _split_chunk_for_route(left, route) + _split_chunk_for_route(right, route)
+
+
+def _chunks_for_route(manifest, route, *, max_blocks_per_chunk=MAX_QUALITY_CHUNK_BLOCKS):
+    result = []
+    for chunk in partition_manifest(manifest, max_blocks_per_chunk=max_blocks_per_chunk):
+        result.extend(_split_chunk_for_route(chunk, route))
+    return tuple(result)
+
+
 class QualityReviewService:
     def __init__(self, unit_of_work, queue, client_for, routes):
         self.uow, self.queue, self.client_for, self.routes = unit_of_work, queue, client_for, dict(routes)
         self.budget = QualityBudget(unit_of_work)
 
+    def _chunks_for_route(self, manifest, route):
+        return _chunks_for_route(manifest, route)
+
+    def estimate(self, manifest, route):
+        chunks = self._chunks_for_route(manifest, route)
+        return sum(route.estimate(_chunk_request(chunk, route)) for chunk in chunks)
+
     def preview(self, book_id, scope='all'):
         with _read_transaction(self.uow) as tx:
-            return snapshot(tx, book_id, scope)
+            manifest = snapshot(tx, book_id, scope)
+        if self.routes:
+            route_estimates = {}
+            for _, route in sorted(self.routes.items()):
+                key = f'{route.route_id}:{route.model}'
+                try:
+                    route_estimates[key] = self.estimate(manifest, route)
+                except Exception:
+                    route_estimates[key] = None
+            manifest = {**manifest, 'route_estimates': route_estimates}
+        return manifest
 
     async def start(self, command, *, require_available=False):
         if (not command.request_key.strip() or not command.model.strip() or not command.route_id.strip()
@@ -59,10 +127,8 @@ class QualityReviewService:
                 if require_available:
                     if route is None:
                         raise WorkStateError('route_unavailable')
-                    request = LLMRequest(kind=LLMResponseKind.QUALITY_REVIEW, instructions=INSTRUCTIONS,
-                        input_text=request_text(manifest), max_completion_tokens=route.max_completion_tokens)
                     try:
-                        estimate = route.estimate(request)
+                        estimate = self.estimate(manifest, route)
                     except Exception:
                         raise WorkStateError('price_unavailable') from None
                     if estimate > command.budget_microusd:
@@ -106,124 +172,200 @@ class QualityReviewService:
         if route is None or thaw(review.settings.get('route_snapshot')) != route.snapshot():
             self._update(review.id, 'failed', reason='price_unavailable')
             return
-        request = LLMRequest(kind=LLMResponseKind.QUALITY_REVIEW, instructions=INSTRUCTIONS,
-            input_text=request_text(manifest), book_id=review.book_id, stage=LLMCallStage.QUALITY_REVIEW,
-            task_id=task.id, scope_id=review.id, ordered_block_ids=tuple(review.manifest['scope']),
-            max_completion_tokens=route.max_completion_tokens)
         try:
-            estimate = route.estimate(request)
+            chunks = self._chunks_for_route(manifest, route)
+            chunk_plans = []
+            for chunk in chunks:
+                req = _chunk_request(
+                    chunk,
+                    route,
+                    book_id=review.book_id,
+                    task_id=task.id,
+                    scope_id=review.id,
+                )
+                chunk_plans.append((chunk, req, route.estimate(req)))
             client = self.client_for(route)
         except Exception:
             self._update(review.id, 'failed', reason='price_or_route_unavailable')
             return
         self._update(review.id, 'running')
-        previous_error: str | None = None
-        previous_raw: str | None = None
         prompt_hash = sha256(INSTRUCTIONS.encode()).hexdigest()
-        for ordinal in range(1, 4):
-            with _read_transaction(self.uow) as tx:
-                current = tx.work.get_review(review.id)
-            try:
-                attempt = self.budget.reserve(review.id, estimate, price=route.snapshot(),
-                    expected_revision=current.revision, task_id=task.id,
-                    expected_manifest_sha=None)
-            except WorkStateError as error:
-                if str(error) == 'manifest_changed' or self.get(task.book_id, review.id)['state'] == 'stale':
-                    self._update(review.id, 'stale', reason='manifest_changed')
-                else:
-                    self._update(review.id, 'limit', reason='budget')
-                return
-            repair_turns = ((previous_raw, previous_error),) if ordinal > 1 and previous_error else ()
-            repair_instructions = (previous_error,) if ordinal > 1 and previous_error else ()
-            context = CallContext(review.conditions_id, 'quality_review', review.id,
-                tuple(review.manifest['scope']), attempt.id, current.revision, route.model,
-                prompt_hash, task_id=task.id)
-            outgoing = replace(
-                request,
-                instructions=INSTRUCTIONS,
-                call_context=context,
-                attempt=ordinal,
-                repair_turns=repair_turns,
-                repair_instructions=repair_instructions,
+        all_findings: list[dict] = []
+        all_checked: list[str] = []
+        all_missing: list[str] = []
+        total_chunks = len(chunk_plans)
+
+        def _dedup_coverage():
+            dedup_missing = tuple(dict.fromkeys(all_missing))
+            missing_set = set(dedup_missing)
+            dedup_checked = tuple(
+                sha for sha in dict.fromkeys(all_checked) if sha not in missing_set
             )
-            if not self.budget.mark_sent(attempt.id):
-                state = self.get(task.book_id, review.id)['state']
-                if state == 'stale':
-                    self._update(review.id, 'stale', reason='manifest_changed')
-                elif state not in ('limit', 'unknown'):
-                    raise WorkStateError('отправка вычитки отклонена')
-                return
-            response = None
-            try:
-                response = await client.generate(outgoing)
-                actual = route.actual(response)
-            except LLMResponseFormatError as error:
-                actual = route.actual(error)
-                self.budget.settle(attempt.id, actual)
-                self._finish_attempt(attempt.id, 'rejected')
-                if actual is None:
-                    return
-                if self._stopped(review.id):
-                    return
-                previous_error = str(error)
-                previous_raw = getattr(error, 'raw_content', None)
-                continue
-            except Exception:
-                self.budget.settle(attempt.id, None)
-                self._finish_attempt(attempt.id, 'unknown')
-                return
-            self.budget.settle(attempt.id, actual)
-            if actual is None:
-                self._finish_attempt(attempt.id, 'unknown')
-                return
-            with _read_transaction(self.uow) as tx:
-                current_review = tx.work.get_review(review.id)
+            return dedup_checked, dedup_missing
+
+        for chunk_idx, (chunk, request, estimate) in enumerate(chunk_plans):
+            is_last_chunk = chunk_idx == total_chunks - 1
+            previous_error: str | None = None
+            previous_raw: str | None = None
+            for ordinal in range(1, 4):
+                with _read_transaction(self.uow) as tx:
+                    current = tx.work.get_review(review.id)
                 try:
-                    after = (
-                        None
-                        if current_review.state == 'stale'
-                        else snapshot(tx, review.book_id, tuple(review.manifest['scope']))
+                    attempt = self.budget.reserve(
+                        review.id,
+                        estimate,
+                        price=route.snapshot(),
+                        expected_revision=current.revision,
+                        task_id=task.id,
+                        expected_manifest_sha=None,
                     )
-                except WorkStateError:
-                    after = None
-                state_after = (
-                    'stale'
-                    if current_review.state == 'stale' or after is None
-                    else quality_review_state(tx, task.book_id, review.id, current_snapshot=after)['state']
-                )
-            if state_after == 'stale':
-                self._finish_attempt(attempt.id, 'rejected')
-                finalize_response(self.uow, response, 'stale')
-                self._update(review.id, 'stale', reason='manifest_changed')
-                return
-            try:
-                if response.truncated:
-                    raise WorkStateError('неполный ответ вычитки')
-                payload = validate_response(review.manifest, response.payload)
-            except Exception as error:
-                record_rejection(self.uow, response, error)
-                self._finish_attempt(attempt.id, 'rejected')
-                if self._stopped(review.id):
+                except WorkStateError as error:
+                    if str(error) == 'manifest_changed' or self.get(task.book_id, review.id)['state'] == 'stale':
+                        self._update(review.id, 'stale', reason='manifest_changed')
+                    else:
+                        dedup_checked, dedup_missing = _dedup_coverage()
+                        self._update(
+                            review.id,
+                            'limit',
+                            findings=tuple(all_findings),
+                            checked=dedup_checked,
+                            missing=dedup_missing,
+                            reason='budget',
+                            partial=bool(dedup_checked or dedup_missing),
+                        )
                     return
-                previous_error = str(error)
-                previous_raw = getattr(response, 'raw_content', None)
-                continue
-            self._finish_attempt(attempt.id, 'validated')
-            with self.uow.transaction() as tx:
-                current = tx.work.get_review(review.id)
-                if current.state == 'stale' or after['manifest_sha'] != review.manifest['manifest_sha']:
-                    tx.work.transition_attempt(attempt.id, 'rejected', expected_state='validated')
-                    finalize_response(self.uow, response, 'stale', transaction=tx)
-                    tx.work.update_review(review.id, state='stale', reason='manifest_changed')
-                else:
+                repair_turns = ((previous_raw, previous_error),) if ordinal > 1 and previous_error else ()
+                repair_instructions = (previous_error,) if ordinal > 1 and previous_error else ()
+                context = CallContext(
+                    review.conditions_id,
+                    'quality_review',
+                    review.id,
+                    tuple(chunk['scope']),
+                    attempt.id,
+                    current.revision,
+                    route.model,
+                    prompt_hash,
+                    task_id=task.id,
+                )
+                outgoing = replace(
+                    request,
+                    instructions=INSTRUCTIONS,
+                    call_context=context,
+                    attempt=ordinal,
+                    repair_turns=repair_turns,
+                    repair_instructions=repair_instructions,
+                )
+                if not self.budget.mark_sent(attempt.id):
+                    state = self.get(task.book_id, review.id)['state']
+                    if state == 'stale':
+                        self._update(review.id, 'stale', reason='manifest_changed')
+                    elif state not in ('limit', 'unknown'):
+                        raise WorkStateError('отправка вычитки отклонена')
+                    return
+                response = None
+                try:
+                    response = await client.generate(outgoing)
+                    actual = route.actual(response)
+                except LLMResponseFormatError as error:
+                    actual = route.actual(error)
+                    self.budget.settle(attempt.id, actual)
+                    self._finish_attempt(attempt.id, 'rejected')
+                    if actual is None:
+                        return
+                    if self._stopped(review.id):
+                        return
+                    previous_error = str(error)
+                    previous_raw = getattr(error, 'raw_content', None)
+                    continue
+                except Exception:
+                    self.budget.settle(attempt.id, None)
+                    self._finish_attempt(attempt.id, 'unknown')
+                    return
+                self.budget.settle(attempt.id, actual)
+                if actual is None:
+                    self._finish_attempt(attempt.id, 'unknown')
+                    return
+                with _read_transaction(self.uow) as tx:
+                    current_review = tx.work.get_review(review.id)
+                    try:
+                        after = (
+                            None
+                            if current_review.state == 'stale'
+                            else snapshot(tx, review.book_id, tuple(review.manifest['scope']))
+                        )
+                    except WorkStateError:
+                        after = None
+                    state_after = (
+                        'stale'
+                        if current_review.state == 'stale' or after is None
+                        else quality_review_state(tx, task.book_id, review.id, current_snapshot=after)['state']
+                    )
+                if state_after == 'stale':
+                    self._finish_attempt(attempt.id, 'rejected')
+                    finalize_response(self.uow, response, 'stale')
+                    self._update(review.id, 'stale', reason='manifest_changed')
+                    return
+                try:
+                    if response.truncated:
+                        raise WorkStateError('неполный ответ вычитки')
+                    payload = validate_response(chunk, response.payload)
+                except Exception as error:
+                    record_rejection(self.uow, response, error)
+                    self._finish_attempt(attempt.id, 'rejected')
+                    if self._stopped(review.id):
+                        return
+                    previous_error = str(error)
+                    previous_raw = getattr(response, 'raw_content', None)
+                    continue
+                self._finish_attempt(attempt.id, 'validated')
+                stop_after_chunk = False
+                with self.uow.transaction() as tx:
+                    current = tx.work.get_review(review.id)
+                    if current.state == 'stale' or after['manifest_sha'] != review.manifest['manifest_sha']:
+                        tx.work.transition_attempt(attempt.id, 'rejected', expected_state='validated')
+                        finalize_response(self.uow, response, 'stale', transaction=tx)
+                        tx.work.update_review(review.id, state='stale', reason='manifest_changed')
+                        return
                     tx.work.transition_attempt(attempt.id, 'accepted', expected_state='validated')
                     finalize_response(self.uow, response, 'accepted', transaction=tx)
-                    tx.work.update_review(review.id, state='limit' if current.state == 'limit' else 'completed',
-                        findings=payload.findings, checked=payload.checked_artifacts,
-                        missing=payload.missing_artifacts,
-                        partial=bool(payload.missing_artifacts or review.manifest['missing_results'] or not review.manifest['book_complete']))
-            return
-        self._update(review.id, 'failed', reason='invalid_response')
+                    all_findings.extend(payload.findings)
+                    all_checked.extend(payload.checked_artifacts)
+                    all_missing.extend(payload.missing_artifacts)
+                    dedup_checked, dedup_missing = _dedup_coverage()
+                    target_state = (
+                        ('limit' if current.state == 'limit' else 'completed')
+                        if is_last_chunk
+                        else ('limit' if current.state == 'limit' else 'running')
+                    )
+                    tx.work.update_review(
+                        review.id,
+                        state=target_state,
+                        findings=tuple(all_findings),
+                        checked=dedup_checked,
+                        missing=dedup_missing,
+                        partial=bool(
+                            dedup_missing
+                            or review.manifest['missing_results']
+                            or not review.manifest['book_complete']
+                            or not is_last_chunk
+                        ),
+                    )
+                    stop_after_chunk = current.state in ('limit', 'unknown', 'stale')
+                if stop_after_chunk:
+                    return
+                break
+            else:
+                dedup_checked, dedup_missing = _dedup_coverage()
+                self._update(
+                    review.id,
+                    'failed',
+                    findings=tuple(all_findings),
+                    checked=dedup_checked,
+                    missing=dedup_missing,
+                    reason='invalid_response',
+                    partial=bool(dedup_checked or dedup_missing),
+                )
+                return
 
     def _finish_attempt(self, attempt_id, state):
         with self.uow.transaction() as tx:
