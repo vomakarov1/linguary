@@ -1160,9 +1160,9 @@ async def test_auto_approve_glossary_computes_mention_counter_once(
 
     assert unit_of_work.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
     assert mention_counter_calls == 1
-    # 1 call inside AnalyzeChapter(command), 1 call for deduplicate_book_before_you_read,
-    # and 1 shared call for both build_glossary_review invocations in auto_approve.
-    assert list_for_book_calls == 3
+    # 1 call inside AnalyzeChapter(command) and 1 shared call in _try_complete_analysis
+    # reused across deduplicate_book_before_you_read and auto_approve.
+    assert list_for_book_calls == 2
 
 
 async def test_process_chapter_reuses_source_texts_and_defers_reconcile_until_completion() -> None:
@@ -1583,6 +1583,59 @@ async def test_request_analysis_reuses_validated_content_plan_without_triple_par
     assert result_frag.analysis.content_plan is not None
     assert result_frag.analysis.content_plan.version == 3
     assert parse_calls == 2
+
+
+async def test_analyze_chapter_preserves_attempts_and_usage_on_truncated_fallback_and_split() -> None:
+    """Truncated whole-chapter fallback and recursive fragment split preserve attempts and token usage, and _to_aliases replaces IDs in a single pass (P3.T1)."""
+    from linguary.application.use_cases.analyze_chapter import _to_aliases
+
+    section = make_analysis_section(
+        texts=("Paragraph 1.", "Paragraph 2.", "Paragraph 3.", "Paragraph 4.")
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document((section,)))
+    client = FakeLLMClient.replying(
+        (
+            LLMResponseFormatError(
+                "truncated whole chapter",
+                truncated=True,
+                usage=TokenUsage(prompt_tokens=100, completion_tokens=50),
+            ),
+            analysis_reply(
+                aliases=("b1", "b2"),
+                usage=TokenUsage(prompt_tokens=60, completion_tokens=30),
+            ),
+            LLMResponseFormatError(
+                "truncated second fragment",
+                truncated=True,
+                usage=TokenUsage(prompt_tokens=70, completion_tokens=40),
+            ),
+            analysis_reply(
+                aliases=("b1",),
+                usage=TokenUsage(prompt_tokens=40, completion_tokens=20),
+            ),
+            analysis_reply(
+                aliases=("b1",),
+                usage=TokenUsage(prompt_tokens=45, completion_tokens=25),
+            ),
+        )
+    )
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    result = await scenario(command())
+
+    assert client.call_count == 5
+    assert result.attempts == 5
+    assert result.usage == TokenUsage(prompt_tokens=315, completion_tokens=165)
+
+    fake_context = SimpleNamespace(
+        block_ids_by_alias={"b1": "block-1", "b2": "block-10"}
+    )
+    aliased = _to_aliases(
+        fake_context,  # type: ignore[arg-type]
+        "не покрывает блоки: ['block-10', 'block-1']",
+    )
+    assert aliased == "не покрывает блоки: ['b2', 'b1']"
+
 
 
 

@@ -28,6 +28,7 @@ only tasks for different books can run in parallel.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from uuid import uuid4
@@ -196,6 +197,7 @@ class AnalyzeChapter:
                 return AnalyzeChapterResult(analysis=analysis)
             fragments = list(plan_fragments(blocks, max_blocks=self._max_fragment_blocks))
             if len(fragments) == 1:
+                attempts = 1
                 try:
                     analysis, attempts, usage = await self._analyze_whole_chapter(
                         document=document,
@@ -214,7 +216,7 @@ class AnalyzeChapter:
                             ChapterFragment(order=0, blocks=tuple(blocks[:mid])),
                             ChapterFragment(order=1, blocks=tuple(blocks[mid:])),
                         ]
-                        analysis, attempts, usage = await self._analyze_by_fragments(
+                        analysis, fragment_attempts, fragment_usage = await self._analyze_by_fragments(
                             document=document,
                             section=section,
                             blocks=blocks,
@@ -225,6 +227,8 @@ class AnalyzeChapter:
                             command=command,
                             concepts=concepts,
                         )
+                        attempts += fragment_attempts
+                        usage = _total_usage([error.usage, fragment_usage])
                     else:
                         raise
             else:
@@ -396,6 +400,9 @@ class AnalyzeChapter:
                 )
             except LLMResponseFormatError as error:
                 if error.truncated and len(fragment.blocks) > 1:
+                    attempts += 1
+                    if error.usage is not None:
+                        usages.append(error.usage)
                     mid = len(fragment.blocks) // 2
                     left = ChapterFragment(order=0, blocks=tuple(fragment.blocks[:mid]))
                     right = ChapterFragment(order=0, blocks=tuple(fragment.blocks[mid:]))
@@ -870,6 +877,7 @@ class ChapterAnalysisSequence:
                 if unfinished:
                     return False
 
+            updated_analyses: Sequence[ChapterAnalysis] | None = None
             document = transaction.documents.get(book_id)
             if document is not None:
                 analyses = transaction.analyses.list_for_book(book_id)
@@ -923,7 +931,11 @@ class ChapterAnalysisSequence:
                 from linguary.application.mention_counter import mention_counter
                 from linguary.domain import TermConcept, TermStatus, TermVariant
 
-                analyses = transaction.analyses.list_for_book(book_id)
+                analyses = (
+                    updated_analyses
+                    if updated_analyses is not None
+                    else transaction.analyses.list_for_book(book_id)
+                )
                 count_mentions = mention_counter(document) if document else None
                 review = build_glossary_review(
                     book_id=book_id,
@@ -938,11 +950,12 @@ class ChapterAnalysisSequence:
                     document=document,
                 )
 
+                approved_concept_ids: set[str] = set()
                 for item in review.items:
                     if (
-                        item.decision is None
+                        item.awaits_decision
                         and bool(item.suggested_translation and item.suggested_translation.strip())
-                        and item.confidence >= confidence_threshold
+                        and item.confidence >= float(confidence_threshold)
                         and not item.model_flagged_review
                     ):
                         concept = TermConcept(
@@ -962,23 +975,17 @@ class ChapterAnalysisSequence:
                             ),
                         )
                         transaction.glossary.save(concept)
+                        approved_concept_ids.add(item.concept_id)
                         for superseded in item.superseded_decisions:
                             transaction.glossary.delete(superseded.id)
 
-                # Re-check if review is complete
-                review = build_glossary_review(
-                    book_id=book_id,
-                    analyses=analyses,
-                    confidence_threshold=confidence_threshold,
-                    decisions=transaction.glossary.list_for_book(book_id),
-                    count_mentions=count_mentions,
-                    min_mentions=min_mentions,
-                    min_chapters=min_chapters,
-                    name_translation_policy=policy,
-                    conditions_id=conditions.id if conditions is not None else None,
-                    document=document,
+                is_review_complete = all(
+                    not item.requires_review
+                    or item.decision is not None
+                    or item.concept_id in approved_concept_ids
+                    for item in review.items
                 )
-                if review.is_complete:
+                if is_review_complete:
                     book = _with_status(
                         book, apply_book_event(book.status, BookEvent.GLOSSARY_REVIEW_COMPLETED)
                     )
@@ -1054,9 +1061,24 @@ def _to_aliases(context: ChapterAnalysisContext, message: str) -> str:
     to_aliases = getattr(context, "to_aliases", None)
     if callable(to_aliases):
         return to_aliases(message)
-    for alias, block_id in context.block_ids_by_alias.items():
-        message = message.replace(block_id, alias)
-    return message
+    mapping = {
+        block_id: alias
+        for alias, block_id in context.block_ids_by_alias.items()
+        if block_id
+    }
+    if not mapping:
+        return message
+    pattern = re.compile(
+        r"(?<![0-9A-Za-z_-])("
+        + "|".join(
+            re.escape(key) for key in sorted(mapping, key=len, reverse=True)
+        )
+        + r")(?![0-9A-Za-z_-])"
+    )
+    return pattern.sub(lambda match: mapping[match.group(0)], message)
+
+
+AnalyzeChapter._to_aliases = staticmethod(_to_aliases)  # type: ignore[attr-defined]
 
 
 def _worded_for_the_model(

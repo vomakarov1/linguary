@@ -452,4 +452,107 @@ async def test_auto_approve_glossary_resolves_parallel_translation_conflicts_and
     assert glossary_items[0].variants[0].text == "Даскмер"
 
 
+async def test_try_complete_analysis_avoids_duplicate_queries_and_only_approves_requires_review_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_try_complete_analysis reuses updated_analyses, queries glossary and builds review once, and only saves TermConcept for requires_review items (P3.T1)."""
+    from types import SimpleNamespace
+    import linguary.application.glossary_review as glossary_review_mod
+    from analysis_fakes import make_analysis_candidate, make_chapter_analysis
+    from linguary.domain import ConceptType, TermStatus
+
+    unit_of_work = make_book(chapters=1)
+    unit_of_work.books.save(make_book_record(status=BookStatus.ANALYZING))
+    unit_of_work.analyses.save(
+        BOOK_ID,
+        make_chapter_analysis(
+            id="analysis-1",
+            section_id="section-1",
+            candidates=(
+                make_analysis_candidate(
+                    analysis_id="analysis-1",
+                    source_text="Duskmere",
+                    type=ConceptType.PLACE,
+                    suggested_translation="Даскмер",
+                    confidence=0.95,
+                    model_flagged_review=False,
+                ),
+                make_analysis_candidate(
+                    analysis_id="analysis-1",
+                    source_text="boardwalk",
+                    type=ConceptType.TERM,
+                    suggested_translation="деревянный настил",
+                    confidence=0.95,
+                    model_flagged_review=False,
+                ),
+            ),
+        ),
+    )
+    conditions = SimpleNamespace(
+        id="cond-1",
+        payload={
+            "checks": {
+                "auto_approve_glossary": True,
+                "auto_start_processing": True,
+                "glossary_confidence_threshold": 0.7,
+                "glossary_review_min_mentions": 1,
+                "glossary_review_min_chapters": 1,
+            }
+        },
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    sequence = make_sequence(
+        unit_of_work,
+        FakeTaskQueue(),
+        FakeLLMClient.always(analysis_reply(aliases=("b1",))),
+    )
+
+    analyses_calls = 0
+    original_analyses_list = type(unit_of_work.analyses).list_for_book
+
+    def counting_analyses_list(self, book_id: str):
+        nonlocal analyses_calls
+        analyses_calls += 1
+        return original_analyses_list(self, book_id)
+
+    glossary_calls = 0
+    original_glossary_list = type(unit_of_work.glossary).list_for_book
+
+    def counting_glossary_list(self, book_id: str):
+        nonlocal glossary_calls
+        glossary_calls += 1
+        return original_glossary_list(self, book_id)
+
+    build_review_calls = 0
+    original_build_review = glossary_review_mod.build_glossary_review
+
+    def counting_build_review(*args, **kwargs):
+        nonlocal build_review_calls
+        build_review_calls += 1
+        return original_build_review(*args, **kwargs)
+
+    monkeypatch.setattr(
+        type(unit_of_work.analyses), "list_for_book", counting_analyses_list
+    )
+    monkeypatch.setattr(
+        type(unit_of_work.glossary), "list_for_book", counting_glossary_list
+    )
+    monkeypatch.setattr(
+        glossary_review_mod, "build_glossary_review", counting_build_review
+    )
+
+    sequence._try_complete_analysis(BOOK_ID)
+
+    assert analyses_calls == 1
+    assert glossary_calls == 1
+    assert build_review_calls == 1
+
+    saved_concepts = unit_of_work.glossary.list_for_book(BOOK_ID)
+    assert [c.canonical_source_text for c in saved_concepts] == ["Duskmere"]
+    assert saved_concepts[0].status is TermStatus.APPROVED
+    stored_book = unit_of_work.books.get(BOOK_ID)
+    assert stored_book is not None and stored_book.status is BookStatus.PROCESSING
+
+
+
 
