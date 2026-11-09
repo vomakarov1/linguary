@@ -1,7 +1,7 @@
 """Resolve pinned work using saved parameters and locally available credentials."""
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import os
 from urllib.parse import urlsplit, urlunsplit
@@ -229,10 +229,25 @@ class ProvenanceClient:
         return response
 
 
+@dataclass(slots=True)
+class _CachedBookGeneration:
+    fingerprint: tuple
+    generation: object
+    active_leases: int = 0
+    retired: bool = False
+    closed: bool = False
+
+
 class BookRuntimeResolver:
     def __init__(self, service, runtime, factory):
         self.service, self.runtime, self.factory = service, runtime, factory
         self.supported = {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 3}
+        self._cache: dict[str, _CachedBookGeneration] = {}
+
+    async def _close_entry(self, entry: _CachedBookGeneration) -> None:
+        if not entry.closed:
+            entry.closed = True
+            await entry.generation.configured_client.aclose()
 
     def settings_for(self, conditions):
         payload = conditions.payload
@@ -297,6 +312,19 @@ class BookRuntimeResolver:
                        checks=CheckSettings(**thaw(payload['checks'])),
                        recovery=RecoverySettings(**thaw(payload.get('recovery_policy', asdict(RecoverySettings())))))
 
+    async def _evict_stale_entries(self, current_creds: tuple) -> None:
+        stale = [
+            (cache_key, cached)
+            for cache_key, cached in tuple(self._cache.items())
+            if cached.fingerprint[1:] != current_creds
+        ]
+        for cache_key, cached in stale:
+            cached.retired = True
+            if self._cache.get(cache_key) is cached:
+                self._cache.pop(cache_key, None)
+            if cached.active_leases == 0:
+                await self._close_entry(cached)
+
     @asynccontextmanager
     async def lease(self, conditions_id, role):
         if role not in {'analysis', 'processing', 'regeneration'}:
@@ -306,8 +334,57 @@ class BookRuntimeResolver:
             if conditions is None:
                 raise ConditionsError('conditions_unavailable')
         settings = self.settings_for(conditions)
-        generation = self.factory(settings, conditions=conditions)
+        key = getattr(conditions, 'id', conditions_id)
+        current_creds = (
+            settings.llm.base_url,
+            settings.llm.proxy_url,
+            settings.llm.api_key,
+        )
+        await self._evict_stale_entries(current_creds)
+        fingerprint = (
+            getattr(conditions, 'revision', None),
+            *current_creds,
+        )
+        entry = self._cache.get(key)
+        if entry is not None and not entry.retired and entry.fingerprint == fingerprint:
+            entry.active_leases += 1
+        else:
+            if entry is not None:
+                entry.retired = True
+                self._cache.pop(key, None)
+                if entry.active_leases == 0:
+                    await self._close_entry(entry)
+            generation = self.factory(settings, conditions=conditions)
+            entry = _CachedBookGeneration(
+                fingerprint=fingerprint,
+                generation=generation,
+                active_leases=1,
+            )
+            self._cache[key] = entry
         try:
-            yield generation
+            yield entry.generation
         finally:
-            await generation.configured_client.aclose()
+            entry.active_leases -= 1
+            if not entry.retired:
+                current_llm = self.runtime.current.settings.llm
+                latest_fingerprint = (
+                    getattr(conditions, 'revision', None),
+                    current_llm.base_url,
+                    current_llm.proxy_url,
+                    current_llm.api_key,
+                )
+                if latest_fingerprint != entry.fingerprint:
+                    entry.retired = True
+                    if self._cache.get(key) is entry:
+                        self._cache.pop(key, None)
+            if entry.retired and entry.active_leases == 0:
+                await self._close_entry(entry)
+
+    async def aclose(self) -> None:
+        entries = tuple(self._cache.values())
+        self._cache.clear()
+        for entry in entries:
+            entry.retired = True
+        for entry in entries:
+            if entry.active_leases == 0:
+                await self._close_entry(entry)

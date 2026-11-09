@@ -216,7 +216,13 @@ class Application:
 
     async def _close(self) -> None:
         errors = []
-        for close in (self.system_settings.aclose, self.runtime_settings.aclose, self._close_quality):
+        for close in (
+            self.system_settings.aclose,
+            self.runtime_settings.aclose,
+            self.book_runtime.aclose,
+            self.correction.resolver.aclose,
+            self._close_quality,
+        ):
             try:
                 await close()
             except Exception:

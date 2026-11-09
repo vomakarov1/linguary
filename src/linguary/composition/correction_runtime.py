@@ -93,6 +93,16 @@ class CorrectionRuntime:
     conditions_id: str
 
 
+@dataclass(slots=True)
+class _CachedCorrectionRuntime:
+    fingerprint: tuple
+    runtime: CorrectionRuntime
+    configured: object
+    active_leases: int = 0
+    retired: bool = False
+    closed: bool = False
+
+
 class CorrectionRuntimeResolver:
     """Lease a client pinned by run_id, resolving only the current route credentials."""
 
@@ -102,6 +112,12 @@ class CorrectionRuntimeResolver:
         self.limiter, self.on_logged = limiter, on_logged
         self.client_factory = client_factory or ConfiguredLLMClient
         self.injected_client = injected_client
+        self._cache: dict[tuple[str, str], _CachedCorrectionRuntime] = {}
+
+    async def _close_entry(self, entry: _CachedCorrectionRuntime) -> None:
+        if not entry.closed:
+            entry.closed = True
+            await entry.configured.aclose()
 
     def _binding(self, transaction, run_id):
         run = transaction.runs.get(run_id)
@@ -148,24 +164,89 @@ class CorrectionRuntimeResolver:
             if run.status != ProcessingRunStatus.ACTIVE:
                 raise RecoveryError('interrupted')
         settings = self.settings_for(snapshot)
-        configured = self.client_factory(settings.llm)
+        key = (run_id, conditions.id)
+        fingerprint = (
+            getattr(conditions, 'revision', None),
+            snapshot.model,
+            thaw(snapshot.route),
+            thaw(snapshot.parameters),
+            getattr(snapshot, 'policy_version', None),
+            settings.llm.base_url,
+            getattr(settings.llm, 'proxy_mode', None),
+            settings.llm.proxy_url,
+            settings.llm.api_key,
+            getattr(settings.llm, 'debug_llm_payloads', False),
+        )
+        entry = self._cache.get(key)
+        if entry is not None and not entry.retired and entry.fingerprint == fingerprint:
+            entry.active_leases += 1
+        else:
+            if entry is not None:
+                entry.retired = True
+                self._cache.pop(key, None)
+                if entry.active_leases == 0:
+                    await self._close_entry(entry)
+            configured = self.client_factory(settings.llm)
+            try:
+                inner = self.injected_client if self.injected_client is not None else configured.client_for(snapshot.model)
+                llm = settings.llm
+                pricing = None
+                if llm.input_price_per_mtok is not None and llm.output_price_per_mtok is not None:
+                    pricing = TokenPricing(Decimal(str(llm.input_price_per_mtok)), Decimal(str(llm.output_price_per_mtok)))
+                logged = LoggingLLMClient(
+                    inner=inner, unit_of_work=self.service.uow, provider=llm.provider, model=snapshot.model,
+                    debug_payloads=llm.debug_llm_payloads, on_logged=self.on_logged, pricing=pricing,
+                )
+                client = CorrectionProvenanceClient(
+                    RateLimitedLLMClient(inner=logged, limiter=self.limiter), self.service,
+                    run_id, conditions.id, snapshot,
+                )
+                correction_rt = CorrectionRuntime(client, snapshot, settings, conditions.id)
+            except BaseException:
+                await configured.aclose()
+                raise
+            entry = _CachedCorrectionRuntime(
+                fingerprint=fingerprint,
+                runtime=correction_rt,
+                configured=configured,
+                active_leases=1,
+            )
+            self._cache[key] = entry
+        entry.runtime.llm_client._attempts.set(())
+        entry.runtime.llm_client._responses.set(())
         try:
-            inner = self.injected_client if self.injected_client is not None else configured.client_for(snapshot.model)
-            llm = settings.llm
-            pricing = None
-            if llm.input_price_per_mtok is not None and llm.output_price_per_mtok is not None:
-                pricing = TokenPricing(Decimal(str(llm.input_price_per_mtok)), Decimal(str(llm.output_price_per_mtok)))
-            logged = LoggingLLMClient(
-                inner=inner, unit_of_work=self.service.uow, provider=llm.provider, model=snapshot.model,
-                debug_payloads=llm.debug_llm_payloads, on_logged=self.on_logged, pricing=pricing,
-            )
-            client = CorrectionProvenanceClient(
-                RateLimitedLLMClient(inner=logged, limiter=self.limiter), self.service,
-                run_id, conditions.id, snapshot,
-            )
-            yield CorrectionRuntime(client, snapshot, settings, conditions.id)
+            yield entry.runtime
         finally:
-            await configured.aclose()
+            entry.active_leases -= 1
+            if not entry.retired:
+                current_llm = self.runtime.current.settings.llm
+                latest_fingerprint = (
+                    getattr(conditions, 'revision', None),
+                    snapshot.model,
+                    thaw(snapshot.route),
+                    thaw(snapshot.parameters),
+                    getattr(snapshot, 'policy_version', None),
+                    current_llm.base_url,
+                    getattr(current_llm, 'proxy_mode', None),
+                    current_llm.proxy_url,
+                    current_llm.api_key,
+                    getattr(current_llm, 'debug_llm_payloads', False),
+                )
+                if latest_fingerprint != entry.fingerprint:
+                    entry.retired = True
+                    if self._cache.get(key) is entry:
+                        self._cache.pop(key, None)
+            if entry.retired and entry.active_leases == 0:
+                await self._close_entry(entry)
+
+    async def aclose(self) -> None:
+        entries = tuple(self._cache.values())
+        self._cache.clear()
+        for entry in entries:
+            entry.retired = True
+        for entry in entries:
+            if entry.active_leases == 0:
+                await self._close_entry(entry)
 
 
 class CorrectionProvenanceClient:
