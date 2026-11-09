@@ -805,7 +805,7 @@ async def test_chapter_analysis_sequence_auto_approve_glossary_success() -> None
 
 
 async def test_chapter_analysis_sequence_auto_approve_glossary_skips_conflicts() -> None:
-    """Candidates with conflicting translations remain unapproved in GLOSSARY_REVIEW (P1.T2)."""
+    """Conflicting candidates flagged for review remain unapproved in GLOSSARY_REVIEW (P1.T2, P2.T1)."""
     ch1 = make_analysis_section(section_id="section-1", title="Chapter 1", order=0, texts=("Ch 1",))
     ch2 = make_analysis_section(section_id="section-2", title="Chapter 2", order=1, texts=("Ch 2",))
     doc = make_analysis_document((ch1, ch2))
@@ -844,7 +844,7 @@ async def test_chapter_analysis_sequence_auto_approve_glossary_skips_conflicts()
                 "type": "place",
                 "suggested_translation": "Сумеречье",
                 "confidence": 0.9,
-                "model_flagged_review": False,
+                "model_flagged_review": True,
                 "note": None,
             }
         ],
@@ -1513,6 +1513,77 @@ async def test_analysis_post_validation_errors_use_block_aliases_and_expectation
     assert "- b1" in repair_text
     assert "- b2" in repair_text
     assert "Целевой язык результата — ru." in repair_text
+
+
+async def test_request_analysis_reuses_validated_content_plan_without_triple_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """validate_content_plan returns ContentPlan and AnalyzeChapter reuses it in whole-chapter and fragment paths without triple parsing (P2.T1)."""
+    import linguary.application.analysis_merge as analysis_merge_mod
+    import linguary.application.use_cases.analyze_chapter as analyze_chapter_mod
+
+    original_parse = analysis_merge_mod.content_plan_from_response
+    parse_calls = 0
+
+    def counting_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(
+        analysis_merge_mod, "content_plan_from_response", counting_parse
+    )
+    monkeypatch.setattr(
+        analyze_chapter_mod, "content_plan_from_response", counting_parse
+    )
+
+    content_plan_payload = {
+        "version": 3,
+        "profile": "content-plan-v3",
+        "difficulties": [],
+        "before_you_read_evidence": [],
+        "context_facts": [],
+    }
+
+    # 1. Whole-chapter analysis (1 LLM call -> 1 content_plan_from_response call)
+    unit_of_work = two_block_book()
+    reply_whole = analysis_reply(
+        aliases=("b1", "b2"),
+        before_you_read=[],
+        content_plan=content_plan_payload,
+    )
+    client_whole = FakeLLMClient.always(reply_whole)
+    scenario_whole, _ = make_analyze_chapter(unit_of_work, client_whole)
+    scenario_whole._context_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3"
+    )
+
+    result_whole = await scenario_whole(command())
+    assert result_whole.analysis.content_plan is not None
+    assert result_whole.analysis.content_plan.version == 3
+    assert parse_calls == 1
+
+    # 2. Fragment-based analysis (2 fragments -> 2 content_plan_from_response calls)
+    parse_calls = 0
+    unit_of_work_frag = two_block_book()
+    reply_frag = analysis_reply(
+        aliases=("b1",),
+        before_you_read=[],
+        content_plan=content_plan_payload,
+    )
+    client_frag = FakeLLMClient.always(reply_frag)
+    scenario_frag, _ = make_analyze_chapter(
+        unit_of_work_frag, client_frag, max_fragment_blocks=1
+    )
+    scenario_frag._context_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3"
+    )
+
+    result_frag = await scenario_frag(command())
+    assert result_frag.analysis.content_plan is not None
+    assert result_frag.analysis.content_plan.version == 3
+    assert parse_calls == 2
+
 
 
 

@@ -162,6 +162,9 @@ class AnalyzeChapter:
         self._loaded_concepts: ContextVar[tuple[TermConcept, ...] | None] = ContextVar(
             f"analyze_chapter_concepts_{id(self)}", default=None
         )
+        self._resolved_content_plan: ContextVar[ContentPlan | None] = ContextVar(
+            f"analyze_chapter_content_plan_{id(self)}", default=None
+        )
 
     async def __call__(self, command: AnalyzeChapterCommand) -> AnalyzeChapterResult:
         """Analyzes a chapter and persists the result.
@@ -173,6 +176,7 @@ class AnalyzeChapter:
         token_attempts = None
         token_responses = None
         token_concepts = self._loaded_concepts.set(None)
+        token_plan = self._resolved_content_plan.set(None)
         if hasattr(self._llm_client, "_attempts"):
             token_attempts = self._llm_client._attempts.set(())
         if hasattr(self._llm_client, "_responses"):
@@ -238,6 +242,7 @@ class AnalyzeChapter:
             self._save(command.book_id, analysis, task_id=command.task_id)
             return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
         finally:
+            self._resolved_content_plan.reset(token_plan)
             self._loaded_concepts.reset(token_concepts)
             if token_attempts is not None:
                 self._llm_client._attempts.reset(token_attempts)
@@ -305,7 +310,11 @@ class AnalyzeChapter:
             concepts=concepts,
         )
         analysis = self._to_analysis(
-            payload, context=context, section=section, blocks=blocks
+            payload,
+            context=context,
+            section=section,
+            blocks=blocks,
+            resolved_content_plan=self._resolved_content_plan.get(),
         )
         return analysis, attempts, usage
 
@@ -405,6 +414,7 @@ class AnalyzeChapter:
                     block_ids_by_alias=context.block_ids_by_alias,
                     texts={b.id: b.text for b in fragment.blocks},
                     visible_texts_by_alias=context.visible_texts_by_alias,
+                    resolved_content_plan=self._resolved_content_plan.get(),
                 )
             )
         analysed = [replace(part, order=i) for i, part in enumerate(analysed)]
@@ -567,7 +577,7 @@ class AnalyzeChapter:
                             reader_level=self._context_builder._reader_level)
                     _ensure_plan_covers_chapter(response.payload, context)
                     _ensure_candidates_single_script(response.payload, context)
-                    validate_content_plan(
+                    plan = validate_content_plan(
                         response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
                         english_help=self._context_builder._english_help,
                         before_you_read_limit=context.before_you_read_limit,
@@ -577,15 +587,11 @@ class AnalyzeChapter:
                         visible_texts_by_alias=context.visible_texts_by_alias,
                     )
                     if request.contract_version in {3, 5}:
-                        plan = content_plan_from_response(
-                            response.payload, context.block_ids_by_alias,
-                            {b.id: b.text for b in blocks},
-                            visible_texts_by_alias=context.visible_texts_by_alias,
-                        )
                         if resolved_concepts is None:
                             with self._unit_of_work.transaction() as transaction:
                                 resolved_concepts = tuple(transaction.glossary.list_for_book(request.book_id))
                         validate_fact_glossary(plan, glossary_context_constraints(resolved_concepts))
+                    self._resolved_content_plan.set(plan)
                 except (ApplicationError, DomainError) as error:
                     if not isinstance(error, ResultValidationError) or error.expectation is None:
                         raise ResultValidationError(
@@ -619,6 +625,7 @@ class AnalyzeChapter:
         context: ChapterAnalysisContext,
         section: DocumentSection,
         blocks: Sequence[DocumentBlock],
+        resolved_content_plan: ContentPlan | None = None,
     ) -> ChapterAnalysis:
         """Converts model response to a domain chapter analysis.
 
@@ -645,9 +652,13 @@ class AnalyzeChapter:
             expected_block_ids=[block.id for block in blocks],
             glossary_candidates=self._candidates(payload, analysis_id=analysis_id),
             before_you_read=_before_you_read(payload),
-            content_plan=content_plan_from_response(
-                payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
-                visible_texts_by_alias=context.visible_texts_by_alias,
+            content_plan=(
+                resolved_content_plan
+                if resolved_content_plan is not None or payload.content_plan is None
+                else content_plan_from_response(
+                    payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
+                    visible_texts_by_alias=context.visible_texts_by_alias,
+                )
             ),
         )
 
@@ -930,10 +941,9 @@ class ChapterAnalysisSequence:
                 for item in review.items:
                     if (
                         item.decision is None
-                        and item.suggested_translation.strip()
+                        and bool(item.suggested_translation and item.suggested_translation.strip())
                         and item.confidence >= confidence_threshold
                         and not item.model_flagged_review
-                        and not item.has_translation_conflict
                     ):
                         concept = TermConcept(
                             id=item.concept_id,

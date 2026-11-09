@@ -354,3 +354,102 @@ async def test_auto_start_processing_transitions_book_after_auto_approve_glossar
     assert stored_direct is not None and stored_direct.status is BookStatus.PROCESSING
 
 
+async def test_auto_approve_glossary_resolves_parallel_translation_conflicts_and_reuses_mention_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parallel chapter analysis with conflicting translations auto-approves high-confidence unflagged candidates and builds mention_counter once (P2.T1)."""
+    from types import SimpleNamespace
+    import linguary.application.mention_counter as mention_counter_mod
+    from linguary.domain import TermStatus
+
+    original_mention_counter = mention_counter_mod.mention_counter
+    mention_counter_calls = 0
+
+    def counting_mention_counter(document):
+        nonlocal mention_counter_calls
+        mention_counter_calls += 1
+        return original_mention_counter(document)
+
+    monkeypatch.setattr(
+        mention_counter_mod, "mention_counter", counting_mention_counter
+    )
+
+    unit_of_work = make_book(chapters=3)
+    conditions = SimpleNamespace(
+        id="cond-1",
+        payload={
+            "checks": {
+                "auto_approve_glossary": True,
+                "auto_start_processing": True,
+                "glossary_confidence_threshold": 0.7,
+                "glossary_review_min_mentions": 1,
+                "glossary_review_min_chapters": 1,
+            }
+        },
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    queue = FakeTaskQueue()
+    reply_daskmer = analysis_reply(
+        aliases=("b1",),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.95,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    reply_sumerechye = analysis_reply(
+        aliases=("b1",),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Сумеречье",
+                "confidence": 0.85,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    client = FakeLLMClient.replying((reply_daskmer, reply_sumerechye, reply_daskmer))
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    analyze_chapter._max_concurrency = 2
+    started_books: list[str] = []
+
+    async def fake_start_processing(book_id: str) -> None:
+        started_books.append(book_id)
+        unit_of_work.books.save(make_book_record(status=BookStatus.PROCESSING))
+
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+        auto_start_processing=True,
+        start_processing=fake_start_processing,
+    )
+    runner = TaskRunner(
+        queue=queue,  # type: ignore[arg-type]
+        handlers={TaskType.ANALYZE_CHAPTER: sequence.run_task},
+    )
+
+    await sequence.start(BOOK_ID)
+    await drain(runner, queue)
+
+    assert mention_counter_calls == 1
+    stored = unit_of_work.books.get(BOOK_ID)
+    assert stored is not None and stored.status is BookStatus.PROCESSING
+    assert started_books == [BOOK_ID]
+    glossary_items = unit_of_work.glossary.list_for_book(BOOK_ID)
+    assert len(glossary_items) == 1
+    assert glossary_items[0].canonical_source_text == "Duskmere"
+    assert glossary_items[0].status is TermStatus.APPROVED
+    assert glossary_items[0].variants[0].text == "Даскмер"
+
+
+

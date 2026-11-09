@@ -122,6 +122,7 @@ class FragmentAnalysis:
         block_ids_by_alias: Mapping[str, str],
         texts: Mapping[str, str] | None = None,
         visible_texts_by_alias: Mapping[str, str] | None = None,
+        resolved_content_plan: ContentPlan | None = None,
     ) -> FragmentAnalysis:
         """Fragment response with plan mapped to chapter block IDs.
 
@@ -148,9 +149,13 @@ class FragmentAnalysis:
             ),
             glossary_candidates=payload.glossary_candidates,
             before_you_read=payload.before_you_read,
-            content_plan=content_plan_from_response(
-                payload, block_ids_by_alias, texts=texts,
-                visible_texts_by_alias=visible_texts_by_alias,
+            content_plan=(
+                resolved_content_plan
+                if resolved_content_plan is not None or payload.content_plan is None
+                else content_plan_from_response(
+                    payload, block_ids_by_alias, texts=texts,
+                    visible_texts_by_alias=visible_texts_by_alias,
+                )
             ),
         )
 
@@ -1150,7 +1155,7 @@ def validate_content_plan(
     note_limits_by_block: Mapping[str, int] | None = None,
     note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
     visible_texts_by_alias: Mapping[str, str] | None = None,
-) -> None:
+) -> ContentPlan | None:
     """Validates source anchors and channel eligibility prior to accepting the response."""
     plan = content_plan_from_response(payload, aliases, texts=texts,
                                       visible_texts_by_alias=visible_texts_by_alias)
@@ -1159,7 +1164,7 @@ def validate_content_plan(
             raise AnalysisMergeError("цитата не разрешается однозначно в тексте блока")
         if english_help:
             raise AnalysisMergeError("режиму английской помощи нужен содержательный план")
-        return
+        return None
     if english_help:
         if plan.version != 3:
             raise AnalysisMergeError("режим английской помощи требует план версии 3")
@@ -1203,6 +1208,7 @@ def validate_content_plan(
         for owner in note_owners
     ):
         raise AnalysisMergeError("содержательный план не помещается в бюджет языковых заметок")
+    return plan
 
 
 def _quotation_key(text: str) -> str:
