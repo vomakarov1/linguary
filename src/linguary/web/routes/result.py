@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -47,8 +48,26 @@ def get_book_result(
         "pending_corrections" if filter_param == "pending_corrections" else None
     )
     summary = book_result(application.unit_of_work, book_id)
-    response = BookResultResponse.of_result(summary)
     header_only = _wants_result_header_fragment(request)
+    effective_summary = summary
+    if not header_only and result_filter == "pending_corrections":
+        filtered_chapters = []
+        for chapter in summary.chapters:
+            kept_groups = [
+                group
+                for group in result_groups(chapter.blocks)
+                if any(
+                    candidate.get("state") == "awaiting_human"
+                    for member in group
+                    for candidate in member.correction_candidates
+                )
+            ]
+            if not kept_groups:
+                continue
+            kept_blocks = tuple(member for group in kept_groups for member in group)
+            filtered_chapters.append(replace(chapter, blocks=kept_blocks))
+        effective_summary = replace(summary, chapters=tuple(filtered_chapters))
+    response = BookResultResponse.of_result(effective_summary)
     if not header_only:
         tasks = _regeneration_tasks(summary.tasks)
         for chapter in response.chapters:
@@ -57,41 +76,6 @@ def get_book_result(
                     current = tasks.get(member.block_id)
                     if current is not None:
                         member.regeneration_task = TaskResponse.of_task(current)
-        if result_filter == "pending_corrections":
-            filtered_chapters = []
-            for chapter in response.chapters:
-                filtered_groups = tuple(
-                    group
-                    for group in chapter.groups
-                    if any(
-                        candidate.get("state") == "awaiting_human"
-                        for member in group.member_blocks
-                        for candidate in member.correction_candidates
-                    )
-                )
-                if not filtered_groups:
-                    continue
-                kept_member_ids = {
-                    member_id
-                    for group in filtered_groups
-                    for member_id in group.member_block_ids
-                }
-                filtered_blocks = tuple(
-                    block
-                    for block in chapter.blocks
-                    if block.block_id in kept_member_ids
-                )
-                filtered_chapters.append(
-                    chapter.model_copy(
-                        update={
-                            "groups": filtered_groups,
-                            "blocks": filtered_blocks,
-                        }
-                    )
-                )
-            response = response.model_copy(
-                update={"chapters": tuple(filtered_chapters)}
-            )
     export_task = next((task for task in summary.tasks
                         if task.task_type is TaskType.EXPORT_BOOK
                         and task.status is not TaskStatus.SUCCEEDED), None)

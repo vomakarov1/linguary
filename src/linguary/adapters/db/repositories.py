@@ -465,6 +465,32 @@ class SqlAlchemyBlockResultRepository:
             for row in rows
         }
 
+    def pronunciation_assistances_for_blocks(
+        self, run_id: str, block_ids: Sequence[str]
+    ) -> dict[str, tuple]:
+        """Return non-empty pronunciation assistances for the specified blocks without loading full results."""
+        unique_ids = tuple(dict.fromkeys(block_ids))
+        if not unique_ids:
+            return {}
+        out: dict[str, tuple] = {}
+        for offset in range(0, len(unique_ids), 500):
+            batch = unique_ids[offset : offset + 500]
+            rows = self._session.execute(
+                select(
+                    BlockResultRow.block_id,
+                    BlockResultRow.pronunciation_assistances_json,
+                ).where(
+                    BlockResultRow.run_id == run_id,
+                    BlockResultRow.block_id.in_(batch),
+                    BlockResultRow.pronunciation_assistances_json.is_not(None),
+                )
+            ).all()
+            for block_id, raw_json in rows:
+                decoded = mapping._decode_pronunciation(raw_json)
+                if decoded:
+                    out[block_id] = decoded
+        return out
+
     def list_for_run(self, run_id: str) -> tuple[BlockProcessingResult, ...]:
         """List all results of a run in source document block order.
 

@@ -191,6 +191,16 @@ class BlockResultRepository(Protocol):
     def get(self, run_id: str, block_id: str) -> BlockProcessingResult | None:
         """Processing result for a single block within a run."""
 
+    def get_many(
+        self, run_id: str, block_ids: Sequence[str]
+    ) -> dict[str, BlockProcessingResult]:
+        """Processing results for multiple blocks within a run."""
+
+    def pronunciation_assistances_for_blocks(
+        self, run_id: str, block_ids: Sequence[str]
+    ) -> dict[str, tuple]:
+        """Non-empty pronunciation assistances for the specified blocks."""
+
     def list_for_run(self, run_id: str) -> tuple[BlockProcessingResult, ...]:
         """All results for the run in original document block order."""
 
@@ -274,7 +284,7 @@ class WorkRepository(Protocol):
     def bind(self, entity_kind, entity_id, *, book_id, conditions_id,
              attempt_id=None, artifact_revision_id=None, payload=None) -> None: ...
     def get_binding(self, entity_kind, entity_id): ...
-    def result_bindings(self, run_id): ...
+    def result_bindings(self, run_id: str, block_ids: Sequence[str] | None = None): ...
     def correction_input_generations(self, run_id): ...
     def observe_correction_input(self, run_id, block_id, fingerprint): ...
     def advance_correction_input(self, run_id, block_id, *, expected_generation, fingerprint) -> None: ...

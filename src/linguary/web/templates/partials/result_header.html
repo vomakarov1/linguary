@@ -1,4 +1,4 @@
-<section class="page-head" data-result-header data-result-url="/books/{{ data.book_id }}/result">
+<section class="page-head" data-result-header data-result-url="/books/{{ data.book_id }}/result{% if result_filter == 'pending_corrections' %}?filter=pending_corrections{% endif %}">
   <div>
     <h1>Результат</h1>
     {% if export_task %}
@@ -16,6 +16,12 @@
       <p role="status">Ожидающих предложений исправлений не осталось. <a href="/books/{{ data.book_id }}/result">Показать все блоки</a></p>
     {% endif %}
     {% if data.epubcheck_hint %}<p>{{ data.epubcheck_hint }}</p>{% endif %}
+    {% if data.pause_requested %}
+      <p role="status">{% if data.is_paused %}Очередь книги поставлена на паузу. Фоновые задачи не выполняются до возобновления.{% else %}Запрошена пауза: текущие обращения завершатся штатно, новые задачи не запускаются.{% endif %}</p>
+      <form class="actions" method="post" action="/books/{{ data.book_id }}/resume">
+        <button type="submit">Возобновить очередь</button>
+      </form>
+    {% endif %}
   </div>
   {% if data.epub_ready or export_task %}
     <div class="actions result-actions">

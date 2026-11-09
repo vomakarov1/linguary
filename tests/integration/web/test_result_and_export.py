@@ -1453,3 +1453,577 @@ def test_analyze_initial_conditions_pause_resume_and_restart_routes_and_pending_
     )
     assert len(fg_tree.xpath(".//*[@data-result-block]")) == 1
 
+
+async def test_pause_lifecycle_restricts_inactive_statuses_clears_on_stage_end_and_manual_start_and_shows_in_result_header(
+    configured_client: TestClient, configured_application: Application
+) -> None:
+    from linguary.application.block_processing import complete_processing
+    from linguary.application.use_cases.analyze_chapter import ChapterAnalysisSequence
+
+    client = configured_client
+    application = configured_application
+
+    # 1. PauseBook rejects statuses outside active queues (`ANALYZING`, `PROCESSING`)
+    ready_book = store_book(
+        application,
+        book_id="book-pause-ready",
+        status=BookStatus.READY_TO_EXPORT,
+        chapters=((SOURCE_TEXT,),),
+    )
+    ready_src = application.paths.source_epub(ready_book.book_id)
+    ready_src.parent.mkdir(parents=True, exist_ok=True)
+    ready_src.write_bytes(b"synthetic ready epub")
+    with application.unit_of_work.transaction() as tx:
+        rec = tx.books.get(ready_book.book_id)
+        tx.books.save(replace(rec, source_epub_path=str(ready_src)))
+    continue_legacy(application, ready_book.book_id)
+    start_run(
+        application,
+        ready_book,
+        results=tuple(translated_result(bid) for bid in ready_book.block_ids()),
+    )
+
+    assert client.post(f"/books/{ready_book.book_id}/pause").status_code == 409
+
+    # 2. If a book has an active pause binding (e.g. paused in PROCESSING or leftover in DB),
+    # result header shows pause status + resume action, and manual POST /export clears pause so export runs.
+    with application.unit_of_work.transaction() as tx:
+        cond = tx.work.latest_conditions(ready_book.book_id)
+        tx.work.set_book_paused(ready_book.book_id, cond.id, True)
+
+    header_paused = client.get(
+        f"/books/{ready_book.book_id}/result",
+        headers={"accept": "text/html", "x-linguary-fragment": "result-header"},
+    )
+    assert header_paused.status_code == 200
+    assert f'/books/{ready_book.book_id}/resume' in header_paused.text
+
+    export_resp = client.post(f"/books/{ready_book.book_id}/export")
+    assert export_resp.status_code == 202
+    with application.unit_of_work.transaction() as tx:
+        assert tx.work.is_book_paused(ready_book.book_id) is False
+    finished_export = await drain_tasks(application)
+    assert [t.status for t in finished_export] == [TaskStatus.SUCCEEDED]
+
+    # 3. Manual POST /analyze clears pause; completing analysis (without auto_start_processing) clears pause,
+    # while auto_start_processing preserves pause; manual POST /process clears pause;
+    # completing processing (`PROCESSING -> READY_TO_EXPORT`) clears pause.
+    analysing_book = store_book(
+        application,
+        book_id="book-pause-stages",
+        status=BookStatus.ANALYZING,
+        chapters=((SOURCE_TEXT,),),
+    )
+    stage_src = application.paths.source_epub(analysing_book.book_id)
+    stage_src.parent.mkdir(parents=True, exist_ok=True)
+    stage_src.write_bytes(b"synthetic stage epub")
+    with application.unit_of_work.transaction() as tx:
+        rec = tx.books.get(analysing_book.book_id)
+        tx.books.save(replace(rec, source_epub_path=str(stage_src)))
+    continue_legacy(application, analysing_book.book_id)
+
+    assert client.post(f"/books/{analysing_book.book_id}/pause").status_code == 200
+    with application.unit_of_work.transaction() as tx:
+        assert tx.work.is_book_paused(analysing_book.book_id) is True
+
+    # Manual POST /analyze clears pause
+    assert client.post(f"/books/{analysing_book.book_id}/analyze").status_code == 202
+    with application.unit_of_work.transaction() as tx:
+        assert tx.work.is_book_paused(analysing_book.book_id) is False
+        cond = tx.work.latest_conditions(analysing_book.book_id)
+        tx.books.save(replace(tx.books.get(analysing_book.book_id), status=BookStatus.ANALYZING))
+        tx.work.set_book_paused(analysing_book.book_id, cond.id, True)
+
+    seq_manual = ChapterAnalysisSequence(
+        unit_of_work=application.unit_of_work,
+        queue=application.task_queue,
+        analyze_chapter=None,  # type: ignore[arg-type]
+        auto_start_processing=False,
+    )
+    assert seq_manual._try_complete_analysis(analysing_book.book_id) is False
+    with application.unit_of_work.transaction() as tx:
+        assert tx.books.get(analysing_book.book_id).status is BookStatus.GLOSSARY_REVIEW
+        assert tx.work.is_book_paused(analysing_book.book_id) is False
+        # When auto_approve_glossary + auto_start_processing triggers automatic transition, pause stays set
+        tx.books.save(replace(tx.books.get(analysing_book.book_id), status=BookStatus.ANALYZING))
+        tx.work.set_book_paused(analysing_book.book_id, cond.id, True)
+
+    async def _noop_start(_bid: str) -> None:
+        return None
+
+    with application.unit_of_work.transaction() as tx:
+        # Enable auto_approve_glossary + auto_start_processing on conditions for auto-transition test
+        auto_cond = application.book_conditions.create(
+            tx,
+            tx.books.get(analysing_book.book_id),
+            application.runtime_settings.revision,
+        )
+        # Update checks via new conditions with auto_approve_glossary
+    seq_auto = ChapterAnalysisSequence(
+        unit_of_work=application.unit_of_work,
+        queue=application.task_queue,
+        analyze_chapter=None,  # type: ignore[arg-type]
+        auto_start_processing=True,
+        start_processing=_noop_start,
+    )
+    with application.unit_of_work.transaction() as tx:
+        from linguary.domain.book_conditions import BookConditions, thaw
+        from uuid import uuid4
+        latest = tx.work.latest_conditions(analysing_book.book_id)
+        payload = thaw(latest.payload)
+        payload.setdefault("checks", {})["auto_approve_glossary"] = True
+        payload["checks"]["auto_start_processing"] = True
+        cond_auto = BookConditions(
+            str(uuid4()),
+            analysing_book.book_id,
+            latest.revision + 1,
+            payload,
+            latest.created_at,
+        )
+        tx.work.add_conditions(cond_auto)
+        tx.work.set_book_paused(analysing_book.book_id, cond_auto.id, True)
+
+    assert seq_auto._try_complete_analysis(analysing_book.book_id) is True
+    with application.unit_of_work.transaction() as tx:
+        assert tx.work.is_book_paused(analysing_book.book_id) is True
+
+    # Manual POST /process clears pause
+    proc_resp = client.post(f"/books/{analysing_book.book_id}/process")
+    assert proc_resp.status_code == 202, proc_resp.text
+    with application.unit_of_work.transaction() as tx:
+        assert tx.work.is_book_paused(analysing_book.book_id) is False
+
+    # Now pause during PROCESSING while last task finishes -> complete_processing clears pause
+    assert client.post(f"/books/{analysing_book.book_id}/pause").status_code == 200
+    with application.unit_of_work.transaction() as tx:
+        run = tx.runs.active_for_book(analysing_book.book_id)
+        for t in tx.tasks.list_for_book(analysing_book.book_id):
+            tx.tasks.delete(t.id)
+        tx.runs.delete(run.id)
+    start_run(
+        application,
+        analysing_book,
+        results=tuple(translated_result(bid) for bid in analysing_book.block_ids()),
+    )
+    with application.unit_of_work.transaction() as tx:
+        cond_latest = tx.work.latest_conditions(analysing_book.book_id)
+        tx.books.save(replace(tx.books.get(analysing_book.book_id), status=BookStatus.PROCESSING))
+        tx.work.set_book_paused(analysing_book.book_id, cond_latest.id, True)
+
+    complete_processing(
+        application.unit_of_work,
+        book_id=analysing_book.book_id,
+        finished_task_id=None,
+        task_types=(TaskType.PROCESS_TRANSLATION_UNIT,),
+    )
+    with application.unit_of_work.transaction() as tx:
+        assert tx.books.get(analysing_book.book_id).status is BookStatus.READY_TO_EXPORT
+        assert tx.work.is_book_paused(analysing_book.book_id) is False
+
+
+def test_web_analyze_and_reanalyze_forms_handle_unchecked_seed_and_existing_conditions_revisions(
+    settings, llm_client, web_task_ids
+) -> None:
+    from lxml import html
+    from linguary.adapters.config import CheckSettings, LLMSettings
+    from linguary.composition import build_application
+    from linguary.web import create_app
+
+    seeded_settings = replace(
+        settings,
+        llm=LLMSettings(model="fake-model", api_key="test-key"),
+        checks=CheckSettings(seed_first_chapter=True),
+    )
+    app = build_application(
+        settings=seeded_settings,
+        llm_client=llm_client,
+        task_id_factory=web_task_ids,
+        content_plan_profile="legacy-v1",
+    )
+    try:
+        scenario = store_book(
+            app,
+            book_id="book-seed-form",
+            status=BookStatus.IMPORTED,
+            analysed_chapters=(),
+            chapters=((SOURCE_TEXT,),),
+        )
+        src = app.paths.source_epub(scenario.book_id)
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"synthetic seed form epub")
+        with app.unit_of_work.transaction() as tx:
+            rec = tx.books.get(scenario.book_id)
+            tx.books.save(replace(rec, source_epub_path=str(src)))
+
+        with TestClient(
+            create_app(application=app, run_background_worker=False),
+            base_url=app.settings.server.base_url,
+        ) as client:
+            # Initially unchecked conditions_id falls back to default_seed_first_chapter=True
+            init_tree = html.fromstring(
+                client.get(f"/books/{scenario.book_id}", headers={"accept": "text/html"}).text
+            )
+            assert init_tree.xpath('//form[contains(@action,"/analyze")]//input[@name="seed_first_chapter" and @checked]')
+
+            # 1. Submitting HTML form without `seed_first_chapter` (unchecked box) disables it despite default True
+            r1 = client.post(
+                f"/books/{scenario.book_id}/analyze",
+                data={"reader_level": "b1"},
+                headers={"accept": "text/html"},
+                follow_redirects=False,
+            )
+            assert r1.status_code == 303
+            with app.unit_of_work.transaction() as tx:
+                c1 = tx.work.latest_conditions(scenario.book_id)
+                assert c1.revision == 1
+                assert c1.payload["reader_level"] == "b1"
+                assert c1.payload["english_help"] is False
+                assert c1.payload["checks"]["seed_first_chapter"] is False
+
+            # 2. Divergent options on non-IMPORTED book (`ANALYZING`) fail with 409
+            conflict_json = client.post(
+                f"/books/{scenario.book_id}/analyze",
+                json={"reader_level": "c1"},
+            )
+            assert conflict_json.status_code == 409
+            conflict_html = client.post(
+                f"/books/{scenario.book_id}/analyze",
+                data={"reader_level": "c1"},
+                headers={"accept": "text/html"},
+            )
+            assert conflict_html.status_code == 409
+            assert "reason_code" not in conflict_html.text
+
+            # 3. `reanalyze` HTML form with checked seed -> revision 2 (seed=True), then unchecked seed -> revision 3 (seed=False)
+            rev = app.runtime_settings.revision
+            r2 = client.post(
+                f"/books/{scenario.book_id}/conditions",
+                data={
+                    "action": "reanalyze",
+                    "reader_level": "a2",
+                    "english_help": "true",
+                    "seed_first_chapter": "true",
+                    "expected_revision": "1",
+                    "settings_revision": str(rev),
+                    "confirmed": "true",
+                },
+                headers={"accept": "text/html"},
+                follow_redirects=False,
+            )
+            assert r2.status_code == 303
+            with app.unit_of_work.transaction() as tx:
+                c2 = tx.work.latest_conditions(scenario.book_id)
+                assert c2.revision == 2
+                assert c2.payload["checks"]["seed_first_chapter"] is True
+
+            r3 = client.post(
+                f"/books/{scenario.book_id}/conditions",
+                data={
+                    "action": "reanalyze",
+                    "reader_level": "a2",
+                    "expected_revision": "2",
+                    "settings_revision": str(rev),
+                    "confirmed": "true",
+                },
+                headers={"accept": "text/html"},
+                follow_redirects=False,
+            )
+            assert r3.status_code == 303
+            with app.unit_of_work.transaction() as tx:
+                c3 = tx.work.latest_conditions(scenario.book_id)
+                assert c3.revision == 3
+                assert c3.payload["english_help"] is False
+                assert c3.payload["checks"]["seed_first_chapter"] is False
+
+            # Saved seed_first_chapter=False is not overridden by default_seed_first_chapter=True in detail.html
+            after_reanalyze_tree = html.fromstring(
+                client.get(f"/books/{scenario.book_id}", headers={"accept": "text/html"}).text
+            )
+            assert not after_reanalyze_tree.xpath(
+                '//form[contains(@action,"/analyze")]//input[@name="seed_first_chapter" and @checked]'
+            )
+
+            # 4. Submitting modified options in `POST /analyze` on clean IMPORTED book creates revision 4
+            r4 = client.post(
+                f"/books/{scenario.book_id}/analyze",
+                data={
+                    "reader_level": "c1",
+                    "english_help": "true",
+                    "pronunciation_help_enabled": "true",
+                    "pronunciation_variant": "us",
+                    "seed_first_chapter": "true",
+                },
+                headers={"accept": "text/html"},
+                follow_redirects=False,
+            )
+            assert r4.status_code == 303
+            with app.unit_of_work.transaction() as tx:
+                c4 = tx.work.latest_conditions(scenario.book_id)
+                assert c4.revision == 4
+                assert c4.payload["reader_level"] == "c1"
+                assert c4.payload["english_help"] is True
+                assert c4.pronunciation_help_enabled is True
+                assert c4.pronunciation_variant == "us"
+                assert c4.payload["checks"]["seed_first_chapter"] is True
+    finally:
+        app.dispose()
+
+
+def test_pending_corrections_filter_recomputes_primary_pronunciations_and_preserves_header_filter_url(
+    client: TestClient, application: Application
+) -> None:
+    from dataclasses import asdict
+    import json
+    from uuid import uuid4
+    from lxml import html
+    from linguary.application.correction import CorrectionInputs, correction_input_fingerprint
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V2,
+        CorrectionSnapshotV2,
+        parse_correction_snapshot,
+    )
+    from linguary.domain.book_conditions import thaw
+    from linguary.domain.content_plan import SourceAnchor, canonical_sha
+    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2, CorrectionCandidate
+    from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
+    from linguary.domain.recovery import CallAttempt
+
+    ch1_text = "The colonel arrived early."
+    ch2_b1_text = "Later the colonel spoke softly."
+    ch2_b2_text = "The colonel nodded again."
+    scenario = store_book(
+        application,
+        book_id="book-filter-pronunciation",
+        status=BookStatus.READY_TO_EXPORT,
+        chapters=((ch1_text,), (ch2_b1_text, ch2_b2_text)),
+    )
+    src = application.paths.source_epub(scenario.book_id)
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"synthetic filter pronunciation epub")
+    with application.unit_of_work.transaction() as tx:
+        rec = tx.books.get(scenario.book_id)
+        tx.books.save(replace(rec, source_epub_path=str(src)))
+    continue_legacy(application, scenario.book_id)
+
+    b_ch1 = scenario.block_ids(0)[0]
+    b_ch2_1, b_ch2_2 = scenario.block_ids(1)
+    evidence = PronunciationEvidence(
+        source_id="synthetic-dict",
+        source_version="v1",
+        entry_id="entry-colonel",
+        sense_id="sense-1",
+        part_of_speech="noun",
+        dictionary_form="colonel",
+        dictionary_ipa="ˈkɜː.nəl",
+        attribution="Synthetic Dictionary",
+    )
+
+    def _occ(bid: str, text: str, hint_id: str) -> PronunciationAssistance:
+        pos = text.index("colonel")
+        return PronunciationAssistance(
+            anchor=SourceAnchor(bid, pos, pos + len("colonel"), "colonel"),
+            form="colonel",
+            ipa="ˈkɜː.nəl",
+            variant="uk",
+            hint_id=hint_id,
+            evidence=evidence,
+        )
+
+    start_run(
+        application,
+        scenario,
+        results=(
+            BlockProcessingResult(
+                block_id=b_ch1,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Полковник прибыл рано.",
+                pronunciation_assistances=(_occ(b_ch1, ch1_text, "ph-ch1-colonel"),),
+            ),
+            BlockProcessingResult(
+                block_id=b_ch2_1,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Позже полковник заговорил тихо.",
+                pronunciation_assistances=(_occ(b_ch2_1, ch2_b1_text, "ph-ch2-colonel"),),
+            ),
+            BlockProcessingResult(
+                block_id=b_ch2_2,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Полковник снова кивнул.",
+                pronunciation_assistances=(_occ(b_ch2_2, ch2_b2_text, "ph-ch2-repeat"),),
+            ),
+        ),
+    )
+
+    with application.unit_of_work.transaction() as tx:
+        cond = tx.work.latest_conditions(scenario.book_id)
+        run = tx.runs.active_for_book(scenario.book_id)
+        doc = tx.documents.get(scenario.book_id)
+        sec2 = scenario.section(1)
+        analysis2 = tx.analyses.get_for_section(scenario.book_id, sec2.id)
+        corr_policy = CorrectionSnapshotV2(
+            model="fake",
+            route={"provider": "fake", "base_url": "http://fake", "proxy": None, "route_id": "fake"},
+            parameters={
+                "temperature": 0.0,
+                "max_output_tokens": 1000,
+                "timeout_seconds": 30,
+                "max_attempts": 1,
+                "max_unit_source_chars": 4000,
+                "input_price_per_mtok": 0.0,
+                "output_price_per_mtok": 0.0,
+            },
+            prompt="Correct chapter.",
+            review_prompt="Review candidate.",
+            versions=CORRECTION_VERSIONS_V2,
+        ).to_payload()
+        tx.work.bind(
+            "run",
+            run.id,
+            book_id=scenario.book_id,
+            conditions_id=cond.id,
+            payload={"schema_version": 1, "correction": corr_policy},
+        )
+        for bid in (b_ch2_1, b_ch2_2):
+            tx.work.bind(
+                "result",
+                f"{run.id}:{bid}",
+                book_id=scenario.book_id,
+                conditions_id=cond.id,
+                payload={"schema_version": 1},
+            )
+        bindings = tx.work.result_bindings(run.id)
+        snapshot = parse_correction_snapshot(corr_policy)
+        res_map = {bid: tx.results.get(run.id, bid) for bid in (b_ch2_1, b_ch2_2)}
+        inputs = CorrectionInputs(
+            doc,
+            sec2,
+            analysis2,
+            run,
+            cond,
+            snapshot,
+            tuple(sec2.ordered_blocks),
+            res_map,
+            {bid: bindings.get(bid) for bid in (b_ch2_1, b_ch2_2)},
+            {},
+        )
+        gens = {
+            bid: tx.work.observe_correction_input(
+                run.id, bid, correction_input_fingerprint(inputs, bid)
+            )
+            for bid in (b_ch2_1, b_ch2_2)
+        }
+        inputs = inputs.with_updated_state(input_generations=gens)
+        attempt_id = str(uuid4())
+        tx.work.add_attempt(
+            CallAttempt(
+                attempt_id,
+                scenario.book_id,
+                state="accepted",
+                conditions_id=cond.id,
+                run_id=run.id,
+                context={
+                    "schema_version": 1,
+                    "stage": "chapter_correction",
+                    "policy_version": CORRECTION_POLICY_VERSION_V2,
+                    "ordered_block_ids": [b_ch2_1, b_ch2_2],
+                },
+            )
+        )
+        candidates_to_add = []
+        for idx, bid in enumerate((b_ch2_1, b_ch2_2)):
+            cur = res_map[bid]
+            prop = replace(cur, translated_text=f"Исправленный перевод {idx}.")
+            payload = {
+                "schema_version": 1,
+                "book_id": scenario.book_id,
+                "run_id": run.id,
+                "conditions_id": cond.id,
+                "section_id": sec2.id,
+                "block_id": bid,
+                "input_sha256": inputs.checksums[bid],
+                "input_generation": gens[bid],
+                "group_id": attempt_id,
+                "proposal_attempt_id": attempt_id,
+                "context_sha256": inputs.context_sha256,
+                "source_binding": thaw(bindings.get(bid)),
+                "original": {"text": sec2.ordered_blocks[idx].text},
+                "current_result": json.loads(json.dumps(asdict(cur))),
+                "result": json.loads(json.dumps(asdict(prop))),
+                "proposal": {
+                    "issues": [
+                        {
+                            "source_quote": "colonel",
+                            "current_evidence": {"kind": "quote", "quote": "полковник"},
+                            "problem": "Оттенок.",
+                            "minimal_fix_reason": "Точнее.",
+                        }
+                    ]
+                },
+                "evidence_valid": False,
+            }
+            candidates_to_add.append(
+                CorrectionCandidate(
+                    candidate_id=str(uuid4()),
+                    run_id=run.id,
+                    book_id=scenario.book_id,
+                    section_id=sec2.id,
+                    block_id=bid,
+                    conditions_id=cond.id,
+                    group_id=attempt_id,
+                    proposal_attempt_id=attempt_id,
+                    input_generation=gens[bid],
+                    input_sha256=inputs.checksums[bid],
+                    proposal_sha256=canonical_sha(payload),
+                    state="awaiting_human",
+                    payload=payload,
+                    review={"verdict": "uncertain", "reason": "Нужна проверка"},
+                )
+            )
+        tx.work.add_correction_candidates(tuple(candidates_to_add))
+
+    filtered_json = client.get(
+        f"/books/{scenario.book_id}/result?filter=pending_corrections"
+    ).json()
+    assert len(filtered_json["chapters"]) == 1
+    groups = filtered_json["chapters"][0]["groups"]
+    assert len(groups) == 2
+    assert groups[0]["pronunciation_assistances"][0]["is_primary"] is True
+    assert groups[0]["pronunciation_assistances"][0]["hint_id"] == "ph-ch2-colonel"
+    assert groups[1]["pronunciation_assistances"][0]["is_primary"] is False
+    assert groups[1]["pronunciation_assistances"][0]["hint_id"] == "ph-ch2-colonel"
+
+    filtered_html = client.get(
+        f"/books/{scenario.book_id}/result?filter=pending_corrections",
+        headers={"accept": "text/html"},
+    )
+    assert filtered_html.status_code == 200
+    assert 'id="ph-ch2-colonel"' in filtered_html.text
+    assert "/ˈkɜː.nəl/" in filtered_html.text
+    assert 'href="#ph-ch2-colonel"' in filtered_html.text
+    assert "ph-ch1-colonel" not in filtered_html.text
+    page_tree = html.fromstring(filtered_html.text)
+    assert (
+        page_tree.xpath("//*[@data-result-header]")[0].get("data-result-url")
+        == f"/books/{scenario.book_id}/result?filter=pending_corrections"
+    )
+
+    header_frag = client.get(
+        f"/books/{scenario.book_id}/result?filter=pending_corrections",
+        headers={"accept": "text/html", "x-linguary-fragment": "result-header"},
+    )
+    assert header_frag.status_code == 200
+    frag_tree = html.fromstring(header_frag.text)
+    assert (
+        frag_tree.get("data-result-url")
+        == f"/books/{scenario.book_id}/result?filter=pending_corrections"
+    )
+    unfiltered_frag = client.get(
+        f"/books/{scenario.book_id}/result",
+        headers={"accept": "text/html", "x-linguary-fragment": "result-header"},
+    )
+    assert (
+        html.fromstring(unfiltered_frag.text).get("data-result-url")
+        == f"/books/{scenario.book_id}/result"
+    )
+
+

@@ -88,6 +88,10 @@ async def _parse_initial_analysis_input(request: Request) -> _InitialAnalysisInp
                 raw[key] = str(value).lower() in {"true", "on", "1"}
             else:
                 raw[key] = value
+        if raw:
+            raw.setdefault("english_help", False)
+            raw.setdefault("pronunciation_help_enabled", False)
+            raw.setdefault("seed_first_chapter", False)
     else:
         return _InitialAnalysisInput()
     try:
@@ -144,12 +148,13 @@ async def start_analysis(
                 if book is None:
                     raise BookNotFoundError(f"книги {book_id} нет в хранилище")
                 existing = tx.work.latest_conditions(book_id)
+                is_clean_imported = (
+                    book.status is BookStatus.IMPORTED
+                    and not tx.analyses.list_for_book(book_id)
+                    and tx.runs.active_for_book(book_id) is None
+                )
                 if existing is None:
-                    if (
-                        book.status is not BookStatus.IMPORTED
-                        or tx.analyses.list_for_book(book_id)
-                        or tx.runs.active_for_book(book_id)
-                    ):
+                    if not is_clean_imported:
                         raise ConditionsError("legacy_choice_required")
                     pronunciation_enabled = bool(initial.pronunciation_help_enabled)
                     conditions = application.book_conditions.create(
@@ -161,12 +166,75 @@ async def start_analysis(
                         pronunciation_help_enabled=pronunciation_enabled,
                         pronunciation_variant=(
                             initial.pronunciation_variant
-                            if pronunciation_enabled
+                            if (
+                                pronunciation_enabled
+                                or initial.pronunciation_help_enabled is None
+                            )
                             else None
                         ),
                         seed_first_chapter=initial.seed_first_chapter,
                     )
                     application.book_runtime.settings_for(conditions)
+                else:
+                    existing_seed = bool(
+                        (existing.payload.get("checks") or {}).get(
+                            "seed_first_chapter",
+                            application.settings.checks.seed_first_chapter,
+                        )
+                    )
+                    eff_reader_level = (
+                        initial.reader_level
+                        if initial.reader_level is not None
+                        else existing.payload.get("reader_level")
+                    )
+                    eff_english_help = (
+                        initial.english_help
+                        if initial.english_help is not None
+                        else bool(existing.payload.get("english_help", False))
+                    )
+                    eff_pron_enabled = (
+                        initial.pronunciation_help_enabled
+                        if initial.pronunciation_help_enabled is not None
+                        else bool(existing.payload.get("pronunciation_help_enabled", False))
+                    )
+                    if not eff_pron_enabled:
+                        eff_pron_variant = (
+                            initial.pronunciation_variant
+                            if initial.pronunciation_help_enabled is None
+                            else None
+                        )
+                    else:
+                        eff_pron_variant = (
+                            initial.pronunciation_variant
+                            if initial.pronunciation_variant is not None
+                            else existing.payload.get("pronunciation_variant")
+                        )
+                    eff_seed = (
+                        initial.seed_first_chapter
+                        if initial.seed_first_chapter is not None
+                        else existing_seed
+                    )
+                    diverges = (
+                        eff_reader_level != existing.payload.get("reader_level")
+                        or eff_english_help != bool(existing.payload.get("english_help", False))
+                        or eff_pron_enabled != bool(existing.payload.get("pronunciation_help_enabled", False))
+                        or eff_pron_variant != existing.payload.get("pronunciation_variant")
+                        or eff_seed != existing_seed
+                    )
+                    if diverges:
+                        if not is_clean_imported:
+                            raise ConditionsError("conditions_already_selected")
+                        conditions = application.book_conditions.create(
+                            tx,
+                            book,
+                            application.runtime_settings.revision,
+                            reader_level=eff_reader_level,
+                            english_help=eff_english_help,
+                            pronunciation_help_enabled=eff_pron_enabled,
+                            pronunciation_variant=eff_pron_variant,
+                            seed_first_chapter=eff_seed,
+                        )
+                        application.book_runtime.settings_for(conditions)
         except ConditionsError as error:
             return input_error_response(request, _conditions_http_error(error))
     task = await application.analysis.start(book_id)
@@ -187,6 +255,10 @@ async def start_processing(
 ) -> ProcessingStartResponse | RedirectResponse:
     """Freeze the glossary and enqueue processing tasks for all chapters."""
     run = application.start_processing()(StartProcessingCommand(book_id=book_id))
+    with application.unit_of_work.transaction() as tx:
+        set_book_paused = getattr(tx.work, "set_book_paused", None)
+        if callable(set_book_paused):
+            set_book_paused(book_id, None, False)
     tasks = await application.processing.start(book_id)
     if wants_html(request):
         return RedirectResponse(
@@ -394,11 +466,13 @@ async def choose_conditions(
         seed_first_chapter: bool | None = None
 
     try:
-        raw = (
-            await request.json()
-            if request.headers.get("content-type", "").startswith("application/json")
-            else dict(await request.form())
-        )
+        is_json = request.headers.get("content-type", "").startswith("application/json")
+        raw = await request.json() if is_json else dict(await request.form())
+        if not is_json and isinstance(raw, dict):
+            if raw.get("pronunciation_variant") == "":
+                raw["pronunciation_variant"] = None
+            if raw.get("action") == "reanalyze":
+                raw.setdefault("seed_first_chapter", False)
         choice = Choice.model_validate(raw)
         if choice.confirmed is not True:
             if wants_html(request):

@@ -278,3 +278,228 @@ def test_enforce_diagnostics_policy_evicts_by_byte_length_without_loading_untouc
         assert transaction.results.get_many(run.id, ()) == {}
 
 
+async def test_result_bindings_filters_by_block_ids_pk_and_translation_call_scopes_binding_reads(
+    unit_of_work,
+) -> None:
+    from sqlalchemy import event
+    from uuid import uuid4
+    from linguary.adapters.llm import FakeLLMClient, FakeReply
+    from linguary.application.block_processing import TranslationCall, note_id_factory
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.validators import TranslationResultValidator
+    from linguary.domain import (
+        BlockTreatment,
+        GlossarySnapshot,
+        TranslationUnit,
+        TranslationUnitItem,
+    )
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.llm_log import CallContext
+    from linguary.domain.recovery import CallAttempt
+    from persistence_factories import (
+        BLOCK_ID,
+        SECOND_BLOCK_ID,
+        make_analysis,
+        make_document,
+        make_glossary_only_result,
+        make_run,
+        make_translated_result,
+    )
+
+    cond_id = str(uuid4())
+    att_id = str(uuid4())
+    with unit_of_work.transaction() as tx:
+        tx.books.add(make_book())
+        doc = make_document()
+        tx.documents.save(doc)
+        conditions = BookConditions(
+            id=cond_id,
+            book_id='book-1',
+            revision=1,
+            created_at=NOW,
+            reproducibility='complete',
+            payload={
+                'schema_version': 1,
+                'source_epub_sha256': 'a' * 64,
+                'settings_revision': 1,
+                'reader_level': 'b2',
+                'english_help': False,
+                'models': {'analysis': 'm', 'processing': 'm', 'correction': 'm'},
+                'checks': {'correction_passes': 1},
+                'versions': {
+                    'prompts': 1,
+                    'schemas': 1,
+                    'validators': 1,
+                    'translation_policy': 1,
+                    'correction_policy': 1,
+                    'quality_policy': 1,
+                },
+            },
+        )
+        tx.work.add_conditions(conditions)
+        run = make_run(run_id='run-scoped-bindings', book_id='book-1')
+        tx.runs.add(run)
+        r1 = make_translated_result(block_id=BLOCK_ID)
+        r2 = make_glossary_only_result(block_id=SECOND_BLOCK_ID)
+        tx.results.replace_results(run.id, (r1, r2))
+        tx.work.add_attempt(
+            CallAttempt(
+                att_id,
+                'book-1',
+                state='accepted',
+                conditions_id=cond_id,
+                run_id=run.id,
+                context={'schema_version': 1, 'stage': 'translation_unit', 'ordered_block_ids': [BLOCK_ID, SECOND_BLOCK_ID]},
+            )
+        )
+        art_ids = tx.work.archive_artifacts(
+            [
+                dict(book_id='book-1', conditions_id=cond_id, attempt_id=att_id, run_id=run.id, kind='block_result', scope_id=BLOCK_ID, body={'schema_version': 1, 'result': {'block_id': BLOCK_ID}}),
+                dict(book_id='book-1', conditions_id=cond_id, attempt_id=att_id, run_id=run.id, kind='block_result', scope_id=SECOND_BLOCK_ID, body={'schema_version': 1, 'result': {'block_id': SECOND_BLOCK_ID}}),
+            ]
+        )
+        tx.work.bind('result', f'{run.id}:{BLOCK_ID}', book_id='book-1', conditions_id=cond_id, attempt_id=att_id, artifact_revision_id=art_ids[0])
+        tx.work.bind('result', f'{run.id}:{SECOND_BLOCK_ID}', book_id='book-1', conditions_id=cond_id, attempt_id=att_id, artifact_revision_id=art_ids[1])
+
+    executed_sql: list[tuple[str, object]] = []
+    with unit_of_work.transaction() as tx:
+        engine = tx._active_session().get_bind()
+
+        def _capture(conn, cursor, statement, parameters, context, executemany):
+            executed_sql.append((statement, parameters))
+
+        event.listen(engine, 'before_cursor_execute', _capture)
+        try:
+            assert tx.work.result_bindings('run-scoped-bindings', block_ids=()) == {}
+            assert [s for s, _ in executed_sql if s.lstrip().upper().startswith('SELECT')] == []
+            scoped = tx.work.result_bindings('run-scoped-bindings', block_ids=(BLOCK_ID,))
+        finally:
+            event.remove(engine, 'before_cursor_execute', _capture)
+
+    assert set(scoped) == {BLOCK_ID}
+    selects = [(s, p) for s, p in executed_sql if s.lstrip().upper().startswith('SELECT')]
+    assert len(selects) == 1
+    stmt, params = selects[0]
+    assert ' IN ' in stmt.upper()
+    assert f'run-scoped-bindings:{BLOCK_ID}' in repr(params)
+    assert f'run-scoped-bindings:{SECOND_BLOCK_ID}' not in repr(params)
+
+    with unit_of_work.read_transaction() as tx:
+        full = tx.work.result_bindings('run-scoped-bindings')
+        assert set(full) == {BLOCK_ID, SECOND_BLOCK_ID}
+
+    # Verify TranslationCall.request and TranslationCall.save pass block_ids to result_bindings
+    binding_calls: list[tuple[str, object]] = []
+    from linguary.adapters.db.work_state import SqlAlchemyWorkRepository
+
+    orig_rb = SqlAlchemyWorkRepository.result_bindings
+
+    def _spy_rb(self_repo, r_id, block_ids=None):
+        binding_calls.append((r_id, None if block_ids is None else tuple(block_ids)))
+        return orig_rb(self_repo, r_id, block_ids=block_ids)
+
+    SqlAlchemyWorkRepository.result_bindings = _spy_rb  # type: ignore[method-assign]
+    try:
+        with unit_of_work.read_transaction() as tx:
+            doc = tx.documents.get('book-1')
+        sec = doc.ordered_sections[0]
+        b0 = sec.ordered_blocks[0]
+        unit = TranslationUnit(
+            id='unit-single',
+            section_id=sec.id,
+            items=(TranslationUnitItem(block=b0, treatment=BlockTreatment.TRANSLATE),),
+        )
+        analysis = make_analysis()
+        ctx = ContextBuilder(content_plan_profile='legacy-v1').for_translation_unit(
+            document=doc,
+            section=sec,
+            unit=unit,
+            analysis=analysis,
+            glossary=GlossarySnapshot(),
+        )
+        new_att_id = str(uuid4())
+        with unit_of_work.transaction() as tx:
+            tx.work.add_attempt(
+                CallAttempt(
+                    new_att_id,
+                    'book-1',
+                    state='sent',
+                    conditions_id=cond_id,
+                    run_id='run-scoped-bindings',
+                    context={'schema_version': 1, 'stage': 'translation_unit', 'ordered_block_ids': [b0.id]},
+                )
+            )
+        call_ctx = CallContext(
+            conditions_id=cond_id,
+            stage='translation_unit',
+            scope_id='unit-single',
+            ordered_block_ids=(b0.id,),
+            attempt_id=new_att_id,
+            generation=0,
+            assigned_model='m',
+            prompt_hash='0' * 64,
+            run_id='run-scoped-bindings',
+        )
+        from linguary.domain import LLMCallStage
+        ctx = replace(
+            ctx,
+            request=replace(
+                ctx.request,
+                call_context=call_ctx,
+                book_id='book-1',
+                stage=LLMCallStage.TRANSLATION_UNIT,
+            ),
+        )
+        fake = FakeLLMClient(
+            [
+                FakeReply.of_payload(
+                    {
+                        'blocks': [
+                            {
+                                'source_block_id': 'b1',
+                                'treatment': 'TRANSLATE',
+                                'translated_text': 'Обновлённый перевод достаточной длины на русском языке.',
+                                'glossary_hints': [],
+                            }
+                        ],
+                        'language_notes': [],
+                    }
+                )
+            ]
+        )
+
+        async def _no_sleep(_s: float) -> None:
+            return None
+
+        t_call = TranslationCall(
+            unit_of_work=unit_of_work,
+            llm_client=fake,
+            retry_policy=RetryPolicy(max_attempts=1),
+            validator=TranslationResultValidator(
+                target_language_min_share=0.5,
+                language_check_min_length=20,
+                repetition_ngram_size=4,
+                repetition_min_repeats=3,
+            ),
+            sleep=_no_sleep,
+        )
+        res = await t_call.request(
+            ctx,
+            unit=unit,
+            target_language='ru',
+            note_ids=note_id_factory(chapter_number=1, used=()),
+        )
+        with unit_of_work.transaction() as tx:
+            tx.work.transition_attempt(new_att_id, 'validated', expected_state='sent')
+        t_call._validated_response.set(
+            replace(t_call._validated_response.get(), call_context=call_ctx)
+        )
+        assert t_call.save(book_id='book-1', run_id='run-scoped-bindings', results=res.results, reconcile=False) is True
+    finally:
+        SqlAlchemyWorkRepository.result_bindings = orig_rb  # type: ignore[method-assign]
+
+    assert len(binding_calls) >= 2
+    assert all(b_ids == (BLOCK_ID,) for _, b_ids in binding_calls)
+
+

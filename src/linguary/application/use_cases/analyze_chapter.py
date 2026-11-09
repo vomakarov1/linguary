@@ -970,13 +970,17 @@ class ChapterAnalysisSequence:
         """Transitions book to `ANALYZING` (ALG-06)."""
         with self._unit_of_work.transaction() as transaction:
             book = self._book(transaction, book_id)
-            if book.status is BookStatus.ANALYZING:
-                return
-            transaction.books.save(
-                _with_status(
-                    book, apply_book_event(book.status, BookEvent.ANALYSIS_STARTED)
-                )
+            next_status = (
+                book.status
+                if book.status is BookStatus.ANALYZING
+                else apply_book_event(book.status, BookEvent.ANALYSIS_STARTED)
             )
+            work_repo = getattr(transaction, "work", None)
+            set_book_paused = getattr(work_repo, "set_book_paused", None)
+            if callable(set_book_paused):
+                set_book_paused(book_id, None, False)
+            if book.status is not BookStatus.ANALYZING:
+                transaction.books.save(_with_status(book, next_status))
 
     def _complete_analysis(self, book_id: str) -> None:
         """Transitions analyzed book to glossary review (ALG-06)."""
@@ -1126,6 +1130,10 @@ class ChapterAnalysisSequence:
                                 ),
                             )
                             transaction.books.save(book)
+            if not should_start_processing and work_repo is not None:
+                set_book_paused = getattr(work_repo, "set_book_paused", None)
+                if callable(set_book_paused):
+                    set_book_paused(book_id, None, False)
         return should_start_processing
 
     def _book(self, transaction: UnitOfWork, book_id: str) -> BookRecord:

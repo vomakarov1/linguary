@@ -868,6 +868,8 @@ class BookResultResponse(BaseModel):
     epub_ready: bool = False
     ordinary_cost: dict = Field(default_factory=dict)
     pending_corrections: int = 0
+    pause_requested: bool = False
+    is_paused: bool = False
     reading_support: dict = Field(default_factory=dict)
 
     @classmethod
@@ -881,6 +883,8 @@ class BookResultResponse(BaseModel):
         return cls(
             book_id=result.book.id,
             pending_corrections=result.pending_corrections,
+            pause_requested=result.pause_requested,
+            is_paused=result.is_paused,
             reading_support={**dict(result.reading_support), 'coverage_label': _READING_SUPPORT_COVERAGE_LABELS[
                 result.reading_support.get('coverage_state', 'not_evaluated')]},
             conditions=dict(result.conditions), reproducibility=result.reproducibility,

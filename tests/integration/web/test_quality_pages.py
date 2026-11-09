@@ -327,3 +327,260 @@ def test_partial_book_result_preserves_primary_pronunciation_hint_id_across_chap
     assert 'href="#ph-primary-chapter-1"' in fragment.text
     assert 'id="ph-secondary-chapter-2"' not in fragment.text
 
+
+def test_partial_book_result_and_book_overview_avoid_loading_unaffected_chapter_results(configured_application):
+    application = configured_application
+    from uuid import uuid4
+    from web_scenario import continue_legacy
+    from linguary.adapters.db.repositories import SqlAlchemyBlockResultRepository
+    from linguary.application.book_overview import book_overview, book_result
+    from linguary.application.correction import CorrectionInputs, correction_input_fingerprint
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V2,
+        CorrectionSnapshotV2,
+        parse_correction_snapshot,
+    )
+    from linguary.domain import BlockProcessingResult, BlockTreatment
+    from linguary.domain.book_conditions import thaw
+    from linguary.domain.content_plan import SourceAnchor, canonical_sha
+    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2, CorrectionCandidate
+    from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
+    from linguary.domain.recovery import CallAttempt
+
+    ch1_p1 = "The colonel arrived early."
+    ch1_p2 = "Plain paragraph without pronunciation hints."
+    ch2_p1 = "Later the colonel spoke softly."
+    ch3_p1 = "Translated block in chapter three."
+    ch3_p2 = "Untranslated block keeping book in PROCESSING."
+    scenario = store_book(
+        application,
+        book_id="book-perf-queries",
+        status=BookStatus.PROCESSING,
+        chapters=((ch1_p1, ch1_p2), (ch2_p1,), (ch3_p1, ch3_p2)),
+    )
+    src = application.paths.source_epub(scenario.book_id)
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"synthetic perf epub")
+    with application.unit_of_work.transaction() as tx:
+        rec = tx.books.get(scenario.book_id)
+        tx.books.save(replace(rec, source_epub_path=str(src)))
+    continue_legacy(application, scenario.book_id)
+
+    b_ch1_1, b_ch1_2 = scenario.block_ids(0)
+    b_ch2_1, = scenario.block_ids(1)
+    b_ch3_1, _ = scenario.block_ids(2)
+
+    evidence = PronunciationEvidence(
+        source_id="synthetic-dict",
+        source_version="v1",
+        entry_id="entry-colonel",
+        sense_id="sense-1",
+        part_of_speech="noun",
+        dictionary_form="colonel",
+        dictionary_ipa="ˈkɜː.nəl",
+        attribution="Synthetic Dictionary",
+    )
+    occ_ch1 = PronunciationAssistance(
+        anchor=SourceAnchor(b_ch1_1, ch1_p1.index("colonel"), ch1_p1.index("colonel") + len("colonel"), "colonel"),
+        form="colonel",
+        ipa="ˈkɜː.nəl",
+        variant="uk",
+        hint_id="ph-ch1",
+        evidence=evidence,
+    )
+    occ_ch2 = PronunciationAssistance(
+        anchor=SourceAnchor(b_ch2_1, ch2_p1.index("colonel"), ch2_p1.index("colonel") + len("colonel"), "colonel"),
+        form="colonel",
+        ipa="ˈkɜː.nəl",
+        variant="uk",
+        hint_id="ph-ch2",
+        evidence=evidence,
+    )
+    start_run(
+        application,
+        scenario,
+        results=[
+            BlockProcessingResult(b_ch1_1, BlockTreatment.TRANSLATE, "Полковник прибыл рано.", pronunciation_assistances=(occ_ch1,)),
+            BlockProcessingResult(b_ch1_2, BlockTreatment.TRANSLATE, "Обычный абзац без транскрипций."),
+            BlockProcessingResult(b_ch2_1, BlockTreatment.TRANSLATE, "Позже полковник заговорил тихо.", pronunciation_assistances=(occ_ch2,)),
+            BlockProcessingResult(b_ch3_1, BlockTreatment.TRANSLATE, "Переведённый блок третьей главы."),
+        ],
+    )
+
+    get_many_calls: list[tuple[str, ...]] = []
+    list_for_run_calls = 0
+    orig_get_many = SqlAlchemyBlockResultRepository.get_many
+    orig_list_for_run = SqlAlchemyBlockResultRepository.list_for_run
+
+    def _spy_get_many(self_repo, run_id, block_ids):
+        get_many_calls.append(tuple(block_ids))
+        return orig_get_many(self_repo, run_id, block_ids)
+
+    def _spy_list_for_run(self_repo, run_id):
+        nonlocal list_for_run_calls
+        list_for_run_calls += 1
+        return orig_list_for_run(self_repo, run_id)
+
+    SqlAlchemyBlockResultRepository.get_many = _spy_get_many  # type: ignore[method-assign]
+    SqlAlchemyBlockResultRepository.list_for_run = _spy_list_for_run  # type: ignore[method-assign]
+    try:
+        # 1. Partial `book_result` loads full results only for target_block_ids (`b_ch2_1`), not Chapter 1
+        partial = book_result(
+            application.unit_of_work,
+            scenario.book_id,
+            include_quality=False,
+            block_ids=(b_ch2_1,),
+        )
+        assert list_for_run_calls == 0
+        assert get_many_calls == [(b_ch2_1,)]
+        assert partial.prior_pronunciation_hints[("colonel", "uk", "ˈkɜː.nəl")] == "ph-ch1"
+
+        # 2. Seed v2 correction policy + an `awaiting_review` candidate in Chapter 1 and `awaiting_human` in Chapter 2
+        with application.unit_of_work.transaction() as tx:
+            cond = tx.work.latest_conditions(scenario.book_id)
+            run = tx.runs.active_for_book(scenario.book_id)
+            doc = tx.documents.get(scenario.book_id)
+            corr_policy = CorrectionSnapshotV2(
+                model="fake",
+                route={"provider": "fake", "base_url": "http://fake", "proxy": None, "route_id": "fake"},
+                parameters={
+                    "temperature": 0.0,
+                    "max_output_tokens": 1000,
+                    "timeout_seconds": 30,
+                    "max_attempts": 1,
+                    "max_unit_source_chars": 4000,
+                    "input_price_per_mtok": 0.0,
+                    "output_price_per_mtok": 0.0,
+                },
+                prompt="Correct chapter.",
+                review_prompt="Review candidate.",
+                versions=CORRECTION_VERSIONS_V2,
+            ).to_payload()
+            tx.work.bind(
+                "run",
+                run.id,
+                book_id=scenario.book_id,
+                conditions_id=cond.id,
+                payload={"schema_version": 1, "correction": corr_policy},
+            )
+            for bid in (b_ch1_1, b_ch1_2, b_ch2_1):
+                tx.work.bind(
+                    "result",
+                    f"{run.id}:{bid}",
+                    book_id=scenario.book_id,
+                    conditions_id=cond.id,
+                    payload={"schema_version": 1},
+                )
+            bindings = tx.work.result_bindings(run.id)
+            snapshot = parse_correction_snapshot(corr_policy)
+
+            def _make_candidate(cur_tx, sec_idx: int, bid: str, *, human: bool) -> CorrectionCandidate:
+                sec = scenario.section(sec_idx)
+                analysis = cur_tx.analyses.get_for_section(scenario.book_id, sec.id)
+                sec_res = {b.id: orig_get_many(cur_tx.results, run.id, [b.id])[b.id] for b in sec.ordered_blocks}
+                inputs = CorrectionInputs(
+                    doc,
+                    sec,
+                    analysis,
+                    run,
+                    cond,
+                    snapshot,
+                    tuple(sec.ordered_blocks),
+                    sec_res,
+                    {b.id: bindings.get(b.id) for b in sec.ordered_blocks},
+                    {},
+                )
+                gen = cur_tx.work.observe_correction_input(
+                    run.id, bid, correction_input_fingerprint(inputs, bid)
+                )
+                inputs = inputs.with_updated_state(input_generations={bid: gen})
+                att_id = str(uuid4())
+                cur_tx.work.add_attempt(
+                    CallAttempt(
+                        att_id,
+                        scenario.book_id,
+                        state="accepted",
+                        conditions_id=cond.id,
+                        run_id=run.id,
+                        context={
+                            "schema_version": 1,
+                            "stage": "chapter_correction",
+                            "policy_version": CORRECTION_POLICY_VERSION_V2,
+                            "ordered_block_ids": [bid],
+                        },
+                    )
+                )
+                cur = sec_res[bid]
+                prop = replace(cur, translated_text="Уточнённый перевод.")
+                payload = {
+                    "schema_version": 1,
+                    "book_id": scenario.book_id,
+                    "run_id": run.id,
+                    "conditions_id": cond.id,
+                    "section_id": sec.id,
+                    "block_id": bid,
+                    "input_sha256": inputs.checksums[bid],
+                    "input_generation": gen,
+                    "group_id": att_id,
+                    "proposal_attempt_id": att_id,
+                    "context_sha256": inputs.context_sha256,
+                    "source_binding": thaw(bindings.get(bid)),
+                    "original": {"text": sec.ordered_blocks[0].text},
+                    "current_result": json.loads(json.dumps(asdict(cur))),
+                    "result": json.loads(json.dumps(asdict(prop))),
+                    "proposal": {
+                        "issues": [
+                            {
+                                "source_quote": "colonel",
+                                "current_evidence": {"kind": "quote", "quote": "полковник"},
+                                "problem": "Смысл.",
+                                "minimal_fix_reason": "Уточнение.",
+                            }
+                        ]
+                    },
+                    "evidence_valid": not human,
+                }
+                return CorrectionCandidate(
+                    candidate_id=str(uuid4()),
+                    run_id=run.id,
+                    book_id=scenario.book_id,
+                    section_id=sec.id,
+                    block_id=bid,
+                    conditions_id=cond.id,
+                    group_id=att_id,
+                    proposal_attempt_id=att_id,
+                    input_generation=gen,
+                    input_sha256=inputs.checksums[bid],
+                    proposal_sha256=canonical_sha(payload),
+                    state="awaiting_human" if human else "awaiting_review",
+                    payload=payload,
+                    review={"verdict": "uncertain", "reason": "Ручная проверка"} if human else None,
+                )
+
+            cand_review_only = _make_candidate(tx, 0, b_ch1_1, human=False)
+            tx.work.add_correction_candidates((cand_review_only,))
+
+        # Only `awaiting_review` exists: `book_overview` must not load any block results!
+        get_many_calls.clear()
+        list_for_run_calls = 0
+        ov_no_human = book_overview(application.unit_of_work, scenario.book_id)
+        assert ov_no_human.pending_corrections == 0
+        assert list_for_run_calls == 0
+        assert get_many_calls == []
+
+        # Add `awaiting_human` in Chapter 2: `book_overview` loads results ONLY for Chapter 2 (`b_ch2_1`), never `list_for_run`!
+        with application.unit_of_work.transaction() as tx2:
+            cand_human = _make_candidate(tx2, 1, b_ch2_1, human=True)
+            tx2.work.add_correction_candidates((cand_human,))
+
+        get_many_calls.clear()
+        list_for_run_calls = 0
+        ov_with_human = book_overview(application.unit_of_work, scenario.book_id)
+        assert ov_with_human.pending_corrections == 1
+        assert list_for_run_calls == 0
+        assert get_many_calls == [(b_ch2_1,)]
+    finally:
+        SqlAlchemyBlockResultRepository.get_many = orig_get_many  # type: ignore[method-assign]
+        SqlAlchemyBlockResultRepository.list_for_run = orig_list_for_run  # type: ignore[method-assign]
+
+

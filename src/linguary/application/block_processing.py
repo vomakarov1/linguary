@@ -167,16 +167,17 @@ class TranslationCall:
                         if context.request.book_id and hasattr(transaction, 'runs')
                         else None
                     )
-                    if run is not None and hasattr(transaction.work, 'result_bindings'):
-                        run_bindings = transaction.work.result_bindings(run.id)
+                    unit_block_ids = tuple(item.block.id for item in unit.items)
+                    if run is not None:
+                        run_bindings = _load_result_bindings(
+                            transaction.work, run.id, unit_block_ids
+                        )
                         self._expected_bindings.set({
-                            item.block.id: run_bindings.get(item.block.id)
-                            for item in unit.items
+                            bid: run_bindings.get(bid)
+                            for bid in unit_block_ids
                         })
                     else:
-                        self._expected_bindings.set({item.block.id: (
-                            transaction.work.get_binding('result', f'{run.id}:{item.block.id}') if run else None
-                        ) for item in unit.items})
+                        self._expected_bindings.set({bid: None for bid in unit_block_ids})
                 if need_conditions and hasattr(transaction.work, 'get_conditions'):
                     checked_conditions_id = explicit_context.conditions_id
                     loaded_conditions = transaction.work.get_conditions(checked_conditions_id)
@@ -465,14 +466,9 @@ class TranslationCall:
             conditions = transaction.work.latest_conditions(book_id) if context else None
             pointers_match = True
             if context is not None and results:
-                result_bindings_fn = getattr(transaction.work, 'result_bindings', None)
-                if callable(result_bindings_fn):
-                    current_bindings = result_bindings_fn(run_id)
-                else:
-                    current_bindings = {
-                        block_id: transaction.work.get_binding('result', f'{run_id}:{block_id}')
-                        for block_id in block_ids
-                    }
+                current_bindings = _load_result_bindings(
+                    transaction.work, run_id, block_ids
+                )
                 for result in results:
                     previous = expected_bindings.get(result.block_id)
                     current = current_bindings.get(result.block_id)
@@ -668,6 +664,10 @@ def complete_processing_in_transaction(transaction, *, book_id, finished_task_id
             raise RecoveryError('unsafe_partition')
         if expected != actual:
             return
+    work_repo = getattr(transaction, "work", None)
+    set_book_paused = getattr(work_repo, "set_book_paused", None)
+    if callable(set_book_paused):
+        set_book_paused(book_id, None, False)
     transaction.books.save(
         replace(
             book,
@@ -758,6 +758,22 @@ def _can_split_truncated_scope(
             if depth >= policy["max_depth"] or leaves + 1 > policy["max_leaves"]:
                 return False
     return True
+
+
+def _load_result_bindings(
+    work_repo, run_id: str, block_ids: Sequence[str]
+) -> dict[str, dict | None]:
+    """Loads result bindings only for the specified blocks when supported."""
+    result_bindings_fn = getattr(work_repo, "result_bindings", None)
+    if callable(result_bindings_fn):
+        try:
+            return dict(result_bindings_fn(run_id, block_ids=block_ids))
+        except TypeError:
+            return dict(result_bindings_fn(run_id))
+    return {
+        block_id: work_repo.get_binding("result", f"{run_id}:{block_id}")
+        for block_id in dict.fromkeys(block_ids)
+    }
 
 
 def _load_results_by_block_id(

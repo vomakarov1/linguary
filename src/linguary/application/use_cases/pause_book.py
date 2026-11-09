@@ -52,7 +52,7 @@ class PauseBook:
             book = transaction.books.get(book_id)
             if book is None:
                 raise BookNotFoundError(f"книги {book_id} нет в хранилище")
-            if book.status in {BookStatus.IMPORTING, BookStatus.FAILED}:
+            if book.status not in {BookStatus.ANALYZING, BookStatus.PROCESSING}:
                 raise PauseBookError("книгу в текущем статусе нельзя поставить на паузу")
             conditions = transaction.work.latest_conditions(book.id)
             if conditions is None:

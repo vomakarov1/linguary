@@ -658,3 +658,107 @@ def test_cli_supports_pause_resume_restart_translation_and_warns_on_pending_corr
         or "correction" in combined_export_output
     )
 
+
+def test_cli_analyze_updates_clean_imported_conditions_after_reanalyze_and_rejects_divergent_active_book(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import asyncio
+    from linguary.adapters.config import load_settings
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+    from linguary.composition import build_application
+
+    config = _config(tmp_path, llm_model="fake-model", api_key="secret-cli-key")
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "import",
+                str(SYNTHETIC_EPUB),
+                "--book-id",
+                "book-cli-reanalyze",
+            ]
+        )
+        == 0
+    )
+    assert main(["--config", str(config), "worker", "--once"]) == 0
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "analyze",
+                "book-cli-reanalyze",
+                "--reader-level",
+                "a2",
+                "--english-help",
+                "--seed-first-chapter",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    # Divergent options while ANALYZING must return non-zero exit code
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "analyze",
+                "book-cli-reanalyze",
+                "--reader-level",
+                "c1",
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+
+    app = build_application(settings=load_settings(config_path=config))
+    try:
+        ChooseBookConditions(app.book_conditions, app.book_runtime)(
+            "book-cli-reanalyze",
+            action="reanalyze",
+            expected_revision=1,
+            settings_revision=app.runtime_settings.revision,
+            confirmed=True,
+            reader_level="a2",
+            english_help=True,
+            seed_first_chapter=True,
+        )
+    finally:
+        asyncio.run(app.aclose())
+
+    # On clean IMPORTED after reanalyze, modified flags create a new conditions revision
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "analyze",
+                "book-cli-reanalyze",
+                "--reader-level",
+                "c1",
+                "--no-english-help",
+                "--no-seed-first-chapter",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    app_check = build_application(settings=load_settings(config_path=config))
+    try:
+        with app_check.unit_of_work.read_transaction() as tx:
+            cond = tx.work.latest_conditions("book-cli-reanalyze")
+            assert cond is not None
+            assert cond.revision == 3
+            assert cond.payload["reader_level"] == "c1"
+            assert cond.payload["english_help"] is False
+            assert cond.payload["checks"]["seed_first_chapter"] is False
+    finally:
+        asyncio.run(app_check.aclose())
+

@@ -156,6 +156,7 @@ class QualityReviewService:
                 raise WorkStateError('вычитка не найдена')
             if review.state not in ('queued', 'running'):
                 return
+            progress = tx.work.review_progress(review.id)
             try:
                 manifest = snapshot(tx, task.book_id, tuple(review.manifest['scope']))
             except WorkStateError:
@@ -168,9 +169,53 @@ class QualityReviewService:
         if initial_state == 'stale':
             self._update(review.id, 'stale', reason='manifest_changed')
             return
+        all_findings: list[dict] = [dict(item) for item in thaw(review.findings)]
+        all_checked: list[str] = list(progress.get('checked') or ())
+        all_missing: list[str] = list(progress.get('missing') or ())
+        manifest_artifact_shas = tuple(
+            dict.fromkeys(
+                a['artifact_sha']
+                for a in (review.manifest.get('artifacts') or ())
+                if 'artifact_sha' in a
+            )
+        )
+
+        def _dedup_coverage():
+            dedup_missing = tuple(dict.fromkeys(all_missing))
+            missing_set = set(dedup_missing)
+            dedup_checked = tuple(
+                sha for sha in dict.fromkeys(all_checked) if sha not in missing_set
+            )
+            return dedup_checked, dedup_missing
+
+        def _stopped_coverage():
+            dedup_checked, dedup_missing = _dedup_coverage()
+            checked_set = set(dedup_checked)
+            full_missing = tuple(
+                dict.fromkeys(
+                    (
+                        *dedup_missing,
+                        *(sha for sha in manifest_artifact_shas if sha not in checked_set),
+                    )
+                )
+            )
+            return dedup_checked, full_missing
+
+        def _persist_stopped(state, *, reason=None):
+            dedup_checked, dedup_missing = _stopped_coverage()
+            self._update(
+                review.id,
+                state,
+                findings=tuple(all_findings),
+                checked=dedup_checked,
+                missing=dedup_missing,
+                reason=reason,
+                partial=bool(dedup_checked or dedup_missing),
+            )
+
         route = self.routes.get((review.settings['route_id'], review.settings['model']))
         if route is None or thaw(review.settings.get('route_snapshot')) != route.snapshot():
-            self._update(review.id, 'failed', reason='price_unavailable')
+            _persist_stopped('failed', reason='price_unavailable')
             return
         try:
             chunks = self._chunks_for_route(manifest, route)
@@ -186,25 +231,46 @@ class QualityReviewService:
                 chunk_plans.append((chunk, req, route.estimate(req)))
             client = self.client_for(route)
         except Exception:
-            self._update(review.id, 'failed', reason='price_or_route_unavailable')
+            _persist_stopped('failed', reason='price_or_route_unavailable')
             return
-        self._update(review.id, 'running')
-        prompt_hash = sha256(INSTRUCTIONS.encode()).hexdigest()
-        all_findings: list[dict] = []
-        all_checked: list[str] = []
-        all_missing: list[str] = []
-        total_chunks = len(chunk_plans)
-
-        def _dedup_coverage():
-            dedup_missing = tuple(dict.fromkeys(all_missing))
-            missing_set = set(dedup_missing)
-            dedup_checked = tuple(
-                sha for sha in dict.fromkeys(all_checked) if sha not in missing_set
+        if review.state != 'running':
+            init_checked, init_missing = _dedup_coverage()
+            self._update(
+                review.id,
+                'running',
+                findings=tuple(all_findings),
+                checked=init_checked,
+                missing=init_missing,
+                reason=progress.get('reason'),
+                partial=bool(progress.get('partial')),
             )
-            return dedup_checked, dedup_missing
+        prompt_hash = sha256(INSTRUCTIONS.encode()).hexdigest()
+        total_chunks = len(chunk_plans)
+        already_checked_set = set(_dedup_coverage()[0])
 
         for chunk_idx, (chunk, request, estimate) in enumerate(chunk_plans):
             is_last_chunk = chunk_idx == total_chunks - 1
+            chunk_shas = [
+                a['artifact_sha']
+                for a in (chunk.get('artifacts') or ())
+                if 'artifact_sha' in a
+            ]
+            if chunk_shas and all(sha in already_checked_set for sha in chunk_shas):
+                if is_last_chunk:
+                    dedup_checked, dedup_missing = _dedup_coverage()
+                    self._update(
+                        review.id,
+                        'completed',
+                        findings=tuple(all_findings),
+                        checked=dedup_checked,
+                        missing=dedup_missing,
+                        partial=bool(
+                            dedup_missing
+                            or review.manifest['missing_results']
+                            or not review.manifest['book_complete']
+                        ),
+                    )
+                continue
             previous_error: str | None = None
             previous_raw: str | None = None
             for ordinal in range(1, 4):
@@ -223,16 +289,7 @@ class QualityReviewService:
                     if str(error) == 'manifest_changed' or self.get(task.book_id, review.id)['state'] == 'stale':
                         self._update(review.id, 'stale', reason='manifest_changed')
                     else:
-                        dedup_checked, dedup_missing = _dedup_coverage()
-                        self._update(
-                            review.id,
-                            'limit',
-                            findings=tuple(all_findings),
-                            checked=dedup_checked,
-                            missing=dedup_missing,
-                            reason='budget',
-                            partial=bool(dedup_checked or dedup_missing),
-                        )
+                        _persist_stopped('limit', reason='budget')
                     return
                 repair_turns = ((previous_raw, previous_error),) if ordinal > 1 and previous_error else ()
                 repair_instructions = (previous_error,) if ordinal > 1 and previous_error else ()
@@ -259,7 +316,9 @@ class QualityReviewService:
                     state = self.get(task.book_id, review.id)['state']
                     if state == 'stale':
                         self._update(review.id, 'stale', reason='manifest_changed')
-                    elif state not in ('limit', 'unknown'):
+                    elif state in ('limit', 'unknown'):
+                        _persist_stopped(state)
+                    else:
                         raise WorkStateError('отправка вычитки отклонена')
                     return
                 response = None
@@ -271,8 +330,12 @@ class QualityReviewService:
                     self.budget.settle(attempt.id, actual)
                     self._finish_attempt(attempt.id, 'rejected')
                     if actual is None:
+                        _persist_stopped('unknown')
                         return
-                    if self._stopped(review.id):
+                    stopped_state = self._stopped_state(review.id)
+                    if stopped_state is not None:
+                        if stopped_state in ('limit', 'unknown'):
+                            _persist_stopped(stopped_state)
                         return
                     previous_error = str(error)
                     previous_raw = getattr(error, 'raw_content', None)
@@ -280,10 +343,12 @@ class QualityReviewService:
                 except Exception:
                     self.budget.settle(attempt.id, None)
                     self._finish_attempt(attempt.id, 'unknown')
+                    _persist_stopped('unknown')
                     return
                 self.budget.settle(attempt.id, actual)
                 if actual is None:
                     self._finish_attempt(attempt.id, 'unknown')
+                    _persist_stopped('unknown')
                     return
                 with _read_transaction(self.uow) as tx:
                     current_review = tx.work.get_review(review.id)
@@ -312,7 +377,10 @@ class QualityReviewService:
                 except Exception as error:
                     record_rejection(self.uow, response, error)
                     self._finish_attempt(attempt.id, 'rejected')
-                    if self._stopped(review.id):
+                    stopped_state = self._stopped_state(review.id)
+                    if stopped_state is not None:
+                        if stopped_state in ('limit', 'unknown'):
+                            _persist_stopped(stopped_state)
                         return
                     previous_error = str(error)
                     previous_raw = getattr(response, 'raw_content', None)
@@ -331,7 +399,12 @@ class QualityReviewService:
                     all_findings.extend(payload.findings)
                     all_checked.extend(payload.checked_artifacts)
                     all_missing.extend(payload.missing_artifacts)
-                    dedup_checked, dedup_missing = _dedup_coverage()
+                    stop_after_chunk = current.state in ('limit', 'unknown', 'stale')
+                    if stop_after_chunk and current.state in ('limit', 'unknown'):
+                        dedup_checked, dedup_missing = _stopped_coverage()
+                    else:
+                        dedup_checked, dedup_missing = _dedup_coverage()
+                    already_checked_set = set(dedup_checked)
                     target_state = (
                         ('limit' if current.state == 'limit' else 'completed')
                         if is_last_chunk
@@ -350,21 +423,11 @@ class QualityReviewService:
                             or not is_last_chunk
                         ),
                     )
-                    stop_after_chunk = current.state in ('limit', 'unknown', 'stale')
                 if stop_after_chunk:
                     return
                 break
             else:
-                dedup_checked, dedup_missing = _dedup_coverage()
-                self._update(
-                    review.id,
-                    'failed',
-                    findings=tuple(all_findings),
-                    checked=dedup_checked,
-                    missing=dedup_missing,
-                    reason='invalid_response',
-                    partial=bool(dedup_checked or dedup_missing),
-                )
+                _persist_stopped('failed', reason='invalid_response')
                 return
 
     def _finish_attempt(self, attempt_id, state):
@@ -376,9 +439,13 @@ class QualityReviewService:
                 return
             tx.work.transition_attempt(attempt_id, state, expected_state='sent')
 
-    def _stopped(self, review_id):
+    def _stopped_state(self, review_id) -> str | None:
         with _read_transaction(self.uow) as tx:
-            return tx.work.get_review(review_id).state in ('limit', 'unknown', 'stale')
+            state = tx.work.get_review(review_id).state
+        return state if state in ('limit', 'unknown', 'stale') else None
+
+    def _stopped(self, review_id):
+        return self._stopped_state(review_id) is not None
 
 
 def quality_review_state(tx, book_id, review_id=None, *, current_snapshot=None):

@@ -298,6 +298,8 @@ class BookResultSummary:
     ordinary_cost: Mapping = field(default_factory=dict)
     tasks: tuple[ProcessingTask, ...] = ()
     pending_corrections: int = 0
+    pause_requested: bool = False
+    is_paused: bool = False
     reading_support: Mapping = field(default_factory=dict)
     prior_pronunciation_hints: Mapping[tuple[str, str, str], str] = field(default_factory=dict)
 
@@ -563,7 +565,13 @@ def book_overview(
         if run is not None and hasattr(transaction.work, "list_correction_candidates"):
             try:
                 candidates = _correction_candidates_projection(
-                    transaction, book_id, run, document=document, analyses=analyses
+                    transaction,
+                    book_id,
+                    run,
+                    document=document,
+                    analyses=analyses,
+                    stored_results=stored_results,
+                    states={"awaiting_human"},
                 )
                 pending_corrections = sum(c["state"] == "awaiting_human" for c in candidates)
             except WorkStateError:
@@ -807,6 +815,12 @@ def book_result(
         )
         run = transaction.runs.active_for_book(book_id)
         tasks = transaction.tasks.list_for_book(book_id)
+        is_book_paused_fn = getattr(transaction.work, "is_book_paused", None)
+        pause_requested = (
+            bool(is_book_paused_fn(book_id))
+            if include_quality and callable(is_book_paused_fn)
+            else False
+        )
         if requested_set is None:
             analyses = transaction.analyses.list_for_book(book_id)
             stored_results = (
@@ -858,36 +872,70 @@ def book_result(
                     else tuple(a for a in all_analyses if a.section_id in target_section_ids)
                 )
             max_target_number = max((number for number, _ in selected_sections), default=0)
-            needed_block_ids = tuple(
+            target_block_ids_seq = tuple(
                 block.id
-                for number, section in enumerate(ordered_sections, start=1)
-                if number <= max_target_number
+                for _, section in selected_sections
                 for block in section.ordered_blocks
             )
-            loaded_by_id: dict[str, BlockProcessingResult] = {}
-            if run is not None and needed_block_ids:
+            target_block_ids = set(target_block_ids_seq)
+            preceding_block_ids = tuple(
+                block.id
+                for number, section in enumerate(ordered_sections, start=1)
+                if number < max_target_number and section.id not in target_section_ids
+                for block in section.ordered_blocks
+            )
+            target_results_by_id: dict[str, BlockProcessingResult] = {}
+            preceding_pronunciations: dict[str, Sequence] = {}
+            if run is not None:
                 get_many = getattr(transaction.results, "get_many", None)
+                pron_for_blocks = getattr(
+                    transaction.results, "pronunciation_assistances_for_blocks", None
+                )
                 if get_many is not None and not include_quality:
-                    for offset in range(0, len(needed_block_ids), 500):
-                        loaded_by_id.update(
-                            get_many(run.id, needed_block_ids[offset : offset + 500])
+                    for offset in range(0, len(target_block_ids_seq), 500):
+                        target_results_by_id.update(
+                            get_many(
+                                run.id,
+                                target_block_ids_seq[offset : offset + 500],
+                            )
                         )
+                    if preceding_block_ids:
+                        if callable(pron_for_blocks):
+                            preceding_pronunciations = dict(
+                                pron_for_blocks(run.id, preceding_block_ids)
+                            )
+                        else:
+                            for offset in range(0, len(preceding_block_ids), 500):
+                                for bid, res in get_many(
+                                    run.id,
+                                    preceding_block_ids[offset : offset + 500],
+                                ).items():
+                                    if res.block_id == bid and res.pronunciation_assistances:
+                                        preceding_pronunciations[bid] = (
+                                            res.pronunciation_assistances
+                                        )
                 else:
                     for item in transaction.results.list_for_run(run.id):
-                        loaded_by_id[item.block_id] = item
-            target_block_ids = {
-                block.id for _, section in selected_sections for block in section.ordered_blocks
-            }
+                        if item.block_id in target_block_ids:
+                            target_results_by_id[item.block_id] = item
+                        elif item.pronunciation_assistances:
+                            preceding_pronunciations[item.block_id] = (
+                                item.pronunciation_assistances
+                            )
             stored_results = tuple(
-                result
-                for block_id, result in loaded_by_id.items()
-                if block_id in target_block_ids
+                target_results_by_id[bid]
+                for bid in target_block_ids_seq
+                if bid in target_results_by_id
             )
+            pronunciations_by_block: dict[str, Sequence] = dict(preceding_pronunciations)
+            for bid, res in target_results_by_id.items():
+                if res.block_id == bid and res.pronunciation_assistances:
+                    pronunciations_by_block[bid] = res.pronunciation_assistances
             prior_pronunciation_hints = _prior_pronunciation_hints(
                 ordered_sections=ordered_sections,
                 max_target_number=max_target_number,
                 target_section_ids=target_section_ids,
-                results_by_block=loaded_by_id,
+                pronunciations_by_block=pronunciations_by_block,
             )
             quality = (
                 _quality_projection(
@@ -969,10 +1017,16 @@ def book_result(
     states = {chapter.support_coverage for chapter in chapters if not chapter.is_notes}
     reading_support['coverage_state'] = next((state for state in ('unresolved', 'not_evaluated', 'pending')
         if state in states), 'checked' if states else 'not_evaluated')
+    is_paused = bool(
+        pause_requested
+        and not any(task.status is TaskStatus.RUNNING for task in tasks)
+    )
     return BookResultSummary(
         book=book,
         tasks=tasks,
         pending_corrections=sum(c['state'] == 'awaiting_human' for c in candidates),
+        pause_requested=pause_requested,
+        is_paused=is_paused,
         **quality,
         chapters=tuple(chapters),
         reading_support=reading_support,
@@ -990,7 +1044,7 @@ def _prior_pronunciation_hints(
     ordered_sections: Sequence[DocumentSection],
     max_target_number: int,
     target_section_ids: set[str],
-    results_by_block: Mapping[str, BlockProcessingResult],
+    pronunciations_by_block: Mapping[str, Sequence],
 ) -> dict[tuple[str, str, str], str]:
     """Map `(normalized_form, variant, ipa) -> first hint_id` from preceding non-target sections."""
     from linguary.application.validators.pronunciation import (
@@ -1005,12 +1059,12 @@ def _prior_pronunciation_hints(
             break
         in_target = section.id in target_section_ids
         for block in section.ordered_blocks:
-            result = results_by_block.get(block.id)
-            if result is None or result.block_id != block.id or not result.pronunciation_assistances:
+            assistances = pronunciations_by_block.get(block.id)
+            if not assistances:
                 continue
             texts = {block.id: block.text}
             valid_items = []
-            for item in result.pronunciation_assistances:
+            for item in assistances:
                 if item.anchor.block_id != block.id:
                     continue
                 try:
@@ -1089,7 +1143,7 @@ def _reading_support_coverage(analysis, section, results, *, english_help):
 
 
 def _correction_candidates_projection(transaction, book_id, run, *, document, analyses,
-                                      stored_results=None, section_id=None):
+                                      stored_results=None, section_id=None, states=None):
     from linguary.application.correction import CorrectionInputs, candidate_is_current
     from linguary.application.correction_dto import parse_correction_snapshot
     from linguary.domain.book_conditions import WorkStateError, thaw
@@ -1100,7 +1154,9 @@ def _correction_candidates_projection(transaction, book_id, run, *, document, an
     if policy.get('policy_version') != CORRECTION_POLICY_VERSION_V2:
         return ()
     pending = transaction.work.list_correction_candidates(
-        run.id, section_id=section_id, states={'awaiting_review', 'awaiting_human'},
+        run.id,
+        section_id=section_id,
+        states={'awaiting_review', 'awaiting_human'} if states is None else states,
     )
     if not pending:
         return ()
@@ -1112,19 +1168,53 @@ def _correction_candidates_projection(transaction, book_id, run, *, document, an
     if document is None:
         raise WorkStateError('книга исправления отсутствует')
     snapshot = parse_correction_snapshot(policy)
-    if stored_results is None:
-        stored_results = transaction.results.list_for_run(run.id)
-    results = {result.block_id: result for result in stored_results}
-    bindings = transaction.work.result_bindings(run.id)
-    generations = transaction.work.correction_input_generations(run.id)
-    analyses_by_section = {analysis.section_id: analysis for analysis in analyses if analysis is not None}
     sections_by_id = {section.id: section for section in document.ordered_sections}
-    sections = {}
-    for pending_section_id in {candidate.section_id for candidate in pending}:
+    affected_section_ids = {candidate.section_id for candidate in pending}
+    section_blocks_by_id = {}
+    for pending_section_id in affected_section_ids:
         section = sections_by_id.get(pending_section_id)
         if section is None:
             raise WorkStateError('глава исправления отсутствует')
-        blocks = textual_blocks(section)
+        section_blocks_by_id[pending_section_id] = textual_blocks(section)
+
+    needed_block_ids = tuple(
+        block.id
+        for blocks in section_blocks_by_id.values()
+        for block in blocks
+    )
+    if stored_results is not None:
+        results = {result.block_id: result for result in stored_results}
+    elif not needed_block_ids:
+        results = {}
+    else:
+        get_many = getattr(transaction.results, 'get_many', None)
+        list_for_section = getattr(transaction.results, 'list_for_section', None)
+        if callable(get_many):
+            results = {}
+            for offset in range(0, len(needed_block_ids), 500):
+                results.update(
+                    get_many(run.id, needed_block_ids[offset : offset + 500])
+                )
+        elif callable(list_for_section):
+            results = {
+                result.block_id: result
+                for sid in affected_section_ids
+                for result in list_for_section(run.id, sid)
+            }
+        else:
+            results = {
+                result.block_id: result
+                for result in transaction.results.list_for_run(run.id)
+            }
+    try:
+        bindings = transaction.work.result_bindings(run.id, block_ids=needed_block_ids)
+    except TypeError:
+        bindings = transaction.work.result_bindings(run.id)
+    generations = transaction.work.correction_input_generations(run.id)
+    analyses_by_section = {analysis.section_id: analysis for analysis in analyses if analysis is not None}
+    sections = {}
+    for pending_section_id, blocks in section_blocks_by_id.items():
+        section = sections_by_id[pending_section_id]
         sections[pending_section_id] = CorrectionInputs(
             document, section, analyses_by_section.get(pending_section_id), run, conditions, snapshot,
             blocks, {block.id: results[block.id] for block in blocks if block.id in results},

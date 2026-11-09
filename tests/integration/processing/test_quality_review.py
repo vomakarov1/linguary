@@ -472,3 +472,158 @@ async def test_quality_review_executes_chunked_manifest_and_keeps_succeeded_task
         assert unknown_state['reserved'] > 0
     finally:
         await app.aclose()
+
+
+async def test_chunked_quality_review_resumes_without_rebilling_checked_chunks_and_populates_missing_on_partial_stop(tmp_path, monkeypatch):
+    from linguary.application.use_cases.approve_glossary import StartProcessingCommand
+    from linguary.application.use_cases.retry_task import RetryTaskCommand
+    from test_book_conditions import store_imported
+
+    class SelectiveReviewFake(ReviewFake):
+        fail_mode_on_call: dict[int, str]
+
+        def __init__(self, replies):
+            super().__init__(replies)
+            self.fail_mode_on_call = {}
+
+        async def generate(self, request):
+            if request.kind != LLMResponseKind.QUALITY_REVIEW:
+                return await super().generate(request)
+            call_no = self.review_calls + 1
+            override = self.fail_mode_on_call.get(call_no)
+            prev_mode = self.mode
+            try:
+                if override is not None:
+                    self.mode = override
+                return await super().generate(request)
+            finally:
+                self.mode = prev_mode
+
+    def bounded_tokens(request):
+        parsed = json.loads(request.input_text)
+        if len(parsed.get('scope') or ()) > 1:
+            raise WorkStateError('полный запрос превышает подтверждённую границу')
+        return 1000
+
+    small_route = QualityRoute(
+        'review-model',
+        'test-route',
+        'fixture-v1',
+        Decimal('1'),
+        Decimal('2'),
+        Decimal('0'),
+        100,
+        bounded_tokens,
+        'fixture-verification-v1',
+        True,
+    )
+
+    fake = SelectiveReviewFake(
+        [
+            analysis_reply(2),
+            analysis_reply(1),
+            translation_reply(2),
+            translation_reply(1),
+        ]
+    )
+    app = build_application(
+        settings=AppSettings(
+            llm=LLMSettings(model='source-model', api_key='synthetic-secret'),
+            storage=StorageSettings(data_root=str(tmp_path / 'data')),
+        ),
+        llm_client=fake,
+        quality_routes={('test-route', 'review-model'): small_route},
+    )
+    try:
+        store_imported(
+            app,
+            (
+                ('He returned home.', 'He waited outside.'),
+                ('He opened the door.',),
+            ),
+        )
+        await app.analysis.start('book-1')
+        assert all(t.status == TaskStatus.SUCCEEDED for t in await drain_tasks(app))
+        app.start_processing()(StartProcessingCommand('book-1'))
+        await app.processing.start('book-1')
+        assert all(t.status == TaskStatus.SUCCEEDED for t in await drain_tasks(app))
+
+        manifest = app.quality_review.preview('book-1')
+        all_manifest_shas = {a['artifact_sha'] for a in manifest['artifacts']}
+        fake.mode = 'finding'
+
+        # 1. Resume after interruption following chunk 1 without rebilling or losing findings
+        orig_reserve = app.quality_review.budget.reserve
+        reserve_calls = 0
+
+        def interrupt_on_second_chunk(*args, **kwargs):
+            nonlocal reserve_calls
+            reserve_calls += 1
+            if reserve_calls == 2:
+                raise ConnectionError('simulated transient worker interruption before chunk 2')
+            return orig_reserve(*args, **kwargs)
+
+        monkeypatch.setattr(app.quality_review.budget, 'reserve', interrupt_on_second_chunk)
+        resumable = await app.quality_review.start(command(app, key='resume-chunked', budget=2500))
+        interrupted_tasks = await drain_tasks(app)
+        assert len(interrupted_tasks) == 1
+        assert interrupted_tasks[0].status == TaskStatus.FAILED
+        assert fake.review_calls == 1
+
+        mid_state = app.quality_review.get('book-1', resumable['review_id'])
+        assert mid_state['state'] == 'running'
+        assert mid_state['spent'] == 100
+        assert len(mid_state['findings']) == 1
+        assert len(mid_state['coverage']['checked']) == 3
+
+        monkeypatch.setattr(app.quality_review.budget, 'reserve', orig_reserve)
+        app.retry_task(RetryTaskCommand(task_id=interrupted_tasks[0].id))
+        resumed_tasks = await drain_tasks(app)
+        assert len(resumed_tasks) == 1 and resumed_tasks[0].status == TaskStatus.SUCCEEDED
+        # Only chunks 2 and 3 were sent on retry (total 3 calls, not 4; budget 2500 would limit if chunk 1 were rebilled)
+        assert fake.review_calls == 3
+        final_resumed = app.quality_review.get('book-1', resumable['review_id'])
+        assert final_resumed['state'] == 'completed-with-findings'
+        assert final_resumed['spent'] == 300
+        assert len(final_resumed['findings']) == 3
+        assert set(final_resumed['coverage']['checked']) == all_manifest_shas
+        assert final_resumed['coverage']['missing'] == []
+
+        # 2. Partial stop on `limit` after chunk 1 populates `coverage.missing` with remaining artifacts
+        fake.review_calls = 0
+        limited = await app.quality_review.start(command(app, key='partial-limit', budget=1250))
+        assert all(t.status == TaskStatus.SUCCEEDED for t in await drain_tasks(app))
+        limit_state = app.quality_review.get('book-1', limited['review_id'])
+        assert limit_state['state'] == 'limit'
+        assert len(limit_state['findings']) == 1
+        assert len(limit_state['coverage']['checked']) == 3
+        assert len(limit_state['coverage']['missing']) > 0
+        assert set(limit_state['coverage']['checked']) & set(limit_state['coverage']['missing']) == set()
+        assert set(limit_state['coverage']['checked']) | set(limit_state['coverage']['missing']) == all_manifest_shas
+
+        # 3. Partial stop on `unknown` (transport error on chunk 2) preserves chunk 1 and populates `missing`
+        fake.review_calls = 0
+        fake.fail_mode_on_call = {2: 'transport'}
+        unknown_rev = await app.quality_review.start(command(app, key='partial-unknown', budget=10000))
+        assert all(t.status == TaskStatus.SUCCEEDED for t in await drain_tasks(app))
+        unk_state = app.quality_review.get('book-1', unknown_rev['review_id'])
+        assert unk_state['state'] == 'unknown'
+        assert len(unk_state['findings']) == 1
+        assert len(unk_state['coverage']['checked']) == 3
+        assert len(unk_state['coverage']['missing']) > 0
+        assert set(unk_state['coverage']['checked']) | set(unk_state['coverage']['missing']) == all_manifest_shas
+
+        # 4. Partial stop on `failed` (3 invalid responses on chunk 2) preserves chunk 1 and populates `missing`
+        fake.review_calls = 0
+        fake.fail_mode_on_call = {2: 'bad-anchor', 3: 'bad-anchor', 4: 'bad-anchor'}
+        failed_rev = await app.quality_review.start(command(app, key='partial-failed', budget=10000))
+        assert all(t.status == TaskStatus.SUCCEEDED for t in await drain_tasks(app))
+        fail_state = app.quality_review.get('book-1', failed_rev['review_id'])
+        assert fail_state['state'] == 'partial'
+        assert fail_state['reason'] == 'invalid_response'
+        assert len(fail_state['findings']) == 1
+        assert len(fail_state['coverage']['checked']) == 3
+        assert len(fail_state['coverage']['missing']) > 0
+        assert set(fail_state['coverage']['checked']) | set(fail_state['coverage']['missing']) == all_manifest_shas
+    finally:
+        await app.aclose()

@@ -1,5 +1,5 @@
 """Durable work store; all operations use the caller's short transaction."""
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -82,8 +82,25 @@ class SqlAlchemyWorkRepository:
         version(row.payload_json.get('schema_version'))
         return {column.name: getattr(row, column.name) for column in row.__table__.columns}
 
-    def result_bindings(self, run_id):
+    def result_bindings(self, run_id: str, block_ids: Sequence[str] | None = None):
         prefix = f'{run_id}:'
+        if block_ids is not None:
+            unique_ids = tuple(dict.fromkeys(block_ids))
+            if not unique_ids:
+                return {}
+            entity_ids = [f'{prefix}{block_id}' for block_id in unique_ids]
+            result = {}
+            for offset in range(0, len(entity_ids), 500):
+                batch = entity_ids[offset : offset + 500]
+                rows = self._session.scalars(
+                    select(WorkBindingRow).where(
+                        WorkBindingRow.entity_kind == 'result',
+                        WorkBindingRow.entity_id.in_(batch),
+                    )
+                ).all()
+                for row in rows:
+                    result[row.entity_id[len(prefix):]] = self._binding_from_row(row)
+            return result
         rows = self._session.scalars(select(WorkBindingRow).where(
             WorkBindingRow.entity_kind == 'result', WorkBindingRow.entity_id >= prefix,
             WorkBindingRow.entity_id < f'{run_id};')).all()

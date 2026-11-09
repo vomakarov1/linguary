@@ -349,9 +349,17 @@ class ExportBookSequence:
                 existing is not None
                 and existing.status in _ACTIVE_EXPORT_TASK_STATUSES
             ):
+                work_repo = getattr(transaction, "work", None)
+                set_book_paused = getattr(work_repo, "set_book_paused", None)
+                if callable(set_book_paused):
+                    set_book_paused(book_id, None, False)
                 return existing
         self._export_book.ensure_ready(book_id)
         with self._unit_of_work.transaction() as transaction:
+            work_repo = getattr(transaction, "work", None)
+            set_book_paused = getattr(work_repo, "set_book_paused", None)
+            if callable(set_book_paused):
+                set_book_paused(book_id, None, False)
             existing = transaction.tasks.find_by_identity(identity)
             if (
                 existing is not None
