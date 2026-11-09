@@ -43,6 +43,16 @@ _SCHEMA_MAPPINGS = frozenset({"properties", "$defs"})
 #: Properties omitted from provider-facing strict schemas (evidence is resolved algorithmically).
 _OMITTED_STRICT_PROPERTIES = frozenset({"before_you_read_evidence", "content_evidence"})
 
+#: Model-specific properties omitted from provider-facing strict schemas.
+_OMITTED_SCHEMA_PROPERTIES: dict[str, frozenset[str]] = {
+    "PronunciationAnchorSchema": frozenset({"start", "end"}),
+    "PronunciationCandidateSchema": frozenset({"form"}),
+    "ReviewAnchor": frozenset({"start", "end"}),
+    "QualityReviewSchema": frozenset({"checked_artifacts", "missing_artifacts"}),
+    "ReviewFinding": frozenset({"artifact_sha"}),
+    "CorrectionVerdictSchema": frozenset({"proposal_sha256"}),
+}
+
 
 def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
     """Model response schema formatted for strict structured output."""
@@ -55,62 +65,28 @@ def _filter_omitted_properties(node: Any) -> None:
     if isinstance(node, dict):
         if "$defs" in node and isinstance(node["$defs"], dict):
             node["$defs"].pop("HelpEvidenceSchema", None)
-            for def_name in ("PronunciationAnchorSchema", "ReviewAnchor"):
+            for def_name, omitted_props in _OMITTED_SCHEMA_PROPERTIES.items():
                 if def_name in node["$defs"] and isinstance(node["$defs"][def_name], dict):
                     target = node["$defs"][def_name]
                     if "properties" in target and isinstance(target["properties"], dict):
-                        target["properties"].pop("start", None)
-                        target["properties"].pop("end", None)
+                        for prop in omitted_props:
+                            target["properties"].pop(prop, None)
                     if "required" in target and isinstance(target["required"], list):
-                        target["required"] = [r for r in target["required"] if r not in {"start", "end"}]
-            if "QualityReviewSchema" in node["$defs"] and isinstance(node["$defs"]["QualityReviewSchema"], dict):
-                target = node["$defs"]["QualityReviewSchema"]
-                if "properties" in target and isinstance(target["properties"], dict):
-                    target["properties"].pop("checked_artifacts", None)
-                    target["properties"].pop("missing_artifacts", None)
-                if "required" in target and isinstance(target["required"], list):
-                    target["required"] = [r for r in target["required"] if r not in {"checked_artifacts", "missing_artifacts"}]
-            if "ReviewFinding" in node["$defs"] and isinstance(node["$defs"]["ReviewFinding"], dict):
-                target = node["$defs"]["ReviewFinding"]
-                if "properties" in target and isinstance(target["properties"], dict):
-                    target["properties"].pop("artifact_sha", None)
-                if "required" in target and isinstance(target["required"], list):
-                    target["required"] = [r for r in target["required"] if r != "artifact_sha"]
-            if "CorrectionVerdictSchema" in node["$defs"] and isinstance(node["$defs"]["CorrectionVerdictSchema"], dict):
-                target = node["$defs"]["CorrectionVerdictSchema"]
-                if "properties" in target and isinstance(target["properties"], dict):
-                    target["properties"].pop("proposal_sha256", None)
-                if "required" in target and isinstance(target["required"], list):
-                    target["required"] = [r for r in target["required"] if r != "proposal_sha256"]
+                        target["required"] = [r for r in target["required"] if r not in omitted_props]
         title = node.get("title")
-        if title in ("PronunciationAnchorSchema", "ReviewAnchor"):
-            if "properties" in node and isinstance(node["properties"], dict):
-                node["properties"].pop("start", None)
-                node["properties"].pop("end", None)
-            if "required" in node and isinstance(node["required"], list):
-                node["required"] = [r for r in node["required"] if r not in {"start", "end"}]
-        elif title == "QualityReviewSchema":
-            if "properties" in node and isinstance(node["properties"], dict):
-                node["properties"].pop("checked_artifacts", None)
-                node["properties"].pop("missing_artifacts", None)
-            if "required" in node and isinstance(node["required"], list):
-                node["required"] = [r for r in node["required"] if r not in {"checked_artifacts", "missing_artifacts"}]
-        elif title == "ReviewFinding":
-            if "properties" in node and isinstance(node["properties"], dict):
-                node["properties"].pop("artifact_sha", None)
-            if "required" in node and isinstance(node["required"], list):
-                node["required"] = [r for r in node["required"] if r != "artifact_sha"]
-        elif title == "CorrectionVerdictSchema":
-            if "properties" in node and isinstance(node["properties"], dict):
-                node["properties"].pop("proposal_sha256", None)
-            if "required" in node and isinstance(node["required"], list):
-                node["required"] = [r for r in node["required"] if r != "proposal_sha256"]
+        omitted = set(_OMITTED_STRICT_PROPERTIES)
+        if isinstance(title, str) and title in _OMITTED_SCHEMA_PROPERTIES:
+            omitted.update(_OMITTED_SCHEMA_PROPERTIES[title])
         if "properties" in node and isinstance(node["properties"], dict):
-            for prop in _OMITTED_STRICT_PROPERTIES:
-                node["properties"].pop(prop, None)
+            props = node["properties"]
+            for prop in omitted:
+                props.pop(prop, None)
             node.setdefault("additionalProperties", False)
-        if "required" in node and isinstance(node["required"], list):
-            node["required"] = [r for r in node["required"] if r not in _OMITTED_STRICT_PROPERTIES]
+            existing_req = [k for k in node.get("required", []) if k in props and k not in omitted]
+            existing_set = set(existing_req)
+            node["required"] = existing_req + [k for k in props.keys() if k not in existing_set]
+        elif "required" in node and isinstance(node["required"], list):
+            node["required"] = [r for r in node["required"] if r not in omitted]
         for v in node.values():
             _filter_omitted_properties(v)
     elif isinstance(node, list):

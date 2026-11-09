@@ -78,7 +78,7 @@ def test_correction_fingerprints_include_source_attributes():
     result = BlockProcessingResult(block_id=block.id, treatment=BlockTreatment.READ_AS_IS)
     task = SimpleNamespace(book_id=inputs.document.id, id='task', scope_id=section.id)
     request = correct._request(replace(inputs, results={block.id: result}), task, (block.id,))
-    assert json.loads(request.input_text)['blocks'][0]['original'] == {'text': block.text}
+    assert 'original' not in json.loads(request.input_text)['blocks'][0]
     assert json.loads(request.input_text)['blocks'][0]['block_id'] == 'b1'
     assert 'book_conditions' not in json.loads(request.input_text)
     assert 'private-dictionary-source' not in request.input_text
@@ -149,7 +149,7 @@ def test_correct_chapter_uses_block_aliases_and_resolves_uuids_before_coverage_c
     body = json.loads(request.input_text)
     assert body['blocks'][0]['block_id'] == 'b1'
     assert body['blocks'][1]['block_id'] == 'b2'
-    assert body['blocks'][0]['original'] == {'text': section.blocks[0].text}
+    assert 'original' not in body['blocks'][0]
     assert dict(request.block_aliases) == {'b1': section.blocks[0].id, 'b2': section.blocks[1].id}
     assert request.ordered_block_ids == target_ids
 
@@ -1369,6 +1369,158 @@ def test_reconcile_corrections_with_section_id_scopes_work_to_target_chapter():
     queried_sections.clear()
     assert correction_coverage_complete(tx, document.id) is False
     assert queried_sections == []
+
+
+def test_correct_chapter_omits_duplicate_original_and_aliases_plan_ids():
+    from dataclasses import asdict
+    from linguary.application.use_cases.correct_chapter import CorrectChapter, CorrectChapterV2
+    from linguary.domain import ChapterAnalysis, TreatmentPlan
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        ContextFact,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+        canonical_sha,
+    )
+    from linguary.domain.correction import CorrectionCandidate
+    from linguary.domain.learning import FragmentAssistance
+
+    section = make_analysis_section(
+        texts=("First sentence with idiom.", "Second sentence he spoke."),
+    )
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+
+    long_diff_id = "df-" + "a" * 64
+    long_fact_id = "cf-" + "b" * 64
+
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id=long_diff_id,
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="First"),),
+                owner_block_id=b1.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p1", description="meaning"),),
+            ),
+        ),
+        context_facts=(
+            ContextFact(
+                id=long_fact_id,
+                kind="speaker",
+                anchors=(SourceAnchor(block_id=b2.id, start=0, end=6, quote="Second"),),
+                subject_anchor=SourceAnchor(block_id=b2.id, start=16, end=18, quote="he"),
+                value="Narrator",
+                certainty="explicit",
+            ),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        expected_block_ids=(b1.id, b2.id),
+        content_plan=content_plan,
+    )
+    res1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Первое предложение.",
+        fragment_assistances=(
+            FragmentAssistance(
+                difficulty_id=long_diff_id,
+                point_ids=("p1",),
+                kind="russian_explanation",
+                text="Пояснение",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=5, quote="First"),),
+            ),
+        ),
+    )
+    res2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Второе предложение.",
+    )
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=section.blocks,
+        results={b1.id: res1, b2.id: res2},
+        bindings={b1.id: None, b2.id: None},
+    )
+    snapshot = SimpleNamespace(
+        prompt="Correct the chapter.",
+        review_prompt="Review proposals.",
+        parameters={"max_attempts": 1, "max_output_tokens": None},
+    )
+    task = SimpleNamespace(book_id=doc.id, id="task", scope_id=section.id)
+    correct = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+    correct_v2 = CorrectChapterV2(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+
+    request = correct._request(inputs, task, (b1.id, b2.id))
+    body = json.loads(request.input_text)
+
+    assert "original" not in body["blocks"][0]
+    assert "original" not in body["blocks"][1]
+    assert body["chapter_analysis"]["content_plan"]["difficulties"][0]["id"] == "d1"
+    assert body["chapter_analysis"]["content_plan"]["context_facts"][0]["id"] == "f1"
+    assert body["blocks"][0]["current_result"]["fragment_assistances"][0]["difficulty_id"] == "d1"
+    assert long_diff_id not in request.input_text
+    assert long_fact_id not in request.input_text
+
+    candidate_payload = json.loads(json.dumps({
+        "schema_version": 1,
+        "book_id": doc.id,
+        "run_id": "run",
+        "conditions_id": "cond-1",
+        "section_id": section.id,
+        "block_id": b1.id,
+        "input_sha256": inputs.checksums[b1.id],
+        "input_generation": 1,
+        "group_id": "group-1",
+        "proposal_attempt_id": "att-1",
+        "original": {"text": b1.text},
+        "current_result": asdict(res1),
+        "result": asdict(replace(res1, translated_text="Первое предложение уточнено.")),
+        "proposal": {"issues": [{"kind": "note", "quote": "First", "explanation": "Уточнить"}]},
+    }))
+    candidate = CorrectionCandidate(
+        candidate_id="cand-1",
+        book_id=doc.id,
+        run_id="run",
+        conditions_id="cond-1",
+        section_id=section.id,
+        block_id=b1.id,
+        input_sha256=inputs.checksums[b1.id],
+        input_generation=1,
+        proposal_sha256=canonical_sha(candidate_payload),
+        payload=candidate_payload,
+        group_id="group-1",
+        proposal_attempt_id="att-1",
+    )
+    review_req = correct_v2._review_request(inputs, task, (candidate,))
+    review_body = json.loads(review_req.input_text)
+    assert review_body["candidates"][0]["candidate_id"] == "c1"
+    assert review_body["candidates"][0]["current_result"]["fragment_assistances"][0]["difficulty_id"] == "d1"
+    assert review_body["candidates"][0]["proposed_result"]["fragment_assistances"][0]["difficulty_id"] == "d1"
+    assert long_diff_id not in review_req.input_text
+    assert long_fact_id not in review_req.input_text
+
 
 
 

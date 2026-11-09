@@ -355,3 +355,43 @@ def test_export_rejects_missing_or_stale_v2_evidence():
         _validate_content_plans(document, (analysis,), (valid,))
     analysis.treatment_plan = SimpleNamespace(items=analysis.treatment_plan.items[:1])
     _validate_content_plans(document, (analysis,), (valid,))
+
+
+@pytest.mark.asyncio
+async def test_export_book_sequence_returns_active_task_without_rechecking_readiness(
+    imported: str, unit_of_work: SqlAlchemyUnitOfWork
+) -> None:
+    from linguary.application.use_cases.export_book import ExportBookSequence
+
+    active_task = ProcessingTask(
+        id="export-task-active",
+        book_id=BOOK_ID,
+        task_type=TaskType.EXPORT_BOOK,
+        status=TaskStatus.RUNNING,
+        attempts=1,
+    )
+    with unit_of_work.transaction() as transaction:
+        transaction.tasks.add(active_task)
+
+    ensure_ready_calls = 0
+
+    class SpyExportBook:
+        def ensure_ready(self, book_id: str) -> None:
+            nonlocal ensure_ready_calls
+            ensure_ready_calls += 1
+            raise AssertionError("ensure_ready must not be called when export task is already active")
+
+    class ForbiddenQueue:
+        async def enqueue(self, identity):
+            raise AssertionError("enqueue must not be called when export task is already active")
+
+    sequence = ExportBookSequence(
+        unit_of_work=unit_of_work,
+        queue=ForbiddenQueue(),  # type: ignore[arg-type]
+        export_book=SpyExportBook(),  # type: ignore[arg-type]
+    )
+    returned = await sequence.start(BOOK_ID)
+    assert returned.id == active_task.id
+    assert returned.status is TaskStatus.RUNNING
+    assert ensure_ready_calls == 0
+

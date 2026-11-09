@@ -362,7 +362,13 @@ def _truncated_by_output_limit(error: Exception) -> bool:
     Resolved by configuring a higher output limit or submitting smaller chunks, so retries
     with the same request or repair prompt are useless here.
     """
-    return isinstance(error, LLMResponseFormatError) and error.truncated
+    return (
+        isinstance(error, LLMResponseFormatError) and error.truncated
+    ) or (
+        isinstance(error, ResultValidationError)
+        and getattr(error, "violation", None) is not None
+        and error.violation.rule_code == "provider_truncated"
+    )
 
 
 def _expectation_of(error: Exception) -> ResultExpectation | None:

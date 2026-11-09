@@ -173,9 +173,15 @@ class PronunciationContextSchema(_ResponseModel):
 
 class PronunciationCandidateSchema(_ResponseModel):
     anchor: PronunciationAnchorSchema
-    form: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
+    form: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)] | None = None
     context: PronunciationContextSchema
     selection_reason: Literal['unpredictable_spelling', 'unpredictable_stress', 'context_dependent']
+
+    @model_validator(mode="after")
+    def _check_form_matches_quote(self) -> PronunciationCandidateSchema:
+        if self.form is not None and self.form != self.anchor.quote:
+            raise ValueError("форма кандидата должна совпадать с цитатой якоря")
+        return self
 
 
 class _PronunciationCandidatesSchema(_ResponseModel):

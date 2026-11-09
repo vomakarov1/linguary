@@ -1624,5 +1624,213 @@ def test_all_read_as_is_unit_with_pronunciation_marks_tail_blocks_context_only()
     assert [b.source_block_id for b in resolved.blocks] == [b.id for b in blocks]
 
 
+def test_owned_content_plan_aliases_difficulty_and_fact_ids_and_resolves_response() -> None:
+    import json
+    from linguary.application.llm_dto import FragmentAssistanceResponse, HelpEvidenceResponse
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        ContextFact,
+        Difficulty,
+        HelpEvidence,
+        RequiredPoint,
+        SourceAnchor,
+    )
+
+    blocks = make_blocks(2, text="Echo calls and answers.")
+    unit = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE))
+    section = make_section(blocks)
+
+    covered_diff = Difficulty(
+        "diff-covered-uuid",
+        (SourceAnchor(blocks[0].id, 0, 4, "Echo"),),
+        blocks[0].id,
+        "idiom",
+        "useful",
+        "explanation",
+        (RequiredPoint("p-cov", "Already in BYR"),),
+    )
+    uncovered_diff_1 = Difficulty(
+        "diff-uncovered-uuid-1",
+        (SourceAnchor(blocks[0].id, 5, 10, "calls"),),
+        blocks[0].id,
+        "wordplay",
+        "critical",
+        "explanation",
+        (RequiredPoint("p-1", "Explain calls"),),
+    )
+    uncovered_diff_2 = Difficulty(
+        "diff-uncovered-uuid-2",
+        (SourceAnchor(blocks[1].id, 0, 4, "Echo"),),
+        blocks[1].id,
+        "grammar",
+        "critical",
+        "explanation",
+        (RequiredPoint("p-2", "Explain grammar"),),
+    )
+    fact_1 = ContextFact(
+        id="fact-uuid-1",
+        kind="speaker",
+        anchors=(SourceAnchor(blocks[0].id, 0, 4, "Echo"),),
+        subject_anchor=SourceAnchor(blocks[0].id, 0, 4, "Echo"),
+        value="Narrator",
+        certainty="explicit",
+    )
+    fact_2 = ContextFact(
+        id="fact-uuid-2",
+        kind="gender",
+        anchors=(SourceAnchor(blocks[1].id, 0, 4, "Echo"),),
+        subject_anchor=SourceAnchor(blocks[1].id, 0, 4, "Echo"),
+        value="feminine",
+        certainty="inferred",
+    )
+
+    analysis = replace(
+        make_analysis(unit),
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(covered_diff, uncovered_diff_1, uncovered_diff_2),
+            before_you_read_evidence=(
+                HelpEvidence(
+                    difficulty_id="diff-covered-uuid",
+                    point_id="p-cov",
+                    artifact_kind="before_you_read.explanation",
+                    artifact_key="before_you_read:0",
+                    block_id=blocks[0].id,
+                    body_excerpt="Already in BYR",
+                ),
+            ),
+            context_facts=(fact_1, fact_2),
+        ),
+    )
+
+    builder = ContextBuilder(content_plan_profile="content-plan-v3")
+    context = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+
+    assert dict(context.difficulty_ids_by_alias) == {
+        "d1": "diff-uncovered-uuid-1",
+        "d2": "diff-uncovered-uuid-2",
+    }
+
+    marker = "Обязательные аспекты и точные связанные привязки:\n"
+    plan_payload = json.loads(context.request.input_text.split(marker, 1)[1])
+    assert [d["id"] for d in plan_payload["difficulties"]] == ["d1", "d2"]
+    assert "diff-covered-uuid" not in context.request.input_text
+    assert [f["id"] for f in plan_payload["context_facts"]] == ["f1", "f2"]
+    assert all(
+        "start" not in anchor and "end" not in anchor
+        for d in plan_payload["difficulties"]
+        for anchor in d["anchors"]
+    )
+
+    response = TranslationResultResponse(
+        blocks=(
+            BlockResultResponse(
+                source_block_id="b1",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Перевод 1.",
+            ),
+            BlockResultResponse(
+                source_block_id="b2",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Перевод 2.",
+            ),
+        ),
+        fragment_assistances=(
+            FragmentAssistanceResponse(
+                difficulty_id="d1",
+                point_ids=("p-1",),
+                kind="lexical_hint",
+                text="simple call",
+            ),
+            FragmentAssistanceResponse(
+                difficulty_id="diff-uncovered-uuid-2",
+                point_ids=("p-2",),
+                kind="russian_explanation",
+                text="Пояснение.",
+            ),
+        ),
+        content_evidence=(
+            HelpEvidenceResponse(
+                difficulty_id="d1",
+                point_id="p-1",
+                artifact_kind="language_note.note",
+                source_block_id="b1",
+                artifact_index=0,
+                body_excerpt="Пояснение",
+            ),
+        ),
+    )
+
+    resolved = context.to_block_ids(response)
+    assert [item.difficulty_id for item in resolved.fragment_assistances] == [
+        "diff-uncovered-uuid-1",
+        "diff-uncovered-uuid-2",
+    ]
+    assert resolved.content_evidence[0].difficulty_id == "diff-uncovered-uuid-1"
+    assert resolved.content_evidence[0].source_block_id == blocks[0].id
+
+    aliased_msg = context.to_aliases(
+        f"не покрыта трудность diff-uncovered-uuid-2 в блоке {blocks[1].id}"
+    )
+    assert aliased_msg == "не покрыта трудность d2 в блоке b2"
+
+
+def test_english_help_multi_block_unit_marks_tail_blocks_context_only_and_uses_english_help_instructions() -> None:
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.domain.content_plan import ContentPlan
+
+    blocks = make_blocks(3)
+    unit = make_unit(
+        blocks,
+        treatments=(
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.READ_AS_IS,
+            BlockTreatment.READ_AS_IS,
+        ),
+    )
+    section = make_section(blocks)
+    analysis = replace(
+        make_analysis(unit),
+        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=()),
+    )
+    policy = NameTranslationPolicy(version=1, strategy=NameTranslationStrategy.MEANING)
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b1",
+        profile="content-plan-v3",
+        english_help=True,
+        name_translation_policy=policy,
+    )
+    builder = ContextBuilder(
+        prompt_templates=templates,
+        content_plan_profile="content-plan-v3",
+        reader_level="b1",
+    )
+    context = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+
+    assert "Режим чтения на английском с помощью к трудным местам." in context.request.instructions
+    assert "непрозрачные части передавай по звучанию" in context.request.instructions
+    assert "TRANSLATE — верни в translated_text полный литературный перевод" not in context.request.instructions
+    assert context.pure_read_as_is_aliases == frozenset({"b2", "b3"})
+    assert "[b1] режим READ_AS_IS\n" in context.request.input_text
+    assert "[b2] режим READ_AS_IS (только для контекста, в blocks не возвращать)" in context.request.input_text
+    assert "[b3] режим READ_AS_IS (только для контекста, в blocks не возвращать)" in context.request.input_text
+
+
+
 
 

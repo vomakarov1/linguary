@@ -133,10 +133,10 @@ def test_unknown_fact_stays_unknown_and_glossary_wins(route):
     compact = context.without_optional_neighbours()
     for candidate in (context, compact):
         data = json.loads(candidate.request.input_text.split("Обязательные аспекты и точные связанные привязки:\n")[1])
-        assert {f["id"] for f in data["context_facts"]} == {"unknown", "inferred"}
-        unknown = next(f for f in data["context_facts"] if f["id"] == "unknown")
+        assert {f["id"] for f in data["context_facts"]} == {"f1", "f2"}
+        unknown = next(f for f in data["context_facts"] if f["kind"] == "speaker")
         assert unknown["certainty"] == "unknown" and "value" not in unknown
-        assert next(f for f in data["context_facts"] if f["id"] == "inferred")["certainty"] == "inferred"
+        assert next(f for f in data["context_facts"] if f["kind"] == "gender")["certainty"] == "inferred"
         assert "Netherfield [place] -> Незерфилд" in candidate.request.input_text
         assert "решения глоссария имеют приоритет" in candidate.request.instructions
 

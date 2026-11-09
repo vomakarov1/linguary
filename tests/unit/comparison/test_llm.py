@@ -497,7 +497,7 @@ async def test_explicit_temperature_policy_is_applied_before_http(policy, presen
         with pytest.raises(LLMResponseFormatError):
             await client.generate(LLMRequest.for_translation(instructions='translate', input_text='private'))
     assert len(requests) == 1 and ('temperature' in requests[0]) is present
-    assert requests[0]['max_tokens'] == 1234
+    assert requests[0]['max_completion_tokens'] == 1234
 
 
 @pytest.mark.parametrize('change', ['bytes', 'tariff', 'unverified', 'missing'])

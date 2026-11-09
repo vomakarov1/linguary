@@ -307,5 +307,60 @@ def test_pronunciation_provider_schema_stays_strict(version):
     assert objects and all(node['additionalProperties'] is False for node in objects)
     assert all(set(node['required']) == set(node['properties']) for node in objects)
     candidate = schema['$defs']['PronunciationCandidateSchema']
-    assert set(candidate['properties']) == {'anchor', 'form', 'context', 'selection_reason'}
+    assert set(candidate['properties']) == {'anchor', 'context', 'selection_reason'}
+    assert set(candidate['required']) == {'anchor', 'context', 'selection_reason'}
     assert schema['properties']['pronunciation_candidates']['items'] == {'$ref': '#/$defs/PronunciationCandidateSchema'}
+
+
+@pytest.mark.parametrize('version,def_name', [(3, 'ContextFactSchema'), (5, 'QuotedContextFactSchema')])
+def test_strict_json_schema_includes_context_fact_value_in_required(version: int, def_name: str) -> None:
+    schema = strict_json_schema(
+        schema_for(LLMResponseKind.CHAPTER_ANALYSIS, contract_version=version)
+    )
+    objects = [node for node in _walk(schema) if isinstance(node, dict) and node.get('type') == 'object']
+    assert objects
+    assert all(set(node['required']) == set(node['properties']) for node in objects)
+    fact_schema = schema['$defs'][def_name]
+    assert 'value' in fact_schema['properties']
+    assert 'value' in fact_schema['required']
+
+
+def test_pronunciation_candidate_schema_omits_form_and_falls_back_to_anchor_quote() -> None:
+    from linguary.adapters.llm.payloads import parse_payload
+    from linguary.adapters.llm.schemas import PronunciationCandidateSchema
+
+    schema = strict_json_schema(
+        schema_for(
+            LLMResponseKind.TRANSLATION_RESULT,
+            contract_version=1,
+            pronunciation_candidates_version=1,
+        )
+    )
+    candidate_def = schema['$defs']['PronunciationCandidateSchema']
+    assert 'form' not in candidate_def['properties']
+    assert 'form' not in candidate_def['required']
+
+    raw_candidate = {
+        'anchor': {'block_id': 'block-1', 'quote': ' Worcester '},
+        'context': {
+            'meaning_in_context': None,
+            'part_of_speech': 'proper noun',
+            'grammatical_form': 'singular',
+            'is_proper_name': True,
+        },
+        'selection_reason': 'unpredictable_spelling',
+    }
+    payload = translation_payload(pronunciation_candidates=[raw_candidate])
+    parsed = parse_payload(
+        LLMResponseKind.TRANSLATION_RESULT,
+        as_content(payload),
+        contract_version=1,
+        pronunciation_candidates_version=1,
+    )
+    assert len(parsed.pronunciation_candidates) == 1
+    assert parsed.pronunciation_candidates[0].form == ' Worcester '
+    assert parsed.pronunciation_candidates[0].anchor.quote == ' Worcester '
+
+    with pytest.raises(ValidationError):
+        PronunciationCandidateSchema.model_validate(raw_candidate | {'form': 'other'})
+

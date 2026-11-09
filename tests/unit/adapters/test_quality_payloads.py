@@ -324,3 +324,190 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
     assert validated.findings[0]["evidence_anchors"][0]["block_id"] == "block-uuid-1"
     assert set(validated.checked_artifacts) == {original_sha, analysis_sha, result_sha}
 
+
+def test_quality_review_supports_multi_block_findings_and_cleans_glossary():
+    from linguary.application.quality_context import (
+        QualityReviewResponse,
+        request_text,
+        validate_response,
+    )
+    from linguary.domain.book_conditions import WorkStateError
+    from linguary.domain.content_plan import canonical_sha
+
+    long_diff_id = "df-" + "1" * 64
+    long_fact_id = "cf-" + "2" * 64
+
+    orig1_env = dict(
+        artifact_kind="original",
+        block_ids=["block-uuid-1"],
+        body=dict(text="The quick brown fox jumps."),
+    )
+    orig1_sha = canonical_sha(orig1_env)
+    orig2_env = dict(
+        artifact_kind="original",
+        block_ids=["block-uuid-2"],
+        body=dict(text="The lazy dog sleeps."),
+    )
+    orig2_sha = canonical_sha(orig2_env)
+
+    res1_env = dict(
+        artifact_kind="result",
+        block_ids=["block-uuid-1"],
+        body=dict(
+            block_id="block-uuid-1",
+            translated_text="Быстрая бурая лиса прыгает.",
+            fragment_assistances=[
+                dict(
+                    difficulty_id=long_diff_id,
+                    anchors=[dict(block_id="block-uuid-1", start=4, end=9, quote="quick")],
+                )
+            ],
+        ),
+    )
+    res1_sha = canonical_sha(res1_env)
+    res2_env = dict(
+        artifact_kind="result",
+        block_ids=["block-uuid-2"],
+        body=dict(
+            block_id="block-uuid-2",
+            translated_text="Ленивая собака спит.",
+        ),
+    )
+    res2_sha = canonical_sha(res2_env)
+
+    analysis_env = dict(
+        artifact_kind="analysis",
+        block_ids=["block-uuid-1", "block-uuid-2"],
+        body=dict(
+            summary="fox and dog",
+            content_plan=dict(
+                version=3,
+                profile="content-plan-v3",
+                sha256="f" * 64,
+                difficulties=[
+                    dict(
+                        id=long_diff_id,
+                        owner_block_id="block-uuid-1",
+                        anchors=[dict(block_id="block-uuid-1", start=4, end=9, quote="quick")],
+                    )
+                ],
+                context_facts=[
+                    dict(
+                        id=long_fact_id,
+                        anchors=[dict(block_id="block-uuid-2", start=4, end=12, quote="lazy dog")],
+                        subject_anchor=dict(block_id="block-uuid-2", start=9, end=12, quote="dog"),
+                    )
+                ],
+            ),
+        ),
+    )
+    analysis_sha = canonical_sha(analysis_env)
+
+    manifest = dict(
+        schema_version=1,
+        book_id="book-1",
+        scope=["block-uuid-1", "block-uuid-2"],
+        book_complete=True,
+        missing_results=[],
+        glossary=dict(
+            id="glossary-db-id",
+            book_id="book-1",
+            entries=[
+                dict(
+                    id="entry-1",
+                    book_id="book-1",
+                    created_at="2026-01-01T00:00:00Z",
+                    concept_id="concept-1",
+                    canonical_source_text="brown fox",
+                    source_text="Brown Fox",
+                    translation="Бурая лиса",
+                    type="person",
+                    status="approved",
+                    note="   ",
+                ),
+                dict(
+                    id="entry-2",
+                    book_id="book-1",
+                    source_text="Lazy Dog",
+                    translation="Ленивый пёс",
+                    type="person",
+                    status="locked",
+                    note="Важное имя",
+                ),
+            ],
+        ),
+        artifacts=[
+            {**orig1_env, "artifact_sha": orig1_sha},
+            {**res1_env, "artifact_sha": res1_sha},
+            {**orig2_env, "artifact_sha": orig2_sha},
+            {**res2_env, "artifact_sha": res2_sha},
+            {**analysis_env, "artifact_sha": analysis_sha},
+        ],
+    )
+
+    serialized = request_text(manifest)
+    parsed = json.loads(serialized)
+
+    assert list(parsed.keys()) == [
+        "scope",
+        "book_complete",
+        "missing_results",
+        "glossary",
+        "artifacts",
+    ]
+    assert serialized.index('"glossary":') < serialized.index('"artifacts":')
+    assert parsed["glossary"] == {
+        "entries": [
+            {
+                "source_text": "Brown Fox",
+                "translation": "Бурая лиса",
+                "type": "person",
+                "status": "approved",
+            },
+            {
+                "source_text": "Lazy Dog",
+                "translation": "Ленивый пёс",
+                "type": "person",
+                "status": "locked",
+                "note": "Важное имя",
+            },
+        ]
+    }
+    assert long_diff_id not in serialized
+    assert long_fact_id not in serialized
+    assert parsed["artifacts"][1]["body"]["fragment_assistances"][0]["difficulty_id"] == "d1"
+    assert parsed["artifacts"][4]["body"]["content_plan"]["difficulties"][0]["id"] == "d1"
+    assert parsed["artifacts"][4]["body"]["content_plan"]["context_facts"][0]["id"] == "f1"
+
+    multi_block_response = QualityReviewResponse(
+        findings=(
+            dict(
+                block_ids=["b1", "b2"],
+                artifact_kind="result",
+                severity="minor",
+                issue="Cross-block consistency",
+                evidence_anchors=[
+                    dict(block_id="b1", quote="brown fox"),
+                    dict(block_id="b2", quote="lazy dog"),
+                ],
+                suggestion="Align terminology",
+                uncertainty="low",
+            ),
+        ),
+        checked_artifacts=(),
+        missing_artifacts=(),
+    )
+    validated = validate_response(manifest, multi_block_response)
+    finding, = validated.findings
+    assert finding["artifact_sha"] == res1_sha
+    assert finding["block_ids"] == ["block-uuid-1", "block-uuid-2"]
+    assert [a["block_id"] for a in finding["evidence_anchors"]] == ["block-uuid-1", "block-uuid-2"]
+
+    manifest_missing_res2 = {
+        **manifest,
+        "artifacts": [a for a in manifest["artifacts"] if a["artifact_sha"] != res2_sha],
+    }
+    with pytest.raises(WorkStateError, match="чужой артефакт замечания"):
+        validate_response(manifest_missing_res2, multi_block_response)
+
+

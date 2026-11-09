@@ -203,7 +203,7 @@ async def test_excess_notes_do_not_bypass_grounding_dedup_or_coverage(tmp_path, 
                 plan, _ = json.JSONDecoder().raw_decode(request.input_text.split(marker, 1)[1])
                 difficulty, = plan['difficulties']
                 assert difficulty['owner_block_id'] == 'b1'
-                assert difficulty['id'] not in {'d1', 'd2'}
+                assert difficulty['id'] == 'd1'
                 self.replies = [*self.replies, planned_child_reply(difficulty, defect=defect)]
             return await super().generate(request)
     fake = PlannedFake(replies)

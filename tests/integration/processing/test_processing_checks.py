@@ -108,7 +108,7 @@ def assert_nothing_saved(unit_of_work: SqlAlchemyUnitOfWork, run_id: str) -> Non
             id="service-message",
         ),
         pytest.param(
-            translated_reply(truncated=True),
+            [translated_reply(truncated=True), translated_reply(("b1",), truncated=True)],
             "лимиту выходных токенов",
             id="truncated-by-provider",
         ),
@@ -124,8 +124,13 @@ async def test_blocking_check_discards_the_whole_unit(
 ) -> None:
     """Any blocking check cancels saving of the entire group (PRD § 15)."""
     scenario = store_processing_book(unit_of_work)
+    client = (
+        FakeLLMClient.replying(reply)
+        if isinstance(reply, list)
+        else FakeLLMClient.always(reply)
+    )
     process, _ = make_process_chapter(
-        unit_of_work, FakeLLMClient.always(reply), max_attempts=1
+        unit_of_work, client, max_attempts=1
     )
 
     with pytest.raises(ResultValidationError, match=reason):
@@ -221,7 +226,7 @@ async def test_output_limit_truncation_is_not_retried_by_the_same_request(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
     """Output limit truncation is not retried: no second billed call is made."""
-    scenario = store_processing_book(unit_of_work)
+    scenario = store_processing_book(unit_of_work, chapters=((SOURCE_TEXT,),))
     client = FakeLLMClient.always(FakeReply(content=TRUNCATED_CONTENT, truncated=True))
     process, delays = make_process_chapter(unit_of_work, client, max_attempts=3)
 

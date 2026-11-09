@@ -920,4 +920,29 @@ def test_matches_chapter_text_requires_all_significant_words_and_ignores_honorif
     assert not _matches_chapter_text("The Battle of Hogwarts", hogwarts_only_text, hogwarts_only_stems)
 
 
+def test_a2_chapter_context_deduplicates_learner_quality_and_pronunciation_omits_form() -> None:
+    section = make_analysis_section(
+        section_id="sec-a2", title="Chapter 1", order=0, texts=("First paragraph.",)
+    )
+    document = make_analysis_document((section,))
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="a2")
+    context = builder.for_chapter_analysis(document=document, section=section)
+
+    instructions = context.request.instructions
+    assert instructions.count("might have been") == 1
+    assert instructions.count("not saying ... isn’t ...") == 1
+    assert instructions.count("ровно два абзаца") == 1
+    assert "Пересказ A2 верни ровно два абзаца" not in instructions
+
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        pronunciation_help_enabled=True,
+    )
+    assert "anchor {block_id, quote}, context" in templates["pronunciation_processing"]
+    assert "form=quote" not in templates["pronunciation_processing"]
+
+
+
 

@@ -245,3 +245,389 @@ def test_distant_difficulty_anchors_do_not_merge_entire_chapter_into_single_reco
     assert [tuple(r.manifest['ordered_blocks']) for r in roots] == [('b1', 'b2'), ('b3', 'b4'), ('b5', 'b6')]
 
 
+@pytest.mark.asyncio
+async def test_local_validator_violation_triggers_recovery_split_on_repeated_signature(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    import linguary.application.block_processing as block_processing_module
+    import linguary.application.diagnostics as diagnostics_module
+    from processing_fakes import (
+        BOOK_ID,
+        SECTION_ID,
+        TARGET_LANGUAGE,
+        make_blocks,
+        make_response,
+        make_unit,
+        make_validator,
+        note_ids,
+    )
+    from linguary.application.block_processing import TranslationCall
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.llm_dto import BlockResultResponse
+    from linguary.application.ports.llm import LLMResponse
+    from linguary.application.recovery import RecoverySplit, local_failure_signature
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.domain import (
+        BlockTreatment,
+        BookMetadata,
+        CanonicalDocument,
+        ChapterAnalysis,
+        DocumentSection,
+        GlossarySnapshot,
+        TreatmentPlan,
+    )
+
+    monkeypatch.setattr(
+        diagnostics_module,
+        "diagnostics_for",
+        lambda uow: SimpleNamespace(ensure_available=lambda: None, fail=lambda: None),
+    )
+    monkeypatch.setattr(
+        block_processing_module,
+        "record_rejection",
+        lambda uow, response, error: None,
+    )
+
+    blocks = make_blocks(2)
+    unit = make_unit(blocks)
+    section = DocumentSection(
+        id=SECTION_ID,
+        document_id=BOOK_ID,
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=blocks,
+    )
+    document = CanonicalDocument(
+        id=BOOK_ID,
+        metadata=BookMetadata(title="Book", authors=("Author",)),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=(section,),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=TreatmentPlan.of_treatments(
+            section.id, ((item.block.id, item.treatment) for item in unit.items)
+        ),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=unit.block_ids,
+    )
+    context = ContextBuilder().for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=GlossarySnapshot(),
+    )
+    context = replace(
+        context,
+        request=replace(
+            context.request,
+            book_id=BOOK_ID,
+            stage=SimpleNamespace(value="translation_unit"),
+        ),
+    )
+
+    recorded_violations = []
+    seen_signatures: list[tuple[str, tuple[str, ...]] | None] = []
+    physical_ctx = SimpleNamespace(
+        conditions_id="00000000-0000-0000-0000-000000000001",
+        attempt_id="attempt-1",
+        root_id="root-1",
+        scope_id="scope-1",
+        stage="translation_unit",
+        ordered_block_ids=unit.block_ids,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+        prompt_hash="hash",
+    )
+
+    class WorkStore:
+        def get_root(self, root_id):
+            return SimpleNamespace(
+                id=root_id,
+                policy_version=CURRENT_TRANSLATION_POLICY,
+                conditions_id=physical_ctx.conditions_id,
+                calls_used=1,
+                extra_calls=0,
+                manifest={"policy": {"max_calls": 10, "max_scope_calls": 4}},
+            )
+
+        def get_conditions(self, conditions_id):
+            return SimpleNamespace(
+                id=conditions_id,
+                payload={"models": {"processing": "gpt-test"}, "versions": {"validators": 1}},
+            )
+
+        def begin_recovery_attempt(self, root_id, scope_id, **kwargs):
+            return physical_ctx
+
+        def owns_recovery_attempt(self, attempt_id):
+            return True
+
+        def record_recovery_failure(self, attempt_id, violation):
+            recorded_violations.append(violation)
+            sig = local_failure_signature(violation, unit.block_ids)
+            seen_signatures.append(sig)
+            return sig is not None and seen_signatures.count(sig) >= 2
+
+        def result_bindings(self, run_id):
+            return {}
+
+    class RunsStore:
+        def active_for_book(self, book_id):
+            return None
+
+    class Uow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=WorkStore(), runs=RunsStore(), llm_calls=SimpleNamespace())
+
+    generate_calls = 0
+
+    class FakeLLMClient:
+        async def generate(self, request):
+            nonlocal generate_calls
+            generate_calls += 1
+            return LLMResponse(
+                payload=make_response(
+                    (
+                        BlockResultResponse(
+                            source_block_id="b1",
+                            treatment=BlockTreatment.TRANSLATE,
+                            translated_text="Первая строка.\nВторая строка.",
+                        ),
+                        BlockResultResponse(
+                            source_block_id="b2",
+                            treatment=BlockTreatment.TRANSLATE,
+                            translated_text="Перевод второго блока.",
+                        ),
+                    )
+                ),
+                provider="fake",
+                model="gpt-test",
+                truncated=False,
+                call_context=request.call_context,
+            )
+
+    call = TranslationCall(
+        unit_of_work=Uow(),
+        llm_client=FakeLLMClient(),
+        retry_policy=RetryPolicy(max_attempts=3),
+        validator=make_validator(),
+        sleep=None,
+    )
+
+    with pytest.raises(RecoverySplit) as exc_info:
+        await call.request(
+            context,
+            unit=unit,
+            target_language=TARGET_LANGUAGE,
+            note_ids=note_ids(),
+            recovery=("root-1", "scope-1"),
+        )
+
+    assert (exc_info.value.root_id, exc_info.value.scope_id) == ("root-1", "scope-1")
+    assert generate_calls == 2
+    assert len(recorded_violations) == 2
+    assert all(v.rule_code == "paragraph_count_mismatch" for v in recorded_violations)
+    assert all(v.scope == "local" and v.block_ids == (blocks[0].id,) for v in recorded_violations)
+
+
+@pytest.mark.asyncio
+async def test_provider_truncated_multi_block_unit_triggers_immediate_recovery_split(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    import linguary.application.block_processing as block_processing_module
+    import linguary.application.diagnostics as diagnostics_module
+    from processing_fakes import (
+        BOOK_ID,
+        SECTION_ID,
+        TARGET_LANGUAGE,
+        make_blocks,
+        make_response,
+        make_unit,
+        make_validator,
+        note_ids,
+    )
+    from linguary.application.block_processing import TranslationCall
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.llm_dto import BlockResultResponse
+    from linguary.application.ports.llm import LLMResponse
+    from linguary.application.recovery import RecoverySplit
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.domain import (
+        BlockTreatment,
+        BookMetadata,
+        CanonicalDocument,
+        ChapterAnalysis,
+        DocumentSection,
+        GlossarySnapshot,
+        TreatmentPlan,
+    )
+
+    monkeypatch.setattr(
+        diagnostics_module,
+        "diagnostics_for",
+        lambda uow: SimpleNamespace(ensure_available=lambda: None, fail=lambda: None),
+    )
+    monkeypatch.setattr(
+        block_processing_module,
+        "record_rejection",
+        lambda uow, response, error: None,
+    )
+
+    blocks = make_blocks(2)
+    unit = make_unit(blocks)
+    section = DocumentSection(
+        id=SECTION_ID,
+        document_id=BOOK_ID,
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=blocks,
+    )
+    document = CanonicalDocument(
+        id=BOOK_ID,
+        metadata=BookMetadata(title="Book", authors=("Author",)),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=(section,),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=TreatmentPlan.of_treatments(
+            section.id, ((item.block.id, item.treatment) for item in unit.items)
+        ),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=unit.block_ids,
+    )
+    context = ContextBuilder().for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=GlossarySnapshot(),
+    )
+    context = replace(
+        context,
+        request=replace(
+            context.request,
+            book_id=BOOK_ID,
+            stage=SimpleNamespace(value="translation_unit"),
+        ),
+    )
+
+    recorded_violations = []
+    physical_ctx = SimpleNamespace(
+        conditions_id="00000000-0000-0000-0000-000000000001",
+        attempt_id="attempt-1",
+        root_id="root-1",
+        scope_id="scope-1",
+        stage="translation_unit",
+        ordered_block_ids=unit.block_ids,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+        prompt_hash="hash",
+    )
+
+    class WorkStore:
+        def get_root(self, root_id):
+            return SimpleNamespace(
+                id=root_id,
+                policy_version=CURRENT_TRANSLATION_POLICY,
+                conditions_id=physical_ctx.conditions_id,
+                calls_used=1,
+                extra_calls=0,
+                manifest={"policy": {"max_calls": 10, "max_scope_calls": 4}},
+            )
+
+        def get_conditions(self, conditions_id):
+            return SimpleNamespace(
+                id=conditions_id,
+                payload={"models": {"processing": "gpt-test"}, "versions": {"validators": 1}},
+            )
+
+        def begin_recovery_attempt(self, root_id, scope_id, **kwargs):
+            return physical_ctx
+
+        def owns_recovery_attempt(self, attempt_id):
+            return True
+
+        def record_recovery_failure(self, attempt_id, violation):
+            recorded_violations.append(violation)
+            return False
+
+        def result_bindings(self, run_id):
+            return {}
+
+    class RunsStore:
+        def active_for_book(self, book_id):
+            return None
+
+    class Uow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=WorkStore(), runs=RunsStore(), llm_calls=SimpleNamespace())
+
+    generate_calls = 0
+
+    class FakeLLMClient:
+        async def generate(self, request):
+            nonlocal generate_calls
+            generate_calls += 1
+            return LLMResponse(
+                payload=make_response(
+                    (
+                        BlockResultResponse(
+                            source_block_id="b1",
+                            treatment=BlockTreatment.TRANSLATE,
+                            translated_text="Перевод первого блока.",
+                        ),
+                        BlockResultResponse(
+                            source_block_id="b2",
+                            treatment=BlockTreatment.TRANSLATE,
+                            translated_text="Перевод второго блока.",
+                        ),
+                    )
+                ),
+                provider="fake",
+                model="gpt-test",
+                truncated=True,
+                call_context=request.call_context,
+            )
+
+    call = TranslationCall(
+        unit_of_work=Uow(),
+        llm_client=FakeLLMClient(),
+        retry_policy=RetryPolicy(max_attempts=3),
+        validator=make_validator(),
+        sleep=None,
+    )
+
+    with pytest.raises(RecoverySplit) as exc_info:
+        await call.request(
+            context,
+            unit=unit,
+            target_language=TARGET_LANGUAGE,
+            note_ids=note_ids(),
+            recovery=("root-1", "scope-1"),
+        )
+
+    assert (exc_info.value.root_id, exc_info.value.scope_id) == ("root-1", "scope-1")
+    assert generate_calls == 1
+    assert len(recorded_violations) == 1
+    assert recorded_violations[0].rule_code == "provider_truncated"
+
+
+
+
