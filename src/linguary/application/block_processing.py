@@ -128,47 +128,69 @@ class TranslationCall:
         if recovery is None and explicit_context is not None and explicit_context.policy_version:
             raise RecoveryError('conditions_unavailable', explicit_context.root_id)
         policy = None
-        if recovery is not None:
-            with self._unit_of_work.transaction() as transaction:
-                root = transaction.work.get_root(recovery[0])
-                if root is None:
-                    raise RecoveryError('conditions_unavailable', recovery[0])
-                try:
-                    policy = require_policy(root.policy_version)
-                except TranslationPolicyUnavailable:
-                    raise RecoveryError('conditions_unavailable', recovery[0]) from None
-                if explicit_context is not None and (
-                    explicit_context.root_id != root.id
-                    or explicit_context.policy_version != policy.version
-                    or explicit_context.scope_id != recovery[1]
-                ):
-                    raise RecoveryError('conditions_unavailable', root.id)
         run = None
         loaded_conditions = None
         checked_conditions_id = None
-        if self._unit_of_work is not None and unit is not None:
+        resolved_source_texts = source_texts if source_texts is not None else self._source_texts
+        need_conditions = (
+            recovery is None
+            and explicit_context is not None
+            and explicit_context.conditions_id is not None
+        )
+        need_texts = (
+            resolved_source_texts is None
+            and bool(context.request.book_id)
+            and (
+                request.contract_version == 4
+                or (context.content_plan is not None and context.content_plan.version == 3)
+            )
+        )
+        if self._unit_of_work is not None and (recovery is not None or unit is not None or need_conditions or need_texts):
             with self._unit_of_work.transaction() as transaction:
-                run = transaction.runs.active_for_book(context.request.book_id) if context.request.book_id else None
-                if run is not None and hasattr(transaction.work, 'result_bindings'):
-                    run_bindings = transaction.work.result_bindings(run.id)
-                    self._expected_bindings.set({
-                        item.block.id: run_bindings.get(item.block.id)
-                        for item in unit.items
-                    })
-                else:
-                    self._expected_bindings.set({item.block.id: (
-                        transaction.work.get_binding('result', f'{run.id}:{item.block.id}') if run else None
-                    ) for item in unit.items})
-                if (
-                    recovery is None
-                    and explicit_context is not None
-                    and explicit_context.conditions_id is not None
-                    and hasattr(transaction.work, 'get_conditions')
-                ):
+                if recovery is not None:
+                    root = transaction.work.get_root(recovery[0])
+                    if root is None:
+                        raise RecoveryError('conditions_unavailable', recovery[0])
+                    try:
+                        policy = require_policy(root.policy_version)
+                    except TranslationPolicyUnavailable:
+                        raise RecoveryError('conditions_unavailable', recovery[0]) from None
+                    if explicit_context is not None and (
+                        explicit_context.root_id != root.id
+                        or explicit_context.policy_version != policy.version
+                        or explicit_context.scope_id != recovery[1]
+                    ):
+                        raise RecoveryError('conditions_unavailable', root.id)
+                if unit is not None:
+                    run = (
+                        transaction.runs.active_for_book(context.request.book_id)
+                        if context.request.book_id and hasattr(transaction, 'runs')
+                        else None
+                    )
+                    if run is not None and hasattr(transaction.work, 'result_bindings'):
+                        run_bindings = transaction.work.result_bindings(run.id)
+                        self._expected_bindings.set({
+                            item.block.id: run_bindings.get(item.block.id)
+                            for item in unit.items
+                        })
+                    else:
+                        self._expected_bindings.set({item.block.id: (
+                            transaction.work.get_binding('result', f'{run.id}:{item.block.id}') if run else None
+                        ) for item in unit.items})
+                if need_conditions and hasattr(transaction.work, 'get_conditions'):
                     checked_conditions_id = explicit_context.conditions_id
                     loaded_conditions = transaction.work.get_conditions(checked_conditions_id)
-            request = replace(context.request, scope_id=unit.id,
-                ordered_block_ids=tuple(item.block.id for item in unit.items), run_id=None if run is None else run.id)
+                if need_texts and hasattr(transaction, 'documents'):
+                    document = transaction.documents.get(context.request.book_id)
+                    if document is not None:
+                        resolved_source_texts = {
+                            block.id: block.text
+                            for section in document.sections
+                            for block in section.blocks
+                        }
+            if unit is not None:
+                request = replace(context.request, scope_id=unit.id,
+                    ordered_block_ids=tuple(item.block.id for item in unit.items), run_id=None if run is None else run.id)
         resolved_glossary = glossary if glossary is not None else (None if run is None else run.glossary_snapshot)
         explained = ExplainedExpressions(
             context.explained_expressions, explanations=context.explained_entries
@@ -274,7 +296,6 @@ class TranslationCall:
                     record_reader_warnings(self._unit_of_work, response,
                         [('translation', result.translated_text or '') for result in results],
                         reader_level=conditions.payload['reader_level'] if conditions else 'b2')
-                resolved_source_texts = source_texts if source_texts is not None else self._source_texts
                 if request.contract_version == 4:
                     from linguary.application.validators.content_plan import resolve_fragment_assistances
                     owners = tuple(r.block_id for r in results)
@@ -282,6 +303,7 @@ class TranslationCall:
                         with self._unit_of_work.transaction() as transaction:
                             document = transaction.documents.get(request.book_id)
                         call_source_texts = {block.id: block.text for section in document.sections for block in section.blocks}
+                        resolved_source_texts = call_source_texts
                     else:
                         call_source_texts = resolved_source_texts
                     assistance = resolve_fragment_assistances(context.content_plan, mapped, results, call_source_texts,
@@ -301,6 +323,7 @@ class TranslationCall:
                                 document = transaction.documents.get(request.book_id)
                             call_source_texts = ({block.id: block.text for section in document.sections for block in section.blocks}
                                 if document is not None else {item.block.id: item.block.text for item in unit.items})
+                            resolved_source_texts = call_source_texts
                         checked, unresolved = resolve_content_coverage(context.content_plan, results,
                             context.before_you_read, evidence, owner_block_ids=owners, source_texts=call_source_texts,
                             validators_version=validators_version)
@@ -328,7 +351,7 @@ class TranslationCall:
                             violation,
                         )
                     if (
-                        split
+                        (split and (unit is None or len(unit.items) > 1))
                         or (
                             violation is not None
                             and violation.rule_code == "provider_truncated"

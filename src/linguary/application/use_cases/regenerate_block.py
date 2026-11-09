@@ -39,6 +39,7 @@ from linguary.application.block_processing import (
     note_id_factory,
 )
 from linguary.application.context_builder import ContextBuilder, is_textual
+from linguary.application.correction import _scoped_reconcile_section
 from linguary.application.ports.llm import LLMClient
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
@@ -219,9 +220,10 @@ class RegenerateBlock:
             if run is None or run.id != work.run.id:
                 return RegenerateBlockResult(work.block.id, work.run.id)
             raise
-        saved = self._call.save(
-            book_id=work.document.id, run_id=work.run.id, results=call.results
-        )
+        with _scoped_reconcile_section(work.section.id):
+            saved = self._call.save(
+                book_id=work.document.id, run_id=work.run.id, results=call.results
+            )
         return RegenerateBlockResult(
             block_id=work.block.id,
             run_id=work.run.id,
@@ -402,12 +404,13 @@ class BlockRegenerationSequence:
                 root_id=task.operation_id,
             )
         )
-        complete_processing(
-            self._unit_of_work,
-            book_id=task.book_id,
-            finished_task_id=task.id,
-            task_types=_COMPLETING_TASK_TYPES,
-        )
+        with _scoped_reconcile_section(task.scope_id):
+            complete_processing(
+                self._unit_of_work,
+                book_id=task.book_id,
+                finished_task_id=task.id,
+                task_types=_COMPLETING_TASK_TYPES,
+            )
 
 
 def _status_after_request(transaction: UnitOfWork, book: BookRecord) -> BookStatus:

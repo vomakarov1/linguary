@@ -1831,6 +1831,97 @@ def test_english_help_multi_block_unit_marks_tail_blocks_context_only_and_uses_e
     assert "[b3] режим READ_AS_IS (только для контекста, в blocks не возвращать)" in context.request.input_text
 
 
+def test_owned_content_plan_omits_empty_payload_and_priority_field() -> None:
+    import json
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        ContextFact,
+        Difficulty,
+        HelpEvidence,
+        RequiredPoint,
+        SourceAnchor,
+    )
+
+    blocks = make_blocks(2, text="Echo calls and answers.")
+    section = make_section(blocks)
+    unit_b1 = make_unit((blocks[0],), treatments=(BlockTreatment.TRANSLATE,))
+    unit_b2 = make_unit((blocks[1],), treatments=(BlockTreatment.TRANSLATE,))
+
+    covered_diff = Difficulty(
+        "diff-covered",
+        (SourceAnchor(blocks[0].id, 0, 4, "Echo"),),
+        blocks[0].id,
+        "idiom",
+        "useful",
+        "explanation",
+        (RequiredPoint("p-cov", "Already in BYR"),),
+    )
+    b2_diff = Difficulty(
+        "diff-b2",
+        (SourceAnchor(blocks[1].id, 0, 4, "Echo"),),
+        blocks[1].id,
+        "wordplay",
+        "critical",
+        "explanation",
+        (RequiredPoint("p-1", "Explain Echo"),),
+    )
+    b2_fact = ContextFact(
+        id="fact-b2",
+        kind="speaker",
+        anchors=(SourceAnchor(blocks[1].id, 0, 4, "Echo"),),
+        subject_anchor=SourceAnchor(blocks[1].id, 0, 4, "Echo"),
+        value="Narrator",
+        certainty="explicit",
+    )
+
+    analysis = replace(
+        make_analysis(make_unit(blocks)),
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(covered_diff, b2_diff),
+            before_you_read_evidence=(
+                HelpEvidence(
+                    difficulty_id="diff-covered",
+                    point_id="p-cov",
+                    artifact_kind="before_you_read.explanation",
+                    artifact_key="before_you_read:0",
+                    block_id=blocks[0].id,
+                    body_excerpt="Already in BYR",
+                ),
+            ),
+            context_facts=(b2_fact,),
+        ),
+    )
+
+    builder = ContextBuilder(content_plan_profile="content-plan-v3")
+    ctx_b1 = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit_b1,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+    marker = "Обязательные аспекты и точные связанные привязки:\n"
+    assert marker not in ctx_b1.request.input_text
+
+    ctx_b2 = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit_b2,
+        analysis=analysis,
+        glossary=make_snapshot(),
+    )
+    assert marker in ctx_b2.request.input_text
+    raw_json = ctx_b2.request.input_text.split(marker, 1)[1]
+    assert '": ' not in raw_json
+    assert '", "' not in raw_json
+    parsed = json.loads(raw_json)
+    assert len(parsed["difficulties"]) == 1
+    assert "priority" not in parsed["difficulties"][0]
+
+
+
 
 
 

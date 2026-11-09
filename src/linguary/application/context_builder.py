@@ -1248,7 +1248,7 @@ class ContextBuilder:
                 limit_lines = (
                     f"В этом ответе не больше {before_you_read_limit} BYR.",
                     f"Бюджет обязательных заметок этого анализа: {note_limit}.",
-                    "Пределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False),
+                    "Пределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False, separators=(",", ":")),
                 )
         return ChapterAnalysisContext(
             before_you_read_limit=before_you_read_limit,
@@ -2406,6 +2406,7 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
         ):
             continue
         value = asdict(difficulty)
+        value.pop("priority", None)
         value["id"] = f"d{len(difficulties) + 1}"
         value["owner_block_id"] = aliases[difficulty.owner_block_id]
         for anchor in value["anchors"]:
@@ -2430,10 +2431,12 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
             anchor.pop("start", None)
             anchor.pop("end", None)
         facts.append(value)
+    if not difficulties and not facts:
+        return ""
     return "Обязательные аспекты и точные связанные привязки:\n" + json.dumps({
         "version": analysis.content_plan.version, "difficulties": difficulties,
         **({'context_facts': facts} if analysis.content_plan.version == 3 else {}),
-    }, ensure_ascii=False)
+    }, ensure_ascii=False, separators=(",", ":"))
 
 
 def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None, pronunciation_help_enabled=False, validators_version=1, analysis_contract_version=None):

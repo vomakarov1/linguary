@@ -508,3 +508,58 @@ async def test_failed_regeneration_preserves_accepted_fragment_help(unit_of_work
     assert isinstance(rejected.value.original_error, ResultValidationError)
     assert stored_results(unit_of_work) == previous
     assert previous[0].fragment_assistances == (help,)
+
+
+async def test_regenerate_block_exhausts_retry_attempts_and_preserves_original_error(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    scenario = store_processing_book(unit_of_work)
+    await process_chapter(unit_of_work, aliases=("b1", "b2"))
+    client = FakeLLMClient.always(
+        translation_reply([block_reply("b1", translated_text=UNTRANSLATED_TEXT)])
+    )
+    regenerate, _ = make_regenerate_block(unit_of_work, client, max_attempts=3)
+
+    with pytest.raises(RecoveryError) as rejected:
+        await regenerate(
+            RegenerateBlockCommand(book_id=BOOK_ID, block_id=scenario.block_ids()[0])
+        )
+
+    assert client.call_count == 3
+    assert isinstance(rejected.value.original_error, ResultValidationError)
+
+
+async def test_regenerate_block_scopes_reconcile_corrections_to_block_section(
+    unit_of_work: SqlAlchemyUnitOfWork,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.correction as correction_module
+
+    scenario = store_processing_book(
+        unit_of_work,
+        chapters=((SOURCE_TEXT, SOURCE_TEXT), (SOURCE_TEXT, SOURCE_TEXT)),
+    )
+    seen_scoped_sections: list[str | None] = []
+    original_reconcile = correction_module.reconcile_corrections
+
+    def spy_reconcile(tx, book_id, *, section_id=None):
+        effective = (
+            section_id
+            if section_id is not None
+            else correction_module._SCOPED_RECONCILE_SECTION_ID.get()
+        )
+        seen_scoped_sections.append(effective)
+        return original_reconcile(tx, book_id, section_id=section_id)
+
+    monkeypatch.setattr(correction_module, "reconcile_corrections", spy_reconcile)
+    client = FakeLLMClient.always(
+        translation_reply([block_reply("b1", translated_text=REGENERATED_TEXT)])
+    )
+    regenerate, _ = make_regenerate_block(unit_of_work, client)
+
+    await regenerate(
+        RegenerateBlockCommand(book_id=BOOK_ID, block_id=scenario.block_ids(0)[0])
+    )
+
+    assert seen_scoped_sections == ["section-1"]
+

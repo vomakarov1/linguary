@@ -749,6 +749,7 @@ def test_chapter_context_keeps_instructions_invariant_across_chapters():
     assert "В этом ответе не больше" in ctx1.request.input_text
     assert "Бюджет обязательных заметок" in ctx1.request.input_text
     assert "Пределы обязательных заметок" in ctx1.request.input_text
+    assert '[{"blocks":["b1","b2"],"limit":' in ctx1.request.input_text
     assert "В этом ответе не больше" in ctx2.request.input_text
     assert "Бюджет обязательных заметок" in ctx2.request.input_text
     assert "Пределы обязательных заметок" in ctx2.request.input_text

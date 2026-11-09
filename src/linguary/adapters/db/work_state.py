@@ -1200,7 +1200,34 @@ class SqlAlchemyWorkRepository:
         previous = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope.id)
             .order_by(LLMAttemptRow.ordinal.desc()).limit(2)).all()
         self._session.flush()
-        return bool(signature and len(previous) == 2 and all(row.state == 'rejected' and row.outcome_json.get('failure_signature') == signature for row in previous))
+        if not (
+            signature
+            and len(previous) == 2
+            and all(
+                row.state == 'rejected' and row.outcome_json.get('failure_signature') == signature
+                for row in previous
+            )
+        ):
+            return False
+        policy = root.manifest['policy']
+        scopes = self.list_scopes(root.id)
+        by_id = {item.id: item for item in scopes}
+        depth, parent = 0, scope
+        while parent.parent_id is not None:
+            depth += 1
+            parent = by_id[parent.parent_id]
+        leaves = sum(item.status != "split" for item in scopes)
+        if "atomic_intervals" in root.manifest:
+            scope_set = set(scope.ordered_blocks)
+            atoms = [tuple(g) for g in root.manifest["atomic_intervals"] if set(g) <= scope_set]
+            can_partition = len(atoms) >= 2
+        else:
+            can_partition = len(scope.ordered_blocks) > 1
+        return bool(
+            can_partition
+            and depth < policy["max_depth"]
+            and leaves + 1 <= policy["max_leaves"]
+        )
 
     def split_scope(self, scope_id, *, expected_generation, children):
         scope = self.get_scope(scope_id)
