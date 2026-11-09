@@ -618,21 +618,58 @@ def test_quality_context_validates_multi_block_artifact_sha_and_filters_scoped_a
     assert [d["id"] for d in analysis_body["content_plan"]["difficulties"]] == ["d1"]
     assert [f["id"] for f in analysis_body["content_plan"]["context_facts"]] == ["f1"]
 
+    orig3_env = dict(
+        artifact_kind="original",
+        block_ids=["block-uuid-3"],
+        body=dict(text="Third block text here."),
+    )
+    orig3_sha = canonical_sha(orig3_env)
+    res3_env = dict(
+        artifact_kind="result",
+        block_ids=["block-uuid-3"],
+        body=dict(block_id="block-uuid-3", translated_text="Третий блок."),
+    )
+    res3_sha = canonical_sha(res3_env)
+
     full_manifest = dict(
         schema_version=1,
         book_id="book-1",
-        scope=["block-uuid-1", "block-uuid-2"],
+        scope=["block-uuid-1", "block-uuid-2", "block-uuid-3"],
         artifacts=[
             {**orig1_env, "artifact_sha": orig1_sha},
             {**res1_env, "artifact_sha": res1_sha},
             {**orig2_env, "artifact_sha": orig2_sha},
             {**res2_env, "artifact_sha": res2_sha},
+            {**orig3_env, "artifact_sha": orig3_sha},
+            {**res3_env, "artifact_sha": res3_sha},
         ],
     )
-    wrong_sha_response = QualityReviewResponse(
+    second_block_sha_response = QualityReviewResponse(
         findings=(
             dict(
                 artifact_sha=res2_sha,
+                block_ids=["b1", "b2"],
+                artifact_kind="result",
+                severity="minor",
+                issue="Second block sha allowed",
+                evidence_anchors=[
+                    dict(block_id="b1", quote="First"),
+                    dict(block_id="b2", quote="Second"),
+                ],
+                suggestion="Fix",
+                uncertainty="low",
+            ),
+        ),
+        checked_artifacts=(),
+        missing_artifacts=(),
+    )
+    validated_second = validate_response(full_manifest, second_block_sha_response)
+    assert validated_second.findings[0]["artifact_sha"] == res2_sha
+
+    wrong_sha_response = QualityReviewResponse(
+        findings=(
+            dict(
+                artifact_sha=res3_sha,
                 block_ids=["b1", "b2"],
                 artifact_kind="result",
                 severity="minor",
