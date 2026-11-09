@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 
 from linguary.adapters.config.settings import LLMSettings, proxy_secrets
-from linguary.adapters.llm.json_schema import strict_json_schema
+from linguary.adapters.llm.json_schema import cached_strict_json_schema, strict_json_schema
 from linguary.adapters.llm.payloads import parse_payload, schema_for
 from linguary.application.ports.llm import (
     LLMClient,
@@ -248,7 +248,7 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
             "json_schema": {
                 "name": request.kind.value,
                 "strict": True,
-                "schema": strict_json_schema(schema_for(request.kind, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version)),
+                "schema": cached_strict_json_schema(schema_for(request.kind, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version)),
             },
         },
     }
@@ -261,6 +261,9 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
     if settings.temperature is not None:
         body["temperature"] = settings.temperature
     return body
+
+
+OpenAICompatibleLLMClient._build_request_body = staticmethod(_body)
 
 
 def _raise_for_status(

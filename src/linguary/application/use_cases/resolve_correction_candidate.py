@@ -58,11 +58,21 @@ class ResolveCorrectionCandidate:
             tx.work.resolve_correction_candidate(candidate.candidate_id,
                 proposal_sha256=candidate.proposal_sha256, input_sha256=candidate.input_sha256,
                 decision={'action': decision.action, 'reason': decision.reason})
+            updated_bindings = {}
             if results:
-                apply_correction_candidate(tx, inputs, candidate, results[0], resolution='human')
+                updated_bindings[candidate.block_id] = apply_correction_candidate(
+                    tx, inputs, candidate, results[0], resolution='human'
+                )
                 tx.results.replace_results(inputs.run.id, results)
                 tx.work.stale_reviews(command.book_id)
-            after = correction_inputs(tx, command.book_id, candidate.section_id)
+            after = (
+                inputs.with_updated_state(
+                    updated_results=results,
+                    updated_bindings=updated_bindings if updated_bindings else None,
+                )
+                if hasattr(inputs, 'with_updated_state')
+                else correction_inputs(tx, command.book_id, candidate.section_id)
+            )
             tx.work.advance_correction_input(inputs.run.id, candidate.block_id,
                 expected_generation=candidate.input_generation,
                 fingerprint=correction_input_fingerprint(after, candidate.block_id))

@@ -1393,6 +1393,330 @@ def test_correct_chapter_candidates_skips_unchanged_revalidation_and_allows_tran
     assert prepare_calls[0] == (b2.id,)
 
 
+@pytest.mark.asyncio
+async def test_correct_chapter_v2_counts_unchanged_blocks_and_skips_reload_in_review_group(monkeypatch):
+    import linguary.application.use_cases.correct_chapter as module
+    from linguary.application.correction_dto import (
+        ChapterCorrectionV2Response,
+        CorrectionIssue,
+        CurrentQuoteEvidence,
+        ProposedBlockResponse,
+        UnchangedBlockResponse,
+    )
+    from linguary.domain.content_plan import ContentEvidence, ContentPlan
+
+    section = make_analysis_section(
+        texts=("First unchanged.", "Second valid proposal.", "Third invalid evidence."),
+    )
+    doc = make_analysis_document((section,))
+    b1, b2, b3 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        (
+            (b1.id, BlockTreatment.TRANSLATE),
+            (b2.id, BlockTreatment.TRANSLATE),
+            (b3.id, BlockTreatment.TRANSLATE),
+        ),
+    )
+    content_plan = ContentPlan(version=3, profile="content-plan-v3", difficulties=())
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id, b3.id),
+        content_plan=content_plan,
+    )
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    ev = ContentEvidence(plan_sha256=content_plan.sha256, version=3)
+    res1 = BlockProcessingResult(block_id=b1.id, treatment=BlockTreatment.TRANSLATE, translated_text="Первый.", content_evidence=ev)
+    res2 = BlockProcessingResult(block_id=b2.id, treatment=BlockTreatment.TRANSLATE, translated_text="Второй старый.", content_evidence=ev)
+    res3 = BlockProcessingResult(block_id=b3.id, treatment=BlockTreatment.TRANSLATE, translated_text="Третий старый.", content_evidence=ev)
+    results = {b1.id: res1, b2.id: res2, b3.id: res3}
+    cond_id = str(uuid4())
+    run_id = str(uuid4())
+    task_id = str(uuid4())
+    bindings = {
+        b.id: {
+            "book_id": doc.id,
+            "conditions_id": cond_id,
+            "attempt_id": str(uuid4()),
+            "artifact_revision_id": str(uuid4()),
+            "payload_json": {"schema_version": 1},
+        }
+        for b in section.blocks
+    }
+    generations = {b1.id: 1, b2.id: 1, b3.id: 1}
+    run = SimpleNamespace(id=run_id, glossary_snapshot=GlossarySnapshot())
+    conditions = SimpleNamespace(id=cond_id, payload={"schema_version": 1, "versions": {"validators": 3}})
+
+    def build_inputs():
+        return CorrectionInputs(
+            document=doc,
+            section=section,
+            analysis=analysis,
+            run=run,
+            conditions=conditions,
+            snapshot=snapshot,
+            blocks=section.blocks,
+            results=dict(results),
+            bindings=dict(bindings),
+            input_generations=dict(generations),
+        )
+
+    initial_inputs = build_inputs()
+    identity = correction_task_identity(
+        book_id=doc.id,
+        run_id=run.id,
+        section_id=section.id,
+        input_generation="gen-1",
+        policy_version=snapshot.policy_version,
+    )
+    task = SimpleNamespace(
+        id=task_id,
+        book_id=doc.id,
+        task_type=TaskType.CHAPTER_CORRECTION,
+        scope_id=section.id,
+        status=TaskStatus.RUNNING,
+        attempts=1,
+        operation_id=identity.operation_id,
+        identity=identity,
+    )
+    work_bindings = {
+        ("task", task.id): {
+            "book_id": doc.id,
+            "conditions_id": conditions.id,
+            "payload_json": {
+                "run_id": run.id,
+                "section_id": section.id,
+                "input_generation": "gen-1",
+                "manifest": initial_inputs.manifest,
+            },
+        },
+    }
+    attempts_store: dict[str, SimpleNamespace] = {}
+    candidates_store: dict[str, CorrectionCandidate] = {}
+    saved_checks: dict[str, object] = {}
+    results_replaced = False
+
+    class FakeWork:
+        def get_binding(self, kind, entity_id):
+            return work_bindings.get((kind, entity_id))
+
+        def bind(self, kind, entity_id, *, book_id, conditions_id, payload, **kwargs):
+            work_bindings[(kind, entity_id)] = {
+                "book_id": book_id,
+                "conditions_id": conditions_id,
+                "payload_json": payload,
+            }
+
+        def add_correction_candidates(self, candidates):
+            for c in candidates:
+                candidates_store[c.candidate_id] = c
+
+        def get_correction_candidate(self, cid):
+            return candidates_store.get(cid)
+
+        def list_correction_candidates(self, run_id, *, section_id=None, states=None):
+            return tuple(
+                c for c in candidates_store.values()
+                if states is None or c.state in states
+            )
+
+        def correction_checks(self, run_id, section_id):
+            return tuple(saved_checks.values())
+
+        def replace_correction_checks(self, run_id, section_id, checks):
+            for c in checks:
+                saved_checks[c.block_id] = c
+
+        def get_attempt(self, attempt_id):
+            return attempts_store.get(attempt_id)
+
+        def transition_attempt(self, attempt_id, new_state, *, expected_state):
+            attempts_store[attempt_id].state = new_state
+
+        def archive_artifacts(self, items):
+            return tuple(f"art-{len(attempts_store)}-{i}" for i in range(len(items)))
+
+        def record_correction_verdict(self, candidate_id, *, state, review, review_attempt_id, **kwargs):
+            old = candidates_store[candidate_id]
+            candidates_store[candidate_id] = replace(
+                old, state=state, review=review, review_attempt_id=review_attempt_id
+            )
+
+        def replace_result_binding(self, key, *, book_id, conditions_id, attempt_id, artifact_revision_id, **kwargs):
+            block_id = key.split(":", 1)[1]
+            bindings[block_id] = {
+                **bindings[block_id],
+                "book_id": book_id,
+                "conditions_id": conditions_id,
+                "attempt_id": attempt_id,
+                "artifact_revision_id": artifact_revision_id,
+                "payload_json": {"schema_version": 1},
+            }
+
+        def advance_correction_input(self, run_id, block_id, *, expected_generation, fingerprint):
+            pass
+
+        def stale_reviews(self, book_id):
+            pass
+
+    class FakeResults:
+        def replace_results(self, run_id, updated):
+            nonlocal results_replaced
+            results_replaced = True
+            for r in updated:
+                results[r.block_id] = r
+
+    fake_tx = SimpleNamespace(
+        tasks=SimpleNamespace(get=lambda tid: task),
+        work=FakeWork(),
+        results=FakeResults(),
+    )
+
+    def guarded_correction_inputs(tx, bid, sid):
+        if results_replaced:
+            raise AssertionError("correction_inputs must not be called after results are replaced; use with_updated_state")
+        return build_inputs()
+
+    note_source_calls = 0
+    orig_validate_note_sources = module.validate_note_sources
+
+    def spy_validate_note_sources(results_arg, texts_arg):
+        nonlocal note_source_calls
+        note_source_calls += 1
+        return orig_validate_note_sources(results_arg, texts_arg)
+
+    monkeypatch.setattr(module, "correction_inputs", guarded_correction_inputs)
+    monkeypatch.setattr(module, "validate_note_sources", spy_validate_note_sources)
+    monkeypatch.setattr(module, "finalize_response", lambda *a, **kw: None)
+
+    class FakeClient:
+        async def generate(self, request):
+            ctx = request.call_context
+            attempts_store[ctx.attempt_id] = SimpleNamespace(
+                id=ctx.attempt_id,
+                book_id=doc.id,
+                state="validated",
+                task_id=task.id,
+                run_id=run.id,
+                conditions_id=conditions.id,
+                context={
+                    **ctx.to_dict(),
+                    "task_attempt": task.attempts,
+                    "operation_id": task.operation_id,
+                },
+            )
+            if request.kind is LLMResponseKind.CHAPTER_CORRECTION:
+                payload = ChapterCorrectionV2Response(
+                    blocks=(
+                        UnchangedBlockResponse(block_id=b1.id),
+                        ProposedBlockResponse(
+                            block_id=b2.id,
+                            translated_text="Второй новый.",
+                            glossary_hints=(),
+                            language_notes=(),
+                            issues=(
+                                CorrectionIssue(
+                                    field_path="translated_text",
+                                    source_quote="Second",
+                                    current_evidence=CurrentQuoteEvidence(
+                                        field_path="translated_text",
+                                        quote="Второй",
+                                    ),
+                                    problem="Точность",
+                                    minimal_fix_reason="Уточнить",
+                                ),
+                            ),
+                        ),
+                        ProposedBlockResponse(
+                            block_id=b3.id,
+                            translated_text="Третий спорный.",
+                            glossary_hints=(),
+                            language_notes=(),
+                            issues=(
+                                CorrectionIssue(
+                                    field_path="translated_text",
+                                    source_quote="MissingQuote",
+                                    current_evidence=CurrentQuoteEvidence(
+                                        field_path="translated_text",
+                                        quote="Третий",
+                                    ),
+                                    problem="Ошибка",
+                                    minimal_fix_reason="Правка",
+                                ),
+                            ),
+                        ),
+                    )
+                )
+            else:
+                cand_id, prop_sha = request.correction_candidate_refs[0]
+                payload = ChapterCorrectionReviewResponse(
+                    candidates=(
+                        CorrectionVerdict(
+                            candidate_id=cand_id,
+                            proposal_sha256=prop_sha,
+                            verdict="confirmed",
+                            error_supported=True,
+                            evidence_valid=True,
+                            minimal=True,
+                            no_semantic_loss=True,
+                            reason="Подтверждено.",
+                        ),
+                    )
+                )
+            return LLMResponse(
+                payload=payload,
+                raw_content="{}",
+                provider="test",
+                model="gpt-test",
+                call_context=ctx,
+            )
+
+    handler = CorrectChapterV2(
+        unit_of_work=SimpleNamespace(transaction=lambda: nullcontext(fake_tx)),
+        llm_client=FakeClient(),
+        snapshot=snapshot,
+        validator=make_validator(),
+    )
+    propose_checked = await handler._propose_group(
+        CorrectChapterCommand(doc.id, section.id, task.id),
+        (b1.id, b2.id, b3.id),
+    )
+    # b1 is unchanged and b3 went directly to awaiting_human; only b2 is awaiting_review
+    assert propose_checked == 2
+    assert note_source_calls == 0
+
+    awaiting_review_ids = tuple(
+        c.candidate_id for c in candidates_store.values() if c.state == "awaiting_review"
+    )
+    assert len(awaiting_review_ids) == 1
+    review_checked = await handler._review_group(
+        CorrectChapterCommand(doc.id, section.id, task.id),
+        awaiting_review_ids,
+    )
+    assert review_checked == 1
+    assert propose_checked + review_checked == 3
+
+
+
 
 
 

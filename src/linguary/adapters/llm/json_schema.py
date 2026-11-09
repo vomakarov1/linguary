@@ -12,6 +12,8 @@ an invalid response is rejected and retried.
 
 from __future__ import annotations
 
+import copy
+import functools
 from typing import Any
 
 from pydantic import BaseModel
@@ -54,11 +56,21 @@ _OMITTED_SCHEMA_PROPERTIES: dict[str, frozenset[str]] = {
 }
 
 
-def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
-    """Model response schema formatted for strict structured output."""
+@functools.lru_cache(maxsize=None)
+def _cached_strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
     schema = model.model_json_schema()
     _filter_omitted_properties(schema)
     return _strip(schema)
+
+
+def cached_strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Cached strict schema for read-only serialization in request bodies."""
+    return _cached_strict_json_schema(model)
+
+
+def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Model response schema formatted for strict structured output."""
+    return copy.deepcopy(_cached_strict_json_schema(model))
 
 
 def _filter_omitted_properties(node: Any) -> None:
@@ -114,4 +126,4 @@ def _strip_mapping(node: Any) -> Any:
     return {name: _strip(value) for name, value in node.items()}
 
 
-__all__ = ["strict_json_schema"]
+__all__ = ["cached_strict_json_schema", "strict_json_schema"]

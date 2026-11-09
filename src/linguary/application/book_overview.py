@@ -408,17 +408,21 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
         and all(item['complete'] for item in root_summaries))
     if epub_ready:
         try:
+            from linguary.application.correction import correction_coverage_complete
             _ensure_ready(book, tasks)
-            if results is None:
-                results = transaction.results.list_for_run(run.id)
-            _validate_content_plans(
-                document,
-                analyses,
-                results,
-                english_help=bool(conditions and conditions.payload.get("english_help")),
-                validators_version=1 if conditions is None else conditions.payload['versions']['validators'],
-                reader_level=None if conditions is None else conditions.payload.get('reader_level'),
-            )
+            if not correction_coverage_complete(transaction, book.id):
+                epub_ready = False
+            else:
+                if results is None:
+                    results = transaction.results.list_for_run(run.id)
+                _validate_content_plans(
+                    document,
+                    analyses,
+                    results,
+                    english_help=bool(conditions and conditions.payload.get("english_help")),
+                    validators_version=1 if conditions is None else conditions.payload['versions']['validators'],
+                    reader_level=None if conditions is None else conditions.payload.get('reader_level'),
+                )
         except (ExportBookError, ResultValidationError, DomainError):
             epub_ready = False
     calls = (

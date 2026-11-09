@@ -1,5 +1,6 @@
 """Current correction coverage and transactional recovery of required chapter work."""
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -41,6 +42,20 @@ def original_block_payload(block):
     return payload
 
 
+def _encoded_json_bytes(value) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+
+
+def _block_checksum(prefix, block, result_obj) -> str:
+    digest = prefix.copy()
+    result_payload = None if result_obj is None else asdict(result_obj)
+    digest.update(_encoded_json_bytes(result_payload))
+    digest.update(b',"original":')
+    digest.update(_encoded_json_bytes(original_block_payload(block)))
+    digest.update(b'}')
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class CorrectionInputs:
     document: CanonicalDocument
@@ -53,13 +68,26 @@ class CorrectionInputs:
     results: dict[str, BlockProcessingResult]
     bindings: dict[str, dict | None]
     input_generations: dict[str, int] = field(default_factory=dict)
+    _precomputed: dict | None = field(default=None, kw_only=True, repr=False, compare=False)
     _context: dict = field(init=False, repr=False, compare=False)
     _context_sha256: str = field(init=False, repr=False, compare=False)
+    _context_bytes: bytes = field(init=False, repr=False, compare=False)
     _checksums: dict[str, str] = field(init=False, repr=False, compare=False)
     _block_aliases: dict[str, str] = field(init=False, repr=False, compare=False)
     _alias_to_block_id: dict[str, str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        precomputed = self._precomputed
+        if precomputed is not None:
+            object.__setattr__(self, '_precomputed', None)
+            object.__setattr__(self, '_context', precomputed['context'])
+            object.__setattr__(self, '_context_sha256', precomputed['context_sha256'])
+            object.__setattr__(self, '_context_bytes', precomputed['context_bytes'])
+            object.__setattr__(self, '_checksums', precomputed['checksums'])
+            object.__setattr__(self, '_block_aliases', precomputed['block_aliases'])
+            object.__setattr__(self, '_alias_to_block_id', precomputed['alias_to_block_id'])
+            return
+
         block_aliases = {
             block.id: f"b{index}"
             for index, block in enumerate(self.section.ordered_blocks, start=1)
@@ -88,26 +116,70 @@ class CorrectionInputs:
             run_glossary=asdict(filtered_glossary),
         )
 
-        def encoded(value):
-            return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
-
-        context_bytes = encoded(context)
+        context_bytes = _encoded_json_bytes(context)
         # Preserve the existing canonical JSON checksum while hashing the shared context once.
         prefix = sha256(b'{"context":' + context_bytes + b',"current_persisted_result":')
-        checksums = {}
-        for block in self.blocks:
-            digest = prefix.copy()
-            result = None if block.id not in self.results else asdict(self.results[block.id])
-            digest.update(encoded(result))
-            digest.update(b',"original":')
-            digest.update(encoded(original_block_payload(block)))
-            digest.update(b'}')
-            checksums[block.id] = digest.hexdigest()
+        checksums = {
+            block.id: _block_checksum(prefix, block, self.results.get(block.id))
+            for block in self.blocks
+        }
         object.__setattr__(self, '_context', context)
         object.__setattr__(self, '_context_sha256', sha256(context_bytes).hexdigest())
+        object.__setattr__(self, '_context_bytes', context_bytes)
         object.__setattr__(self, '_checksums', checksums)
         object.__setattr__(self, '_block_aliases', block_aliases)
         object.__setattr__(self, '_alias_to_block_id', alias_to_block_id)
+
+    def with_updated_state(
+        self,
+        *,
+        updated_results=(),
+        updated_bindings=None,
+        input_generations=None,
+    ) -> "CorrectionInputs":
+        if isinstance(updated_results, Mapping):
+            changed_results = dict(updated_results)
+        else:
+            changed_results = {r.block_id: r for r in updated_results}
+        new_results = {**self.results, **changed_results} if changed_results else dict(self.results)
+        new_bindings = (
+            {**self.bindings, **updated_bindings}
+            if updated_bindings is not None
+            else dict(self.bindings)
+        )
+        new_generations = (
+            dict(input_generations)
+            if input_generations is not None
+            else dict(self.input_generations)
+        )
+        new_checksums = dict(self._checksums)
+        if changed_results:
+            prefix = sha256(b'{"context":' + self._context_bytes + b',"current_persisted_result":')
+            blocks_by_id = {block.id: block for block in self.blocks}
+            for block_id, result_obj in changed_results.items():
+                block = blocks_by_id.get(block_id)
+                if block is not None:
+                    new_checksums[block_id] = _block_checksum(prefix, block, result_obj)
+        return CorrectionInputs(
+            document=self.document,
+            section=self.section,
+            analysis=self.analysis,
+            run=self.run,
+            conditions=self.conditions,
+            snapshot=self.snapshot,
+            blocks=self.blocks,
+            results=new_results,
+            bindings=new_bindings,
+            input_generations=new_generations,
+            _precomputed=dict(
+                context=self._context,
+                context_sha256=self._context_sha256,
+                context_bytes=self._context_bytes,
+                checksums=new_checksums,
+                block_aliases=self._block_aliases,
+                alias_to_block_id=self._alias_to_block_id,
+            ),
+        )
 
     @property
     def block_aliases(self) -> dict[str, str]:
@@ -183,7 +255,12 @@ def _section_correction_inputs(
     if result_bindings is not None:
         bindings = {b.id: result_bindings.get(b.id) for b in blocks}
     else:
-        bindings = {b.id: tx.work.get_binding('result', f'{run.id}:{b.id}') for b in blocks}
+        result_bindings_fn = getattr(tx.work, 'result_bindings', None)
+        if callable(result_bindings_fn):
+            run_bindings = result_bindings_fn(run.id)
+            bindings = {b.id: run_bindings.get(b.id) for b in blocks}
+        else:
+            bindings = {b.id: tx.work.get_binding('result', f'{run.id}:{b.id}') for b in blocks}
     if generations is None:
         generations = (
             tx.work.correction_input_generations(run.id)
@@ -399,7 +476,7 @@ def _observe_correction_inputs(tx, inputs):
         if inputs.input_generations.get(block.id) and generation != inputs.input_generations.get(block.id):
             tx.work.stale_correction_candidates(inputs.run.id, block_ids=(block.id,))
         updated_generations[block.id] = generation
-    return replace(inputs, input_generations=updated_generations)
+    return inputs.with_updated_state(input_generations=updated_generations)
 
 
 def _restore_correction_checks(tx, inputs, tasks):
@@ -495,7 +572,8 @@ def task_matches_inputs(tx, task, payload, inputs):
 def correction_coverage_complete(tx, book_id):
     """Legacy runs retain their prior export semantics; required runs need current checks."""
     run = tx.runs.active_for_book(book_id)
-    binding = None if run is None else tx.work.get_binding('run', run.id)
+    get_binding = getattr(tx.work, 'get_binding', None)
+    binding = None if run is None or not callable(get_binding) else get_binding('run', run.id)
     policy = correction_policy({} if binding is None else binding['payload_json'])
     if policy is None:
         return True

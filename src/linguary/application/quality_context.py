@@ -1,6 +1,7 @@
 """Immutable review inputs and source-bound response validation."""
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 import json
 from typing import Any
 from linguary.application.analysis_merge import find_quote_span
@@ -50,7 +51,6 @@ def snapshot(tx, book_id, scope):
         ids = tuple(b for b in selected if b in analysis.treatment_plan.block_ids)
         if ids:
             add('analysis', ids, asdict(analysis))
-    glossary = tuple(tx.glossary.list_for_book(book_id)) if run is None else run.glossary_snapshot
     current_glossary = [asdict(g) for g in tx.glossary.list_for_book(book_id)]
     book_manifest_sha = canonical_sha(dict(
         originals=[dict(id=b.id, text=b.text) for b in blocks.values()],
@@ -58,11 +58,12 @@ def snapshot(tx, book_id, scope):
         glossary=current_glossary, run_id=None if run is None else run.id))
     value = dict(schema_version=1, book_id=book_id, book_manifest_sha=book_manifest_sha, conditions_id=conditions.id,
         conditions_sha=canonical_sha(thaw(conditions.payload)), scope=list(selected), artifacts=artifacts,
-        glossary=asdict(glossary) if run else [asdict(g) for g in glossary],
+        glossary=asdict(run.glossary_snapshot) if run is not None else current_glossary,
         book_complete=bool(blocks) and set(blocks) <= results.keys(),
         missing_results=[b for b in selected if b not in results])
-    value = json.loads(json.dumps(value, ensure_ascii=False))
-    return {**value, 'manifest_sha': canonical_sha(value)}
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    value = json.loads(encoded)
+    return {**value, 'manifest_sha': sha256(encoded.encode()).hexdigest()}
 
 
 def _manifest_block_aliases(manifest: Mapping[str, Any]) -> dict[str, str]:
@@ -480,8 +481,9 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
                     raise WorkStateError('чужой артефакт замечания')
                 per_block.append(matched_art)
             first_art = per_block[0]
+            allowed_shas = {art['artifact_sha'] for art in per_block}
             if artifact_sha:
-                if artifact_sha != first_art['artifact_sha']:
+                if artifact_sha not in allowed_shas:
                     raise WorkStateError('чужой артефакт замечания')
             else:
                 artifact_sha = first_art['artifact_sha']
@@ -505,7 +507,7 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
                 or artifact['artifact_kind'] != kind
                 or not ordered_bids
                 or (
-                    artifact['block_ids'] != [ordered_bids[0]]
+                    artifact['artifact_sha'] not in {art['artifact_sha'] for art in per_block}
                     if multi_block_single_artifact
                     else not f_bids <= set(artifact['block_ids'])
                 )

@@ -635,6 +635,7 @@ class CorrectChapter:
                         raise RecoveryError('interrupted')
                     candidates = self._candidates(tx, current, response.payload)
                     changed = tuple(r for r in candidates if r != current.results[r.block_id])
+                    updated_bindings = {}
                     # Validate the whole group before writing any projection or archive.
                     for result in changed:
                         predecessor = current.bindings[result.block_id]
@@ -652,11 +653,26 @@ class CorrectChapter:
                             expected_attempt_id=predecessor['attempt_id'],
                             provenance=None,
                             expected_artifact_revision_id=predecessor['artifact_revision_id'])
+                        updated_bindings[result.block_id] = {
+                            **predecessor,
+                            'book_id': command.book_id,
+                            'conditions_id': current.conditions.id,
+                            'attempt_id': attempt.id,
+                            'artifact_revision_id': artifact,
+                            'payload_json': {'schema_version': 1},
+                        }
                     if changed:
                         tx.results.replace_results(current.run.id, changed)
                         tx.work.stale_reviews(command.book_id)
                     tx.work.transition_attempt(attempt.id, 'accepted', expected_state='validated')
-                    accepted = correction_inputs(tx, command.book_id, command.section_id)
+                    accepted = (
+                        current.with_updated_state(
+                            updated_results=changed,
+                            updated_bindings=updated_bindings,
+                        )
+                        if hasattr(current, 'with_updated_state')
+                        else correction_inputs(tx, command.book_id, command.section_id)
+                    )
                     checksums = accepted.checksums
                     tx.work.replace_correction_checks(current.run.id, command.section_id,
                         tuple(CorrectionCheck(current.run.id, b, command.section_id, checksums[b], attempt.id)
@@ -753,7 +769,15 @@ class CorrectChapter:
                 language_notes=tuple(restored_notes))
             candidate, = ReaderTextPolicy().prepare_results((candidate,), section_quote_fragments)
             candidates.append(candidate)
-        validate_note_sources(candidates, {b.id: b.text for b in inputs.section.ordered_blocks})
+        has_v3_content_plan = (
+            getattr(inputs, 'analysis', None) is not None
+            and getattr(inputs.analysis, 'content_plan', None) is not None
+            and inputs.analysis.content_plan.version == 3
+            and not getattr(inputs.document, 'is_front_matter', lambda s: False)(inputs.section)
+            and not getattr(inputs.section, 'is_notes_only', False)
+        )
+        if not has_v3_content_plan:
+            validate_note_sources(candidates, {b.id: b.text for b in inputs.section.ordered_blocks})
         merged = tuple(next((candidate for candidate in candidates if candidate.block_id == r.block_id), r)
                        for r in all_results)
         note_ids = [n.id for r in merged for n in r.language_notes]
@@ -823,6 +847,14 @@ def apply_correction_candidate(tx, inputs, candidate, result, *, resolution):
         attempt_id=candidate.proposal_attempt_id, artifact_revision_id=artifact,
         expected_attempt_id=predecessor['attempt_id'],
         expected_artifact_revision_id=predecessor['artifact_revision_id'], provenance=None)
+    return {
+        **(predecessor or {}),
+        'book_id': candidate.book_id,
+        'conditions_id': candidate.conditions_id,
+        'attempt_id': candidate.proposal_attempt_id,
+        'artifact_revision_id': artifact,
+        'payload_json': {'schema_version': 1},
+    }
 
 
 class CorrectChapterV2(CorrectChapter):
@@ -1004,7 +1036,7 @@ class CorrectChapterV2(CorrectChapter):
                             tuple(CorrectionCheck(current.run.id, b, command.section_id,
                                 current.checksums[b], attempt.id, 'unchanged') for b in unchanged))
                     finalize_response(self.uow, response, 'accepted', transaction=tx)
-                return len(block_ids) if not has_awaiting_review else 0
+                return len(block_ids) - sum(1 for c in candidates if c.state == 'awaiting_review')
             except LLMContextCapacityError:
                 if len(block_ids) == 1:
                     raise LLMContextCapacityError('блок с контекстом предложения не помещается') from None
@@ -1152,12 +1184,22 @@ class CorrectChapterV2(CorrectChapter):
                             proposal_sha256=candidate.proposal_sha256, input_sha256=candidate.input_sha256,
                             review_attempt_id=attempt.id, review=dict(asdict(verdict), artifact_revision_id=artifact),
                             state='auto_applied' if candidate in accepted else 'awaiting_human')
+                    updated_bindings = {}
                     for candidate, result in zip(accepted, results, strict=True):
-                        apply_correction_candidate(tx, current, candidate, result, resolution='confirmed')
+                        updated_bindings[candidate.block_id] = apply_correction_candidate(
+                            tx, current, candidate, result, resolution='confirmed'
+                        )
                     if results:
                         tx.results.replace_results(current.run.id, results)
                         tx.work.stale_reviews(command.book_id)
-                    after = correction_inputs(tx, command.book_id, command.section_id)
+                    after = (
+                        current.with_updated_state(
+                            updated_results=results,
+                            updated_bindings=updated_bindings,
+                        )
+                        if hasattr(current, 'with_updated_state')
+                        else correction_inputs(tx, command.book_id, command.section_id)
+                    )
                     for candidate in accepted:
                         tx.work.advance_correction_input(current.run.id, candidate.block_id,
                             expected_generation=candidate.input_generation,

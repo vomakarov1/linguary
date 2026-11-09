@@ -1522,6 +1522,205 @@ def test_correct_chapter_omits_duplicate_original_and_aliases_plan_ids():
     assert long_fact_id not in review_req.input_text
 
 
+def test_section_correction_inputs_uses_batch_result_bindings_and_incremental_state_update(monkeypatch):
+    import linguary.application.correction as correction_module
+    from linguary.application.book_overview import _quality_projection
+    from linguary.application.correction import (
+        CorrectionInputs,
+        _observe_correction_inputs,
+        _section_correction_inputs,
+    )
+    from linguary.application.correction_dto import CORRECTION_VERSIONS_V2, CorrectionSnapshotV2
+    from linguary.application.quality_context import QualityReviewResponse, snapshot as quality_snapshot, validate_response
+    from linguary.domain import BookStatus, ChapterAnalysis, TreatmentPlan
+
+    section = make_analysis_section(texts=("First block.", "Second block."))
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    res1 = BlockProcessingResult(block_id=b1.id, treatment=BlockTreatment.TRANSLATE, translated_text="Первый.")
+    res2 = BlockProcessingResult(block_id=b2.id, treatment=BlockTreatment.TRANSLATE, translated_text="Второй.")
+    binding1 = {"book_id": doc.id, "conditions_id": "cond-1", "attempt_id": "att-1", "artifact_revision_id": "art-1"}
+    binding2 = {"book_id": doc.id, "conditions_id": "cond-1", "attempt_id": "att-2", "artifact_revision_id": "art-2"}
+    run = SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot())
+    conditions = SimpleNamespace(id="cond-1", revision=1, payload={"schema_version": 1, "versions": {"validators": 3}},
+                                 pronunciation_help_enabled=False, pronunciation_variant=None, reproducibility="strict")
+
+    batch_calls: list[str] = []
+
+    class FakeWork:
+        def result_bindings(self, run_id: str):
+            batch_calls.append(run_id)
+            return {b1.id: binding1, b2.id: binding2}
+
+        def get_binding(self, kind: str, entity_id: str):
+            if kind == "result":
+                raise AssertionError("Per-block get_binding('result', ...) must not be called when result_bindings is available")
+            return None
+
+        def correction_input_generations(self, run_id: str):
+            return {b1.id: 1, b2.id: 1}
+
+        def observe_correction_input(self, run_id: str, block_id: str, fingerprint: str) -> int:
+            return 2 if block_id == b1.id else 1
+
+        def stale_correction_candidates(self, run_id: str, *, block_ids=None, candidate_ids=None):
+            pass
+
+    tx = SimpleNamespace(
+        results=SimpleNamespace(list_for_section=lambda _rid, _sid: (res1, res2)),
+        work=FakeWork(),
+        analyses=SimpleNamespace(get_for_section=lambda _bid, _sid: analysis),
+    )
+
+    inputs = _section_correction_inputs(
+        tx,
+        document=doc,
+        section=section,
+        run=run,
+        conditions=conditions,
+        snapshot=snapshot,
+    )
+    assert batch_calls == ["run-1"]
+    assert inputs.bindings == {b1.id: binding1, b2.id: binding2}
+
+    payload_calls: list[str] = []
+    orig_payload_fn = correction_module.original_block_payload
+
+    def spy_payload(block):
+        payload_calls.append(block.id)
+        return orig_payload_fn(block)
+
+    monkeypatch.setattr(correction_module, "original_block_payload", spy_payload)
+
+    observed = _observe_correction_inputs(tx, inputs)
+    assert observed.input_generations == {b1.id: 2, b2.id: 1}
+    assert payload_calls == []
+
+    updated_res1 = replace(res1, translated_text="Первый обновлённый.")
+    updated_binding1 = {**binding1, "attempt_id": "att-1-new", "artifact_revision_id": "art-1-new"}
+    updated = inputs.with_updated_state(
+        updated_results=(updated_res1,),
+        updated_bindings={b1.id: updated_binding1},
+        input_generations={b1.id: 3, b2.id: 1},
+    )
+    assert payload_calls == [b1.id]
+    assert updated.context is inputs.context
+    assert updated.context_sha256 == inputs.context_sha256
+    assert updated.checksums[b2.id] == inputs.checksums[b2.id]
+    assert updated.checksums[b1.id] != inputs.checksums[b1.id]
+    assert updated.bindings[b1.id] == updated_binding1
+    assert updated.bindings[b2.id] == binding2
+    assert updated.input_generations == {b1.id: 3, b2.id: 1}
+
+    fresh = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=run,
+        conditions=conditions,
+        snapshot=snapshot,
+        blocks=section.blocks,
+        results={b1.id: updated_res1, b2.id: res2},
+        bindings={b1.id: updated_binding1, b2.id: binding2},
+        input_generations={b1.id: 3, b2.id: 1},
+    )
+    assert updated.checksums == fresh.checksums
+
+    # Verify quality_context.snapshot single glossary read when run is None and multi-block finding artifact_sha
+    glossary_calls = 0
+
+    def count_glossary(_book_id: str):
+        nonlocal glossary_calls
+        glossary_calls += 1
+        return ()
+
+    q_tx = SimpleNamespace(
+        documents=SimpleNamespace(get=lambda _bid: doc),
+        work=SimpleNamespace(latest_conditions=lambda _bid: conditions),
+        runs=SimpleNamespace(active_for_book=lambda _bid: None),
+        results=SimpleNamespace(list_for_run=lambda _rid: ()),
+        analyses=SimpleNamespace(list_for_book=lambda _bid: (analysis,)),
+        glossary=SimpleNamespace(list_for_book=count_glossary),
+    )
+    manifest = quality_snapshot(q_tx, doc.id, "all")
+    assert glossary_calls == 1
+    orig_b2_sha = next(
+        a["artifact_sha"]
+        for a in manifest["artifacts"]
+        if a["artifact_kind"] == "original" and a["block_ids"] == [b2.id]
+    )
+    validated_qr = validate_response(
+        manifest,
+        QualityReviewResponse(
+            findings=(
+                {
+                    "artifact_kind": "original",
+                    "artifact_sha": orig_b2_sha,
+                    "block_ids": ["b1", "b2"],
+                    "evidence_anchors": [{"block_id": "b2", "quote": "Second"}],
+                    "problem": "Issue across blocks",
+                },
+            ),
+            checked_artifacts=(),
+            missing_artifacts=(),
+        ),
+    )
+    assert validated_qr.findings[0]["artifact_sha"] == orig_b2_sha
+
+    # Verify book_overview._quality_projection checks correction_coverage_complete
+    monkeypatch.setattr(correction_module, "correction_coverage_complete", lambda _tx, _bid: False)
+    book_record = SimpleNamespace(id=doc.id, status=BookStatus.READY_TO_EXPORT, source_language="en")
+    overview_tx = SimpleNamespace(
+        work=SimpleNamespace(
+            latest_conditions=lambda _bid: conditions,
+            list_roots=lambda _bid, run_id=None: (),
+            list_reviews=lambda _bid: (),
+        ),
+        results=SimpleNamespace(list_for_run=lambda _rid: (res1, res2)),
+        llm_calls=SimpleNamespace(list_for_book=lambda _bid: ()),
+    )
+    projection = _quality_projection(
+        overview_tx,
+        book_record,
+        doc,
+        (analysis,),
+        run,
+        (),
+        stored_results=(res1, res2),
+        stored_calls=(),
+    )
+    assert projection["epub_ready"] is False
+
+
+
 
 
 

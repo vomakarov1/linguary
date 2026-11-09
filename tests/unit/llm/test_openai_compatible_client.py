@@ -980,4 +980,41 @@ async def test_response_coverage_error_preserves_truncated_flag(monkeypatch: pyt
         await client.aclose()
 
 
+async def test_strict_json_schema_is_cached_across_openai_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    from linguary.adapters.llm import json_schema as json_schema_module
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    from linguary.adapters.llm.payloads import schema_for
+    from linguary.application.ports.llm import LLMResponseKind
+
+    model_cls = schema_for(LLMResponseKind.TRANSLATION_RESULT, contract_version=1)
+    if hasattr(json_schema_module, "_cached_strict_json_schema"):
+        json_schema_module._cached_strict_json_schema.cache_clear()
+
+    build_count = 0
+    orig_filter = json_schema_module._filter_omitted_properties
+
+    def counting_filter(node: Any) -> None:
+        nonlocal build_count
+        if isinstance(node, dict) and "$defs" in node:
+            build_count += 1
+        orig_filter(node)
+
+    monkeypatch.setattr(json_schema_module, "_filter_omitted_properties", counting_filter)
+
+    client = client_over(responding(completion(as_content(translation_payload()))))
+    try:
+        req = LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
+        await client.generate(req)
+        await client.generate(req)
+        assert build_count == 1
+    finally:
+        await client.aclose()
+
+    schema_copy = strict_json_schema(model_cls)
+    schema_copy["properties"]["mutated_key"] = {"type": "string"}
+    fresh_copy = strict_json_schema(model_cls)
+    assert "mutated_key" not in fresh_copy["properties"]
+
+
+
 
