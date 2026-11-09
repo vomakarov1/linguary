@@ -1200,11 +1200,15 @@ class SqlAlchemyWorkRepository:
         previous = self._session.scalars(select(LLMAttemptRow).where(LLMAttemptRow.scope_id == scope.id)
             .order_by(LLMAttemptRow.ordinal.desc()).limit(2)).all()
         self._session.flush()
-        if not (
+        is_truncated = (
+            violation is not None and violation.rule_code == "provider_truncated"
+        )
+        if not is_truncated and not (
             signature
             and len(previous) == 2
             and all(
-                row.state == 'rejected' and row.outcome_json.get('failure_signature') == signature
+                row.state == "rejected"
+                and row.outcome_json.get("failure_signature") == signature
                 for row in previous
             )
         ):

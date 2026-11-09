@@ -305,3 +305,74 @@ async def test_restart_rejects_stale_generation(tmp_path):
             ))
     finally:
         await app.aclose()
+
+
+async def test_restart_translation_allows_accepted_scope_updated_by_chapter_correction(tmp_path):
+    from dataclasses import asdict
+    from uuid import uuid4
+    from linguary.domain.recovery import CallAttempt
+
+    app, _, _, run, _, root, accepted, unfinished = await make_partial_root(tmp_path)
+    try:
+        accepted_block = accepted.ordered_blocks[0]
+        correction_attempt_id = str(uuid4())
+        correction_artifact_id = str(uuid4())
+        with app.unit_of_work.transaction() as transaction:
+            before_result = transaction.results.get(run.id, accepted_block)
+            before_binding = transaction.work.get_binding("result", f"{run.id}:{accepted_block}")
+            transaction.work.add_attempt(
+                CallAttempt(
+                    correction_attempt_id,
+                    root.book_id,
+                    state="accepted",
+                    generation=0,
+                    ordinal=1,
+                    conditions_id=root.conditions_id,
+                    run_id=run.id,
+                    context={
+                        "schema_version": 1,
+                        "stage": "chapter_correction",
+                        "ordered_block_ids": [accepted_block],
+                        "policy_version": "correction-v1",
+                    },
+                )
+            )
+            transaction.work.archive_artifacts(
+                [
+                    {
+                        "id": correction_artifact_id,
+                        "book_id": root.book_id,
+                        "conditions_id": root.conditions_id,
+                        "run_id": run.id,
+                        "attempt_id": correction_attempt_id,
+                        "kind": "block_result",
+                        "scope_id": accepted_block,
+                        "body": {
+                            "schema_version": 1,
+                            "result": asdict(before_result),
+                            "source_revision": before_binding["artifact_revision_id"],
+                            "source_attempt": before_binding["attempt_id"],
+                        },
+                    }
+                ]
+            )
+            transaction.work.replace_result_binding(
+                f"{run.id}:{accepted_block}",
+                book_id=root.book_id,
+                conditions_id=root.conditions_id,
+                attempt_id=correction_attempt_id,
+                artifact_revision_id=correction_artifact_id,
+                expected_attempt_id=before_binding["attempt_id"],
+                expected_artifact_revision_id=before_binding["artifact_revision_id"],
+                provenance={"schema_version": 1},
+            )
+
+        result = restart(app, root)
+        with app.unit_of_work.transaction() as transaction:
+            successor = transaction.work.get_root(result.successor_root_id)
+            scopes = transaction.work.list_scopes(successor.id)
+            assert successor.manifest["historical_coverage"] == accepted.ordered_blocks
+            assert [scope.ordered_blocks for scope in scopes] == [unfinished.ordered_blocks]
+    finally:
+        await app.aclose()
+

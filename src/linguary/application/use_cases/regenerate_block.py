@@ -273,8 +273,10 @@ class RegenerateBlock:
                 )
             block = _block_of(document, command)
             section = document.section(block.section_id)
-            analysis = transaction.analyses.get_for_section(
-                command.book_id, section.id
+            all_analyses = transaction.analyses.list_for_book(command.book_id)
+            analysis = (
+                next((ch for ch in all_analyses if ch.section_id == section.id), None)
+                or transaction.analyses.get_for_section(command.book_id, section.id)
             )
             if analysis is None:
                 raise RegenerateBlockError(
@@ -301,7 +303,8 @@ class RegenerateBlock:
             )
             book_candidates = tuple(
                 candidate
-                for chapter in transaction.analyses.list_for_book(command.book_id)
+                for chapter in all_analyses
+                if chapter.section_id != section.id
                 for candidate in chapter.glossary_candidates
             )
         section_block_ids = {item.id for item in section.ordered_blocks}

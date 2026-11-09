@@ -350,15 +350,16 @@ class TranslationCall:
                             physical_context.attempt_id,
                             violation,
                         )
-                    if (
-                        (split and (unit is None or len(unit.items) > 1))
-                        or (
-                            violation is not None
+                        if (
+                            not split
+                            and violation is not None
                             and violation.rule_code == "provider_truncated"
-                            and unit is not None
-                            and len(unit.items) > 1
-                        )
-                    ) and not isinstance(error, LLMContextCapacityError):
+                        ):
+                            current_root = transaction.work.get_root(recovery[0])
+                            split = _can_split_truncated_scope(
+                                transaction.work, current_root, recovery[1], unit
+                            )
+                    if split and (unit is None or len(unit.items) > 1) and not isinstance(error, LLMContextCapacityError):
                         raise RecoverySplit(*recovery) from None
                 if isinstance(error, LLMContextCapacityError):
                     can_retry = (policy is not None and context.has_optional_neighbours
@@ -666,6 +667,41 @@ def _total_tokens(values: Iterable[int | None]) -> int | None:
     return sum(reported) if reported else None
 
 
+def _can_split_truncated_scope(
+    work_repo,
+    root,
+    scope_id: str,
+    unit: TranslationUnit | None,
+) -> bool:
+    if unit is None or len(unit.items) <= 1:
+        return False
+    manifest = getattr(root, "manifest", None) or {}
+    if "atomic_intervals" in manifest:
+        scope_set = set(unit.block_ids)
+        atoms = [
+            tuple(group)
+            for group in manifest["atomic_intervals"]
+            if set(group) <= scope_set
+        ]
+        if len(atoms) < 2:
+            return False
+    list_scopes = getattr(work_repo, "list_scopes", None)
+    policy = manifest.get("policy") or {}
+    if callable(list_scopes) and "max_depth" in policy and "max_leaves" in policy:
+        scopes = list_scopes(root.id)
+        by_id = {item.id: item for item in scopes}
+        scope = by_id.get(scope_id)
+        if scope is not None:
+            depth, parent = 0, scope
+            while parent.parent_id is not None:
+                depth += 1
+                parent = by_id[parent.parent_id]
+            leaves = sum(item.status != "split" for item in scopes)
+            if depth >= policy["max_depth"] or leaves + 1 > policy["max_leaves"]:
+                return False
+    return True
+
+
 def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exception:
     """Same error rephrased using block aliases seen by the model (ALG-05).
 
@@ -678,7 +714,7 @@ def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exce
         return error
     return ResultValidationError(
         context.to_aliases(str(error)),
-        expectation=error.expectation,
+        expectation=error.expectation or getattr(context, "expectation", None),
         violation=getattr(error, "violation", None),
     )
 

@@ -198,10 +198,52 @@ class RestartTranslation:
             if binding["attempt_id"] == attempt.id:
                 continue
             replacement = transaction.work.get_attempt(binding["attempt_id"])
-            if (replacement is None or replacement.state != "accepted" or replacement.run_id != run_id
-                    or replacement.conditions_id != root.conditions_id
-                    or replacement.context.get("stage") != "block_regeneration"):
-                raise RestartTranslationError("принятый результат изменился без проверяемого происхождения")
+            if (
+                replacement is None
+                or replacement.state != "accepted"
+                or replacement.run_id != run_id
+                or replacement.conditions_id != root.conditions_id
+            ):
+                raise RestartTranslationError(
+                    "принятый результат изменился без проверяемого происхождения"
+                )
+            if replacement.id != attempt.id:
+                stage = replacement.context.get("stage")
+                if stage == "chapter_correction":
+                    translation_source = getattr(transaction.work, "_translation_source", None)
+                    source_attempt = (
+                        translation_source(
+                            book_id=root.book_id,
+                            run_id=run_id,
+                            conditions_id=root.conditions_id,
+                            block_id=block_id,
+                            artifact_revision_id=binding["artifact_revision_id"],
+                            attempt_id=binding["attempt_id"],
+                        )
+                        if callable(translation_source)
+                        else None
+                    )
+                    if source_attempt is None:
+                        raise RestartTranslationError(
+                            "принятый результат изменился без проверяемого происхождения"
+                        )
+                    if source_attempt.id != attempt.id and (
+                        source_attempt.state != "accepted"
+                        or source_attempt.run_id != run_id
+                        or source_attempt.conditions_id != root.conditions_id
+                        or source_attempt.context.get("stage") != "block_regeneration"
+                        or tuple(source_attempt.context.get("ordered_block_ids", ())) != (block_id,)
+                    ):
+                        raise RestartTranslationError(
+                            "принятый результат изменился без проверяемого происхождения"
+                        )
+                elif (
+                    stage != "block_regeneration"
+                    or tuple(replacement.context.get("ordered_block_ids", ())) != (block_id,)
+                ):
+                    raise RestartTranslationError(
+                        "принятый результат изменился без проверяемого происхождения"
+                    )
 
 
 def _new_task_id(queue: TaskQueue) -> str:

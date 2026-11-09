@@ -962,6 +962,390 @@ async def test_record_recovery_failure_does_not_split_single_block_or_single_ato
     assert generate_calls == 3
 
 
+@pytest.mark.asyncio
+async def test_provider_truncated_indivisible_atomic_interval_does_not_trigger_recovery_split(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from contextlib import contextmanager
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from uuid import uuid4
+    import linguary.application.block_processing as block_processing_module
+    import linguary.application.diagnostics as diagnostics_module
+    from processing_fakes import (
+        BOOK_ID,
+        SECTION_ID,
+        TARGET_LANGUAGE,
+        make_blocks,
+        make_response,
+        make_unit,
+        make_validator,
+        note_ids,
+    )
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.models import Base
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+    from linguary.application.block_processing import TranslationCall, _worded_for_the_model
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.llm_dto import BlockResultResponse
+    from linguary.application.ports.llm import LLMResponse, LLMResponseFormatError
+    from linguary.application.ports.persistence import BookRecord
+    from linguary.application.recovery import RecoveryError, root_manifest
+    from linguary.application.retry_policy import ResultValidationError, RetryPolicy
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.domain import (
+        BlockTreatment,
+        BookMetadata,
+        BookStatus,
+        CanonicalDocument,
+        ChapterAnalysis,
+        DocumentSection,
+        GlossarySnapshot,
+        TreatmentPlan,
+    )
+    from linguary.domain.book_conditions import BookConditions
+    from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
 
+    engine = create_database_engine(tmp_path / "truncated_atomic_split_test.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    try:
+        cond_id = "00000000-0000-0000-0000-000000000001"
+        root_atom_id = "00000000-0000-0000-0000-000000000012"
+        scope_atom_id = "00000000-0000-0000-0000-000000000022"
+        root_div_id = "00000000-0000-0000-0000-000000000013"
+        scope_div_id = "00000000-0000-0000-0000-000000000023"
+        with uow.transaction() as tx:
+            tx.books.add(
+                BookRecord(
+                    id=BOOK_ID,
+                    metadata=BookMetadata(title="Book", authors=("Author",)),
+                    source_language="en",
+                    target_language="ru",
+                    status=BookStatus.PROCESSING,
+                    source_epub_path="book.epub",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            tx.work.add_conditions(
+                BookConditions(
+                    id=cond_id,
+                    book_id=BOOK_ID,
+                    revision=1,
+                    payload={"schema_version": 1, "models": {"processing": "gpt-test"}},
+                    created_at=datetime.now(UTC),
+                )
+            )
+            atom_manifest = root_manifest(
+                book_id=BOOK_ID,
+                conditions_id=cond_id,
+                glossary_sha="g",
+                analysis_sha="a",
+                plan_sha=None,
+                ordered_blocks=("b1", "b2"),
+                treatments=("TRANSLATE", "TRANSLATE"),
+                boundaries=(("b1", "b2"),),
+                atomic_intervals=(("b1", "b2"),),
+                max_source_chars=100,
+            )
+            tx.work.add_root(
+                RecoveryRoot(
+                    root_atom_id,
+                    BOOK_ID,
+                    cond_id,
+                    "key-atom",
+                    atom_manifest,
+                    policy_version=CURRENT_TRANSLATION_POLICY,
+                )
+            )
+            tx.work.add_scope(RecoveryScope(scope_atom_id, root_atom_id, ("b1", "b2")))
+
+            divisible_manifest = root_manifest(
+                book_id=BOOK_ID,
+                conditions_id=cond_id,
+                glossary_sha="g",
+                analysis_sha="a",
+                plan_sha=None,
+                ordered_blocks=("b1", "b2"),
+                treatments=("TRANSLATE", "TRANSLATE"),
+                boundaries=(("b1", "b2"),),
+                atomic_intervals=(("b1",), ("b2",)),
+                max_source_chars=100,
+            )
+            tx.work.add_root(
+                RecoveryRoot(
+                    root_div_id,
+                    BOOK_ID,
+                    cond_id,
+                    "key-divisible",
+                    divisible_manifest,
+                    policy_version=CURRENT_TRANSLATION_POLICY,
+                )
+            )
+            tx.work.add_scope(RecoveryScope(scope_div_id, root_div_id, ("b1", "b2")))
+
+        truncated_violation = Violation("provider_truncated", "translation_unit", "unknown")
+        with uow.transaction() as tx:
+            atom_attempt_id = str(uuid4())
+            claimed_atom = tx.work.claim_scope(scope_atom_id, expected_generation=0)
+            tx.work.add_attempt(
+                CallAttempt(
+                    atom_attempt_id,
+                    BOOK_ID,
+                    state="rejected",
+                    generation=claimed_atom.generation,
+                    ordinal=1,
+                    conditions_id=cond_id,
+                    root_id=root_atom_id,
+                    scope_id=scope_atom_id,
+                    context={"schema_version": 1, "root_generation": 0},
+                )
+            )
+            assert tx.work.record_recovery_failure(atom_attempt_id, truncated_violation) is False
+
+            div_attempt_id = str(uuid4())
+            claimed_div = tx.work.claim_scope(scope_div_id, expected_generation=0)
+            tx.work.add_attempt(
+                CallAttempt(
+                    div_attempt_id,
+                    BOOK_ID,
+                    state="rejected",
+                    generation=claimed_div.generation,
+                    ordinal=1,
+                    conditions_id=cond_id,
+                    root_id=root_div_id,
+                    scope_id=scope_div_id,
+                    context={"schema_version": 1, "root_generation": 0},
+                )
+            )
+            assert tx.work.record_recovery_failure(div_attempt_id, truncated_violation) is True
+    finally:
+        engine.dispose()
+
+    monkeypatch.setattr(
+        diagnostics_module,
+        "diagnostics_for",
+        lambda uow_arg: SimpleNamespace(ensure_available=lambda: None, fail=lambda: None),
+    )
+    monkeypatch.setattr(
+        block_processing_module,
+        "record_rejection",
+        lambda uow_arg, response, error: None,
+    )
+
+    blocks = make_blocks(2)
+    unit = make_unit(blocks)
+    section = DocumentSection(
+        id=SECTION_ID,
+        document_id=BOOK_ID,
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=blocks,
+    )
+    document = CanonicalDocument(
+        id=BOOK_ID,
+        metadata=BookMetadata(title="Book", authors=("Author",)),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=(section,),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=TreatmentPlan.of_treatments(
+            section.id, ((item.block.id, item.treatment) for item in unit.items)
+        ),
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=unit.block_ids,
+    )
+    context = ContextBuilder().for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=GlossarySnapshot(),
+    )
+    context = replace(
+        context,
+        request=replace(
+            context.request,
+            book_id=BOOK_ID,
+            stage=SimpleNamespace(value="translation_unit"),
+        ),
+    )
+
+    rephrased = _worded_for_the_model(ResultValidationError("ошибка в b1", expectation=None), context)
+    assert isinstance(rephrased, ResultValidationError)
+    assert rephrased.expectation == context.expectation
+
+    physical_ctx = SimpleNamespace(
+        conditions_id="00000000-0000-0000-0000-000000000001",
+        attempt_id="attempt-1",
+        root_id="root-atom",
+        scope_id="scope-atom",
+        stage="translation_unit",
+        ordered_block_ids=unit.block_ids,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+        prompt_hash="hash",
+    )
+
+    class IndivisibleWorkStore:
+        def get_root(self, root_id):
+            return SimpleNamespace(
+                id=root_id,
+                policy_version=CURRENT_TRANSLATION_POLICY,
+                conditions_id=physical_ctx.conditions_id,
+                calls_used=1,
+                extra_calls=0,
+                manifest={
+                    "policy": {"max_calls": 10, "max_scope_calls": 4, "max_depth": 4, "max_leaves": 8},
+                    "atomic_intervals": [list(unit.block_ids)],
+                },
+            )
+
+        def get_conditions(self, conditions_id):
+            return SimpleNamespace(
+                id=conditions_id,
+                payload={"models": {"processing": "gpt-test"}, "versions": {"validators": 1}},
+            )
+
+        def begin_recovery_attempt(self, root_id, scope_id, **kwargs):
+            return physical_ctx
+
+        def owns_recovery_attempt(self, attempt_id):
+            return True
+
+        def record_recovery_failure(self, attempt_id, violation):
+            return False
+
+        def list_scopes(self, root_id):
+            return (SimpleNamespace(id="scope-atom", parent_id=None, status="pending"),)
+
+        def scope_attempt_count(self, scope_id):
+            return 2
+
+        def stop_root(self, root_id, reason):
+            pass
+
+        def result_bindings(self, run_id):
+            return {}
+
+    class RunsStore:
+        def active_for_book(self, book_id):
+            return None
+
+    class FakeUow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=IndivisibleWorkStore(), runs=RunsStore(), llm_calls=SimpleNamespace())
+
+    generate_calls = 0
+
+    class FakeLLMClient:
+        async def generate(self, request):
+            nonlocal generate_calls
+            generate_calls += 1
+            return LLMResponse(
+                payload=make_response(
+                    (
+                        BlockResultResponse(
+                            source_block_id="b1",
+                            treatment=BlockTreatment.TRANSLATE,
+                            translated_text="Перевод первого блока.",
+                        ),
+                        BlockResultResponse(
+                            source_block_id="b2",
+                            treatment=BlockTreatment.TRANSLATE,
+                            translated_text="Перевод второго блока.",
+                        ),
+                    )
+                ),
+                provider="fake",
+                model="gpt-test",
+                truncated=True,
+                call_context=request.call_context,
+            )
+
+    call = TranslationCall(
+        unit_of_work=FakeUow(),
+        llm_client=FakeLLMClient(),
+        retry_policy=RetryPolicy(max_attempts=2),
+        validator=make_validator(),
+        sleep=None,
+    )
+
+    with pytest.raises(RecoveryError) as exc_info:
+        await call.request(
+            context,
+            unit=unit,
+            target_language=TARGET_LANGUAGE,
+            note_ids=note_ids(),
+            recovery=("root-atom", "scope-atom"),
+        )
+
+    assert not isinstance(exc_info.value, block_processing_module.RecoverySplit)
+    assert exc_info.value.reason == "unsafe_partition"
+    assert isinstance(exc_info.value.original_error, ResultValidationError)
+    assert generate_calls == 1
+
+    from linguary.application.use_cases.process_chapter import ProcessChapter, ProcessChapterCommand
+    from linguary.application.use_cases.regenerate_block import RegenerateBlock, RegenerateBlockCommand
+
+    cand_ch1 = SimpleNamespace(id="c1", analysis_id=analysis.id)
+    cand_ch2 = SimpleNamespace(id="c2", analysis_id="analysis-2")
+    analysis_ch1 = replace(analysis, glossary_candidates=(cand_ch1,))
+    analysis_ch2 = replace(
+        analysis,
+        id="analysis-2",
+        section_id="section-2",
+        treatment_plan=replace(analysis.treatment_plan, section_id="section-2"),
+        glossary_candidates=(cand_ch2,),
+    )
+
+    get_for_section_calls = 0
+
+    class FakeAnalysesRepo:
+        def list_for_book(self, book_id):
+            return (analysis_ch1, analysis_ch2)
+
+        def get_for_section(self, book_id, sec_id):
+            nonlocal get_for_section_calls
+            get_for_section_calls += 1
+            return analysis_ch1
+
+    fake_tx = SimpleNamespace(
+        documents=SimpleNamespace(get=lambda book_id: document),
+        analyses=FakeAnalysesRepo(),
+        runs=SimpleNamespace(
+            active_for_book=lambda book_id: SimpleNamespace(
+                id="run-1",
+                glossary_snapshot=GlossarySnapshot(),
+            )
+        ),
+        results=SimpleNamespace(list_for_section=lambda run_id, sec_id: ()),
+        work=SimpleNamespace(
+            latest_conditions=lambda book_id: None,
+            list_active_roots=lambda book_id, run_id=None: (),
+        ),
+    )
+
+    pc = ProcessChapter.__new__(ProcessChapter)
+    chapter_work = pc._load(
+        ProcessChapterCommand(book_id=BOOK_ID, section_id=section.id),
+        transaction=fake_tx,
+    )
+    assert get_for_section_calls == 0
+    assert chapter_work.book_candidates == (cand_ch2,)
+
+    rb = RegenerateBlock.__new__(RegenerateBlock)
+    block_work = rb._load(
+        RegenerateBlockCommand(book_id=BOOK_ID, block_id=blocks[0].id),
+        transaction=fake_tx,
+    )
+    assert get_for_section_calls == 0
+    assert block_work.book_candidates == (cand_ch2,)
 
 

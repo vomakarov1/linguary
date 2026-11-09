@@ -259,6 +259,7 @@ class ProcessChapter:
         note_ids: Callable[[], str],
         result: ProcessChapterResult,
         recovery: tuple[str, str],
+        root=None,
     ) -> ProcessChapterResult:
         """One ALG-04 cycle: context assembly, model call, validation, atomic save."""
         all_read_as_is = all(
@@ -309,10 +310,12 @@ class ProcessChapter:
                     expected_state='sent',
                     outcome={'schema_version': 1, 'provider': 'local', 'model': 'local', 'call_id': None},
                 )
+                expected = {
+                    b_id: transaction.work.get_binding('result', f'{work.run.id}:{b_id}')
+                    for b_id in unit.block_ids
+                }
             response = LLMResponse(raw_content="", payload=None, provider="local", model="local", call_context=physical_context, call_id=None)
             self._call._validated_response.set(response)
-            with self._unit_of_work.transaction() as transaction:
-                expected = {b_id: transaction.work.get_binding('result', f'{work.run.id}:{b_id}') for b_id in unit.block_ids}
             self._call._expected_bindings.set(expected)
             saved = self._call.save(
                 book_id=work.document.id,
@@ -329,8 +332,9 @@ class ProcessChapter:
                 discarded=not saved,
             )
 
-        with self._unit_of_work.transaction() as transaction:
-            root = transaction.work.get_root(recovery[0])
+        if root is None:
+            with self._unit_of_work.transaction() as transaction:
+                root = transaction.work.get_root(recovery[0])
         recovery_child = tuple(unit.block_ids) != tuple(root.manifest['ordered_blocks'])
         context = self._context_builder.for_translation_unit(
             document=work.document,
@@ -384,7 +388,8 @@ class ProcessChapter:
 
     async def _process_roots(self, roots, *, work, note_ids, result):
         with self._unit_of_work.transaction() as transaction:
-            before = sum(transaction.work.get_root(root).calls_used for root in roots)
+            roots_by_id = {root: transaction.work.get_root(root) for root in roots}
+            before = sum(r.calls_used for r in roots_by_id.values())
         blocks = {block.id: block for block in work.section.ordered_blocks}
         result = replace(result, units=len(roots))
 
@@ -415,6 +420,7 @@ class ProcessChapter:
                             note_ids=safe_note_ids,
                             result=root_result,
                             recovery=(root_id, scope.id),
+                            root=roots_by_id.get(root_id),
                         )
                     except RecoverySplit:
                         self._recovery.split(root_id, scope.id)
@@ -458,8 +464,10 @@ class ProcessChapter:
             if document is None:
                 raise ProcessChapterError(f"книги {command.book_id} нет в хранилище")
             section = _section_of(document, command)
-            analysis = tx.analyses.get_for_section(
-                command.book_id, command.section_id
+            all_analyses = tx.analyses.list_for_book(command.book_id)
+            analysis = (
+                next((ch for ch in all_analyses if ch.section_id == section.id), None)
+                or tx.analyses.get_for_section(command.book_id, command.section_id)
             )
             if analysis is None:
                 raise ProcessChapterError(
@@ -480,7 +488,8 @@ class ProcessChapter:
             )
             book_candidates = tuple(
                 candidate
-                for chapter in tx.analyses.list_for_book(command.book_id)
+                for chapter in all_analyses
+                if chapter.section_id != section.id
                 for candidate in chapter.glossary_candidates
             )
             work_repo = getattr(tx, "work", None)
