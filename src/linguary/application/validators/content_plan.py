@@ -1,10 +1,33 @@
 """Structural completeness validation against final visible help bodies."""
+from collections.abc import Iterable
 from dataclasses import dataclass
 import re
 
 from linguary.application.retry_policy import ResultValidationError
 from linguary.domain import DomainError, without_footnote_markers
 from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
+from linguary.domain.llm_log import Violation
+
+
+def _validation_error(
+    message: str,
+    *,
+    rule_code: str = 'content_plan',
+    block_ids: Iterable[str] = (),
+) -> ResultValidationError:
+    local_blocks = tuple(dict.fromkeys(b for b in block_ids if b))
+    violation = (
+        Violation(
+            rule_code,
+            'translation_unit',
+            scope='local',
+            block_ids=local_blocks,
+            safe_message=message,
+        )
+        if local_blocks
+        else None
+    )
+    return ResultValidationError(message, violation=violation)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,10 +68,18 @@ def validate_note_sources(results, source_texts):
         seen = set()
         for note in result.language_notes:
             if find_quote_span(source_texts[result.block_id], note.original_excerpt) is None:
-                raise ResultValidationError('цитата языковой заметки отсутствует в исходном блоке')
+                raise _validation_error(
+                    f'цитата языковой заметки отсутствует в исходном блоке ({result.block_id})',
+                    rule_code='note_quote_missing',
+                    block_ids=(result.block_id,),
+                )
             body = _substance(note.note)
             if body in seen:
-                raise ResultValidationError('повтор языковой заметки в исходном блоке')
+                raise _validation_error(
+                    f'повтор языковой заметки в исходном блоке ({result.block_id})',
+                    rule_code='note_duplicate',
+                    block_ids=(result.block_id,),
+                )
             seen.add(body)
 
 
@@ -57,13 +88,20 @@ def _validate_difficulties(plan, owners, source_texts=None):
         if difficulty.owner_block_id not in owners:
             continue
         if difficulty.kind == 'grammar' and difficulty.help_kind != 'explanation':
-            raise ResultValidationError('грамматическая трудность требует объяснения')
+            raise _validation_error(
+                f'грамматическая трудность требует объяснения ({difficulty.id}, {difficulty.owner_block_id})',
+                block_ids=(difficulty.owner_block_id,),
+            )
         if source_texts is not None:
             for anchor in difficulty.anchors:
                 try:
                     anchor.validate(source_texts)
                 except DomainError as error:
-                    raise ResultValidationError(str(error)) from error
+                    local = (difficulty.owner_block_id,) if difficulty.owner_block_id in owners else ()
+                    raise _validation_error(
+                        f'{error} ({difficulty.id}, {anchor.block_id})',
+                        block_ids=local,
+                    ) from error
 
 
 def _quote_matches_anchor(quote: str, anchor_quote: str, difficulty_kind: str) -> bool:
@@ -84,10 +122,16 @@ def _validate_artifact_source(artifact, difficulty, source_texts=None):
         if artifact.kind == 'before_you_read.explanation' or anchor.block_id == artifact.block_id)
     anchor_quotes = tuple(without_footnote_markers(anchor.quote).strip() for anchor in anchors)
     if not quote or not any(_quote_matches_anchor(quote, anchor, difficulty.kind) for anchor in anchor_quotes):
-        raise ResultValidationError('помощь не относится к исходной цитате трудности')
+        raise _validation_error(
+            f'помощь не относится к исходной цитате трудности ({difficulty.id}, {artifact.block_id})',
+            block_ids=(artifact.block_id,),
+        )
     if source_texts is not None and not any(quote in without_footnote_markers(source_texts.get(anchor.block_id, ''))
             for anchor in anchors):
-        raise ResultValidationError('цитата помощи отсутствует в исходном блоке')
+        raise _validation_error(
+            f'цитата помощи отсутствует в исходном блоке ({difficulty.id}, {artifact.block_id})',
+            block_ids=(artifact.block_id,),
+        )
 
 
 def _checked_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids, source_texts=None, validators_version=1):
@@ -103,25 +147,41 @@ def _checked_content_coverage(plan, results, before_you_read, evidence, *, owner
         try:
             plan.validate_evidence(item)
         except DomainError as error:
-            raise ResultValidationError(str(error)) from error
+            local = (item.block_id,) if item.block_id in owners else ()
+            raise _validation_error(
+                f'{error} ({item.difficulty_id}, {item.block_id})',
+                block_ids=local,
+            ) from error
         if item.block_id not in owners:
-            raise ResultValidationError('свидетельство чужого владельца')
+            raise _validation_error(f'свидетельство чужого владельца ({item.difficulty_id}, {item.block_id})')
         point = (item.difficulty_id, item.point_id)
         if validators_version == 4 and point in seen:
-            raise ResultValidationError('повтор свидетельства одного смыслового аспекта')
+            raise _validation_error(
+                f'повтор свидетельства одного смыслового аспекта ({item.difficulty_id}, {item.block_id})',
+                block_ids=(item.block_id,),
+            )
         seen.add(point)
         difficulty = next(d for d in plan.difficulties if d.id == item.difficulty_id)
         a = catalog.get((item.artifact_kind, item.block_id, item.artifact_key))
         if a is None or item.body_excerpt not in a.body:
-            raise ResultValidationError('свидетельство не указывает на конечное тело помощи')
+            raise _validation_error(
+                f'свидетельство не указывает на конечное тело помощи ({item.difficulty_id}, {item.block_id})',
+                block_ids=(item.block_id,),
+            )
         if validators_version == 4:
             _validate_artifact_source(a, difficulty, source_texts)
         if item.artifact_kind.endswith('.translation'):
             if (validators_version == 4 and difficulty.kind == 'grammar'
                     or difficulty.help_kind != 'lexical_hint' or not _substance(item.body_excerpt)):
-                raise ResultValidationError('перевод не покрывает объяснение')
+                raise _validation_error(
+                    f'перевод не покрывает объяснение ({item.difficulty_id}, {item.block_id})',
+                    block_ids=(item.block_id,),
+                )
         elif not _substance(item.body_excerpt) or _substance(item.body_excerpt) in {_substance(q) for q in (*a.quotes, *(anchor.quote for anchor in difficulty.anchors))}:
-            raise ResultValidationError('цитата или перевод без объясняющего тела')
+            raise _validation_error(
+                f'цитата или перевод без объясняющего тела ({item.difficulty_id}, {item.block_id})',
+                block_ids=(item.block_id,),
+            )
         checked.append(item)
     covered = {(e.difficulty_id, e.point_id) for e in checked}
     required = {(d.id, p.id) for d in plan.difficulties if d.owner_block_id in owners for p in d.required_points}
@@ -129,10 +189,22 @@ def _checked_content_coverage(plan, results, before_you_read, evidence, *, owner
 
 
 def validate_content_coverage(plan, results, before_you_read, evidence, *, owner_block_ids, source_texts=None, validators_version=1):
+    owners = set(owner_block_ids)
     checked, missing = _checked_content_coverage(plan, results, before_you_read, evidence,
         owner_block_ids=owner_block_ids, source_texts=source_texts, validators_version=validators_version)
     if missing or evidence.structural_coverage != 'complete':
-        raise ResultValidationError('не все обязательные аспекты имеют конечное объяснение')
+        missing_difficulties = tuple(
+            d for d in plan.difficulties
+            if d.owner_block_id in owners
+            and any((d.id, p.id) in missing for p in d.required_points)
+        )
+        missing_ids = tuple(d.id for d in missing_difficulties)
+        missing_owners = tuple(dict.fromkeys(d.owner_block_id for d in missing_difficulties))
+        suffix = f" ({', '.join(missing_ids)})" if missing_ids else ''
+        raise _validation_error(
+            'не все обязательные аспекты имеют конечное объяснение' + suffix,
+            block_ids=missing_owners,
+        )
     return checked
 
 
@@ -155,7 +227,10 @@ def resolve_content_coverage(plan, results, before_you_read, evidence, *, owner_
         required = {(difficulty.id, point.id) for difficulty in plan.difficulties
             if difficulty.owner_block_id == owner for point in difficulty.required_points}
         if covered & uncovered or covered | uncovered != required:
-            raise ResultValidationError('покрытые и неразрешённые аспекты не совпадают с планом владельца')
+            raise _validation_error(
+                f'покрытые и неразрешённые аспекты не совпадают с планом владельца ({owner})',
+                block_ids=(owner,),
+            )
     return checked, unresolved
 
 
@@ -174,47 +249,86 @@ def validate_saved_content_coverage(plan, results, before_you_read, *, owner_blo
         found = set()
         for result in results:
             if result.content_evidence and getattr(result.content_evidence, "evidence", ()):
-                raise ResultValidationError('помощь к фрагментам не должна дублировать свидетельства')
+                raise _validation_error(
+                    f'помощь к фрагментам не должна дублировать свидетельства ({result.block_id})',
+                    block_ids=(result.block_id,),
+                )
             for assistance in result.fragment_assistances:
                 difficulty = planned.get(assistance.difficulty_id)
                 if (difficulty is None or difficulty.owner_block_id != result.block_id
                         or assistance.difficulty_id in found):
-                    raise ResultValidationError('чужая или повторная трудность помощи')
+                    raise _validation_error(
+                        f'чужая или повторная трудность помощи ({assistance.difficulty_id}, {result.block_id})',
+                        block_ids=(result.block_id,),
+                    )
                 if (len(assistance.point_ids) != len(set(assistance.point_ids))
                         or set(assistance.point_ids) != {point.id for point in difficulty.required_points}):
-                    raise ResultValidationError('неполный состав смысловых пунктов помощи')
+                    raise _validation_error(
+                        f'неполный состав смысловых пунктов помощи ({assistance.difficulty_id}, {result.block_id})',
+                        block_ids=(result.block_id,),
+                    )
                 if assistance.anchors != difficulty.anchors:
-                    raise ResultValidationError('помощь не совпадает с точными привязками плана')
+                    raise _validation_error(
+                        f'помощь не совпадает с точными привязками плана ({assistance.difficulty_id}, {result.block_id})',
+                        block_ids=(result.block_id,),
+                    )
                 if assistance.kind == 'lexical_hint' and difficulty.help_kind != 'lexical_hint':
-                    raise ResultValidationError('лексическая подсказка не покрывает объяснение')
+                    raise _validation_error(
+                        f'лексическая подсказка не покрывает объяснение ({assistance.difficulty_id}, {result.block_id})',
+                        block_ids=(result.block_id,),
+                    )
                 found.add(assistance.difficulty_id)
         if found != set(planned):
-            raise ResultValidationError('не все трудности получили явную помощь')
+            missing_ids = tuple(d_id for d_id in planned if d_id not in found)
+            missing_owners = tuple(dict.fromkeys(planned[d_id].owner_block_id for d_id in missing_ids))
+            raise _validation_error(
+                f"не все трудности получили явную помощь ({', '.join(missing_ids)})",
+                block_ids=missing_owners,
+            )
         return ()
     all_checked = []
     for result in results:
         evidence = result.content_evidence
         if not evidence:
-            raise ResultValidationError('отсутствуют свидетельства содержательного плана')
+            raise _validation_error(
+                f'отсутствуют свидетельства содержательного плана ({result.block_id})',
+                block_ids=(result.block_id,),
+            )
         checked, missing = resolve_content_coverage(plan, (result,), before_you_read, evidence,
             owner_block_ids=(result.block_id,), source_texts=source_texts, validators_version=validators_version)
         expected = {item.difficulty_id: item for item in missing[result.block_id]}
         if evidence.structural_coverage != ('partial' if expected else 'complete'):
-            raise ResultValidationError('состояние покрытия не совпадает с неразрешёнными аспектами')
+            raise _validation_error(
+                f'состояние покрытия не совпадает с неразрешёнными аспектами ({result.block_id})',
+                block_ids=(result.block_id,),
+            )
         found = set()
         for assistance in result.fragment_assistances:
             expected_item = expected.get(assistance.difficulty_id)
             if (assistance.kind != 'unresolved' or expected_item is None
                     or assistance.difficulty_id in found):
-                raise ResultValidationError('чужая или повторная неразрешённая трудность')
+                raise _validation_error(
+                    f'чужая или повторная неразрешённая трудность ({assistance.difficulty_id}, {result.block_id})',
+                    block_ids=(result.block_id,),
+                )
             if (len(assistance.point_ids) != len(set(assistance.point_ids))
                     or set(assistance.point_ids) != set(expected_item.point_ids)):
-                raise ResultValidationError('неразрешённые аспекты не совпадают с остатком плана')
+                raise _validation_error(
+                    f'неразрешённые аспекты не совпадают с остатком плана ({assistance.difficulty_id}, {result.block_id})',
+                    block_ids=(result.block_id,),
+                )
             if assistance.anchors != expected_item.anchors:
-                raise ResultValidationError('неразрешённая помощь не совпадает с точными привязками плана')
+                raise _validation_error(
+                    f'неразрешённая помощь не совпадает с точными привязками плана ({assistance.difficulty_id}, {result.block_id})',
+                    block_ids=(result.block_id,),
+                )
             found.add(assistance.difficulty_id)
         if found != set(expected):
-            raise ResultValidationError('не все непокрытые аспекты явно отмечены')
+            missing_ids = tuple(d_id for d_id in expected if d_id not in found)
+            raise _validation_error(
+                f"не все непокрытые аспекты явно отмечены ({', '.join((*missing_ids, result.block_id))})",
+                block_ids=(result.block_id,),
+            )
         all_checked.extend(checked)
     return tuple(all_checked)
 
@@ -243,15 +357,22 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
             key = artifact_key(kind, owner, content)
             a = next(a for a in catalog if (a.kind, a.block_id, a.key) == (kind, owner, key))
         except (KeyError, IndexError, StopIteration) as error:
-            raise ResultValidationError('ссылка на отсутствующий артефакт помощи') from error
+            local = (owner,) if owner in by_owner else ()
+            raise _validation_error(
+                f'ссылка на отсутствующий артефакт помощи ({item.difficulty_id}, {owner})',
+                block_ids=local,
+            ) from error
         excerpt = item.body_excerpt if plan.version == 3 else without_footnote_markers(item.body_excerpt)
         if plan.version == 3:
             from linguary.application.reader_text import ReaderTextPolicy
-            excerpt = ReaderTextPolicy().prepare(kind, excerpt, a.quotes)
+            excerpt = ReaderTextPolicy().prepare(kind, excerpt, a.quotes, block_id=owner)
         elif excerpt != item.body_excerpt:
             excerpt = excerpt.strip()
         if not excerpt:
-            raise ResultValidationError('пустое свидетельство помощи')
+            raise _validation_error(
+                f'пустое свидетельство помощи ({item.difficulty_id}, {owner})',
+                block_ids=(owner,),
+            )
         if a.body and excerpt not in a.body and plan.version != 3:
             from linguary.application.analysis_merge import _quotation_key, find_quote_span
             span = find_quote_span(a.body, excerpt)
@@ -300,7 +421,7 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
                                 excerpt = body_excerpt if plan.version == 3 else without_footnote_markers(body_excerpt)
                                 if plan.version == 3:
                                     from linguary.application.reader_text import ReaderTextPolicy
-                                    excerpt = ReaderTextPolicy().prepare('language_note.note', excerpt, (note.original_excerpt,))
+                                    excerpt = ReaderTextPolicy().prepare('language_note.note', excerpt, (note.original_excerpt,), block_id=r.block_id)
                                 elif excerpt != body_excerpt:
                                     excerpt = excerpt.strip()
                                 if excerpt and _substance(excerpt) not in forbidden:
@@ -341,7 +462,7 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
                                 excerpt = body_excerpt if plan.version == 3 else without_footnote_markers(body_excerpt)
                                 if plan.version == 3:
                                     from linguary.application.reader_text import ReaderTextPolicy
-                                    excerpt = ReaderTextPolicy().prepare(kind, excerpt, (hint.original,))
+                                    excerpt = ReaderTextPolicy().prepare(kind, excerpt, (hint.original,), block_id=r.block_id)
                                 elif excerpt != body_excerpt:
                                     excerpt = excerpt.strip()
                                 if excerpt and _substance(excerpt) not in forbidden:
@@ -371,19 +492,36 @@ def resolve_fragment_assistances(plan, payload, results, source_texts, *, owner_
     for item in payload.fragment_assistances:
         difficulty = planned.get(item.difficulty_id)
         if difficulty is None or item.difficulty_id in found:
-            raise ResultValidationError('чужая или повторная трудность помощи')
+            local = (difficulty.owner_block_id,) if difficulty is not None else ()
+            details = f'{item.difficulty_id}, {difficulty.owner_block_id}' if difficulty is not None else item.difficulty_id
+            raise _validation_error(
+                f'чужая или повторная трудность помощи ({details})',
+                block_ids=local,
+            )
         if len(item.point_ids) != len(set(item.point_ids)) or set(item.point_ids) != {p.id for p in difficulty.required_points}:
-            raise ResultValidationError('неполный состав смысловых пунктов помощи')
+            raise _validation_error(
+                f'неполный состав смысловых пунктов помощи ({difficulty.id}, {difficulty.owner_block_id})',
+                block_ids=(difficulty.owner_block_id,),
+            )
         if validators_version == 4 and item.kind == 'lexical_hint' and difficulty.help_kind != 'lexical_hint':
-            raise ResultValidationError('лексическая подсказка не покрывает объяснение')
+            raise _validation_error(
+                f'лексическая подсказка не покрывает объяснение ({difficulty.id}, {difficulty.owner_block_id})',
+                block_ids=(difficulty.owner_block_id,),
+            )
         for anchor in difficulty.anchors:
             try:
                 anchor.validate(source_texts)
             except DomainError as error:
-                raise ResultValidationError(str(error)) from error
+                raise _validation_error(
+                    f'{error} ({difficulty.id}, {anchor.block_id})',
+                    block_ids=(difficulty.owner_block_id,),
+                ) from error
             occurrence = (anchor.block_id, anchor.start, anchor.end)
             if occurrence in occurrences:
-                raise ResultValidationError('конкурирующая помощь к одному вхождению')
+                raise _validation_error(
+                    f'конкурирующая помощь к одному вхождению ({difficulty.id}, {anchor.block_id})',
+                    block_ids=(difficulty.owner_block_id,),
+                )
             occurrences.add(occurrence)
         result = by_owner[difficulty.owner_block_id]
         quotes = {a.quote for a in difficulty.anchors}
@@ -391,15 +529,29 @@ def resolve_fragment_assistances(plan, payload, results, source_texts, *, owner_
                 or any(hint.original in quotes for hint in result.glossary_hints)
                 or any(note.original_excerpt in quotes for note in result.language_notes)
                 or any(entry.expression in quotes for entry in before_you_read)):
-            raise ResultValidationError('помощь к фрагменту дублирует материалы того же вхождения')
+            raise _validation_error(
+                f'помощь к фрагменту дублирует материалы того же вхождения ({difficulty.id}, {difficulty.owner_block_id})',
+                block_ids=(difficulty.owner_block_id,),
+            )
         if item.kind == 'russian_explanation':
             for entry in glossary_entries:
                 if entry.source_text in quotes and entry.translation.casefold() not in item.text.casefold():
-                    raise ResultValidationError('русская помощь не сохраняет принятое решение глоссария')
+                    raise _validation_error(
+                        f'русская помощь не сохраняет принятое решение глоссария ({difficulty.id}, {difficulty.owner_block_id})',
+                        block_ids=(difficulty.owner_block_id,),
+                    )
         try:
             found[item.difficulty_id] = FragmentAssistance(item.difficulty_id, item.point_ids, item.kind, item.text, difficulty.anchors)
         except DomainError as error:
-            raise ResultValidationError(str(error)) from error
+            raise _validation_error(
+                f'{error} ({difficulty.id}, {difficulty.owner_block_id})',
+                block_ids=(difficulty.owner_block_id,),
+            ) from error
     if set(found) != set(planned):
-        raise ResultValidationError('не все трудности получили явную помощь')
+        missing_ids = tuple(d_id for d_id in planned if d_id not in found)
+        missing_owners = tuple(dict.fromkeys(planned[d_id].owner_block_id for d_id in missing_ids))
+        raise _validation_error(
+            f"не все трудности получили явную помощь ({', '.join(missing_ids)})",
+            block_ids=missing_owners,
+        )
     return {owner: tuple(found[d.id] for d in plan.difficulties if d.owner_block_id == owner) for owner in owners}

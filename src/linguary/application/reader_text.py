@@ -15,10 +15,23 @@ _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
 
 
 class ReaderTextError(ResultValidationError):
-    def __init__(self, reason_code):
+    def __init__(self, reason_code, *, kind=None, block_id=None):
         self.reason_code = reason_code
-        super().__init__('Учебный текст требует повторной генерации: ' + reason_code,
-            violation=Violation(reason_code, 'reader_text', safe_message='Учебный текст требует повторной генерации'))
+        self.kind = kind
+        self.block_id = block_id
+        details = tuple(item for item in (kind, block_id) if item)
+        suffix = f" ({', '.join(details)})" if details else ''
+        super().__init__(
+            'Учебный текст требует повторной генерации: ' + reason_code + suffix,
+            violation=Violation(
+                reason_code,
+                'reader_text',
+                scope='local' if block_id else 'unknown',
+                block_ids=(block_id,) if block_id else (),
+                artifact_kinds=(kind,) if kind else (),
+                safe_message='Учебный текст требует повторной генерации',
+            ),
+        )
 
 
 def _protected_spans(body, protected_quotes):
@@ -96,7 +109,7 @@ def validate_a2_summary(
 class ReaderTextPolicy:
     semantic_correctness = 'not_evaluated'
 
-    def prepare(self, kind, body, protected_quotes=()):
+    def prepare(self, kind, body, protected_quotes=(), *, block_id=None):
         if body is None:
             return None
         original = body
@@ -107,22 +120,22 @@ class ReaderTextPolicy:
             for match in reversed(matches):
                 body = body[:match.start()] + body[match.end():]
             body = body.strip()
-        self.validate_final(kind, body, protected_quotes)
+        self.validate_final(kind, body, protected_quotes, block_id=block_id)
         for quote in protected_quotes:
             if quote and original.count(quote) != body.count(quote):
                 # Removed service labels may happen to contain a short quoted source token.
                 if re.fullmatch(r'b\d+', quote, re.I) is None:
-                    raise ReaderTextError('protected_quote_changed')
+                    raise ReaderTextError('protected_quote_changed', kind=kind, block_id=block_id)
         return body
 
-    def validate_final(self, kind, body, protected_quotes=()):
+    def validate_final(self, kind, body, protected_quotes=(), *, block_id=None):
         if not body or not body.strip():
-            raise ReaderTextError('required_help_erased')
+            raise ReaderTextError('required_help_erased', kind=kind, block_id=block_id)
         outside = _outside_quotes(body, protected_quotes)
         if _SERVICE_TOKEN.search(outside):
-            raise ReaderTextError('ambiguous_service_marker')
+            raise ReaderTextError('ambiguous_service_marker', kind=kind, block_id=block_id)
         if kind in _EXPLANATIONS and not re.search(r'\w', outside, re.UNICODE):
-            raise ReaderTextError('required_help_erased')
+            raise ReaderTextError('required_help_erased', kind=kind, block_id=block_id)
         return body
 
     def warnings(self, kind, body, *, reader_level):
@@ -136,13 +149,13 @@ class ReaderTextPolicy:
     def prepare_results(self, results, protected_quotes=()):
         checked = []
         for result in results:
-            translated = self.prepare('translation', result.translated_text, protected_quotes) if result.translated_text is not None else None
+            translated = self.prepare('translation', result.translated_text, protected_quotes, block_id=result.block_id) if result.translated_text is not None else None
             hints = tuple(replace(hint,
-                translation=self.prepare('glossary_hint.translation', hint.translation, (hint.original,)),
-                note=self.prepare('glossary_hint.note', hint.note, (hint.original, hint.translation)) if hint.note else hint.note)
+                translation=self.prepare('glossary_hint.translation', hint.translation, (hint.original,), block_id=result.block_id),
+                note=self.prepare('glossary_hint.note', hint.note, (hint.original, hint.translation), block_id=result.block_id) if hint.note else hint.note)
                 for hint in result.glossary_hints)
             notes = tuple(replace(note, note=self.prepare('language_note.note', note.note,
-                          (note.original_excerpt, note.translated_excerpt or ''))) for note in result.language_notes)
+                          (note.original_excerpt, note.translated_excerpt or ''), block_id=result.block_id)) for note in result.language_notes)
             checked.append(replace(result, translated_text=translated, glossary_hints=hints, language_notes=notes))
         return tuple(checked)
 

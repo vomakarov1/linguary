@@ -1921,6 +1921,118 @@ def test_owned_content_plan_omits_empty_payload_and_priority_field() -> None:
     assert "priority" not in parsed["difficulties"][0]
 
 
+def test_translation_context_to_aliases_prevents_prefix_collision_and_english_help_omits_notes_budget() -> None:
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        ContextFact,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
+
+    blocks = tuple(
+        replace(make_block(order=index, text="Echo calls and answers."), id=f"block-{index + 1}")
+        for index in range(10)
+    )
+    unit = make_unit(blocks, treatments=(BlockTreatment.READ_AS_IS,) * 10)
+    section = make_section(blocks)
+    diff_1 = Difficulty(
+        "diff-1",
+        (SourceAnchor("block-1", 0, 4, "Echo"),),
+        "block-1",
+        "idiom",
+        "critical",
+        "explanation",
+        (RequiredPoint("p-1", "Explain 1"),),
+    )
+    diff_10 = Difficulty(
+        "diff-10",
+        (SourceAnchor("block-10", 0, 4, "Echo"),),
+        "block-10",
+        "idiom",
+        "critical",
+        "explanation",
+        (RequiredPoint("p-10", "Explain 10"),),
+    )
+    fact_1 = ContextFact(
+        id="fact-1",
+        kind="speaker",
+        anchors=(SourceAnchor("block-1", 0, 4, "Echo"),),
+        subject_anchor=SourceAnchor("block-1", 0, 4, "Echo"),
+        value="Narrator",
+        certainty="explicit",
+    )
+    fact_10 = ContextFact(
+        id="fact-10",
+        kind="speaker",
+        anchors=(SourceAnchor("block-10", 0, 4, "Echo"),),
+        subject_anchor=SourceAnchor("block-10", 0, 4, "Echo"),
+        value="Listener",
+        certainty="explicit",
+    )
+    chapter_candidate = GlossaryCandidate.create(
+        id="cand-1",
+        analysis_id="analysis-1",
+        source_text="Echo",
+        type=ConceptType.TERM,
+        suggested_translation="Эхо",
+        confidence=0.9,
+        model_flagged_review=False,
+        confidence_threshold=0.8,
+        note="женский род",
+    )
+    analysis = replace(
+        make_analysis(unit),
+        glossary_candidates=(chapter_candidate,),
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(diff_1, diff_10),
+            context_facts=(fact_1, fact_10),
+        ),
+    )
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+        english_help=True,
+    )
+    builder = ContextBuilder(
+        prompt_templates=templates,
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+    )
+    context = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+        book_candidates=(chapter_candidate,),
+        recovery_child=False,
+    )
+    recovery_context = builder.for_translation_unit(
+        document=make_document(section),
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=make_snapshot(),
+        book_candidates=(chapter_candidate,),
+        recovery_child=True,
+    )
+
+    msg = "ошибка (diff-10, block-10) и (diff-1, block-1) и факт fact-10 / fact-1, но не block-100"
+    assert (
+        context.to_aliases(msg)
+        == "ошибка (d2, b10) и (d1, b1) и факт f2 / f1, но не block-100"
+    )
+    assert "языковых заметок" not in context.request.input_text
+    assert "языковых заметок" not in recovery_context.request.input_text
+
+
+
 
 
 

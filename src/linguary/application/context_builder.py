@@ -505,15 +505,34 @@ class TranslationContext(AliasedBlocksContext):
         Rejection reasons are sent to the model with repair instructions (ALG-05),
         while validation checks format messages using internal block IDs the model never saw.
         """
-        for alias, block_id in self.block_ids_by_alias.items():
-            message = message.replace(block_id, alias)
-        for alias, difficulty_id in sorted(
-            self.difficulty_ids_by_alias.items(),
-            key=lambda item: len(item[1]),
-            reverse=True,
-        ):
-            message = message.replace(difficulty_id, alias)
-        return message
+        replacements: dict[str, str] = {
+            block_id: alias
+            for alias, block_id in self.block_ids_by_alias.items()
+            if block_id
+        }
+        for alias, difficulty_id in self.difficulty_ids_by_alias.items():
+            if difficulty_id:
+                replacements[difficulty_id] = alias
+        if self.content_plan is not None:
+            unit_block_ids = set(self.block_ids_by_alias.values())
+            fact_index = 0
+            for fact in self.content_plan.context_facts:
+                if fact.subject_anchor.block_id not in unit_block_ids:
+                    continue
+                fact_index += 1
+                if fact.id:
+                    replacements.setdefault(fact.id, f"f{fact_index}")
+        if not replacements:
+            return message
+        pattern = re.compile(
+            r"(?<![0-9A-Za-z_-])(?:"
+            + "|".join(
+                re.escape(raw_id)
+                for raw_id in sorted(replacements, key=len, reverse=True)
+            )
+            + r")(?![0-9A-Za-z_-])"
+        )
+        return pattern.sub(lambda match: replacements[match.group(0)], message)
 
     @property
     def has_optional_neighbours(self) -> bool:
@@ -977,7 +996,14 @@ class ContextBuilder:
         else:
             pure_read_as_is_aliases = frozenset()
         difficulty_ids_by_alias = _owned_difficulty_aliases(analysis, unit)
-        candidates = (*analysis.glossary_candidates, *book_candidates)
+        candidates = tuple(
+            dict.fromkeys(
+                (
+                    *analysis.glossary_candidates,
+                    *(c for c in book_candidates if c.analysis_id != analysis.id),
+                )
+            )
+        )
         input_args = dict(
             document=document,
             section=section,
@@ -1085,15 +1111,23 @@ class ContextBuilder:
             normalized_blocks_text=normalized_target_text,
         )
 
+        notes_budget_line = (
+            ""
+            if self._english_help
+            else (
+                f"Ориентир количества языковых заметок: {budget}. "
+                "Для необходимого объяснения можно превысить этот ориентир, в том числе дать три заметки одному фрагменту. "
+                "Не теряй обязательную помощь из учебного плана ради количества. "
+                "Каждая заметка должна быть привязана к исходнику; не повторяй уже объяснённое."
+                if recovery_child
+                else f"В этом запросе — не больше {budget} языковых заметок."
+            )
+        )
         parts = [
             _chapter_header(document=document, section=section),
             _chapter_digest(analysis, glossary, candidates),
             _explained_expressions(analysis, section),
-            (f"Ориентир количества языковых заметок: {budget}. "
-             "Для необходимого объяснения можно превысить этот ориентир, в том числе дать три заметки одному фрагменту. "
-             "Не теряй обязательную помощь из учебного плана ради количества. "
-             "Каждая заметка должна быть привязана к исходнику; не повторяй уже объяснённое."
-             if recovery_child else f"В этом запросе — не больше {budget} языковых заметок."),
+            notes_budget_line,
             _mandatory_decisions(
                 _with_agreed_notes(filtered_mandatory, glossary, candidates),
                 target_language=document.target_language,

@@ -106,3 +106,26 @@ def test_translation_preserves_exact_source_quote_with_service_like_text():
     original = 'The printed code was "[b17]".'
     translation = 'Напечатан код «[b17]».'
     assert ReaderTextPolicy().prepare('translation', translation, source_quote_fragments((original,))) == translation
+
+
+def test_reader_text_error_includes_kind_and_block_id():
+    from linguary.domain import BlockProcessingResult, BlockTreatment, LanguageNote
+
+    policy = ReaderTextPolicy()
+    result = BlockProcessingResult(
+        'block-10',
+        BlockTreatment.READ_AS_IS,
+        language_notes=(LanguageNote('n1', 'block-10', 'Echo', '[b17]'),),
+    )
+    with pytest.raises(ReaderTextError) as exc_info:
+        policy.prepare_results((result,))
+    err = exc_info.value
+    assert err.reason_code == 'required_help_erased'
+    assert err.kind == 'language_note.note'
+    assert err.block_id == 'block-10'
+    assert '(language_note.note, block-10)' in str(err)
+    assert err.violation is not None
+    assert err.violation.scope == 'local'
+    assert err.violation.block_ids == ('block-10',)
+    assert err.violation.artifact_kinds == ('language_note.note',)
+

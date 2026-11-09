@@ -191,3 +191,63 @@ def test_fragment_assistance_rejects_duplicate_material_and_glossary_conflict():
         resolve_fragment_assistances(plan(), payload, (BlockProcessingResult('block', BlockTreatment.READ_AS_IS),), {'block': 'Echo'}, owner_block_ids=('block',), glossary_entries=(SimpleNamespace(source_text='Echo', translation='Эхо'),))
     with pytest.raises(ResultValidationError, match='дублирует'):
         resolve_fragment_assistances(plan(), payload, (result(),), {'block': 'Echo'}, owner_block_ids=('block',))
+
+
+def test_content_plan_errors_include_offending_ids_and_local_violation():
+    from linguary.application.validators.content_plan import validate_note_sources
+
+    p = plan(owner='block-10')
+    r = result(owner='block-10')
+
+    with pytest.raises(ResultValidationError) as missing_exc:
+        validate_content_coverage(
+            p, (r,), (), ContentEvidence(p.sha256), owner_block_ids=('block-10',)
+        )
+    assert 'не все обязательные аспекты имеют конечное объяснение (d)' in str(missing_exc.value)
+    assert missing_exc.value.violation is not None
+    assert missing_exc.value.violation.scope == 'local'
+    assert missing_exc.value.violation.block_ids == ('block-10',)
+
+    bad_note_result = BlockProcessingResult(
+        'block-10',
+        BlockTreatment.READ_AS_IS,
+        language_notes=(LanguageNote('n1', 'block-10', 'MissingQuote', 'Объяснение.'),),
+    )
+    with pytest.raises(ResultValidationError) as note_exc:
+        validate_note_sources((bad_note_result,), {'block-10': 'Echo'})
+    assert 'цитата языковой заметки отсутствует в исходном блоке (block-10)' in str(note_exc.value)
+    assert note_exc.value.violation is not None
+    assert note_exc.value.violation.rule_code == 'note_quote_missing'
+    assert note_exc.value.violation.scope == 'local'
+    assert note_exc.value.violation.block_ids == ('block-10',)
+
+    dup_note_result = BlockProcessingResult(
+        'block-10',
+        BlockTreatment.READ_AS_IS,
+        language_notes=(
+            LanguageNote('n1', 'block-10', 'Echo', 'Одинаковое объяснение.'),
+            LanguageNote('n2', 'block-10', 'Echo', 'Одинаковое объяснение!'),
+        ),
+    )
+    with pytest.raises(ResultValidationError) as dup_exc:
+        validate_note_sources((dup_note_result,), {'block-10': 'Echo'})
+    assert 'повтор языковой заметки в исходном блоке (block-10)' in str(dup_exc.value)
+    assert dup_exc.value.violation is not None
+    assert dup_exc.value.violation.rule_code == 'note_duplicate'
+    assert dup_exc.value.violation.scope == 'local'
+    assert dup_exc.value.violation.block_ids == ('block-10',)
+
+    e = evidence(p, r)
+    with pytest.raises(ResultValidationError) as body_exc:
+        validate_content_coverage(
+            p,
+            (replace(r, language_notes=()),),
+            (),
+            e,
+            owner_block_ids=('block-10',),
+        )
+    assert 'свидетельство не указывает на конечное тело помощи (d, block-10)' in str(body_exc.value)
+    assert body_exc.value.violation is not None
+    assert body_exc.value.violation.scope == 'local'
+    assert body_exc.value.violation.block_ids == ('block-10',)
+
