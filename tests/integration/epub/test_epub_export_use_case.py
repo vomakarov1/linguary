@@ -395,3 +395,30 @@ async def test_export_book_sequence_returns_active_task_without_rechecking_readi
     assert returned.status is TaskStatus.RUNNING
     assert ensure_ready_calls == 0
 
+
+def test_export_book_reuses_validated_export_inputs_helper(
+    imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_ready(unit_of_work)
+    exporter = export(unit_of_work)
+    assert hasattr(exporter, "_load_validated_export_inputs")
+
+    calls: list[str] = []
+    original = exporter._load_validated_export_inputs
+
+    def spy_load(transaction, book_id: str):
+        calls.append(book_id)
+        return original(transaction, book_id)
+
+    monkeypatch.setattr(exporter, "_load_validated_export_inputs", spy_load)
+
+    exporter.ensure_ready(BOOK_ID)
+    assert calls == [BOOK_ID]
+
+    exporter(command(tmp_path, mode=ExportMode.STRUCTURE_ONLY))
+    assert calls == [BOOK_ID]
+
+    exporter(command(tmp_path, mode=ExportMode.FULL))
+    assert calls == [BOOK_ID, BOOK_ID]
+
+

@@ -511,3 +511,214 @@ def test_quality_review_supports_multi_block_findings_and_cleans_glossary():
         validate_response(manifest_missing_res2, multi_block_response)
 
 
+def test_quality_context_validates_multi_block_artifact_sha_and_filters_scoped_analysis():
+    from linguary.application.quality_context import (
+        QualityReviewResponse,
+        request_text,
+        validate_response,
+    )
+    from linguary.domain.book_conditions import WorkStateError
+    from linguary.domain.content_plan import canonical_sha
+
+    orig1_env = dict(
+        artifact_kind="original",
+        block_ids=["block-uuid-1"],
+        body=dict(text="First block text here."),
+    )
+    orig1_sha = canonical_sha(orig1_env)
+    orig2_env = dict(
+        artifact_kind="original",
+        block_ids=["block-uuid-2"],
+        body=dict(text="Second block text here."),
+    )
+    orig2_sha = canonical_sha(orig2_env)
+
+    res1_env = dict(
+        artifact_kind="result",
+        block_ids=["block-uuid-1"],
+        body=dict(block_id="block-uuid-1", translated_text="Первый блок."),
+    )
+    res1_sha = canonical_sha(res1_env)
+    res2_env = dict(
+        artifact_kind="result",
+        block_ids=["block-uuid-2"],
+        body=dict(block_id="block-uuid-2", translated_text="Второй блок."),
+    )
+    res2_sha = canonical_sha(res2_env)
+
+    analysis_env = dict(
+        artifact_kind="analysis",
+        block_ids=["block-uuid-1"],
+        body=dict(
+            summary="scoped chapter",
+            treatment_plan=dict(
+                section_id="sec-1",
+                items=[
+                    dict(block_id="block-uuid-1", treatment="TRANSLATE"),
+                    dict(block_id="block-uuid-2", treatment="READ_AS_IS"),
+                ],
+            ),
+            content_plan=dict(
+                version=3,
+                profile="content-plan-v3",
+                sha256="f" * 64,
+                difficulties=[
+                    dict(
+                        id="df-" + "1" * 64,
+                        owner_block_id="block-uuid-1",
+                        span_block_ids=["block-uuid-1"],
+                        anchors=[dict(block_id="block-uuid-1", start=0, end=5, quote="First")],
+                    ),
+                    dict(
+                        id="df-" + "2" * 64,
+                        owner_block_id="block-uuid-2",
+                        span_block_ids=["block-uuid-2"],
+                        anchors=[dict(block_id="block-uuid-2", start=0, end=6, quote="Second")],
+                    ),
+                ],
+                context_facts=[
+                    dict(
+                        id="cf-" + "1" * 64,
+                        applies_to_block_ids=["block-uuid-1"],
+                        anchors=[dict(block_id="block-uuid-1", start=0, end=5, quote="First")],
+                        subject_anchor=dict(block_id="block-uuid-1", start=0, end=5, quote="First"),
+                    ),
+                    dict(
+                        id="cf-" + "2" * 64,
+                        applies_to_block_ids=["block-uuid-2"],
+                        anchors=[dict(block_id="block-uuid-2", start=0, end=6, quote="Second")],
+                        subject_anchor=dict(block_id="block-uuid-2", start=0, end=6, quote="Second"),
+                    ),
+                ],
+            ),
+        ),
+    )
+    analysis_sha = canonical_sha(analysis_env)
+
+    scoped_manifest = dict(
+        schema_version=1,
+        book_id="book-1",
+        scope=["block-uuid-1"],
+        book_complete=False,
+        missing_results=[],
+        artifacts=[
+            {**orig1_env, "artifact_sha": orig1_sha},
+            {**res1_env, "artifact_sha": res1_sha},
+            {**analysis_env, "artifact_sha": analysis_sha},
+        ],
+    )
+    serialized = request_text(scoped_manifest)
+    assert '": ' not in serialized
+    assert '", ' not in serialized
+    parsed = json.loads(serialized)
+    analysis_body = parsed["artifacts"][2]["body"]
+    assert analysis_body["treatment_plan"]["items"] == [
+        dict(block_id="b1", treatment="TRANSLATE"),
+    ]
+    assert [d["id"] for d in analysis_body["content_plan"]["difficulties"]] == ["d1"]
+    assert [f["id"] for f in analysis_body["content_plan"]["context_facts"]] == ["f1"]
+
+    full_manifest = dict(
+        schema_version=1,
+        book_id="book-1",
+        scope=["block-uuid-1", "block-uuid-2"],
+        artifacts=[
+            {**orig1_env, "artifact_sha": orig1_sha},
+            {**res1_env, "artifact_sha": res1_sha},
+            {**orig2_env, "artifact_sha": orig2_sha},
+            {**res2_env, "artifact_sha": res2_sha},
+        ],
+    )
+    wrong_sha_response = QualityReviewResponse(
+        findings=(
+            dict(
+                artifact_sha=res2_sha,
+                block_ids=["b1", "b2"],
+                artifact_kind="result",
+                severity="minor",
+                issue="Mismatch sha",
+                evidence_anchors=[
+                    dict(block_id="b1", quote="First"),
+                    dict(block_id="b2", quote="Second"),
+                ],
+                suggestion="Fix",
+                uncertainty="low",
+            ),
+        ),
+        checked_artifacts=(),
+        missing_artifacts=(),
+    )
+    with pytest.raises(WorkStateError, match="чужой артефакт замечания"):
+        validate_response(full_manifest, wrong_sha_response)
+
+    missing_second_manifest = dict(
+        schema_version=1,
+        book_id="book-1",
+        scope=["block-uuid-1", "block-uuid-2"],
+        artifacts=[
+            {**orig1_env, "artifact_sha": orig1_sha},
+            {**res1_env, "artifact_sha": res1_sha},
+            {**orig2_env, "artifact_sha": orig2_sha},
+        ],
+    )
+    explicit_first_sha_response = QualityReviewResponse(
+        findings=(
+            dict(
+                artifact_sha=res1_sha,
+                block_ids=["b1", "b2"],
+                artifact_kind="result",
+                severity="minor",
+                issue="Second result missing",
+                evidence_anchors=[
+                    dict(block_id="b1", quote="First"),
+                    dict(block_id="b2", quote="Second"),
+                ],
+                suggestion="Fix",
+                uncertainty="low",
+            ),
+        ),
+        checked_artifacts=(),
+        missing_artifacts=(),
+    )
+    with pytest.raises(WorkStateError, match="чужой артефакт замечания"):
+        validate_response(missing_second_manifest, explicit_first_sha_response)
+
+    from types import SimpleNamespace
+    from linguary.application.quality_budget import QualityBudget
+    import linguary.application.quality_context as qc_mod
+
+    cancelled: list[str] = []
+    snapshot_calls = 0
+
+    def fail_if_snapshot_called(*args, **kwargs):
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        raise AssertionError("snapshot must not be called when review is already stale")
+
+    fake_tx = SimpleNamespace(
+        work=SimpleNamespace(
+            get_attempt=lambda aid: SimpleNamespace(id=aid, review_id="rev-stale"),
+            get_review=lambda rid: SimpleNamespace(
+                id=rid,
+                book_id="book-1",
+                state="stale",
+                manifest={"scope": ["block-uuid-1"], "manifest_sha": "a" * 64},
+            ),
+            cancel_review_unsent=lambda aid: cancelled.append(aid),
+        )
+    )
+    from contextlib import nullcontext
+
+    budget = QualityBudget(SimpleNamespace(transaction=lambda: nullcontext(fake_tx)))
+    orig_snapshot = qc_mod.snapshot
+    qc_mod.snapshot = fail_if_snapshot_called
+    try:
+        assert budget.mark_sent("att-stale") is False
+        assert cancelled == ["att-stale"]
+        assert snapshot_calls == 0
+    finally:
+        qc_mod.snapshot = orig_snapshot
+
+
+
+

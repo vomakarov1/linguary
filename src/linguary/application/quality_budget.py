@@ -109,6 +109,8 @@ class QualityBudget:
                 if attempt is None:
                     raise WorkStateError('попытка не найдена')
                 review = tx.work.get_review(attempt.review_id)
+                if review is None or review.state not in ('queued', 'running'):
+                    raise WorkStateError('stale')
                 if review.manifest.get('manifest_sha') is not None:
                     from linguary.application.quality_context import snapshot
                     if snapshot(tx, review.book_id, tuple(review.manifest['scope']))['manifest_sha'] != review.manifest['manifest_sha']:

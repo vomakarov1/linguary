@@ -126,7 +126,7 @@ class QualityReviewService:
             try:
                 attempt = self.budget.reserve(review.id, estimate, price=route.snapshot(),
                     expected_revision=current.revision, task_id=task.id,
-                    expected_manifest_sha=None if ordinal == 1 else review.manifest['manifest_sha'])
+                    expected_manifest_sha=None)
             except WorkStateError as error:
                 if str(error) == 'manifest_changed' or self.get(task.book_id, review.id)['state'] == 'stale':
                     self._update(review.id, 'stale', reason='manifest_changed')

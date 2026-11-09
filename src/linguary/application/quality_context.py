@@ -126,9 +126,23 @@ def _llm_artifact(
     artifact: Mapping[str, Any],
     aliases: Mapping[str, str] | None = None,
     difficulty_aliases: Mapping[str, str] | None = None,
+    scope_block_ids: Any = None,
 ) -> dict[str, Any]:
     alias_map = aliases or {}
     diff_alias_map = difficulty_aliases or {}
+    artifact_bids = [
+        bid for bid in (artifact.get('block_ids') or ()) if isinstance(bid, str)
+    ]
+    raw_scope = (
+        {bid for bid in scope_block_ids if isinstance(bid, str)}
+        if scope_block_ids is not None
+        else set(artifact_bids)
+    )
+    allowed_scope = (
+        ({alias_map.get(bid, bid) for bid in raw_scope} | raw_scope)
+        if raw_scope
+        else None
+    )
     out = {k: v for k, v in artifact.items() if k != 'artifact_sha'}
     if isinstance(out.get('block_ids'), (list, tuple)):
         out['block_ids'] = [
@@ -197,7 +211,7 @@ def _llm_artifact(
         if isinstance(tp, Mapping):
             cleaned_tp = {k: v for k, v in tp.items() if k != 'section_id'}
             if isinstance(cleaned_tp.get('items'), (list, tuple)):
-                cleaned_tp['items'] = [
+                items = [
                     {
                         **item,
                         'block_id': alias_map.get(item['block_id'], item['block_id']),
@@ -206,6 +220,15 @@ def _llm_artifact(
                     else item
                     for item in cleaned_tp['items']
                 ]
+                if allowed_scope is not None:
+                    items = [
+                        item
+                        for item in items
+                        if not isinstance(item, Mapping)
+                        or not isinstance(item.get('block_id'), str)
+                        or item.get('block_id') in allowed_scope
+                    ]
+                cleaned_tp['items'] = items
             cleaned['treatment_plan'] = cleaned_tp
         cp = cleaned.get('content_plan')
         if isinstance(cp, Mapping):
@@ -218,6 +241,17 @@ def _llm_artifact(
                 difficulties = []
                 for idx, d in enumerate(cleaned_cp['difficulties'], start=1):
                     if isinstance(d, Mapping):
+                        if allowed_scope is not None:
+                            in_scope = (
+                                d.get('owner_block_id') in allowed_scope
+                                or bool(set(d.get('span_block_ids') or ()) & allowed_scope)
+                                or any(
+                                    isinstance(a, Mapping) and a.get('block_id') in allowed_scope
+                                    for a in (d.get('anchors') or ())
+                                )
+                            )
+                            if not in_scope:
+                                continue
                         diff = dict(d)
                         diff_id = diff.get('id')
                         if isinstance(diff_id, str):
@@ -237,6 +271,18 @@ def _llm_artifact(
                 facts = []
                 for idx, f in enumerate(cleaned_cp['context_facts'], start=1):
                     if isinstance(f, Mapping):
+                        if allowed_scope is not None:
+                            subj = f.get('subject_anchor')
+                            in_scope = (
+                                bool(set(f.get('applies_to_block_ids') or ()) & allowed_scope)
+                                or (isinstance(subj, Mapping) and subj.get('block_id') in allowed_scope)
+                                or any(
+                                    isinstance(a, Mapping) and a.get('block_id') in allowed_scope
+                                    for a in (f.get('anchors') or ())
+                                )
+                            )
+                            if not in_scope:
+                                continue
                         fact = dict(f)
                         fact_id = fact.get('id')
                         if _needs_plan_id_alias(fact_id, 'cf-'):
@@ -367,8 +413,13 @@ def request_text(manifest: Mapping[str, Any]) -> str:
                 ordered_payload[key] = _normalize_sorted_keys(cleaned[key])
         if 'artifacts' in cleaned:
             ordered_payload['artifacts'] = _normalize_sorted_keys(cleaned['artifacts'])
-        return json.dumps(ordered_payload, ensure_ascii=False, sort_keys=False)
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return json.dumps(
+            ordered_payload,
+            ensure_ascii=False,
+            sort_keys=False,
+            separators=(',', ':'),
+        )
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
 INSTRUCTIONS = (
@@ -392,6 +443,20 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
             or set(checked) & set(missing) or set(checked) | set(missing) != artifacts.keys()):
         raise WorkStateError('неполный или чужой охват ответа вычитки')
     originals = {a['block_ids'][0]: a['body']['text'] for a in artifacts.values() if a['artifact_kind'] == 'original'}
+    by_kind_block: dict[tuple[str, str], Mapping[str, Any]] = {}
+    duplicate_kind_blocks: set[tuple[str, str]] = set()
+    for a in manifest['artifacts']:
+        a_kind = a.get('artifact_kind') or a.get('kind')
+        a_bids = a.get('block_ids') or ()
+        if isinstance(a_kind, str) and len(a_bids) == 1 and isinstance(a_bids[0], str):
+            key = (a_kind, a_bids[0])
+            if key in by_kind_block:
+                duplicate_kind_blocks.add(key)
+            else:
+                by_kind_block[key] = a
+    for key in duplicate_kind_blocks:
+        by_kind_block.pop(key, None)
+
     updated_findings = []
     for finding in response.findings:
         f = dict(finding)
@@ -404,35 +469,38 @@ def validate_response(manifest: Mapping[str, Any], response: QualityReviewRespon
         ordered_bids = list(f.get('block_ids') or ())
         f_bids = set(ordered_bids)
         kind = f.get('artifact_kind')
-        if not artifact_sha:
+        multi_block_single_artifact = kind in {'result', 'original'} and len(f_bids) > 1
+        if multi_block_single_artifact:
             if not ordered_bids:
                 raise WorkStateError('чужой артефакт замечания')
-            if kind in {'result', 'original'} and len(f_bids) > 1:
-                per_block = []
-                for bid in ordered_bids:
-                    matches = [
-                        a for a in manifest['artifacts']
-                        if (a.get('artifact_kind') or a.get('kind')) == kind and a['block_ids'] == [bid]
-                    ]
-                    if len(matches) != 1 or matches[0]['artifact_sha'] not in checked:
-                        raise WorkStateError('чужой артефакт замечания')
-                    per_block.append(matches[0])
-                artifact_sha = per_block[0]['artifact_sha']
-                f['artifact_sha'] = artifact_sha
-            else:
-                matching = [
-                    a for a in manifest['artifacts']
-                    if (a.get('artifact_kind') or a.get('kind')) == kind and (
-                        f_bids <= set(a['block_ids']) if kind == 'analysis' else set(a['block_ids']) == f_bids
-                    )
-                ]
-                if len(matching) != 1:
+            per_block = []
+            for bid in ordered_bids:
+                matched_art = by_kind_block.get((kind, bid))
+                if matched_art is None or matched_art['artifact_sha'] not in checked:
                     raise WorkStateError('чужой артефакт замечания')
-                artifact_sha = matching[0]['artifact_sha']
+                per_block.append(matched_art)
+            first_art = per_block[0]
+            if artifact_sha:
+                if artifact_sha != first_art['artifact_sha']:
+                    raise WorkStateError('чужой артефакт замечания')
+            else:
+                artifact_sha = first_art['artifact_sha']
                 f['artifact_sha'] = artifact_sha
+        elif not artifact_sha:
+            if not ordered_bids:
+                raise WorkStateError('чужой артефакт замечания')
+            matching = [
+                a for a in manifest['artifacts']
+                if (a.get('artifact_kind') or a.get('kind')) == kind and (
+                    f_bids <= set(a['block_ids']) if kind == 'analysis' else set(a['block_ids']) == f_bids
+                )
+            ]
+            if len(matching) != 1:
+                raise WorkStateError('чужой артефакт замечания')
+            artifact_sha = matching[0]['artifact_sha']
+            f['artifact_sha'] = artifact_sha
 
         artifact = artifacts.get(artifact_sha)
-        multi_block_single_artifact = kind in {'result', 'original'} and len(f_bids) > 1
         if (artifact is None or artifact_sha not in checked
                 or artifact['artifact_kind'] != kind
                 or not ordered_bids

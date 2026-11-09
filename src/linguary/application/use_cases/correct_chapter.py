@@ -6,6 +6,7 @@ import copy
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -27,7 +28,7 @@ from linguary.application.recovery import RecoveryError
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators import TranslationResultValidator
 from linguary.application.validators.content_plan import validate_note_sources
-from linguary.domain import LLMCallStage, TaskStatus, TaskType, TranslationUnit
+from linguary.domain import BlockTreatment, LLMCallStage, TaskStatus, TaskType, TranslationUnit
 from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.content_plan import canonical_sha
 from linguary.domain.correction import CorrectionCheck, CorrectionCandidate, correction_task_identity
@@ -224,22 +225,72 @@ def _difficulty_aliases(analysis: Any) -> dict[str, str]:
     return aliases
 
 
+def _fact_aliases(analysis: Any) -> dict[str, str]:
+    if analysis is None:
+        return {}
+    raw = thaw(analysis) if isinstance(analysis, Mapping) else analysis
+    cp = raw.get('content_plan') if isinstance(raw, Mapping) else getattr(raw, 'content_plan', None)
+    if cp is None:
+        return {}
+    facts = cp.get('context_facts') if isinstance(cp, Mapping) else getattr(cp, 'context_facts', None)
+    if not isinstance(facts, (list, tuple)):
+        return {}
+    aliases: dict[str, str] = {}
+    for idx, f in enumerate(facts, start=1):
+        fact_id = f.get('id') if isinstance(f, Mapping) else getattr(f, 'id', None)
+        if _needs_plan_id_alias(fact_id, 'cf-'):
+            aliases[fact_id] = f'f{idx}'
+    return aliases
+
+
+def _inputs_difficulty_aliases(inputs: Any) -> Mapping[str, str]:
+    explicit = getattr(inputs, 'difficulty_aliases', None)
+    if explicit is not None:
+        return explicit
+    raw_analysis = (
+        getattr(inputs, 'analysis', None)
+        or (inputs.context.get('chapter_analysis') if isinstance(getattr(inputs, 'context', None), Mapping) else None)
+    )
+    return _difficulty_aliases(raw_analysis)
+
+
+def _inputs_fact_aliases(inputs: Any) -> Mapping[str, str]:
+    explicit = getattr(inputs, 'fact_aliases', None)
+    if explicit is not None:
+        return explicit
+    raw_analysis = (
+        getattr(inputs, 'analysis', None)
+        or (inputs.context.get('chapter_analysis') if isinstance(getattr(inputs, 'context', None), Mapping) else None)
+    )
+    return _fact_aliases(raw_analysis)
+
+
 def _alias_error_for_retry(
-    error: Exception,
+    error: Exception | str,
     block_aliases: Mapping[str, str] | None = None,
+    difficulty_aliases: Mapping[str, str] | None = None,
+    fact_aliases: Mapping[str, str] | None = None,
     candidate_aliases: Mapping[str, str] | None = None,
-) -> Exception:
+) -> Exception | str:
     replacements: dict[str, str] = {}
-    if block_aliases:
-        replacements.update(block_aliases)
-    if candidate_aliases:
-        replacements.update(candidate_aliases)
+    for mapping in (block_aliases, difficulty_aliases, fact_aliases, candidate_aliases):
+        if mapping:
+            replacements.update(mapping)
     if not replacements:
         return error
-    message = str(error)
-    for raw_id, alias in replacements.items():
-        if raw_id and raw_id in message:
-            message = message.replace(raw_id, alias)
+    raw_message = error if isinstance(error, str) else str(error)
+    sorted_keys = [k for k in sorted(replacements, key=len, reverse=True) if k]
+    if sorted_keys:
+        pattern = re.compile(
+            r"(?<![0-9A-Za-z_-])("
+            + "|".join(re.escape(k) for k in sorted_keys)
+            + r")(?![0-9A-Za-z_-])"
+        )
+        message = pattern.sub(lambda m: replacements[m.group(0)], raw_message)
+    else:
+        message = raw_message
+    if isinstance(error, str):
+        return message
     expectation = getattr(error, 'expectation', None)
     new_expectation = expectation
     if expectation is not None and getattr(expectation, 'blocks', None):
@@ -249,10 +300,10 @@ def _alias_error_for_retry(
         )
         if aliased_blocks != expectation.blocks:
             new_expectation = replace(expectation, blocks=aliased_blocks)
-    if message == str(error) and new_expectation is expectation:
+    if message == raw_message and new_expectation is expectation:
         return error
     copied = copy.copy(error)
-    if message != str(error):
+    if message != raw_message:
         copied.args = (message, *error.args[1:])
     if new_expectation is not expectation:
         copied.expectation = new_expectation
@@ -637,7 +688,12 @@ class CorrectChapter:
                     middle = len(block_ids) // 2
                     return (await self._group(command, block_ids[:middle])
                             + await self._group(command, block_ids[middle:]))
-                aliased_error = _alias_error_for_retry(error, getattr(inputs, 'block_aliases', None))
+                aliased_error = _alias_error_for_retry(
+                    error,
+                    getattr(inputs, 'block_aliases', None),
+                    _inputs_difficulty_aliases(inputs),
+                    _inputs_fact_aliases(inputs),
+                )
                 decision = self.retry.decide(
                     aliased_error,
                     attempts=ordinal,
@@ -665,16 +721,15 @@ class CorrectChapter:
                 for n in c.payload['result']['language_notes'])
         notes = note_id_factory(chapter_number=chapter_number(inputs.document, inputs.section), used=used_note_ids)
         originals = {b.id: b for b in inputs.blocks}
-        section_quote_fragments = source_quote_fragments(b.text for b in inputs.section.ordered_blocks)
+        section_quote_fragments = None
         candidates = []
         for block in response.blocks:
             previous = inputs.results[block.block_id]
             if not isinstance(block, CorrectedBlockResponse):
-                prepared = ReaderTextPolicy().prepare_results((previous,), section_quote_fragments)
-                if prepared != (previous,):
-                    raise ResultValidationError('неизменённый блок содержит неочищенный читательский текст')
                 candidates.append(previous)
                 continue
+            if section_quote_fragments is None:
+                section_quote_fragments = source_quote_fragments(b.text for b in inputs.section.ordered_blocks)
             unit = TranslationUnit.of_blocks(id=str(uuid4()), blocks=(originals[block.block_id],),
                                             plan=inputs.analysis.treatment_plan)
             payload = TranslationResultResponse(
@@ -708,12 +763,22 @@ class CorrectChapter:
                                english_help=inputs.conditions.payload.get('english_help', False),
                                validators_version=inputs.conditions.payload['versions']['validators'],
                                reader_level=inputs.conditions.payload.get('reader_level'))
+        treatments = (
+            {item.block_id: item.treatment for item in inputs.analysis.treatment_plan.items}
+            if getattr(inputs, 'analysis', None) is not None
+            and getattr(inputs.analysis, 'treatment_plan', None) is not None
+            else {}
+        )
         for candidate in candidates:
+            block_treatment = treatments.get(candidate.block_id, candidate.treatment)
             for assistance in (candidate.fragment_assistances
                                if inputs.conditions.payload.get('english_help', False) else ()):
                 quotes = {anchor.quote for anchor in assistance.anchors}
-                if (candidate.translated_text or any(h.original in quotes for h in candidate.glossary_hints)
-                        or any(n.original_excerpt in quotes for n in candidate.language_notes)):
+                if (
+                    (bool(candidate.translated_text) and block_treatment != BlockTreatment.TRANSLATE)
+                    or any(h.original in quotes for h in candidate.glossary_hints)
+                    or any(n.original_excerpt in quotes for n in candidate.language_notes)
+                ):
                     raise ResultValidationError('исправление дублирует защищённую помощь к фрагменту')
         return tuple(next(r for r in candidates if r.block_id == block_id) for block_id in ids)
 
@@ -952,7 +1017,12 @@ class CorrectChapterV2(CorrectChapter):
                 if isinstance(error, LLMResponseFormatError) and error.truncated and len(block_ids) > 1:
                     middle = len(block_ids) // 2
                     return await self._propose_group(command, block_ids[:middle]) + await self._propose_group(command, block_ids[middle:])
-                aliased_error = _alias_error_for_retry(error, getattr(inputs, 'block_aliases', None))
+                aliased_error = _alias_error_for_retry(
+                    error,
+                    getattr(inputs, 'block_aliases', None),
+                    _inputs_difficulty_aliases(inputs),
+                    _inputs_fact_aliases(inputs),
+                )
                 decision = self.retry.decide(
                     aliased_error,
                     attempts=ordinal,
@@ -1025,29 +1095,24 @@ class CorrectChapterV2(CorrectChapter):
                 max_chars = getattr(self.snapshot, 'parameters', {}).get('max_unit_source_chars')
                 by_block = {c.block_id: c.candidate_id for c in candidates}
                 chunks = _chunk_correction_blocks(tuple(by_block), inputs, max_chars)
+                if len(chunks) <= 1:
+                    refs = tuple((c.candidate_id, c.proposal_sha256) for c in candidates)
+                    base_request = self._review_request(inputs, task, candidates)
+                    if repair_turns or repair_instructions:
+                        base_request = replace(
+                            base_request,
+                            repair_turns=repair_turns,
+                            repair_instructions=repair_instructions,
+                        )
+                    request, context = self._call(tx, inputs, task, payload,
+                        base_request, ordinal,
+                        kind='correction_review_request', refs=refs)
+                    expected = inputs.manifest
             if len(chunks) > 1:
                 total = 0
                 for chunk in chunks:
                     total += await self._review_group(command, tuple(by_block[b] for b in chunk))
                 return total
-            with self.uow.transaction() as tx:
-                inputs, task, payload = self._load(tx, command)
-                candidates = tuple(tx.work.get_correction_candidate(i) for i in candidate_ids)
-                if any(c is None or c.state != 'awaiting_review' or not candidate_is_current(tx, inputs, c)
-                       for c in candidates):
-                    raise RecoveryError('interrupted')
-                refs = tuple((c.candidate_id, c.proposal_sha256) for c in candidates)
-                base_request = self._review_request(inputs, task, candidates)
-                if repair_turns or repair_instructions:
-                    base_request = replace(
-                        base_request,
-                        repair_turns=repair_turns,
-                        repair_instructions=repair_instructions,
-                    )
-                request, context = self._call(tx, inputs, task, payload,
-                    base_request, ordinal,
-                    kind='correction_review_request', refs=refs)
-                expected = inputs.manifest
             try:
                 response = await self.client.generate(request)
                 if (response.truncated or not isinstance(response.payload, ChapterCorrectionReviewResponse)
@@ -1128,7 +1193,9 @@ class CorrectChapterV2(CorrectChapter):
                 aliased_error = _alias_error_for_retry(
                     error,
                     getattr(inputs, 'block_aliases', None),
-                    candidate_aliases,
+                    _inputs_difficulty_aliases(inputs),
+                    _inputs_fact_aliases(inputs),
+                    candidate_aliases=candidate_aliases,
                 )
                 decision = self.retry.decide(
                     aliased_error,

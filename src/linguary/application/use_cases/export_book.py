@@ -173,36 +173,43 @@ class ExportBook:
             validation_report_path=validation.report_path,
         )
 
+    def _load_validated_export_inputs(
+        self, transaction: object, book_id: str
+    ) -> tuple[BookRecord, CanonicalDocument, tuple[BlockProcessingResult, ...], tuple[ChapterAnalysis, ...]]:
+        book = transaction.books.get(book_id)  # type: ignore[attr-defined]
+        if book is None:
+            raise ExportBookNotFoundError(f"книги {book_id} нет в хранилище")
+        document = transaction.documents.get(book_id)  # type: ignore[attr-defined]
+        if document is None or not document.sections:
+            raise ExportBookError(
+                f"книга {book_id} не импортирована: экспортировать нечего"
+            )
+        _ensure_ready(book, transaction.tasks.list_for_book(book_id))  # type: ignore[attr-defined]
+        run = transaction.runs.active_for_book(book_id)  # type: ignore[attr-defined]
+        if run is None:
+            raise ExportBookError(
+                f"у книги {book_id} нет запуска обработки: полный экспорт "
+                f"собирать не из чего"
+            )
+        _ensure_recovery_complete(transaction, book_id, run.id)
+        results = tuple(transaction.results.list_for_run(run.id))  # type: ignore[attr-defined]
+        _ensure_result_coverage(document, results)
+        analyses = tuple(transaction.analyses.list_for_book(book_id))  # type: ignore[attr-defined]
+        conditions = transaction.work.latest_conditions(book_id)  # type: ignore[attr-defined]
+        _ensure_content_plans(
+            document,
+            analyses,
+            results,
+            english_help=bool(conditions and conditions.payload.get("english_help")),
+            validators_version=1 if conditions is None else conditions.payload['versions']['validators'],
+            reader_level=None if conditions is None else conditions.payload.get('reader_level'),
+        )
+        return book, document, results, analyses
+
     def ensure_ready(self, book_id: str) -> None:
         """Checks whether full export is possible before enqueuing a background task."""
         with self._unit_of_work.transaction() as transaction:
-            book = transaction.books.get(book_id)
-            if book is None:
-                raise ExportBookNotFoundError(f"книги {book_id} нет в хранилище")
-            document = transaction.documents.get(book_id)
-            if document is None or not document.sections:
-                raise ExportBookError(
-                    f"книга {book_id} не импортирована: экспортировать нечего"
-                )
-            _ensure_ready(book, transaction.tasks.list_for_book(book_id))
-            run = transaction.runs.active_for_book(book_id)
-            if run is None:
-                raise ExportBookError(
-                    f"у книги {book_id} нет запуска обработки: полный экспорт "
-                    f"собирать не из чего"
-                )
-            _ensure_recovery_complete(transaction, book_id, run.id)
-            results = transaction.results.list_for_run(run.id)
-            _ensure_result_coverage(document, results)
-            conditions = transaction.work.latest_conditions(book_id)
-            _ensure_content_plans(
-                document,
-                transaction.analyses.list_for_book(book_id),
-                results,
-                english_help=bool(conditions and conditions.payload.get("english_help")),
-                validators_version=1 if conditions is None else conditions.payload['versions']['validators'],
-                reader_level=None if conditions is None else conditions.payload.get('reader_level'),
-            )
+            self._load_validated_export_inputs(transaction, book_id)
 
     def downloadable_task(self, book_id: str) -> ProcessingTask:
         """Latest successful task whose file is available for download."""
@@ -229,47 +236,33 @@ class ExportBook:
     def _plan(self, command: ExportBookCommand) -> _ExportPlan:
         """Reads everything needed by the exporter in a single short transaction."""
         with self._unit_of_work.transaction() as transaction:
-            book = transaction.books.get(command.book_id)
-            if book is None:
-                raise ExportBookNotFoundError(
-                    f"книги {command.book_id} нет в хранилище"
+            if command.mode is ExportMode.STRUCTURE_ONLY:
+                book = transaction.books.get(command.book_id)
+                if book is None:
+                    raise ExportBookNotFoundError(
+                        f"книги {command.book_id} нет в хранилище"
+                    )
+                document = transaction.documents.get(command.book_id)
+                if document is None or not document.sections:
+                    raise ExportBookError(
+                        f"книга {command.book_id} не импортирована: экспортировать нечего"
+                    )
+                return _ExportPlan(
+                    document=document,
+                    stored_resource_paths=transaction.documents.stored_resource_paths(
+                        command.book_id
+                    ),
+                    source_epub_path=book.source_epub_path,
                 )
-            document = transaction.documents.get(command.book_id)
-            if document is None or not document.sections:
-                raise ExportBookError(
-                    f"книга {command.book_id} не импортирована: экспортировать нечего"
-                )
-            plan = _ExportPlan(
+            book, document, results, analyses = self._load_validated_export_inputs(
+                transaction, command.book_id
+            )
+            return _ExportPlan(
                 document=document,
                 stored_resource_paths=transaction.documents.stored_resource_paths(
                     command.book_id
                 ),
                 source_epub_path=book.source_epub_path,
-            )
-            if command.mode is ExportMode.STRUCTURE_ONLY:
-                return plan
-            _ensure_ready(book, transaction.tasks.list_for_book(command.book_id))
-            run = transaction.runs.active_for_book(command.book_id)
-            if run is None:
-                raise ExportBookError(
-                    f"у книги {command.book_id} нет запуска обработки: полный экспорт "
-                    f"собирать не из чего"
-                )
-            _ensure_recovery_complete(transaction, command.book_id, run.id)
-            results = transaction.results.list_for_run(run.id)
-            _ensure_result_coverage(document, results)
-            analyses = transaction.analyses.list_for_book(command.book_id)
-            conditions = transaction.work.latest_conditions(command.book_id)
-            _ensure_content_plans(
-                document,
-                analyses,
-                results,
-                english_help=bool(conditions and conditions.payload.get("english_help")),
-                validators_version=1 if conditions is None else conditions.payload['versions']['validators'],
-                reader_level=None if conditions is None else conditions.payload.get('reader_level'),
-            )
-            return replace(
-                plan,
                 block_results={result.block_id: result for result in results},
                 learning_materials=_learning_materials(
                     document=document,

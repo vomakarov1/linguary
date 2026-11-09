@@ -1230,5 +1230,169 @@ def test_alias_error_for_retry_does_not_mutate_original_error():
     assert [b.block_id for b in err.expectation.blocks] == ["uuid-block-1"]
 
 
+@pytest.mark.asyncio
+async def test_alias_error_for_retry_replaces_difficulty_and_fact_ids_in_single_pass():
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.application.use_cases.correct_chapter import _alias_error_for_retry
+
+    diff_id = "df-" + "a" * 64
+    fact_id = "cf-" + "b" * 64
+    err = ResultValidationError(
+        f"Block block-1 and block-10 failed on {diff_id}, {fact_id}, and sub-{diff_id}-tail"
+    )
+    aliased = _alias_error_for_retry(
+        err,
+        {"block-1": "b1", "block-10": "b10", "b1": "d99"},
+        {diff_id: "d1"},
+        {fact_id: "f1"},
+    )
+    assert str(aliased) == f"Block b1 and b10 failed on d1, f1, and sub-{diff_id}-tail"
+
+    aliased_str = _alias_error_for_retry(
+        f"Error in block-10 and {diff_id} and {fact_id}",
+        {"block-1": "b1", "block-10": "b10"},
+        {diff_id: "d1"},
+        {fact_id: "f1"},
+    )
+    assert aliased_str == "Error in b10 and d1 and f1"
+
+
+def test_correct_chapter_candidates_skips_unchanged_revalidation_and_allows_translated_blocks_with_english_help(
+    monkeypatch,
+):
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS,
+        ChapterCorrectionResponse,
+        CorrectedBlockResponse,
+        CorrectionSnapshot,
+        UnchangedBlockResponse,
+    )
+    from linguary.application.reader_text import ReaderTextPolicy
+    from linguary.application.use_cases.correct_chapter import CorrectChapter
+    from linguary.domain.content_plan import (
+        ContentEvidence,
+        ContentPlan,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
+    from linguary.domain.learning import FragmentAssistance
+
+    section = make_analysis_section(texts=("First unchanged.", "Second translated with help."))
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    anchor2 = SourceAnchor(block_id=b2.id, start=0, end=6, quote="Second")
+    diff2 = Difficulty(
+        id="df-" + "1" * 64,
+        anchors=(anchor2,),
+        owner_block_id=b2.id,
+        kind="idiom",
+        priority="critical",
+        help_kind="explanation",
+        required_points=(RequiredPoint(id="p1", description="point"),),
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(diff2,),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+        content_plan=content_plan,
+    )
+    assistance2 = FragmentAssistance(
+        difficulty_id=diff2.id,
+        point_ids=("p1",),
+        kind="russian_explanation",
+        text="Пояснение к фрагменту.",
+        anchors=(anchor2,),
+    )
+    res1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Первый перевод.",
+        content_evidence=ContentEvidence(plan_sha256=content_plan.sha256, version=3),
+    )
+    res2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Второй старый перевод.",
+        fragment_assistances=(assistance2,),
+        content_evidence=ContentEvidence(plan_sha256=content_plan.sha256, version=3),
+    )
+    snapshot = CorrectionSnapshot(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Correct.",
+        versions=CORRECTION_VERSIONS,
+    )
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(
+            id="cond-1",
+            payload={"schema_version": 1, "english_help": True, "versions": {"validators": 3}},
+        ),
+        snapshot=snapshot,
+        blocks=section.blocks,
+        results={b1.id: res1, b2.id: res2},
+        bindings={b1.id: None, b2.id: None},
+    )
+
+    prepare_calls: list[tuple[str, ...]] = []
+    orig_prepare = ReaderTextPolicy.prepare_results
+
+    def spy_prepare(self, results, *args, **kwargs):
+        prepare_calls.append(tuple(r.block_id for r in results))
+        return orig_prepare(self, results, *args, **kwargs)
+
+    monkeypatch.setattr(ReaderTextPolicy, "prepare_results", spy_prepare)
+
+    handler = CorrectChapter(
+        unit_of_work=None,
+        llm_client=None,
+        snapshot=snapshot,
+        validator=make_validator(),
+    )
+    response = ChapterCorrectionResponse(
+        blocks=(
+            UnchangedBlockResponse(block_id=b1.id),
+            CorrectedBlockResponse(
+                block_id=b2.id,
+                translated_text="Второй обновлённый перевод.",
+                glossary_hints=(),
+                language_notes=(),
+            ),
+        )
+    )
+    candidates = handler._candidates(None, inputs, response)
+    assert len(candidates) == 2
+    assert candidates[0] == res1
+    assert candidates[1].translated_text == "Второй обновлённый перевод."
+    assert (b1.id,) not in prepare_calls
+    assert prepare_calls[0] == (b2.id,)
+
+
+
 
 
