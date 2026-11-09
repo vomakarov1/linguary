@@ -129,12 +129,20 @@ class BoundTaskQueue:
         return await self.queue.save(task)
 
 
+_CREATED_PROVENANCE_CLIENTS: ContextVar[list | None] = ContextVar(
+    '_created_provenance_clients', default=None
+)
+
+
 class ProvenanceClient:
     """Persist the designated conditions and actual physical response separately."""
     def __init__(self, inner, service, conditions_id):
         self.inner, self.service, self.conditions_id = inner, service, conditions_id
         self._attempts = ContextVar(f'book_attempts_{id(self)}', default=())
         self._responses = ContextVar(f'book_responses_{id(self)}', default=())
+        bucket = _CREATED_PROVENANCE_CLIENTS.get()
+        if bucket is not None:
+            bucket.append(self)
 
     @property
     def attempts(self):
@@ -229,10 +237,48 @@ class ProvenanceClient:
         return response
 
 
+def _collect_context_clients(generation, created=()) -> tuple:
+    found = []
+    seen = set()
+
+    def _add(candidate) -> None:
+        if (
+            candidate is not None
+            and id(candidate) not in seen
+            and isinstance(getattr(candidate, '_attempts', None), ContextVar)
+            and isinstance(getattr(candidate, '_responses', None), ContextVar)
+        ):
+            seen.add(id(candidate))
+            found.append(candidate)
+
+    for item in created:
+        _add(item)
+
+    def _walk(obj, depth: int) -> None:
+        if obj is None or depth < 0:
+            return
+        _add(obj)
+        if depth == 0:
+            return
+        attrs = getattr(obj, '__dict__', None)
+        if isinstance(attrs, dict):
+            for val in attrs.values():
+                _walk(val, depth - 1)
+        for slot in getattr(type(obj), '__slots__', ()):
+            if isinstance(slot, str) and hasattr(obj, slot):
+                _walk(getattr(obj, slot), depth - 1)
+
+    for root_attr in ('analysis', 'processing', 'regeneration'):
+        _walk(getattr(generation, root_attr, None), 4)
+    return tuple(found)
+
+
 @dataclass(slots=True)
 class _CachedBookGeneration:
     fingerprint: tuple
     generation: object
+    book_id: str | None = None
+    clients: tuple = ()
     active_leases: int = 0
     retired: bool = False
     closed: bool = False
@@ -243,11 +289,23 @@ class BookRuntimeResolver:
         self.service, self.runtime, self.factory = service, runtime, factory
         self.supported = {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 3}
         self._cache: dict[str, _CachedBookGeneration] = {}
+        self._closed: bool = False
 
     async def _close_entry(self, entry: _CachedBookGeneration) -> None:
         if not entry.closed:
             entry.closed = True
             await entry.generation.configured_client.aclose()
+
+    def _runtime_fingerprint(self, settings) -> tuple:
+        llm = settings.llm
+        worker = getattr(settings, 'worker', None)
+        return (
+            llm.base_url,
+            llm.proxy_url,
+            llm.api_key,
+            getattr(worker, 'concurrency', None),
+            getattr(llm, 'debug_llm_payloads', False),
+        )
 
     def settings_for(self, conditions):
         payload = conditions.payload
@@ -305,25 +363,17 @@ class BookRuntimeResolver:
             raise ConditionsError('route_unavailable')
         if not current.llm.api_key:
             raise ConditionsError('route_unavailable')
-        llm = LLMSettings(**{**thaw(payload['llm_parameters']), 'base_url': current.llm.base_url,
-                            'proxy_url': current.llm.proxy_url, 'api_key': current.llm.api_key})
+        llm = LLMSettings(**{
+            **thaw(payload['llm_parameters']),
+            'base_url': current.llm.base_url,
+            'proxy_url': current.llm.proxy_url,
+            'api_key': current.llm.api_key,
+            'debug_llm_payloads': getattr(current.llm, 'debug_llm_payloads', False),
+        })
         return replace(current, llm=llm, reading=ReadingSettings(reader_level=payload['reader_level'],
                        name_translation_strategy=policy.strategy.value if policy is not None else 'sound'),
                        checks=CheckSettings(**thaw(payload['checks'])),
                        recovery=RecoverySettings(**thaw(payload.get('recovery_policy', asdict(RecoverySettings())))))
-
-    async def _evict_stale_entries(self, current_creds: tuple) -> None:
-        stale = [
-            (cache_key, cached)
-            for cache_key, cached in tuple(self._cache.items())
-            if cached.fingerprint[1:] != current_creds
-        ]
-        for cache_key, cached in stale:
-            cached.retired = True
-            if self._cache.get(cache_key) is cached:
-                self._cache.pop(cache_key, None)
-            if cached.active_leases == 0:
-                await self._close_entry(cached)
 
     @asynccontextmanager
     async def lease(self, conditions_id, role):
@@ -335,43 +385,72 @@ class BookRuntimeResolver:
                 raise ConditionsError('conditions_unavailable')
         settings = self.settings_for(conditions)
         key = getattr(conditions, 'id', conditions_id)
-        current_creds = (
-            settings.llm.base_url,
-            settings.llm.proxy_url,
-            settings.llm.api_key,
-        )
-        await self._evict_stale_entries(current_creds)
+        book_id = getattr(conditions, 'book_id', None)
+        runtime_fp = self._runtime_fingerprint(settings)
         fingerprint = (
             getattr(conditions, 'revision', None),
-            *current_creds,
+            *runtime_fp,
         )
+        to_close: list[_CachedBookGeneration] = []
+        for cache_key, cached in tuple(self._cache.items()):
+            if cache_key != key and (
+                cached.fingerprint[1:] != runtime_fp
+                or (book_id is not None and cached.book_id == book_id)
+            ):
+                cached.retired = True
+                if self._cache.get(cache_key) is cached:
+                    self._cache.pop(cache_key, None)
+                to_close.append(cached)
         entry = self._cache.get(key)
-        if entry is not None and not entry.retired and entry.fingerprint == fingerprint:
+        if (
+            entry is not None
+            and not entry.retired
+            and entry.fingerprint == fingerprint
+            and not self._closed
+        ):
             entry.active_leases += 1
         else:
-            if entry is not None:
-                entry.retired = True
-                self._cache.pop(key, None)
-                if entry.active_leases == 0:
-                    await self._close_entry(entry)
-            generation = self.factory(settings, conditions=conditions)
-            entry = _CachedBookGeneration(
+            created_clients: list[ProvenanceClient] = []
+            token_created = _CREATED_PROVENANCE_CLIENTS.set(created_clients)
+            try:
+                generation = self.factory(settings, conditions=conditions)
+            finally:
+                _CREATED_PROVENANCE_CLIENTS.reset(token_created)
+            new_entry = _CachedBookGeneration(
                 fingerprint=fingerprint,
                 generation=generation,
+                book_id=book_id,
+                clients=_collect_context_clients(generation, created_clients),
                 active_leases=1,
             )
-            self._cache[key] = entry
+            old_entry = self._cache.get(key)
+            if old_entry is not None:
+                old_entry.retired = True
+                self._cache.pop(key, None)
+                to_close.append(old_entry)
+            if self._closed:
+                new_entry.retired = True
+            else:
+                self._cache[key] = new_entry
+            entry = new_entry
+        tokens = tuple(
+            (client, client._attempts.set(()), client._responses.set(()))
+            for client in entry.clients
+        )
         try:
+            for stale_entry in to_close:
+                if stale_entry.active_leases == 0:
+                    await self._close_entry(stale_entry)
             yield entry.generation
         finally:
+            for client, token_attempts, token_responses in reversed(tokens):
+                client._attempts.reset(token_attempts)
+                client._responses.reset(token_responses)
             entry.active_leases -= 1
             if not entry.retired:
-                current_llm = self.runtime.current.settings.llm
                 latest_fingerprint = (
                     getattr(conditions, 'revision', None),
-                    current_llm.base_url,
-                    current_llm.proxy_url,
-                    current_llm.api_key,
+                    *self._runtime_fingerprint(self.runtime.current.settings),
                 )
                 if latest_fingerprint != entry.fingerprint:
                     entry.retired = True
@@ -381,6 +460,7 @@ class BookRuntimeResolver:
                 await self._close_entry(entry)
 
     async def aclose(self) -> None:
+        self._closed = True
         entries = tuple(self._cache.values())
         self._cache.clear()
         for entry in entries:

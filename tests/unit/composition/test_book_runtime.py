@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -9,7 +10,11 @@ from uuid import uuid4
 import pytest
 
 from linguary.adapters.config.settings import AppSettings, LLMSettings
-from linguary.composition.book_runtime import BookRuntimeResolver, conditions_payload
+from linguary.composition.book_runtime import (
+    BookRuntimeResolver,
+    ProvenanceClient,
+    conditions_payload,
+)
 from linguary.composition.container import Application
 from linguary.composition.runtime_settings import RuntimeGeneration
 from linguary.domain.book_conditions import BookConditions
@@ -166,3 +171,251 @@ async def test_book_runtime_resolver_retires_old_generation_after_active_lease_f
 
     assert created_clients[1].closed == 1
     assert "correction" in closed_order
+
+
+@pytest.mark.asyncio
+async def test_book_runtime_resolver_no_race_when_closing_stale_entry_during_concurrent_lease() -> None:
+    settings_v1 = _make_settings("sk-v1")
+    current_conditions = _make_conditions(settings_v1, revision=1)
+
+    class _Work:
+        def get_conditions(self, conditions_id: str):
+            return current_conditions if conditions_id == current_conditions.id else None
+
+    class _UoW:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=_Work())
+
+    service = SimpleNamespace(uow=_UoW())
+    runtime = SimpleNamespace(current=SimpleNamespace(settings=settings_v1))
+
+    close_started = asyncio.Event()
+    allow_close_finish = asyncio.Event()
+
+    class _SlowCloseClient(_FakeConfiguredClient):
+        def __init__(self, llm_settings: LLMSettings, index: int) -> None:
+            super().__init__(llm_settings)
+            self.index = index
+
+        async def aclose(self) -> None:
+            self.closed += 1
+            if self.index == 0 and self.closed == 1:
+                close_started.set()
+                await allow_close_finish.wait()
+
+    created_clients: list[_SlowCloseClient] = []
+
+    def factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
+        client = _SlowCloseClient(candidate.llm, len(created_clients))
+        created_clients.append(client)
+        return RuntimeGeneration(
+            settings=candidate,
+            configured_client=client,
+            analysis=SimpleNamespace(language_detector=object()),
+            processing=SimpleNamespace(),
+            regeneration=SimpleNamespace(),
+        )
+
+    resolver = BookRuntimeResolver(service, runtime, factory)
+
+    async with resolver.lease(current_conditions.id, "processing"):
+        assert len(created_clients) == 1
+
+    current_conditions = replace(current_conditions, revision=2)
+
+    lease_a_entered = asyncio.Event()
+    release_lease_a = asyncio.Event()
+
+    async def worker_a() -> None:
+        async with resolver.lease(current_conditions.id, "processing"):
+            lease_a_entered.set()
+            await release_lease_a.wait()
+
+    task_a = asyncio.create_task(worker_a())
+    await close_started.wait()
+
+    async with resolver.lease(current_conditions.id, "processing"):
+        allow_close_finish.set()
+        await lease_a_entered.wait()
+
+    release_lease_a.set()
+    await task_a
+
+    await resolver.aclose()
+    assert all(client.closed == 1 for client in created_clients)
+    assert resolver._cache == {}
+
+
+@pytest.mark.asyncio
+async def test_book_runtime_resolver_aclose_during_stale_entry_close_leaves_cache_empty() -> None:
+    settings_v1 = _make_settings("sk-v1")
+    current_conditions = _make_conditions(settings_v1, revision=1)
+
+    class _Work:
+        def get_conditions(self, conditions_id: str):
+            return current_conditions if conditions_id == current_conditions.id else None
+
+    class _UoW:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=_Work())
+
+    service = SimpleNamespace(uow=_UoW())
+    runtime = SimpleNamespace(current=SimpleNamespace(settings=settings_v1))
+
+    close_started = asyncio.Event()
+    allow_close_finish = asyncio.Event()
+
+    class _SlowCloseClient(_FakeConfiguredClient):
+        def __init__(self, llm_settings: LLMSettings, index: int) -> None:
+            super().__init__(llm_settings)
+            self.index = index
+
+        async def aclose(self) -> None:
+            self.closed += 1
+            if self.index == 0 and self.closed == 1:
+                close_started.set()
+                await allow_close_finish.wait()
+
+    created_clients: list[_SlowCloseClient] = []
+
+    def factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
+        client = _SlowCloseClient(candidate.llm, len(created_clients))
+        created_clients.append(client)
+        return RuntimeGeneration(
+            settings=candidate,
+            configured_client=client,
+            analysis=SimpleNamespace(),
+            processing=SimpleNamespace(),
+            regeneration=SimpleNamespace(),
+        )
+
+    resolver = BookRuntimeResolver(service, runtime, factory)
+
+    async with resolver.lease(current_conditions.id, "processing"):
+        pass
+
+    current_conditions = replace(current_conditions, revision=2)
+
+    async def worker() -> None:
+        async with resolver.lease(current_conditions.id, "processing"):
+            pass
+
+    task = asyncio.create_task(worker())
+    await close_started.wait()
+    await resolver.aclose()
+    assert resolver._cache == {}
+    allow_close_finish.set()
+    await task
+
+    assert resolver._cache == {}
+    assert all(client.closed == 1 for client in created_clients)
+
+
+@pytest.mark.asyncio
+async def test_book_runtime_resolver_resets_provenance_client_contextvars_on_lease_exit() -> None:
+    settings = _make_settings("sk-ctx")
+    conditions = _make_conditions(settings)
+    service = _make_service(conditions)
+    runtime = SimpleNamespace(current=SimpleNamespace(settings=settings))
+
+    created_provenance: list[ProvenanceClient] = []
+
+    def factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
+        client = _FakeConfiguredClient(candidate.llm)
+        prov = ProvenanceClient(SimpleNamespace(), service, conditions.id)
+        created_provenance.append(prov)
+        return RuntimeGeneration(
+            settings=candidate,
+            configured_client=client,
+            analysis=SimpleNamespace(_analyze_chapter=SimpleNamespace(_llm_client=prov)),
+            processing=SimpleNamespace(_process_chapter=SimpleNamespace(_call=SimpleNamespace(_llm_client=prov))),
+            regeneration=SimpleNamespace(_regenerate_block=SimpleNamespace(_call=SimpleNamespace(_llm_client=prov))),
+        )
+
+    resolver = BookRuntimeResolver(service, runtime, factory)
+
+    async with resolver.lease(conditions.id, "processing"):
+        prov = created_provenance[0]
+        prov._attempts.set(("attempt-1",))
+        prov._responses.set((SimpleNamespace(id="resp-1"),))
+        assert len(prov.attempts) == 1
+        assert len(prov.responses) == 1
+
+    assert created_provenance[0].attempts == ()
+    assert created_provenance[0].responses == ()
+
+    async with resolver.lease(conditions.id, "processing"):
+        assert created_provenance[0].attempts == ()
+        assert created_provenance[0].responses == ()
+
+
+@pytest.mark.asyncio
+async def test_book_runtime_resolver_evicts_previous_conditions_of_same_book_and_tracks_worker_and_debug_settings() -> None:
+    settings = _make_settings("sk-book")
+    cond1 = _make_conditions(settings, revision=1)
+    cond2 = _make_conditions(settings, revision=2)
+    by_id = {cond1.id: cond1, cond2.id: cond2}
+
+    class _Work:
+        def get_conditions(self, conditions_id: str):
+            return by_id.get(conditions_id)
+
+    class _UoW:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=_Work())
+
+    service = SimpleNamespace(uow=_UoW())
+    runtime = SimpleNamespace(current=SimpleNamespace(settings=settings))
+
+    created_clients: list[_FakeConfiguredClient] = []
+
+    def factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
+        client = _FakeConfiguredClient(candidate.llm)
+        created_clients.append(client)
+        return RuntimeGeneration(
+            settings=candidate,
+            configured_client=client,
+            analysis=SimpleNamespace(),
+            processing=SimpleNamespace(),
+            regeneration=SimpleNamespace(),
+        )
+
+    resolver = BookRuntimeResolver(service, runtime, factory)
+
+    async with resolver.lease(cond1.id, "analysis"):
+        assert len(created_clients) == 1
+        assert created_clients[0].closed == 0
+
+    async with resolver.lease(cond2.id, "analysis") as gen_cond2:
+        assert len(created_clients) == 2
+        assert created_clients[0].closed == 1
+        assert created_clients[1].closed == 0
+
+    runtime.current = SimpleNamespace(
+        settings=replace(settings, worker=replace(settings.worker, concurrency=4))
+    )
+    async with resolver.lease(cond2.id, "processing") as gen_concurrency:
+        assert gen_concurrency is not gen_cond2
+        assert len(created_clients) == 3
+        assert created_clients[1].closed == 1
+        assert created_clients[2].closed == 0
+
+    runtime.current = SimpleNamespace(
+        settings=replace(
+            runtime.current.settings,
+            llm=replace(runtime.current.settings.llm, debug_llm_payloads=True),
+        )
+    )
+    async with resolver.lease(cond2.id, "processing") as gen_debug:
+        assert gen_debug is not gen_concurrency
+        assert gen_debug.settings.llm.debug_llm_payloads is True
+        assert len(created_clients) == 4
+        assert created_clients[2].closed == 1
+        assert created_clients[3].closed == 0
+
+    await resolver.aclose()
+    assert created_clients[3].closed == 1
+

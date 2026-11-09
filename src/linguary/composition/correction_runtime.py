@@ -98,6 +98,7 @@ class _CachedCorrectionRuntime:
     fingerprint: tuple
     runtime: CorrectionRuntime
     configured: object
+    book_id: str | None = None
     active_leases: int = 0
     retired: bool = False
     closed: bool = False
@@ -113,11 +114,48 @@ class CorrectionRuntimeResolver:
         self.client_factory = client_factory or ConfiguredLLMClient
         self.injected_client = injected_client
         self._cache: dict[tuple[str, str], _CachedCorrectionRuntime] = {}
+        self._closed: bool = False
 
     async def _close_entry(self, entry: _CachedCorrectionRuntime) -> None:
         if not entry.closed:
             entry.closed = True
             await entry.configured.aclose()
+
+    def _runtime_fingerprint(self, settings) -> tuple:
+        llm = settings.llm
+        return (
+            llm.base_url,
+            getattr(llm, 'proxy_mode', None),
+            llm.proxy_url,
+            llm.api_key,
+            getattr(llm, 'debug_llm_payloads', False),
+        )
+
+    def _fingerprint(self, conditions, snapshot, settings) -> tuple:
+        return (
+            getattr(conditions, 'revision', None),
+            snapshot.model,
+            thaw(snapshot.route),
+            thaw(snapshot.parameters),
+            getattr(snapshot, 'policy_version', None),
+            *self._runtime_fingerprint(settings),
+        )
+
+    async def _evict_for_book_or_run(
+        self, *, book_id: str | None = None, run_id: str | None = None
+    ) -> None:
+        to_close: list[_CachedCorrectionRuntime] = []
+        for cache_key, cached in tuple(self._cache.items()):
+            if (run_id is not None and cache_key[0] == run_id) or (
+                book_id is not None and cached.book_id == book_id
+            ):
+                cached.retired = True
+                if self._cache.get(cache_key) is cached:
+                    self._cache.pop(cache_key, None)
+                to_close.append(cached)
+        for stale_entry in to_close:
+            if stale_entry.active_leases == 0:
+                await self._close_entry(stale_entry)
 
     def _binding(self, transaction, run_id):
         run = transaction.runs.get(run_id)
@@ -159,33 +197,39 @@ class CorrectionRuntimeResolver:
             if snapshot is None:
                 raise ConditionsError('correction_not_required')
             conditions = self.service.require(run.book_id, transaction=transaction)
-            if conditions.id != binding['conditions_id']:
-                raise ConditionsError('conditions_revision_conflict')
-            if run.status != ProcessingRunStatus.ACTIVE:
-                raise RecoveryError('interrupted')
+            revision_conflict = conditions.id != binding['conditions_id']
+            inactive_run = run.status != ProcessingRunStatus.ACTIVE
+        if revision_conflict:
+            await self._evict_for_book_or_run(book_id=run.book_id, run_id=run_id)
+            raise ConditionsError('conditions_revision_conflict')
+        if inactive_run:
+            await self._evict_for_book_or_run(book_id=run.book_id, run_id=run_id)
+            raise RecoveryError('interrupted')
         settings = self.settings_for(snapshot)
         key = (run_id, conditions.id)
-        fingerprint = (
-            getattr(conditions, 'revision', None),
-            snapshot.model,
-            thaw(snapshot.route),
-            thaw(snapshot.parameters),
-            getattr(snapshot, 'policy_version', None),
-            settings.llm.base_url,
-            getattr(settings.llm, 'proxy_mode', None),
-            settings.llm.proxy_url,
-            settings.llm.api_key,
-            getattr(settings.llm, 'debug_llm_payloads', False),
-        )
+        book_id = getattr(run, 'book_id', None) or getattr(conditions, 'book_id', None)
+        runtime_fp = self._runtime_fingerprint(settings)
+        fingerprint = self._fingerprint(conditions, snapshot, settings)
+        to_close: list[_CachedCorrectionRuntime] = []
+        for cache_key, cached in tuple(self._cache.items()):
+            if cache_key != key and (
+                cached.fingerprint[5:] != runtime_fp
+                or (book_id is not None and cached.book_id == book_id)
+                or cache_key[0] == run_id
+            ):
+                cached.retired = True
+                if self._cache.get(cache_key) is cached:
+                    self._cache.pop(cache_key, None)
+                to_close.append(cached)
         entry = self._cache.get(key)
-        if entry is not None and not entry.retired and entry.fingerprint == fingerprint:
+        if (
+            entry is not None
+            and not entry.retired
+            and entry.fingerprint == fingerprint
+            and not self._closed
+        ):
             entry.active_leases += 1
         else:
-            if entry is not None:
-                entry.retired = True
-                self._cache.pop(key, None)
-                if entry.active_leases == 0:
-                    await self._close_entry(entry)
             configured = self.client_factory(settings.llm)
             try:
                 inner = self.injected_client if self.injected_client is not None else configured.client_for(snapshot.model)
@@ -205,32 +249,37 @@ class CorrectionRuntimeResolver:
             except BaseException:
                 await configured.aclose()
                 raise
-            entry = _CachedCorrectionRuntime(
+            new_entry = _CachedCorrectionRuntime(
                 fingerprint=fingerprint,
                 runtime=correction_rt,
                 configured=configured,
+                book_id=book_id,
                 active_leases=1,
             )
-            self._cache[key] = entry
-        entry.runtime.llm_client._attempts.set(())
-        entry.runtime.llm_client._responses.set(())
+            old_entry = self._cache.get(key)
+            if old_entry is not None:
+                old_entry.retired = True
+                self._cache.pop(key, None)
+                to_close.append(old_entry)
+            if self._closed:
+                new_entry.retired = True
+            else:
+                self._cache[key] = new_entry
+            entry = new_entry
+        token_attempts = entry.runtime.llm_client._attempts.set(())
+        token_responses = entry.runtime.llm_client._responses.set(())
         try:
+            for stale_entry in to_close:
+                if stale_entry.active_leases == 0:
+                    await self._close_entry(stale_entry)
             yield entry.runtime
         finally:
+            entry.runtime.llm_client._attempts.reset(token_attempts)
+            entry.runtime.llm_client._responses.reset(token_responses)
             entry.active_leases -= 1
             if not entry.retired:
-                current_llm = self.runtime.current.settings.llm
-                latest_fingerprint = (
-                    getattr(conditions, 'revision', None),
-                    snapshot.model,
-                    thaw(snapshot.route),
-                    thaw(snapshot.parameters),
-                    getattr(snapshot, 'policy_version', None),
-                    current_llm.base_url,
-                    getattr(current_llm, 'proxy_mode', None),
-                    current_llm.proxy_url,
-                    current_llm.api_key,
-                    getattr(current_llm, 'debug_llm_payloads', False),
+                latest_fingerprint = self._fingerprint(
+                    conditions, snapshot, self.runtime.current.settings
                 )
                 if latest_fingerprint != entry.fingerprint:
                     entry.retired = True
@@ -240,6 +289,7 @@ class CorrectionRuntimeResolver:
                 await self._close_entry(entry)
 
     async def aclose(self) -> None:
+        self._closed = True
         entries = tuple(self._cache.values())
         self._cache.clear()
         for entry in entries:
