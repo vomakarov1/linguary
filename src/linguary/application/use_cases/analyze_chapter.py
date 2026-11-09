@@ -587,18 +587,20 @@ class AnalyzeChapter:
                                 resolved_concepts = tuple(transaction.glossary.list_for_book(request.book_id))
                         validate_fact_glossary(plan, glossary_context_constraints(resolved_concepts))
                 except (ApplicationError, DomainError) as error:
-                    raise ResultValidationError(
-                        _to_aliases(context, str(error)),
-                        expectation=context.expectation,
-                        violation=getattr(error, "violation", None),
-                    ) from error
+                    if not isinstance(error, ResultValidationError) or error.expectation is None:
+                        raise ResultValidationError(
+                            str(error),
+                            expectation=context.expectation,
+                            violation=getattr(error, "violation", None),
+                        ) from error
+                    raise
             except Exception as error:
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
                     if hasattr(self._llm_client, 'reject_last'):
                         self._llm_client.reject_last()
                 decision = self._retry_policy.decide(
-                    error,
+                    _worded_for_the_model(error, context),
                     attempts=attempts,
                     raw_content=response.raw_content if response is not None else None,
                 )
@@ -1025,14 +1027,14 @@ def _ensure_plan_covers_chapter(
     if missing:
         raise ResultValidationError(
             f"план обработки главы {context.section_id} не покрывает блоки: "
-            f"{missing}",
+            f"{[context.block_id_for(alias) for alias in missing]}",
             expectation=context.expectation,
         )
     duplicated = sorted({block for block in returned if returned.count(block) > 1})
     if duplicated:
         raise ResultValidationError(
             f"блоки главы {context.section_id} получили по два режима обработки: "
-            f"{duplicated}",
+            f"{[context.block_id_for(alias) for alias in duplicated]}",
             expectation=context.expectation,
         )
 
@@ -1045,6 +1047,19 @@ def _to_aliases(context: ChapterAnalysisContext, message: str) -> str:
     for alias, block_id in context.block_ids_by_alias.items():
         message = message.replace(block_id, alias)
     return message
+
+
+def _worded_for_the_model(
+    error: Exception, context: ChapterAnalysisContext
+) -> Exception:
+    """Same error rephrased using block aliases seen by the model (ALG-05)."""
+    if not isinstance(error, ResultValidationError):
+        return error
+    return ResultValidationError(
+        _to_aliases(context, str(error)),
+        expectation=error.expectation or context.expectation,
+        violation=getattr(error, "violation", None),
+    )
 
 
 def _ensure_candidates_single_script(

@@ -257,7 +257,7 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
             raise LLMConfigurationError('неверный общий предел выходных токенов')
         body['max_completion_tokens'] = request.max_completion_tokens
     elif settings.max_output_tokens is not None:
-        body["max_completion_tokens"] = settings.max_output_tokens
+        body["max_tokens"] = settings.max_output_tokens
     if settings.temperature is not None:
         body["temperature"] = settings.temperature
     return body

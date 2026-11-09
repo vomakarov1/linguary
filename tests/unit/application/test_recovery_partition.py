@@ -246,7 +246,7 @@ def test_distant_difficulty_anchors_do_not_merge_entire_chapter_into_single_reco
 
 
 @pytest.mark.asyncio
-async def test_provider_truncated_multi_block_unit_triggers_immediate_recovery_split(
+async def test_local_validator_violation_triggers_recovery_split_on_repeated_signature(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from contextlib import contextmanager
@@ -267,7 +267,7 @@ async def test_provider_truncated_multi_block_unit_triggers_immediate_recovery_s
     from linguary.application.context_builder import ContextBuilder
     from linguary.application.llm_dto import BlockResultResponse
     from linguary.application.ports.llm import LLMResponse
-    from linguary.application.recovery import RecoverySplit
+    from linguary.application.recovery import RecoverySplit, local_failure_signature
     from linguary.application.retry_policy import RetryPolicy
     from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
     from linguary.domain import (
@@ -335,6 +335,7 @@ async def test_provider_truncated_multi_block_unit_triggers_immediate_recovery_s
     )
 
     recorded_violations = []
+    seen_signatures: list[tuple[str, tuple[str, ...]] | None] = []
     physical_ctx = SimpleNamespace(
         conditions_id="00000000-0000-0000-0000-000000000001",
         attempt_id="attempt-1",
@@ -371,7 +372,9 @@ async def test_provider_truncated_multi_block_unit_triggers_immediate_recovery_s
 
         def record_recovery_failure(self, attempt_id, violation):
             recorded_violations.append(violation)
-            return False
+            sig = local_failure_signature(violation, unit.block_ids)
+            seen_signatures.append(sig)
+            return sig is not None and seen_signatures.count(sig) >= 2
 
         def result_bindings(self, run_id):
             return {}
@@ -397,7 +400,7 @@ async def test_provider_truncated_multi_block_unit_triggers_immediate_recovery_s
                         BlockResultResponse(
                             source_block_id="b1",
                             treatment=BlockTreatment.TRANSLATE,
-                            translated_text="Перевод первого блока.",
+                            translated_text="Первая строка.\nВторая строка.",
                         ),
                         BlockResultResponse(
                             source_block_id="b2",
@@ -408,7 +411,7 @@ async def test_provider_truncated_multi_block_unit_triggers_immediate_recovery_s
                 ),
                 provider="fake",
                 model="gpt-test",
-                truncated=True,
+                truncated=False,
                 call_context=request.call_context,
             )
 
@@ -430,9 +433,10 @@ async def test_provider_truncated_multi_block_unit_triggers_immediate_recovery_s
         )
 
     assert (exc_info.value.root_id, exc_info.value.scope_id) == ("root-1", "scope-1")
-    assert generate_calls == 1
-    assert len(recorded_violations) == 1
-    assert recorded_violations[0].rule_code == "provider_truncated"
+    assert generate_calls == 2
+    assert len(recorded_violations) == 2
+    assert all(v.rule_code == "paragraph_count_mismatch" for v in recorded_violations)
+    assert all(v.scope == "local" and v.block_ids == (blocks[0].id,) for v in recorded_violations)
 
 
 

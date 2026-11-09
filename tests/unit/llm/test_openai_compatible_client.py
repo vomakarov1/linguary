@@ -279,8 +279,7 @@ async def test_request_asks_provider_for_structured_output() -> None:
     assert [message["role"] for message in body["messages"]] == ["system", "user"]
     assert body["messages"][0]["content"] == "Переводи"
     assert body["messages"][1]["content"] == "block-1: text"
-    assert body["max_completion_tokens"] == 4096
-    assert "max_tokens" not in body
+    assert body["max_tokens"] == 4096
     assert body["temperature"] == 0.2
     schema = body["response_format"]["json_schema"]
     assert body["response_format"]["type"] == "json_schema"
@@ -895,7 +894,7 @@ def test_openai_client_sends_assistant_message_before_user_repair_instruction() 
     assert OpenAICompatibleLLMClient._build_messages(request) == body["messages"]
 
 
-def test_global_max_output_tokens_sent_as_max_completion_tokens() -> None:
+def test_global_max_output_tokens_and_request_max_completion_tokens() -> None:
     cfg = LLMSettings(
         provider="openai",
         api_key="secret",
@@ -909,8 +908,14 @@ def test_global_max_output_tokens_sent_as_max_completion_tokens() -> None:
 
     body = openai_compatible._body(request, settings=cfg)
 
-    assert body["max_completion_tokens"] == 2048
-    assert "max_tokens" not in body
+    assert body["max_tokens"] == 2048
+    assert "max_completion_tokens" not in body
+
+    capped_request = replace(request, max_completion_tokens=1024)
+    capped_body = openai_compatible._body(capped_request, settings=cfg)
+
+    assert capped_body["max_completion_tokens"] == 1024
+    assert "max_tokens" not in capped_body
 
 
 async def test_response_coverage_error_preserves_truncated_flag(monkeypatch: pytest.MonkeyPatch) -> None:

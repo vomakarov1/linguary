@@ -1720,9 +1720,17 @@ def test_owned_content_plan_aliases_difficulty_and_fact_ids_and_resolves_respons
 
     marker = "Обязательные аспекты и точные связанные привязки:\n"
     plan_payload = json.loads(context.request.input_text.split(marker, 1)[1])
-    assert [d["id"] for d in plan_payload["difficulties"]] == ["d1", "d2"]
+    assert [d["id"] for d in plan_payload["difficulties"]] == [
+        "diff-uncovered-uuid-1",
+        "diff-uncovered-uuid-2",
+    ]
     assert "diff-covered-uuid" not in context.request.input_text
-    assert [f["id"] for f in plan_payload["context_facts"]] == ["f1", "f2"]
+    assert [f["id"] for f in plan_payload["context_facts"]] == ["fact-uuid-1", "fact-uuid-2"]
+    assert all(
+        "start" not in anchor and "end" not in anchor
+        for d in plan_payload["difficulties"]
+        for anchor in d["anchors"]
+    )
 
     response = TranslationResultResponse(
         blocks=(
