@@ -1010,4 +1010,92 @@ def test_coverage_violation_detects_duplicates_in_linear_time() -> None:
     )
 
 
+def test_validator_attaches_structured_violation_with_rule_code_and_block_id() -> None:
+    blocks = make_blocks(2)
+    unit = make_unit(blocks)
+
+    cases = [
+        (
+            make_response(
+                (
+                    make_block_result(blocks[0]),
+                    make_block_result(
+                        blocks[1],
+                        treatment=BlockTreatment.READ_AS_IS,
+                        translated_text=None,
+                    ),
+                )
+            ),
+            "treatment_mismatch",
+            "Режим блока не совпадает с планом обработки",
+        ),
+        (
+            make_response(
+                (
+                    make_block_result(blocks[0]),
+                    with_fields(make_block_result(blocks[1]), translated_text=None),
+                )
+            ),
+            "content_violation",
+            "Содержимое блока не прошло структурную проверку",
+        ),
+        (
+            make_response(
+                (
+                    make_block_result(blocks[0]),
+                    make_block_result(blocks[1], translated_text="Первый.\n\nВторой."),
+                )
+            ),
+            "paragraph_count_mismatch",
+            "Нарушено число строк или абзацев перевода",
+        ),
+        (
+            make_response(
+                (
+                    make_block_result(blocks[0]),
+                    make_block_result(blocks[1], translated_text=ENGLISH_TRANSLATION),
+                )
+            ),
+            "wrong_target_language",
+            "Перевод выполнен не на целевом языке",
+        ),
+        (
+            make_response(
+                (
+                    make_block_result(blocks[0]),
+                    make_block_result(
+                        blocks[1],
+                        translated_text="Извините, но я не могу выполнить этот запрос.",
+                    ),
+                )
+            ),
+            "service_message_leak",
+            "В ответе обнаружено служебное сообщение модели",
+        ),
+        (
+            make_response(
+                (
+                    make_block_result(blocks[0]),
+                    make_block_result(
+                        blocks[1],
+                        translated_text="И стала ждать вместе с Selenой Роу.",
+                    ),
+                )
+            ),
+            "mixed_script_leak",
+            "В тексте обнаружено смешение алфавитов внутри слова",
+        ),
+    ]
+
+    for payload, expected_rule_code, expected_safe_message in cases:
+        error = rejection(payload, unit=unit)
+        assert error.violation is not None
+        assert error.violation.rule_code == expected_rule_code
+        assert error.violation.stage == "translation_unit"
+        assert error.violation.scope == "local"
+        assert error.violation.block_ids == (blocks[1].id,)
+        assert error.violation.safe_message == expected_safe_message
+
+
+
 

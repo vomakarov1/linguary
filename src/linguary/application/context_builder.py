@@ -438,6 +438,7 @@ class TranslationContext(AliasedBlocksContext):
     before_you_read: tuple[BeforeYouReadEntry, ...] = ()
     _input_without_optional_neighbours: str | _LazyTranslationInput | None = None
     pure_read_as_is_aliases: frozenset[str] = frozenset()
+    difficulty_ids_by_alias: Mapping[str, str] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -452,15 +453,14 @@ class TranslationContext(AliasedBlocksContext):
         before_you_read: tuple[BeforeYouReadEntry, ...] = (),
         input_without_optional_neighbours: str | _LazyTranslationInput | None = None,
         pure_read_as_is_aliases: Iterable[str] = frozenset(),
+        difficulty_ids_by_alias: Mapping[str, str] = (),
         *,
         _input_without_optional_neighbours: str | _LazyTranslationInput | None = None,
     ) -> None:
         object.__setattr__(self, "section_id", section_id)
         object.__setattr__(self, "unit_id", unit_id)
         object.__setattr__(self, "request", request)
-        object.__setattr__(
-            self, "block_ids_by_alias", MappingProxyType(dict(block_ids_by_alias))
-        )
+        object.__setattr__(self, "block_ids_by_alias", block_ids_by_alias)
         object.__setattr__(self, "expectation", expectation)
         object.__setattr__(self, "explained_expressions", explained_expressions)
         object.__setattr__(self, "explained_entries", explained_entries)
@@ -473,8 +473,21 @@ class TranslationContext(AliasedBlocksContext):
             if _input_without_optional_neighbours is not None
             else input_without_optional_neighbours,
         )
+        object.__setattr__(self, "pure_read_as_is_aliases", pure_read_as_is_aliases)
+        object.__setattr__(self, "difficulty_ids_by_alias", difficulty_ids_by_alias)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
         object.__setattr__(
-            self, "pure_read_as_is_aliases", frozenset(pure_read_as_is_aliases)
+            self, "block_ids_by_alias", MappingProxyType(dict(self.block_ids_by_alias))
+        )
+        object.__setattr__(
+            self, "pure_read_as_is_aliases", frozenset(self.pure_read_as_is_aliases)
+        )
+        object.__setattr__(
+            self,
+            "difficulty_ids_by_alias",
+            MappingProxyType(dict(self.difficulty_ids_by_alias)),
         )
 
     @property
@@ -494,6 +507,12 @@ class TranslationContext(AliasedBlocksContext):
         """
         for alias, block_id in self.block_ids_by_alias.items():
             message = message.replace(block_id, alias)
+        for alias, difficulty_id in sorted(
+            self.difficulty_ids_by_alias.items(),
+            key=lambda item: len(item[1]),
+            reverse=True,
+        ):
+            message = message.replace(difficulty_id, alias)
         return message
 
     @property
@@ -575,8 +594,25 @@ class TranslationContext(AliasedBlocksContext):
             pronunciation_candidates=tuple(replace(candidate, anchor=replace(candidate.anchor,
                 block_id=self.block_ids_by_alias.get(candidate.anchor.block_id, '')))
                 for candidate in payload.pronunciation_candidates),
-            fragment_assistances=payload.fragment_assistances,
-            content_evidence=tuple(replace(e, source_block_id=self.block_id_for(e.source_block_id)) for e in payload.content_evidence),
+            fragment_assistances=tuple(
+                replace(
+                    item,
+                    difficulty_id=self.difficulty_ids_by_alias.get(
+                        item.difficulty_id, item.difficulty_id
+                    ),
+                )
+                for item in payload.fragment_assistances
+            ),
+            content_evidence=tuple(
+                replace(
+                    e,
+                    source_block_id=self.block_id_for(e.source_block_id),
+                    difficulty_id=self.difficulty_ids_by_alias.get(
+                        e.difficulty_id, e.difficulty_id
+                    ),
+                )
+                for e in payload.content_evidence
+            ),
             blocks=resolved_blocks,
             language_notes=tuple(
                 replace(note, source_block_id=self.block_id_for(note.source_block_id))
@@ -892,7 +928,10 @@ class ContextBuilder:
         if version == 3 and not self._english_help:
             instructions += "\n" + self._prompt_templates.get('learner_quality', learner_instructions(self._reader_level))
         if self._english_help:
-            instructions += "\n" + self._prompt_templates["english_help_processing"]
+            instructions = _with_name_policy(
+                self._prompt_templates["english_help_processing"],
+                self._name_translation_policy,
+            )
         pronunciation_version = self._pronunciation_version if document.source_language == 'en' else None
         if pronunciation_version is not None:
             instructions += '\n' + self._prompt_templates['pronunciation_processing']
@@ -925,18 +964,19 @@ class ContextBuilder:
             if item.treatment is BlockTreatment.READ_AS_IS
             and item.block.id not in uncovered_owners
         )
-        if len(unit.items) > 1 and not self._english_help:
+        if len(unit.items) > 1:
             if len(candidate_pure) < len(unit.items):
                 pure_read_as_is_aliases = candidate_pure
             elif (
                 len(candidate_pure) == len(unit.items)
-                and self._pronunciation_version is not None
+                and (self._pronunciation_version is not None or self._english_help)
             ):
                 pure_read_as_is_aliases = candidate_pure - {_alias(1)}
             else:
                 pure_read_as_is_aliases = frozenset()
         else:
             pure_read_as_is_aliases = frozenset()
+        difficulty_ids_by_alias = _owned_difficulty_aliases(analysis, unit)
         candidates = (*analysis.glossary_candidates, *book_candidates)
         input_args = dict(
             document=document,
@@ -992,6 +1032,7 @@ class ContextBuilder:
             before_you_read=() if section.is_notes_only else analysis.before_you_read,
             input_without_optional_neighbours=mandatory_input,
             pure_read_as_is_aliases=pure_read_as_is_aliases,
+            difficulty_ids_by_alias=difficulty_ids_by_alias,
         )
 
     def _translation_input(
@@ -1193,7 +1234,14 @@ class ContextBuilder:
                                 else _CONTENT_PLAN_ANALYSIS_V3) if version == 3 else _CONTENT_PLAN_ANALYSIS
             instructions += "\n" + self._prompt_templates.get("content_analysis", default_analysis)
             if version == 3 and not self._english_help:
-                instructions += "\n" + self._prompt_templates.get("learner_quality", learner_instructions(self._reader_level))
+                learner_quality = self._prompt_templates.get(
+                    "learner_quality", learner_instructions(self._reader_level)
+                )
+                if "might have been" in instructions:
+                    learner_quality = _deduplicate_a2_analysis_learner_quality(
+                        learner_quality
+                    )
+                instructions += "\n" + learner_quality
             if not self._english_help:
                 instructions += "\nСоблюдай лимиты BYR и обязательных заметок, указанные в запросе."
                 instructions += "\nСначала используй существующий BYR или допустимый hint.note; READ_AS_IS требует отдельной заметки, если BYR не покрывает все аспекты."
@@ -2292,16 +2340,73 @@ __all__ = [
 ]
 
 
+_DUPLICATE_A2_ANALYSIS_LINES = (
+    "Пересказ A2 верни ровно два абзаца:",
+    "связями причин и событий, затем отдельный абзац",
+    "Если встречаются модальный перфект вроде might have been",
+    "«то, что» или отрыв предлога в конце придаточного",
+    "словарной подсказкой: переведи конструкцию полностью",
+    "в отдельной языковой заметке.",
+    "Для двойного отрицания вида «not saying ... isn’t ...»",
+    "например, признание качества персонажа или события.",
+    "объяснение BYR формулируй утвердительно,",
+    "Например, «not saying the spell isn’t brilliant»",
+    "заклинание блестящее»; не превращай это в «заклинание не блестящее».",
+)
+
+
+def _deduplicate_a2_analysis_learner_quality(learner_quality: str) -> str:
+    return "\n".join(
+        line
+        for line in learner_quality.splitlines()
+        if not any(marker in line for marker in _DUPLICATE_A2_ANALYSIS_LINES)
+    )
+
+
+def _owned_difficulty_aliases(
+    analysis: ChapterAnalysis, unit: TranslationUnit
+) -> dict[str, str]:
+    if analysis.content_plan is None:
+        return {}
+    unit_block_ids = {item.block.id for item in unit.items}
+    covered_points = {
+        (e.difficulty_id, e.point_id)
+        for e in analysis.content_plan.before_you_read_evidence
+    }
+    mapping: dict[str, str] = {}
+    for difficulty in analysis.content_plan.difficulties:
+        if difficulty.owner_block_id not in unit_block_ids:
+            continue
+        if difficulty.required_points and all(
+            (difficulty.id, point.id) in covered_points
+            for point in difficulty.required_points
+        ):
+            continue
+        alias = f"d{len(mapping) + 1}"
+        mapping[alias] = difficulty.id
+    return mapping
+
+
 def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str:
     if analysis.content_plan is None:
         return ""
     aliases = {item.block.id: _alias(i) for i, item in enumerate(unit.items, 1)}
+    covered_points = {
+        (e.difficulty_id, e.point_id)
+        for e in analysis.content_plan.before_you_read_evidence
+    }
     difficulties = []
     related = {}
     for difficulty in analysis.content_plan.difficulties:
         if difficulty.owner_block_id not in aliases:
             continue
+        if difficulty.required_points and all(
+            (difficulty.id, point.id) in covered_points
+            for point in difficulty.required_points
+        ):
+            continue
         value = asdict(difficulty)
+        value["id"] = f"d{len(difficulties) + 1}"
         value["owner_block_id"] = aliases[difficulty.owner_block_id]
         for anchor in value["anchors"]:
             source_id = anchor["block_id"]
@@ -2316,6 +2421,7 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
         if fact.subject_anchor.block_id not in aliases:
             continue
         value = fact.to_dict()
+        value["id"] = f"f{len(facts) + 1}"
         for anchor in (*value['anchors'], value['subject_anchor']):
             source_id = anchor['block_id']
             if source_id not in aliases:
@@ -2382,9 +2488,9 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
 ошибочного чтения, учитывая уровень и контекст оригинала; длина и редкость сами
 по себе не служат причиной. Кандидаты допустимы в TRANSLATE, GLOSSARY_ONLY и READ_AS_IS,
 даже если смысл понятен и перевод или смысловая помощь не нужны.
-Каждый кандидат: anchor {{block_id, quote}}, form, context
+Каждый кандидат: anchor {{block_id, quote}}, context
 {{meaning_in_context, part_of_speech, grammatical_form, is_proper_name}}, selection_reason.
-anchor.block_id — псевдоним целевого блока b1..bN; quote и form копируй дословно, form=quote; не выбирай соседние блоки.
+anchor.block_id — псевдоним целевого блока b1..bN; quote копируй дословно; не выбирай соседние блоки.
 meaning_in_context — значение на языке оригинала; grammatical_form включает время/число.
 Неизвестные текстовые признаки — null; is_proper_name — логическое значение.
 selection_reason: unpredictable_spelling, unpredictable_stress или context_dependent.

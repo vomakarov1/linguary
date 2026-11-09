@@ -53,6 +53,7 @@ from linguary.domain import (
     known_markers_only,
     without_footnote_markers,
 )
+from linguary.domain.llm_log import Violation
 
 
 class TranslationResultValidator:
@@ -104,9 +105,33 @@ class TranslationResultValidator:
             unit, target_language=target_language
         )
         self._ensure(coverage_violation(payload, unit=unit), expected)
-        self._ensure(treatment_violation(payload, unit=unit), expected)
-        self._ensure(content_violation(payload, unit=unit), expected)
-        self._ensure(paragraph_violation(payload, unit=unit), expected)
+        for block in payload.blocks:
+            single = replace(payload, blocks=(block,))
+            self._ensure_block(
+                treatment_violation(single, unit=unit),
+                expected,
+                block_id=block.source_block_id,
+                rule_code="treatment_mismatch",
+                safe_message="Режим блока не совпадает с планом обработки",
+            )
+        for block in payload.blocks:
+            single = replace(payload, blocks=(block,))
+            self._ensure_block(
+                content_violation(single, unit=unit),
+                expected,
+                block_id=block.source_block_id,
+                rule_code="content_violation",
+                safe_message="Содержимое блока не прошло структурную проверку",
+            )
+        for block in payload.blocks:
+            single = replace(payload, blocks=(block,))
+            self._ensure_block(
+                paragraph_violation(single, unit=unit),
+                expected,
+                block_id=block.source_block_id,
+                rule_code="paragraph_count_mismatch",
+                safe_message="Нарушено число строк или абзацев перевода",
+            )
         normalized_payload = replace(
             payload,
             blocks=tuple(
@@ -123,17 +148,38 @@ class TranslationResultValidator:
         if truncation is not None:
             message, violation = truncation
             raise ResultValidationError(message, expectation=expected, violation=violation)
-        self._ensure(
-            language_violation(
-                normalized_payload,
-                target_language=target_language,
-                min_share=self._target_language_min_share,
-                min_length=self._language_check_min_length,
-            ),
-            expected,
-        )
-        self._ensure(service_message_violation(normalized_payload), expected)
-        self._ensure(mixed_script_violation(normalized_payload), expected)
+        for block in normalized_payload.blocks:
+            single = replace(normalized_payload, blocks=(block,))
+            self._ensure_block(
+                language_violation(
+                    single,
+                    target_language=target_language,
+                    min_share=self._target_language_min_share,
+                    min_length=self._language_check_min_length,
+                ),
+                expected,
+                block_id=block.source_block_id,
+                rule_code="wrong_target_language",
+                safe_message="Перевод выполнен не на целевом языке",
+            )
+        for block in normalized_payload.blocks:
+            single = replace(normalized_payload, blocks=(block,))
+            self._ensure_block(
+                service_message_violation(single),
+                expected,
+                block_id=block.source_block_id,
+                rule_code="service_message_leak",
+                safe_message="В ответе обнаружено служебное сообщение модели",
+            )
+        for block in normalized_payload.blocks:
+            single = replace(normalized_payload, blocks=(block,))
+            self._ensure_block(
+                mixed_script_violation(single),
+                expected,
+                block_id=block.source_block_id,
+                rule_code="mixed_script_leak",
+                safe_message="В тексте обнаружено смешение алфавитов внутри слова",
+            )
         results = tuple(
             self._result(
                 block,
@@ -213,6 +259,36 @@ class TranslationResultValidator:
         """Converts an encountered violation into rejection of the entire unit."""
         if violation is not None:
             raise ResultValidationError(violation, expectation=expectation)
+
+    def _ensure_block(
+        self,
+        problem: str | Violation | None,
+        expectation: ResultExpectation,
+        *,
+        block_id: str,
+        rule_code: str,
+        safe_message: str,
+    ) -> None:
+        """Converts a block-scoped violation into rejection with structured Violation."""
+        if problem is None:
+            return
+        actual_rule_code = getattr(problem, "rule_code", None) or rule_code
+        message = (
+            problem.safe_message
+            if isinstance(problem, Violation) and problem.safe_message
+            else str(problem)
+        )
+        raise ResultValidationError(
+            message,
+            expectation=expectation,
+            violation=Violation(
+                actual_rule_code,
+                "translation_unit",
+                scope="local",
+                block_ids=(block_id,),
+                safe_message=safe_message,
+            ),
+        )
 
     def _ensure_domain_rules(
         self,
