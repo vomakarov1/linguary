@@ -1006,8 +1006,8 @@ async def test_parallel_batch_analysis_ignores_unfinished_peer_chapter_candidate
             book_id=BOOK_ID,
             task_type=TaskType.ANALYZE_CHAPTER,
             scope_id="section-3",
-            status=TaskStatus.PENDING,
-            attempts=0,
+            status=TaskStatus.RUNNING,
+            attempts=1,
         ),
     )
     unit_of_work.tasks = SimpleNamespace(list_for_book=lambda _: tasks)  # type: ignore[attr-defined]
@@ -1342,6 +1342,178 @@ async def test_process_chapter_reuses_source_texts_and_defers_reconcile_until_co
     assert save_calls[1]["reconcile"] is False
     assert len(request_source_texts) == 1
     assert request_source_texts[0] is work.source_texts
+
+
+async def test_sequential_analysis_accumulates_candidates_when_pending_tasks_exist() -> None:
+    """At concurrency == 1, queued PENDING peer tasks do not disable candidate accumulation (P2.T1)."""
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Chapter {number} text with Mr. Bennet and Duskmere.",),
+        )
+        for number in (1, 2, 3)
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    unit_of_work.analyses.save(
+        BOOK_ID,
+        make_chapter_analysis(
+            id="analysis-1",
+            section_id="section-1",
+            candidates=(
+                make_analysis_candidate(
+                    analysis_id="analysis-1",
+                    source_text="Mr. Bennet",
+                    suggested_translation="мистер Беннет",
+                ),
+            ),
+        ),
+    )
+    tasks = (
+        ProcessingTask(
+            id="task-1",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-1",
+            status=TaskStatus.SUCCEEDED,
+            attempts=1,
+        ),
+        ProcessingTask(
+            id="task-2",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-2",
+            status=TaskStatus.RUNNING,
+            attempts=1,
+        ),
+        ProcessingTask(
+            id="task-3",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-3",
+            status=TaskStatus.PENDING,
+            attempts=0,
+        ),
+    )
+    unit_of_work.tasks = SimpleNamespace(list_for_book=lambda _: tasks)  # type: ignore[attr-defined]
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+    scenario._max_concurrency = 1
+
+    await scenario(
+        AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-2", task_id="task-2")
+    )
+
+    request_text = client.requests[0].input_text
+    assert "мистер Беннет" in request_text
+
+
+async def test_parallel_analysis_keeps_last_chapter_in_parallel_batch_when_concurrency_gt_1() -> None:
+    """When max_concurrency > 1, even the last chapter runs in parallel_batch mode without unconfirmed peer candidates (P2.T1)."""
+    sections = tuple(
+        make_analysis_section(
+            section_id=f"section-{number}",
+            title=f"Chapter {number}",
+            order=number - 1,
+            texts=(f"Chapter {number} text with Mr. Bennet and Duskmere.",),
+        )
+        for number in (1, 2, 3)
+    )
+    unit_of_work = FakeUnitOfWork(document=make_analysis_document(sections))
+    unit_of_work.analyses.save(
+        BOOK_ID,
+        make_chapter_analysis(
+            id="analysis-1",
+            section_id="section-1",
+            candidates=(
+                make_analysis_candidate(
+                    analysis_id="analysis-1",
+                    source_text="Mr. Bennet",
+                    suggested_translation="мистер Беннет",
+                ),
+                make_analysis_candidate(
+                    analysis_id="analysis-1",
+                    source_text="Duskmere",
+                    suggested_translation="Даскмир",
+                    type=ConceptType.PLACE,
+                ),
+            ),
+        ),
+    )
+    unit_of_work.glossary.save(
+        _decision("concept-1", "Duskmere", "Даскмер", TermStatus.APPROVED)
+    )
+    tasks = (
+        ProcessingTask(
+            id="task-1",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-1",
+            status=TaskStatus.SUCCEEDED,
+            attempts=1,
+        ),
+        ProcessingTask(
+            id="task-2",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-2",
+            status=TaskStatus.SUCCEEDED,
+            attempts=1,
+        ),
+        ProcessingTask(
+            id="task-3",
+            book_id=BOOK_ID,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="section-3",
+            status=TaskStatus.RUNNING,
+            attempts=1,
+        ),
+    )
+    unit_of_work.tasks = SimpleNamespace(list_for_book=lambda _: tasks)  # type: ignore[attr-defined]
+    client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+    scenario._max_concurrency = 2
+
+    await scenario(
+        AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-3", task_id="task-3")
+    )
+
+    request_text = client.requests[0].input_text
+    assert "мистер Беннет" not in request_text
+    assert "Даскмер" in request_text
+
+
+async def test_analysis_post_validation_errors_use_block_aliases_and_expectation() -> None:
+    """Post-validation errors in AnalyzeChapter replace internal block UUIDs with b1..bN aliases and attach expectation (P2.T1)."""
+    unit_of_work = two_block_book()
+    section = unit_of_work.documents.get(BOOK_ID).section("section-1")  # type: ignore[union-attr]
+    block_1, block_2 = section.ordered_blocks
+    client = FakeLLMClient.replying(
+        (
+            analysis_reply(
+                aliases=("b1",),
+                chapter_summary=f"Ошибочная сводка с внутренним ID {block_1.id}.",
+            ),
+            analysis_reply(
+                aliases=("b1", "b2"),
+                chapter_summary="The story continues.\n\nИстория продолжается.",
+            ),
+        )
+    )
+    scenario, _ = make_analyze_chapter(unit_of_work, client)
+
+    result = await scenario(command())
+
+    assert result.attempts == 2
+    repair_text = "\n".join(client.requests[1].repair_instructions)
+    assert "['b2']" in repair_text
+    assert block_1.id not in repair_text
+    assert block_2.id not in repair_text
+    assert "- b1" in repair_text
+    assert "- b2" in repair_text
+    assert "Целевой язык результата — ru." in repair_text
+
 
 
 

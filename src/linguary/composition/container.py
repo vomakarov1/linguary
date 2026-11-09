@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
@@ -81,6 +81,7 @@ from linguary.application.use_cases.analyze_chapter import (
 from linguary.application.use_cases.approve_glossary import (
     ApproveGlossary,
     StartProcessing,
+    StartProcessingCommand,
 )
 from linguary.application.use_cases.export_book import (
     ExportBook,
@@ -366,6 +367,27 @@ def build_application(
         if conditions is not None:
             analysis_client = ProvenanceClient(analysis_client, book_conditions, conditions.id)
             processing_client = ProvenanceClient(processing_client, book_conditions, conditions.id)
+        processing_seq = _processing_sequence(
+            **pronunciation,
+            settings=candidate, unit_of_work=unit_of_work,
+            task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
+            name_translation_policy=policy,
+        )
+
+        async def _start_book_processing(book_id: str) -> object:
+            candidate.llm.ensure_ready()
+            start_use_case = StartProcessing(
+                unit_of_work=unit_of_work,
+                book_conditions=book_conditions if conditions is not None else None,
+                glossary_confidence_threshold=candidate.checks.glossary_confidence_threshold,
+                glossary_review_min_mentions=candidate.checks.glossary_review_min_mentions,
+                glossary_review_min_chapters=candidate.checks.glossary_review_min_chapters,
+                llm_settings_snapshot=_llm_snapshot(candidate),
+                correction_snapshot=correction_snapshot(candidate),
+            )
+            start_use_case(StartProcessingCommand(book_id=book_id))
+            return await processing_seq.start(book_id)
+
         generation = RuntimeGeneration(
             settings=candidate,
             configured_client=configured_client,
@@ -373,13 +395,9 @@ def build_application(
                 settings=candidate, unit_of_work=unit_of_work,
                 task_queue=queue, model=analysis_client, content_plan_profile=profile, prompt_templates=templates,
                 name_translation_policy=policy, conditions_id=conditions_id,
+                start_processing=_start_book_processing,
             ),
-            processing=_processing_sequence(
-                **pronunciation,
-                settings=candidate, unit_of_work=unit_of_work,
-                task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
-                name_translation_policy=policy,
-            ),
+            processing=processing_seq,
             regeneration=_regeneration_sequence(
                 **pronunciation,
                 settings=candidate, unit_of_work=unit_of_work,
@@ -570,11 +588,14 @@ def _analysis_sequence(
     prompt_templates=None,
     name_translation_policy: NameTranslationPolicy | None = None,
     conditions_id: str | None = None,
+    start_processing: Callable[[str], Awaitable[object]] | None = None,
 ) -> ChapterAnalysisSequence:
     """Chapter analysis with glossary threshold and fragment limit from settings (PRD § 12, § 14)."""
     return ChapterAnalysisSequence(
         unit_of_work=unit_of_work,
         queue=task_queue,
+        auto_start_processing=settings.checks.auto_start_processing,
+        start_processing=start_processing,
         analyze_chapter=AnalyzeChapter(
             unit_of_work=unit_of_work,
             llm_client=model,
@@ -585,6 +606,7 @@ def _analysis_sequence(
             context_builder=_context_builder(settings, content_plan_profile=content_plan_profile, prompt_templates=prompt_templates, name_translation_policy=name_translation_policy),
             name_translation_policy=name_translation_policy,
             conditions_id=conditions_id,
+            max_concurrency=settings.worker.concurrency,
         ),
     )
 

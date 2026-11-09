@@ -144,6 +144,7 @@ class AnalyzeChapter:
         sleep: Sleep | None = None,
         name_translation_policy: NameTranslationPolicy | None = None,
         conditions_id: str | None = None,
+        max_concurrency: int = 1,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._llm_client = llm_client
@@ -154,6 +155,7 @@ class AnalyzeChapter:
         self._context_builder = context_builder or ContextBuilder()
         self._name_translation_policy = name_translation_policy or self._context_builder.name_translation_policy
         self._conditions_id = conditions_id
+        self._max_concurrency = max_concurrency
         self._id_factory = id_factory or _new_id
         self._sleep = sleep or asyncio.sleep
         from contextvars import ContextVar
@@ -442,12 +444,12 @@ class AnalyzeChapter:
             concepts = tuple(transaction.glossary.list_for_book(command.book_id))
             self._loaded_concepts.set(concepts)
             tasks_repo = getattr(transaction, "tasks", None)
-            parallel_batch = (
+            parallel_batch = self._max_concurrency > 1 or (
                 tasks_repo is not None
                 and any(
                     task.task_type is TaskType.ANALYZE_CHAPTER
                     and task.scope_id != command.section_id
-                    and task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+                    and task.status is TaskStatus.RUNNING
                     for task in tasks_repo.list_for_book(command.book_id)
                 )
             )
@@ -542,24 +544,29 @@ class AnalyzeChapter:
                         "ответ модели оборван по лимиту выходных токенов",
                         raw_content=response.raw_content,
                         truncated=True,
+                        usage=response.usage,
+                        cost=response.cost,
+                        provider=response.provider,
+                        model=response.model,
+                        call_context=response.call_context,
                     )
-                if request.contract_version in {3, 5}:
-                    response = replace(response, payload=prepare_analysis_payload(response.payload))
-                if self._context_builder._reader_level == "a2":
-                    validate_a2_summary(
-                        response.payload.chapter_summary,
-                        source_texts=tuple(block.text for block in blocks),
-                        source_language=source_language,
-                        language_detector=self._language_detector,
-                    )
-                if request.contract_version in {3, 5}:
-                    record_reader_warnings(self._unit_of_work, response,
-                        [('summary', response.payload.chapter_summary),
-                         *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],
-                        reader_level=self._context_builder._reader_level)
-                _ensure_plan_covers_chapter(response.payload, context)
-                _ensure_candidates_single_script(response.payload, context)
                 try:
+                    if request.contract_version in {3, 5}:
+                        response = replace(response, payload=prepare_analysis_payload(response.payload))
+                    if self._context_builder._reader_level == "a2":
+                        validate_a2_summary(
+                            response.payload.chapter_summary,
+                            source_texts=tuple(block.text for block in blocks),
+                            source_language=source_language,
+                            language_detector=self._language_detector,
+                        )
+                    if request.contract_version in {3, 5}:
+                        record_reader_warnings(self._unit_of_work, response,
+                            [('summary', response.payload.chapter_summary),
+                             *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],
+                            reader_level=self._context_builder._reader_level)
+                    _ensure_plan_covers_chapter(response.payload, context)
+                    _ensure_candidates_single_script(response.payload, context)
                     validate_content_plan(
                         response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
                         english_help=self._context_builder._english_help,
@@ -580,7 +587,11 @@ class AnalyzeChapter:
                                 resolved_concepts = tuple(transaction.glossary.list_for_book(request.book_id))
                         validate_fact_glossary(plan, glossary_context_constraints(resolved_concepts))
                 except (ApplicationError, DomainError) as error:
-                    raise ResultValidationError(str(error), expectation=context.expectation) from error
+                    raise ResultValidationError(
+                        _to_aliases(context, str(error)),
+                        expectation=context.expectation,
+                        violation=getattr(error, "violation", None),
+                    ) from error
             except Exception as error:
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
@@ -720,10 +731,14 @@ class ChapterAnalysisSequence:
         unit_of_work: UnitOfWork,
         queue: TaskQueue,
         analyze_chapter: AnalyzeChapter,
+        auto_start_processing: bool = False,
+        start_processing: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._queue = queue
         self._analyze_chapter = analyze_chapter
+        self._auto_start_processing = auto_start_processing
+        self._start_processing = start_processing
 
     async def start(self, book_id: str) -> ProcessingTask | None:
         """Starts book analysis: transitions book to `ANALYZING` and enqueues all chapters.
@@ -756,13 +771,17 @@ class ChapterAnalysisSequence:
                 task_id=task.id,
             )
         )
-        self._try_complete_analysis(task.book_id, finished_task_id=task.id)
+        if self._try_complete_analysis(task.book_id, finished_task_id=task.id):
+            assert self._start_processing is not None
+            await self._start_processing(task.book_id)
 
     async def _enqueue_all(self, book_id: str) -> list[ProcessingTask]:
         """Enqueues tasks for all unanalyzed chapters in parallel."""
         section_ids = self._unanalyzed_section_ids(book_id)
         if not section_ids:
-            self._try_complete_analysis(book_id)
+            if self._try_complete_analysis(book_id):
+                assert self._start_processing is not None
+                await self._start_processing(book_id)
             return []
         tasks = []
         for section_id in section_ids:
@@ -818,13 +837,14 @@ class ChapterAnalysisSequence:
         """Transitions analyzed book to glossary review (ALG-06)."""
         self._try_complete_analysis(book_id)
 
-    def _try_complete_analysis(self, book_id: str, *, finished_task_id: str | None = None) -> None:
+    def _try_complete_analysis(self, book_id: str, *, finished_task_id: str | None = None) -> bool:
         """Atomically checks if all chapters are analyzed and performs auto-approve if configured."""
+        should_start_processing = False
         with self._unit_of_work.transaction() as transaction:
             _record_success_in_tx(transaction, finished_task_id)
             book = self._book(transaction, book_id)
             if book.status is not BookStatus.ANALYZING:
-                return
+                return False
 
             tasks_repo = getattr(transaction, "tasks", None)
             if tasks_repo is not None:
@@ -835,7 +855,7 @@ class ChapterAnalysisSequence:
                     and t.status not in {TaskStatus.SUCCEEDED, TaskStatus.SUPERSEDED}
                 ]
                 if unfinished:
-                    return
+                    return False
 
             document = transaction.documents.get(book_id)
             if document is not None:
@@ -845,7 +865,7 @@ class ChapterAnalysisSequence:
                     for analysis in analyses
                 }
                 if any(section.id not in analyzed for section in document.ordered_sections):
-                    return
+                    return False
 
                 from linguary.application.analysis_merge import deduplicate_book_before_you_read
                 updated_analyses = deduplicate_book_before_you_read(document, analyses)
@@ -862,6 +882,7 @@ class ChapterAnalysisSequence:
             work_repo = getattr(transaction, "work", None)
             conditions = work_repo.latest_conditions(book_id) if work_repo is not None else None
             auto_approve = False
+            auto_start_processing = self._auto_start_processing
             confidence_threshold = 0.7
             min_mentions = 5
             min_chapters = 3
@@ -870,6 +891,9 @@ class ChapterAnalysisSequence:
             if conditions is not None:
                 checks = conditions.payload.get("checks", {})
                 auto_approve = checks.get("auto_approve_glossary", False)
+                auto_start_processing = bool(
+                    checks.get("auto_start_processing", False) or self._auto_start_processing
+                )
                 confidence_threshold = checks.get("glossary_confidence_threshold", 0.7)
                 min_mentions = checks.get("glossary_review_min_mentions", 5)
                 min_chapters = checks.get("glossary_review_min_chapters", 3)
@@ -947,6 +971,18 @@ class ChapterAnalysisSequence:
                         book, apply_book_event(book.status, BookEvent.GLOSSARY_REVIEW_COMPLETED)
                     )
                     transaction.books.save(book)
+                    if auto_start_processing:
+                        if self._start_processing is not None:
+                            should_start_processing = True
+                        else:
+                            book = _with_status(
+                                book,
+                                apply_book_event(
+                                    book.status, BookEvent.PROCESSING_RUN_STARTED
+                                ),
+                            )
+                            transaction.books.save(book)
+        return should_start_processing
 
     def _book(self, transaction: UnitOfWork, book_id: str) -> BookRecord:
         """Book record in open transaction."""
@@ -987,10 +1023,9 @@ def _ensure_plan_covers_chapter(
         )
     missing = sorted(set(expected) - set(returned))
     if missing:
-        missing_block_ids = [context.block_id_for(alias) for alias in missing]
         raise ResultValidationError(
             f"план обработки главы {context.section_id} не покрывает блоки: "
-            f"{missing_block_ids}",
+            f"{missing}",
             expectation=context.expectation,
         )
     duplicated = sorted({block for block in returned if returned.count(block) > 1})
@@ -1000,6 +1035,16 @@ def _ensure_plan_covers_chapter(
             f"{duplicated}",
             expectation=context.expectation,
         )
+
+
+def _to_aliases(context: ChapterAnalysisContext, message: str) -> str:
+    """Replaces internal block IDs in validation message with prompt aliases (b1..bN)."""
+    to_aliases = getattr(context, "to_aliases", None)
+    if callable(to_aliases):
+        return to_aliases(message)
+    for alias, block_id in context.block_ids_by_alias.items():
+        message = message.replace(block_id, alias)
+    return message
 
 
 def _ensure_candidates_single_script(

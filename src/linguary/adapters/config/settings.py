@@ -254,10 +254,13 @@ class CheckSettings:
     repetition_min_repeats: int = 3
     language_notes_per_chapter: int = 8
     auto_approve_glossary: bool = False
+    auto_start_processing: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.auto_approve_glossary, bool):
             raise SettingsError("auto_approve_glossary должен быть булевым значением")
+        if not isinstance(self.auto_start_processing, bool):
+            raise SettingsError("auto_start_processing должен быть булевым значением")
         for name in ("glossary_confidence_threshold", "target_language_min_share"):
             value: float = getattr(self, name)
             if not 0.0 <= value <= 1.0:

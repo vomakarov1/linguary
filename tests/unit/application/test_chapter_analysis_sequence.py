@@ -270,3 +270,87 @@ async def test_repeated_start_keeps_a_permanently_failed_analysis_task() -> None
     again = await sequence.start(BOOK_ID)
 
     assert again == permanent
+
+
+async def test_auto_start_processing_transitions_book_after_auto_approve_glossary() -> None:
+    """When auto_approve_glossary and auto_start_processing are enabled and review completes, book transitions to PROCESSING (P2.T1)."""
+    from types import SimpleNamespace
+
+    unit_of_work = make_book(chapters=2)
+    conditions = SimpleNamespace(
+        id="cond-1",
+        payload={
+            "checks": {
+                "auto_approve_glossary": True,
+                "auto_start_processing": True,
+                "glossary_confidence_threshold": 0.7,
+                "glossary_review_min_mentions": 1,
+                "glossary_review_min_chapters": 1,
+            }
+        },
+    )
+    unit_of_work.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    queue = FakeTaskQueue()
+    reply = analysis_reply(
+        aliases=("b1",),
+        before_you_read=[],
+        candidates=[
+            {
+                "source_text": "Duskmere",
+                "type": "place",
+                "suggested_translation": "Даскмер",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    client = FakeLLMClient.always(reply)
+    analyze_chapter, _ = make_analyze_chapter(unit_of_work, client)
+    started_books: list[str] = []
+
+    async def fake_start_processing(book_id: str) -> None:
+        started_books.append(book_id)
+        book = unit_of_work.books.get(book_id)
+        assert book is not None and book.status is BookStatus.READY_TO_PROCESS
+        unit_of_work.books.save(make_book_record(status=BookStatus.PROCESSING))
+
+    sequence = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work,  # type: ignore[arg-type]
+        queue=queue,  # type: ignore[arg-type]
+        analyze_chapter=analyze_chapter,
+        auto_start_processing=True,
+        start_processing=fake_start_processing,
+    )
+    runner = TaskRunner(
+        queue=queue,  # type: ignore[arg-type]
+        handlers={TaskType.ANALYZE_CHAPTER: sequence.run_task},
+    )
+
+    await sequence.start(BOOK_ID)
+    await drain(runner, queue)
+
+    stored = unit_of_work.books.get(BOOK_ID)
+    assert stored is not None and stored.status is BookStatus.PROCESSING
+    assert started_books == [BOOK_ID]
+
+    # Also verify fallback transition when start_processing callback is None
+    unit_of_work_direct = make_book(chapters=1)
+    unit_of_work_direct.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
+    queue_direct = FakeTaskQueue()
+    analyze_direct, _ = make_analyze_chapter(
+        unit_of_work_direct, FakeLLMClient.always(reply)
+    )
+    sequence_direct = ChapterAnalysisSequence(
+        unit_of_work=unit_of_work_direct,  # type: ignore[arg-type]
+        queue=queue_direct,  # type: ignore[arg-type]
+        analyze_chapter=analyze_direct,
+        auto_start_processing=True,
+    )
+    first_direct = await sequence_direct.start(BOOK_ID)
+    assert first_direct is not None
+    await sequence_direct.run_task(first_direct.start())
+    stored_direct = unit_of_work_direct.books.get(BOOK_ID)
+    assert stored_direct is not None and stored_direct.status is BookStatus.PROCESSING
+
+
