@@ -321,12 +321,21 @@ class TranslationCall:
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
                 if recovery is not None and physical_context is not None:
+                    violation = violation_of(error, context=physical_context)
                     with self._unit_of_work.transaction() as transaction:
                         split = transaction.work.record_recovery_failure(
                             physical_context.attempt_id,
-                            violation_of(error, context=physical_context),
+                            violation,
                         )
-                    if split and not isinstance(error, LLMContextCapacityError):
+                    if (
+                        split
+                        or (
+                            violation is not None
+                            and violation.rule_code == "provider_truncated"
+                            and unit is not None
+                            and len(unit.items) > 1
+                        )
+                    ) and not isinstance(error, LLMContextCapacityError):
                         raise RecoverySplit(*recovery) from None
                 if isinstance(error, LLMContextCapacityError):
                     can_retry = (policy is not None and context.has_optional_neighbours
@@ -645,7 +654,9 @@ def _worded_for_the_model(error: Exception, context: TranslationContext) -> Exce
     if not isinstance(error, ResultValidationError):
         return error
     return ResultValidationError(
-        context.to_aliases(str(error)), expectation=error.expectation
+        context.to_aliases(str(error)),
+        expectation=error.expectation,
+        violation=getattr(error, "violation", None),
     )
 
 

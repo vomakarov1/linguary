@@ -869,7 +869,7 @@ def test_review_request_aliases_candidate_ids_and_resolves_verdicts():
 
 
 @pytest.mark.asyncio
-async def test_propose_group_skips_review_group_for_invalid_evidence_candidates():
+async def test_propose_group_skips_review_group_for_invalid_evidence_candidates(tmp_path):
     from linguary.application.correction_dto import (
         ChapterCorrectionV2Response,
         CorrectionIssue,
@@ -1098,8 +1098,137 @@ async def test_propose_group_skips_review_group_for_invalid_evidence_candidates(
         assert len(saved_checks) == 1
         assert saved_checks[0].block_id == b1.id
         assert saved_checks[0].basis == "unchanged"
+
+        from datetime import UTC, datetime
+        from linguary.adapters.db import Base, SqlAlchemyUnitOfWork, create_database_engine
+        from linguary.adapters.db.models import (
+            BookConditionsRow,
+            BookRow,
+            CorrectionInputRow,
+            LLMAttemptRow,
+            ProcessingRunRow,
+        )
+        from linguary.domain.book_conditions import WorkStateError, thaw
+
+        engine = create_database_engine(tmp_path / "test.db")
+        Base.metadata.create_all(engine)
+        uow = SqlAlchemyUnitOfWork.for_engine(engine)
+        now = datetime.now(UTC)
+        with uow.transaction() as tx:
+            session = tx.work._session
+            session.add(
+                BookRow(
+                    id=doc.id,
+                    title="Book",
+                    authors_json=["Author"],
+                    identifier=None,
+                    publisher=None,
+                    source_language="en",
+                    target_language="ru",
+                    status="processing",
+                    source_epub_path="book.epub",
+                    export_validation_status=None,
+                    created_at=now,
+                )
+            )
+            session.flush()
+            tx.documents.save(doc)
+            session.add(
+                BookConditionsRow(
+                    id=conditions.id,
+                    book_id=doc.id,
+                    revision=1,
+                    schema_version=1,
+                    payload_json=conditions.payload,
+                    reproducibility="strict",
+                    created_at=now,
+                )
+            )
+            session.add(
+                ProcessingRunRow(
+                    id=run.id,
+                    book_id=doc.id,
+                    status="active",
+                    glossary_snapshot_json=[],
+                    llm_settings_json={},
+                    created_at=now,
+                )
+            )
+            session.flush()
+            attempt_obj = attempts_store[saved_candidate.proposal_attempt_id]
+            session.add(
+                LLMAttemptRow(
+                    id=attempt_obj.id,
+                    book_id=doc.id,
+                    conditions_id=conditions.id,
+                    task_id=task.id,
+                    run_id=run.id,
+                    generation=0,
+                    ordinal=1,
+                    state="validated",
+                    context_json=attempt_obj.context,
+                    outcome_json={},
+                )
+            )
+            session.add(
+                CorrectionInputRow(
+                    run_id=run.id,
+                    block_id=b2.id,
+                    generation=1,
+                    fingerprint=canonical_sha(
+                        dict(
+                            input_sha256=saved_candidate.input_sha256,
+                            source_result_binding=thaw(saved_candidate.payload["source_binding"]),
+                        )
+                    ),
+                )
+            )
+            session.flush()
+            tx.work.add_correction_candidates((saved_candidate,))
+            persisted = tx.work.get_correction_candidate(saved_candidate.candidate_id)
+            assert persisted is not None
+            assert persisted.state == "awaiting_human"
+            assert persisted.review == saved_candidate.review
+            assert tx.work.list_correction_candidates(
+                run.id, section_id=section.id, states=("awaiting_human",)
+            ) == (persisted,)
+
+            valid_evidence_payload = {**thaw(saved_candidate.payload), "evidence_valid": True}
+            invalid_for_valid_evidence = replace(
+                saved_candidate,
+                candidate_id=str(uuid4()),
+                payload=valid_evidence_payload,
+                proposal_sha256=canonical_sha(valid_evidence_payload),
+            )
+            with pytest.raises(WorkStateError):
+                tx.work.add_correction_candidates((invalid_for_valid_evidence,))
     finally:
         monkeypatch.undo()
+
+
+def test_alias_error_for_retry_does_not_mutate_original_error():
+    from linguary.application.retry_policy import (
+        ExpectedBlock,
+        ResultExpectation,
+        ResultValidationError,
+    )
+    from linguary.application.use_cases.correct_chapter import _alias_error_for_retry
+
+    err = ResultValidationError(
+        "Unbalanced quote in block uuid-block-1",
+        expectation=ResultExpectation(
+            target_language="ru",
+            blocks=(ExpectedBlock(block_id="uuid-block-1"),),
+        ),
+    )
+    aliased = _alias_error_for_retry(err, {"uuid-block-1": "b1"})
+
+    assert aliased is not err
+    assert str(aliased) == "Unbalanced quote in block b1"
+    assert [b.block_id for b in aliased.expectation.blocks] == ["b1"]
+    assert str(err) == "Unbalanced quote in block uuid-block-1"
+    assert [b.block_id for b in err.expectation.blocks] == ["uuid-block-1"]
+
 
 
 

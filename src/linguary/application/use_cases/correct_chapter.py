@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Mapping, Sequence
+import copy
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
@@ -239,17 +240,23 @@ def _alias_error_for_retry(
     for raw_id, alias in replacements.items():
         if raw_id and raw_id in message:
             message = message.replace(raw_id, alias)
-    if message != str(error):
-        error.args = (message, *error.args[1:])
     expectation = getattr(error, 'expectation', None)
+    new_expectation = expectation
     if expectation is not None and getattr(expectation, 'blocks', None):
         aliased_blocks = tuple(
             replace(b, block_id=replacements.get(b.block_id, b.block_id))
             for b in expectation.blocks
         )
         if aliased_blocks != expectation.blocks:
-            error.expectation = replace(expectation, blocks=aliased_blocks)
-    return error
+            new_expectation = replace(expectation, blocks=aliased_blocks)
+    if message == str(error) and new_expectation is expectation:
+        return error
+    copied = copy.copy(error)
+    if message != str(error):
+        copied.args = (message, *error.args[1:])
+    if new_expectation is not expectation:
+        copied.expectation = new_expectation
+    return copied
 
 
 def _llm_anchor(anchor: Mapping[str, Any], aliases: Mapping[str, str]) -> dict[str, Any]:
@@ -521,6 +528,7 @@ class CorrectChapter:
     async def _group(self, command, block_ids):
         response = None
         repair_turns = ()
+        repair_instructions = ()
         for ordinal in range(1, self.retry.max_attempts + 1):
             with self.uow.transaction() as tx:
                 inputs, task, payload = self._load(tx, command)
@@ -533,7 +541,7 @@ class CorrectChapter:
                     run_id=inputs.run.id, task_id=task.id, policy_version=self.snapshot.policy_version)
                 request = replace(request, call_context=context, attempt=ordinal,
                     max_completion_tokens=self.snapshot.parameters['max_output_tokens'],
-                    repair_turns=repair_turns)
+                    repair_turns=repair_turns, repair_instructions=repair_instructions)
                 expected = inputs.manifest
                 tx.work.bind('correction_request', context.attempt_id, book_id=command.book_id,
                     conditions_id=inputs.conditions.id, payload=dict(schema_version=1,
@@ -629,9 +637,9 @@ class CorrectChapter:
                     middle = len(block_ids) // 2
                     return (await self._group(command, block_ids[:middle])
                             + await self._group(command, block_ids[middle:]))
-                _alias_error_for_retry(error, getattr(inputs, 'block_aliases', None))
+                aliased_error = _alias_error_for_retry(error, getattr(inputs, 'block_aliases', None))
                 decision = self.retry.decide(
-                    error,
+                    aliased_error,
                     attempts=ordinal,
                     raw_content=response.raw_content if response is not None else None,
                 )
@@ -641,6 +649,7 @@ class CorrectChapter:
                     await self.sleep(decision.backoff_seconds)
                 next_req = decision.next_request(request)
                 repair_turns = next_req.repair_turns
+                repair_instructions = next_req.repair_instructions
                 response = None
         raise ResultValidationError('исчерпаны попытки исправления главы')
 
@@ -830,13 +839,18 @@ class CorrectChapterV2(CorrectChapter):
 
     async def _propose_group(self, command, block_ids):
         repair_turns = ()
+        repair_instructions = ()
         for ordinal in range(1, self.retry.max_attempts + 1):
             response = None
             with self.uow.transaction() as tx:
                 inputs, task, payload = self._load(tx, command)
                 base_request = self._request(inputs, task, block_ids)
-                if repair_turns:
-                    base_request = replace(base_request, repair_turns=repair_turns)
+                if repair_turns or repair_instructions:
+                    base_request = replace(
+                        base_request,
+                        repair_turns=repair_turns,
+                        repair_instructions=repair_instructions,
+                    )
                 request, context = self._call(tx, inputs, task, payload,
                     base_request, ordinal, kind='correction_request')
                 expected = inputs.manifest
@@ -938,9 +952,9 @@ class CorrectChapterV2(CorrectChapter):
                 if isinstance(error, LLMResponseFormatError) and error.truncated and len(block_ids) > 1:
                     middle = len(block_ids) // 2
                     return await self._propose_group(command, block_ids[:middle]) + await self._propose_group(command, block_ids[middle:])
-                _alias_error_for_retry(error, getattr(inputs, 'block_aliases', None))
+                aliased_error = _alias_error_for_retry(error, getattr(inputs, 'block_aliases', None))
                 decision = self.retry.decide(
-                    error,
+                    aliased_error,
                     attempts=ordinal,
                     raw_content=response.raw_content if response is not None else None,
                 )
@@ -950,6 +964,7 @@ class CorrectChapterV2(CorrectChapter):
                     await self.sleep(decision.backoff_seconds)
                 next_req = decision.next_request(request)
                 repair_turns = next_req.repair_turns
+                repair_instructions = next_req.repair_instructions
                 response = None
         raise ResultValidationError('исчерпаны попытки предложения исправления')
 
@@ -998,6 +1013,7 @@ class CorrectChapterV2(CorrectChapter):
 
     async def _review_group(self, command, candidate_ids):
         repair_turns = ()
+        repair_instructions = ()
         for ordinal in range(1, self.retry.max_attempts + 1):
             response = None
             with self.uow.transaction() as tx:
@@ -1022,8 +1038,12 @@ class CorrectChapterV2(CorrectChapter):
                     raise RecoveryError('interrupted')
                 refs = tuple((c.candidate_id, c.proposal_sha256) for c in candidates)
                 base_request = self._review_request(inputs, task, candidates)
-                if repair_turns:
-                    base_request = replace(base_request, repair_turns=repair_turns)
+                if repair_turns or repair_instructions:
+                    base_request = replace(
+                        base_request,
+                        repair_turns=repair_turns,
+                        repair_instructions=repair_instructions,
+                    )
                 request, context = self._call(tx, inputs, task, payload,
                     base_request, ordinal,
                     kind='correction_review_request', refs=refs)
@@ -1105,13 +1125,13 @@ class CorrectChapterV2(CorrectChapter):
                 candidate_aliases = {
                     cid: f'c{idx}' for idx, cid in enumerate(candidate_ids, start=1)
                 }
-                _alias_error_for_retry(
+                aliased_error = _alias_error_for_retry(
                     error,
                     getattr(inputs, 'block_aliases', None),
                     candidate_aliases,
                 )
                 decision = self.retry.decide(
-                    error,
+                    aliased_error,
                     attempts=ordinal,
                     raw_content=response.raw_content if response is not None else None,
                 )
@@ -1121,6 +1141,7 @@ class CorrectChapterV2(CorrectChapter):
                     await self.sleep(decision.backoff_seconds)
                 next_req = decision.next_request(request)
                 repair_turns = next_req.repair_turns
+                repair_instructions = next_req.repair_instructions
                 response = None
         raise ResultValidationError('исчерпаны попытки проверки кандидатов')
 

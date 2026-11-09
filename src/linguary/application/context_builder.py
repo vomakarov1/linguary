@@ -2406,6 +2406,7 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
         ):
             continue
         value = asdict(difficulty)
+        value["id"] = f"d{len(difficulties) + 1}"
         value["owner_block_id"] = aliases[difficulty.owner_block_id]
         for anchor in value["anchors"]:
             source_id = anchor["block_id"]
@@ -2420,6 +2421,7 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
         if fact.subject_anchor.block_id not in aliases:
             continue
         value = fact.to_dict()
+        value["id"] = f"f{len(facts) + 1}"
         for anchor in (*value['anchors'], value['subject_anchor']):
             source_id = anchor['block_id']
             if source_id not in aliases:

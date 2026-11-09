@@ -371,7 +371,8 @@ class ReceiptHTTPClient:
             raise ComparisonStopped('Не доказана граница оплачиваемого входа; synthetic требует MockTransport')
         if self.route_metadata is None or not self.route_metadata.model_versions or not self.route_metadata.provider_names:
             raise ComparisonStopped('Не приняты точные обозначения квитанции')
-        if not bounds.output_includes_reasoning or body.get('max_tokens') != self.max_output_tokens:
+        output_limit = body.get('max_completion_tokens', body.get('max_tokens'))
+        if not bounds.output_includes_reasoning or output_limit != self.max_output_tokens:
             raise ComparisonStopped('Не доказана граница оплачиваемого вывода')
         if bounds.input_bound_method == 'provider_context_limit':
             try:
@@ -379,7 +380,7 @@ class ReceiptHTTPClient:
             except ProtocolError:
                 self.ledger.stop('endpoint_envelope_mismatch')
                 raise ComparisonStopped('Принятая квота или тариф точки изменились') from None
-        if set(body) - {'model', 'messages', 'response_format', 'temperature', 'max_tokens'}:
+        if set(body) - {'model', 'messages', 'response_format', 'temperature', 'max_tokens', 'max_completion_tokens'}:
             raise ComparisonStopped('Дополнительные оплачиваемые возможности запрещены')
         body['provider'] = {'order': [self.route], 'allow_fallbacks': False, 'require_parameters': True,
                             'max_price': {'prompt': bounds.input_price_per_mtok / bounds.input_price_multiplier, 'completion': bounds.output_price_per_mtok}}

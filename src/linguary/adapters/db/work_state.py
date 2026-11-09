@@ -1,4 +1,5 @@
 """Durable work store; all operations use the caller's short transaction."""
+from collections.abc import Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -250,11 +251,21 @@ class SqlAlchemyWorkRepository:
             block = self._owned(DocumentBlockRow, candidate.block_id, candidate.book_id)
             attempt = self.get_attempt(candidate.proposal_attempt_id)
             inputs = self._session.get(CorrectionInputRow, (candidate.run_id, candidate.block_id))
+            invalid_evidence_human = (
+                isinstance(candidate.payload, Mapping)
+                and candidate.payload.get('evidence_valid') is False
+                and candidate.state == 'awaiting_human'
+                and candidate.review is not None
+            )
+            valid_initial_state = (
+                (candidate.state == 'awaiting_review' and candidate.review is None)
+                or invalid_evidence_human
+            )
             if (run.status != 'active' or block.section_id != candidate.section_id
                     or inputs is None or inputs.generation != candidate.input_generation
                     or inputs.fingerprint != canonical_sha(dict(input_sha256=candidate.input_sha256,
                         source_result_binding=thaw(candidate.payload['source_binding'])))
-                    or candidate.state != 'awaiting_review' or candidate.review is not None or candidate.decision is not None
+                    or not valid_initial_state or candidate.decision is not None
                     or attempt is None or attempt.state not in {'validated', 'accepted'}
                     or attempt.book_id != candidate.book_id or attempt.run_id != candidate.run_id
                     or attempt.conditions_id != candidate.conditions_id
@@ -276,6 +287,8 @@ class SqlAlchemyWorkRepository:
                 input_sha256=candidate.input_sha256, input_generation=candidate.input_generation,
                 proposal_sha256=candidate.proposal_sha256, payload_json=thaw(candidate.payload),
                 group_id=candidate.group_id, proposal_attempt_id=candidate.proposal_attempt_id,
+                review_attempt_id=candidate.review_attempt_id,
+                review_json=thaw(candidate.review) if candidate.review is not None else None,
                 state=candidate.state))
 
     def record_correction_verdict(self, candidate_id, *, proposal_sha256, input_sha256,

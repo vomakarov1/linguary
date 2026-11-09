@@ -950,7 +950,7 @@ async def test_live_admission_and_run_with_mock_transport(tmp_path, monkeypatch,
         body = json.loads(request.content)
         calls.append(body)
         assert ('temperature' in body) is (temperature_policy == 'set')
-        assert body['max_tokens'] == value.generation['max_output_tokens']
+        assert body['max_completion_tokens'] == value.generation['max_output_tokens']
         assert body['provider'] == {'order': ['mock-route'], 'allow_fallbacks': False, 'require_parameters': True, 'max_price': {'prompt': 1, 'completion': 1}}
         assert request.headers['X-OpenRouter-Cache'] == 'false'
         kind = body['response_format']['json_schema']['name']
