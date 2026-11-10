@@ -25,7 +25,7 @@ class WorkerSettings:
     """Local worker settings."""
 
     concurrency: int = 1
-    idle_delay_seconds: float = 0.05
+    idle_delay_seconds: float = 0.5
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -45,6 +45,7 @@ class TaskWorkerPool:
         self._changed = asyncio.Event()
         self._workers: dict[int, asyncio.Task[None]] = {}
         self._worker_wakes: dict[int, asyncio.Event] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._running = False
         self._busy_slots: set[int] = set()
         self._capacity_waiters: set[int] = set()
@@ -64,6 +65,21 @@ class TaskWorkerPool:
             for wake in self._worker_wakes.values():
                 wake.set()
 
+    def notify(self) -> None:
+        """Thread-safely wakes idle workers when queue work becomes available."""
+        loop = self._loop
+        if not self._running or loop is None or loop.is_closed():
+            return
+        with suppress(RuntimeError):
+            loop.call_soon_threadsafe(self._wake_workers)
+
+    def _wake_workers(self) -> None:
+        if not self._running or self._stop.is_set():
+            return
+        for slot, wake in self._worker_wakes.items():
+            if slot not in self._capacity_waiters:
+                wake.set()
+
     async def drain(self) -> tuple[ProcessingTask, ...]:
         """Executes tasks until queue is empty and returns completed tasks.
 
@@ -79,8 +95,14 @@ class TaskWorkerPool:
         """Manages worker coroutines until stopped, then awaits their completion."""
         if self._running:
             raise RuntimeError("пул воркеров уже запущен")
+        self._loop = asyncio.get_running_loop()
         self._running = True
         self._stop.clear()
+        queue = getattr(self._runner, "_queue", None)
+        subscribe = getattr(queue, "subscribe_wakeup", None)
+        unsubscribe = getattr(queue, "unsubscribe_wakeup", None)
+        if callable(subscribe):
+            subscribe(self.notify)
         try:
             while True:
                 self._changed.clear()
@@ -100,7 +122,10 @@ class TaskWorkerPool:
                     return
                 await self._changed.wait()
         finally:
+            if callable(unsubscribe):
+                unsubscribe(self.notify)
             self._running = False
+            self._loop = None
             workers = tuple(self._workers.values())
             for worker in workers:
                 worker.cancel()
@@ -136,6 +161,7 @@ class TaskWorkerPool:
                 finally:
                     self._capacity_waiters.discard(slot)
                 continue
+            wake.clear()
             self._busy_slots.add(slot)
             try:
                 task = await self._runner.run_next()
@@ -143,7 +169,7 @@ class TaskWorkerPool:
                 self._busy_slots.remove(slot)
                 for waiting_slot in self._capacity_waiters:
                     self._worker_wakes[waiting_slot].set()
-            if task is None:
+            if task is None and not self._stop.is_set():
                 await self._wait_for_work(wake)
 
     async def _wait_for_work(self, wake: asyncio.Event) -> None:

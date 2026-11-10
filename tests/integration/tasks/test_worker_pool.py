@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from uuid import uuid4
 
 import pytest
-from task_factories import make_identity
+from task_factories import BOOK_ID, CREATED_AT, make_identity
 
-from linguary.adapters.runtime import SqliteTaskQueue, TaskWorkerPool, WorkerSettings
+from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+from linguary.adapters.runtime import (
+    SqliteTaskQueue,
+    SqliteTaskStore,
+    TaskWorkerPool,
+    WorkerSettings,
+)
 from linguary.application.task_runner import TaskHandler, TaskRunner
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
+from linguary.domain.book_conditions import BookConditions
 
 #: Timeout limit in tests: safeguard against hanging, not part of the assertion.
 TIMEOUT_SECONDS = 5.0
@@ -317,3 +326,92 @@ async def test_resize_down_prevents_extra_claims_while_old_slots_are_busy():
         assert runner.active == 1
     finally:
         await stop_controlled_pool(pool, running, runner)
+
+
+async def test_worker_pool_wakes_thread_safely_on_enqueue_with_long_idle_delay(
+    task_store: SqliteTaskStore,
+    task_queue: SqliteTaskQueue,
+    unit_of_work: SqlAlchemyUnitOfWork,
+    stored_book: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workers parked on a long idle delay wake immediately on cross-thread `enqueue` and `notify()`."""
+    handled: asyncio.Queue[str] = asyncio.Queue()
+    empty_polls: asyncio.Queue[None] = asyncio.Queue()
+    inject_during_claim = False
+    original_claim = task_queue.claim_next_pending
+
+    async def tracked_claim() -> ProcessingTask | None:
+        nonlocal inject_during_claim
+        claimed = await original_claim()
+        if claimed is None:
+            if inject_during_claim:
+                inject_during_claim = False
+                race_thread = threading.Thread(
+                    target=lambda: task_store.enqueue(make_identity(scope_id="section-3"))
+                )
+                race_thread.start()
+                race_thread.join(timeout=TIMEOUT_SECONDS)
+                await asyncio.sleep(0)
+            empty_polls.put_nowait(None)
+        return claimed
+
+    monkeypatch.setattr(task_queue, "claim_next_pending", tracked_claim)
+
+    async def handle(task: ProcessingTask) -> None:
+        handled.put_nowait(task.scope_id)
+
+    pool = make_pool(task_queue, handle, WorkerSettings(idle_delay_seconds=3600.0))
+    running = asyncio.create_task(pool.run_forever())
+    try:
+        await asyncio.wait_for(empty_polls.get(), timeout=TIMEOUT_SECONDS)
+        await asyncio.sleep(0)
+
+        enqueue_thread = threading.Thread(
+            target=lambda: task_store.enqueue(make_identity(scope_id="section-1"))
+        )
+        enqueue_thread.start()
+        enqueue_thread.join(timeout=TIMEOUT_SECONDS)
+
+        assert await asyncio.wait_for(handled.get(), timeout=0.5) == "section-1"
+        await asyncio.wait_for(empty_polls.get(), timeout=TIMEOUT_SECONDS)
+        await asyncio.sleep(0)
+
+        conditions_id = str(uuid4())
+        with unit_of_work.transaction() as uow:
+            uow.work.add_conditions(
+                BookConditions(
+                    id=conditions_id,
+                    book_id=BOOK_ID,
+                    revision=1,
+                    payload={"schema_version": 1},
+                    created_at=CREATED_AT,
+                )
+            )
+            uow.work.set_book_paused(BOOK_ID, conditions_id, True)
+
+        await task_queue.enqueue(make_identity(scope_id="section-2"))
+        await asyncio.wait_for(empty_polls.get(), timeout=TIMEOUT_SECONDS)
+        await asyncio.sleep(0)
+
+        with unit_of_work.transaction() as uow:
+            uow.work.set_book_paused(BOOK_ID, conditions_id, False)
+
+        notify_thread = threading.Thread(target=pool.notify)
+        notify_thread.start()
+        notify_thread.join(timeout=TIMEOUT_SECONDS)
+
+        assert await asyncio.wait_for(handled.get(), timeout=0.5) == "section-2"
+        await asyncio.wait_for(empty_polls.get(), timeout=TIMEOUT_SECONDS)
+        await asyncio.sleep(0)
+
+        inject_during_claim = True
+        pool.notify()
+        assert await asyncio.wait_for(handled.get(), timeout=0.5) == "section-3"
+    finally:
+        pool.request_stop()
+        await asyncio.wait_for(running, timeout=TIMEOUT_SECONDS)
+
+    pool.notify()
+    task_queue.notify_work_available()
+    assert WorkerSettings().idle_delay_seconds == 0.5

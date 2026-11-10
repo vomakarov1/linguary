@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import asyncio
 from dataclasses import replace
+from typing import Any
+from uuid import uuid4
 
 import pytest
-from task_factories import BOOK_ID, make_identity
+from sqlalchemy import Engine, event
+from task_factories import BOOK_ID, CREATED_AT, make_identity
 
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
 from linguary.adapters.runtime import SqliteTaskQueue
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
+from linguary.domain.book_conditions import BookConditions
 
 #: Finishing a claimed task: either succeeded or failed.
 FinishTask = Callable[[ProcessingTask], ProcessingTask]
@@ -144,3 +149,81 @@ async def test_running_tasks_are_listed_for_recovery(
 
     assert claimed is not None
     assert [task.id for task in running] == [claimed.id]
+
+
+async def test_claim_next_pending_skips_begin_immediate_when_queue_empty_or_paused(
+    engine: Engine,
+    task_queue: SqliteTaskQueue,
+    unit_of_work: SqlAlchemyUnitOfWork,
+    stored_book: None,
+) -> None:
+    """Idle or paused queue polling performs a read check without acquiring `BEGIN IMMEDIATE`."""
+    begin_immediates: list[str] = []
+
+    def record_sql(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        if statement.strip().upper() == "BEGIN IMMEDIATE":
+            begin_immediates.append(statement)
+
+    wakeups: list[int] = []
+    callback = lambda: wakeups.append(1)
+
+    event.listen(engine, "before_cursor_execute", record_sql)
+    try:
+        begin_immediates.clear()
+        assert await task_queue.claim_next_pending() is None
+        assert begin_immediates == []
+
+        conditions_id = str(uuid4())
+        with unit_of_work.transaction() as uow:
+            uow.work.add_conditions(
+                BookConditions(
+                    id=conditions_id,
+                    book_id=BOOK_ID,
+                    revision=1,
+                    payload={"schema_version": 1},
+                    created_at=CREATED_AT,
+                )
+            )
+            uow.work.set_book_paused(BOOK_ID, conditions_id, True)
+
+        task_queue.subscribe_wakeup(callback)
+        enqueued = await task_queue.enqueue(make_identity())
+        assert len(wakeups) == 1
+
+        begin_immediates.clear()
+        assert await task_queue.claim_next_pending() is None
+        assert begin_immediates == []
+
+        with unit_of_work.transaction() as uow:
+            uow.work.set_book_paused(BOOK_ID, conditions_id, False)
+
+        begin_immediates.clear()
+        claimed = await task_queue.claim_next_pending()
+        assert claimed is not None
+        assert claimed.id == enqueued.id
+        assert claimed.status is TaskStatus.RUNNING
+        assert len(begin_immediates) == 1
+
+        begin_immediates.clear()
+        assert await task_queue.claim_next_pending() is None
+        assert begin_immediates == []
+
+        second = await task_queue.enqueue(make_identity(scope_id="section-2"))
+        concurrent_claims = await asyncio.gather(
+            task_queue.claim_next_pending(),
+            task_queue.claim_next_pending(),
+        )
+        assert [item.id for item in concurrent_claims if item is not None] == [second.id]
+
+        task_queue.unsubscribe_wakeup(callback)
+        task_queue.notify_work_available()
+        assert len(wakeups) == 2
+    finally:
+        event.remove(engine, "before_cursor_execute", record_sql)

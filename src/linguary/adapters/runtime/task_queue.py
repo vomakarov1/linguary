@@ -23,6 +23,18 @@ class SqliteTaskQueue:
     def __init__(self, store: SqliteTaskStore) -> None:
         self._store = store
 
+    def subscribe_wakeup(self, callback: Callable[[], None]) -> None:
+        """Registers a thread-safe callback invoked when queue work may be available."""
+        self._store.subscribe_wakeup(callback)
+
+    def unsubscribe_wakeup(self, callback: Callable[[], None]) -> None:
+        """Removes a previously registered wakeup callback."""
+        self._store.unsubscribe_wakeup(callback)
+
+    def notify_work_available(self) -> None:
+        """Notifies subscribed workers that claimable work may be available."""
+        self._store.notify_work_available()
+
     def new_task_id(self) -> str:
         """Return an identifier from the queue's configured factory."""
         return self._store.new_task_id()

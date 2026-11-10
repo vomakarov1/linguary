@@ -12,6 +12,7 @@ Task state transitions are performed by domain entities: this adapter is respons
 from __future__ import annotations
 
 from collections.abc import Callable
+import threading
 from uuid import uuid4
 
 from sqlalchemy import Engine, exists, func, select, update
@@ -42,6 +43,27 @@ class SqliteTaskStore:
     ) -> None:
         self._session_factory = session_factory
         self._id_factory = id_factory or _new_task_id
+        self._wakeup_lock = threading.Lock()
+        self._wakeup_callbacks: list[Callable[[], None]] = []
+
+    def subscribe_wakeup(self, callback: Callable[[], None]) -> None:
+        """Registers a thread-safe callback invoked when queue work may be available."""
+        with self._wakeup_lock:
+            if callback not in self._wakeup_callbacks:
+                self._wakeup_callbacks.append(callback)
+
+    def unsubscribe_wakeup(self, callback: Callable[[], None]) -> None:
+        """Removes a previously registered wakeup callback."""
+        with self._wakeup_lock:
+            if callback in self._wakeup_callbacks:
+                self._wakeup_callbacks.remove(callback)
+
+    def notify_work_available(self) -> None:
+        """Notifies registered wakeup callbacks that claimable work may exist."""
+        with self._wakeup_lock:
+            callbacks = tuple(self._wakeup_callbacks)
+        for callback in callbacks:
+            callback()
 
     def new_task_id(self) -> str:
         """Return an identifier using the same factory as persisted queue tasks."""
@@ -58,6 +80,8 @@ class SqliteTaskStore:
         """Enqueues a task; reenqueuing an existing identity creates no duplicates."""
         existing = self._find(identity)
         if existing is not None:
+            if existing.status is TaskStatus.PENDING:
+                self.notify_work_available()
             return existing
         task = ProcessingTask(
             id=self._id_factory(),
@@ -76,11 +100,17 @@ class SqliteTaskStore:
             stored = self._find(identity)
             if stored is None:
                 raise
+            if stored.status is TaskStatus.PENDING:
+                self.notify_work_available()
             return stored
+        self.notify_work_available()
         return task
 
     def claim_next_pending(self) -> ProcessingTask | None:
         """Claims the next `pending` task, transitioning it to `running` (ALG-02)."""
+        with self._session_factory() as read_session:
+            if self._next_pending(read_session) is None:
+                return None
         session = self._session_factory()
         try:
             session.connection().exec_driver_sql(_BEGIN_IMMEDIATE)
