@@ -466,7 +466,7 @@ def _order_artifacts_for_request(
         for idx, a in enumerate(raw_artifacts)
         if isinstance(a, Mapping) and a.get('artifact_kind') == 'analysis'
     ]
-    if len(analysis_indices) <= 1:
+    if not analysis_indices:
         return list(raw_artifacts)
 
     scope_pos = {

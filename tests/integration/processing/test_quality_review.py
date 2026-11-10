@@ -627,3 +627,103 @@ async def test_chunked_quality_review_resumes_without_rebilling_checked_chunks_a
         assert set(fail_state['coverage']['checked']) | set(fail_state['coverage']['missing']) == all_manifest_shas
     finally:
         await app.aclose()
+
+
+async def test_quality_review_populates_missing_after_reconciled_unknown_and_preserves_unknown_reason(tmp_path, monkeypatch):
+    app, fake, doc, run = await make_review_app(tmp_path)
+    try:
+        manifest = app.quality_review.preview('book-1')
+        all_manifest_shas = [a['artifact_sha'] for a in manifest['artifacts']]
+
+        # 1. When budget.reserve fails because the review was reconciled to `unknown`,
+        #    run_task checks _stopped_state first, preserves state='unknown' and reason=None (never 'budget'),
+        #    and ensures coverage.missing has all unchecked manifest artifact_shas with partial=True.
+        created = await app.quality_review.start(command(app, key='reconciled-during-reserve', budget=10000))
+        review_id = created['review_id']
+        orig_reserve = app.quality_review.budget.reserve
+
+        def reconcile_to_unknown_then_fail(rev_id, estimate, **kwargs):
+            att = orig_reserve(rev_id, estimate, **kwargs)
+            assert app.quality_review.budget.mark_sent(att.id) is True
+            app.quality_review.budget.reconcile()
+            raise WorkStateError('бюджет исчерпан или состояние вычитки изменилось')
+
+        monkeypatch.setattr(app.quality_review.budget, 'reserve', reconcile_to_unknown_then_fail)
+        finished = await drain_tasks(app)
+        assert len(finished) == 1 and finished[0].status == TaskStatus.SUCCEEDED
+        monkeypatch.setattr(app.quality_review.budget, 'reserve', orig_reserve)
+
+        state = app.quality_review.get('book-1', review_id)
+        assert state['state'] == 'unknown'
+        assert state['reason'] is None
+        assert state['coverage']['checked'] == []
+        assert state['coverage']['missing'] == all_manifest_shas
+        with app.unit_of_work.transaction() as tx:
+            progress = tx.work.review_progress(review_id)
+            assert progress['partial'] is True
+            assert progress['reason'] is None
+            rev_after_stop = tx.work.get_review(review_id)
+
+        # Calling run_task again on the already-accounted `unknown` review does not bump revision or mutate it
+        await app.quality_review.run_task(finished[0])
+        with app.unit_of_work.transaction() as tx:
+            assert tx.work.get_review(review_id) == rev_after_stop
+
+        # 2. Entering run_task on an already stopped `unknown` review that still has unaccounted
+        #    manifest artifact_sha items after a crash populates `missing` with partial=True,
+        #    and subsequent run_task calls do not bump revision.
+        created2 = await app.quality_review.start(command(app, key='crashed-after-settle-unknown', budget=10000))
+        review2_id = created2['review_id']
+        with app.unit_of_work.transaction() as tx:
+            rev2 = tx.work.get_review(review2_id)
+        att2 = app.quality_review.budget.reserve(
+            review2_id,
+            1200,
+            price=route().snapshot(),
+            expected_revision=rev2.revision,
+        )
+        assert app.quality_review.budget.mark_sent(att2.id) is True
+        app.quality_review.budget.settle(att2.id, None)
+        app.quality_review._finish_attempt(att2.id, 'unknown')
+        with app.unit_of_work.transaction() as tx:
+            assert tx.work.get_review(review2_id).state == 'unknown'
+            assert tx.work.review_progress(review2_id).get('missing') is None
+
+        finished2 = await drain_tasks(app)
+        assert len(finished2) == 1 and finished2[0].status == TaskStatus.SUCCEEDED
+        state2 = app.quality_review.get('book-1', review2_id)
+        assert state2['state'] == 'unknown'
+        assert state2['reason'] is None
+        assert state2['coverage']['checked'] == []
+        assert state2['coverage']['missing'] == all_manifest_shas
+        with app.unit_of_work.transaction() as tx:
+            assert tx.work.review_progress(review2_id)['partial'] is True
+            rev2_accounted = tx.work.get_review(review2_id)
+
+        await app.quality_review.run_task(finished2[0])
+        with app.unit_of_work.transaction() as tx:
+            assert tx.work.get_review(review2_id) == rev2_accounted
+
+        # 3. Stopping due to `stale` also populates `missing` with remaining unchecked artifact_sha items and partial=True
+        created3 = await app.quality_review.start(command(app, key='stale-populates-missing', budget=10000))
+        review3_id = created3['review_id']
+        with app.unit_of_work.transaction() as tx:
+            current_res = tx.results.list_for_run(run.id)[0]
+            tx.results.replace_results(run.id, (replace(current_res, translated_text='Изменённый перевод до запуска.'),))
+        finished3 = await drain_tasks(app)
+        assert len(finished3) == 1 and finished3[0].status == TaskStatus.SUCCEEDED
+        state3 = app.quality_review.get('book-1', review3_id)
+        assert state3['state'] == 'stale'
+        assert state3['reason'] == 'manifest_changed'
+        assert state3['coverage']['checked'] == []
+        assert state3['coverage']['missing'] == all_manifest_shas
+        with app.unit_of_work.transaction() as tx:
+            assert tx.work.review_progress(review3_id)['partial'] is True
+            rev3_accounted = tx.work.get_review(review3_id)
+
+        await app.quality_review.run_task(finished3[0])
+        with app.unit_of_work.transaction() as tx:
+            assert tx.work.get_review(review3_id) == rev3_accounted
+    finally:
+        await app.aclose()
+

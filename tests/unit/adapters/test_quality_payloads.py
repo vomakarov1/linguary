@@ -252,13 +252,18 @@ def test_request_text_strips_internal_evidence_and_warnings_while_preserving_man
     assert parsed["missing_results"] == ["b2"]
     assert [e["source_text"] for e in parsed["glossary"]["entries"]] == ["Brown Fox"]
     assert all("artifact_sha" not in a for a in parsed["artifacts"])
+    assert [a["artifact_kind"] for a in parsed["artifacts"]] == [
+        "analysis",
+        "original",
+        "result",
+    ]
     assert [a["block_ids"] for a in parsed["artifacts"]] == [
-        ["b1"],
         ["b1", "b2"],
+        ["b1"],
         ["b1"],
     ]
 
-    llm_analysis_body = parsed["artifacts"][1]["body"]
+    llm_analysis_body = parsed["artifacts"][0]["body"]
     assert llm_analysis_body["summary"] == "fox chapter"
     assert "id" not in llm_analysis_body
     assert "section_id" not in llm_analysis_body
@@ -475,9 +480,9 @@ def test_quality_review_supports_multi_block_findings_and_cleans_glossary():
     }
     assert long_diff_id not in serialized
     assert long_fact_id not in serialized
-    assert parsed["artifacts"][1]["body"]["fragment_assistances"][0]["difficulty_id"] == "d1"
-    assert parsed["artifacts"][4]["body"]["content_plan"]["difficulties"][0]["id"] == "d1"
-    assert parsed["artifacts"][4]["body"]["content_plan"]["context_facts"][0]["id"] == "f1"
+    assert parsed["artifacts"][3]["body"]["fragment_assistances"][0]["difficulty_id"] == "d1"
+    assert parsed["artifacts"][0]["body"]["content_plan"]["difficulties"][0]["id"] == "d1"
+    assert parsed["artifacts"][0]["body"]["content_plan"]["context_facts"][0]["id"] == "f1"
 
     multi_block_response = QualityReviewResponse(
         findings=(
@@ -611,7 +616,7 @@ def test_quality_context_validates_multi_block_artifact_sha_and_filters_scoped_a
     assert '": ' not in serialized
     assert '", ' not in serialized
     parsed = json.loads(serialized)
-    analysis_body = parsed["artifacts"][2]["body"]
+    analysis_body = parsed["artifacts"][0]["body"]
     assert analysis_body["treatment_plan"]["items"] == [
         dict(block_id="b1", treatment="TRANSLATE"),
     ]
@@ -843,11 +848,11 @@ def test_partition_manifest_keeps_single_chapter_order_and_splits_multi_chapter_
 
     single_parsed = json.loads(request_text(single_manifest))
     assert [a["artifact_kind"] for a in single_parsed["artifacts"]] == [
-        "original",
-        "result",
-        "original",
-        "result",
         "analysis",
+        "original",
+        "original",
+        "result",
+        "result",
     ]
 
     # 2. Multi-chapter manifest: grouped by chapter in request_text when >1 analysis,
@@ -1004,4 +1009,101 @@ def test_partition_manifest_keeps_single_chapter_order_and_splits_multi_chapter_
     assert "1" in foreign_msg
     assert "b9" in foreign_msg
     assert "Block two" in foreign_msg
+
+
+def test_single_chapter_request_text_places_analysis_before_blocks_preserving_manifest_sha():
+    from types import SimpleNamespace
+    from analysis_fakes import make_analysis_document, make_analysis_section
+    from linguary.application.quality_context import (
+        _order_artifacts_for_request,
+        partition_manifest,
+        request_text,
+        snapshot,
+    )
+    from linguary.domain import (
+        BlockProcessingResult,
+        BlockTreatment,
+        ChapterAnalysis,
+        GlossarySnapshot,
+        TreatmentPlan,
+    )
+
+    section = make_analysis_section(
+        section_id="sec-1",
+        order=0,
+        texts=("First paragraph.", "Second paragraph."),
+    )
+    b1, b2 = section.blocks
+    doc = make_analysis_document((section,))
+    analysis = ChapterAnalysis.create(
+        id="analysis-sec-1",
+        section_id="sec-1",
+        treatment_plan=TreatmentPlan.of_treatments(
+            "sec-1",
+            ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+        ),
+        translation_instructions="Keep style.",
+        chapter_summary="Single chapter summary.",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    r1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text=" Первый абзац.",
+    )
+    r2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text=" Второй абзац.",
+    )
+    run = SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot())
+    tx = SimpleNamespace(
+        documents=SimpleNamespace(get=lambda _bid: doc),
+        work=SimpleNamespace(
+            latest_conditions=lambda _bid: SimpleNamespace(
+                id="cond-1",
+                payload={"schema_version": 1},
+            )
+        ),
+        runs=SimpleNamespace(active_for_book=lambda _bid: run),
+        results=SimpleNamespace(list_for_run=lambda _rid: (r1, r2)),
+        analyses=SimpleNamespace(list_for_book=lambda _bid: (analysis,)),
+        glossary=SimpleNamespace(list_for_book=lambda _bid: ()),
+    )
+
+    manifest = snapshot(tx, "book-1", "all")
+    expected_manifest_sha = manifest["manifest_sha"]
+    # Snapshot itself keeps canonical artifact order (originals/results then analysis) for manifest_sha stability
+    assert [a["artifact_kind"] for a in manifest["artifacts"]] == [
+        "original",
+        "result",
+        "original",
+        "result",
+        "analysis",
+    ]
+
+    # Single-chapter request_text places chapter analysis first before original and result blocks
+    chunk, = partition_manifest(manifest)
+    parsed = json.loads(request_text(chunk))
+    assert manifest["manifest_sha"] == expected_manifest_sha
+    assert chunk["manifest_sha"] == expected_manifest_sha
+    assert [a["artifact_kind"] for a in parsed["artifacts"]] == [
+        "analysis",
+        "original",
+        "original",
+        "result",
+        "result",
+    ]
+    assert [a["block_ids"] for a in parsed["artifacts"]] == [
+        ["b1", "b2"],
+        ["b1"],
+        ["b2"],
+        ["b1"],
+        ["b2"],
+    ]
+
+    # Without analysis artifacts, _order_artifacts_for_request preserves raw order
+    no_analysis = [a for a in manifest["artifacts"] if a["artifact_kind"] != "analysis"]
+    assert _order_artifacts_for_request(no_analysis, manifest["scope"]) == no_analysis
+
 

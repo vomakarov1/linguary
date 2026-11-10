@@ -154,21 +154,19 @@ class QualityReviewService:
             review = tx.work.get_review(task.scope_id)
             if review is None or review.book_id != task.book_id:
                 raise WorkStateError('вычитка не найдена')
-            if review.state not in ('queued', 'running'):
-                return
             progress = tx.work.review_progress(review.id)
-            try:
-                manifest = snapshot(tx, task.book_id, tuple(review.manifest['scope']))
-            except WorkStateError:
-                manifest = None
-            initial_state = (
-                'stale'
-                if manifest is None
-                else quality_review_state(tx, task.book_id, review.id, current_snapshot=manifest)['state']
-            )
-        if initial_state == 'stale':
-            self._update(review.id, 'stale', reason='manifest_changed')
-            return
+            manifest = None
+            initial_state = review.state
+            if review.state in ('queued', 'running'):
+                try:
+                    manifest = snapshot(tx, task.book_id, tuple(review.manifest['scope']))
+                except WorkStateError:
+                    manifest = None
+                initial_state = (
+                    'stale'
+                    if manifest is None
+                    else quality_review_state(tx, task.book_id, review.id, current_snapshot=manifest)['state']
+                )
         all_findings: list[dict] = [dict(item) for item in thaw(review.findings)]
         all_checked: list[str] = list(progress.get('checked') or ())
         all_missing: list[str] = list(progress.get('missing') or ())
@@ -203,15 +201,41 @@ class QualityReviewService:
 
         def _persist_stopped(state, *, reason=None):
             dedup_checked, dedup_missing = _stopped_coverage()
+            partial = bool(dedup_checked or dedup_missing or state in ('unknown', 'limit', 'stale'))
+            with _read_transaction(self.uow) as tx:
+                current_review = tx.work.get_review(review.id)
+                current_progress = tx.work.review_progress(review.id)
+            effective_reason = current_progress.get('reason') if reason is None else reason
+            if (
+                current_review is not None
+                and current_review.state == state
+                and thaw(current_review.findings) == thaw(tuple(all_findings))
+                and tuple(current_progress.get('checked') or ()) == dedup_checked
+                and tuple(current_progress.get('missing') or ()) == dedup_missing
+                and current_progress.get('reason') == effective_reason
+                and bool(current_progress.get('partial')) == partial
+            ):
+                return
             self._update(
                 review.id,
                 state,
                 findings=tuple(all_findings),
                 checked=dedup_checked,
                 missing=dedup_missing,
-                reason=reason,
-                partial=bool(dedup_checked or dedup_missing),
+                reason=effective_reason,
+                partial=partial,
             )
+
+        if review.state not in ('queued', 'running'):
+            if review.state in ('unknown', 'limit', 'stale'):
+                stop_reason = progress.get('reason')
+                if review.state == 'stale' and stop_reason is None:
+                    stop_reason = 'manifest_changed'
+                _persist_stopped(review.state, reason=stop_reason)
+            return
+        if initial_state == 'stale':
+            _persist_stopped('stale', reason='manifest_changed')
+            return
 
         route = self.routes.get((review.settings['route_id'], review.settings['model']))
         if route is None or thaw(review.settings.get('route_snapshot')) != route.snapshot():
@@ -286,8 +310,13 @@ class QualityReviewService:
                         expected_manifest_sha=None,
                     )
                 except WorkStateError as error:
-                    if str(error) == 'manifest_changed' or self.get(task.book_id, review.id)['state'] == 'stale':
-                        self._update(review.id, 'stale', reason='manifest_changed')
+                    stopped_state = self._stopped_state(review.id)
+                    if stopped_state == 'stale':
+                        _persist_stopped('stale', reason='manifest_changed')
+                    elif stopped_state in ('unknown', 'limit'):
+                        _persist_stopped(stopped_state)
+                    elif str(error) == 'manifest_changed' or self.get(task.book_id, review.id)['state'] == 'stale':
+                        _persist_stopped('stale', reason='manifest_changed')
                     else:
                         _persist_stopped('limit', reason='budget')
                     return
@@ -313,9 +342,10 @@ class QualityReviewService:
                     repair_instructions=repair_instructions,
                 )
                 if not self.budget.mark_sent(attempt.id):
-                    state = self.get(task.book_id, review.id)['state']
+                    stopped_state = self._stopped_state(review.id)
+                    state = stopped_state or self.get(task.book_id, review.id)['state']
                     if state == 'stale':
-                        self._update(review.id, 'stale', reason='manifest_changed')
+                        _persist_stopped('stale', reason='manifest_changed')
                     elif state in ('limit', 'unknown'):
                         _persist_stopped(state)
                     else:
@@ -334,7 +364,9 @@ class QualityReviewService:
                         return
                     stopped_state = self._stopped_state(review.id)
                     if stopped_state is not None:
-                        if stopped_state in ('limit', 'unknown'):
+                        if stopped_state == 'stale':
+                            _persist_stopped('stale', reason='manifest_changed')
+                        elif stopped_state in ('limit', 'unknown'):
                             _persist_stopped(stopped_state)
                         return
                     previous_error = str(error)
@@ -368,7 +400,7 @@ class QualityReviewService:
                 if state_after == 'stale':
                     self._finish_attempt(attempt.id, 'rejected')
                     finalize_response(self.uow, response, 'stale')
-                    self._update(review.id, 'stale', reason='manifest_changed')
+                    _persist_stopped('stale', reason='manifest_changed')
                     return
                 try:
                     if response.truncated:
@@ -379,7 +411,9 @@ class QualityReviewService:
                     self._finish_attempt(attempt.id, 'rejected')
                     stopped_state = self._stopped_state(review.id)
                     if stopped_state is not None:
-                        if stopped_state in ('limit', 'unknown'):
+                        if stopped_state == 'stale':
+                            _persist_stopped('stale', reason='manifest_changed')
+                        elif stopped_state in ('limit', 'unknown'):
                             _persist_stopped(stopped_state)
                         return
                     previous_error = str(error)
@@ -392,7 +426,16 @@ class QualityReviewService:
                     if current.state == 'stale' or after['manifest_sha'] != review.manifest['manifest_sha']:
                         tx.work.transition_attempt(attempt.id, 'rejected', expected_state='validated')
                         finalize_response(self.uow, response, 'stale', transaction=tx)
-                        tx.work.update_review(review.id, state='stale', reason='manifest_changed')
+                        dedup_checked, dedup_missing = _stopped_coverage()
+                        tx.work.update_review(
+                            review.id,
+                            state='stale',
+                            findings=tuple(all_findings),
+                            checked=dedup_checked,
+                            missing=dedup_missing,
+                            reason='manifest_changed',
+                            partial=True,
+                        )
                         return
                     tx.work.transition_attempt(attempt.id, 'accepted', expected_state='validated')
                     finalize_response(self.uow, response, 'accepted', transaction=tx)
@@ -400,15 +443,15 @@ class QualityReviewService:
                     all_checked.extend(payload.checked_artifacts)
                     all_missing.extend(payload.missing_artifacts)
                     stop_after_chunk = current.state in ('limit', 'unknown', 'stale')
-                    if stop_after_chunk and current.state in ('limit', 'unknown'):
+                    if stop_after_chunk:
                         dedup_checked, dedup_missing = _stopped_coverage()
                     else:
                         dedup_checked, dedup_missing = _dedup_coverage()
                     already_checked_set = set(dedup_checked)
                     target_state = (
-                        ('limit' if current.state == 'limit' else 'completed')
-                        if is_last_chunk
-                        else ('limit' if current.state == 'limit' else 'running')
+                        current.state
+                        if stop_after_chunk
+                        else ('completed' if is_last_chunk else 'running')
                     )
                     tx.work.update_review(
                         review.id,
@@ -417,7 +460,8 @@ class QualityReviewService:
                         checked=dedup_checked,
                         missing=dedup_missing,
                         partial=bool(
-                            dedup_missing
+                            stop_after_chunk
+                            or dedup_missing
                             or review.manifest['missing_results']
                             or not review.manifest['book_complete']
                             or not is_last_chunk
