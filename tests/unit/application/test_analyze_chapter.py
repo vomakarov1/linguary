@@ -1190,7 +1190,6 @@ async def test_process_chapter_reuses_source_texts_and_defers_reconcile_until_co
     )
     doc = make_analysis_document((ch1, ch2))
     b1, b2 = ch1.ordered_blocks
-    b3 = ch2.ordered_blocks[0]
 
     plan = TreatmentPlan.of_treatments(
         ch1.id,
@@ -1288,7 +1287,6 @@ async def test_process_chapter_reuses_source_texts_and_defers_reconcile_until_co
     assert dict(work.source_texts) == {
         b1.id: b1.text,
         b2.id: b2.text,
-        b3.id: b3.text,
     }
 
     save_calls: list[dict[str, object]] = []

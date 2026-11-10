@@ -69,6 +69,11 @@ class CallObservation:
     def public(self):
         result = asdict(self)
         result.pop('_raw')
+        if self.usage is not None:
+            result['usage'] = {
+                'prompt_tokens': self.usage.prompt_tokens,
+                'completion_tokens': self.usage.completion_tokens,
+            }
         if self.cost is not None:
             result['cost'] = str(self.cost)
         return result
