@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
+import json
 
-from sqlalchemy import LargeBinary, cast, delete, func, or_, select, update
+from sqlalchemy import JSON, LargeBinary, cast, delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from linguary.adapters.db import mapping
@@ -761,12 +762,55 @@ class SqlAlchemyLLMCallLogRepository:
 
     def list_for_book(self, book_id: str) -> tuple[LLMCallLog, ...]:
         """List log entries for a book in invocation order."""
-        rows = self._session.scalars(
-            select(LLMCallLogRow)
+        rows = self._session.execute(
+            select(
+                LLMCallLogRow.id,
+                LLMCallLogRow.book_id,
+                LLMCallLogRow.task_id,
+                LLMCallLogRow.stage,
+                LLMCallLogRow.provider,
+                LLMCallLogRow.model,
+                LLMCallLogRow.started_at,
+                LLMCallLogRow.duration_ms,
+                LLMCallLogRow.attempt,
+                LLMCallLogRow.success,
+                LLMCallLogRow.error_type,
+                LLMCallLogRow.error_message,
+                LLMCallLogRow.error_detail,
+                LLMCallLogRow.prompt_tokens,
+                LLMCallLogRow.completion_tokens,
+                LLMCallLogRow.cost,
+                LLMCallLogRow.attempt_id,
+                func.json_remove(
+                    LLMCallLogRow.diagnostic_meta_json,
+                    "$.input_text",
+                    type_=JSON(none_as_null=True),
+                ).label("diagnostic_meta_json"),
+            )
             .where(LLMCallLogRow.book_id == book_id)
             .order_by(LLMCallLogRow.started_at, LLMCallLogRow.id)
         ).all()
-        return tuple(mapping.to_llm_call(row) for row in rows)
+        return tuple(
+            mapping.to_llm_call(
+                row,
+                diagnostic_meta=(
+                    json.loads(row.diagnostic_meta_json)
+                    if isinstance(row.diagnostic_meta_json, str)
+                    else row.diagnostic_meta_json
+                ),
+            )
+            for row in rows
+        )
+
+    def get_for_book(self, book_id: str, call_id: str) -> LLMCallLog | None:
+        """Get a single log entry for a book with full diagnostic metadata, or `None`."""
+        row = self._session.scalars(
+            select(LLMCallLogRow).where(
+                LLMCallLogRow.book_id == book_id,
+                LLMCallLogRow.id == call_id,
+            )
+        ).one_or_none()
+        return None if row is None else mapping.to_llm_call(row)
 
 
     def diagnostic_record(self, *, call_id=None, attempt_id=None):

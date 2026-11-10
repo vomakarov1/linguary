@@ -159,6 +159,14 @@ class LoggingLLMClient(LLMClient):
         context = request.call_context
         metadata = {'schema_version': 1, 'decision': 'unknown', 'body_meta': supplied_meta,
                     'context': None if context is None else context.to_dict()}
+        if usage is not None:
+            usage_details: dict[str, int] = {}
+            if usage.cached_prompt_tokens is not None:
+                usage_details['cached_prompt_tokens'] = usage.cached_prompt_tokens
+            if usage.reasoning_tokens is not None:
+                usage_details['reasoning_tokens'] = usage.reasoning_tokens
+            if usage_details:
+                metadata['usage_details'] = usage_details
         if request.repair_instructions:
             metadata['repair_instructions'] = list(request.repair_instructions)
             if request.attempt > 1 and self.debug_payloads and policy.bodies_enabled:

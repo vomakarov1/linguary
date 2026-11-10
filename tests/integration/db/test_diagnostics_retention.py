@@ -503,3 +503,130 @@ async def test_result_bindings_filters_by_block_ids_pk_and_translation_call_scop
     assert all(b_ids == (BLOCK_ID,) for _, b_ids in binding_calls)
 
 
+async def test_llm_call_log_persists_cached_and_reasoning_tokens_in_diagnostic_meta(
+    unit_of_work,
+) -> None:
+    import pytest
+    from linguary.adapters.llm import FakeLLMClient, FakeReply, LoggingLLMClient
+    from linguary.application.ports.llm import LLMRequest, LLMResponseFormatError
+    from linguary.domain import LLMCallStage, TokenUsage
+
+    with unit_of_work.transaction() as tx:
+        tx.books.add(make_book())
+
+    valid_payload = {
+        'blocks': [
+            {
+                'source_block_id': 'b1',
+                'treatment': 'TRANSLATE',
+                'translated_text': 'Обновлённый перевод достаточной длины на русском языке.',
+                'glossary_hints': [],
+            }
+        ],
+        'language_notes': [],
+    }
+    fake = FakeLLMClient.replying(
+        [
+            FakeReply.of_payload(
+                valid_payload,
+                usage=TokenUsage(
+                    prompt_tokens=120,
+                    completion_tokens=45,
+                    cached_prompt_tokens=80,
+                    reasoning_tokens=15,
+                ),
+            ),
+            LLMResponseFormatError(
+                'невалидный JSON ответа',
+                raw_content='{broken',
+                usage=TokenUsage(
+                    prompt_tokens=90,
+                    completion_tokens=30,
+                    cached_prompt_tokens=0,
+                    reasoning_tokens=12,
+                ),
+            ),
+            FakeReply.of_payload(
+                valid_payload,
+                usage=TokenUsage(prompt_tokens=50, completion_tokens=10),
+            ),
+        ]
+    )
+    tick = 0
+
+    def _clock() -> datetime:
+        nonlocal tick
+        current = NOW + timedelta(seconds=tick)
+        tick += 1
+        return current
+
+    client = LoggingLLMClient(
+        inner=fake,
+        unit_of_work=unit_of_work,
+        provider='fake',
+        model='fake-model',
+        clock=_clock,
+        debug_payloads=True,
+    )
+    req = LLMRequest.for_translation(
+        instructions='Системная инструкция.',
+        input_text='Исходный блок для перевода.',
+    ).with_logging(book_id='book-1', stage=LLMCallStage.TRANSLATION_UNIT)
+
+    resp1 = await client.generate(req)
+    with pytest.raises(LLMResponseFormatError) as exc_info:
+        await client.generate(req)
+    resp3 = await client.generate(req)
+
+    with unit_of_work.transaction() as tx:
+        rec1 = tx.llm_calls.diagnostic_record(call_id=resp1.call_id)
+        rec2 = tx.llm_calls.diagnostic_record(call_id=exc_info.value.call_id)
+        rec3 = tx.llm_calls.diagnostic_record(call_id=resp3.call_id)
+        assert rec1['metadata']['usage_details'] == {
+            'cached_prompt_tokens': 80,
+            'reasoning_tokens': 15,
+        }
+        assert rec2['metadata']['usage_details'] == {
+            'cached_prompt_tokens': 0,
+            'reasoning_tokens': 12,
+        }
+        assert 'usage_details' not in rec3['metadata']
+
+        entries = tx.llm_calls.list_for_book('book-1')
+        assert len(entries) == 3
+        assert entries[0].usage == TokenUsage(
+            prompt_tokens=120,
+            completion_tokens=45,
+            cached_prompt_tokens=80,
+            reasoning_tokens=15,
+        )
+        assert entries[1].usage == TokenUsage(
+            prompt_tokens=90,
+            completion_tokens=30,
+            cached_prompt_tokens=0,
+            reasoning_tokens=12,
+        )
+        assert entries[2].usage == TokenUsage(
+            prompt_tokens=50,
+            completion_tokens=10,
+            cached_prompt_tokens=None,
+            reasoning_tokens=None,
+        )
+
+        single = tx.llm_calls.get_for_book('book-1', resp1.call_id)
+        assert single is not None
+        assert single.usage == entries[0].usage
+
+    diagnostics = Diagnostics(unit_of_work, clock=lambda: NOW + timedelta(seconds=10))
+    diagnostics.purge('book-1')
+    with unit_of_work.transaction() as tx:
+        after_purge = tx.llm_calls.list_for_book('book-1')
+        assert after_purge[0].usage == TokenUsage(
+            prompt_tokens=120,
+            completion_tokens=45,
+            cached_prompt_tokens=80,
+            reasoning_tokens=15,
+        )
+
+
+

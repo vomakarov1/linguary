@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from dataclasses import asdict
+import json
 from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
 from enum import StrEnum
 from typing import Any
@@ -631,9 +632,25 @@ def to_llm_call_row(entry: LLMCallLog) -> LLMCallLogRow:
     )
 
 
-def to_llm_call(row: LLMCallLogRow) -> LLMCallLog:
+_UNSET = object()
+
+
+def _nonnegative_token_count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def to_llm_call(
+    row: LLMCallLogRow | Any, *, diagnostic_meta: Any = _UNSET
+) -> LLMCallLog:
     """Convert a database row to a domain LLM call log entry."""
+    raw_meta = row.diagnostic_meta_json if diagnostic_meta is _UNSET else diagnostic_meta
+    resolved_meta = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
     has_usage = row.prompt_tokens is not None or row.completion_tokens is not None
+    usage_details = (
+        resolved_meta.get("usage_details") if isinstance(resolved_meta, dict) else None
+    )
     return LLMCallLog(
         id=row.id,
         book_id=row.book_id,
@@ -648,14 +665,25 @@ def to_llm_call(row: LLMCallLogRow) -> LLMCallLog:
         error=_to_task_error(row.error_type, row.error_message, row.error_detail),
         usage=(
             TokenUsage(
-                prompt_tokens=row.prompt_tokens, completion_tokens=row.completion_tokens
+                prompt_tokens=row.prompt_tokens,
+                completion_tokens=row.completion_tokens,
+                cached_prompt_tokens=(
+                    _nonnegative_token_count(usage_details.get("cached_prompt_tokens"))
+                    if isinstance(usage_details, dict)
+                    else None
+                ),
+                reasoning_tokens=(
+                    _nonnegative_token_count(usage_details.get("reasoning_tokens"))
+                    if isinstance(usage_details, dict)
+                    else None
+                ),
             )
             if has_usage
             else None
         ),
         cost=row.cost,
         attempt_id=row.attempt_id,
-        diagnostic_meta=row.diagnostic_meta_json,
+        diagnostic_meta=resolved_meta,
     )
 
 

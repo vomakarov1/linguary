@@ -215,12 +215,22 @@ class Diagnostics:
     def read(self, book_id, call_id):
         with self.uow.transaction() as transaction:
             self._require_book(transaction, book_id)
-            record = transaction.llm_calls.diagnostic_record(call_id=call_id)
+            repo = transaction.llm_calls
+            record = repo.diagnostic_record(call_id=call_id)
             if record is None or record['book_id'] != book_id:
                 raise DiagnosticNotFoundError('диагностическая запись не найдена')
-            transaction.llm_calls.enforce_diagnostics_policy(self.policy, self.clock(), book_id=book_id)
-            record = transaction.llm_calls.diagnostic_record(call_id=call_id)
-            entry = next(entry for entry in transaction.llm_calls.list_for_book(book_id) if entry.id == call_id)
+            repo.enforce_diagnostics_policy(self.policy, self.clock(), book_id=book_id)
+            record = repo.diagnostic_record(call_id=call_id)
+            get_for_book = getattr(repo, 'get_for_book', None)
+            if callable(get_for_book):
+                entry = get_for_book(book_id, call_id)
+            else:
+                entry = next(
+                    (item for item in repo.list_for_book(book_id) if item.id == call_id),
+                    None,
+                )
+            if entry is None:
+                raise DiagnosticNotFoundError('диагностическая запись не найдена')
             body_status = ((record['metadata'] or {}).get('body_meta') or {}).get('body_status')
             return dict(metadata=self._metadata(entry), body=record['body'],
                 body_status=body_status or ('available' if record['body'] is not None else 'unavailable'))
