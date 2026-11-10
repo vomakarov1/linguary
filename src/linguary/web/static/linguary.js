@@ -28,6 +28,11 @@ document.addEventListener("submit", async (event) => {
     return;
   }
 
+  if (form.matches("[data-resolve-candidate-form]")) {
+    await submitResolveCandidateForm(event, form);
+    return;
+  }
+
   if (!form.matches("[data-regenerate-form]")) {
     return;
   }
@@ -74,6 +79,9 @@ document.addEventListener("submit", async (event) => {
     if (root instanceof HTMLElement) {
       replaceResultGroup(root, blockId, await response.text());
     }
+    if (hasResolvedFilteredBlock(root)) {
+      await refreshResultGroups();
+    }
     refreshResultHeader().catch(() => {});
   } catch (_error) {
     if (block.isConnected) {
@@ -90,6 +98,105 @@ document.addEventListener("submit", async (event) => {
     pollResultGroups(resultGroupsAttempt);
   }
 });
+
+async function submitResolveCandidateForm(event, form) {
+  event.preventDefault();
+
+  const block = form.closest("[data-result-block]");
+  const blockId = form.dataset.blockId;
+  if (!(block instanceof HTMLElement) || !blockId) {
+    form.submit();
+    return;
+  }
+
+  let formData;
+  try {
+    formData = new FormData(form, event.submitter);
+  } catch (_error) {
+    formData = new FormData(form);
+    if (event.submitter && event.submitter.name) {
+      formData.append(event.submitter.name, event.submitter.value);
+    }
+  }
+
+  const buttons = Array.from(form.querySelectorAll("button[type='submit']"));
+  for (const button of buttons) {
+    if (button instanceof HTMLButtonElement) {
+      button.disabled = true;
+    }
+  }
+  block.setAttribute("aria-busy", "true");
+
+  try {
+    const response = await fetch(form.action, {
+      method: "POST",
+      headers: {
+        "Accept": "text/html",
+        "X-Linguary-Fragment": "result-block",
+      },
+      body: formData,
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`);
+    }
+    const markup = await response.text();
+    const root = document.querySelector("[data-result-groups]");
+    let replacement = null;
+    if (root instanceof HTMLElement) {
+      replacement = replaceResultGroup(root, blockId, markup);
+    }
+    if (
+      isPendingCorrectionsFilterActive(root) &&
+      (!(replacement instanceof HTMLElement) ||
+        !replacement.querySelector("[data-resolve-candidate-form]"))
+    ) {
+      await refreshResultGroups();
+    }
+    await refreshResultHeader();
+  } catch (_error) {
+    if (block.isConnected) {
+      block.removeAttribute("aria-busy");
+      showTaskState(block, "Не удалось применить решение. Попробуйте ещё раз.");
+      for (const button of buttons) {
+        if (button instanceof HTMLButtonElement) {
+          button.disabled = false;
+        }
+      }
+    }
+  }
+}
+
+function isPendingCorrectionsFilterActive(root = document.querySelector("[data-result-groups]")) {
+  if (root instanceof HTMLElement && root.dataset.resultUrl) {
+    try {
+      const url = new URL(root.dataset.resultUrl, window.location.href);
+      if (url.searchParams.get("filter") === "pending_corrections") {
+        return true;
+      }
+    } catch (_error) {
+      if (root.dataset.resultUrl.includes("filter=pending_corrections")) {
+        return true;
+      }
+    }
+  }
+  try {
+    return new URLSearchParams(window.location.search).get("filter") === "pending_corrections";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function hasResolvedFilteredBlock(root = document.querySelector("[data-result-groups]")) {
+  if (!(root instanceof HTMLElement) || !isPendingCorrectionsFilterActive(root)) {
+    return false;
+  }
+  return Array.from(root.querySelectorAll("[data-result-block]")).some(
+    (block) =>
+      !block.querySelector("[data-active-task='true']") &&
+      !block.querySelector("[data-resolve-candidate-form]"),
+  );
+}
 
 async function submitExportForm(event, form) {
   event.preventDefault();
@@ -194,8 +301,9 @@ function restoreResultFocus(root, target) {
 }
 
 function resultGroupForBlock(root, blockId) {
-  const form = Array.from(root.querySelectorAll("[data-regenerate-form]"))
-    .find((item) => item.dataset.blockId === blockId);
+  const form = Array.from(
+    root.querySelectorAll("[data-regenerate-form], [data-resolve-candidate-form]"),
+  ).find((item) => item.dataset.blockId === blockId);
   return form?.closest("[data-result-block]") || null;
 }
 
@@ -238,6 +346,10 @@ async function refreshResultBlocks(blockIds) {
   }
   for (let offset = 0; offset < blockIds.length; offset += RESULT_BLOCK_BATCH_SIZE) {
     await refreshResultBlockBatch(blockIds.slice(offset, offset + RESULT_BLOCK_BATCH_SIZE));
+  }
+  const root = document.querySelector("[data-result-groups]");
+  if (hasResolvedFilteredBlock(root)) {
+    await refreshResultGroups();
   }
 }
 
@@ -437,8 +549,10 @@ function pollResultGroups(attempt = 1) {
       await refreshActiveResultBlocks();
       const currentRoot = document.querySelector("[data-result-groups]");
       if (
-        resultGroupsRefreshNeeded && currentRoot instanceof HTMLElement &&
-        !currentRoot.querySelector("[data-active-task='true']")
+        currentRoot instanceof HTMLElement &&
+        (hasResolvedFilteredBlock(currentRoot) ||
+          (resultGroupsRefreshNeeded &&
+            !currentRoot.querySelector("[data-active-task='true']")))
       ) {
         await refreshResultGroups();
       }

@@ -23,6 +23,7 @@ from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
+    BlockType,
     BookImportWarning,
     BookStatus,
     CanonicalDocument,
@@ -254,7 +255,13 @@ def result_groups(blocks: Sequence[ResultBlockSummary]) -> tuple[tuple[ResultBlo
     groups: list[list[ResultBlockSummary]] = []
     for block in blocks:
         key = block.block.attributes.get("split_group")
-        if groups and key and groups[-1][-1].block.attributes.get("split_group") == key:
+        if (
+            groups
+            and key
+            and block.block.type in (BlockType.PARAGRAPH, BlockType.QUOTE)
+            and groups[-1][-1].block.type is block.block.type
+            and groups[-1][-1].block.attributes.get("split_group") == key
+        ):
             groups[-1].append(block)
         else:
             groups.append([block])
@@ -797,12 +804,15 @@ def book_result(
     *,
     include_quality: bool = True,
     block_ids: Collection[str] | None = None,
+    include_chapters: bool = True,
 ) -> BookResultSummary:
     """Processing results by block in stable original document order.
 
     Document, plan, and results are read in a single transaction: book warnings are
     derived from the same dataset without a secondary query.
     """
+    from linguary.domain.book_conditions import WorkStateError
+
     requested_set = None if block_ids is None else set(block_ids)
     prior_pronunciation_hints: dict[tuple[str, str, str], str] = {}
     with _read_transaction(unit_of_work) as transaction:
@@ -810,7 +820,7 @@ def book_result(
         document = transaction.documents.get(book_id)
         import_warnings = (
             transaction.documents.import_warnings(book_id)
-            if include_quality
+            if include_quality and include_chapters
             else ()
         )
         run = transaction.runs.active_for_book(book_id)
@@ -821,7 +831,54 @@ def book_result(
             if include_quality and callable(is_book_paused_fn)
             else False
         )
-        if requested_set is None:
+        if not include_chapters:
+            analyses = (
+                transaction.analyses.list_for_book(book_id)
+                if include_quality
+                else ()
+            )
+            stored_results: Sequence[BlockProcessingResult] = ()
+            done_block_ids: set[str] | None = None
+            if include_quality and run is not None:
+                block_ids_for_run = getattr(transaction.results, "block_ids_for_run", None)
+                if callable(block_ids_for_run):
+                    done_block_ids = set(block_ids_for_run(run.id))
+                else:
+                    stored_results = transaction.results.list_for_run(run.id)
+                    done_block_ids = {r.block_id for r in stored_results}
+            quality = (
+                _quality_projection(
+                    transaction,
+                    book,
+                    document,
+                    analyses,
+                    run,
+                    tasks,
+                    stored_results=stored_results or None,
+                    result_block_ids=done_block_ids,
+                )
+                if include_quality
+                else {}
+            )
+            reading_support = _saved_reading_support(transaction, run)
+            try:
+                candidates = (
+                    _correction_candidates_projection(
+                        transaction,
+                        book_id,
+                        run,
+                        document=document,
+                        analyses=analyses,
+                        stored_results=stored_results or None,
+                        states={"awaiting_human"},
+                    )
+                    if include_quality
+                    else ()
+                )
+            except WorkStateError:
+                candidates = ()
+            selected_sections = ()
+        elif requested_set is None:
             analyses = transaction.analyses.list_for_book(book_id)
             stored_results = (
                 transaction.results.list_for_run(run.id) if run is not None else ()
@@ -977,6 +1034,24 @@ def book_result(
                 candidates = tuple(collected_candidates)
             else:
                 candidates = ()
+    is_paused = bool(
+        pause_requested
+        and not any(task.status is TaskStatus.RUNNING for task in tasks)
+    )
+    if not include_chapters:
+        reading_support["coverage_state"] = "not_evaluated"
+        return BookResultSummary(
+            book=book,
+            tasks=tasks,
+            pending_corrections=sum(c["state"] == "awaiting_human" for c in candidates),
+            pause_requested=pause_requested,
+            is_paused=is_paused,
+            **quality,
+            chapters=(),
+            reading_support=reading_support,
+            prior_pronunciation_hints=prior_pronunciation_hints,
+            warnings=BookWarnings(),
+        )
     treatments = {
         item.block_id: item.treatment
         for analysis in analyses
@@ -1017,10 +1092,6 @@ def book_result(
     states = {chapter.support_coverage for chapter in chapters if not chapter.is_notes}
     reading_support['coverage_state'] = next((state for state in ('unresolved', 'not_evaluated', 'pending')
         if state in states), 'checked' if states else 'not_evaluated')
-    is_paused = bool(
-        pause_requested
-        and not any(task.status is TaskStatus.RUNNING for task in tasks)
-    )
     return BookResultSummary(
         book=book,
         tasks=tasks,

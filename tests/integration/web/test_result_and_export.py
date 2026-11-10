@@ -2027,3 +2027,196 @@ def test_pending_corrections_filter_recomputes_primary_pronunciations_and_preser
     )
 
 
+def test_result_header_fragment_preserves_epub_ready_and_pause_without_building_chapters(
+    client: TestClient, application: Application, monkeypatch
+) -> None:
+    from lxml import html
+    from linguary.application import book_overview as overview_module
+    from linguary.application.book_overview import book_result, result_groups
+    from linguary.web.routes import result as result_route
+
+    scenario = store_book(
+        application,
+        book_id="book-header-lightweight",
+        status=BookStatus.READY_TO_EXPORT,
+        chapters=((SOURCE_TEXT, "Second quote part."),),
+    )
+    src = application.paths.source_epub(scenario.book_id)
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(b"synthetic header epub")
+
+    section = scenario.section(0)
+    b0, b1 = section.ordered_blocks
+    q0 = replace(
+        b0,
+        type=BlockType.QUOTE,
+        attributes={"tag": "blockquote", "split_group": "/body/blockquote[1]", "split_index": "1", "split_total": "2"},
+    )
+    q1 = replace(
+        b1,
+        type=BlockType.QUOTE,
+        attributes={"tag": "blockquote", "split_group": "/body/blockquote[1]", "split_index": "2", "split_total": "2"},
+    )
+    p_other = DocumentBlock.create(
+        document_id=scenario.book_id,
+        section_id=section.id,
+        type=BlockType.PARAGRAPH,
+        order=2,
+        text="Trailing paragraph with same split_group key.",
+        source_reference=SourceReference(resource_path="ch1.xhtml", structural_path="/body/p[1]"),
+        attributes={"tag": "p", "split_group": "/body/blockquote[1]"},
+    )
+    grouped = result_groups(
+        (
+            ResultBlockSummary(block=q0, chapter_number=1),
+            ResultBlockSummary(block=q1, chapter_number=1),
+            ResultBlockSummary(block=p_other, chapter_number=1),
+        )
+    )
+    assert [[item.block.id for item in group] for group in grouped] == [
+        [q0.id, q1.id],
+        [p_other.id],
+    ]
+
+    with application.unit_of_work.transaction() as tx:
+        rec = tx.books.get(scenario.book_id)
+        tx.books.save(replace(rec, source_epub_path=str(src)))
+    conditions = continue_legacy(application, scenario.book_id)
+    start_run(
+        application,
+        scenario,
+        results=tuple(translated_result(bid) for bid in scenario.block_ids()),
+    )
+    with application.unit_of_work.transaction() as tx:
+        tx.work.set_book_paused(scenario.book_id, conditions.id, True)
+
+    summary_no_chapters = book_result(
+        application.unit_of_work, scenario.book_id, include_chapters=False
+    )
+    assert summary_no_chapters.chapters == ()
+    assert summary_no_chapters.epub_ready is True
+    assert summary_no_chapters.pause_requested is True
+    assert summary_no_chapters.is_paused is True
+    assert summary_no_chapters.conditions["conditions_id"] == conditions.id
+    assert summary_no_chapters.recovery["covered"] == len(scenario.block_ids())
+    assert summary_no_chapters.quality_review["state"] == "not-requested"
+    assert summary_no_chapters.ordinary_cost["currency"] == "USD"
+
+    seen_kwargs: list[dict] = []
+    original_book_result = result_route.book_result
+
+    def spy_book_result(*args, **kwargs):
+        seen_kwargs.append(dict(kwargs))
+        return original_book_result(*args, **kwargs)
+
+    def fail_if_chapters_built(*args, **kwargs):
+        raise AssertionError("result-header must not assemble chapters or warnings")
+
+    monkeypatch.setattr(result_route, "book_result", spy_book_result)
+    monkeypatch.setattr(overview_module, "_warnings_of", fail_if_chapters_built)
+    monkeypatch.setattr(overview_module, "_reading_support_coverage", fail_if_chapters_built)
+
+    header_resp = client.get(
+        f"/books/{scenario.book_id}/result",
+        headers={"accept": "text/html", "x-linguary-fragment": "result-header"},
+    )
+    assert header_resp.status_code == 200
+    assert seen_kwargs == [{"include_chapters": False}]
+    header_tree = html.fromstring(header_resp.text)
+    assert header_tree.xpath('.//form[@data-export-form]')
+    assert header_tree.xpath(f'.//form[@action="/books/{scenario.book_id}/resume"]')
+    assert "Обязательная обработка завершена: EPUB готов к сборке." in header_resp.text
+
+    notified: list[int] = []
+    monkeypatch.setattr(application.worker_pool, "notify", lambda: notified.append(1))
+    retryable = store_task(application, task=failed_task(scenario))
+    retry_resp = client.post(f"/tasks/{retryable.id}/retry")
+    assert retry_resp.status_code == 200
+    assert notified == [1]
+
+
+def test_quality_review_partial_uses_default_seed_first_chapter_on_result_page(
+    settings, llm_client, web_task_ids
+) -> None:
+    from lxml import html
+    from linguary.adapters.config import CheckSettings, LLMSettings, ReadingSettings
+    from linguary.composition import build_application
+    from linguary.web import create_app
+
+    seeded_settings = replace(
+        settings,
+        llm=LLMSettings(model="fake-model", api_key="test-key"),
+        reading=ReadingSettings(reader_level="a2"),
+        checks=CheckSettings(seed_first_chapter=True),
+    )
+    app = build_application(
+        settings=seeded_settings,
+        llm_client=llm_client,
+        task_id_factory=web_task_ids,
+        content_plan_profile="legacy-v1",
+    )
+    try:
+        scenario = store_book(
+            app,
+            book_id="book-result-default-seed",
+            status=BookStatus.READY_TO_EXPORT,
+            chapters=((SOURCE_TEXT,),),
+        )
+        start_run(
+            app,
+            scenario,
+            results=(translated_result(scenario.block_ids()[0]),),
+        )
+        with TestClient(
+            create_app(application=app, run_background_worker=False),
+            base_url=app.settings.server.base_url,
+        ) as client:
+            result_html = client.get(
+                f"/books/{scenario.book_id}/result",
+                headers={"accept": "text/html"},
+            )
+            assert result_html.status_code == 200
+            tree = html.fromstring(result_html.text)
+            reanalyze_form = tree.xpath(
+                f'//form[@action="/books/{scenario.book_id}/conditions"][.//input[@name="action" and @value="reanalyze"]]'
+            )[0]
+            assert reanalyze_form.xpath(
+                './/input[@name="seed_first_chapter" and @checked]'
+            )
+            assert reanalyze_form.xpath(
+                './/select[@name="reader_level"]/option[@value="a2" and @selected]'
+            )
+
+            with app.unit_of_work.transaction() as tx:
+                book = tx.books.get(scenario.book_id)
+                app.book_conditions.create(
+                    tx,
+                    book,
+                    app.runtime_settings.revision,
+                    reader_level="c1",
+                    english_help=False,
+                    pronunciation_help_enabled=False,
+                    pronunciation_variant=None,
+                    seed_first_chapter=False,
+                )
+
+            saved_html = client.get(
+                f"/books/{scenario.book_id}/result",
+                headers={"accept": "text/html"},
+            )
+            assert saved_html.status_code == 200
+            saved_tree = html.fromstring(saved_html.text)
+            saved_form = saved_tree.xpath(
+                f'//form[@action="/books/{scenario.book_id}/conditions"][.//input[@name="action" and @value="reanalyze"]]'
+            )[0]
+            assert not saved_form.xpath(
+                './/input[@name="seed_first_chapter" and @checked]'
+            )
+            assert saved_form.xpath(
+                './/select[@name="reader_level"]/option[@value="c1" and @selected]'
+            )
+    finally:
+        app.dispose()
+
+
+

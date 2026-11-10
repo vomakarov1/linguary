@@ -40,7 +40,7 @@
     {% if candidate.review_reason %}<p>Результат перепроверки: {{ candidate.review_reason }}</p>{% endif %}
     {% if candidate.state == 'awaiting_human' %}
       <p>Предложение доступно для добровольного просмотра и не блокирует сборку EPUB.</p>
-      <form method="post" action="/books/{{ book_id }}/correction-candidates/{{ candidate.candidate_id }}/resolve">
+      <form method="post" action="/books/{{ book_id }}/correction-candidates/{{ candidate.candidate_id }}/resolve{% if result_filter == 'pending_corrections' %}?filter=pending_corrections{% endif %}" data-resolve-candidate-form data-block-id="{{ block.block_id }}">
         <input type="hidden" name="proposal_sha256" value="{{ candidate.proposal_sha256 }}">
         <input type="hidden" name="input_sha256" value="{{ candidate.input_sha256 }}">
         <label for="correction-reason-{{ candidate.candidate_id }}">Причина решения</label>

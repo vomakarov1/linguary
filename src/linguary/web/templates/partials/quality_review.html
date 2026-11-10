@@ -57,6 +57,7 @@
     <p>Новый анализ заменит текущий анализ и текущие результаты обработки. Архив версий сохранится. Будут закреплены новые условия; новые запросы оплачиваются отдельно.</p>
     {% if quality_ui.llm_ready %}
       {% set reanalyze_level = data.conditions.reader_level or default_reader_level|default('b2') %}
+      {% set reanalyze_seed = data.conditions.seed_first_chapter if data.conditions.conditions_id else default_seed_first_chapter|default(false) %}
       <form method="post" action="/books/{{ quality_book_id }}/conditions">
         <input type="hidden" name="action" value="reanalyze">
       <label><input type="checkbox" name="english_help" value="true" {% if data.conditions.english_help %}checked{% endif %}> Пояснять сложные места простым английским</label>
@@ -72,7 +73,7 @@
             </select>
           </label>
         {% endif %}
-        <label><input type="checkbox" name="seed_first_chapter" value="true" {% if data.conditions.seed_first_chapter %}checked{% endif %}> Сначала проанализировать первую главу</label>
+        <label><input type="checkbox" name="seed_first_chapter" value="true" {% if reanalyze_seed %}checked{% endif %}> Сначала проанализировать первую главу</label>
         <input type="hidden" name="expected_revision" value="{{ data.conditions.revision or 0 }}">
         <input type="hidden" name="settings_revision" value="{{ quality_ui.settings_revision }}">
         <label><input type="checkbox" name="confirmed" value="true" required> Подтверждаю новый анализ</label>

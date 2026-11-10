@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -47,8 +48,15 @@ def get_book_result(
     result_filter = (
         "pending_corrections" if filter_param == "pending_corrections" else None
     )
-    summary = book_result(application.unit_of_work, book_id)
     header_only = _wants_result_header_fragment(request)
+    try:
+        summary = book_result(
+            application.unit_of_work,
+            book_id,
+            include_chapters=not header_only,
+        )
+    except TypeError:
+        summary = book_result(application.unit_of_work, book_id)
     effective_summary = summary
     if not header_only and result_filter == "pending_corrections":
         filtered_chapters = []
@@ -90,6 +98,8 @@ def get_book_result(
             export_task=export_task_response,
             quality_ui=quality_page_context(request, application, book_id, tasks=summary.tasks),
             result_filter=result_filter,
+            default_reader_level=application.settings.reading.normalized_level,
+            default_seed_first_chapter=application.settings.checks.seed_first_chapter,
         )
     if (
         wants_html(request)
@@ -110,6 +120,8 @@ def get_book_result(
             export_task=export_task_response,
             quality_ui=quality_page_context(request, application, book_id, tasks=summary.tasks),
             result_filter=result_filter,
+            default_reader_level=application.settings.reading.normalized_level,
+            default_seed_first_chapter=application.settings.checks.seed_first_chapter,
         )
     return response
 
@@ -191,9 +203,16 @@ async def regenerate_book_block(
 @router.post('/books/{book_id}/correction-candidates/{candidate_id}/resolve', response_model=ResultGroupResponse)
 async def resolve_correction_candidate(request: Request, application: CurrentApplication,
                                        book_id: str, candidate_id: str):
+    is_json = request.headers.get('content-type', '').split(';')[0] == 'application/json'
+    form_filter: str | None = None
     try:
-        raw = (await request.json() if request.headers.get('content-type', '').split(';')[0] == 'application/json'
-               else dict(await request.form()))
+        if is_json:
+            raw = await request.json()
+        else:
+            raw = dict(await request.form())
+            form_filter_val = raw.pop('filter', None)
+            if isinstance(form_filter_val, str):
+                form_filter = form_filter_val
         data = ResolveCorrectionInput.model_validate(raw)
     except (ValidationError, ValueError, TypeError):
         raise HTTPException(status_code=422, detail='Проверьте решение и укажите его причину.') from None
@@ -207,12 +226,28 @@ async def resolve_correction_candidate(request: Request, application: CurrentApp
     except (CorrectionCandidateConflict, WorkStateError, ResultValidationError):
         raise HTTPException(status_code=409,
             detail='Предложение или данные книги изменились. Обновите страницу результата.') from None
+    referer_filters = parse_qs(urlsplit(request.headers.get('referer', '')).query).get('filter', [])
+    filter_active = (
+        request.query_params.get('filter') == 'pending_corrections'
+        or form_filter == 'pending_corrections'
+        or 'pending_corrections' in referer_filters
+    )
+    result_filter = 'pending_corrections' if filter_active else None
     response = _result_block_response(application, book_id, block_id)
     if _wants_result_block_fragment(request):
-        return render(request, 'partials/result_block.html', block=response, book_id=book_id)
+        return render(
+            request,
+            'partials/result_block.html',
+            block=response,
+            book_id=book_id,
+            result_filter=result_filter,
+        )
     if wants_html(request):
-        return RedirectResponse(url=f'/books/{book_id}/result#{_block_anchor(block_id)}',
-                                status_code=status.HTTP_303_SEE_OTHER)
+        query_suffix = '?filter=pending_corrections' if filter_active else ''
+        return RedirectResponse(
+            url=f'/books/{book_id}/result{query_suffix}#{_block_anchor(block_id)}',
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
     return response
 
 
@@ -222,6 +257,9 @@ def retry_task(
 ) -> TaskResponse | RedirectResponse:
     """Re-enqueue a recoverable failed task."""
     task = application.retry_task(RetryTaskCommand(task_id=task_id))
+    notify = getattr(application.worker_pool, "notify", None)
+    if callable(notify):
+        notify()
     if wants_html(request):
         return RedirectResponse(
             url=f"/books/{task.book_id}", status_code=status.HTTP_303_SEE_OTHER

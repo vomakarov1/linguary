@@ -41,9 +41,12 @@ from web_scenario import (
 
 def _seed_book_with_awaiting_human_candidate(
     application: Application,
+    *,
+    book_id: str = "book-web-1",
 ) -> tuple[str, str, CorrectionCandidate]:
     scenario = store_book(
         application,
+        book_id=book_id,
         status=BookStatus.PROCESSING,
         chapters=((SOURCE_TEXT, "She closed the window quietly."),),
     )
@@ -412,3 +415,84 @@ def test_russian_correction_and_quality_prompts_preserve_schema_contracts() -> N
     ):
         assert token in CORRECTION_REVIEW_PROMPT
     assert "proposal_sha256" not in CORRECTION_REVIEW_PROMPT
+
+
+def test_pending_corrections_filter_refreshes_groups_on_resolve_and_regeneration(
+    configured_application: Application,
+    configured_client: TestClient,
+) -> None:
+    from pathlib import Path
+    from lxml import html
+
+    book_id, block_id, candidate = _seed_book_with_awaiting_human_candidate(
+        configured_application
+    )
+
+    filtered_page = configured_client.get(
+        f"/books/{book_id}/result?filter=pending_corrections",
+        headers={"Accept": "text/html"},
+    )
+    assert filtered_page.status_code == status.HTTP_200_OK
+    tree = html.fromstring(filtered_page.text)
+    resolve_forms = tree.xpath("//form[@data-resolve-candidate-form]")
+    assert len(resolve_forms) == 1
+    resolve_form = resolve_forms[0]
+    assert resolve_form.get("data-block-id") == block_id
+    assert (
+        resolve_form.get("action")
+        == f"/books/{book_id}/correction-candidates/{candidate.candidate_id}/resolve?filter=pending_corrections"
+    )
+
+    # Fragment resolution returns the updated result block without data-resolve-candidate-form
+    fragment_resp = configured_client.post(
+        resolve_form.get("action"),
+        data={
+            "proposal_sha256": candidate.proposal_sha256,
+            "input_sha256": candidate.input_sha256,
+            "action": "keep",
+            "reason": "Текущий перевод точен.",
+        },
+        headers={
+            "Accept": "text/html",
+            "X-Linguary-Fragment": "result-block",
+        },
+    )
+    assert fragment_resp.status_code == status.HTTP_200_OK
+    frag_tree = html.fromstring(fragment_resp.text)
+    assert frag_tree.get("data-result-block") is not None
+    assert not frag_tree.xpath(".//form[@data-resolve-candidate-form]")
+
+    # Re-seed to verify HTML redirect preserves ?filter=pending_corrections
+    book_id2, block_id2, candidate2 = _seed_book_with_awaiting_human_candidate(
+        configured_application, book_id="book-web-2"
+    )
+    redirect_resp = configured_client.post(
+        f"/books/{book_id2}/correction-candidates/{candidate2.candidate_id}/resolve?filter=pending_corrections",
+        data={
+            "proposal_sha256": candidate2.proposal_sha256,
+            "input_sha256": candidate2.input_sha256,
+            "action": "accept",
+            "reason": "Принимаем исправление.",
+        },
+        headers={"Accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert redirect_resp.status_code == status.HTTP_303_SEE_OTHER
+    assert (
+        redirect_resp.headers["location"]
+        == f"/books/{book_id2}/result?filter=pending_corrections#block-{block_id2}"
+    )
+
+    js_source = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "linguary"
+        / "web"
+        / "static"
+        / "linguary.js"
+    ).read_text(encoding="utf-8")
+    assert "[data-resolve-candidate-form]" in js_source
+    assert "new FormData(form, event.submitter)" in js_source
+    assert "filter=pending_corrections" in js_source or "pending_corrections" in js_source
+    assert "refreshResultGroups()" in js_source
+
