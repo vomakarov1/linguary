@@ -334,3 +334,205 @@ def test_build_application_defaults_to_content_plan_v3(tmp_path, monkeypatch):
     finally:
         app.dispose()
 
+
+def test_web_and_cli_analyze_share_ensure_initial_for_analysis(
+    configured_client, configured_application, monkeypatch, tmp_path
+):
+    from dataclasses import asdict
+    from linguary.application.book_conditions import BookConditionsService, payload_digest
+    from linguary.application.recovery import NOTES_POLICY, RecoveryPolicy, root_manifest
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.cli import app as cli_app
+    from linguary.domain import (
+        BlockTreatment,
+        ChapterAnalysis,
+        LLMSettingsSnapshot,
+        ProcessingRun,
+        ProcessingRunStatus,
+        TaskStatus,
+        TaskType,
+        TreatmentPlan,
+    )
+    from linguary.domain.processing import GlossarySnapshot
+    from linguary.domain.recovery import RecoveryRoot, RecoveryScope
+    from linguary.domain.tasks import ProcessingTask
+
+    scenario = store_book(
+        configured_application,
+        status=BookStatus.IMPORTED,
+        analysed_chapters=(),
+    )
+    source = configured_application.paths.source_epub(scenario.book_id)
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"isolated initial conditions source")
+    with configured_application.unit_of_work.transaction() as tx:
+        book = tx.books.get(scenario.book_id)
+        tx.books.save(replace(book, source_epub_path=str(source)))
+
+    calls: list[dict[str, object]] = []
+    orig_ensure = BookConditionsService.ensure_initial_for_analysis
+
+    def spy_ensure(self, book_id: str, **kwargs):
+        calls.append({"book_id": book_id, **kwargs})
+        return orig_ensure(self, book_id, **kwargs)
+
+    monkeypatch.setattr(BookConditionsService, "ensure_initial_for_analysis", spy_ensure)
+
+    async def fake_start_analysis(book_id: str):
+        return ProcessingTask(
+            id="task-analyze-1",
+            book_id=book_id,
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="s1",
+            status=TaskStatus.PENDING,
+        )
+
+    monkeypatch.setattr(configured_application.analysis, "start", fake_start_analysis)
+
+    web_resp = configured_client.post(
+        f"/books/{scenario.book_id}/analyze",
+        json={
+            "reader_level": "a2",
+            "english_help": True,
+            "pronunciation_help_enabled": True,
+            "pronunciation_variant": "uk",
+            "seed_first_chapter": True,
+        },
+    )
+    assert web_resp.status_code == 202, web_resp.text
+    assert len(calls) == 1
+    assert calls[0]["book_id"] == scenario.book_id
+    assert calls[0]["reader_level"] == "a2"
+    assert calls[0]["english_help"] is True
+    assert calls[0]["pronunciation_help_enabled"] is True
+    assert calls[0]["pronunciation_variant"] == "uk"
+    assert calls[0]["seed_first_chapter"] is True
+    assert (
+        calls[0]["default_seed_first_chapter"]
+        is configured_application.settings.checks.seed_first_chapter
+    )
+    assert calls[0]["validate_conditions"] == configured_application.book_runtime.settings_for
+
+    async def noop_aclose(self):
+        return None
+
+    monkeypatch.setattr(type(configured_application), "aclose", noop_aclose)
+    monkeypatch.setattr(cli_app, "_application", lambda _args: configured_application)
+
+    exit_code = cli_app.main(
+        [
+            "analyze",
+            scenario.book_id,
+            "--reader-level",
+            "b1",
+            "--no-english-help",
+            "--pronunciation-help",
+            "--pronunciation-variant",
+            "us",
+            "--no-seed-first-chapter",
+        ]
+    )
+    assert exit_code == 0
+    assert len(calls) == 2
+    assert calls[1]["book_id"] == scenario.book_id
+    assert calls[1]["reader_level"] == "b1"
+    assert calls[1]["english_help"] is False
+    assert calls[1]["pronunciation_help_enabled"] is True
+    assert calls[1]["pronunciation_variant"] == "us"
+    assert calls[1]["seed_first_chapter"] is False
+    assert (
+        calls[1]["default_seed_first_chapter"]
+        is configured_application.settings.checks.seed_first_chapter
+    )
+    assert calls[1]["validate_conditions"] == configured_application.book_runtime.settings_for
+
+    notify_calls = 0
+    orig_notify = configured_application.worker_pool.notify
+
+    def spy_notify():
+        nonlocal notify_calls
+        notify_calls += 1
+        return orig_notify()
+
+    monkeypatch.setattr(configured_application.worker_pool, "notify", spy_notify)
+
+    with configured_application.unit_of_work.transaction() as tx:
+        cond = tx.work.latest_conditions(scenario.book_id)
+        doc = tx.documents.get(scenario.book_id)
+        sec = doc.ordered_sections[0]
+        blocks = tuple(b.id for b in sec.ordered_blocks if b.text.strip())
+        analysis = ChapterAnalysis.create(
+            id=f"analysis-{sec.id}",
+            section_id=sec.id,
+            treatment_plan=TreatmentPlan.of_treatments(
+                sec.id, [(bid, BlockTreatment.TRANSLATE) for bid in blocks]
+            ),
+            glossary_candidates=(),
+            translation_instructions="Сохраняй смысл.",
+            chapter_summary="Summary.",
+            expected_block_ids=list(blocks),
+        )
+        tx.analyses.save(scenario.book_id, analysis)
+        run = ProcessingRun(
+            id="run-notify-check",
+            book_id=scenario.book_id,
+            status=ProcessingRunStatus.ACTIVE,
+            glossary_snapshot=GlossarySnapshot(),
+            llm_settings_snapshot=LLMSettingsSnapshot(
+                provider="openai_compatible", model="fake-model"
+            ),
+        )
+        tx.runs.add(run)
+        policy = RecoveryPolicy(**asdict(configured_application.settings.recovery))
+        manifest = root_manifest(
+            book_id=scenario.book_id,
+            conditions_id=cond.id,
+            glossary_sha=payload_digest(asdict(run.glossary_snapshot)),
+            analysis_sha=payload_digest(asdict(analysis)),
+            plan_sha=None,
+            ordered_blocks=blocks,
+            treatments=tuple("TRANSLATE" for _ in blocks),
+            boundaries=tuple((bid,) for bid in blocks),
+            atomic_intervals=tuple((bid,) for bid in blocks),
+            max_source_chars=4000,
+            policy=policy,
+            block_chars={bid: 20 for bid in blocks},
+        )
+        manifest.update(
+            notes_policy=NOTES_POLICY,
+            active_run_id=run.id,
+            historical_coverage=[],
+        )
+        root_id = str(uuid4())
+        tx.work.add_root(
+            RecoveryRoot(
+                root_id,
+                scenario.book_id,
+                cond.id,
+                str(uuid4()),
+                manifest,
+                calls_used=policy.max_calls,
+                status="stopped",
+                reason="limit",
+                operation_kind="translation",
+                policy_version=CURRENT_TRANSLATION_POLICY,
+            )
+        )
+        for bid in blocks:
+            tx.work.add_scope(RecoveryScope(str(uuid4()), root_id, (bid,)))
+        book_rec = tx.books.get(scenario.book_id)
+        tx.books.save(replace(book_rec, status=BookStatus.PROCESSING))
+
+    assert configured_client.post(f"/books/{scenario.book_id}/pause").status_code == 200
+    resume_resp = configured_client.post(f"/books/{scenario.book_id}/resume")
+    assert resume_resp.status_code == 200, resume_resp.text
+    assert notify_calls == 1
+
+    restart_resp = configured_client.post(
+        f"/books/{scenario.book_id}/recovery/{root_id}/restart",
+        json={"expected_generation": 0, "confirmed": True},
+    )
+    assert restart_resp.status_code == 202, restart_resp.text
+    assert notify_calls == 2
+
+

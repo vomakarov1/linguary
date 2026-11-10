@@ -28,7 +28,7 @@ from linguary.adapters.config import (
     load_settings,
 )
 from linguary.application.book_conditions import ConditionsError
-from linguary.application.book_overview import BookNotFoundError, book_overview
+from linguary.application.book_overview import book_overview
 from linguary.application.errors import ApplicationError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.export_book import ExportBookCommand, ExportMode
@@ -294,95 +294,16 @@ def _analyze(args: argparse.Namespace) -> int:
             )
         ):
             try:
-                with application.unit_of_work.transaction() as tx:
-                    book = tx.books.get(args.book_id)
-                    if book is None:
-                        raise BookNotFoundError(f"книги {args.book_id} нет в хранилище")
-                    existing = tx.work.latest_conditions(args.book_id)
-                    is_clean_imported = (
-                        book.status is BookStatus.IMPORTED
-                        and not tx.analyses.list_for_book(args.book_id)
-                        and tx.runs.active_for_book(args.book_id) is None
-                    )
-                    if existing is None:
-                        if not is_clean_imported:
-                            raise ConditionsError("legacy_choice_required")
-                        pron_enabled = bool(pronunciation_help)
-                        conditions = application.book_conditions.create(
-                            tx,
-                            book,
-                            application.runtime_settings.revision,
-                            reader_level=reader_level,
-                            english_help=bool(english_help),
-                            pronunciation_help_enabled=pron_enabled,
-                            pronunciation_variant=(
-                                pronunciation_variant
-                                if (pron_enabled or pronunciation_help is None)
-                                else None
-                            ),
-                            seed_first_chapter=seed_first_chapter,
-                        )
-                        application.book_runtime.settings_for(conditions)
-                    else:
-                        existing_seed = bool(
-                            (existing.payload.get("checks") or {}).get(
-                                "seed_first_chapter",
-                                application.settings.checks.seed_first_chapter,
-                            )
-                        )
-                        eff_reader_level = (
-                            reader_level
-                            if reader_level is not None
-                            else existing.payload.get("reader_level")
-                        )
-                        eff_english_help = (
-                            english_help
-                            if english_help is not None
-                            else bool(existing.payload.get("english_help", False))
-                        )
-                        eff_pron_enabled = (
-                            pronunciation_help
-                            if pronunciation_help is not None
-                            else bool(existing.payload.get("pronunciation_help_enabled", False))
-                        )
-                        if not eff_pron_enabled:
-                            eff_pron_variant = (
-                                pronunciation_variant
-                                if pronunciation_help is None
-                                else None
-                            )
-                        else:
-                            eff_pron_variant = (
-                                pronunciation_variant
-                                if pronunciation_variant is not None
-                                else existing.payload.get("pronunciation_variant")
-                            )
-                        eff_seed = (
-                            seed_first_chapter
-                            if seed_first_chapter is not None
-                            else existing_seed
-                        )
-                        diverges = (
-                            eff_reader_level != existing.payload.get("reader_level")
-                            or eff_english_help != bool(existing.payload.get("english_help", False))
-                            or eff_pron_enabled != bool(existing.payload.get("pronunciation_help_enabled", False))
-                            or eff_pron_variant != existing.payload.get("pronunciation_variant")
-                            or eff_seed != existing_seed
-                        )
-                        if diverges:
-                            if not is_clean_imported:
-                                raise ConditionsError("conditions_already_selected")
-                            conditions = application.book_conditions.create(
-                                tx,
-                                book,
-                                application.runtime_settings.revision,
-                                reader_level=eff_reader_level,
-                                english_help=eff_english_help,
-                                pronunciation_help_enabled=eff_pron_enabled,
-                                pronunciation_variant=eff_pron_variant,
-                                seed_first_chapter=eff_seed,
-                            )
-                            application.book_runtime.settings_for(conditions)
+                application.book_conditions.ensure_initial_for_analysis(
+                    args.book_id,
+                    reader_level=reader_level,
+                    english_help=english_help,
+                    pronunciation_help_enabled=pronunciation_help,
+                    pronunciation_variant=pronunciation_variant,
+                    seed_first_chapter=seed_first_chapter,
+                    default_seed_first_chapter=application.settings.checks.seed_first_chapter,
+                    validate_conditions=application.book_runtime.settings_for,
+                )
             except (ConditionsError, WorkStateError) as error:
                 raise ApplicationError(str(error)) from error
         task = asyncio.run(application.analysis.start(args.book_id))
@@ -463,6 +384,19 @@ def _resume(args: argparse.Namespace) -> int:
         asyncio.run(application.aclose())
 
 
+def _warn_if_book_paused(unit_of_work: object, book_id: str) -> None:
+    open_tx = getattr(unit_of_work, "read_transaction", unit_of_work.transaction)
+    with open_tx() as tx:
+        is_book_paused = getattr(tx.work, "is_book_paused", None)
+        paused = bool(is_book_paused(book_id)) if callable(is_book_paused) else False
+    if paused:
+        print(
+            f"Warning: очередь задач книги {book_id} на паузе (pause_requested); "
+            f"задачи ожидают до выполнения 'linguary resume {book_id}'.",
+            file=sys.stderr,
+        )
+
+
 def _restart_translation(args: argparse.Namespace) -> int:
     """Restart unfinished scopes of a translation recovery root."""
     application = _application(args)
@@ -474,6 +408,7 @@ def _restart_translation(args: argparse.Namespace) -> int:
                 expected_generation=args.expected_generation,
             )
         )
+        _warn_if_book_paused(application.unit_of_work, args.book_id)
         print(f"Book: {args.book_id}")
         print(f"Successor root: {result.successor_root_id}")
         print(f"Task: {result.task_id}")
@@ -524,6 +459,7 @@ def _retry(args: argparse.Namespace) -> int:
     application = _application(args)
     try:
         task = application.retry_task(RetryTaskCommand(task_id=args.task_id))
+        _warn_if_book_paused(application.unit_of_work, task.book_id)
         print(f"Task: {task.id}")
         print(f"Status: {task.status.value}")
         return 0

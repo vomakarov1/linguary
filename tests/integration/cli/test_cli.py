@@ -762,3 +762,196 @@ def test_cli_analyze_updates_clean_imported_conditions_after_reanalyze_and_rejec
     finally:
         asyncio.run(app_check.aclose())
 
+
+def test_cli_retry_and_restart_translation_warn_when_book_is_paused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import asyncio
+    from dataclasses import asdict, replace
+    from uuid import uuid4
+    from linguary.adapters.config import load_settings
+    from linguary.application.book_conditions import payload_digest
+    from linguary.application.recovery import NOTES_POLICY, RecoveryPolicy, root_manifest
+    from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+    from linguary.composition import build_application
+    from linguary.domain import (
+        BlockTreatment,
+        BookStatus,
+        ChapterAnalysis,
+        ErrorType,
+        LLMSettingsSnapshot,
+        ProcessingRun,
+        ProcessingRunStatus,
+        TaskError,
+        TaskStatus,
+        TaskType,
+        TreatmentPlan,
+    )
+    from linguary.domain.processing import GlossarySnapshot
+    from linguary.domain.recovery import RecoveryRoot, RecoveryScope
+    from linguary.domain.tasks import ProcessingTask
+
+    config = _config(tmp_path, llm_model="fake-model", api_key="secret-cli-key")
+    book_id = "book-cli-paused-warn"
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "import",
+                str(SYNTHETIC_EPUB),
+                "--book-id",
+                book_id,
+            ]
+        )
+        == 0
+    )
+    assert main(["--config", str(config), "worker", "--once"]) == 0
+    assert main(["--config", str(config), "analyze", book_id, "--reader-level", "b1"]) == 0
+    assert main(["--config", str(config), "pause", book_id]) == 0
+    capsys.readouterr()
+
+    failed_task_id = "task-failed-paused"
+    root_id = str(uuid4())
+    app = build_application(settings=load_settings(config_path=config))
+    try:
+        with app.unit_of_work.transaction() as tx:
+            cond = tx.work.latest_conditions(book_id)
+            doc = tx.documents.get(book_id)
+            for existing_task in tx.tasks.list_for_book(book_id):
+                tx.tasks.delete(existing_task.id)
+            first_section = doc.ordered_sections[0]
+            blocks = tuple(b.id for b in first_section.ordered_blocks if b.text.strip())
+            analysis = ChapterAnalysis.create(
+                id=f"analysis-{first_section.id}",
+                section_id=first_section.id,
+                treatment_plan=TreatmentPlan.of_treatments(
+                    first_section.id,
+                    [(bid, BlockTreatment.TRANSLATE) for bid in blocks],
+                ),
+                glossary_candidates=(),
+                translation_instructions="Сохраняй смысл.",
+                chapter_summary="Summary.",
+                expected_block_ids=list(blocks),
+            )
+            tx.analyses.save(book_id, analysis)
+            run = ProcessingRun(
+                id="run-paused-cli",
+                book_id=book_id,
+                status=ProcessingRunStatus.ACTIVE,
+                glossary_snapshot=GlossarySnapshot(),
+                llm_settings_snapshot=LLMSettingsSnapshot(
+                    provider="openai_compatible", model="fake-model"
+                ),
+            )
+            tx.runs.add(run)
+            policy = RecoveryPolicy(**asdict(app.settings.recovery))
+            manifest = root_manifest(
+                book_id=book_id,
+                conditions_id=cond.id,
+                glossary_sha=payload_digest(asdict(run.glossary_snapshot)),
+                analysis_sha=payload_digest(asdict(analysis)),
+                plan_sha=None,
+                ordered_blocks=blocks,
+                treatments=tuple("TRANSLATE" for _ in blocks),
+                boundaries=tuple((bid,) for bid in blocks),
+                atomic_intervals=tuple((bid,) for bid in blocks),
+                max_source_chars=4000,
+                policy=policy,
+                block_chars={bid: 20 for bid in blocks},
+            )
+            manifest.update(
+                notes_policy=NOTES_POLICY,
+                active_run_id=run.id,
+                historical_coverage=[],
+            )
+            tx.work.add_root(
+                RecoveryRoot(
+                    root_id,
+                    book_id,
+                    cond.id,
+                    str(uuid4()),
+                    manifest,
+                    calls_used=policy.max_calls,
+                    status="stopped",
+                    reason="limit",
+                    operation_kind="translation",
+                    policy_version=CURRENT_TRANSLATION_POLICY,
+                )
+            )
+            for bid in blocks:
+                tx.work.add_scope(RecoveryScope(str(uuid4()), root_id, (bid,)))
+            failed_task = ProcessingTask(
+                id=failed_task_id,
+                book_id=book_id,
+                task_type=TaskType.ANALYZE_CHAPTER,
+                scope_id=first_section.id,
+                status=TaskStatus.FAILED,
+                last_error=TaskError(
+                    type=ErrorType.TRANSIENT, message="temporary failure"
+                ),
+            )
+            tx.tasks.add(failed_task)
+            tx.work.bind("task", failed_task_id, book_id=book_id, conditions_id=cond.id)
+            book_rec = tx.books.get(book_id)
+            tx.books.save(replace(book_rec, status=BookStatus.PROCESSING))
+    finally:
+        asyncio.run(app.aclose())
+
+    assert main(["--config", str(config), "retry", failed_task_id]) == 0
+    retry_captured = capsys.readouterr()
+    assert f"Task: {failed_task_id}" in retry_captured.out
+    assert "Status: pending" in retry_captured.out
+    assert "Warning:" in retry_captured.err
+    assert book_id in retry_captured.err
+    assert "pause" in retry_captured.err.lower() or "пауз" in retry_captured.err.lower()
+    assert "resume" in retry_captured.err.lower()
+
+    assert (
+        main(
+            [
+                "--config",
+                str(config),
+                "restart-translation",
+                book_id,
+                root_id,
+                "--expected-generation",
+                "0",
+            ]
+        )
+        == 0
+    )
+    restart_captured = capsys.readouterr()
+    assert f"Book: {book_id}" in restart_captured.out
+    assert "Successor root:" in restart_captured.out
+    assert "Warning:" in restart_captured.err
+    assert book_id in restart_captured.err
+    assert "pause" in restart_captured.err.lower() or "пауз" in restart_captured.err.lower()
+    assert "resume" in restart_captured.err.lower()
+
+    assert main(["--config", str(config), "resume", book_id]) == 0
+    capsys.readouterr()
+
+    app_unpaused = build_application(settings=load_settings(config_path=config))
+    try:
+        with app_unpaused.unit_of_work.transaction() as tx:
+            task = tx.tasks.get(failed_task_id)
+            assert task is not None
+            tx.tasks.save(
+                task.start().fail(
+                    TaskError(
+                        type=ErrorType.TRANSIENT,
+                        message="temporary failure after resume",
+                    )
+                )
+            )
+    finally:
+        asyncio.run(app_unpaused.aclose())
+
+    assert main(["--config", str(config), "retry", failed_task_id]) == 0
+    unpaused_captured = capsys.readouterr()
+    assert f"Task: {failed_task_id}" in unpaused_captured.out
+    assert unpaused_captured.err == ""
+
+
+
