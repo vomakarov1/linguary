@@ -1166,3 +1166,43 @@ async def test_openai_client_extracts_cached_and_reasoning_tokens() -> None:
         reasoning_tokens=90,
     )
 
+
+@pytest.mark.parametrize(
+    ("base_url", "expected_provider_routing"),
+    [
+        ("https://openrouter.ai/api/v1", {"require_parameters": True}),
+        ("https://api.openrouter.ai/api/v1/", {"require_parameters": True}),
+        ("https://api.openai.com/v1", None),
+        ("http://localhost:8000/v1", None),
+    ],
+)
+async def test_openrouter_base_url_includes_provider_require_parameters(
+    base_url: str, expected_provider_routing: dict[str, Any] | None
+) -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json=completion(as_content(translation_payload())))
+
+    client = client_over(
+        handler,
+        base_url=base_url,
+        model="deepseek/deepseek-v4.1-flash-1017",
+    )
+    try:
+        await client.generate(
+            LLMRequest.for_translation(
+                instructions="Translate.",
+                input_text="b1: text",
+            )
+        )
+    finally:
+        await client.aclose()
+
+    assert len(captured) == 1
+    assert _json(captured[0]).get("provider") == expected_provider_routing
+
+
+
+

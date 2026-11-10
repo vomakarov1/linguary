@@ -148,6 +148,22 @@ def schema_for(
     return SCHEMAS[kind]
 
 
+def _strip_markdown_fence(content: str) -> str:
+    """Strips an outer ```json ... ``` or ``` ... ``` fence if present."""
+    if not isinstance(content, str):
+        return content
+    stripped = content.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        first_newline = stripped.find("\n")
+        if first_newline != -1:
+            header = stripped[3:first_newline].strip().lower()
+            if header in {"", "json"}:
+                inner = stripped[first_newline + 1 : -3].strip()
+                if inner:
+                    return inner
+    return content
+
+
 def parse_payload(
     kind: LLMResponseKind, content: str, *, contract_version: int = 1,
     name_translation_policy_version: int | None = None, truncated: bool = False,
@@ -166,7 +182,7 @@ def parse_payload(
             violation=Violation('provider_truncated', kind.value, safe_message='Ответ исправления оборван'),
         )
     try:
-        raw_object = json.loads(content)
+        raw_object = json.loads(_strip_markdown_fence(content))
     except (json.JSONDecodeError, TypeError, ValueError):
         reason = "обрыв ответа по лимиту токенов" if truncated else "ответ не оборван"
         raise LLMResponseFormatError(

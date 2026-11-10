@@ -434,3 +434,23 @@ def test_parse_payload_validates_parsed_dict_without_reserializing(monkeypatch):
     assert loads_calls == 1
     assert len(an_res.content_plan.before_you_read_evidence) == 1
 
+
+@pytest.mark.parametrize(
+    "fence_header",
+    ["```json", "```JSON", "```"],
+)
+def test_parse_payload_strips_markdown_code_fences(fence_header: str) -> None:
+    raw_json = as_content(translation_payload())
+    fenced = f"  \n{fence_header}\n{raw_json}\n```\n  "
+
+    result = parse_payload(LLMResponseKind.TRANSLATION_RESULT, fenced)
+
+    assert len(result.blocks) == 2
+    assert result.blocks[0].source_block_id == "block-1"
+
+    with pytest.raises(LLMResponseFormatError) as caught:
+        parse_payload(LLMResponseKind.TRANSLATION_RESULT, f"{fence_header}\n{{broken\n```")
+    assert caught.value.violation is not None
+    assert caught.value.violation.rule_code == "response_parse"
+
+

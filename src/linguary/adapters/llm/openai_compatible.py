@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 from urllib.request import getproxies
 from typing import Any
 
@@ -200,6 +201,8 @@ class OpenAICompatibleLLMClient(LLMClient):
 
     async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
         """Sends request to provider and returns parsed JSON body on success."""
+        if _is_openrouter_url(self._settings.base_url) and isinstance(self._http, httpx.AsyncClient):
+            body = {**body, "provider": {"require_parameters": True}}
         try:
             response = await self._http.post(
                 _endpoint(self._settings.base_url),
@@ -256,6 +259,15 @@ def _build_messages(request: LLMRequest[Any]) -> list[dict[str, str]]:
 
 
 OpenAICompatibleLLMClient._build_messages = staticmethod(_build_messages)
+
+
+def _is_openrouter_url(base_url: str) -> bool:
+    """Whether the configured base URL targets OpenRouter."""
+    try:
+        host = (urlsplit(base_url.strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
 
 def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
