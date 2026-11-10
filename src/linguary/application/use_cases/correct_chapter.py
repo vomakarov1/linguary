@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from linguary.application.analysis_merge import find_quote_span
 from linguary.application.block_processing import chapter_number, complete_processing, note_id_factory
 from linguary.application.context_builder import _extract_word_stems, _matches_chapter_text
 from linguary.application.correction import (
@@ -36,7 +37,15 @@ from linguary.application.validators.content_plan import (
     validate_content_coverage,
     validate_note_sources,
 )
-from linguary.domain import BlockTreatment, LLMCallStage, TaskStatus, TaskType, TranslationUnit, glossary_key
+from linguary.domain import (
+    BlockTreatment,
+    LLMCallStage,
+    TaskStatus,
+    TaskType,
+    TranslationUnit,
+    glossary_key,
+    without_footnote_markers,
+)
 from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.content_plan import ContentEvidence, canonical_sha
 from linguary.domain.correction import CorrectionCheck, CorrectionCandidate, correction_task_identity
@@ -558,6 +567,17 @@ _LLM_RESULT_FIELDS = (
 )
 
 
+def _same_quote(first: str, second: str) -> bool:
+    clean_first = without_footnote_markers(first).strip()
+    clean_second = without_footnote_markers(second).strip()
+    return (
+        bool(clean_first)
+        and bool(clean_second)
+        and find_quote_span(clean_first, clean_second) is not None
+        and find_quote_span(clean_second, clean_first) is not None
+    )
+
+
 def _llm_block_result(
     result: Mapping[str, Any],
     aliases: Mapping[str, str],
@@ -572,10 +592,17 @@ def _llm_block_result(
             notes = []
             for n in value:
                 if isinstance(n, Mapping):
-                    target = {k: v for k, v in n.items() if k != 'id'}
-                    for bid_key in ('block_id', 'source_block_id'):
-                        if bid_key in target and target[bid_key] in aliases:
-                            target[bid_key] = aliases[target[bid_key]]
+                    target: dict[str, Any] = {}
+                    if 'source_block_id' in n or 'block_id' in n:
+                        raw_bid = n.get('source_block_id', n.get('block_id'))
+                        target['source_block_id'] = (
+                            aliases.get(raw_bid, raw_bid)
+                            if isinstance(raw_bid, str)
+                            else raw_bid
+                        )
+                    for k, v in n.items():
+                        if k not in ('id', 'block_id', 'source_block_id'):
+                            target[k] = v
                     notes.append(target)
                 else:
                     notes.append(n)
@@ -890,8 +917,21 @@ class CorrectChapter:
             used = set()
             restored_notes = []
             for raw, note in zip(block.language_notes, validated.language_notes, strict=True):
-                old = next((n for n in previous.language_notes
-                            if n.original_excerpt == raw.original_excerpt and n.id not in used), None)
+                old = next(
+                    (
+                        n
+                        for n in previous.language_notes
+                        if n.original_excerpt == raw.original_excerpt and n.id not in used
+                    ),
+                    None,
+                ) or next(
+                    (
+                        n
+                        for n in previous.language_notes
+                        if _same_quote(n.original_excerpt, raw.original_excerpt) and n.id not in used
+                    ),
+                    None,
+                )
                 if old is not None:
                     used.add(old.id)
                 restored_notes.append(replace(note, id=note.id if old is None else old.id,
@@ -978,11 +1018,11 @@ class CorrectChapter:
             block_treatment = treatments.get(candidate.block_id, candidate.treatment)
             for assistance in (candidate.fragment_assistances
                                if inputs.conditions.payload.get('english_help', False) else ()):
-                quotes = {anchor.quote for anchor in assistance.anchors}
+                quotes = tuple(anchor.quote for anchor in assistance.anchors)
                 if (
                     (bool(candidate.translated_text) and block_treatment != BlockTreatment.TRANSLATE)
-                    or any(h.original in quotes for h in candidate.glossary_hints)
-                    or any(n.original_excerpt in quotes for n in candidate.language_notes)
+                    or any(_same_quote(h.original, q) for h in candidate.glossary_hints for q in quotes)
+                    or any(_same_quote(n.original_excerpt, q) for n in candidate.language_notes for q in quotes)
                 ):
                     raise ResultValidationError('исправление дублирует защищённую помощь к фрагменту')
         return tuple(next(r for r in candidates if r.block_id == block_id) for block_id in ids)

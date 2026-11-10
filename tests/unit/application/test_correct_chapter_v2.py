@@ -2547,8 +2547,427 @@ async def test_correct_chapter_v2_materializes_null_lists_and_compacts_archive_p
         assert tx.work._confirmed_candidate(persisted) is True
 
 
+def test_correction_issue_and_note_id_preservation_match_normalized_typography():
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS,
+        ChapterCorrectionResponse,
+        ChapterCorrectionV2Response,
+        CorrectedBlockResponse,
+        CorrectionIssue,
+        CorrectionSnapshot,
+        CurrentQuoteEvidence,
+        ProposedBlockResponse,
+        UnchangedBlockResponse,
+    )
+    from linguary.application.llm_dto import GlossaryHintResponse, LanguageNoteResponse
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.application.use_cases.correct_chapter import CorrectChapter
+    from linguary.domain import GlossaryHint, LanguageNote
+    from linguary.domain.content_plan import (
+        ContentEvidence,
+        ContentPlan,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
+    from linguary.domain.learning import FragmentAssistance
+
+    section = make_analysis_section(
+        texts=(
+            "“Don’t—wait,” she whispered.",
+            "“Hold—on,” he muttered.",
+        ),
+    )
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+
+    # 1. CurrentQuoteEvidence.valid_for and CorrectionIssue.valid_for use find_quote_span
+    #    and exclude metadata keys {'id', 'block_id', 'source_block_id'}.
+    current_note = LanguageNote(
+        id="ln-ch01-007",
+        block_id=b1.id,
+        original_excerpt="“Don’t—wait”",
+        note="Старая разговорная заметка.",
+        translated_excerpt="«Не жди — останься»",
+    )
+    current_res = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="«Не жди — останься», — прошептала она.",
+        language_notes=(current_note,),
+    )
+    current_dict = asdict(current_res)
+
+    issue = CorrectionIssue(
+        field_path="translated_text",
+        source_quote="don't-wait",
+        current_evidence=CurrentQuoteEvidence(
+            field_path="translated_text",
+            quote='"не жди - останься"',
+        ),
+        problem="Неточный перевод реплики",
+        minimal_fix_reason="Уточнить смысл без лишних правок",
+    )
+    assert issue.valid_for(b1.text, current_dict) is True
+
+    note_dict_with_meta = {
+        "language_notes": [
+            {
+                "id": "ln-ch01-007",
+                "block_id": b1.id,
+                "source_block_id": "b1",
+                "original_excerpt": "“Don’t—wait”",
+                "note": "Старая разговорная заметка.",
+                "translated_excerpt": None,
+            }
+        ]
+    }
+    assert CurrentQuoteEvidence("language_notes[0]", "ln-ch01-007").valid_for(note_dict_with_meta) is False
+    assert CurrentQuoteEvidence("language_notes[0]", b1.id).valid_for(note_dict_with_meta) is False
+    assert CurrentQuoteEvidence("language_notes[0]", "b1").valid_for(note_dict_with_meta) is False
+    assert CurrentQuoteEvidence("language_notes[0]", "Don't-wait").valid_for(note_dict_with_meta) is True
+
+    # 2. LanguageNote.id preservation in CorrectChapter._candidates matches normalized typography.
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.READ_AS_IS)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-typo",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 1000,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    res2 = BlockProcessingResult(block_id=b2.id, treatment=BlockTreatment.READ_AS_IS)
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(id="cond-1", payload={"schema_version": 1, "versions": {"validators": 3}}),
+        snapshot=snapshot,
+        blocks=section.blocks,
+        results={b1.id: current_res, b2.id: res2},
+        bindings={b1.id: None, b2.id: None},
+    )
+    fake_tx = SimpleNamespace(work=SimpleNamespace(list_correction_candidates=lambda *a, **kw: ()))
+    validator = make_validator()
+    handler = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=validator)
+
+    proposed_b1 = ProposedBlockResponse(
+        block_id=b1.id,
+        translated_text="«Не жди», — прошептала она.",
+        glossary_hints=(),
+        language_notes=(
+            LanguageNoteResponse(
+                source_block_id=b1.id,
+                original_excerpt="whispered",
+                note="Новая заметка о глаголе.",
+            ),
+            LanguageNoteResponse(
+                source_block_id=b1.id,
+                original_excerpt="Don't-wait",
+                note="Обновлённая разговорная заметка.",
+            ),
+        ),
+        issues=(issue,),
+    )
+    candidates = handler._candidates(
+        fake_tx,
+        inputs,
+        ChapterCorrectionV2Response((proposed_b1, UnchangedBlockResponse(b2.id))),
+    )
+    assert len(candidates[0].language_notes) == 2
+    assert candidates[0].language_notes[1].id == "ln-ch01-007"
+    assert candidates[0].language_notes[0].id != "ln-ch01-007"
+
+    # 3. fragment_assistances overlap check in CorrectChapter._candidates uses find_quote_span.
+    eh_b1_anchor = SourceAnchor(block_id=b1.id, start=1, end=11, quote="Don’t—wait")
+    eh_b1_diff = Difficulty(
+        id="df-" + "8" * 64,
+        anchors=(eh_b1_anchor,),
+        owner_block_id=b1.id,
+        kind="idiom",
+        priority="critical",
+        help_kind="explanation",
+        required_points=(RequiredPoint(id="p1", description="do not wait"),),
+    )
+    eh_anchor = SourceAnchor(block_id=b2.id, start=1, end=8, quote="Hold—on")
+    eh_diff = Difficulty(
+        id="df-" + "9" * 64,
+        anchors=(eh_anchor,),
+        owner_block_id=b2.id,
+        kind="idiom",
+        priority="critical",
+        help_kind="explanation",
+        required_points=(RequiredPoint(id="p1", description="wait briefly"),),
+    )
+    eh_content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(eh_b1_diff, eh_diff),
+    )
+    eh_plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.GLOSSARY_ONLY), (b2.id, BlockTreatment.READ_AS_IS)),
+    )
+    eh_analysis = ChapterAnalysis.create(
+        id="analysis-eh",
+        section_id=section.id,
+        treatment_plan=eh_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+        content_plan=eh_content_plan,
+    )
+    eh_assistance = FragmentAssistance(
+        difficulty_id=eh_diff.id,
+        point_ids=("p1",),
+        kind="sentence_rephrase",
+        text="Wait for a short moment.",
+        anchors=(eh_anchor,),
+    )
+    eh_b1_assistance = FragmentAssistance(
+        difficulty_id=eh_b1_diff.id,
+        point_ids=("p1",),
+        kind="sentence_rephrase",
+        text="Do not wait.",
+        anchors=(eh_b1_anchor,),
+    )
+    eh_res1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint(original="whispered", translation="прошептала"),),
+        fragment_assistances=(eh_b1_assistance,),
+        content_evidence=ContentEvidence(plan_sha256=eh_content_plan.sha256, version=3),
+    )
+    eh_res2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.READ_AS_IS,
+        fragment_assistances=(eh_assistance,),
+        content_evidence=ContentEvidence(plan_sha256=eh_content_plan.sha256, version=3),
+    )
+    v1_snapshot = CorrectionSnapshot(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters=dict(snapshot.parameters),
+        prompt="Correct.",
+        versions=CORRECTION_VERSIONS,
+    )
+    eh_inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=eh_analysis,
+        run=SimpleNamespace(id="run-eh", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(
+            id="cond-eh",
+            payload={"schema_version": 1, "english_help": True, "versions": {"validators": 3}},
+        ),
+        snapshot=v1_snapshot,
+        blocks=section.blocks,
+        results={b1.id: eh_res1, b2.id: eh_res2},
+        bindings={b1.id: None, b2.id: None},
+    )
+    eh_handler = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=v1_snapshot, validator=validator)
+
+    with pytest.raises(ResultValidationError, match="дублирует защищённую помощь к фрагменту"):
+        eh_handler._candidates(
+            fake_tx,
+            eh_inputs,
+            ChapterCorrectionResponse(
+                blocks=(
+                    UnchangedBlockResponse(b1.id),
+                    CorrectedBlockResponse(
+                        block_id=b2.id,
+                        translated_text=None,
+                        glossary_hints=(),
+                        language_notes=(
+                            LanguageNoteResponse(
+                                source_block_id=b2.id,
+                                original_excerpt="hold-on",
+                                note="Подожди.",
+                            ),
+                        ),
+                    ),
+                )
+            ),
+        )
+
+    with pytest.raises(ResultValidationError, match="дублирует защищённую помощь к фрагменту"):
+        eh_handler._candidates(
+            fake_tx,
+            eh_inputs,
+            ChapterCorrectionResponse(
+                blocks=(
+                    CorrectedBlockResponse(
+                        block_id=b1.id,
+                        translated_text=None,
+                        glossary_hints=(
+                            GlossaryHintResponse(original="don't-wait", translation="не жди"),
+                        ),
+                        language_notes=(),
+                    ),
+                    UnchangedBlockResponse(b2.id),
+                )
+            ),
+        )
+
+    non_overlapping = eh_handler._candidates(
+        fake_tx,
+        eh_inputs,
+        ChapterCorrectionResponse(
+            blocks=(
+                CorrectedBlockResponse(
+                    block_id=b1.id,
+                    translated_text=None,
+                    glossary_hints=(
+                        GlossaryHintResponse(original="whispered", translation="шепнула"),
+                    ),
+                    language_notes=(),
+                ),
+                UnchangedBlockResponse(b2.id),
+            )
+        ),
+    )
+    assert non_overlapping[0].glossary_hints[0].translation == "шепнула"
 
 
+def test_materialize_for_rejects_null_translation_without_list_edits_on_translate_block():
+    from linguary.application.correction_dto import (
+        ChapterCorrectionV2Response,
+        CorrectionIssue,
+        CurrentQuoteEvidence,
+        ProposedBlockResponse,
+    )
+    from linguary.application.llm_dto import (
+        GlossaryHintResponse,
+        LLMPayloadError,
+        LanguageNoteResponse,
+    )
+    from linguary.domain import GlossaryHint, LanguageNote
 
+    b1 = "block-1"
+    b2 = "block-2"
+    previous_translate = BlockProcessingResult(
+        block_id=b1,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Старый перевод предложения.",
+        glossary_hints=(GlossaryHint(original="Lantern", translation="фонарь"),),
+        language_notes=(
+            LanguageNote(
+                id="ln-ch01-001",
+                block_id=b1,
+                original_excerpt="Lantern",
+                note="Старая заметка.",
+            ),
+        ),
+    )
+    note_issue = CorrectionIssue(
+        field_path="language_notes[0].note",
+        source_quote="Lantern",
+        current_evidence=CurrentQuoteEvidence(field_path="language_notes[0].note", quote="Старая"),
+        problem="Неточная заметка",
+        minimal_fix_reason="Уточнить заметку",
+    )
+    translation_issue = CorrectionIssue(
+        field_path="translated_text",
+        source_quote="Lantern",
+        current_evidence=CurrentQuoteEvidence(field_path="translated_text", quote="Старый"),
+        problem="Неточный перевод",
+        minimal_fix_reason="Исправить слово",
+    )
+
+    # 1. Rejects null translated_text when both glossary_hints and language_notes are None on TRANSLATE block.
+    all_null_proposal = ProposedBlockResponse(
+        block_id=b1,
+        translated_text=None,
+        glossary_hints=None,
+        language_notes=None,
+        issues=(note_issue,),
+    )
+    with pytest.raises(LLMPayloadError):
+        all_null_proposal.materialize_for(previous_translate)
+    with pytest.raises(LLMPayloadError):
+        ChapterCorrectionV2Response((all_null_proposal,)).materialize_for({b1: previous_translate})
+
+    # 2. Rejects null translated_text when any issue targets translated_text, even if list edits are provided.
+    null_with_translation_issue = ProposedBlockResponse(
+        block_id=b1,
+        translated_text=None,
+        glossary_hints=(GlossaryHintResponse(original="Lantern", translation="светильник"),),
+        language_notes=(),
+        issues=(translation_issue,),
+    )
+    with pytest.raises(LLMPayloadError):
+        null_with_translation_issue.materialize_for(previous_translate)
+
+    # 3. Allows null translated_text on TRANSLATE block when editing notes/hints only and issues do not target translated_text.
+    valid_list_only_proposal = ProposedBlockResponse(
+        block_id=b1,
+        translated_text=None,
+        glossary_hints=None,
+        language_notes=(
+            LanguageNoteResponse(
+                source_block_id=b1,
+                original_excerpt="Lantern",
+                note="Обновлённая заметка.",
+            ),
+        ),
+        issues=(note_issue,),
+    )
+    materialized = valid_list_only_proposal.materialize_for(previous_translate)
+    assert materialized.translated_text == "Старый перевод предложения."
+    assert materialized.glossary_hints == (
+        GlossaryHintResponse(original="Lantern", translation="фонарь", note=None),
+    )
+    assert len(materialized.language_notes) == 1
+    assert materialized.language_notes[0].note == "Обновлённая заметка."
+
+    # 4. Non-translate blocks keep translated_text=None during materialization.
+    previous_glossary_only = BlockProcessingResult(
+        block_id=b2,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        translated_text=None,
+        glossary_hints=(GlossaryHint(original="Lantern", translation="фонарь"),),
+    )
+    glossary_only_proposal = ProposedBlockResponse(
+        block_id=b2,
+        translated_text=None,
+        glossary_hints=(GlossaryHintResponse(original="Lantern", translation="светильник"),),
+        language_notes=None,
+        issues=(
+            CorrectionIssue(
+                field_path="glossary_hints[0].translation",
+                source_quote="Lantern",
+                current_evidence=CurrentQuoteEvidence(
+                    field_path="glossary_hints[0].translation",
+                    quote="фонарь",
+                ),
+                problem="Уточнение подсказки",
+                minimal_fix_reason="Заменить перевод",
+            ),
+        ),
+    )
+    materialized_go = glossary_only_proposal.materialize_for(previous_glossary_only)
+    assert materialized_go.translated_text is None
+    assert materialized_go.language_notes == ()
 
 

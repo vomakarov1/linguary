@@ -396,7 +396,7 @@ def test_correct_chapter_request_aliases_analysis_and_strips_internal_result_fie
     assert "pronunciation_assistances" not in current_result
     assert current_result["language_notes"] == [
         {
-            "block_id": "b1",
+            "source_block_id": "b1",
             "original_excerpt": "First",
             "note": "Заметка",
             "translated_excerpt": None,
@@ -530,7 +530,7 @@ def test_correct_chapter_v2_review_request_includes_block_alias_and_aliases_note
     assert "content_evidence" not in cand_payload["current_result"]
     assert cand_payload["current_result"]["language_notes"] == [
         {
-            "block_id": "b1",
+            "source_block_id": "b1",
             "original_excerpt": "First",
             "note": "Старая заметка",
             "translated_excerpt": None,
@@ -538,7 +538,7 @@ def test_correct_chapter_v2_review_request_includes_block_alias_and_aliases_note
     ]
     assert cand_payload["proposed_result"]["language_notes"] == [
         {
-            "block_id": "b1",
+            "source_block_id": "b1",
             "original_excerpt": "First",
             "note": "Новая заметка",
             "translated_excerpt": None,
@@ -2304,9 +2304,186 @@ def test_is_pure_read_as_is_skips_english_help_and_byr_covered_blocks():
     assert unchecked_blocks(FakeTx(), std_inputs) == (b_partial.id, b_trans.id)
 
 
+def test_llm_block_result_serializes_note_source_block_id_preserving_checksums():
+    from dataclasses import asdict
+    from hashlib import sha256
+    from linguary.application.correction import original_block_payload
+    from linguary.application.use_cases.correct_chapter import (
+        CorrectChapter,
+        CorrectChapterV2,
+        _llm_block_result,
+    )
+    from linguary.domain import ChapterAnalysis, LanguageNote, TreatmentPlan
+    from linguary.domain.content_plan import canonical_sha
+    from linguary.domain.correction import CorrectionCandidate
 
+    section = make_analysis_section(texts=("First sentence.", "Second sentence."))
+    doc = make_analysis_document((section,))
+    b1, b2 = section.blocks
+    plan = TreatmentPlan.of_treatments(
+        section.id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    res1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Первое предложение.",
+        language_notes=(
+            LanguageNote(
+                id="ln-ch01-001",
+                block_id=b1.id,
+                original_excerpt="First",
+                note="Заметка.",
+                translated_excerpt="Первое",
+            ),
+        ),
+    )
+    res2 = BlockProcessingResult(
+        block_id=b2.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Второе предложение.",
+    )
+    inputs = CorrectionInputs(
+        document=doc,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=section.blocks,
+        results={b1.id: res1, b2.id: res2},
+        bindings={b1.id: None, b2.id: None},
+    )
 
+    # Canonical checksums and context_sha256 hash the persisted domain structure (with block_id on LanguageNote).
+    expected_context_bytes = json.dumps(
+        inputs.context, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    expected_context_sha = sha256(expected_context_bytes).hexdigest()
+    expected_b1_checksum = sha256(
+        b'{"context":'
+        + expected_context_bytes
+        + b',"current_persisted_result":'
+        + json.dumps(asdict(res1), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        + b',"original":'
+        + json.dumps(
+            original_block_payload(b1), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+        + b"}"
+    ).hexdigest()
+    assert inputs.context_sha256 == expected_context_sha
+    assert inputs.checksums[b1.id] == expected_b1_checksum
+    checksums_before = dict(inputs.checksums)
 
+    direct = _llm_block_result(asdict(res1), inputs.block_aliases)
+    assert direct["language_notes"] == [
+        {
+            "source_block_id": "b1",
+            "original_excerpt": "First",
+            "note": "Заметка.",
+            "translated_excerpt": "Первое",
+        }
+    ]
+    assert "block_id" not in direct["language_notes"][0]
+    assert "id" not in direct["language_notes"][0]
 
+    already_source_keyed = _llm_block_result(
+        {
+            "treatment": "TRANSLATE",
+            "language_notes": [
+                {
+                    "id": "ln-ch01-001",
+                    "source_block_id": b1.id,
+                    "original_excerpt": "First",
+                    "note": "Заметка.",
+                    "translated_excerpt": None,
+                }
+            ],
+        },
+        inputs.block_aliases,
+    )
+    assert already_source_keyed["language_notes"] == [
+        {
+            "source_block_id": "b1",
+            "original_excerpt": "First",
+            "note": "Заметка.",
+            "translated_excerpt": None,
+        }
+    ]
 
+    snapshot = SimpleNamespace(
+        prompt="Propose.",
+        review_prompt="Review.",
+        parameters={"max_attempts": 1, "max_output_tokens": None},
+    )
+    task = SimpleNamespace(book_id=doc.id, id="task-1", scope_id=section.id)
+    correct = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+    req = correct._request(inputs, task, (b1.id, b2.id))
+    req_body = json.loads(req.input_text)
+    assert req_body["blocks"][0]["current_result"]["language_notes"] == [
+        {
+            "source_block_id": "b1",
+            "original_excerpt": "First",
+            "note": "Заметка.",
+            "translated_excerpt": "Первое",
+        }
+    ]
+
+    cand_payload = json.loads(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "book_id": doc.id,
+                "run_id": "run-1",
+                "conditions_id": "cond-1",
+                "section_id": section.id,
+                "block_id": b1.id,
+                "input_sha256": inputs.checksums[b1.id],
+                "input_generation": 1,
+                "group_id": "group-1",
+                "proposal_attempt_id": "att-1",
+                "original": {"text": b1.text},
+                "current_result": asdict(res1),
+                "result": asdict(res1),
+                "proposal": {"issues": [{"kind": "note", "quote": "First", "explanation": "Уточнить"}]},
+            }
+        )
+    )
+    candidate = CorrectionCandidate(
+        candidate_id="cand-1",
+        book_id=doc.id,
+        run_id="run-1",
+        conditions_id="cond-1",
+        section_id=section.id,
+        block_id=b1.id,
+        input_sha256=inputs.checksums[b1.id],
+        input_generation=1,
+        proposal_sha256=canonical_sha(cand_payload),
+        payload=cand_payload,
+        group_id="group-1",
+        proposal_attempt_id="att-1",
+    )
+    correct_v2 = CorrectChapterV2(unit_of_work=None, llm_client=None, snapshot=snapshot, validator=None)
+    rev_req = correct_v2._review_request(inputs, task, (candidate,))
+    rev_body = json.loads(rev_req.input_text)
+    for field_name in ("current_result", "proposed_result"):
+        assert rev_body["candidates"][0][field_name]["language_notes"] == [
+            {
+                "source_block_id": "b1",
+                "original_excerpt": "First",
+                "note": "Заметка.",
+                "translated_excerpt": "Первое",
+            }
+        ]
+
+    assert inputs.checksums == checksums_before
+    assert inputs.context_sha256 == expected_context_sha
 

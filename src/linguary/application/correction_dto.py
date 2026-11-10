@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 import re
 from typing import Literal
 
+from linguary.application.analysis_merge import find_quote_span
 from linguary.application.llm_dto import (
     BlockResultResponse, GlossaryHintResponse, LanguageNoteResponse, LLMPayloadError,
 )
@@ -261,12 +262,12 @@ class CurrentQuoteEvidence:
                 yield item
             elif isinstance(item, Mapping):
                 for key, child in item.items():
-                    if key not in {'id', 'source_block_id'}:
+                    if key not in {'id', 'block_id', 'source_block_id'}:
                         yield from texts(child)
             elif isinstance(item, (tuple, list)):
                 for child in item:
                     yield from texts(child)
-        return any(self.quote in text for text in texts(value))
+        return any(find_quote_span(text, self.quote) is not None for text in texts(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +312,10 @@ class CorrectionIssue:
             raise LLMPayloadError('неполное основание исправления')
 
     def valid_for(self, original, current):
-        return self.source_quote in original and self.current_evidence.valid_for(current)
+        return (
+            find_quote_span(original, self.source_quote) is not None
+            and self.current_evidence.valid_for(current)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,11 +348,25 @@ class ProposedBlockResponse(CorrectedBlockResponse):
             raise LLMPayloadError('предложение исправления требует основания')
 
     def materialize_for(self, previous) -> ProposedBlockResponse:
-        translated_text = (
-            previous.translated_text
-            if (self.translated_text is None and previous.treatment is BlockTreatment.TRANSLATE)
-            else self.translated_text
+        requires_translation = getattr(
+            previous.treatment,
+            'requires_translation',
+            previous.treatment == BlockTreatment.TRANSLATE,
         )
+        if self.translated_text is None and requires_translation:
+            if (
+                any(
+                    i.field_path == 'translated_text'
+                    or i.field_path.startswith(('translated_text.', 'translated_text['))
+                    for i in self.issues
+                )
+                or (self.glossary_hints is None and self.language_notes is None)
+                or previous.translated_text is None
+            ):
+                raise LLMPayloadError(f'для блока {self.block_id} обязателен полный перевод')
+            translated_text = previous.translated_text
+        else:
+            translated_text = self.translated_text
         glossary_hints = (
             tuple(
                 GlossaryHintResponse(original=h.original, translation=h.translation, note=h.note)
