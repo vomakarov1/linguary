@@ -945,5 +945,231 @@ def test_a2_chapter_context_deduplicates_learner_quality_and_pronunciation_omits
     assert "form=quote" not in templates["pronunciation_processing"]
 
 
+def test_translation_input_and_lazy_input_append_pronunciation_note_preserving_block_header_and_prompt_sha() -> None:
+    from hashlib import sha256
+    from linguary.application.book_conditions import payload_digest
+    from linguary.application.context_builder import (
+        _LazyTranslationInput,
+        _TRANSLATION_INSTRUCTIONS,
+    )
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        Difficulty,
+        RequiredPoint,
+        SourceAnchor,
+    )
 
+    assert (
+        sha256(_TRANSLATION_INSTRUCTIONS.encode("utf-8")).hexdigest()
+        == "8c39d00a516d9db9a8a0079602c48bcfb6d9fc02714338d5d444be6304acbafa"
+    )
+    baseline_templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        pronunciation_help_enabled=True,
+    )
+    assert (
+        payload_digest(baseline_templates)
+        == "0a1ec545a2c264d12e0e02c5ff9be85cd7c3305b4fc900603f0f57b01da1c5b8"
+    )
+
+    sec = make_analysis_section(
+        section_id="sec-mixed",
+        texts=(
+            "Neighbour paragraph before the group.",
+            "Opaque opening line requiring full translation.",
+            "Simple clear line in Worcester.",
+            "Another clear line in Cholmondeley.",
+            "Neighbour paragraph after the group.",
+        ),
+    )
+    doc = make_analysis_document((sec,))
+    unit_blocks = sec.blocks[1:4]
+    plan = TreatmentPlan.of_treatments(
+        sec.id,
+        (
+            (sec.blocks[0].id, BlockTreatment.READ_AS_IS),
+            (unit_blocks[0].id, BlockTreatment.TRANSLATE),
+            (unit_blocks[1].id, BlockTreatment.READ_AS_IS),
+            (unit_blocks[2].id, BlockTreatment.READ_AS_IS),
+            (sec.blocks[4].id, BlockTreatment.READ_AS_IS),
+        ),
+    )
+    unit = TranslationUnit.of_blocks(id="unit-mixed", blocks=unit_blocks, plan=plan)
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                "diff-1",
+                (SourceAnchor(unit_blocks[0].id, 0, 6, "Opaque"),),
+                unit_blocks[0].id,
+                "grammar",
+                "critical",
+                "explanation",
+                (RequiredPoint("p-1", "Explain syntax"),),
+            ),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-mixed",
+        section_id=sec.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=tuple(b.id for b in sec.blocks),
+        content_plan=content_plan,
+    )
+    glossary = GlossarySnapshot()
+
+    v3_pron_templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        profile="content-plan-v3",
+        pronunciation_help_enabled=True,
+    )
+    builder_with_pron = ContextBuilder(
+        prompt_templates=v3_pron_templates,
+        content_plan_profile="content-plan-v3",
+    )
+    ctx = builder_with_pron.for_translation_unit(
+        document=doc,
+        section=sec,
+        unit=unit,
+        analysis=analysis,
+        glossary=glossary,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+
+    assert ctx.pure_read_as_is_aliases == frozenset({"b2", "b3"})
+    assert isinstance(ctx._input_without_optional_neighbours, _LazyTranslationInput)
+    without_neighbours_text = ctx.without_optional_neighbours().request.input_text
+    assert "Соседние абзацы главы" in ctx.request.input_text
+    assert "Соседние абзацы главы" not in without_neighbours_text
+
+    for rendered_input in (ctx.request.input_text, without_neighbours_text):
+        assert (
+            "[b2] режим READ_AS_IS (только для контекста, в blocks не возвращать)\n"
+            "Simple clear line in Worcester."
+        ) in rendered_input
+        assert (
+            "[b3] режим READ_AS_IS (только для контекста, в blocks не возвращать)\n"
+            "Another clear line in Cholmondeley."
+        ) in rendered_input
+
+        blocks_section = rendered_input.split("Блоки для обработки:\n\n", 1)[1].split(
+            "\n\nОбязательные аспекты и точные связанные привязки:", 1
+        )[0]
+        section_paragraphs = blocks_section.split("\n\n")
+        note_line = section_paragraphs[-1]
+        assert "\n" not in note_line
+        assert "pronunciation_candidates" in note_line
+        assert "b1..b3" in note_line
+        assert "READ_AS_IS" in note_line
+        assert "b2, b3" in note_line
+        assert "anchor.block_id" in note_line
+
+    # Single context-only READ_AS_IS block in mixed group also gets singular note referencing b2.
+    single_pure_plan = TreatmentPlan.of_treatments(
+        sec.id,
+        (
+            (sec.blocks[0].id, BlockTreatment.READ_AS_IS),
+            (unit_blocks[0].id, BlockTreatment.TRANSLATE),
+            (unit_blocks[1].id, BlockTreatment.READ_AS_IS),
+            (unit_blocks[2].id, BlockTreatment.GLOSSARY_ONLY),
+            (sec.blocks[4].id, BlockTreatment.READ_AS_IS),
+        ),
+    )
+    single_pure_unit = TranslationUnit.of_blocks(
+        id="unit-single-pure", blocks=unit_blocks, plan=single_pure_plan
+    )
+    single_pure_analysis = ChapterAnalysis.create(
+        id="analysis-single-pure",
+        section_id=sec.id,
+        treatment_plan=single_pure_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=tuple(b.id for b in sec.blocks),
+        content_plan=content_plan,
+    )
+    ctx_single_pure = builder_with_pron.for_translation_unit(
+        document=doc,
+        section=sec,
+        unit=single_pure_unit,
+        analysis=single_pure_analysis,
+        glossary=glossary,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+    assert ctx_single_pure.pure_read_as_is_aliases == frozenset({"b2"})
+    for rendered_single in (
+        ctx_single_pure.request.input_text,
+        ctx_single_pure.without_optional_neighbours().request.input_text,
+    ):
+        single_note = (
+            rendered_single.split("Блоки для обработки:\n\n", 1)[1]
+            .split("\n\nОбязательные аспекты и точные связанные привязки:", 1)[0]
+            .split("\n\n")[-1]
+        )
+        assert "блок READ_AS_IS (b2)" in single_note
+        assert "ссылайся на b2 в anchor.block_id" in single_note
+
+    # Without pronunciation active, mixed group keeps exact header and omits pronunciation note.
+    builder_no_pron = ContextBuilder(content_plan_profile="content-plan-v3")
+    ctx_no_pron = builder_no_pron.for_translation_unit(
+        document=doc,
+        section=sec,
+        unit=unit,
+        analysis=analysis,
+        glossary=glossary,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+    assert (
+        "[b2] режим READ_AS_IS (только для контекста, в blocks не возвращать)\n"
+        in ctx_no_pron.request.input_text
+    )
+    assert "pronunciation_candidates" not in ctx_no_pron.request.input_text
+    assert (
+        "pronunciation_candidates"
+        not in ctx_no_pron.without_optional_neighbours().request.input_text
+    )
+
+    # With pronunciation active but no context-only READ_AS_IS blocks, note is omitted.
+    non_mixed_plan = TreatmentPlan.of_treatments(
+        sec.id,
+        (
+            (sec.blocks[0].id, BlockTreatment.READ_AS_IS),
+            (unit_blocks[0].id, BlockTreatment.TRANSLATE),
+            (unit_blocks[1].id, BlockTreatment.GLOSSARY_ONLY),
+            (unit_blocks[2].id, BlockTreatment.TRANSLATE),
+            (sec.blocks[4].id, BlockTreatment.READ_AS_IS),
+        ),
+    )
+    non_mixed_unit = TranslationUnit.of_blocks(
+        id="unit-non-mixed", blocks=unit_blocks, plan=non_mixed_plan
+    )
+    non_mixed_analysis = ChapterAnalysis.create(
+        id="analysis-non-mixed",
+        section_id=sec.id,
+        treatment_plan=non_mixed_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=tuple(b.id for b in sec.blocks),
+        content_plan=content_plan,
+    )
+    ctx_non_mixed = builder_with_pron.for_translation_unit(
+        document=doc,
+        section=sec,
+        unit=non_mixed_unit,
+        analysis=non_mixed_analysis,
+        glossary=glossary,
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+    assert ctx_non_mixed.pure_read_as_is_aliases == frozenset()
+    assert "pronunciation_candidates" not in ctx_non_mixed.request.input_text
+    assert (
+        "pronunciation_candidates"
+        not in ctx_non_mixed.without_optional_neighbours().request.input_text
+    )
 

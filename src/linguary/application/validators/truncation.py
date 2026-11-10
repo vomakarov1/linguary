@@ -15,6 +15,7 @@ unclosed pair is considered truncation only when the original lacked such an imb
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from linguary.application.llm_dto import TranslationResultResponse
@@ -31,6 +32,9 @@ _BRACKETS: tuple[tuple[str, str], ...] = (("(", ")"), ("[", "]"), ("{", "}"))
 
 #: Symmetric quotation mark: pairing is determined by the parity of occurrence count.
 _SYMMETRIC_QUOTE = '"'
+
+#: Intraword typographic apostrophe (`don’t`, `Bennet’s`), distinct from a closing single quote `’`.
+_INTRAWORD_APOSTROPHE = re.compile(r"(?<=[^\W_])’(?=[^\W_])")
 
 
 def truncation_violation(
@@ -76,9 +80,24 @@ def _unbalanced(text: str, *, source: str) -> str | None:
     """Type of paired punctuation whose imbalance was introduced in the translation."""
     original = _balances(source)
     for name, balance in _balances(text).items():
-        if balance != 0 and balance != original[name]:
-            return name
+        if balance == 0 or balance == original[name]:
+            continue
+        if (
+            name == "кавычки"
+            and balance == 1
+            and _has_british_unclosed_opening_quote(source)
+        ):
+            continue
+        return name
     return None
+
+
+def _has_british_unclosed_opening_quote(source: str) -> bool:
+    """Whether `source` opens British single-quoted dialogue left unclosed at paragraph end."""
+    if not source.lstrip().startswith("‘"):
+        return False
+    closing_quotes = source.count("’") - len(_INTRAWORD_APOSTROPHE.findall(source))
+    return source.count("‘") > closing_quotes
 
 
 def _balances(text: str) -> Mapping[str, int]:

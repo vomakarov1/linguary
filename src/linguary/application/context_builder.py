@@ -376,6 +376,7 @@ class _LazyTranslationInput:
     candidates: tuple[GlossaryCandidate, ...]
     recovery_child: bool = False
     pure_read_as_is_aliases: frozenset[str] = frozenset()
+    pronunciation_version: int | None = None
 
     def __call__(self) -> str:
         return self.builder._translation_input(
@@ -388,6 +389,7 @@ class _LazyTranslationInput:
             neighbours=(),
             recovery_child=self.recovery_child,
             pure_read_as_is_aliases=self.pure_read_as_is_aliases,
+            pronunciation_version=self.pronunciation_version,
         )
 
     def _fields_tuple(self) -> tuple[object, ...]:
@@ -401,6 +403,7 @@ class _LazyTranslationInput:
             self.candidates,
             self.recovery_child,
             self.pure_read_as_is_aliases,
+            self.pronunciation_version,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -1013,6 +1016,7 @@ class ContextBuilder:
             candidates=candidates,
             recovery_child=recovery_child,
             pure_read_as_is_aliases=pure_read_as_is_aliases,
+            pronunciation_version=pronunciation_version,
         )
         input_text = self._translation_input(**input_args, neighbours=neighbours)
         mandatory_input = (
@@ -1026,6 +1030,7 @@ class ContextBuilder:
                 candidates=candidates,
                 recovery_child=recovery_child,
                 pure_read_as_is_aliases=pure_read_as_is_aliases,
+                pronunciation_version=pronunciation_version,
             )
             if neighbours and policy_version != LEGACY_TRANSLATION_POLICY
             else None
@@ -1073,6 +1078,7 @@ class ContextBuilder:
         neighbours: Sequence[_NeighbourBlocks],
         recovery_child: bool = False,
         pure_read_as_is_aliases: frozenset[str] = frozenset(),
+        pronunciation_version: int | None = None,
     ) -> str:
         """Processing request prompt text: header, chapter digest, glossary, and blocks.
 
@@ -1139,7 +1145,11 @@ class ContextBuilder:
                 target_language=document.target_language,
             ),
             _neighbour_context(neighbours),
-            _unit_blocks(unit, pure_read_as_is_aliases=pure_read_as_is_aliases),
+            _unit_blocks(
+                unit,
+                pure_read_as_is_aliases=pure_read_as_is_aliases,
+                pronunciation_version=pronunciation_version,
+            ),
             _owned_content_plan(analysis, unit),
         ]
         return "\n\n".join(part for part in parts if part)
@@ -2190,6 +2200,8 @@ def _points_to_book_anchor(target: str | None) -> bool:
 def _unit_blocks(
     unit: TranslationUnit,
     pure_read_as_is_aliases: frozenset[str] = frozenset(),
+    *,
+    pronunciation_version: int | None = None,
 ) -> str:
     """Group blocks with aliases along with their treatment modes."""
     lines = ["Блоки для обработки:"]
@@ -2203,6 +2215,25 @@ def _unit_blocks(
         + f"\n{source_text_for_model(item.block, footnote_markers=True)}"
         for index, item in enumerate(unit.items, start=1)
     )
+    if pure_read_as_is_aliases and pronunciation_version:
+        ordered_aliases = [
+            alias
+            for index in range(1, len(unit.items) + 1)
+            if (alias := _alias(index)) in pure_read_as_is_aliases
+        ] or sorted(pure_read_as_is_aliases)
+        context_only = ", ".join(ordered_aliases)
+        group_span = (
+            f"b1..{_alias(len(unit.items))}" if len(unit.items) > 1 else _alias(1)
+        )
+        block_phrase = (
+            f"включая блок READ_AS_IS ({context_only}), не возвращаемый в blocks"
+            if len(ordered_aliases) == 1
+            else f"включая блоки READ_AS_IS ({context_only}), не возвращаемые в blocks"
+        )
+        lines.append(
+            f"Кандидаты pronunciation_candidates отбирай по всем блокам группы ({group_span}), "
+            f"{block_phrase}: ссылайся на {context_only} в anchor.block_id."
+        )
     return "\n\n".join(lines)
 
 

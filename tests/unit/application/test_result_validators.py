@@ -1097,5 +1097,63 @@ def test_validator_attaches_structured_violation_with_rule_code_and_block_id() -
         assert error.violation.safe_message == expected_safe_message
 
 
+def test_truncation_allows_british_unclosed_opening_quote_and_rejects_broken_closed_quote() -> None:
+    """British multi-paragraph dialogue opens single quote ‘ without closing ’ until the final paragraph."""
+    from linguary.application.validators.truncation import _unbalanced, truncation_diagnostic
 
+    unclosed_source = "‘Go there, don’t look back, and wait by Mr Bennet’s gate."
+    open_translation = "«Иди туда, не оглядывайся и жди у ворот мистера Беннета."
+
+    assert _unbalanced(open_translation, source=unclosed_source) is None
+    block_open = make_block(order=0, text=unclosed_source)
+    unit_open = make_unit((block_open,))
+    payload_open = make_response(
+        (make_block_result(block_open, translated_text=open_translation),)
+    )
+    assert validate(payload_open, unit=unit_open)[0].translated_text == open_translation
+    assert truncation_diagnostic(payload_open, unit=unit_open, truncated=False) is None
+
+    # Second quote in same paragraph left open for next paragraph (2 opening ‘ > 1 closing ’).
+    multi_open_source = "‘Go there,’ he said, ‘and don’t look back."
+    multi_open_translation = "«Иди туда, — сказал он, — и не оглядывайся."
+    assert _unbalanced(multi_open_translation, source=multi_open_source) is None
+    block_multi = make_block(order=0, text=multi_open_source)
+    unit_multi = make_unit((block_multi,))
+    payload_multi = make_response(
+        (make_block_result(block_multi, translated_text=multi_open_translation),)
+    )
+    assert validate(payload_multi, unit=unit_multi)[0].translated_text == multi_open_translation
+
+    # Leading whitespace before British opening quote is still allowed, and balance 0 (dash dialogue) remains allowed.
+    assert _unbalanced("«Подожди здесь.", source="  ‘Wait here.") is None
+    assert _unbalanced("— Иди туда, не оглядывайся.", source=unclosed_source) is None
+
+    # Closed British single-quoted dialogue whose translation drops its closing quote MUST be rejected.
+    closed_source = "‘Go there, don’t look back, and wait by Mr Bennet’s gate.’"
+    assert _unbalanced(open_translation, source=closed_source) == "кавычки"
+    block_closed = make_block(order=0, text=closed_source)
+    unit_closed = make_unit((block_closed,))
+    payload_broken_closed = make_response(
+        (make_block_result(block_closed, translated_text=open_translation),)
+    )
+    err_closed = rejection(payload_broken_closed, unit=unit_closed)
+    assert "не закрыты кавычки" in str(err_closed)
+    assert err_closed.violation is not None
+    assert err_closed.violation.rule_code == "quote_balance"
+
+    # British logical punctuation closed quote (‘...’, he said.) dropping closing quote is also rejected.
+    logical_closed_source = "‘Go there’, he said."
+    logical_broken_translation = "«Иди туда, сказал он."
+    assert _unbalanced(logical_broken_translation, source=logical_closed_source) == "кавычки"
+
+    # Non-dialogue-initial ‘ or balance != +1 in translation remain rejected.
+    assert (
+        _unbalanced(
+            "Он прошептал: «Иди туда и не оглядывайся.",
+            source="He whispered, ‘Go there and don’t look back.",
+        )
+        == "кавычки"
+    )
+    assert _unbalanced("«Иди «туда.", source=unclosed_source) == "кавычки"
+    assert _unbalanced("Иди туда.»", source=unclosed_source) == "кавычки"
 
