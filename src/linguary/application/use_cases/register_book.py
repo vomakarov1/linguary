@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from linguary.application.errors import ApplicationError
+from linguary.application.ports.epub import normalize_language_code
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import BookEvent, BookMetadata, apply_book_event
 
@@ -41,10 +42,14 @@ class RegisterBookCommand:
             raise RegisterBookError("путь к загруженному файлу книги пуст")
         if not self.title.strip():
             raise RegisterBookError("название книги пусто")
-        if not self.source_language.strip():
+        source_language = normalize_language_code(self.source_language)
+        target_language = normalize_language_code(self.target_language)
+        if not source_language:
             raise RegisterBookError("исходный язык книги не выбран")
-        if not self.target_language.strip():
+        if not target_language:
             raise RegisterBookError("целевой язык книги не выбран")
+        object.__setattr__(self, "source_language", source_language)
+        object.__setattr__(self, "target_language", target_language)
 
 
 class RegisterBook:

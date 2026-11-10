@@ -56,6 +56,7 @@ from linguary.application.ports.epub import (
     EpubReader,
     EpubReadRequest,
     ImportedBook,
+    normalize_language_code,
 )
 from linguary.domain import (
     BlockType,
@@ -230,7 +231,7 @@ class EbookLibEpubReader(EpubReader):
                 id=request.book_id,
                 metadata=_metadata(book, source_path=request.source_path),
                 source_language=_source_language(book, request=request),
-                target_language=request.target_language,
+                target_language=normalize_language_code(request.target_language),
                 sections=tuple(sections),
                 resources=resources,
             ),
@@ -531,8 +532,8 @@ def _first_metadata(book: epub.EpubBook, name: str) -> str | None:
 def _source_language(book: epub.EpubBook, *, request: EpubReadRequest) -> str:
     """Source language: from the request, otherwise from book metadata."""
     language = request.source_language or _first_metadata(book, "language")
-    language = (language or _DEFAULT_SOURCE_LANGUAGE).strip()
-    if language == request.target_language:
+    language = normalize_language_code(language or _DEFAULT_SOURCE_LANGUAGE)
+    if language == normalize_language_code(request.target_language):
         raise EpubImportFatalError(
             f"язык оригинала книги совпадает с целевым языком перевода: {language}"
         )
@@ -729,12 +730,16 @@ class _SectionBuilder:
         if reason is not None:
             self._drops.record(reason, structural_path)
             return
-        if block_type is BlockType.PARAGRAPH and len(content.text) >= SPLIT_MIN_CHARS:
+        if (
+            block_type in (BlockType.PARAGRAPH, BlockType.QUOTE)
+            and len(content.text) >= SPLIT_MIN_CHARS
+        ):
             split_blocks = self._split_and_add_paragraph(
                 element=element,
                 structural_path=structural_path,
                 content=content,
                 context=context,
+                block_type=block_type,
             )
             if split_blocks:
                 return
@@ -753,6 +758,8 @@ class _SectionBuilder:
         structural_path: str,
         content: InlineContent,
         context: _BlockContext,
+        *,
+        block_type: BlockType = BlockType.PARAGRAPH,
     ) -> list[DocumentBlock]:
         """Splits a long paragraph into balanced source fragments near 300 characters."""
         fragments = split_inline_content(content)
@@ -761,9 +768,9 @@ class _SectionBuilder:
 
         total_parts = len(fragments)
         base_xpath = structural_path
-        block_type = BlockType.PARAGRAPH
         element_id = element.get("id") if element is not None else None
-        tag = (local_name(element) if element is not None else None) or "p"
+        default_tag = "blockquote" if block_type is BlockType.QUOTE else "p"
+        tag = (local_name(element) if element is not None else None) or default_tag
         result_blocks: list[DocumentBlock] = []
 
         for k, fragment in enumerate(fragments, start=1):
@@ -815,12 +822,16 @@ class _SectionBuilder:
             return
         block_type = context.inherited_type or BlockType.PARAGRAPH
         structural_path = f"{_structural_path(container)}/text()[{run.index}]"
-        if block_type is BlockType.PARAGRAPH and len(content.text) >= SPLIT_MIN_CHARS:
+        if (
+            block_type in (BlockType.PARAGRAPH, BlockType.QUOTE)
+            and len(content.text) >= SPLIT_MIN_CHARS
+        ):
             split_blocks = self._split_and_add_paragraph(
                 element=None,
                 structural_path=structural_path,
                 content=content,
                 context=context,
+                block_type=block_type,
             )
             if split_blocks:
                 return

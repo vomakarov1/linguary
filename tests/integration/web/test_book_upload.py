@@ -158,3 +158,120 @@ def test_empty_file_is_rejected(client: TestClient, tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert "пуст" in response.json()["detail"]
+
+
+async def test_register_and_direct_import_normalize_bcp47_source_and_target_language_codes(
+    client: TestClient, application: Application, tmp_path: Path
+) -> None:
+    """Register, upload, direct import, and EPUB metadata normalize en/ru variants without touching other codes."""
+    import re
+    import zipfile
+
+    import linguary.application.ports.epub as epub_ports
+    from linguary.application.ports.epub import EpubReadRequest
+    from linguary.application.use_cases.import_book import ImportBookCommand
+    from linguary.application.use_cases.register_book import (
+        RegisterBookCommand,
+        RegisterBookError,
+    )
+
+    with SYNTHETIC_BOOK.open("rb") as file:
+        response = client.post(
+            "/books/upload",
+            files={"file": (SYNTHETIC_BOOK.name, file, "application/epub+zip")},
+            data={"source_language": " en-US ", "target_language": " ru_RU "},
+            follow_redirects=False,
+        )
+    assert response.status_code == 303
+    uploaded_id = response.headers["location"].rsplit("/", 1)[-1]
+
+    books = client.get("/books").json()["books"]
+    assert len(books) == 1
+    assert books[0]["source_language"] == "en"
+    assert books[0]["target_language"] == "ru"
+
+    await drain_tasks(application)
+    detail = client.get(f"/books/{uploaded_id}").json()
+    assert detail["book"]["source_language"] == "en"
+    assert detail["book"]["target_language"] == "ru"
+
+    direct_result = application.import_book(
+        ImportBookCommand(
+            book_id="direct-iso639-3",
+            source_epub_path=str(SYNTHETIC_BOOK),
+            source_language="ENG",
+            target_language="rus",
+        )
+    )
+    assert direct_result.book.source_language == "en"
+    assert direct_result.book.target_language == "ru"
+    assert direct_result.document.source_language == "en"
+    assert direct_result.document.target_language == "ru"
+
+    bcp47_epub = tmp_path / "bcp47_lang.epub"
+    with (
+        zipfile.ZipFile(SYNTHETIC_BOOK, "r") as src_zip,
+        zipfile.ZipFile(bcp47_epub, "w") as dst_zip,
+    ):
+        for info in src_zip.infolist():
+            payload = src_zip.read(info.filename)
+            if info.filename.endswith(".opf"):
+                text = payload.decode("utf-8")
+                text = re.sub(
+                    r"(<dc:language[^>]*>)[^<]+(</dc:language>)",
+                    r"\g<1>en-GB\g<2>",
+                    text,
+                )
+                payload = text.encode("utf-8")
+            dst_zip.writestr(info, payload)
+
+    inferred_result = application.import_book(
+        ImportBookCommand(
+            book_id="direct-metadata-bcp47",
+            source_epub_path=str(bcp47_epub),
+            source_language=None,
+            target_language="RU-RU",
+        )
+    )
+    assert inferred_result.book.source_language == "en"
+    assert inferred_result.book.target_language == "ru"
+    assert inferred_result.document.source_language == "en"
+    assert inferred_result.document.target_language == "ru"
+
+    read_req = EpubReadRequest(
+        book_id="req-norm",
+        source_path=str(SYNTHETIC_BOOK),
+        source_language="EN",
+        target_language="rus",
+    )
+    assert read_req.source_language == "en"
+    assert read_req.target_language == "ru"
+
+    other_cmd = RegisterBookCommand(
+        book_id="other-lang",
+        source_epub_path=str(SYNTHETIC_BOOK),
+        title="French Book",
+        source_language=" fr-CA ",
+        target_language=" DE ",
+    )
+    assert other_cmd.source_language == "fr-ca"
+    assert other_cmd.target_language == "de"
+
+    with pytest.raises(RegisterBookError):
+        RegisterBookCommand(
+            book_id="empty-lang",
+            source_epub_path=str(SYNTHETIC_BOOK),
+            title="Empty Lang",
+            source_language="   ",
+            target_language="ru",
+        )
+
+    normalize_language_code = epub_ports.normalize_language_code
+    for en_code in ("en", "EN", " en-US ", "en_GB", "eng", "ENG"):
+        assert normalize_language_code(en_code) == "en"
+    for ru_code in ("ru", "RU", " ru-RU ", "ru_RU", "rus", "RUS"):
+        assert normalize_language_code(ru_code) == "ru"
+    assert normalize_language_code("fr-CA") == "fr-ca"
+    assert normalize_language_code("DE") == "de"
+    assert normalize_language_code("   ") == ""
+

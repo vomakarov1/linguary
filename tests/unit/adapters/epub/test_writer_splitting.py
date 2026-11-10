@@ -248,3 +248,130 @@ def test_fragment_help_offsets_include_source_line_breaks(original):
     assert any(a.get("href") == f"#{reference.get('id')}" for a in footnote.iter(f"{_XHTML}a"))
     assert all(a.get("href")[1:] in ids for a in footnote.iter(f"{_XHTML}a")
                if a.get("href", "").startswith("#"))
+
+
+def test_reader_and_writer_split_and_regroup_long_leaf_blockquotes_preserving_nested_quotes() -> None:
+    """Split leaf BlockType.QUOTE fragments regroup in a single <blockquote> while nested container quotes stay intact."""
+    from linguary.adapters.epub.reader import _BlockContext, _SectionBuilder
+
+    q1 = DocumentBlock.create(
+        document_id="book_1",
+        section_id="sec_1",
+        type=BlockType.QUOTE,
+        order=0,
+        text="First leaf quote part, ",
+        source_reference=SourceReference(
+            resource_path="sec_1.xhtml",
+            structural_path="/html[1]/body[1]/blockquote[1]/text()[1]",
+        ),
+        inline_annotations=(InlineAnnotation(InlineAnnotationType.ITALIC, 6, 10),),
+        attributes={
+            "tag": "blockquote",
+            "anchor_ids": "leaf-quote",
+            "split_group": "/html[1]/body[1]/blockquote[1]",
+            "split_index": "1",
+            "split_total": "2",
+        },
+    )
+    q2 = DocumentBlock.create(
+        document_id="book_1",
+        section_id="sec_1",
+        type=BlockType.QUOTE,
+        order=1,
+        text="second linked quote part.",
+        source_reference=SourceReference(
+            resource_path="sec_1.xhtml",
+            structural_path="/html[1]/body[1]/blockquote[1]/text()[2]",
+        ),
+        inline_annotations=(
+            InlineAnnotation(InlineAnnotationType.LINK, 7, 13, "https://example.com"),
+        ),
+        attributes={
+            "tag": "blockquote",
+            "split_group": "/html[1]/body[1]/blockquote[1]",
+            "split_index": "2",
+            "split_total": "2",
+        },
+    )
+    container_quote = DocumentBlock.create(
+        document_id="book_1",
+        section_id="sec_1",
+        type=BlockType.QUOTE,
+        order=2,
+        text="",
+        source_reference=SourceReference(
+            resource_path="sec_1.xhtml",
+            structural_path="/html[1]/body[1]/blockquote[2]",
+        ),
+        attributes={
+            "tag": "blockquote",
+            "split_group": "/html[1]/body[1]/blockquote[1]",
+            "split_index": "3",
+            "split_total": "3",
+        },
+    )
+    nested_child = DocumentBlock.create(
+        document_id="book_1",
+        section_id="sec_1",
+        type=BlockType.QUOTE,
+        order=3,
+        text="Nested quote child preserved intact.",
+        parent_id=container_quote.id,
+        source_reference=SourceReference(
+            resource_path="sec_1.xhtml",
+            structural_path="/html[1]/body[1]/blockquote[2]/p[1]",
+        ),
+        attributes={"tag": "p"},
+    )
+
+    root = render_split_blocks((q1, q2, container_quote, nested_child))
+    chapter = root.find(f".//{_XHTML}section")
+    assert chapter is not None
+    top_blockquotes = chapter.findall(f"{_XHTML}blockquote")
+    assert len(top_blockquotes) == 1
+    wrapper = top_blockquotes[0]
+
+    direct_paragraphs = wrapper.findall(f"{_XHTML}p")
+    assert len(direct_paragraphs) == 1
+    assert "".join(direct_paragraphs[0].itertext()) == q1.text + q2.text
+    assert any(node.get("id") == "leaf-quote" for node in direct_paragraphs[0].iter())
+    assert next(direct_paragraphs[0].iter(f"{_XHTML}i")).text == "leaf"
+    assert next(direct_paragraphs[0].iter(f"{_XHTML}a")).text == "linked"
+
+    nested_blockquotes = wrapper.findall(f"{_XHTML}blockquote")
+    assert len(nested_blockquotes) == 1
+    assert ["".join(p.itertext()) for p in nested_blockquotes[0].findall(f"{_XHTML}p")] == [
+        "Nested quote child preserved intact."
+    ]
+    assert all(p.find(f".//{_XHTML}p") is None for p in root.iter(f"{_XHTML}p"))
+
+    # Also verify full reader -> writer round-trip on a >=600-char leaf blockquote
+    s1 = "First long quoted sentence with " + "careful phrasing " * 14 + "to exceed threshold. "
+    s2 = "Second long quoted sentence with " + "measured cadence " * 14 + "for balanced splitting. "
+    s3 = "Third long quoted sentence with " + "closing reflection " * 14 + "at the end."
+    long_quote = s1 + s2 + s3
+    assert len(long_quote) >= 600
+
+    parsed = etree.fromstring(
+        f"<html><body><blockquote id='long-q'>{long_quote}</blockquote></body></html>"
+    )
+    parsed_body = parsed.find("body")
+    assert parsed_body is not None
+    builder = _SectionBuilder(
+        book_id="book_1",
+        section_id="sec_1",
+        resource_path="sec_1.xhtml",
+        footnote_ids=frozenset(),
+        manifest_paths=frozenset({"sec_1.xhtml"}),
+    )
+    builder.walk(parsed_body, _BlockContext())
+    assert len(builder.blocks) > 1
+    assert all(b.type is BlockType.QUOTE for b in builder.blocks)
+
+    roundtrip_root = render_split_blocks(builder.blocks)
+    roundtrip_chapter = roundtrip_root.find(f".//{_XHTML}section")
+    assert roundtrip_chapter is not None
+    roundtrip_quotes = roundtrip_chapter.findall(f"{_XHTML}blockquote")
+    assert len(roundtrip_quotes) == 1
+    assert not roundtrip_quotes[0].xpath('.//*[contains(@class, "linguary-split-continuation")]')
+

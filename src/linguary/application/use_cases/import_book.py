@@ -20,6 +20,7 @@ from linguary.application.ports.epub import (
     EpubReadRequest,
     EpubResourceStore,
     StoreResourcesRequest,
+    normalize_language_code,
 )
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
@@ -46,6 +47,15 @@ class ImportBookCommand:
     source_epub_path: str
     target_language: str
     source_language: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "target_language", normalize_language_code(self.target_language)
+        )
+        if self.source_language is not None:
+            object.__setattr__(
+                self, "source_language", normalize_language_code(self.source_language)
+            )
 
 
 @dataclass(frozen=True, slots=True)

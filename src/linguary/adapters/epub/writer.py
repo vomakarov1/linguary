@@ -637,16 +637,26 @@ class _ChapterRenderer:
             parts = [block]
             index += 1
             split_group = block.attributes.get("split_group")
-            if split_group and block.type is BlockType.PARAGRAPH and not children.get(block.id):
+            if (
+                split_group
+                and block.type in (BlockType.PARAGRAPH, BlockType.QUOTE)
+                and not children.get(block.id)
+            ):
                 while index < len(blocks):
                     following = blocks[index]
-                    if (following.type is not BlockType.PARAGRAPH
-                            or following.attributes.get("split_group") != split_group
-                            or children.get(following.id)):
+                    if (
+                        following.type is not block.type
+                        or following.attributes.get("split_group") != split_group
+                        or children.get(following.id)
+                    ):
                         break
                     parts.append(following)
                     index += 1
-            wrapper = _GROUPING_TAGS.get(block.type)
+            wrapper = (
+                None
+                if block.type is BlockType.QUOTE and parent_type is BlockType.QUOTE
+                else _GROUPING_TAGS.get(block.type)
+            )
             if wrapper is None or block.type is not grouped:
                 group, grouped = None, None
             if wrapper is not None and group is None:
@@ -762,7 +772,7 @@ class _ChapterRenderer:
                 ),
             )
         element = self._build_element(
-            parent, block, state=state, parent_type=parent_type
+            parent, block, nested=nested, state=state, parent_type=parent_type
         )
         self._attach_anchors(parent, element, block, state=state, inside=True)
         return element
@@ -772,14 +782,19 @@ class _ChapterRenderer:
         parent: etree._Element,
         block: DocumentBlock,
         *,
+        nested: bool = False,
         state: _SectionState,
         parent_type: BlockType | None,
     ) -> etree._Element:
         """Block element based on its type, complete with text and inline markup."""
-        tag = _block_tag(block, parent_type=parent_type)
+        tag = (
+            "blockquote"
+            if nested and block.type is BlockType.QUOTE
+            else _block_tag(block, parent_type=parent_type)
+        )
         element = _sub(parent, tag, _block_attributes(block, tag=tag))
         host = element
-        if tag == "aside" and block.text:
+        if tag in ("aside", "blockquote") and block.text:
             host = _sub(element, "p")
         if block.text and local_name(host) not in _VOID_TAGS:
             _append_inline(host, block.text, _nestable(block.inline_annotations), state)

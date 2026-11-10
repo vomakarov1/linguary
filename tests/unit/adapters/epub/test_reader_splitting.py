@@ -5,6 +5,7 @@ from __future__ import annotations
 from lxml import etree
 
 from linguary.adapters.epub.reader import _BlockContext, _SectionBuilder
+from linguary.adapters.epub.splitting import SPLIT_MIN_CHARS
 from linguary.domain import BlockType
 
 
@@ -121,3 +122,73 @@ def test_reader_preserves_short_paragraphs() -> None:
     assert "split_group" not in block.attributes
     assert "split_index" not in block.attributes
     assert "split_total" not in block.attributes
+
+
+def test_reader_and_writer_split_and_regroup_long_leaf_blockquotes_preserving_nested_quotes() -> None:
+    """Long leaf blockquotes and quote inline runs split at SPLIT_MIN_CHARS while container quotes keep child blocks."""
+    assert SPLIT_MIN_CHARS == 600
+    _, long_text = _make_long_paragraph_html()
+
+    html = etree.fromstring(
+        f"<html><body>"
+        f"<blockquote id='leaf-q'>{long_text}</blockquote>"
+        f"<blockquote id='run-q'>{long_text}<p>Short attribution.</p></blockquote>"
+        f"<blockquote id='nested-q'><p>{long_text}</p><blockquote><p>Inner nested quote.</p></blockquote></blockquote>"
+        f"</body></html>"
+    )
+    body = html.find("body")
+    assert body is not None
+
+    builder = _make_builder()
+    builder.walk(body, _BlockContext())
+
+    leaf_blocks = [
+        block
+        for block in builder.blocks
+        if block.attributes.get("split_group") == "/html[1]/body[1]/blockquote[1]"
+    ]
+    assert len(leaf_blocks) > 1
+    assert all(block.type is BlockType.QUOTE for block in leaf_blocks)
+    assert "".join(block.text for block in leaf_blocks) == long_text
+    assert [block.source_reference.structural_path for block in leaf_blocks] == [
+        f"/html[1]/body[1]/blockquote[1]/text()[{idx}]"
+        for idx in range(1, len(leaf_blocks) + 1)
+    ]
+
+    run_blocks = [
+        block
+        for block in builder.blocks
+        if block.attributes.get("split_group") == "/html[1]/body[1]/blockquote[2]/text()[1]"
+    ]
+    assert len(run_blocks) > 1
+    assert all(block.type is BlockType.QUOTE for block in run_blocks)
+    assert "".join(block.text for block in run_blocks) == long_text
+
+    attribution_blocks = [
+        block
+        for block in builder.blocks
+        if block.source_reference.structural_path == "/html[1]/body[1]/blockquote[2]/p[1]"
+    ]
+    assert len(attribution_blocks) == 1
+    assert attribution_blocks[0].type is BlockType.QUOTE
+    assert "split_group" not in attribution_blocks[0].attributes
+
+    outer_quote_blocks = [
+        block
+        for block in builder.blocks
+        if block.attributes.get("split_group") == "/html[1]/body[1]/blockquote[3]/p[1]"
+    ]
+    assert len(outer_quote_blocks) > 1
+    assert all(block.type is BlockType.QUOTE for block in outer_quote_blocks)
+
+    inner_nested_blocks = [
+        block
+        for block in builder.blocks
+        if block.source_reference.structural_path
+        == "/html[1]/body[1]/blockquote[3]/blockquote[1]/p[1]"
+    ]
+    assert len(inner_nested_blocks) == 1
+    assert inner_nested_blocks[0].type is BlockType.QUOTE
+    assert inner_nested_blocks[0].text == "Inner nested quote."
+    assert "split_group" not in inner_nested_blocks[0].attributes
+

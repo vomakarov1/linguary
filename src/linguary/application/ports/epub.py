@@ -23,6 +23,19 @@ from linguary.domain import (
 )
 
 
+def normalize_language_code(code: str) -> str:
+    """Normalizes a language code: `en`/`ru` variants map to base codes; others are stripped and lowercased."""
+    normalized = code.strip().lower()
+    if not normalized:
+        return ""
+    primary = normalized.replace("_", "-").split("-", 1)[0]
+    if primary in {"en", "eng"}:
+        return "en"
+    if primary in {"ru", "rus"}:
+        return "ru"
+    return normalized
+
+
 class EpubImportFatalError(DomainError):
     """EPUB cannot be imported (`SupportStatus.FATAL`, PRD § 6).
 
@@ -46,6 +59,15 @@ class EpubReadRequest:
     source_path: str
     target_language: str
     source_language: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "target_language", normalize_language_code(self.target_language)
+        )
+        if self.source_language is not None:
+            object.__setattr__(
+                self, "source_language", normalize_language_code(self.source_language)
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,4 +216,5 @@ __all__ = [
     "ImportedBook",
     "StoreResourcesRequest",
     "StoredResources",
+    "normalize_language_code",
 ]
