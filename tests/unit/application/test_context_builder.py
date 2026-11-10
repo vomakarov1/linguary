@@ -66,9 +66,14 @@ def _policy(strategy):
 
 def test_sound_does_not_translate_components():
     templates = snapshot_prompt_templates(source_language='en', target_language='ru', reader_level='b2', name_translation_policy=_policy('sound'))
-    assert 'произношение' in templates['analysis']
-    assert 'не переводи' in templates['analysis']
-    assert 'смысловые части' in templates['analysis']
+    for key in ('analysis', 'fragment', 'translation', 'regeneration'):
+        assert 'произношение' in templates[key]
+        assert 'не переводи' in templates[key]
+        assert 'смысловые части' in templates[key]
+        assert 'известных переводов книги' in templates[key]
+        assert 'Волан-де-Морт' in templates[key]
+        assert 'Тисовая улица' in templates[key]
+    assert 'applied_method=sound' in templates['analysis']
 
 
 def test_meaning_keeps_opaque_parts():
