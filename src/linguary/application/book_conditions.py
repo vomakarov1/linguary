@@ -1,10 +1,12 @@
 """Freeze execution conditions before work and preserve historical provenance."""
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
 from uuid import uuid4
 
+from linguary.application.book_overview import BookNotFoundError
 from linguary.application.ports.llm import LLMConfigurationError
 from linguary.domain.book_conditions import BookConditions, thaw
 from linguary.domain import BookStatus
@@ -202,11 +204,197 @@ class BookConditionsService:
             raise ConditionsError('source_digest_mismatch')
 
     @staticmethod
-    def archive_analysis(transaction, book_id, analysis, conditions_id, attempt_id=None):
+    def _resolve_initial_options(
+        existing: BookConditions | None,
+        *,
+        reader_level: str | None,
+        english_help: bool | None,
+        pronunciation_help_enabled: bool | None,
+        pronunciation_variant: str | None,
+        seed_first_chapter: bool | None,
+        default_seed_first_chapter: bool,
+    ) -> tuple[bool, dict]:
+        if existing is None:
+            pron_enabled = bool(pronunciation_help_enabled)
+            return True, dict(
+                reader_level=reader_level,
+                english_help=bool(english_help),
+                pronunciation_help_enabled=pron_enabled,
+                pronunciation_variant=(
+                    pronunciation_variant
+                    if (pron_enabled or pronunciation_help_enabled is None)
+                    else None
+                ),
+                seed_first_chapter=seed_first_chapter,
+            )
+        existing_seed = bool(
+            (existing.payload.get('checks') or {}).get(
+                'seed_first_chapter',
+                default_seed_first_chapter,
+            )
+        )
+        eff_reader_level = (
+            reader_level
+            if reader_level is not None
+            else existing.payload.get('reader_level')
+        )
+        eff_english_help = (
+            english_help
+            if english_help is not None
+            else bool(existing.payload.get('english_help', False))
+        )
+        eff_pron_enabled = (
+            pronunciation_help_enabled
+            if pronunciation_help_enabled is not None
+            else bool(existing.payload.get('pronunciation_help_enabled', False))
+        )
+        if not eff_pron_enabled:
+            eff_pron_variant = (
+                pronunciation_variant
+                if pronunciation_help_enabled is None
+                else None
+            )
+        else:
+            eff_pron_variant = (
+                pronunciation_variant
+                if pronunciation_variant is not None
+                else existing.payload.get('pronunciation_variant')
+            )
+        eff_seed = (
+            seed_first_chapter
+            if seed_first_chapter is not None
+            else existing_seed
+        )
+        diverges = (
+            eff_reader_level != existing.payload.get('reader_level')
+            or eff_english_help != bool(existing.payload.get('english_help', False))
+            or eff_pron_enabled != bool(existing.payload.get('pronunciation_help_enabled', False))
+            or eff_pron_variant != existing.payload.get('pronunciation_variant')
+            or eff_seed != existing_seed
+        )
+        return diverges, dict(
+            reader_level=eff_reader_level,
+            english_help=eff_english_help,
+            pronunciation_help_enabled=eff_pron_enabled,
+            pronunciation_variant=eff_pron_variant,
+            seed_first_chapter=eff_seed,
+        )
+
+    def ensure_initial_for_analysis(
+        self,
+        book_id: str,
+        *,
+        settings_revision: int | None = None,
+        reader_level: str | None = None,
+        english_help: bool | None = None,
+        english_help_enabled: bool | None = None,
+        pronunciation_help_enabled: bool | None = None,
+        pronunciation_variant: str | None = None,
+        seed_first_chapter: bool | None = None,
+        default_seed_first_chapter: bool = False,
+        validate_conditions: Callable[[BookConditions], object] | None = None,
+    ) -> BookConditions:
+        if (
+            english_help is not None
+            and english_help_enabled is not None
+            and english_help != english_help_enabled
+        ):
+            raise ConditionsError('invalid_conditions_choice')
+        effective_english_help = (
+            english_help if english_help is not None else english_help_enabled
+        )
+        expected_revision = (
+            self._settings_revision()
+            if settings_revision is None
+            else settings_revision
+        )
+        with self.uow.transaction() as tx:
+            book = tx.books.get(book_id)
+            if book is None:
+                raise BookNotFoundError(f"книги {book_id} нет в хранилище")
+            if reader_level is not None and reader_level not in {'a2', 'b1', 'b2', 'c1'}:
+                raise ConditionsError('invalid_reader_level')
+            if effective_english_help is not None and type(effective_english_help) is not bool:
+                raise ConditionsError('invalid_conditions_choice')
+            if (
+                pronunciation_help_enabled is not None
+                and type(pronunciation_help_enabled) is not bool
+            ):
+                raise ConditionsError('invalid_pronunciation_choice')
+            if pronunciation_variant not in {None, 'uk', 'us'}:
+                raise ConditionsError('invalid_pronunciation_variant')
+            if seed_first_chapter is not None and type(seed_first_chapter) is not bool:
+                raise ConditionsError('invalid_conditions_choice')
+            if type(default_seed_first_chapter) is not bool:
+                raise ConditionsError('invalid_conditions_choice')
+            existing = tx.work.latest_conditions(book_id)
+            is_clean_imported = (
+                book.status is BookStatus.IMPORTED
+                and not tx.analyses.list_for_book(book_id)
+                and tx.runs.active_for_book(book_id) is None
+            )
+            diverges, create_kwargs = self._resolve_initial_options(
+                existing,
+                reader_level=reader_level,
+                english_help=effective_english_help,
+                pronunciation_help_enabled=pronunciation_help_enabled,
+                pronunciation_variant=pronunciation_variant,
+                seed_first_chapter=seed_first_chapter,
+                default_seed_first_chapter=default_seed_first_chapter,
+            )
+            if existing is None:
+                if not is_clean_imported:
+                    raise ConditionsError('legacy_choice_required')
+                conditions = self.create(
+                    tx,
+                    book,
+                    expected_revision,
+                    **create_kwargs,
+                )
+                if validate_conditions is not None:
+                    validate_conditions(conditions)
+                return conditions
+            if not diverges:
+                self.verify_source(book, existing)
+                if validate_conditions is not None:
+                    validate_conditions(existing)
+                return existing
+            if not is_clean_imported:
+                raise ConditionsError('conditions_already_selected')
+            conditions = self.create(
+                tx,
+                book,
+                expected_revision,
+                **create_kwargs,
+            )
+            if validate_conditions is not None:
+                validate_conditions(conditions)
+            return conditions
+
+    @staticmethod
+    def archive_analysis(
+        transaction,
+        book_id,
+        analysis,
+        conditions_id,
+        attempt_id=None,
+        *,
+        replace_binding: bool = False,
+    ):
         body = {'schema_version': 1, 'analysis': asdict(analysis)}
         artifact_id, = transaction.work.archive_artifacts([dict(book_id=book_id, conditions_id=conditions_id,
             kind='analysis', scope_id=analysis.section_id, attempt_id=attempt_id, body=body)])
-        if conditions_id is None or transaction.work.get_binding('analysis', analysis.id) is not None:
+        if conditions_id is None:
+            return
+        if transaction.work.get_binding('analysis', analysis.id) is not None:
+            if replace_binding:
+                transaction.work.replace_analysis_binding(
+                    analysis.id,
+                    book_id=book_id,
+                    conditions_id=conditions_id,
+                    attempt_id=attempt_id,
+                    artifact_revision_id=artifact_id,
+                )
             return
         transaction.work.bind('analysis', analysis.id, book_id=book_id, conditions_id=conditions_id,
             attempt_id=attempt_id, artifact_revision_id=artifact_id)

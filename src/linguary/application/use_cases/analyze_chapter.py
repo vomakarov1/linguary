@@ -1007,6 +1007,7 @@ class ChapterAnalysisSequence:
                     return False
 
             updated_analyses: Sequence[ChapterAnalysis] | None = None
+            work_repo = getattr(transaction, "work", None)
             document = transaction.documents.get(book_id)
             if document is not None:
                 analyses = transaction.analyses.list_for_book(book_id)
@@ -1020,16 +1021,33 @@ class ChapterAnalysisSequence:
                 from linguary.application.analysis_merge import deduplicate_book_before_you_read
                 updated_analyses = deduplicate_book_before_you_read(document, analyses)
                 original_by_id = {a.id: a for a in analyses}
+                can_rearchive = (
+                    work_repo is not None
+                    and callable(getattr(work_repo, "get_binding", None))
+                    and callable(getattr(work_repo, "archive_artifacts", None))
+                    and callable(getattr(work_repo, "replace_analysis_binding", None))
+                )
                 for updated in updated_analyses:
                     if updated != original_by_id.get(updated.id):
                         transaction.analyses.save(book_id, updated)
+                        if can_rearchive:
+                            binding = work_repo.get_binding("analysis", updated.id)
+                            if binding is not None and binding.get("conditions_id") is not None:
+                                from linguary.application.book_conditions import BookConditionsService
+                                BookConditionsService.archive_analysis(
+                                    transaction,
+                                    book_id,
+                                    updated,
+                                    binding["conditions_id"],
+                                    binding.get("attempt_id"),
+                                    replace_binding=True,
+                                )
 
             book = _with_status(
                 book, apply_book_event(book.status, BookEvent.ANALYSIS_COMPLETED)
             )
             transaction.books.save(book)
 
-            work_repo = getattr(transaction, "work", None)
             conditions = work_repo.latest_conditions(book_id) if work_repo is not None else None
             auto_approve = False
             auto_start_processing = self._auto_start_processing

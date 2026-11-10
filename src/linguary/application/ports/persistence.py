@@ -353,6 +353,15 @@ class WorkRepository(Protocol):
     def transition_attempt(self, attempt_id, state, *, expected_state, outcome=None): ...
     def archive_artifacts(self, artifacts): ...
     def get_artifact(self, artifact_id): ...
+    def replace_analysis_binding(
+        self,
+        analysis_id: str,
+        *,
+        book_id: str,
+        conditions_id: str,
+        attempt_id: str | None = None,
+        artifact_revision_id: str,
+    ) -> None: ...
     def replace_result_binding(self, entity_id, *, book_id, conditions_id, attempt_id,
                                artifact_revision_id, expected_attempt_id, provenance,
                                expected_artifact_revision_id=None) -> None:

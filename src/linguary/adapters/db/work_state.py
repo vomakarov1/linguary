@@ -836,6 +836,34 @@ class SqlAlchemyWorkRepository:
                 self.settle(row.id, actual=None)
                 if row.state == 'sent':
                     self.transition_attempt(row.id, 'unknown', expected_state='sent')
+                review_row = self._session.get(QualityReviewRow, row.review_id)
+                if review_row is not None:
+                    findings_data = dict(thaw(review_row.findings_json) or {'schema_version': 1, 'items': []})
+                    checked = list(dict.fromkeys(findings_data.get('checked') or ()))
+                    checked_set = set(checked)
+                    existing_missing = list(findings_data.get('missing') or ())
+                    manifest_shas = [
+                        artifact['artifact_sha']
+                        for artifact in ((review_row.manifest_json or {}).get('artifacts') or ())
+                        if isinstance(artifact, Mapping) and isinstance(artifact.get('artifact_sha'), str)
+                    ]
+                    missing = list(
+                        dict.fromkeys(
+                            (
+                                *existing_missing,
+                                *(sha for sha in manifest_shas if sha not in checked_set),
+                            )
+                        )
+                    )
+                    review_row.findings_json = {
+                        **findings_data,
+                        'schema_version': 1,
+                        'items': list(findings_data.get('items') or ()),
+                        'checked': checked,
+                        'missing': missing,
+                        'reason': findings_data.get('reason'),
+                        'partial': True,
+                    }
             else:
                 reservation = self.get_reservation(row.id)
                 changed = self._session.execute(update(QualityReservationRow).where(
@@ -932,6 +960,66 @@ class SqlAlchemyWorkRepository:
                         return None
             return attempt
         return None
+
+    def replace_analysis_binding(
+        self,
+        analysis_id: str,
+        *,
+        book_id: str,
+        conditions_id: str,
+        attempt_id: str | None = None,
+        artifact_revision_id: str,
+    ) -> None:
+        if not artifact_revision_id:
+            raise WorkStateError('ссылка на отсутствующую или чужую работу')
+        self._owned(BookConditionsRow, conditions_id, book_id)
+        artifact = self._owned(ArtifactRevisionRow, artifact_revision_id, book_id)
+        if (
+            artifact.kind != 'analysis'
+            or artifact.conditions_id != conditions_id
+            or artifact.attempt_id != attempt_id
+        ):
+            raise WorkStateError('условия происхождения не совпадают')
+        if attempt_id is not None:
+            attempt = self._owned(LLMAttemptRow, attempt_id, book_id)
+            if attempt.conditions_id != conditions_id:
+                raise WorkStateError('условия происхождения не совпадают')
+        current = self._session.get(WorkBindingRow, ('analysis', analysis_id))
+        if current is None:
+            self.bind(
+                'analysis',
+                analysis_id,
+                book_id=book_id,
+                conditions_id=conditions_id,
+                attempt_id=attempt_id,
+                artifact_revision_id=artifact_revision_id,
+            )
+            return
+        if current.book_id != book_id:
+            raise WorkStateError('ссылка на отсутствующую или чужую работу')
+        if (
+            current.artifact_revision_id is None
+            or self._session.get(ArtifactRevisionRow, current.artifact_revision_id) is None
+        ):
+            raise WorkStateError('предыдущая версия анализа не заархивирована')
+        previous_revision = current.artifact_revision_id
+        changed = self._session.execute(
+            update(WorkBindingRow)
+            .where(
+                WorkBindingRow.entity_kind == 'analysis',
+                WorkBindingRow.entity_id == analysis_id,
+                WorkBindingRow.book_id == book_id,
+                WorkBindingRow.artifact_revision_id == previous_revision,
+            )
+            .values(
+                conditions_id=conditions_id,
+                attempt_id=attempt_id,
+                artifact_revision_id=artifact_revision_id,
+            )
+        )
+        if changed.rowcount != 1:
+            raise WorkStateError('указатель анализа изменился')
+        self._session.flush()
 
     def replace_result_binding(self, entity_id, *, book_id, conditions_id, attempt_id,
                                artifact_revision_id, expected_attempt_id, provenance,

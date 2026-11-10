@@ -516,3 +516,150 @@ async def test_source_digest_uses_stat_cache_across_calls_and_invalidates_on_fil
     finally:
         await app.aclose()
 
+
+async def test_complete_analysis_updates_archived_analysis_binding_without_breaking_reanalyze(tmp_path):
+    shared_byr = [{'expression': 'entailed estate', 'explanation': 'имение с ограничением наследования'}]
+    reply_with_byr = FakeReply.of_payload({
+        'treatment_plan': [{'source_block_id': 'b1', 'treatment': 'READ_AS_IS'}],
+        'glossary_candidates': [],
+        'translation_instructions': 'Сохраняй смысл.',
+        'chapter_summary': 'The cat sat.',
+        'before_you_read': shared_byr,
+    })
+    app = make_app(tmp_path, FakeLLMClient([reply_with_byr, reply_with_byr]))
+    try:
+        store_imported(app, (('Entailed estate in chapter one.',), ('Entailed estate in chapter two.',)))
+        await app.analysis.start('book-1')
+        completed = await drain_tasks(app)
+        assert all(task.status == TaskStatus.SUCCEEDED for task in completed)
+
+        with app.unit_of_work.transaction() as tx:
+            conditions_v1 = tx.work.latest_conditions('book-1')
+            analyses = tx.analyses.list_for_book('book-1')
+            assert len(analyses) == 2
+            ch1, ch2 = analyses
+            assert len(ch1.before_you_read) == 1
+            assert ch2.before_you_read == ()
+
+            binding_1 = tx.work.get_binding('analysis', ch1.id)
+            binding_2 = tx.work.get_binding('analysis', ch2.id)
+            assert binding_1['conditions_id'] == conditions_v1.id
+            assert binding_2['conditions_id'] == conditions_v1.id
+            assert binding_2['attempt_id'] is not None
+            assert tx.work.get_attempt(binding_2['attempt_id']).state == 'accepted'
+
+            archived_2 = tx.work.get_artifact(binding_2['artifact_revision_id'])
+            assert archived_2['body']['analysis']['before_you_read'] == []
+            refreshed_revision_id = binding_2['artifact_revision_id']
+            refreshed_attempt_id = binding_2['attempt_id']
+
+        conditions_v2 = ChooseBookConditions(app.book_conditions, app.book_runtime)(
+            'book-1',
+            action='reanalyze',
+            expected_revision=1,
+            settings_revision=0,
+            confirmed=True,
+        )
+        assert conditions_v2.revision == 2
+
+        with app.unit_of_work.transaction() as tx:
+            assert tx.analyses.list_for_book('book-1') == ()
+            binding_after_reanalyze = tx.work.get_binding('analysis', ch2.id)
+            assert binding_after_reanalyze['conditions_id'] == conditions_v1.id
+            assert binding_after_reanalyze['attempt_id'] == refreshed_attempt_id
+            assert binding_after_reanalyze['artifact_revision_id'] == refreshed_revision_id
+    finally:
+        await app.aclose()
+
+
+async def test_ensure_initial_for_analysis_creates_or_reuses_matching_conditions_and_validates_variant(tmp_path):
+    from linguary.application.book_overview import BookNotFoundError
+
+    app = make_app(tmp_path)
+    try:
+        with pytest.raises(BookNotFoundError):
+            app.book_conditions.ensure_initial_for_analysis('missing-book', reader_level='a2')
+
+        store_imported(app)
+
+        def reject_conditions(_conditions):
+            raise ConditionsError('conditions_unavailable')
+
+        with pytest.raises(ConditionsError, match='conditions_unavailable'):
+            app.book_conditions.ensure_initial_for_analysis(
+                'book-1',
+                reader_level='a2',
+                validate_conditions=reject_conditions,
+            )
+        with app.unit_of_work.transaction() as tx:
+            assert tx.work.latest_conditions('book-1') is None
+
+        created = app.book_conditions.ensure_initial_for_analysis(
+            'book-1',
+            reader_level='a2',
+            english_help=True,
+            pronunciation_help_enabled=True,
+            pronunciation_variant='uk',
+            seed_first_chapter=True,
+            default_seed_first_chapter=False,
+            validate_conditions=app.book_runtime.settings_for,
+        )
+        assert created.revision == 1
+        assert created.payload['reader_level'] == 'a2'
+        assert created.payload['english_help'] is True
+        assert created.pronunciation_help_enabled is True
+        assert created.pronunciation_variant == 'uk'
+        assert created.payload['checks']['seed_first_chapter'] is True
+
+        reused = app.book_conditions.ensure_initial_for_analysis(
+            'book-1',
+            reader_level='a2',
+            english_help=None,
+            pronunciation_help_enabled=None,
+            pronunciation_variant=None,
+            seed_first_chapter=None,
+            default_seed_first_chapter=False,
+            validate_conditions=app.book_runtime.settings_for,
+        )
+        assert reused.id == created.id
+        assert reused.revision == 1
+
+        for bad_variant in ('', 'au'):
+            with pytest.raises(ConditionsError, match='invalid_pronunciation_variant'):
+                app.book_conditions.ensure_initial_for_analysis(
+                    'book-1',
+                    pronunciation_help_enabled=None,
+                    pronunciation_variant=bad_variant,
+                    default_seed_first_chapter=False,
+                    validate_conditions=app.book_runtime.settings_for,
+                )
+        assert app.book_conditions.require('book-1').id == created.id
+
+        updated = app.book_conditions.ensure_initial_for_analysis(
+            'book-1',
+            pronunciation_help_enabled=None,
+            pronunciation_variant='us',
+            default_seed_first_chapter=False,
+            validate_conditions=app.book_runtime.settings_for,
+        )
+        assert updated.revision == 2
+        assert updated.pronunciation_help_enabled is True
+        assert updated.pronunciation_variant == 'us'
+
+        await app.analysis.start('book-1')
+        reused_analyzing = app.book_conditions.ensure_initial_for_analysis(
+            'book-1',
+            reader_level='a2',
+            validate_conditions=app.book_runtime.settings_for,
+        )
+        assert reused_analyzing.id == updated.id
+        with pytest.raises(ConditionsError, match='conditions_already_selected'):
+            app.book_conditions.ensure_initial_for_analysis(
+                'book-1',
+                reader_level='b1',
+                validate_conditions=app.book_runtime.settings_for,
+            )
+    finally:
+        await app.aclose()
+
+

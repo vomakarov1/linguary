@@ -771,6 +771,123 @@ async def test_chapter_analysis_sequence_seed_first_chapter_passes_only_seed_can
     assert original_error.violation.block_ids == (canonical_block_id,)
 
 
+async def test_try_complete_analysis_rearchives_deduplicated_chapter_and_guards_fake_work_repo() -> None:
+    """After cross-chapter Before You Read deduplication, _try_complete_analysis refreshes the modified chapter's analysis binding while guarding FakeUnitOfWork doubles."""
+    from types import SimpleNamespace
+    from analysis_fakes import make_chapter_analysis
+    from linguary.domain import BeforeYouReadEntry
+
+    # 1. Work repo with archive + binding support refreshes only deduplicated chapter
+    uow = make_book(chapters=2)
+    uow.books.save(make_book_record(status=BookStatus.ANALYZING))
+    byr_card = BeforeYouReadEntry(
+        expression="entailed estate",
+        explanation="имение с ограничением наследования",
+    )
+    a1 = make_chapter_analysis(id="analysis-1", section_id="section-1")
+    a2 = make_chapter_analysis(id="analysis-2", section_id="section-2")
+    from dataclasses import replace as dc_replace
+    a1 = dc_replace(a1, before_you_read=(byr_card,))
+    a2 = dc_replace(a2, before_you_read=(byr_card,))
+    uow.analyses.save(BOOK_ID, a1)
+    uow.analyses.save(BOOK_ID, a2)
+
+    archived: dict[str, dict] = {
+        "rev-1": {"id": "rev-1", "body": {"schema_version": 1}},
+        "rev-2": {"id": "rev-2", "body": {"schema_version": 1}},
+    }
+    bindings: dict[tuple[str, str], dict] = {
+        ("analysis", "analysis-1"): {
+            "entity_kind": "analysis",
+            "entity_id": "analysis-1",
+            "book_id": BOOK_ID,
+            "conditions_id": "cond-hist",
+            "attempt_id": "attempt-1",
+            "artifact_revision_id": "rev-1",
+        },
+        ("analysis", "analysis-2"): {
+            "entity_kind": "analysis",
+            "entity_id": "analysis-2",
+            "book_id": BOOK_ID,
+            "conditions_id": "cond-hist",
+            "attempt_id": "attempt-2",
+            "artifact_revision_id": "rev-2",
+        },
+    }
+    replaced_calls: list[dict] = []
+
+    def archive_artifacts(items):
+        ids = []
+        for item in items:
+            rev_id = f"rev-{len(archived) + 1}"
+            archived[rev_id] = {**item, "id": rev_id}
+            ids.append(rev_id)
+        return tuple(ids)
+
+    def replace_analysis_binding(
+        analysis_id: str,
+        *,
+        book_id: str,
+        conditions_id: str,
+        attempt_id: str | None = None,
+        artifact_revision_id: str,
+    ) -> None:
+        call = {
+            "analysis_id": analysis_id,
+            "book_id": book_id,
+            "conditions_id": conditions_id,
+            "attempt_id": attempt_id,
+            "artifact_revision_id": artifact_revision_id,
+        }
+        replaced_calls.append(call)
+        bindings[("analysis", analysis_id)] = {
+            "entity_kind": "analysis",
+            "entity_id": analysis_id,
+            "book_id": book_id,
+            "conditions_id": conditions_id,
+            "attempt_id": attempt_id,
+            "artifact_revision_id": artifact_revision_id,
+        }
+
+    uow.work = SimpleNamespace(  # type: ignore[attr-defined]
+        latest_conditions=lambda _: SimpleNamespace(id="cond-latest", payload={}),
+        get_binding=lambda kind, eid: bindings.get((kind, eid)),
+        archive_artifacts=archive_artifacts,
+        replace_analysis_binding=replace_analysis_binding,
+    )
+    sequence = make_sequence(
+        uow, FakeTaskQueue(), FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    )
+    sequence._try_complete_analysis(BOOK_ID)
+
+    saved = {a.section_id: a for a in uow.analyses.list_for_book(BOOK_ID)}
+    assert len(saved["section-1"].before_you_read) == 1
+    assert saved["section-2"].before_you_read == ()
+    assert len(replaced_calls) == 1
+    assert replaced_calls[0] == {
+        "analysis_id": "analysis-2",
+        "book_id": BOOK_ID,
+        "conditions_id": "cond-hist",
+        "attempt_id": "attempt-2",
+        "artifact_revision_id": "rev-3",
+    }
+    assert archived["rev-3"]["body"]["analysis"]["before_you_read"] == ()
+
+    # 2. FakeUnitOfWork without get_binding on work_repo still deduplicates cleanly
+    uow_minimal = make_book(chapters=2)
+    uow_minimal.books.save(make_book_record(status=BookStatus.ANALYZING))
+    uow_minimal.analyses.save(BOOK_ID, a1)
+    uow_minimal.analyses.save(BOOK_ID, a2)
+    uow_minimal.work = SimpleNamespace(latest_conditions=lambda _: None)  # type: ignore[attr-defined]
+    seq_minimal = make_sequence(
+        uow_minimal, FakeTaskQueue(), FakeLLMClient.always(analysis_reply(aliases=("b1",)))
+    )
+    seq_minimal._try_complete_analysis(BOOK_ID)
+    saved_min = {a.section_id: a for a in uow_minimal.analyses.list_for_book(BOOK_ID)}
+    assert saved_min["section-2"].before_you_read == ()
+
+
+
 
 
 

@@ -146,3 +146,116 @@ def test_purge_diagnostics_keeps_metadata(unit_of_work):
         assert unit_of_work.work.purge_diagnostics('book-1', call_id='call-1') == 0
         assert unit_of_work.llm_calls.response_text_for('call-1') is None
         assert len(unit_of_work.llm_calls.list_for_book('book-1')) == 1
+
+
+def test_replace_analysis_binding_updates_pointer_without_requiring_latest_conditions(unit_of_work):
+    conditions_1, _, _ = prepare(unit_of_work)
+    attempt = CallAttempt(uid(), 'book-1', state='accepted', conditions_id=conditions_1.id)
+    first_artifact = {
+        'id': uid(),
+        'book_id': 'book-1',
+        'conditions_id': conditions_1.id,
+        'attempt_id': attempt.id,
+        'kind': 'analysis',
+        'scope_id': 'section-2',
+        'body': {'schema_version': 1, 'before_you_read': ['duplicate']},
+    }
+    second_artifact = {
+        'id': uid(),
+        'book_id': 'book-1',
+        'conditions_id': conditions_1.id,
+        'attempt_id': attempt.id,
+        'kind': 'analysis',
+        'scope_id': 'section-2',
+        'body': {'schema_version': 1, 'before_you_read': []},
+    }
+    conditions_2 = BookConditions(uid(), 'book-1', 2, {'schema_version': 1}, datetime.now(UTC))
+    with unit_of_work.transaction():
+        unit_of_work.work.add_attempt(attempt)
+        unit_of_work.work.archive_artifacts([first_artifact])
+        unit_of_work.work.bind(
+            'analysis',
+            'analysis-2',
+            book_id='book-1',
+            conditions_id=conditions_1.id,
+            attempt_id=attempt.id,
+            artifact_revision_id=first_artifact['id'],
+        )
+        unit_of_work.work.add_conditions(conditions_2)
+        assert unit_of_work.work.latest_conditions('book-1').id == conditions_2.id
+        unit_of_work.work.archive_artifacts([second_artifact])
+        unit_of_work.work.replace_analysis_binding(
+            'analysis-2',
+            book_id='book-1',
+            conditions_id=conditions_1.id,
+            attempt_id=attempt.id,
+            artifact_revision_id=second_artifact['id'],
+        )
+        binding = unit_of_work.work.get_binding('analysis', 'analysis-2')
+        assert binding['conditions_id'] == conditions_1.id
+        assert binding['attempt_id'] == attempt.id
+        assert binding['artifact_revision_id'] == second_artifact['id']
+        assert unit_of_work.work.get_artifact(first_artifact['id'])['body']['before_you_read'] == ['duplicate']
+        assert unit_of_work.work.get_artifact(second_artifact['id'])['body']['before_you_read'] == []
+
+
+def test_reconcile_quality_attempts_populates_missing_and_sets_partial(unit_of_work):
+    conditions, _, _ = prepare(unit_of_work)
+    manifest = {
+        'schema_version': 1,
+        'artifacts': [
+            {'artifact_sha': 'sha-1'},
+            {'artifact_sha': 'sha-2'},
+            {'artifact_sha': 'sha-3'},
+        ],
+    }
+    review_dispatched = QualityReview(
+        uid(), 'book-1', uid(), manifest, {'schema_version': 1}, 20, conditions_id=conditions.id
+    )
+    attempt_dispatched = CallAttempt(uid(), 'book-1', review_id=review_dispatched.id, conditions_id=conditions.id)
+    review_unsent = QualityReview(
+        uid(), 'book-1', uid(), manifest, {'schema_version': 1}, 20, conditions_id=conditions.id
+    )
+    attempt_unsent = CallAttempt(uid(), 'book-1', review_id=review_unsent.id, conditions_id=conditions.id)
+    with unit_of_work.transaction():
+        unit_of_work.work.add_review(review_dispatched)
+        unit_of_work.work.update_review(
+            review_dispatched.id,
+            state='running',
+            findings=[{'issue': 'existing'}],
+            checked=['sha-1'],
+            missing=[],
+            partial=False,
+        )
+        fresh = unit_of_work.work.get_review(review_dispatched.id)
+        unit_of_work.work.add_attempt(attempt_dispatched)
+        unit_of_work.work.reserve(
+            QualityReservation(attempt_dispatched.id, review_dispatched.id, 8),
+            expected_revision=fresh.revision,
+        )
+        unit_of_work.work.mark_review_sent(attempt_dispatched.id)
+
+        unit_of_work.work.add_review(review_unsent)
+        unit_of_work.work.add_attempt(attempt_unsent)
+        unit_of_work.work.reserve(
+            QualityReservation(attempt_unsent.id, review_unsent.id, 5),
+            expected_revision=0,
+        )
+
+    with unit_of_work.transaction():
+        unit_of_work.work.reconcile_quality_attempts()
+        reconciled = unit_of_work.work.get_review(review_dispatched.id)
+        assert reconciled.state == 'unknown'
+        assert reconciled.findings == ({'issue': 'existing'},)
+        assert unit_of_work.work.get_attempt(attempt_dispatched.id).state == 'unknown'
+        progress = unit_of_work.work.review_progress(review_dispatched.id)
+        assert progress['checked'] == ['sha-1']
+        assert progress['missing'] == ['sha-2', 'sha-3']
+        assert progress['partial'] is True
+
+        assert unit_of_work.work.get_attempt(attempt_unsent.id).state == 'cancelled'
+        assert unit_of_work.work.get_review(review_unsent.id).state == 'queued'
+        unsent_progress = unit_of_work.work.review_progress(review_unsent.id)
+        assert unsent_progress['missing'] is None
+        assert unsent_progress['partial'] is None
+
