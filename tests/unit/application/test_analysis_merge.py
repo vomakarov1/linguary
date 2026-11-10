@@ -492,15 +492,23 @@ def test_before_you_read_deduplicated_by_normalized_expression() -> None:
 def test_before_you_read_deduplicates_stems_and_phrase_extensions_by_first_word() -> None:
     entries = (
         BeforeYouReadEntryResponse(expression="Snapped", explanation="первая карточка"),
-        BeforeYouReadEntryResponse(expression="snapped at", explanation="расширение"),
-        BeforeYouReadEntryResponse(expression="snapping loudly", explanation="однокоренное слово"),
+        BeforeYouReadEntryResponse(expression="snapping", explanation="однокоренное слово"),
+        BeforeYouReadEntryResponse(expression="snapped at", explanation="отдельное фразовое выражение"),
+        BeforeYouReadEntryResponse(expression="Make a grab", explanation="идиома"),
+        BeforeYouReadEntryResponse(expression="making a grab at", explanation="расширение"),
         BeforeYouReadEntryResponse(expression="Started", explanation="другая карточка"),
     )
 
     result = before_you_read_entries(entries)
 
-    assert [entry.expression for entry in result] == ["Snapped", "Started"]
+    assert [entry.expression for entry in result] == [
+        "Snapped",
+        "snapped at",
+        "Make a grab",
+        "Started",
+    ]
     assert result[0].explanation == "первая карточка"
+    assert result[2].explanation == "идиома"
 
 
 def test_content_plan_evidence_moves_to_the_first_byr_when_explanation_matches() -> None:
@@ -508,19 +516,19 @@ def test_content_plan_evidence_moves_to_the_first_byr_when_explanation_matches()
     from linguary.application.llm_dto import ContentPlanResponse, HelpEvidenceResponse, TreatmentPlanItemResponse
     from linguary.domain.content_plan import Difficulty, RequiredPoint, SourceAnchor, artifact_key
 
-    explanation = "Речь звучит резко."
+    explanation = "Она сделала резкое движение рукой."
     payload = ChapterAnalysisResponse(
         "instructions",
         "summary",
         treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
         before_you_read=(
-            BeforeYouReadEntryResponse("snapped", explanation),
-            BeforeYouReadEntryResponse("snapped at", explanation),
+            BeforeYouReadEntryResponse("made a grab", explanation),
+            BeforeYouReadEntryResponse("made a grab at", explanation),
         ),
         content_plan=ContentPlanResponse(
             (Difficulty(
                 "d",
-                (SourceAnchor("b1", 4, 14, "snapped at"),),
+                (SourceAnchor("b1", 4, 18, "made a grab at"),),
                 "b1",
                 "idiom",
                 "critical",
@@ -534,17 +542,17 @@ def test_content_plan_evidence_moves_to_the_first_byr_when_explanation_matches()
     )
 
     plan = content_plan_from_response(
-        payload, {"b1": "stable"}, {"stable": "She snapped at him."}
+        payload, {"b1": "stable"}, {"stable": "She made a grab at him."}
     )
     validate_content_plan(
-        payload, {"b1": "stable"}, {"stable": "She snapped at him."}
+        payload, {"b1": "stable"}, {"stable": "She made a grab at him."}
     )
 
     evidence = plan.before_you_read_evidence[0]
     assert evidence.artifact_key == artifact_key(
         "before_you_read.explanation",
         "stable",
-        {"expression": "snapped", "explanation": explanation},
+        {"expression": "made a grab", "explanation": explanation},
     )
     assert evidence.body_excerpt == explanation
 
@@ -559,13 +567,13 @@ def test_content_plan_drops_duplicate_byr_evidence_not_supported_by_first_card()
         "summary",
         treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.READ_AS_IS),),
         before_you_read=(
-            BeforeYouReadEntryResponse("snapped", "Он резко прервал фразу."),
-            BeforeYouReadEntryResponse("snapped at", "Он ответил собеседнику сердито."),
+            BeforeYouReadEntryResponse("made a grab", "Она сделала резкое движение."),
+            BeforeYouReadEntryResponse("made a grab at", "Она резко попыталась схватить его."),
         ),
         content_plan=ContentPlanResponse(
             (Difficulty(
                 "d",
-                (SourceAnchor("b1", 4, 14, "snapped at"),),
+                (SourceAnchor("b1", 4, 18, "made a grab at"),),
                 "b1",
                 "idiom",
                 "critical",
@@ -574,16 +582,16 @@ def test_content_plan_drops_duplicate_byr_evidence_not_supported_by_first_card()
             ),),
             (HelpEvidenceResponse(
                 "d", "p", "before_you_read.explanation", "b1", 1,
-                "Он ответил собеседнику сердито.",
+                "Она резко попыталась схватить его.",
             ),),
         ),
     )
 
     plan = content_plan_from_response(
-        payload, {"b1": "stable"}, {"stable": "She snapped at him."}
+        payload, {"b1": "stable"}, {"stable": "She made a grab at him."}
     )
     validate_content_plan(
-        payload, {"b1": "stable"}, {"stable": "She snapped at him."}
+        payload, {"b1": "stable"}, {"stable": "She made a grab at him."}
     )
 
     assert plan.before_you_read_evidence == ()
@@ -1377,9 +1385,59 @@ def test_validate_content_plan_attaches_local_canonical_violation_and_parses_com
     assert "EN\\nRU" in str(a2_err)
 
 
+def test_find_quote_span_prefers_exact_case_and_falls_back_to_case_insensitive_typography() -> None:
+    from linguary.application.analysis_merge import find_quote_span
+
+    exact_text = "WAIT here, then Wait there."
+    assert find_quote_span(exact_text, "Wait", estimated_start=0) == (16, 20, "Wait")
+
+    typo_case_text = "ONE’S cheeks burned, while one’s hands trembled."
+    assert find_quote_span(typo_case_text, "one's", estimated_start=0) == (27, 32, "one’s")
+
+    ci_text = "One’s cheeks burned. Later, ONE’S hands trembled."
+    assert find_quote_span(ci_text, "one's", estimated_start=0) == (0, 5, "One’s")
+    assert find_quote_span(ci_text, "one's", estimated_start=25) == (28, 33, "ONE’S")
+
+    wrapped_text = "Don’t make a grab at it!"
+    assert find_quote_span(wrapped_text, "“—don't make a grab at—”") == (
+        0,
+        20,
+        "Don’t make a grab at",
+    )
+    assert find_quote_span(wrapped_text, "‘–don't make a grab at–’") == (
+        0,
+        20,
+        "Don’t make a grab at",
+    )
 
 
+def test_same_byr_prefix_preserves_multiword_idioms_and_keeps_make_a_grab_overlap() -> None:
+    from linguary.application.analysis_merge import _same_byr_prefix
 
+    # Single-word items match single-word items only
+    assert _same_byr_prefix(("snapped",), ("snapping",)) is True
+    assert _same_byr_prefix(("snapped",), ("snapped", "at")) is False
+    assert _same_byr_prefix(("dead",), ("dead", "end")) is False
 
+    # Length ratio guard: 2 * len(shorter) >= len(longer)
+    assert _same_byr_prefix(("break", "the", "ice"), ("breaking", "the", "ice", "now")) is True
+    assert (
+        _same_byr_prefix(
+            ("break", "the", "ice"),
+            ("break", "the", "ice", "at", "the", "formal", "dinner"),
+        )
+        is False
+    )
 
+    # At least 2 non-function words in shorter
+    assert _same_byr_prefix(("in", "the"), ("in", "the", "dark")) is False
+    assert _same_byr_prefix(("on", "fire"), ("on", "fire", "with")) is False
+    assert _same_byr_prefix(("make", "a"), ("make", "a", "grab")) is False
+
+    # Full lexical verbs (make, take, give, keep, turn) are NOT treated as stop-words
+    assert _same_byr_prefix(("make", "a", "grab"), ("make", "a", "grab", "at")) is True
+    assert _same_byr_prefix(("take", "heart"), ("taking", "heart", "from")) is True
+    assert _same_byr_prefix(("give", "way"), ("giving", "way", "to")) is True
+    assert _same_byr_prefix(("keep", "watch"), ("keeping", "watch", "over")) is True
+    assert _same_byr_prefix(("turn", "tail"), ("turning", "tail", "quickly")) is True
 

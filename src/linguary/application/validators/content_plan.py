@@ -105,18 +105,28 @@ def _validate_difficulties(plan, owners, source_texts=None):
 
 
 def _quote_matches_anchor(quote: str, anchor_quote: str, difficulty_kind: str) -> bool:
-    if not quote or not anchor_quote:
+    from linguary.application.analysis_merge import _quote_matches_anchor as match_anchor
+
+    return match_anchor(quote, anchor_quote, difficulty_kind)
+
+
+def _matches_full_anchor(quote: str, anchor_quotes: tuple[str, ...]) -> bool:
+    from linguary.application.analysis_merge import find_quote_span
+
+    clean_quote = without_footnote_markers(quote).strip()
+    if not clean_quote:
         return False
-    if anchor_quote in quote:
-        return True
-    if quote in anchor_quote:
-        if difficulty_kind == 'grammar' and len(anchor_quote.split()) > 1 and len(quote.split()) < 2:
-            return False
-        return True
-    return False
+    return any(
+        bool(anchor_quote)
+        and find_quote_span(anchor_quote, clean_quote) is not None
+        and find_quote_span(clean_quote, anchor_quote) is not None
+        for anchor_quote in anchor_quotes
+    )
 
 
 def _validate_artifact_source(artifact, difficulty, source_texts=None):
+    from linguary.application.analysis_merge import find_quote_span
+
     quote = without_footnote_markers(artifact.quotes[0]).strip()
     anchors = tuple(anchor for anchor in difficulty.anchors
         if artifact.kind == 'before_you_read.explanation' or anchor.block_id == artifact.block_id)
@@ -126,8 +136,10 @@ def _validate_artifact_source(artifact, difficulty, source_texts=None):
             f'помощь не относится к исходной цитате трудности ({difficulty.id}, {artifact.block_id})',
             block_ids=(artifact.block_id,),
         )
-    if source_texts is not None and not any(quote in without_footnote_markers(source_texts.get(anchor.block_id, ''))
-            for anchor in anchors):
+    if source_texts is not None and not any(
+        find_quote_span(without_footnote_markers(source_texts.get(anchor.block_id, '')), quote) is not None
+        for anchor in anchors
+    ):
         raise _validation_error(
             f'цитата помощи отсутствует в исходном блоке ({difficulty.id}, {artifact.block_id})',
             block_ids=(artifact.block_id,),
@@ -524,18 +536,18 @@ def resolve_fragment_assistances(plan, payload, results, source_texts, *, owner_
                 )
             occurrences.add(occurrence)
         result = by_owner[difficulty.owner_block_id]
-        quotes = {a.quote for a in difficulty.anchors}
+        anchor_quotes = tuple(without_footnote_markers(a.quote).strip() for a in difficulty.anchors)
         if (result.translated_text
-                or any(hint.original in quotes for hint in result.glossary_hints)
-                or any(note.original_excerpt in quotes for note in result.language_notes)
-                or any(entry.expression in quotes for entry in before_you_read)):
+                or any(_matches_full_anchor(hint.original, anchor_quotes) for hint in result.glossary_hints)
+                or any(_matches_full_anchor(note.original_excerpt, anchor_quotes) for note in result.language_notes)
+                or any(_matches_full_anchor(entry.expression, anchor_quotes) for entry in before_you_read)):
             raise _validation_error(
                 f'помощь к фрагменту дублирует материалы того же вхождения ({difficulty.id}, {difficulty.owner_block_id})',
                 block_ids=(difficulty.owner_block_id,),
             )
         if item.kind == 'russian_explanation':
             for entry in glossary_entries:
-                if entry.source_text in quotes and entry.translation.casefold() not in item.text.casefold():
+                if _matches_full_anchor(entry.source_text, anchor_quotes) and entry.translation.casefold() not in item.text.casefold():
                     raise _validation_error(
                         f'русская помощь не сохраняет принятое решение глоссария ({difficulty.id}, {difficulty.owner_block_id})',
                         block_ids=(difficulty.owner_block_id,),

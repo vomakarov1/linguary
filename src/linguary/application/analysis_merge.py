@@ -549,6 +549,10 @@ _BYR_IRREGULAR_STEMS = {
     "taken": "take",
     "took": "take",
     "taking": "take",
+    "gave": "give",
+    "given": "give",
+    "giving": "give",
+    "kept": "keep",
 }
 
 
@@ -572,12 +576,64 @@ def _stem_byr_word(word: str) -> str:
     return word
 
 
+_BYR_STOP_WORDS = frozenset(
+    {
+        "a", "an", "the", "this", "that", "these", "those",
+        "some", "any", "each", "every", "either", "neither", "no", "such",
+        "i", "me", "my", "mine", "myself",
+        "you", "your", "yours", "yourself", "yourselves",
+        "he", "him", "his", "himself",
+        "she", "her", "hers", "herself",
+        "it", "its", "itself",
+        "we", "us", "our", "ours", "ourselves",
+        "they", "them", "their", "theirs", "themselves",
+        "one", "ones", "oneself",
+        "who", "whom", "whose", "which", "what",
+        "in", "on", "at", "to", "for", "of", "with", "by", "from",
+        "up", "down", "out", "off", "over", "under", "into", "onto", "upon",
+        "about", "above", "across", "after", "against", "along", "amid", "among",
+        "around", "as", "before", "behind", "below", "beneath", "beside",
+        "between", "beyond", "despite", "during", "except", "inside", "near",
+        "outside", "per", "since", "than", "through", "throughout", "till",
+        "toward", "towards", "until", "via", "within", "without",
+        "and", "or", "nor", "but", "so", "yet", "if", "though", "although",
+        "because", "while", "when", "where", "whether", "not",
+        "be", "am", "is", "are", "was", "were", "been", "being",
+        "have", "has", "had", "having", "hav",
+        "do", "does", "did",
+        "will", "would", "shall", "should", "can", "cannot", "could",
+        "may", "might", "must",
+        "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't",
+        "haven't", "hasn't", "hadn't", "won't", "wouldn't", "can't",
+        "couldn't", "shouldn't", "mustn't",
+    }
+)
+
+
 def _same_byr_prefix(words_a: Sequence[str], words_b: Sequence[str]) -> bool:
     if not words_a or not words_b:
         return False
+    if len(words_a) == len(words_b):
+        return all(
+            _stem_byr_word(a) == _stem_byr_word(b)
+            for a, b in zip(words_a, words_b, strict=True)
+        )
+    shorter, longer = (
+        (words_a, words_b) if len(words_a) < len(words_b) else (words_b, words_a)
+    )
+    if len(shorter) < 2 or 2 * len(shorter) < len(longer):
+        return False
+    significant = sum(
+        1
+        for word in shorter
+        if word.casefold() not in _BYR_STOP_WORDS
+        and _stem_byr_word(word) not in _BYR_STOP_WORDS
+    )
+    if significant < 2:
+        return False
     return all(
-        _stem_byr_word(words_a[i]) == _stem_byr_word(words_b[i])
-        for i in range(min(len(words_a), len(words_b)))
+        _stem_byr_word(shorter[i]) == _stem_byr_word(longer[i])
+        for i in range(len(shorter))
     )
 
 
@@ -841,15 +897,36 @@ def find_quote_span(
         ]
         if regex_matches:
             return min(regex_matches, key=lambda m: abs(m[0] - estimated_start))
+        ci_matches = list(re.finditer(pattern, text, flags=re.IGNORECASE))
+        if ci_matches:
+            best = min(ci_matches, key=lambda m: abs(m.start() - estimated_start))
+            return (best.start(), best.end(), text[best.start() : best.end()])
     except re.error:
         pass
 
     # Search without surrounding punctuation
-    stripped = quote.strip(" \t\r\n.,;:!?\"'«»()[]")
+    stripped = quote.strip(" \t\r\n.,;:!?\"'«»()[]“”‘’—–")
     if stripped and stripped != quote:
         return find_quote_span(text, stripped, estimated_start=estimated_start)
 
     return None
+
+
+def _quote_matches_anchor(quote: str, anchor_quote: str, difficulty_kind: str) -> bool:
+    if not quote or not anchor_quote:
+        return False
+    if find_quote_span(quote, anchor_quote) is not None:
+        return True
+    span = find_quote_span(anchor_quote, quote)
+    if span is not None:
+        if (
+            difficulty_kind == "grammar"
+            and len(anchor_quote.split()) > 1
+            and (len(quote.split()) < 2 or len(span[2].split()) < 2)
+        ):
+            return False
+        return True
+    return False
 
 
 def _substance(text: str) -> str:
@@ -958,23 +1035,15 @@ def content_plan_from_response(
                 for entry in selected:
                     expr = without_footnote_markers(entry.expression).strip() if is_v3 else entry.expression.strip()
                     if is_v3:
-                        matched = (
-                            bool(expr and quote)
-                            and (
-                                quote in expr
-                                or (
-                                    expr in quote
-                                    and (
-                                        difficulty.kind != "grammar"
-                                        or len(quote.split()) <= 1
-                                        or len(expr.split()) >= 2
-                                    )
-                                )
+                        matched = _quote_matches_anchor(
+                            expr, quote, difficulty.kind
+                        ) and (
+                            texts is None
+                            or find_quote_span(
+                                without_footnote_markers(texts.get(anchor.block_id, "")),
+                                expr,
                             )
-                            and (
-                                texts is None
-                                or expr in without_footnote_markers(texts.get(anchor.block_id, ""))
-                            )
+                            is not None
                         )
                     else:
                         matched = (

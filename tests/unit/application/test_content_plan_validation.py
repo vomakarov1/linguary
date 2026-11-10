@@ -251,3 +251,77 @@ def test_content_plan_errors_include_offending_ids_and_local_violation():
     assert body_exc.value.violation.scope == 'local'
     assert body_exc.value.violation.block_ids == ('block-10',)
 
+
+def test_fragment_assistance_uses_quote_span_and_mutual_full_anchor_glossary_match():
+    from types import SimpleNamespace
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+    from linguary.application.validators.content_plan import resolve_fragment_assistances
+
+    source_texts = {'block': 'One’s cheeks burned with shame.'}
+    p = ContentPlan(
+        version=3,
+        profile='content-plan-v3',
+        difficulties=(
+            Difficulty(
+                'd',
+                (SourceAnchor('block', 0, 19, 'One’s cheeks burned'),),
+                'block',
+                'idiom',
+                'critical',
+                'explanation',
+                (RequiredPoint('p', 'Explain blushing'),),
+            ),
+        ),
+    )
+    payload = TranslationResultResponse(
+        fragment_assistances=(
+            FragmentAssistanceResponse(
+                'd', ('p',), 'russian_explanation', 'Герой покраснел от стыда.'
+            ),
+        )
+    )
+    read_as_is = BlockProcessingResult('block', BlockTreatment.READ_AS_IS)
+
+    # Substring glossary entry ("cheeks") inside multi-word anchor must NOT force glossary match
+    resolved = resolve_fragment_assistances(
+        p,
+        payload,
+        (read_as_is,),
+        source_texts,
+        owner_block_ids=('block',),
+        glossary_entries=(SimpleNamespace(source_text='cheeks', translation='щёки'),),
+        validators_version=4,
+    )
+    assert len(resolved['block']) == 1
+
+    # Mutual full-anchor match with normalized case/apostrophe MUST enforce glossary translation
+    with pytest.raises(ResultValidationError, match='глоссария'):
+        resolve_fragment_assistances(
+            p,
+            payload,
+            (read_as_is,),
+            source_texts,
+            owner_block_ids=('block',),
+            glossary_entries=(
+                SimpleNamespace(source_text="one's cheeks burned", translation='щёки пылали'),
+            ),
+            validators_version=4,
+        )
+
+    # Case/typography-normalized duplicate material in same occurrence is rejected
+    dup_note = BlockProcessingResult(
+        'block',
+        BlockTreatment.READ_AS_IS,
+        language_notes=(LanguageNote('n1', 'block', "“one's cheeks burned”", 'Объяснение.'),),
+    )
+    with pytest.raises(ResultValidationError, match='дублирует'):
+        resolve_fragment_assistances(
+            p,
+            payload,
+            (dup_note,),
+            source_texts,
+            owner_block_ids=('block',),
+            validators_version=4,
+        )
+
+

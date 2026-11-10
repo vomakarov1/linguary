@@ -94,8 +94,8 @@ def test_fragment_merge_remaps_evidence_to_retained_duplicate_byr():
 
     plan = _merged_content_plan(
         (
-            fragment(0, 'first', 'snapped', 'point-first'),
-            fragment(1, 'second', 'snapped at', 'point-second'),
+            fragment(0, 'first', 'made a grab', 'point-first'),
+            fragment(1, 'second', 'made a grab at', 'point-second'),
         )
     )
 
@@ -105,7 +105,7 @@ def test_fragment_merge_remaps_evidence_to_retained_duplicate_byr():
         assert item.artifact_key == artifact_key(
             'before_you_read.explanation',
             item.block_id,
-            {'expression': 'snapped', 'explanation': explanation},
+            {'expression': 'made a grab', 'explanation': explanation},
         )
 
 
@@ -168,4 +168,108 @@ def test_fragment_merge_keeps_distinct_phrasal_verbs_and_their_evidence():
         'Снять одежду или взлететь.',
         'Происходить, состояться.',
     }
+
+
+def test_content_plan_v3_binds_case_and_apostrophe_normalized_byr_and_note_evidence():
+    from linguary.application.analysis_merge import before_you_read_entries, validate_content_plan
+    from linguary.application.llm_dto import (
+        LanguageNoteResponse,
+        TranslationResultResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.application.validators.content_plan import (
+        resolve_response_evidence,
+        validate_content_coverage,
+        validate_note_sources,
+    )
+    from linguary.domain import BlockProcessingResult, BlockTreatment, LanguageNote
+
+    aliases = {'b1': 'block-1', 'b2': 'block-2'}
+    texts = {
+        'block-1': 'Don’t make a grab at the bottle.',
+        'block-2': 'One’s cheeks burned with shame.',
+    }
+    d1 = Difficulty(
+        'd1',
+        (SourceAnchor('b1', 0, 20, 'Don’t make a grab at'),),
+        'b1',
+        'idiom',
+        'critical',
+        'explanation',
+        (RequiredPoint('p1', 'Объяснить идиому'),),
+    )
+    d2 = Difficulty(
+        'd2',
+        (SourceAnchor('b2', 0, 19, 'One’s cheeks burned'),),
+        'b2',
+        'idiom',
+        'critical',
+        'explanation',
+        (RequiredPoint('p2', 'Объяснить образ стыда'),),
+    )
+    payload = ChapterAnalysisResponse(
+        'Сохраняй смысл.',
+        'Герой смутился.',
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b2', BlockTreatment.READ_AS_IS),
+        ),
+        before_you_read=(
+            BeforeYouReadEntryResponse(
+                "don't make a grab at",
+                'Не пытайся резко схватить рукой.',
+            ),
+        ),
+        content_plan=ContentPlanResponse(
+            version=3,
+            profile='content-plan-v3',
+            difficulties=(d1, d2),
+        ),
+    )
+
+    plan = validate_content_plan(payload, aliases, texts)
+    assert plan is not None
+    assert len(plan.before_you_read_evidence) == 1
+
+    selected_byr = before_you_read_entries(payload.before_you_read, strict=True)
+    note_body = 'Щёки горели от стыда и неловкости.'
+    results = (
+        BlockProcessingResult(
+            'block-1',
+            BlockTreatment.TRANSLATE,
+            translated_text='Не хватай бутылку.',
+        ),
+        BlockProcessingResult(
+            'block-2',
+            BlockTreatment.READ_AS_IS,
+            language_notes=(
+                LanguageNote('n1', 'block-2', "“one's cheeks burned”", note_body),
+            ),
+        ),
+    )
+    validate_note_sources(results, texts)
+
+    translation_payload = TranslationResultResponse(
+        language_notes=(
+            LanguageNoteResponse('block-2', "“one's cheeks burned”", note_body),
+        ),
+    )
+    evidence = resolve_response_evidence(
+        plan,
+        translation_payload,
+        results,
+        selected_byr,
+        owner_block_ids=('block-1', 'block-2'),
+    )
+    checked = validate_content_coverage(
+        plan,
+        results,
+        selected_byr,
+        evidence,
+        owner_block_ids=('block-1', 'block-2'),
+        source_texts=texts,
+        validators_version=4,
+    )
+    assert len(checked) == 2
+
 
