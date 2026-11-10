@@ -133,3 +133,42 @@ async def test_ipa_dict_no_network(monkeypatch):
     monkeypatch.setattr(socket, 'create_connection', no_network)
     module._load_index.cache_clear()
     assert (await module.IpaDictPronunciationSource().lookup('queue', 'uk')).status == 'found'
+
+
+async def test_resolve_pronunciation_anchor_and_ipa_dict_accept_typographic_apostrophe():
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    from linguary.application.llm_dto import PronunciationAnchorResponse
+    from linguary.application.validators.pronunciation import resolve_pronunciation_anchor
+
+    for form in ("can't", 'can’t', 'can‘t', 'canʼt'):
+        assert valid_lookup_form(form)
+    assert not valid_lookup_form('ʼ')
+
+    source = IpaDictPronunciationSource()
+    for query in ('can’t', 'can‘t', 'canʼt'):
+        result = await source.lookup(query, 'us')
+        assert result.status == 'found'
+        matched, = result.entries
+        assert matched.form == "can't"
+        assert matched.evidence.dictionary_form == "can't"
+        assert matched.ipa == 'ˈkænt'
+
+    assert (await source.lookup('Can’t', 'us')).status == 'missing'
+
+    texts = {'b1': 'He can’t, she can‘t, they canʼt; Colonel waited.'}
+    used_spans: set[tuple[str, int, int]] = set()
+    resolved_quotes = [
+        resolve_pronunciation_anchor(
+            PronunciationAnchorResponse('b1', "can't"), texts, used_spans=used_spans
+        )
+        for _ in range(3)
+    ]
+    for item in resolved_quotes:
+        item.validate(texts)
+    assert [item.quote for item in resolved_quotes] == ['can’t', 'can‘t', 'canʼt']
+
+    colonel_anchor = resolve_pronunciation_anchor(
+        PronunciationAnchorResponse('b1', 'colonel'), texts, used_spans=used_spans
+    )
+    colonel_anchor.validate(texts)
+    assert colonel_anchor.quote == 'Colonel'

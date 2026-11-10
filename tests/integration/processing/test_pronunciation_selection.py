@@ -691,3 +691,144 @@ async def test_pronunciation_invalid_translation_with_valid_candidate_saves_noth
         assert source.calls == []
     finally:
         await app.aclose()
+
+
+async def test_pronunciation_identity_unifies_curly_and_straight_apostrophes(tmp_path):
+    from linguary.adapters.pronunciation.source import IpaDictPronunciationSource
+    from linguary.application.validators.pronunciation import pronunciation_identity
+
+    texts = {
+        'b1': 'Can’t Colonel wait?',
+        'b2': "He can't, she can‘t, they canʼt; the colonel waited.",
+    }
+    ipa_candidates = [
+        PronunciationCandidateResponse(
+            PronunciationAnchorResponse('b1', "can't"),
+            "can't",
+            PronunciationContextResponse(None, None, None, False),
+            'unpredictable_spelling',
+        ),
+        PronunciationCandidateResponse(
+            PronunciationAnchorResponse('b1', 'Colonel'),
+            'Colonel',
+            PronunciationContextResponse(None, None, None, False),
+            'unpredictable_spelling',
+        ),
+        PronunciationCandidateResponse(
+            PronunciationAnchorResponse('b2', "can't"),
+            "can't",
+            PronunciationContextResponse(None, None, None, False),
+            'unpredictable_spelling',
+        ),
+        PronunciationCandidateResponse(
+            PronunciationAnchorResponse('b2', 'can‘t'),
+            'can‘t',
+            PronunciationContextResponse(None, None, None, False),
+            'unpredictable_spelling',
+        ),
+        PronunciationCandidateResponse(
+            PronunciationAnchorResponse('b2', 'canʼt'),
+            'canʼt',
+            PronunciationContextResponse(None, None, None, False),
+            'unpredictable_spelling',
+        ),
+        PronunciationCandidateResponse(
+            PronunciationAnchorResponse('b2', 'colonel'),
+            'colonel',
+            PronunciationContextResponse(None, None, None, False),
+            'unpredictable_spelling',
+        ),
+    ]
+    selected = await verify_candidates(
+        ipa_candidates, source=IpaDictPronunciationSource(), texts=texts, variant='us', scope_id='run'
+    )
+    assert [item.anchor.quote for item in selected.accepted] == [
+        'Can’t', 'Colonel', "can't", 'can‘t', 'canʼt', 'colonel',
+    ]
+    assert [item.form for item in selected.accepted] == [
+        "can't", 'colonel', "can't", "can't", "can't", 'colonel',
+    ]
+    groups = group_pronunciations(selected.accepted, block_order={'b1': 0, 'b2': 1})
+    assert len(groups) == 2
+    assert len(groups[0].occurrences) == 4
+    assert len(groups[1].occurrences) == 2
+
+    # Synthetic sources with distinct apostrophe dictionary forms still unify in pronunciation_identity & hint_id.
+    apostrophe_forms = ("zorp's", 'zorp’s', 'zorp‘s', 'zorpʼs')
+    synthetic_entries = [entry(form=form, ipa='zɔːps') for form in apostrophe_forms]
+    synthetic = SyntheticSource(synthetic_entries)
+    block_texts = {f'b{i}': form for i, form in enumerate(apostrophe_forms, 1)}
+    synth_candidates = [
+        candidate(form, block=f'b{i}') for i, form in enumerate(apostrophe_forms, 1)
+    ]
+    synth_selected = await verify_candidates(
+        synth_candidates, source=synthetic, texts=block_texts, variant='uk', scope_id='run'
+    )
+    assert len(synth_selected.accepted) == 4
+    assert len({pronunciation_identity(item) for item in synth_selected.accepted}) == 1
+    assert len({item.hint_id for item in synth_selected.accepted}) == 1
+    synth_group, = group_pronunciations(
+        synth_selected.accepted, block_order={f'b{i}': i for i in range(1, 5)}
+    )
+    assert len(synth_group.occurrences) == 4
+
+    # Proper name never falls back to lowercase, while common word falls back on missing exact lookup.
+    lower_only = SyntheticSource([entry(form='zorp')])
+    proper_skip = await verify_candidates(
+        [candidate('Zorp', proper=True)], source=lower_only, texts={'b1': 'Zorp'}, variant='uk', scope_id='run'
+    )
+    assert proper_skip.accepted == ()
+    assert lower_only.calls == [('Zorp', 'uk')]
+
+    lower_only.calls.clear()
+    common_hit = await verify_candidates(
+        [candidate('Zorp', proper=False)], source=lower_only, texts={'b1': 'Zorp'}, variant='uk', scope_id='run'
+    )
+    assert len(common_hit.accepted) == 1
+    assert common_hit.accepted[0].anchor.quote == 'Zorp'
+    assert common_hit.accepted[0].form == 'zorp'
+    assert lower_only.calls == [('Zorp', 'uk'), ('zorp', 'uk')]
+
+    # Quote-only duplicate candidates differing only in apostrophe/case deduplicate cleanly on a single occurrence.
+    dedup_selected = await verify_candidates(
+        [
+            PronunciationCandidateResponse(
+                PronunciationAnchorResponse('b1', 'Can’t'),
+                'Can’t',
+                PronunciationContextResponse(None, None, None, False),
+                'unpredictable_spelling',
+            ),
+            PronunciationCandidateResponse(
+                PronunciationAnchorResponse('b1', "can't"),
+                "can't",
+                PronunciationContextResponse(None, None, None, False),
+                'unpredictable_spelling',
+            ),
+        ],
+        source=IpaDictPronunciationSource(),
+        texts={'b1': 'Can’t wait.'},
+        variant='us',
+        scope_id='run',
+    )
+    assert len(dedup_selected.accepted) == 1
+    assert dedup_selected.skipped == ()
+    assert dedup_selected.accepted[0].anchor.quote == 'Can’t'
+    assert dedup_selected.accepted[0].form == "can't"
+
+    # Full runtime + SQLite persistence round-trip preserves authentic book slice and strict dictionary form.
+    app, _, _, run, _ = await prepare_app(
+        tmp_path,
+        None,
+        [candidate('Colonel', start=0), candidate('o’clock', start=19)],
+        text='Colonel arrived at o’clock.',
+    )
+    try:
+        with app.unit_of_work.transaction() as tx:
+            saved_result, = tx.results.list_for_run(run.id)
+        assert [(item.anchor.quote, item.form, item.evidence.dictionary_form)
+                for item in saved_result.pronunciation_assistances] == [
+            ('Colonel', 'colonel', 'colonel'),
+            ('o’clock', "o'clock", "o'clock"),
+        ]
+    finally:
+        await app.aclose()

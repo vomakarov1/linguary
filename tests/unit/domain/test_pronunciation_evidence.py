@@ -106,3 +106,43 @@ def test_lexicon_assistance_variant_matches_its_source_file():
     )
     with pytest.raises(DomainError):
         replace(help, variant='us')
+
+
+def test_pronunciation_assistance_allows_case_and_apostrophe_variants_between_anchor_and_dictionary_form():
+    capitalized = PronunciationAssistance(
+        SourceAnchor('block', 0, 5, 'Queue'), 'queue', 'kjuː', 'uk', 'hint', lexicon_evidence(),
+    )
+    assert capitalized.anchor.quote == 'Queue'
+    assert capitalized.form == capitalized.evidence.dictionary_form == 'queue'
+    with pytest.raises(DomainError):
+        replace(capitalized, form='Queue')
+
+    us_cant_evidence = lexicon_evidence(
+        entry_id="en_US.txt:1:can't",
+        dictionary_form="can't",
+        dictionary_ipa='ˈkænt',
+        license_id='MIT',
+        source_uri=f'https://raw.githubusercontent.com/open-dict-data/ipa-dict/{SNAPSHOT}/data/en_US.txt',
+    )
+    for quote in ("can’t", "Can’t", "can‘t", "canʼt", "CAN'T"):
+        assistance = PronunciationAssistance(
+            SourceAnchor('block', 0, len(quote), quote),
+            "can't",
+            'ˈkænt',
+            'us',
+            'hint',
+            us_cant_evidence,
+        )
+        assert assistance.anchor.quote == quote
+        assert assistance.form == "can't"
+
+    with pytest.raises(DomainError):
+        PronunciationAssistance(
+            SourceAnchor('block', 0, 5, 'can’t'), "can’t", 'ˈkænt', 'us', 'hint', us_cant_evidence,
+        )
+    with pytest.raises(DomainError):
+        PronunciationAssistance(
+            SourceAnchor('block', 0, 6, 'queues'), 'queue', 'kjuː', 'uk', 'hint', lexicon_evidence(),
+        )
+    with pytest.raises(ValueError):
+        SourceEntry('can’t', 'ˈkænt', 'us', None, None, us_cant_evidence)

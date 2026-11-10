@@ -11,9 +11,9 @@ type PronunciationVariant = Literal['uk', 'us']
 
 def valid_lookup_form(form: str) -> bool:
     return (isinstance(form, str) and 0 < len(form) <= 200
-        and any(char.isalpha() for char in form)
+        and any(char.isalpha() and char != 'ʼ' for char in form)
         and all(char.isalpha() or unicodedata.category(char).startswith('M')
-                or char in "'-’" for char in form))
+                or char in "'-’‘ʼ" for char in form))
 
 
 def _valid_ipa(text: str) -> bool:

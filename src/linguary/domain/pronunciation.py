@@ -7,6 +7,17 @@ from linguary.domain.content_plan import SourceAnchor
 from linguary.domain.errors import DomainError
 
 
+_APOSTROPHE_TABLE = str.maketrans({'’': "'", '‘': "'", 'ʼ': "'"})
+
+
+def canonicalize_pronunciation_apostrophes(text: str) -> str:
+    return text.translate(_APOSTROPHE_TABLE)
+
+
+def canonical_pronunciation_form(text: str) -> str:
+    return canonicalize_pronunciation_apostrophes(text).casefold()
+
+
 @dataclass(frozen=True, slots=True)
 class PronunciationEvidence:
     source_id: str
@@ -80,7 +91,8 @@ class PronunciationAssistance:
             raise DomainError('произношение требует привязки и свидетельства')
         if any(not isinstance(value, str) or not value.strip() for value in (self.form, self.ipa, self.hint_id)):
             raise DomainError('неполная помощь произношения')
-        if self.variant not in {'uk', 'us'} or self.form != self.anchor.quote:
+        if (self.variant not in {'uk', 'us'}
+                or canonical_pronunciation_form(self.form) != canonical_pronunciation_form(self.anchor.quote)):
             raise DomainError('произношение не соответствует варианту или фактической форме')
         if self.evidence.kind == 'lexicon_form' and self.variant != self.evidence.lexicon_variant:
             raise DomainError('вариант произношения не соответствует источнику лексикона')

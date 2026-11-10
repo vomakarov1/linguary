@@ -8,7 +8,7 @@ import re
 from types import MappingProxyType
 
 from linguary.application.ports.pronunciation import SourceEntry, SourceLookupResult, _valid_ipa, valid_lookup_form
-from linguary.domain.pronunciation import PronunciationEvidence
+from linguary.domain.pronunciation import PronunciationEvidence, canonicalize_pronunciation_apostrophes
 
 
 SNAPSHOT = '972cd67dd5f96bc5660e28070cde26e3928abcd7'
@@ -109,15 +109,21 @@ class IpaDictPronunciationSource:
             except (OSError, ValueError, TypeError, KeyError, UnicodeError):
                 return SourceLookupResult.unavailable('source_unavailable')
             _LOADED_INDICES[variant] = index
-        pronunciations = index.get(form, ())
+        lookup_form = form
+        pronunciations = index.get(lookup_form)
+        if pronunciations is None:
+            canonical_form = canonicalize_pronunciation_apostrophes(form)
+            if canonical_form != form:
+                lookup_form = canonical_form
+                pronunciations = index.get(lookup_form)
         if not pronunciations:
             return SourceLookupResult.missing()
         filename, _, _, _, license_id = _FILES[variant]
         source_uri = f'https://raw.githubusercontent.com/open-dict-data/ipa-dict/{SNAPSHOT}/data/{filename}'
-        entries = tuple(SourceEntry(form, ipa, variant, None, None, PronunciationEvidence(
+        entries = tuple(SourceEntry(lookup_form, ipa, variant, None, None, PronunciationEvidence(
             source_id='ipa-dict', source_version=SOURCE_VERSION,
-            entry_id=f'{SNAPSHOT}:{filename}:{number}:{form}:{sha256(ipa.encode()).hexdigest()[:16]}',
-            sense_id=None, part_of_speech=None, dictionary_form=form, dictionary_ipa=ipa,
+            entry_id=f'{SNAPSHOT}:{filename}:{number}:{lookup_form}:{sha256(ipa.encode()).hexdigest()[:16]}',
+            sense_id=None, part_of_speech=None, dictionary_form=lookup_form, dictionary_ipa=ipa,
             attribution=f'ipa-dict {filename} ({license_id}), snapshot {SNAPSHOT}',
             kind='lexicon_form', license_id=license_id, source_uri=source_uri))
             for ipa, number in pronunciations)

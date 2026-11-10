@@ -7,7 +7,11 @@ from linguary.application.llm_dto import PronunciationAnchorResponse, Pronunciat
 from linguary.application.ports.pronunciation import PronunciationSource, valid_lookup_form
 from linguary.domain.content_plan import SourceAnchor, canonical_sha
 from linguary.domain.errors import DomainError
-from linguary.domain.pronunciation import PronunciationAssistance
+from linguary.domain.pronunciation import (
+    PronunciationAssistance,
+    canonical_pronunciation_form,
+    canonicalize_pronunciation_apostrophes,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,39 +28,44 @@ class PronunciationSelection:
     unavailable: bool = False
 
 
-_WORD_JOINERS = frozenset("'’ʼ-‐‑")
+_WORD_JOINERS = frozenset("'’‘ʼ-‐‑")
+
+
+def _iter_pronunciation_word_spans(text: str):
+    def is_letter(char):
+        return char not in _WORD_JOINERS and unicodedata.category(char).startswith('L')
+
+    index = 0
+    length = len(text)
+    while index < length:
+        if not is_letter(text[index]):
+            index += 1
+            continue
+        word_start = index
+        index += 1
+        while index < length:
+            char = text[index]
+            if is_letter(char) or unicodedata.category(char).startswith('M'):
+                index += 1
+            elif char in _WORD_JOINERS and index + 1 < length and is_letter(text[index + 1]):
+                index += 2
+            else:
+                break
+        yield word_start, index
 
 
 def is_complete_pronunciation_form(text: str, start: int, end: int) -> bool:
     """Match a whole Unicode word without normalizing text or its offsets."""
     if not 0 <= start < end <= len(text):
         return False
-
-    def is_letter(char):
-        return char not in _WORD_JOINERS and unicodedata.category(char).startswith('L')
-
-    index = 0
-    while index <= start:
-        if not is_letter(text[index]):
-            index += 1
-            continue
-        word_start = index
-        index += 1
-        while index < len(text):
-            char = text[index]
-            if is_letter(char) or unicodedata.category(char).startswith('M'):
-                index += 1
-            elif char in _WORD_JOINERS and index + 1 < len(text) and is_letter(text[index + 1]):
-                index += 2
-            else:
-                break
-        if index > start:
-            return word_start == start and index == end
+    for word_start, word_end in _iter_pronunciation_word_spans(text):
+        if word_end > start:
+            return word_start == start and word_end == end
     return False
 
 
 def _normalized(text):
-    return ' '.join(unicodedata.normalize('NFC', text).split()).casefold()
+    return ' '.join(canonicalize_pronunciation_apostrophes(unicodedata.normalize('NFC', text)).split()).casefold()
 
 
 def pronunciation_identity(item):
@@ -99,21 +108,63 @@ def resolve_pronunciation_anchor(
         return source_anchor
 
     quote = anchor.quote
-    quote_len = len(quote)
-    start_pos = 0
-    while True:
-        pos = text.find(quote, start_pos)
-        if pos == -1:
-            break
-        end_pos = pos + quote_len
-        span = (anchor.block_id, pos, end_pos)
-        if (used_spans is None or span not in used_spans) and is_complete_pronunciation_form(text, pos, end_pos):
-            if used_spans is not None:
-                used_spans.add(span)
-            return SourceAnchor(anchor.block_id, pos, end_pos, quote)
-        start_pos = pos + 1
+    if quote:
+        quote_len = len(quote)
+        start_pos = 0
+        while True:
+            pos = text.find(quote, start_pos)
+            if pos == -1:
+                break
+            end_pos = pos + quote_len
+            span = (anchor.block_id, pos, end_pos)
+            if (used_spans is None or span not in used_spans) and is_complete_pronunciation_form(text, pos, end_pos):
+                if used_spans is not None:
+                    used_spans.add(span)
+                return SourceAnchor(anchor.block_id, pos, end_pos, text[pos:end_pos])
+            start_pos = pos + 1
+
+        word_spans = [
+            (pos, end_pos)
+            for pos, end_pos in _iter_pronunciation_word_spans(text)
+            if used_spans is None or (anchor.block_id, pos, end_pos) not in used_spans
+        ]
+        canonical_quote = canonicalize_pronunciation_apostrophes(quote)
+        for pos, end_pos in word_spans:
+            if canonicalize_pronunciation_apostrophes(text[pos:end_pos]) == canonical_quote:
+                if used_spans is not None:
+                    used_spans.add((anchor.block_id, pos, end_pos))
+                return SourceAnchor(anchor.block_id, pos, end_pos, text[pos:end_pos])
+
+        folded_quote = canonical_pronunciation_form(quote)
+        for pos, end_pos in word_spans:
+            if canonical_pronunciation_form(text[pos:end_pos]) == folded_quote:
+                if used_spans is not None:
+                    used_spans.add((anchor.block_id, pos, end_pos))
+                return SourceAnchor(anchor.block_id, pos, end_pos, text[pos:end_pos])
 
     raise DomainError(f"не удалось найти целое слово {quote!r} в блоке {anchor.block_id}")
+
+
+def _candidate_dedup_key(candidate: PronunciationCandidateResponse) -> tuple:
+    normalize = (
+        canonicalize_pronunciation_apostrophes
+        if candidate.context.is_proper_name
+        else canonical_pronunciation_form
+    )
+    return (
+        candidate.anchor.block_id,
+        candidate.anchor.start,
+        candidate.anchor.end,
+        normalize(candidate.anchor.quote),
+        normalize(candidate.form),
+        candidate.selection_reason,
+        (
+            candidate.context.meaning_in_context,
+            candidate.context.part_of_speech,
+            candidate.context.grammatical_form,
+            candidate.context.is_proper_name,
+        ),
+    )
 
 
 async def verify_candidates(candidates, *, source: PronunciationSource, texts, variant, scope_id):
@@ -125,28 +176,19 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
     resolved_candidates: list[tuple[PronunciationCandidateResponse, SourceAnchor]] = []
 
     for candidate in candidates:
-        cache_key = (
-            candidate.anchor.block_id,
-            candidate.anchor.start,
-            candidate.anchor.end,
-            candidate.anchor.quote,
-            candidate.form,
-            candidate.selection_reason,
-            (
-                candidate.context.meaning_in_context,
-                candidate.context.part_of_speech,
-                candidate.context.grammatical_form,
-                candidate.context.is_proper_name,
-            ),
-        )
-        if cache_key in candidate_cache:
+        cache_key = _candidate_dedup_key(candidate)
+        if (candidate.anchor.start is not None and candidate.anchor.end is not None
+                and cache_key in candidate_cache):
             resolved_candidates.append(candidate_cache[cache_key])
             continue
 
         try:
             anchor = resolve_pronunciation_anchor(candidate.anchor, texts, used_spans=used_spans)
         except DomainError:
-            skipped.append(PronunciationSkip(candidate, 'invalid_anchor'))
+            if cache_key in candidate_cache:
+                resolved_candidates.append(candidate_cache[cache_key])
+            else:
+                skipped.append(PronunciationSkip(candidate, 'invalid_anchor'))
             continue
 
         updated_candidate = replace(
@@ -161,7 +203,7 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
         by_anchor.setdefault((anchor.block_id, anchor.start, anchor.end), []).append((cand, anchor))
     for duplicates in by_anchor.values():
         candidate, anchor = duplicates[0]
-        if any(other[0] != candidate for other in duplicates):
+        if any(_candidate_dedup_key(other[0]) != _candidate_dedup_key(candidate) for other in duplicates):
             skipped.append(PronunciationSkip(candidate, 'conflicting_candidates'))
             continue
         try:
@@ -169,7 +211,7 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
         except DomainError:
             skipped.append(PronunciationSkip(candidate, 'invalid_anchor'))
             continue
-        if candidate.form != anchor.quote:
+        if canonical_pronunciation_form(candidate.form) != canonical_pronunciation_form(anchor.quote):
             skipped.append(PronunciationSkip(candidate, 'invalid_form'))
             continue
         if not is_complete_pronunciation_form(texts[anchor.block_id], anchor.start, anchor.end):
@@ -182,8 +224,13 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
             skipped.append(PronunciationSkip(candidate, 'selection_reason'))
             continue
         context = candidate.context
+        canonical_form = canonicalize_pronunciation_apostrophes(candidate.form)
         try:
             found = await source.lookup(candidate.form, variant)
+            if found.status == 'missing' and not context.is_proper_name:
+                fallback_form = canonical_form.casefold()
+                if fallback_form != candidate.form and valid_lookup_form(fallback_form):
+                    found = await source.lookup(fallback_form, variant)
         except Exception:
             unavailable.append(anchor)
             skipped.append(PronunciationSkip(candidate, 'source_unavailable'))
@@ -199,7 +246,11 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
                    (context.meaning_in_context, context.part_of_speech, context.grammatical_form)):
                 skipped.append(PronunciationSkip(candidate, 'unknown_context'))
                 continue
-            matches = [item for item in found.entries if item.form == candidate.form and item.variant == variant
+            matches = [item for item in found.entries if (
+                    canonicalize_pronunciation_apostrophes(item.form) == canonical_form
+                    if context.is_proper_name
+                    else canonical_pronunciation_form(item.form) == canonical_pronunciation_form(candidate.form)
+                ) and item.variant == variant
                 and _normalized(item.sense) == _normalized(context.meaning_in_context)
                 and _normalized(item.evidence.part_of_speech) == _normalized(context.part_of_speech)
                 and _normalized(item.grammatical_form) == _normalized(context.grammatical_form)
@@ -222,8 +273,11 @@ async def verify_candidates(candidates, *, source: PronunciationSource, texts, v
 
 
 def _lexicon_matches(entries, candidate, variant):
+    expected_form = canonical_pronunciation_form(candidate.form)
     if candidate.context.is_proper_name or any(
-            item.evidence.kind != 'lexicon_form' or item.form != candidate.form or item.variant != variant
+            item.evidence.kind != 'lexicon_form'
+            or canonical_pronunciation_form(item.form) != expected_form
+            or item.variant != variant
             or item.sense is not None or item.grammatical_form is not None
             or item.evidence.sense_id is not None or item.evidence.part_of_speech is not None
             or item.evidence.rule_id is not None or item.evidence.rule_version is not None
