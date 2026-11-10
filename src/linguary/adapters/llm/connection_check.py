@@ -43,7 +43,11 @@ async def test_llm_connection(
     proxy_secret_tokens = tuple(secret for url in urls for secret in proxy_secrets(url))
 
     def _clean(text: str) -> str:
-        return safe_detail(text, api_key=settings.api_key, secrets=proxy_secret_tokens)
+        return safe_detail(
+            text,
+            api_key=settings.api_key,
+            secrets=(*proxy_secret_tokens, *((api_key,) if api_key else ())),
+        )
 
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
@@ -53,7 +57,12 @@ async def test_llm_connection(
     body: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
+        "max_completion_tokens": 32,
+    }
+    fallback_body: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 16,
     }
 
     client_kwargs: dict[str, Any] = {
@@ -66,6 +75,8 @@ async def test_llm_connection(
     try:
         async with httpx.AsyncClient(**client_kwargs) as client:
             response = await client.post(endpoint, json=body, headers=headers)
+            if response.status_code == 400:
+                response = await client.post(endpoint, json=fallback_body, headers=headers)
             if 200 <= response.status_code < 300:
                 return True, "Подключение успешно установлено"
             if response.status_code in (401, 403):

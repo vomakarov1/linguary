@@ -55,6 +55,26 @@ _RATE_LIMIT_STATUS = 429
 #: Insufficient credits status code: retrying without top-up produces identical result.
 _PAYMENT_REQUIRED_STATUS = 402
 
+#: Payload too large status code: gateway rejected request before model execution.
+_PAYLOAD_TOO_LARGE_STATUS = 413
+
+#: Structured error codes indicating context window overflow.
+_CONTEXT_OVERFLOW_CODES = frozenset(
+    {
+        "context_length_exceeded",
+        "context_overflow",
+        "string_above_max_length",
+    }
+)
+
+#: Explicit gateway message substrings indicating context window overflow when error.code is absent.
+_CONTEXT_OVERFLOW_PHRASES = (
+    "maximum context length",
+    "prompt is too long",
+    "input tokens exceed",
+    "context window",
+)
+
 #: Finish reason indicating generation cut off due to token limits.
 _LENGTH_FINISH_REASON = "length"
 
@@ -274,7 +294,7 @@ def _raise_for_status(
     if status < 400:
         return
     detail = f"{status}{_detail(response, api_key=api_key, secrets=secrets)}"
-    if status == 400 and _error_code(response) == "context_length_exceeded":
+    if _is_context_capacity_error(response):
         raise LLMContextCapacityError(f"запрос превысил вместимость контекста провайдера {provider}: {detail}")
     if status in _AUTHORIZATION_STATUSES:
         raise LLMConfigurationError(
@@ -292,15 +312,32 @@ def _raise_for_status(
     raise LLMProviderError(f"провайдер {provider} отверг запрос: {detail}")
 
 
-def _error_code(response: httpx.Response) -> str | None:
-    """Only the structured provider code can prove a context capacity rejection."""
+OpenAICompatibleLLMClient._raise_for_status = staticmethod(_raise_for_status)
+
+
+def _is_context_capacity_error(response: httpx.Response) -> bool:
+    """Detects context window overflow from HTTP 413 or structured/gateway HTTP 400 responses."""
+    status = response.status_code
+    if status == _PAYLOAD_TOO_LARGE_STATUS:
+        return True
+    if status != 400:
+        return False
     try:
         document = response.json()
     except ValueError:
-        return None
+        return False
     error = document.get("error") if isinstance(document, dict) else None
-    code = error.get("code") if isinstance(error, dict) else None
-    return code if isinstance(code, str) else None
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    if isinstance(code, str) and code in _CONTEXT_OVERFLOW_CODES:
+        return True
+    if code is None:
+        message = error.get("message")
+        if isinstance(message, str):
+            lowered = message.lower()
+            return any(phrase in lowered for phrase in _CONTEXT_OVERFLOW_PHRASES)
+    return False
 
 
 def _retry_after(response: httpx.Response) -> float | None:
@@ -390,19 +427,49 @@ def _model(document: dict[str, Any], *, fallback: str) -> str:
     return model if isinstance(model, str) and model.strip() else fallback
 
 
+def _nonnegative_int(value: Any) -> int | None:
+    """Returns non-negative integer token count, rejecting booleans and invalid types."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _usage(document: dict[str, Any]) -> TokenUsage | None:
     """Token usage metrics reported by provider (PRD § 24)."""
     usage = document.get("usage")
     if not isinstance(usage, dict):
         return None
-    prompt = usage.get("prompt_tokens")
-    completion = usage.get("completion_tokens")
-    if not isinstance(prompt, int) and not isinstance(completion, int):
+    prompt = _nonnegative_int(usage.get("prompt_tokens"))
+    completion = _nonnegative_int(usage.get("completion_tokens"))
+    if prompt is None and completion is None:
         return None
-    return TokenUsage(
-        prompt_tokens=prompt if isinstance(prompt, int) else None,
-        completion_tokens=completion if isinstance(completion, int) else None,
+    prompt_details = usage.get("prompt_tokens_details")
+    cached = (
+        _nonnegative_int(prompt_details.get("cached_tokens"))
+        if isinstance(prompt_details, dict)
+        else None
     )
+    if cached is None:
+        cached = _nonnegative_int(usage.get("cached_tokens"))
+    if cached is None:
+        cached = _nonnegative_int(usage.get("cached_prompt_tokens"))
+    completion_details = usage.get("completion_tokens_details")
+    reasoning = (
+        _nonnegative_int(completion_details.get("reasoning_tokens"))
+        if isinstance(completion_details, dict)
+        else None
+    )
+    if reasoning is None:
+        reasoning = _nonnegative_int(usage.get("reasoning_tokens"))
+    return TokenUsage(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        cached_prompt_tokens=cached,
+        reasoning_tokens=reasoning,
+    )
+
+
+OpenAICompatibleLLMClient._usage = staticmethod(_usage)
 
 
 def _cost(document: dict[str, Any]) -> Decimal | None:

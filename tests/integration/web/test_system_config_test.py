@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 from threading import Thread
 
 import pytest
@@ -262,3 +263,90 @@ def test_config_test_rejects_unsupported_provider(configured_client):
     assert data["ok"] is False
     assert data["message"] == "Ошибка конфигурации подключения"
     assert data["error"] == "Провайдер не поддерживается"
+
+
+def test_connection_check_uses_max_completion_tokens_and_falls_back_to_max_tokens_on_400(
+    configured_client,
+):
+    secret_key = "sk-reasoning-secret-key-999"
+    internal_leak = "raw-gateway-error-detail-must-not-appear"
+    scenarios = [
+        # Reasoning model server: accepts max_completion_tokens on the first try
+        [(200, b'{"choices":[{"message":{"content":""},"finish_reason":"length"}]}')],
+        # Legacy server: rejects max_completion_tokens with 400, accepts max_tokens on retry
+        [
+            (400, f'{{"error":"unknown field max_completion_tokens {secret_key} {internal_leak}"}}'.encode()),
+            (200, b'{"choices":[{"message":{"content":"pong"}}]}'),
+        ],
+        # Both requests rejected with 400: retries only once and never leaks raw body or secret
+        [
+            (400, f'{{"error":"first 400 {secret_key} {internal_leak}"}}'.encode()),
+            (400, f'{{"error":"second 400 {secret_key} {internal_leak}"}}'.encode()),
+            (200, b'{"choices":[{"message":{"content":"unreachable"}}]}'),
+        ],
+    ]
+
+    for idx, replies in enumerate(scenarios):
+        seen_bodies: list[dict] = []
+
+        class SequenceHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b"{}"
+                seen_bodies.append(json.loads(raw.decode("utf-8")))
+                step = min(len(seen_bodies) - 1, len(replies) - 1)
+                status, body = replies[step]
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        http = ThreadingHTTPServer(("127.0.0.1", 0), SequenceHandler)
+        thread = Thread(target=http.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{http.server_port}"
+            response = configured_client.post(
+                "/system/config/test",
+                json={
+                    "base_url": f"{base_url}/v1",
+                    "model": "o3-mini",
+                    "api_key": secret_key,
+                },
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert secret_key not in response.text
+            assert internal_leak not in response.text
+
+            if idx == 0:
+                assert data["ok"] is True
+                assert data["error"] is None
+                assert len(seen_bodies) == 1
+                assert seen_bodies[0].get("max_completion_tokens") == 32
+                assert "max_tokens" not in seen_bodies[0]
+            elif idx == 1:
+                assert data["ok"] is True
+                assert data["error"] is None
+                assert len(seen_bodies) == 2
+                assert seen_bodies[0].get("max_completion_tokens") == 32
+                assert "max_tokens" not in seen_bodies[0]
+                assert seen_bodies[1].get("max_tokens") == 16
+                assert "max_completion_tokens" not in seen_bodies[1]
+            else:
+                assert data["ok"] is False
+                assert "400" in (data["error"] or "")
+                assert len(seen_bodies) == 2
+                assert seen_bodies[0].get("max_completion_tokens") == 32
+                assert "max_tokens" not in seen_bodies[0]
+                assert seen_bodies[1].get("max_tokens") == 16
+                assert "max_completion_tokens" not in seen_bodies[1]
+        finally:
+            http.shutdown()
+            http.server_close()
+            thread.join()
+

@@ -403,8 +403,10 @@ async def test_context_length_code_maps_to_capacity_error() -> None:
 
 
 @pytest.mark.parametrize("document", [
-    {"error": {"message": "context_length_exceeded: maximum context length exceeded"}},
+    {"error": {"message": "context_length_exceeded"}},
+    {"error": {"message": "Unsupported parameter: max_completion_tokens"}},
     {"error": {"code": "invalid_request", "message": "context_length_exceeded"}},
+    {"error": {"code": "invalid_request", "message": "context_length_exceeded: maximum context length exceeded"}},
     {"error": {"type": "context_length_exceeded"}},
     {"code": "context_length_exceeded"},
     {"error": "context_length_exceeded"},
@@ -1016,5 +1018,151 @@ async def test_strict_json_schema_is_cached_across_openai_requests(monkeypatch: 
     assert "mutated_key" not in fresh_copy["properties"]
 
 
+@pytest.mark.parametrize(
+    ("status_code", "response_kwargs"),
+    [
+        pytest.param(413, {"text": f"413 Payload Too Large ({API_KEY})"}, id="413-text"),
+        pytest.param(413, {"json": {"error": {"message": "Request entity too large"}}}, id="413-json"),
+        pytest.param(400, {"json": {"error": {"code": "context_overflow", "message": "Overflow"}}}, id="code-context-overflow"),
+        pytest.param(400, {"json": {"error": {"code": "string_above_max_length", "message": "Too long"}}}, id="code-string-above-max-length"),
+        pytest.param(
+            400,
+            {"json": {"error": {"message": "This model's Maximum Context Length is 128000 tokens."}}},
+            id="msg-maximum-context-length",
+        ),
+        pytest.param(
+            400,
+            {"json": {"error": {"code": None, "message": "Prompt is too long: 210000 tokens > 200000 maximum"}}},
+            id="msg-prompt-is-too-long",
+        ),
+        pytest.param(
+            400,
+            {"json": {"error": {"type": "invalid_request_error", "message": "Input tokens exceed the configured limit"}}},
+            id="msg-input-tokens-exceed",
+        ),
+        pytest.param(
+            400,
+            {"json": {"error": {"message": f"Request exceeds model Context Window ({API_KEY})"}}},
+            id="msg-context-window",
+        ),
+    ],
+)
+async def test_openai_client_maps_413_and_gateway_400_overflow_to_context_capacity_error(
+    status_code: int, response_kwargs: dict[str, Any]
+) -> None:
+    context = CallContext(
+        str(uuid4()),
+        "translation_unit",
+        "scope",
+        ("target",),
+        str(uuid4()),
+        0,
+        "test-model",
+        "a" * 64,
+        root_id=str(uuid4()),
+        policy_version="translation-context-v2",
+    )
+    request = replace(
+        LLMRequest.for_translation(instructions="Переводи", input_text="b1: text"),
+        call_context=context,
+    )
+    client = client_over(lambda req: httpx.Response(status_code, **response_kwargs))
+    try:
+        with pytest.raises(LLMContextCapacityError) as caught:
+            await client.generate(request)
+        assert isinstance(caught.value, LLMProviderError)
+        assert caught.value.provider == settings().provider
+        assert caught.value.model == "test-model"
+        assert caught.value.call_context == context
+        assert caught.value.__cause__ is None
+        assert API_KEY not in str(caught.value)
+    finally:
+        await client.aclose()
 
+
+async def test_openai_client_extracts_cached_and_reasoning_tokens() -> None:
+    from linguary.domain.errors import LLMCallLogError
+    from linguary.domain.llm_log import TokenPricing
+
+    for bad_kwargs in ({"cached_prompt_tokens": -1}, {"reasoning_tokens": -1}):
+        with pytest.raises(LLMCallLogError):
+            TokenUsage(prompt_tokens=100, completion_tokens=50, **bad_kwargs)
+
+    zero_usage = TokenUsage(
+        prompt_tokens=100,
+        completion_tokens=50,
+        cached_prompt_tokens=0,
+        reasoning_tokens=0,
+    )
+    assert zero_usage.total_tokens == 150
+
+    pricing = TokenPricing(input_per_mtok=Decimal("2.00"), output_per_mtok=Decimal("8.00"))
+    nested_doc = completion(
+        as_content(translation_payload()),
+        usage={
+            "prompt_tokens": 1000,
+            "completion_tokens": 400,
+            "prompt_tokens_details": {"cached_tokens": 600},
+            "completion_tokens_details": {"reasoning_tokens": 250},
+        },
+    )
+    client = client_over(responding(nested_doc))
+    try:
+        res = await client.generate(
+            LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
+        )
+        assert res.usage == TokenUsage(
+            prompt_tokens=1000,
+            completion_tokens=400,
+            cached_prompt_tokens=600,
+            reasoning_tokens=250,
+        )
+        assert res.usage.total_tokens == 1400
+        assert pricing.cost_of(res.usage) == (
+            Decimal("2.00") * 1000 + Decimal("8.00") * 400
+        ) / Decimal(1_000_000)
+    finally:
+        await client.aclose()
+
+    fallback_doc = completion(
+        as_content(translation_payload()),
+        usage={
+            "prompt_tokens": 500,
+            "completion_tokens": 120,
+            "cached_tokens": 300,
+            "reasoning_tokens": 45,
+        },
+    )
+    fallback_client = client_over(responding(fallback_doc))
+    try:
+        fallback_res = await fallback_client.generate(
+            LLMRequest.for_translation(instructions="Переводи", input_text="block-1: text")
+        )
+        assert fallback_res.usage == TokenUsage(
+            prompt_tokens=500,
+            completion_tokens=120,
+            cached_prompt_tokens=300,
+            reasoning_tokens=45,
+        )
+        assert fallback_res.usage.total_tokens == 620
+    finally:
+        await fallback_client.aclose()
+
+    err = await format_error_from(
+        completion(
+            schema_error_content(),
+            usage={
+                "prompt_tokens": 800,
+                "completion_tokens": 200,
+                "prompt_tokens_details": {"cached_tokens": 400},
+                "completion_tokens_details": {"reasoning_tokens": 90},
+            },
+        )
+    )
+    assert err.usage == TokenUsage(
+        prompt_tokens=800,
+        completion_tokens=200,
+        cached_prompt_tokens=400,
+        reasoning_tokens=90,
+    )
 

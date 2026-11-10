@@ -33,9 +33,16 @@ class TokenUsage:
 
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    cached_prompt_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        for name in ("prompt_tokens", "completion_tokens"):
+        for name in (
+            "prompt_tokens",
+            "completion_tokens",
+            "cached_prompt_tokens",
+            "reasoning_tokens",
+        ):
             value = getattr(self, name)
             if value is not None and value < 0:
                 raise LLMCallLogError(f"количество токенов не может быть отрицательным: {name}")
