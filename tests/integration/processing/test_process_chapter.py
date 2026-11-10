@@ -471,3 +471,194 @@ async def test_parallel_roots_isolate_contextvars_and_preserve_recovery_invarian
     note_ids = [note.id for note in all_notes]
     assert len(set(note_ids)) == 3
     assert all(nid.startswith("ln-ch01-") for nid in note_ids)
+
+
+async def test_process_unit_skips_llm_for_byr_covered_or_foreign_anchor_read_as_is_and_attaches_evidence(
+    unit_of_work: SqlAlchemyUnitOfWork,
+) -> None:
+    from dataclasses import replace
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.use_cases.export_book import _validate_content_plans
+    from linguary.domain import BeforeYouReadEntry
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        Difficulty,
+        HelpEvidence,
+        RequiredPoint,
+        SourceAnchor,
+        artifact_key,
+    )
+
+    ch1_texts = (
+        "Break a leg on the big stage tonight.",
+        "Good morning to everyone in the hall.",
+        "Quiet footsteps crossed the wooden floor.",
+        "Sunlight warmed the narrow window ledge.",
+        "Nobody spoke while the curtain rose.",
+        f"{SOURCE_TEXT} They carried on quietly.",
+    )
+    ch2_texts = ("Another chapter paragraph that stays out of section-1 source_texts.",)
+    scenario = store_processing_book(
+        unit_of_work,
+        chapters=(ch1_texts, ch2_texts),
+        treatments={
+            "section-1": (
+                BlockTreatment.READ_AS_IS,
+                BlockTreatment.READ_AS_IS,
+                BlockTreatment.READ_AS_IS,
+                BlockTreatment.READ_AS_IS,
+                BlockTreatment.READ_AS_IS,
+                BlockTreatment.TRANSLATE,
+            ),
+            "section-2": (BlockTreatment.READ_AS_IS,),
+        },
+    )
+    section_1 = scenario.section(0)
+    b1, b2, b3, b4, b5, b6 = section_1.ordered_blocks
+
+    byr_entry = BeforeYouReadEntry(
+        expression="Break a leg",
+        explanation="Театральное пожелание ни пуха ни пера перед выходом на сцену.",
+    )
+    byr_key = artifact_key(
+        "before_you_read.explanation",
+        b1.id,
+        {"expression": byr_entry.expression, "explanation": byr_entry.explanation},
+    )
+    byr_ev_1 = HelpEvidence(
+        difficulty_id="d-byr",
+        point_id="p1",
+        artifact_kind="before_you_read.explanation",
+        block_id=b1.id,
+        artifact_key=byr_key,
+        body_excerpt="Театральное пожелание",
+    )
+    byr_ev_2 = HelpEvidence(
+        difficulty_id="d-byr",
+        point_id="p2",
+        artifact_kind="before_you_read.explanation",
+        block_id=b1.id,
+        artifact_key=byr_key,
+        body_excerpt="перед выходом на сцену",
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id="d-byr",
+                anchors=(SourceAnchor(block_id=b1.id, start=0, end=11, quote="Break a leg"),),
+                owner_block_id=b1.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(
+                    RequiredPoint(id="p1", description="idiomatic wish"),
+                    RequiredPoint(id="p2", description="stage context"),
+                ),
+            ),
+            Difficulty(
+                id="d-foreign",
+                anchors=(
+                    SourceAnchor(block_id=b2.id, start=0, end=12, quote="Good morning"),
+                    SourceAnchor(
+                        block_id=b6.id,
+                        start=len(SOURCE_TEXT) + 6,
+                        end=len(SOURCE_TEXT) + 16,
+                        quote="carried on",
+                    ),
+                ),
+                owner_block_id=b6.id,
+                kind="semantic_relation",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p1", description="phrasal continuity"),),
+            ),
+        ),
+        before_you_read_evidence=(byr_ev_1, byr_ev_2),
+    )
+
+    with unit_of_work.transaction() as tx:
+        existing_analysis = tx.analyses.get_for_section(BOOK_ID, "section-1")
+        assert existing_analysis is not None
+        updated_analysis = replace(
+            existing_analysis,
+            before_you_read=(byr_entry,),
+            content_plan=content_plan,
+        )
+        tx.analyses.save(BOOK_ID, updated_analysis)
+
+    # Only b6 (unit 6) should invoke the LLM; b1..b5 (including BYR-covered b1 and foreign-anchor b2) must skip LLM.
+    client = FakeLLMClient.replying(
+        [
+            translation_reply(
+                [
+                    block_reply(
+                        "b1",
+                        treatment=BlockTreatment.TRANSLATE,
+                        translated_text=f"{TRANSLATED_TEXT} Они спокойно продолжали.",
+                    )
+                ],
+                notes=[
+                    note_reply(
+                        "b1",
+                        original_excerpt="carried on",
+                        translated_excerpt="продолжали",
+                        note="Фразовый глагол означает продолжение прежнего действия.",
+                    )
+                ],
+            )
+        ]
+    )
+    process, _ = make_process_chapter(
+        unit_of_work,
+        client,
+        max_unit_source_chars=45,
+    )
+    process._context_builder = ContextBuilder(content_plan_profile="content-plan-v3")
+    with unit_of_work.transaction() as tx:
+        conditions = tx.work.latest_conditions(BOOK_ID)
+        assert conditions is not None
+
+    loaded_work, roots = process.prepare(command("section-1"))
+    assert len(roots) == 6
+    assert set(loaded_work.source_texts) == {b.id for b in section_1.blocks}
+
+    result = await process(command("section-1"))
+
+    assert result.units == 6
+    assert result.processed_units == 6
+    assert result.saved_blocks == 6
+    assert not result.discarded
+    assert client.call_count == 1
+
+    stored = {item.block_id: item for item in stored_results(unit_of_work, scenario.run_id)}
+    assert set(stored) == {b.id for b in section_1.ordered_blocks}
+    assert stored[b1.id].treatment is BlockTreatment.READ_AS_IS
+    assert stored[b1.id].content_evidence.plan_sha256 == content_plan.sha256
+    assert stored[b1.id].content_evidence.evidence == content_plan.before_you_read_evidence
+    assert stored[b2.id].treatment is BlockTreatment.READ_AS_IS
+    assert stored[b2.id].content_evidence.plan_sha256 == content_plan.sha256
+    assert stored[b2.id].content_evidence.evidence == ()
+    assert len(stored[b6.id].language_notes) == 1
+
+    _validate_content_plans(
+        scenario.document,
+        (updated_analysis,),
+        tuple(stored[b.id] for b in section_1.ordered_blocks),
+        english_help=False,
+        validators_version=3,
+        reader_level="b1",
+    )
+
+    # When pronunciation help is enabled, a pure/BYR-covered READ_AS_IS unit still calls the LLM.
+    section_2 = scenario.section(1)
+    pron_client = FakeLLMClient.replying(
+        [translation_reply([block_reply("b1", treatment=BlockTreatment.READ_AS_IS)])]
+    )
+    pron_process, _ = make_process_chapter(unit_of_work, pron_client)
+    pron_process._call._pronunciation_enabled = True
+    pron_result = await pron_process(command(section_2.id))
+    assert pron_result.saved_blocks == 1
+    assert pron_client.call_count == 1
+

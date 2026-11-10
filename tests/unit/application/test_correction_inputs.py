@@ -2028,6 +2028,283 @@ def test_quality_projection_reuses_preloaded_inputs_in_correction_coverage_compl
     assert counts == {"latest_conditions": 1, "result_bindings": 1, "list_for_run": 0}
 
 
+def test_is_pure_read_as_is_skips_english_help_and_byr_covered_blocks():
+    from linguary.application.correction import _is_pure_read_as_is, unchecked_blocks
+    from linguary.domain import (
+        BeforeYouReadEntry,
+        ChapterAnalysis,
+        GlossaryHint,
+        LanguageNote,
+        TreatmentPlan,
+    )
+    from linguary.domain.content_plan import (
+        ContentPlan,
+        Difficulty,
+        HelpEvidence,
+        RequiredPoint,
+        SourceAnchor,
+        artifact_key,
+    )
+    from linguary.domain.learning import FragmentAssistance
+
+    class FakeTx:
+        class work:
+            @staticmethod
+            def correction_checks(run_id, section_id):
+                return ()
+
+    # 1. english_help=True: READ_AS_IS without translation/hints/notes is pure even with fragment_assistances & difficulties
+    eh_section = make_analysis_section(
+        texts=(
+            "Echo. The cat sat.",
+            "Second original block with note.",
+            "Third original block with hint.",
+            "Fourth original block with translation.",
+            "Fifth translated block.",
+        )
+    )
+    eh_doc = make_analysis_document((eh_section,))
+    eh_b1, eh_b2, eh_b3, eh_b4, eh_b5 = eh_section.blocks
+    eh_anchor = SourceAnchor(block_id=eh_b1.id, start=0, end=4, quote="Echo")
+    eh_plan = TreatmentPlan.of_treatments(
+        eh_section.id,
+        (
+            (eh_b1.id, BlockTreatment.READ_AS_IS),
+            (eh_b2.id, BlockTreatment.READ_AS_IS),
+            (eh_b3.id, BlockTreatment.READ_AS_IS),
+            (eh_b4.id, BlockTreatment.READ_AS_IS),
+            (eh_b5.id, BlockTreatment.TRANSLATE),
+        ),
+    )
+    eh_content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id="d-eh",
+                anchors=(eh_anchor,),
+                owner_block_id=eh_b1.id,
+                kind="vocabulary",
+                priority="critical",
+                help_kind="lexical_hint",
+                required_points=(RequiredPoint(id="p1", description="meaning"),),
+            ),
+        ),
+    )
+    eh_analysis = ChapterAnalysis.create(
+        id="analysis-eh",
+        section_id=eh_section.id,
+        treatment_plan=eh_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=tuple(b.id for b in eh_section.blocks),
+        content_plan=eh_content_plan,
+    )
+    eh_results = {
+        eh_b1.id: BlockProcessingResult(
+            block_id=eh_b1.id,
+            treatment=BlockTreatment.READ_AS_IS,
+            fragment_assistances=(
+                FragmentAssistance(
+                    difficulty_id="d-eh",
+                    point_ids=("p1",),
+                    kind="lexical_hint",
+                    text="a returning sound",
+                    anchors=(eh_anchor,),
+                ),
+            ),
+        ),
+        eh_b2.id: BlockProcessingResult(
+            block_id=eh_b2.id,
+            treatment=BlockTreatment.READ_AS_IS,
+            language_notes=(
+                LanguageNote(
+                    id="ln-ch01-001",
+                    block_id=eh_b2.id,
+                    original_excerpt="Second",
+                    note="Заметка",
+                ),
+            ),
+        ),
+        eh_b3.id: BlockProcessingResult(
+            block_id=eh_b3.id,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint(original="Third", translation="Третий"),),
+        ),
+        eh_b4.id: BlockProcessingResult(
+            block_id=eh_b4.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Четвёртый блок.",
+        ),
+        eh_b5.id: BlockProcessingResult(
+            block_id=eh_b5.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Пятый блок.",
+        ),
+    }
+    eh_inputs = CorrectionInputs(
+        document=eh_doc,
+        section=eh_section,
+        analysis=eh_analysis,
+        run=SimpleNamespace(id="run-eh", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1, "english_help": True}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=eh_section.blocks,
+        results=eh_results,
+        bindings={b.id: None for b in eh_section.blocks},
+    )
+    assert _is_pure_read_as_is(eh_b1, eh_inputs) is True
+    assert _is_pure_read_as_is(eh_b2, eh_inputs) is False
+    assert _is_pure_read_as_is(eh_b3, eh_inputs) is False
+    assert _is_pure_read_as_is(eh_b4, eh_inputs) is False
+    assert _is_pure_read_as_is(eh_b5, eh_inputs) is False
+    assert unchecked_blocks(FakeTx(), eh_inputs) == (
+        eh_b2.id,
+        eh_b3.id,
+        eh_b4.id,
+        eh_b5.id,
+    )
+
+    # 2. english_help=False: BYR-covered owned difficulties and foreign-owner anchor overlaps are pure;
+    # partially/uncovered owned difficulties are not pure.
+    std_section = make_analysis_section(
+        texts=(
+            "Break a leg tonight.",
+            "Hello there, friend.",
+            "Spill the beans now.",
+            "They carried on talking.",
+        )
+    )
+    std_doc = make_analysis_document((std_section,))
+    b_byr, b_foreign, b_partial, b_trans = std_section.blocks
+    std_plan = TreatmentPlan.of_treatments(
+        std_section.id,
+        (
+            (b_byr.id, BlockTreatment.READ_AS_IS),
+            (b_foreign.id, BlockTreatment.READ_AS_IS),
+            (b_partial.id, BlockTreatment.READ_AS_IS),
+            (b_trans.id, BlockTreatment.TRANSLATE),
+        ),
+    )
+    byr_entry_1 = BeforeYouReadEntry(expression="Break a leg", explanation="Пожелание удачи перед выступлением.")
+    byr_entry_2 = BeforeYouReadEntry(expression="Spill the beans", explanation="Выдать секрет.")
+    key_b_byr = artifact_key(
+        "before_you_read.explanation",
+        b_byr.id,
+        {"expression": byr_entry_1.expression, "explanation": byr_entry_1.explanation},
+    )
+    key_b_partial = artifact_key(
+        "before_you_read.explanation",
+        b_partial.id,
+        {"expression": byr_entry_2.expression, "explanation": byr_entry_2.explanation},
+    )
+    std_content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id="d-byr",
+                anchors=(SourceAnchor(block_id=b_byr.id, start=0, end=11, quote="Break a leg"),),
+                owner_block_id=b_byr.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(
+                    RequiredPoint(id="p1", description="idiomatic meaning"),
+                    RequiredPoint(id="p2", description="theatre usage"),
+                ),
+            ),
+            Difficulty(
+                id="d-foreign",
+                anchors=(
+                    SourceAnchor(block_id=b_foreign.id, start=0, end=11, quote="Hello there"),
+                    SourceAnchor(block_id=b_trans.id, start=5, end=15, quote="carried on"),
+                ),
+                owner_block_id=b_trans.id,
+                kind="semantic_relation",
+                priority="useful",
+                help_kind="explanation",
+                required_points=(RequiredPoint(id="p1", description="continuity"),),
+            ),
+            Difficulty(
+                id="d-partial",
+                anchors=(SourceAnchor(block_id=b_partial.id, start=0, end=15, quote="Spill the beans"),),
+                owner_block_id=b_partial.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(
+                    RequiredPoint(id="p1", description="literal image"),
+                    RequiredPoint(id="p2", description="uncovered nuance"),
+                ),
+            ),
+        ),
+        before_you_read_evidence=(
+            HelpEvidence(
+                difficulty_id="d-byr",
+                point_id="p1",
+                artifact_kind="before_you_read.explanation",
+                block_id=b_byr.id,
+                artifact_key=key_b_byr,
+                body_excerpt="Пожелание удачи",
+            ),
+            HelpEvidence(
+                difficulty_id="d-byr",
+                point_id="p2",
+                artifact_kind="before_you_read.explanation",
+                block_id=b_byr.id,
+                artifact_key=key_b_byr,
+                body_excerpt="перед выступлением",
+            ),
+            HelpEvidence(
+                difficulty_id="d-partial",
+                point_id="p1",
+                artifact_kind="before_you_read.explanation",
+                block_id=b_partial.id,
+                artifact_key=key_b_partial,
+                body_excerpt="Выдать секрет",
+            ),
+        ),
+    )
+    std_analysis = ChapterAnalysis.create(
+        id="analysis-std",
+        section_id=std_section.id,
+        treatment_plan=std_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=tuple(b.id for b in std_section.blocks),
+        before_you_read=(byr_entry_1, byr_entry_2),
+        content_plan=std_content_plan,
+    )
+    std_results = {
+        b_byr.id: BlockProcessingResult(block_id=b_byr.id, treatment=BlockTreatment.READ_AS_IS),
+        b_foreign.id: BlockProcessingResult(block_id=b_foreign.id, treatment=BlockTreatment.READ_AS_IS),
+        b_partial.id: BlockProcessingResult(block_id=b_partial.id, treatment=BlockTreatment.READ_AS_IS),
+        b_trans.id: BlockProcessingResult(
+            block_id=b_trans.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Они продолжали разговаривать.",
+        ),
+    }
+    std_inputs = CorrectionInputs(
+        document=std_doc,
+        section=std_section,
+        analysis=std_analysis,
+        run=SimpleNamespace(id="run-std", glossary_snapshot=GlossarySnapshot()),
+        conditions=SimpleNamespace(payload={"schema_version": 1, "english_help": False}),
+        snapshot=SimpleNamespace(to_payload=lambda: {"model": "correction"}),
+        blocks=std_section.blocks,
+        results=std_results,
+        bindings={b.id: None for b in std_section.blocks},
+    )
+    assert _is_pure_read_as_is(b_byr, std_inputs) is True
+    assert _is_pure_read_as_is(b_foreign, std_inputs) is True
+    assert _is_pure_read_as_is(b_partial, std_inputs) is False
+    assert _is_pure_read_as_is(b_trans, std_inputs) is False
+    assert unchecked_blocks(FakeTx(), std_inputs) == (b_partial.id, b_trans.id)
+
+
+
 
 
 

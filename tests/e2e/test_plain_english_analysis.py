@@ -82,7 +82,6 @@ def test_english_lexical_analysis_processes_and_stores_without_byr(tmp_path, lev
         assert [(request.kind, request.contract_version) for request in client.requests] == [
             (LLMResponseKind.CHAPTER_ANALYSIS, 5),
             (LLMResponseKind.TRANSLATION_RESULT, 4),
-            (LLMResponseKind.CHAPTER_CORRECTION, 2),
         ]
         with app.unit_of_work.transaction() as tx:
             results = tx.results.list_for_run(processing_run.id)

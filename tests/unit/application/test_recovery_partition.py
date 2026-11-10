@@ -1626,4 +1626,216 @@ async def test_provider_truncated_skips_fallback_split_for_attempt_tracked_repo_
         engine.dispose()
 
 
+def test_recovery_historical_validation_uses_section_local_source_texts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    import linguary.application.validators.content_plan as cp_validators
+    from processing_fakes import BOOK_ID, TARGET_LANGUAGE, make_blocks, make_validator
+    from linguary.application.recovery import Recovery
+    from linguary.application.use_cases.process_chapter import ProcessChapter, ProcessChapterCommand
+    from linguary.domain import (
+        BeforeYouReadEntry,
+        BlockProcessingResult,
+        BlockTreatment,
+        BookMetadata,
+        CanonicalDocument,
+        ChapterAnalysis,
+        DocumentSection,
+        GlossarySnapshot,
+        TranslationUnit,
+        TreatmentPlan,
+    )
+    from linguary.domain.content_plan import (
+        ContentEvidence,
+        ContentPlan,
+        HelpEvidence,
+        artifact_key,
+    )
+
+    ch1_blocks = make_blocks(2)
+    ch2_blocks = (
+        replace(
+            make_blocks(1)[0],
+            id="foreign-chapter-block",
+            section_id="section-2",
+            text="Foreign chapter text that must not enter section-1 source_texts.",
+        ),
+    )
+    section_1 = DocumentSection(
+        id="section-1",
+        document_id=BOOK_ID,
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=ch1_blocks,
+    )
+    section_2 = DocumentSection(
+        id="section-2",
+        document_id=BOOK_ID,
+        title="Chapter 2",
+        order=1,
+        source_resource_path="ch2.xhtml",
+        blocks=ch2_blocks,
+    )
+    document = CanonicalDocument(
+        id=BOOK_ID,
+        metadata=BookMetadata(title="Book", authors=("Author",)),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=(section_1, section_2),
+    )
+
+    b1, b2 = ch1_blocks
+    byr_entry = BeforeYouReadEntry(
+        expression=b1.text[:5],
+        explanation="Пояснение к первому блоку.",
+    )
+    byr_key = artifact_key(
+        "before_you_read.explanation",
+        b1.id,
+        {"expression": byr_entry.expression, "explanation": byr_entry.explanation},
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                id="d-hist",
+                anchors=(SourceAnchor(b1.id, 0, 5, b1.text[:5]),),
+                owner_block_id=b1.id,
+                kind="idiom",
+                priority="critical",
+                help_kind="explanation",
+                required_points=(RequiredPoint("p1", "meaning"),),
+            ),
+        ),
+        before_you_read_evidence=(
+            HelpEvidence(
+                difficulty_id="d-hist",
+                point_id="p1",
+                artifact_kind="before_you_read.explanation",
+                block_id=b1.id,
+                artifact_key=byr_key,
+                body_excerpt="Пояснение",
+            ),
+        ),
+    )
+    treatment_plan = TreatmentPlan.of_treatments(
+        section_1.id,
+        ((b1.id, BlockTreatment.READ_AS_IS), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis_1 = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section_1.id,
+        treatment_plan=treatment_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+        before_you_read=(byr_entry,),
+        content_plan=content_plan,
+    )
+    saved_b1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.READ_AS_IS,
+        content_evidence=ContentEvidence(
+            content_plan.sha256,
+            content_plan.before_you_read_evidence,
+            version=3,
+        ),
+    )
+    conditions = SimpleNamespace(
+        id="00000000-0000-0000-0000-000000000001",
+        payload={
+            "schema_version": 1,
+            "reader_level": "a2",
+            "english_help": False,
+            "versions": {"validators": 4},
+            "checks": {"language_notes_per_chapter": 4},
+        },
+    )
+
+    load_tx = SimpleNamespace(
+        documents=SimpleNamespace(get=lambda _bid: document),
+        analyses=SimpleNamespace(
+            list_for_book=lambda _bid: (analysis_1,),
+            get_for_section=lambda _bid, _sid: analysis_1,
+        ),
+        runs=SimpleNamespace(
+            active_for_book=lambda _bid: SimpleNamespace(
+                id="run-1",
+                glossary_snapshot=GlossarySnapshot(),
+            )
+        ),
+        results=SimpleNamespace(list_for_section=lambda _rid, _sid: (saved_b1,)),
+        work=SimpleNamespace(latest_conditions=lambda _bid: conditions),
+    )
+    pc = ProcessChapter.__new__(ProcessChapter)
+    chapter_work = pc._load(
+        ProcessChapterCommand(book_id=BOOK_ID, section_id=section_1.id),
+        transaction=load_tx,
+    )
+    assert dict(chapter_work.source_texts) == {b1.id: b1.text, b2.id: b2.text}
+    assert "foreign-chapter-block" not in chapter_work.source_texts
+
+    captured_source_texts: list[dict[str, str]] = []
+    orig_validate_saved = cp_validators.validate_saved_content_coverage
+
+    def spy_validate_saved(*args, **kwargs):
+        captured_source_texts.append(dict(kwargs["source_texts"]))
+        return orig_validate_saved(*args, **kwargs)
+
+    monkeypatch.setattr(cp_validators, "validate_saved_content_coverage", spy_validate_saved)
+
+    guarded_doc = SimpleNamespace(
+        id=document.id,
+        target_language=document.target_language,
+        blocks=lambda: (_ for _ in ()).throw(
+            AssertionError("document.blocks() must not be called in _validate_historical")
+        ),
+    )
+    guarded_work = replace(chapter_work, document=guarded_doc)
+
+    roots, scopes = [], []
+
+    class WorkStore:
+        def latest_conditions(self, _book_id):
+            return conditions
+
+        def add_root(self, root):
+            roots.append(root)
+
+        def list_scopes(self, root_id):
+            return tuple(s for s in scopes if s.root_id == root_id)
+
+        def add_scope(self, scope):
+            scopes.append(scope)
+
+    class ResultsStore:
+        def get(self, _run_id, block_id):
+            return saved_b1 if block_id == b1.id else None
+
+    class FakeUow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=WorkStore(), results=ResultsStore())
+
+    units = (
+        TranslationUnit.of_blocks(id="u-1", blocks=(b1,), plan=treatment_plan),
+        TranslationUnit.of_blocks(id="u-2", blocks=(b2,), plan=treatment_plan),
+    )
+    Recovery(FakeUow()).prepare_roots(
+        guarded_work,
+        units,
+        max_source_chars=1000,
+        validator=make_validator(),
+    )
+
+    assert captured_source_texts == [{b1.id: b1.text, b2.id: b2.text}]
+    assert len(roots) == 2
+    assert tuple(roots[0].manifest["historical_coverage"]) == (b1.id,)
+
+
+
 

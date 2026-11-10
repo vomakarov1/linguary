@@ -408,14 +408,34 @@ def _is_pure_read_as_is(block: DocumentBlock, inputs: CorrectionInputs) -> bool:
         return False
     result = inputs.results.get(block.id)
     if result is not None:
-        if result.language_notes:
+        if (
+            result.treatment != BlockTreatment.READ_AS_IS
+            or result.translated_text
+            or result.glossary_hints
+            or result.language_notes
+        ):
             return False
-        if getattr(result, "fragment_assistances", ()):
-            return False
+    conditions = getattr(inputs, "conditions", None)
+    payload = getattr(conditions, "payload", None)
+    english_help = bool(
+        (payload.get("english_help") if isinstance(payload, Mapping) else None)
+        or getattr(conditions, "english_help", False)
+    )
+    if english_help:
+        return True
+    if result is not None and getattr(result, "fragment_assistances", ()):
+        return False
     if inputs.analysis is not None and inputs.analysis.content_plan is not None:
         plan = inputs.analysis.content_plan
+        covered_points = {
+            (e.difficulty_id, e.point_id)
+            for e in plan.before_you_read_evidence
+        }
         for d in plan.difficulties:
-            if d.owner_block_id == block.id or any(a.block_id == block.id for a in d.anchors):
+            if d.owner_block_id == block.id and (
+                not d.required_points
+                or any((d.id, p.id) not in covered_points for p in d.required_points)
+            ):
                 return False
     return True
 

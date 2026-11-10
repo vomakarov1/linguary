@@ -265,8 +265,25 @@ class Recovery:
             if validators_version == 4:
                 if conditions.payload.get('reader_level') != 'a2':
                     raise RecoveryError('conditions_unavailable')
+                section = getattr(work, 'section', None)
+                if section is not None:
+                    source_texts = {block.id: block.text for block in section.blocks}
+                elif getattr(work, 'source_texts', None):
+                    source_texts = dict(work.source_texts)
+                else:
+                    doc_sections = getattr(getattr(work, 'document', None), 'sections', None)
+                    matched_section = (
+                        next((s for s in doc_sections if s.id == work.analysis.section_id), None)
+                        if doc_sections is not None
+                        else None
+                    )
+                    source_texts = (
+                        {block.id: block.text for block in matched_section.blocks}
+                        if matched_section is not None
+                        else {b_id: b.text for b_id, b in blocks.items()}
+                    )
                 validate_saved_content_coverage(plan, stored, work.analysis.before_you_read,
-                    owner_block_ids=block_ids, source_texts={block.id: block.text for block in work.document.blocks()},
+                    owner_block_ids=block_ids, source_texts=source_texts,
                     validators_version=validators_version, english_help=conditions.payload.get('english_help', False))
             else:
                 evidence = tuple(item for result in stored for item in getattr(result.content_evidence, 'evidence', ()))

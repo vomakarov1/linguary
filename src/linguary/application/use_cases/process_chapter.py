@@ -268,12 +268,37 @@ class ProcessChapter:
         )
         plan = work.analysis.content_plan
         unit_block_ids = set(unit.block_ids)
-        has_difficulties = bool(plan and any(
-            d.owner_block_id in unit_block_ids
-            or any(a.block_id in unit_block_ids for a in d.anchors)
-            for d in plan.difficulties
-        ))
-        if all_read_as_is and not has_difficulties and not work.pronunciation_help_enabled:
+        covered_points = (
+            set()
+            if plan is None or work.section.is_notes_only
+            else {(e.difficulty_id, e.point_id) for e in plan.before_you_read_evidence}
+        )
+        has_uncovered_owned_difficulties = bool(
+            plan
+            and any(
+                d.owner_block_id in unit_block_ids
+                and (
+                    not d.required_points
+                    or any((d.id, p.id) not in covered_points for p in d.required_points)
+                )
+                for d in plan.difficulties
+            )
+        )
+        if (
+            all_read_as_is
+            and not has_uncovered_owned_difficulties
+            and not work.pronunciation_help_enabled
+        ):
+            byr_by_block = (
+                {
+                    b_id: tuple(
+                        e for e in plan.before_you_read_evidence if e.block_id == b_id
+                    )
+                    for b_id in unit.block_ids
+                }
+                if plan is not None and not work.section.is_notes_only
+                else {}
+            )
             results = tuple(
                 BlockProcessingResult(
                     block_id=b_id,
@@ -281,7 +306,15 @@ class ProcessChapter:
                     translated_text=None,
                     glossary_hints=(),
                     language_notes=(),
-                    content_evidence=ContentEvidence(plan.sha256, (), version=plan.version) if plan else (),
+                    content_evidence=(
+                        ContentEvidence(
+                            plan.sha256,
+                            byr_by_block.get(b_id, ()),
+                            version=plan.version,
+                        )
+                        if plan
+                        else ()
+                    ),
                 )
                 for b_id in unit.block_ids
             )
@@ -363,8 +396,7 @@ class ProcessChapter:
                 input_text=context.request.input_text + '\n\nКонтекст исходной сцены; эти строки не являются дополнительными целями изменения:\n' + readonly))
         source_texts = work.source_texts or {
             block.id: block.text
-            for section in work.document.sections
-            for block in section.blocks
+            for block in work.section.blocks
         }
         call = await self._call.request(
             context, unit=unit, target_language=work.target_language, note_ids=note_ids,
@@ -498,13 +530,14 @@ class ProcessChapter:
                 if work_repo is not None
                 else None
             )
+            call = getattr(self, "_call", None)
             pronunciation_help_enabled = bool(
-                conditions and conditions.payload.get("pronunciation_help_enabled")
+                (conditions and conditions.payload.get("pronunciation_help_enabled"))
+                or getattr(call, "_pronunciation_enabled", False)
             )
             source_texts = {
                 block.id: block.text
-                for doc_section in document.sections
-                for block in doc_section.blocks
+                for block in section.blocks
             }
         section_block_ids = {block.id for block in section.ordered_blocks}
         return _ChapterWork(
