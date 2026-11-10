@@ -36,12 +36,19 @@ EXPECTED_INDEXES: dict[str, dict[str, tuple[str, ...]]] = {
     "llm_attempts": {
         "ix_llm_attempts_scope_id": ("scope_id",),
         "ix_llm_attempts_task_id": ("task_id",),
+        "ix_llm_attempts_book_id": ("book_id",),
     },
     "work_bindings": {
         "ix_work_bindings_book_id_entity_kind": ("book_id", "entity_kind"),
     },
     "artifact_revisions": {
         "ix_artifact_revisions_book_id_run_id": ("book_id", "run_id"),
+    },
+    "correction_candidates": {
+        "ix_correction_candidates_book_id": ("book_id",),
+    },
+    "processing_runs": {
+        "ix_processing_runs_book_id": ("book_id",),
     },
 }
 
@@ -72,6 +79,22 @@ def test_work_state_tables_define_expected_indexes() -> None:
     spec.loader.exec_module(migration)
     assert migration.revision == "0014"
     assert migration.down_revision == "0013"
+
+    migration_0015_path = (
+        Path(__file__).resolve().parents[3]
+        / "alembic"
+        / "versions"
+        / "0015_book_id_cascade_indexes.py"
+    )
+    assert (
+        migration_0015_path.exists()
+    ), "Миграция 0015_book_id_cascade_indexes.py должна существовать"
+    spec_0015 = importlib.util.spec_from_file_location("migration_0015", migration_0015_path)
+    assert spec_0015 is not None and spec_0015.loader is not None
+    migration_0015 = importlib.util.module_from_spec(spec_0015)
+    spec_0015.loader.exec_module(migration_0015)
+    assert migration_0015.revision == "0015"
+    assert migration_0015.down_revision == "0014"
 
 
 def test_unit_of_work_retries_transient_sqlite_locks(monkeypatch: pytest.MonkeyPatch) -> None:

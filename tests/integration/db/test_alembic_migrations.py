@@ -54,12 +54,40 @@ def test_upgrade_creates_schema_on_empty_database(
     )
 
 
-def test_migrated_schema_matches_models(engine: Engine) -> None:
+CASCADE_BOOK_ID_INDEXES = (
+    ("correction_candidates", "ix_correction_candidates_book_id"),
+    ("llm_attempts", "ix_llm_attempts_book_id"),
+    ("processing_runs", "ix_processing_runs_book_id"),
+)
+
+
+def test_migrated_schema_matches_models(alembic_config: Config, engine: Engine) -> None:
     """Schema after migration matches ORM models: no discrepancies."""
+    for table, index_name in CASCADE_BOOK_ID_INDEXES:
+        names = {index["name"] for index in inspect(engine).get_indexes(table)}
+        assert index_name in names, f"в таблице {table} нет индекса {index_name}: {sorted(names)}"
+
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
         differences = compare_metadata(context, Base.metadata)
     assert not differences, f"схема разошлась с моделями: {differences}"
+
+    command.downgrade(alembic_config, "0014")
+    for table, index_name in CASCADE_BOOK_ID_INDEXES:
+        names = {index["name"] for index in inspect(engine).get_indexes(table)}
+        assert (
+            index_name not in names
+        ), f"после отката 0014 в таблице {table} остался индекс {index_name}"
+
+    command.upgrade(alembic_config, "head")
+    for table, index_name in CASCADE_BOOK_ID_INDEXES:
+        names = {index["name"] for index in inspect(engine).get_indexes(table)}
+        assert index_name in names, f"в таблице {table} нет индекса {index_name}: {sorted(names)}"
+
+    with engine.connect() as connection:
+        context = MigrationContext.configure(connection)
+        differences = compare_metadata(context, Base.metadata)
+    assert not differences, f"схема разошлась с моделями после повтора 0015: {differences}"
 
 
 def test_downgrade_removes_schema(alembic_config: Config, engine: Engine) -> None:
@@ -97,6 +125,17 @@ def test_downgrade_removes_schema(alembic_config: Config, engine: Engine) -> Non
         ),
         pytest.param(
             "result_warnings", "ix_result_warnings_run_id_block_id", id="warnings-run-block"
+        ),
+        pytest.param(
+            "correction_candidates",
+            "ix_correction_candidates_book_id",
+            id="candidates-book-id",
+        ),
+        pytest.param(
+            "llm_attempts", "ix_llm_attempts_book_id", id="llm-attempts-book-id"
+        ),
+        pytest.param(
+            "processing_runs", "ix_processing_runs_book_id", id="runs-book-id"
         ),
     ],
 )

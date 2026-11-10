@@ -313,6 +313,7 @@ class ProcessingRunRow(Base):
             unique=True,
             sqlite_where=text(ACTIVE_RUN_CONDITION),
         ),
+        Index("ix_processing_runs_book_id", "book_id"),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -357,6 +358,7 @@ class CorrectionCandidateRow(Base):
     __table_args__ = (
         UniqueConstraint('run_id', 'block_id', 'input_generation'),
         Index('ix_correction_candidates_run_section_state', 'run_id', 'section_id', 'state'),
+        Index("ix_correction_candidates_book_id", "book_id"),
     )
 
     candidate_id: Mapped[str] = mapped_column(String(255), primary_key=True)
@@ -641,6 +643,7 @@ class LLMAttemptRow(Base):
         CheckConstraint("ordinal >= 0", name="ordinal_nonnegative"),
         Index('ix_llm_attempts_scope_id', 'scope_id'),
         Index('ix_llm_attempts_task_id', 'task_id'),
+        Index("ix_llm_attempts_book_id", "book_id"),
     )
     id: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     book_id: Mapped[str] = mapped_column(String, ForeignKey('books.id', ondelete="CASCADE", deferrable=True, initially="DEFERRED"), nullable=False)
