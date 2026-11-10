@@ -243,3 +243,70 @@ async def test_correction_runtime_resolver_no_race_on_stale_close_and_resets_con
     await resolver.aclose()
     assert all(client.closed == 1 for client in created_clients)
 
+
+@pytest.mark.asyncio
+async def test_runtime_resolvers_lease_and_snapshot_use_read_transaction() -> None:
+    settings = _make_settings("sk-corr-read-tx")
+    book = SimpleNamespace(source_language="en", target_language="ru")
+    conditions = BookConditions(
+        id=str(uuid4()),
+        book_id="book-1",
+        revision=1,
+        payload=conditions_payload(book, settings, 1, "content-plan-v3"),
+        created_at=datetime.now(UTC),
+    )
+    snapshot = correction_snapshot(settings)
+    run_id = "run-1"
+    run = SimpleNamespace(id=run_id, book_id="book-1", status=ProcessingRunStatus.ACTIVE)
+    binding = {
+        "book_id": "book-1",
+        "conditions_id": conditions.id,
+        "payload_json": {"schema_version": 1, "correction": snapshot.to_payload()},
+    }
+    read_calls = 0
+
+    class _Runs:
+        def get(self, target_run_id: str):
+            return run if target_run_id == run_id else None
+
+    class _Work:
+        def get_binding(self, kind: str, entity_id: str):
+            if kind == "run" and entity_id == run_id:
+                return binding
+            return None
+
+    class _ReadOnlyUoW:
+        @contextmanager
+        def transaction(self):
+            raise AssertionError("write transaction() must not be opened for read-only snapshot_for/lease")
+            yield  # pragma: no cover
+
+        @contextmanager
+        def read_transaction(self):
+            nonlocal read_calls
+            read_calls += 1
+            yield SimpleNamespace(runs=_Runs(), work=_Work())
+
+    service = SimpleNamespace(
+        uow=_ReadOnlyUoW(),
+        require=lambda book_id, transaction=None: conditions,
+    )
+    runtime = SimpleNamespace(current=SimpleNamespace(settings=settings))
+    resolver = CorrectionRuntimeResolver(
+        service,
+        runtime,
+        limiter=SimpleNamespace(),
+        client_factory=_FakeConfiguredClient,
+    )
+
+    loaded_snapshot = resolver.snapshot_for(run_id)
+    assert loaded_snapshot == snapshot
+    assert read_calls == 1
+
+    async with resolver.lease(run_id) as leased:
+        assert leased.conditions_id == conditions.id
+        assert leased.snapshot == snapshot
+    assert read_calls == 2
+
+    await resolver.aclose()
+

@@ -13,7 +13,7 @@ from linguary.application.book_conditions import (
     A2_CONTENT_PLAN_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS, ConditionsError, payload_digest,
 )
 from linguary.application.context_builder import snapshot_prompt_templates
-from linguary.domain import ProcessingTask
+from linguary.domain import ProcessingTask, TaskStatus
 from linguary.domain.book_conditions import thaw
 from linguary.domain.recovery import CallAttempt
 from linguary.domain.llm_log import CallContext
@@ -123,6 +123,10 @@ class BoundTaskQueue:
                 transaction.work.bind('task', task.id, book_id=task.book_id, conditions_id=conditions.id)
             elif binding['conditions_id'] != conditions.id:
                 raise ConditionsError('conditions_revision_conflict')
+        if getattr(task, 'status', TaskStatus.PENDING) == TaskStatus.PENDING:
+            notify = getattr(self.queue, 'notify_work_available', None)
+            if callable(notify):
+                notify()
         return task
 
     async def save(self, task):
@@ -407,7 +411,8 @@ class BookRuntimeResolver:
     async def lease(self, conditions_id, role):
         if role not in {'analysis', 'processing', 'regeneration'}:
             raise ConditionsError('conditions_unavailable')
-        with self.service.uow.transaction() as transaction:
+        uow = self.service.uow
+        with getattr(uow, 'read_transaction', uow.transaction)() as transaction:
             conditions = transaction.work.get_conditions(conditions_id)
             if conditions is None:
                 raise ConditionsError('conditions_unavailable')

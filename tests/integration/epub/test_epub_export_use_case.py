@@ -422,3 +422,73 @@ def test_export_book_reuses_validated_export_inputs_helper(
     assert calls == [BOOK_ID, BOOK_ID]
 
 
+def test_export_ensure_ready_and_downloadable_task_use_read_transaction(
+    imported: str,
+    engine,
+    unit_of_work: SqlAlchemyUnitOfWork,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import event
+
+    export_task = ProcessingTask(
+        id="export-task-ok",
+        book_id=BOOK_ID,
+        task_type=TaskType.EXPORT_BOOK,
+        status=TaskStatus.SUCCEEDED,
+        attempts=1,
+    )
+    make_ready(
+        unit_of_work,
+        status=BookStatus.COMPLETED,
+        tasks=(export_task,),
+    )
+    exporter = export(unit_of_work)
+
+    tx_calls: list[str] = []
+    original_tx = unit_of_work.transaction
+    original_read_tx = unit_of_work.read_transaction
+
+    def spy_transaction():
+        tx_calls.append("write")
+        return original_tx()
+
+    def spy_read_transaction():
+        tx_calls.append("read")
+        return original_read_tx()
+
+    monkeypatch.setattr(unit_of_work, "transaction", spy_transaction)
+    monkeypatch.setattr(unit_of_work, "read_transaction", spy_read_transaction)
+
+    executed_sql: list[str] = []
+
+    def capture_sql(_conn, _cursor, statement: str, *_args) -> None:
+        executed_sql.append(statement.strip().upper())
+
+    event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        exporter.ensure_ready(BOOK_ID)
+        downloaded = exporter.downloadable_task(BOOK_ID)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_sql)
+
+    assert downloaded.id == export_task.id
+    assert tx_calls == ["read", "read"]
+    assert not any("BEGIN IMMEDIATE" in sql for sql in executed_sql)
+    assert not any(sql.startswith(("INSERT", "UPDATE", "DELETE")) for sql in executed_sql)
+
+    fallback_calls = 0
+
+    class _LegacyUoWProxy:
+        def transaction(self):
+            nonlocal fallback_calls
+            fallback_calls += 1
+            return original_read_tx()
+
+    legacy_exporter = ExportBook(
+        unit_of_work=_LegacyUoWProxy(),  # type: ignore[arg-type]
+        writer=EpubExportWriter(),
+    )
+    legacy_exporter.ensure_ready(BOOK_ID)
+    assert legacy_exporter.downloadable_task(BOOK_ID).id == export_task.id
+    assert fallback_calls == 2
+

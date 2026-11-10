@@ -208,12 +208,14 @@ class ExportBook:
 
     def ensure_ready(self, book_id: str) -> None:
         """Checks whether full export is possible before enqueuing a background task."""
-        with self._unit_of_work.transaction() as transaction:
+        uow = self._unit_of_work
+        with getattr(uow, "read_transaction", uow.transaction)() as transaction:
             self._load_validated_export_inputs(transaction, book_id)
 
     def downloadable_task(self, book_id: str) -> ProcessingTask:
         """Latest successful task whose file is available for download."""
-        with self._unit_of_work.transaction() as transaction:
+        uow = self._unit_of_work
+        with getattr(uow, "read_transaction", uow.transaction)() as transaction:
             book = transaction.books.get(book_id)
             if book is None:
                 raise ExportBookNotFoundError(f"книги {book_id} нет в хранилище")
@@ -593,7 +595,11 @@ def _ensure_recovery_complete(transaction, book_id, run_id):
     if not correction_coverage_complete(transaction, book_id):
         raise ExportBookError('обязательное исправление глав не завершено или устарело')
     for root in transaction.work.list_roots(book_id, run_id=run_id):
-        if not transaction.work.root_coverage_complete(root.id):
+        try:
+            complete = transaction.work.root_coverage_complete(root.id, update_state=False)
+        except TypeError:
+            complete = transaction.work.root_coverage_complete(root.id)
+        if not complete:
             raise ExportBookError('восстановление книги не завершено: полный экспорт недоступен')
 
 

@@ -172,7 +172,8 @@ class CorrectionRuntimeResolver:
         return run, binding, snapshot
 
     def snapshot_for(self, run_id) -> CorrectionSnapshot | CorrectionSnapshotV2 | None:
-        with self.service.uow.transaction() as transaction:
+        uow = self.service.uow
+        with getattr(uow, 'read_transaction', uow.transaction)() as transaction:
             return self._binding(transaction, run_id)[2]
 
     def settings_for(self, snapshot):
@@ -192,7 +193,8 @@ class CorrectionRuntimeResolver:
 
     @asynccontextmanager
     async def lease(self, run_id):
-        with self.service.uow.transaction() as transaction:
+        uow = self.service.uow
+        with getattr(uow, 'read_transaction', uow.transaction)() as transaction:
             run, binding, snapshot = self._binding(transaction, run_id)
             if snapshot is None:
                 raise ConditionsError('correction_not_required')

@@ -10,13 +10,16 @@ from uuid import uuid4
 import pytest
 
 from linguary.adapters.config.settings import AppSettings, LLMSettings
+from linguary.application.book_conditions import ConditionsError
 from linguary.composition.book_runtime import (
     BookRuntimeResolver,
+    BoundTaskQueue,
     ProvenanceClient,
     conditions_payload,
 )
 from linguary.composition.container import Application
 from linguary.composition.runtime_settings import RuntimeGeneration
+from linguary.domain import ProcessingTask, TaskIdentity, TaskStatus, TaskType
 from linguary.domain.book_conditions import BookConditions
 
 
@@ -418,4 +421,126 @@ async def test_book_runtime_resolver_evicts_previous_conditions_of_same_book_and
 
     await resolver.aclose()
     assert created_clients[3].closed == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_resolvers_lease_and_snapshot_use_read_transaction() -> None:
+    settings = _make_settings("sk-read-tx")
+    conditions = _make_conditions(settings)
+    read_calls = 0
+
+    class _Work:
+        def get_conditions(self, conditions_id: str):
+            return conditions if conditions_id == conditions.id else None
+
+    class _ReadOnlyUoW:
+        @contextmanager
+        def transaction(self):
+            raise AssertionError("write transaction() must not be opened during BookRuntimeResolver.lease")
+            yield  # pragma: no cover
+
+        @contextmanager
+        def read_transaction(self):
+            nonlocal read_calls
+            read_calls += 1
+            yield SimpleNamespace(work=_Work())
+
+    service = SimpleNamespace(uow=_ReadOnlyUoW())
+    runtime = SimpleNamespace(current=SimpleNamespace(settings=settings))
+
+    def factory(candidate: AppSettings, *, conditions=None) -> RuntimeGeneration:
+        return RuntimeGeneration(
+            settings=candidate,
+            configured_client=_FakeConfiguredClient(candidate.llm),
+            analysis=SimpleNamespace(),
+            processing=SimpleNamespace(),
+            regeneration=SimpleNamespace(),
+        )
+
+    resolver = BookRuntimeResolver(service, runtime, factory)
+    async with resolver.lease(conditions.id, "processing") as gen:
+        assert gen.settings.llm.api_key == "sk-read-tx"
+    assert read_calls == 1
+    await resolver.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bound_task_queue_enqueue_notifies_work_available_after_commit() -> None:
+    settings = _make_settings("sk-queue-notify")
+    conditions = _make_conditions(settings)
+    in_tx = False
+    committed_count = 0
+    stored_tasks: dict[TaskIdentity, ProcessingTask] = {}
+    bindings: dict[tuple[str, str], dict] = {}
+    active_conditions = conditions
+
+    class _QueueTasks:
+        def find_by_identity(self, identity: TaskIdentity):
+            return stored_tasks.get(identity)
+
+        def add(self, task: ProcessingTask) -> None:
+            stored_tasks[task.identity] = task
+
+    class _QueueWork:
+        def get_binding(self, kind: str, entity_id: str):
+            return bindings.get((kind, entity_id))
+
+        def bind(self, kind: str, entity_id: str, *, book_id: str, conditions_id: str) -> None:
+            bindings[(kind, entity_id)] = {"book_id": book_id, "conditions_id": conditions_id}
+
+    class _QueueUoW:
+        @contextmanager
+        def transaction(self):
+            nonlocal in_tx, committed_count
+            in_tx = True
+            try:
+                yield SimpleNamespace(tasks=_QueueTasks(), work=_QueueWork())
+            except BaseException:
+                in_tx = False
+                raise
+            in_tx = False
+            committed_count += 1
+
+    notify_states: list[tuple[bool, int]] = []
+
+    class _SpyQueue:
+        def notify_work_available(self) -> None:
+            notify_states.append((in_tx, committed_count))
+
+    queue_service = SimpleNamespace(
+        uow=_QueueUoW(),
+        require=lambda book_id, transaction=None: active_conditions,
+    )
+    bound = BoundTaskQueue(_SpyQueue(), queue_service, conditions.id, id_factory=lambda: "task-1")
+    identity = TaskIdentity(
+        book_id="book-1",
+        task_type=TaskType.ANALYZE_CHAPTER,
+        scope_id="sec-1",
+    )
+
+    enqueued = await bound.enqueue(identity)
+    assert enqueued.id == "task-1"
+    assert enqueued.status is TaskStatus.PENDING
+    assert notify_states == [(False, 1)]
+
+    enqueued_again = await bound.enqueue(identity)
+    assert enqueued_again.id == "task-1"
+    assert notify_states == [(False, 1), (False, 2)]
+
+    stored_tasks[identity] = replace(enqueued, status=TaskStatus.SUCCEEDED, attempts=1)
+    completed = await bound.enqueue(identity)
+    assert completed.status is TaskStatus.SUCCEEDED
+    assert notify_states == [(False, 1), (False, 2)]
+
+    active_conditions = _make_conditions(settings, revision=2)
+    with pytest.raises(ConditionsError, match="conditions_revision_conflict"):
+        await bound.enqueue(identity)
+    assert notify_states == [(False, 1), (False, 2)]
+
+    active_conditions = conditions
+    plain_bound = BoundTaskQueue(SimpleNamespace(), queue_service, conditions.id, id_factory=lambda: "task-2")
+    plain_task = await plain_bound.enqueue(
+        TaskIdentity(book_id="book-1", task_type=TaskType.ANALYZE_CHAPTER, scope_id="sec-2")
+    )
+    assert plain_task.id == "task-2"
 
