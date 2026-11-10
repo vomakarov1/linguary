@@ -1135,5 +1135,276 @@ def test_approve_glossary_reuses_or_loads_document_and_passes_to_build_glossary_
     assert passed_documents == [expected_doc2]
 
 
+def test_glossary_decision_command_accepts_concept_id_without_source_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.use_cases.approve_glossary as ag_module
+
+    cmd_by_concept = GlossaryDecisionCommand(
+        BOOK_ID, GlossaryDecision.ACCEPT, concept_id="candidate-analysis-1-Mr. Bennet"
+    )
+    assert cmd_by_concept.source_text is None
+    assert cmd_by_concept.concept_id == "candidate-analysis-1-Mr. Bennet"
+
+    cmd_positional = GlossaryDecisionCommand(
+        BOOK_ID, GlossaryDecision.ACCEPT, "Mr. Bennet"
+    )
+    assert cmd_positional.source_text == "Mr. Bennet"
+
+    with pytest.raises(GlossaryReviewError):
+        GlossaryDecisionCommand(book_id=BOOK_ID, decision=GlossaryDecision.ACCEPT)
+
+    with pytest.raises(GlossaryReviewError):
+        GlossaryDecisionCommand(
+            book_id=BOOK_ID,
+            decision=GlossaryDecision.ACCEPT,
+            source_text="   ",
+            concept_id="  ",
+        )
+
+    load_review_calls = 0
+    orig_load_review = ag_module._load_review
+
+    def spy_load_review(*args, **kwargs):
+        nonlocal load_review_calls
+        load_review_calls += 1
+        return orig_load_review(*args, **kwargs)
+
+    monkeypatch.setattr(ag_module, "_load_review", spy_load_review)
+
+    unit_of_work = glossary_book(make_analysis_candidate())
+    concept = approve(unit_of_work)(
+        GlossaryDecisionCommand(
+            book_id=BOOK_ID,
+            decision=GlossaryDecision.CORRECT,
+            translation="господин Беннет",
+            concept_id="candidate-analysis-1-Mr. Bennet",
+        )
+    )
+    variant = concept.variant_for("ru")
+    assert load_review_calls == 1
+    assert concept.id == "candidate-analysis-1-Mr. Bennet"
+    assert concept.canonical_source_text == "Mr. Bennet"
+    assert variant is not None
+    assert variant.text == "господин Беннет"
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
+
+    with pytest.raises(GlossaryNotFoundError):
+        approve(unit_of_work)(
+            GlossaryDecisionCommand(
+                book_id=BOOK_ID,
+                decision=GlossaryDecision.ACCEPT,
+                concept_id="missing-concept",
+            )
+        )
+
+    read_tx_calls = 0
+    orig_transaction = unit_of_work.transaction
+
+    def spy_read_transaction():
+        nonlocal read_tx_calls
+        read_tx_calls += 1
+        return orig_transaction()
+
+    def forbidden_write_transaction():
+        raise AssertionError("review() must use read_transaction when available")
+
+    unit_of_work.read_transaction = spy_read_transaction  # type: ignore[attr-defined]
+    unit_of_work.transaction = forbidden_write_transaction  # type: ignore[method-assign]
+    reviewed = approve(unit_of_work).review(BOOK_ID)
+    assert read_tx_calls == 1
+    assert reviewed.is_complete
+
+
+def test_accept_all_awaiting_deletes_superseded_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.use_cases.approve_glossary as ag_module
+
+    unit_of_work = glossary_book(
+        make_analysis_candidate(source_text="Mr. Bennet"),
+        make_analysis_candidate(
+            source_text="Longbourn",
+            type=ConceptType.PLACE,
+            suggested_translation="Лонгборн",
+        ),
+    )
+    superseded = TermConcept(
+        id="superseded-bennet",
+        book_id=BOOK_ID,
+        type=ConceptType.PERSON,
+        canonical_source_text="Mr Bennet",
+        status=TermStatus.APPROVED,
+        variants=(
+            TermVariant(
+                concept_id="superseded-bennet",
+                language="ru",
+                text="господин Беннет",
+                status=TermStatus.APPROVED,
+            ),
+        ),
+    )
+    unit_of_work.glossary.save(superseded)
+
+    orig_build_review = ag_module.build_glossary_review
+
+    def build_with_awaiting_superseded(*args, **kwargs):
+        kwargs = {**kwargs, "decisions": ()}
+        built = orig_build_review(*args, **kwargs)
+        items = tuple(
+            replace(item, superseded_decisions=(superseded,))
+            if item.source_text == "Mr. Bennet"
+            else item
+            for item in built.items
+        )
+        return replace(built, items=items)
+
+    monkeypatch.setattr(ag_module, "build_glossary_review", build_with_awaiting_superseded)
+
+    concepts = approve(unit_of_work).accept_all_awaiting(BOOK_ID)
+
+    assert len(concepts) == 2
+    assert unit_of_work.glossary.get("superseded-bennet") is None
+    assert {c.id for c in unit_of_work.glossary.list_for_book(BOOK_ID)} == {
+        c.id for c in concepts
+    }
+
+
+def test_set_note_on_last_awaiting_item_completes_glossary_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linguary.application.use_cases.approve_glossary as ag_module
+    from analysis_fakes import FakeChapterAnalysisRepository
+    from linguary.application.mention_counter import mention_counter as real_mention_counter
+
+    counter_calls = 0
+
+    def counting_mention_counter(document):
+        nonlocal counter_calls
+        counter_calls += 1
+        return real_mention_counter(document)
+
+    monkeypatch.setattr(ag_module, "mention_counter", counting_mention_counter)
+
+    analyses_calls = 0
+    orig_list_for_book = FakeChapterAnalysisRepository.list_for_book
+
+    def tracked_list_for_book(self, book_id: str):
+        nonlocal analyses_calls
+        analyses_calls += 1
+        return orig_list_for_book(self, book_id)
+
+    monkeypatch.setattr(FakeChapterAnalysisRepository, "list_for_book", tracked_list_for_book)
+
+    unit_of_work = glossary_book(
+        make_analysis_candidate(source_text="Mr. Bennet"),
+        make_analysis_candidate(
+            source_text="Longbourn",
+            type=ConceptType.PLACE,
+            suggested_translation="Лонгборн",
+        ),
+    )
+    backing_docs = unit_of_work._documents
+    doc_calls = 0
+
+    class CountingDocuments:
+        def get(self, book_id: str):
+            nonlocal doc_calls
+            doc_calls += 1
+            return backing_docs.get(book_id)
+
+    unit_of_work._documents = CountingDocuments()  # type: ignore[assignment]
+    conditions_calls = 0
+    pinned_conditions = SimpleNamespace(
+        id="conditions-1",
+        payload={
+            "checks": {
+                "glossary_confidence_threshold": CONFIDENCE_THRESHOLD,
+                "glossary_review_min_mentions": 5,
+                "glossary_review_min_chapters": 3,
+            }
+        },
+    )
+
+    def counting_latest_conditions(book_id: str):
+        nonlocal conditions_calls
+        conditions_calls += 1
+        return pinned_conditions
+
+    unit_of_work.work = SimpleNamespace(latest_conditions=counting_latest_conditions)
+
+    first = approve(unit_of_work).set_note(
+        GlossaryNoteCommand(
+            book_id=BOOK_ID,
+            concept_id="candidate-analysis-1-Mr. Bennet",
+            note="мужской род",
+        )
+    )
+    assert first.status is TermStatus.APPROVED
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.GLOSSARY_REVIEW
+    assert counter_calls == 1
+    assert analyses_calls == 1
+    assert doc_calls == 1
+    assert conditions_calls == 1
+
+    superseded = TermConcept(
+        id="superseded-longbourn",
+        book_id=BOOK_ID,
+        type=ConceptType.PLACE,
+        canonical_source_text="Longbourn Estate",
+        status=TermStatus.APPROVED,
+        variants=(
+            TermVariant(
+                concept_id="superseded-longbourn",
+                language="ru",
+                text="усадьба Лонгборн",
+                status=TermStatus.APPROVED,
+            ),
+        ),
+    )
+    unit_of_work.glossary.save(superseded)
+    orig_build_review = ag_module.build_glossary_review
+
+    def build_with_undecided_superseded(*args, **kwargs):
+        decisions = tuple(
+            d for d in kwargs.get("decisions", ()) if d.id != "superseded-longbourn"
+        )
+        built = orig_build_review(*args, **{**kwargs, "decisions": decisions})
+        items = tuple(
+            replace(item, superseded_decisions=(superseded,))
+            if item.source_text == "Longbourn"
+            else item
+            for item in built.items
+        )
+        return replace(built, items=items)
+
+    monkeypatch.setattr(ag_module, "build_glossary_review", build_with_undecided_superseded)
+
+    counter_calls = 0
+    analyses_calls = 0
+    doc_calls = 0
+    conditions_calls = 0
+
+    second = approve(unit_of_work).set_note(
+        GlossaryNoteCommand(
+            book_id=BOOK_ID,
+            concept_id="candidate-analysis-1-Longbourn",
+            note="родовое поместье",
+        )
+    )
+    assert second.status is TermStatus.APPROVED
+    assert second.note == "родовое поместье"
+    assert counter_calls == 1
+    assert analyses_calls == 1
+    assert doc_calls == 1
+    assert conditions_calls == 1
+    assert unit_of_work.glossary.get("superseded-longbourn") is None
+    assert unit_of_work.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
+
+    monkeypatch.setattr(ag_module, "build_glossary_review", orig_build_review)
+    assert start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
+
+
+
 
 

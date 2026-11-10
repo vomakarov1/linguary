@@ -435,3 +435,108 @@ def test_unknown_glossary_resource_returns_404(
         ).status_code
         == 404
     )
+
+
+def test_glossary_html_post_routes_avoid_redundant_review_passes(
+    client: TestClient, application: Application, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTML POST routes neither pre-load nor post-load glossary review; JSON routes load once via read_transaction."""
+    import linguary.application.use_cases.approve_glossary as ag_module
+
+    first = glossary_candidate(candidate_id="candidate-first")
+    second = glossary_candidate(
+        candidate_id="candidate-second",
+        source_text="Longbourn",
+        suggested_translation="Лонгборн",
+    )
+    scenario = store_book(
+        application,
+        glossary_candidates={0: (first, second)},
+        chapters=(("Mr. Bennet Longbourn " * 5,),),
+    )
+
+    review_calls = 0
+    orig_review = application.approve_glossary.review
+
+    def spy_review(book_id: str):
+        nonlocal review_calls
+        review_calls += 1
+        return orig_review(book_id)
+
+    load_review_calls = 0
+    orig_load_review = ag_module._load_review
+
+    def spy_load_review(*args, **kwargs):
+        nonlocal load_review_calls
+        load_review_calls += 1
+        return orig_load_review(*args, **kwargs)
+
+    read_tx_calls = 0
+    orig_read_tx = application.unit_of_work.read_transaction
+
+    def spy_read_tx():
+        nonlocal read_tx_calls
+        read_tx_calls += 1
+        return orig_read_tx()
+
+    monkeypatch.setattr(application.approve_glossary, "review", spy_review)
+    monkeypatch.setattr(ag_module, "_load_review", spy_load_review)
+    monkeypatch.setattr(application.unit_of_work, "read_transaction", spy_read_tx)
+
+    html_decide = client.post(
+        f"/books/{scenario.book_id}/glossary/{first.id}",
+        data={"action": "accept"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert html_decide.status_code == 303
+    assert html_decide.headers["location"] == f"/books/{scenario.book_id}/glossary"
+    assert review_calls == 0
+    assert load_review_calls == 1
+
+    review_calls = 0
+    load_review_calls = 0
+
+    html_note = client.post(
+        f"/books/{scenario.book_id}/glossary/{second.id}/note",
+        data={"note": "родовое поместье"},
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert html_note.status_code == 303
+    assert html_note.headers["location"] == f"/books/{scenario.book_id}/glossary"
+    assert review_calls == 0
+    assert load_review_calls == 1
+    with application.unit_of_work.read_transaction() as uow:
+        assert uow.books.get(scenario.book_id).status is BookStatus.READY_TO_PROCESS
+
+    review_calls = 0
+    load_review_calls = 0
+    read_tx_calls = 0
+
+    json_decide = client.post(
+        f"/books/{scenario.book_id}/glossary/{first.id}",
+        data={"action": "lock"},
+        headers={"accept": "application/json"},
+    )
+    assert json_decide.status_code == 200
+    assert json_decide.json()["status"] == "locked"
+    assert review_calls == 1
+    assert load_review_calls == 2
+    assert read_tx_calls == 1
+
+    review_calls = 0
+    load_review_calls = 0
+    read_tx_calls = 0
+
+    json_note = client.post(
+        f"/books/{scenario.book_id}/glossary/{second.id}/note",
+        data={"note": "поместье Беннетов"},
+        headers={"accept": "application/json"},
+    )
+    assert json_note.status_code == 200
+    assert json_note.json()["note"] == "поместье Беннетов"
+    assert review_calls == 1
+    assert load_review_calls == 2
+    assert read_tx_calls == 1
+

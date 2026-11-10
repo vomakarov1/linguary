@@ -64,31 +64,28 @@ def decide_glossary_item(
     request: Annotated[GlossaryDecisionRequest, Form()],
 ) -> GlossaryItemResponse | RedirectResponse:
     """Accept, correct, fix, or skip a single detected term."""
-    review = application.approve_glossary.review(book_id)
-    item = review.item_for_concept(concept_id)
-    if item is None:
+    if not concept_id.strip():
         raise GlossaryNotFoundError(
             f"в глоссарии книги {book_id} нет понятия {concept_id!r}"
         )
-    application.approve_glossary(
+    concept = application.approve_glossary(
         GlossaryDecisionCommand(
             book_id=book_id,
-            source_text=item.source_text,
-            concept_id=concept_id,
             decision=request.action,
             translation=request.text,
+            concept_id=concept_id,
             note=request.note,
             type=request.type,
         )
     )
-    updated = application.approve_glossary.review(book_id).item_for_concept(concept_id)
-    if updated is None:
-        raise GlossaryNotFoundError(
-            f"решение по понятию {concept_id!r} книги {book_id} не сохранилось"
-        )
     if wants_html(http_request):
         return RedirectResponse(
             url=f"/books/{book_id}/glossary", status_code=303
+        )
+    updated = application.approve_glossary.review(book_id).item_for_concept(concept.id)
+    if updated is None:
+        raise GlossaryNotFoundError(
+            f"решение по понятию {concept_id!r} книги {book_id} не сохранилось"
         )
     return GlossaryItemResponse.of_item(updated)
 
@@ -102,18 +99,18 @@ def set_glossary_note(
     request: Annotated[GlossaryNoteRequest, Form()],
 ) -> GlossaryItemResponse | RedirectResponse:
     """Update translation guidance for an item without changing the accepted translation."""
-    application.approve_glossary.set_note(
+    concept = application.approve_glossary.set_note(
         GlossaryNoteCommand(
             book_id=book_id, concept_id=concept_id, note=request.note
         )
     )
-    updated = application.approve_glossary.review(book_id).item_for_concept(concept_id)
+    if wants_html(http_request):
+        return RedirectResponse(url=f"/books/{book_id}/glossary", status_code=303)
+    updated = application.approve_glossary.review(book_id).item_for_concept(concept.id)
     if updated is None:
         raise GlossaryNotFoundError(
             f"указание по понятию {concept_id!r} книги {book_id} не сохранилось"
         )
-    if wants_html(http_request):
-        return RedirectResponse(url=f"/books/{book_id}/glossary", status_code=303)
     return GlossaryItemResponse.of_item(updated)
 
 

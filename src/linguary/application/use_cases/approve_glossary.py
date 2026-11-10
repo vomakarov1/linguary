@@ -102,12 +102,20 @@ class GlossaryDecisionCommand:
     """
 
     book_id: str
-    source_text: str
     decision: GlossaryDecision
+    source_text: str | None = None
     translation: str | None = None
     concept_id: str | None = None
     note: str | None = None
     type: ConceptType | None = None
+
+    def __post_init__(self) -> None:
+        has_source = bool(self.source_text and self.source_text.strip())
+        has_concept = bool(self.concept_id and self.concept_id.strip())
+        if not has_source and not has_concept:
+            raise GlossaryReviewError(
+                "команда решения по глоссарию должна содержать source_text или concept_id"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +154,9 @@ class ApproveGlossary:
 
     def review(self, book_id: str) -> GlossaryReview:
         """Book glossary along with already accepted decisions."""
-        with self._unit_of_work.transaction() as transaction:
+        with getattr(
+            self._unit_of_work, "read_transaction", self._unit_of_work.transaction
+        )() as transaction:
             book = _book(transaction, book_id)
             return replace(
                 _load_review(
@@ -188,19 +198,34 @@ class ApproveGlossary:
                 conditions=conditions,
                 document=document,
             )
-            item = review.item_for(command.source_text)
-            if item is None:
-                raise GlossaryNotFoundError(
-                    f"в глоссарии книги {command.book_id} нет элемента "
-                    f"{command.source_text!r}"
+            if command.source_text is not None and command.source_text.strip():
+                item = review.item_for(command.source_text)
+                if item is None:
+                    raise GlossaryNotFoundError(
+                        f"в глоссарии книги {command.book_id} нет элемента "
+                        f"{command.source_text!r}"
+                    )
+                if (
+                    command.concept_id is not None
+                    and command.concept_id != item.concept_id
+                ):
+                    raise GlossaryNotFoundError(
+                        f"в глоссарии книги {command.book_id} нет понятия "
+                        f"{command.concept_id!r}"
+                    )
+            else:
+                concept_id = (command.concept_id or "").strip()
+                item = (
+                    review.item_for_concept(command.concept_id or "")
+                    or review.item_for_concept(concept_id)
                 )
-            if (
-                command.concept_id is not None
-                and command.concept_id != item.concept_id
-            ):
-                raise GlossaryNotFoundError(
-                    f"в глоссарии книги {command.book_id} нет понятия "
-                    f"{command.concept_id!r}"
+                if item is None:
+                    raise GlossaryNotFoundError(
+                        f"в глоссарии книги {command.book_id} нет понятия "
+                        f"{command.concept_id!r}"
+                    )
+                command = replace(
+                    command, source_text=item.source_text, concept_id=item.concept_id
                 )
             concept = self._decide(item, command, book=book)
             transaction.glossary.save(concept)
@@ -258,9 +283,9 @@ class ApproveGlossary:
                     item,
                     GlossaryDecisionCommand(
                         book_id=book_id,
+                        decision=GlossaryDecision.ACCEPT,
                         source_text=item.source_text,
                         concept_id=item.concept_id,
-                        decision=GlossaryDecision.ACCEPT,
                     ),
                     book=book,
                 )
@@ -268,6 +293,8 @@ class ApproveGlossary:
             )
             for concept in concepts:
                 transaction.glossary.save(concept)
+            for item in awaiting_items:
+                _drop_superseded(transaction, item)
             _complete_review_if_ready(
                 transaction,
                 book,
@@ -294,12 +321,28 @@ class ApproveGlossary:
         with self._unit_of_work.transaction() as transaction:
             book = _book(transaction, command.book_id)
             _ensure_editable(book)
+            analyses = transaction.analyses.list_for_book(command.book_id)
+            conditions = (
+                work.latest_conditions(command.book_id)
+                if (work := getattr(transaction, "work", None)) is not None
+                else None
+            )
+            document = transaction.documents.get(command.book_id)
+            count_mentions = (
+                mention_counter(document)
+                if document is not None
+                else None
+            )
             review = _load_review(
                 transaction,
                 command.book_id,
                 confidence_threshold=self._glossary_confidence_threshold,
                 min_mentions=self._glossary_review_min_mentions,
                 min_chapters=self._glossary_review_min_chapters,
+                analyses=analyses,
+                count_mentions=count_mentions,
+                conditions=conditions,
+                document=document,
             )
             item = review.item_for_concept(command.concept_id)
             if item is None:
@@ -309,6 +352,21 @@ class ApproveGlossary:
                 )
             concept = self._with_note(item, command.note.strip(), book=book)
             transaction.glossary.save(concept)
+            if item.decision is None:
+                _drop_superseded(transaction, item)
+                _complete_review_if_ready(
+                    transaction,
+                    book,
+                    confidence_threshold=self._glossary_confidence_threshold,
+                    min_mentions=self._glossary_review_min_mentions,
+                    min_chapters=self._glossary_review_min_chapters,
+                    analyses=analyses,
+                    count_mentions=count_mentions,
+                    conditions=conditions,
+                    document=document,
+                    review=review,
+                    resolved_keys=(item.source_text,),
+                )
         return concept
 
     def _with_note(
