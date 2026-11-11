@@ -60,7 +60,7 @@ from linguary.application.llm_dto import (
 )
 from linguary.application.ports.llm import LLMRequest, LLMResponseKind
 from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY, require_policy
-from linguary.domain.content_plan import ContentPlan, ContextFact, artifact_key, canonical_sha
+from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, artifact_key, canonical_sha
 from linguary.domain import BeforeYouReadEntry
 from linguary.application.retry_policy import (
     ExpectedBlock,
@@ -1118,18 +1118,7 @@ class ContextBuilder:
             _alias(index): item.block.id
             for index, item in enumerate(unit.items, start=1)
         }
-        uncovered_owners: set[str] = set()
-        if analysis.content_plan is not None:
-            covered_points = {
-                (e.difficulty_id, e.point_id)
-                for e in analysis.content_plan.before_you_read_evidence
-            }
-            for difficulty in analysis.content_plan.difficulties:
-                if not difficulty.required_points or any(
-                    (difficulty.id, point.id) not in covered_points
-                    for point in difficulty.required_points
-                ):
-                    uncovered_owners.add(difficulty.owner_block_id)
+        uncovered_owners = {d.owner_block_id for d in _uncovered_difficulties(analysis)}
         candidate_pure = frozenset(
             alias
             for alias, item in zip(aliases, unit.items, strict=True)
@@ -1235,13 +1224,18 @@ class ContextBuilder:
         `candidates` — candidates from book chapter analyses: used to check chapter and glossary
         instructions against user-rejected model suggestions.
         """
-        budget = notes_budget(
-            unit_chars=sum(len(item.block.text) for item in unit.items),
-            chapter_chars=sum(len(block.text) for block in textual_blocks(section)),
-            per_chapter=self._language_notes_per_chapter,
-        )
         if self._english_help:
             budget = 0
+        elif analysis.scenes:
+            budget = _scene_notes_budget(
+                analysis, section, unit, per_chapter=self._language_notes_per_chapter,
+            )
+        else:
+            budget = notes_budget(
+                unit_chars=sum(len(item.block.text) for item in unit.items),
+                chapter_chars=sum(len(block.text) for block in textual_blocks(section)),
+                per_chapter=self._language_notes_per_chapter,
+            )
         if analysis.content_plan is not None and self._language_notes_per_chapter == 0:
             budget = 0
         target_blocks = [item.block for item in unit.items]
@@ -1275,13 +1269,14 @@ class ContextBuilder:
                 "Для необходимого объяснения можно превысить этот ориентир, в том числе дать три заметки одному фрагменту. "
                 "Не теряй обязательную помощь из учебного плана ради количества. "
                 "Каждая заметка должна быть привязана к исходнику; не повторяй уже объяснённое."
-                if recovery_child
+                if recovery_child and not analysis.scenes
                 else f"В этом запросе — не больше {budget} языковых заметок."
             )
         )
         parts = [
             _chapter_header(document=document, section=section),
             _chapter_digest(analysis, glossary, candidates),
+            _scene_context(analysis, section, unit),
             _explained_expressions(analysis, section),
             notes_budget_line,
             _mandatory_decisions(
@@ -2106,6 +2101,61 @@ Before You Read и подсказкой своего блока. Полный с
 Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
 
 
+def _scene_notes_budget(
+    analysis: ChapterAnalysis, section: DocumentSection, unit: TranslationUnit, *, per_chapter: int,
+) -> int:
+    """Additive block allowances preserve mandatory help across scene/recovery boundaries.
+
+    Reserve one note per uncovered READ_AS_IS explanation owner, then apportion the
+    remainder by source length. Disjoint groups cannot receive more than the chapter
+    allowance, even after atomic merges or recovery splits.
+    """
+    owners = {
+        difficulty.owner_block_id for difficulty in _uncovered_difficulties(analysis)
+        if difficulty.help_kind == "explanation"
+        and analysis.treatment_plan.treatment_for(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
+    }
+    if len(owners) > per_chapter:
+        raise ContextBuildError("обязательные объяснения превышают бюджет заметок главы")
+    blocks = textual_blocks(section)
+    chapter_chars = sum(len(block.text) for block in blocks)
+    remaining = per_chapter - len(owners)
+    targets = set(unit.block_ids)
+    budget = 0
+    cursor = 0
+    for block in blocks:
+        end = cursor + len(block.text)
+        if block.id in targets:
+            budget += int(block.id in owners)
+            if chapter_chars:
+                budget += remaining * end // chapter_chars - remaining * cursor // chapter_chars
+        cursor = end
+    return budget
+
+
+def _scene_context(
+    analysis: ChapterAnalysis, section: DocumentSection, unit: TranslationUnit,
+) -> str:
+    """Scenes overlapping target blocks, using the whole chapter's source order."""
+    if not analysis.scenes:
+        return ""
+    positions = {block.id: index for index, block in enumerate(section.ordered_blocks)}
+    targets = [positions[block_id] for block_id in unit.block_ids if block_id in positions]
+    descriptions = []
+    for scene in sorted(analysis.scenes, key=lambda scene: positions[scene.start_block_id]):
+        start, end = positions[scene.start_block_id], positions[scene.end_block_id]
+        if not any(start <= position <= end for position in targets):
+            continue
+        lines = ["Текущая сцена главы:"]
+        if scene.location:
+            lines.append(f"Место: {scene.location}")
+        if scene.participants:
+            lines.append(f"Участники: {', '.join(scene.participants)}")
+        lines.append(scene.summary)
+        descriptions.append("\n".join(lines))
+    return "\n\n".join(descriptions)
+
+
 def _chapter_digest(
     analysis: ChapterAnalysis,
     glossary: GlossarySnapshot,
@@ -2589,24 +2639,31 @@ def _deduplicate_a2_analysis_learner_quality(learner_quality: str) -> str:
     )
 
 
+def _uncovered_difficulties(analysis: ChapterAnalysis) -> tuple[Difficulty, ...]:
+    if analysis.content_plan is None:
+        return ()
+    covered_points = {
+        (e.difficulty_id, e.point_id)
+        for e in analysis.content_plan.before_you_read_evidence
+    }
+    return tuple(
+        difficulty for difficulty in analysis.content_plan.difficulties
+        if not difficulty.required_points or any(
+            (difficulty.id, point.id) not in covered_points
+            for point in difficulty.required_points
+        )
+    )
+
+
 def _owned_difficulty_aliases(
     analysis: ChapterAnalysis, unit: TranslationUnit
 ) -> dict[str, str]:
     if analysis.content_plan is None:
         return {}
     unit_block_ids = {item.block.id for item in unit.items}
-    covered_points = {
-        (e.difficulty_id, e.point_id)
-        for e in analysis.content_plan.before_you_read_evidence
-    }
     mapping: dict[str, str] = {}
-    for difficulty in analysis.content_plan.difficulties:
+    for difficulty in _uncovered_difficulties(analysis):
         if difficulty.owner_block_id not in unit_block_ids:
-            continue
-        if difficulty.required_points and all(
-            (difficulty.id, point.id) in covered_points
-            for point in difficulty.required_points
-        ):
             continue
         alias = f"d{len(mapping) + 1}"
         mapping[alias] = difficulty.id
@@ -2617,19 +2674,10 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     if analysis.content_plan is None:
         return ""
     aliases = {item.block.id: _alias(i) for i, item in enumerate(unit.items, 1)}
-    covered_points = {
-        (e.difficulty_id, e.point_id)
-        for e in analysis.content_plan.before_you_read_evidence
-    }
     difficulties = []
     related = {}
-    for difficulty in analysis.content_plan.difficulties:
+    for difficulty in _uncovered_difficulties(analysis):
         if difficulty.owner_block_id not in aliases:
-            continue
-        if difficulty.required_points and all(
-            (difficulty.id, point.id) in covered_points
-            for point in difficulty.required_points
-        ):
             continue
         value = asdict(difficulty)
         value.pop("priority", None)

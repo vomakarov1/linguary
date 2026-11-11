@@ -20,6 +20,7 @@ from linguary.domain import (
     TreatmentPlan,
     UnknownBlockError,
 )
+from linguary.domain.content_plan import Scene
 
 
 def plan_units(
@@ -235,3 +236,33 @@ def test_units_get_identifiers_from_factory() -> None:
     units = plan_units(blocks, max_source_chars=200)
 
     assert tuple(unit.id for unit in units) == ("id-1", "id-2")
+
+
+@pytest.mark.parametrize(
+    ("block_chars", "scene_end", "expected_sizes"),
+    ((400, 0, (400, 800, 400)), (399, 0, (798, 798)), (600, 3, (600, 600, 600, 600))),
+)
+def test_scene_boundaries_close_only_filled_groups_within_size_limit(
+    block_chars: int, scene_end: int, expected_sizes: tuple[int, ...],
+) -> None:
+    blocks = make_blocks(4, text="a" * block_chars)
+    scenes = (Scene("scene-1", 0, blocks[0].id, blocks[scene_end].id, "Opening"),)
+
+    units = plan_translation_units(
+        blocks, make_plan(blocks), id_factory=sequential_ids(),
+        max_source_chars=1000, scenes=scenes,
+    )
+
+    assert sizes(units) == expected_sizes
+    assert tuple(block for unit in units for block in unit.blocks) == blocks
+
+
+def test_scene_boundary_does_not_split_cohesive_blocks() -> None:
+    blocks = tuple(make_block(order=i, text="a" * 200, type=BlockType.POEM)
+                   for i in range(4))
+    units = plan_translation_units(
+        blocks, make_plan(blocks), id_factory=sequential_ids(), max_source_chars=1000,
+        scenes=(Scene("scene-1", 0, blocks[0].id, blocks[1].id, "Opening"),),
+    )
+
+    assert sizes(units) == (800,)

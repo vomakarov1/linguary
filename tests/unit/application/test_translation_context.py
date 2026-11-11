@@ -52,6 +52,157 @@ from linguary.domain import (
 
 SOURCE_LANGUAGE = "en"
 
+
+@pytest.mark.parametrize("bounds", ((0, 3), (0, 2)))
+def test_translation_scene_context_uses_chapter_order_and_full_range_overlap(bounds) -> None:
+    from linguary.domain.content_plan import Scene
+
+    blocks = tuple(replace(make_block(order=i), id=block_id)
+                   for i, block_id in enumerate(("z", "a", "m", "b", "y")))
+    section = make_section(tuple(reversed(blocks)))
+    unit = make_unit(blocks[1:3] if bounds == (0, 3) else blocks[2:4])
+    scenes = (
+        Scene("first", 0, blocks[bounds[0]].id, blocks[bounds[1]].id,
+              "A private conversation.", location="Orchard", participants=("Alice", "Bob")),
+        Scene("second", 1, blocks[bounds[1] + 1].id, blocks[4].id,
+              "A rider arrives.", location="Stable", participants=("Carol",)),
+    )
+    analysis = replace(make_analysis(make_unit(blocks)), scenes=scenes)
+
+    context = ContextBuilder().for_translation_unit(
+        document=make_document(section), section=section, unit=unit,
+        analysis=analysis, glossary=make_snapshot(),
+    )
+
+    text = context.request.input_text
+    assert "Текущая сцена главы:" in text
+    assert "A private conversation." in text
+    assert "Orchard" in text
+    assert "Alice" in text and "Bob" in text
+    if bounds == (0, 3):
+        assert "A rider arrives." not in text
+        assert "Stable" not in text and "Carol" not in text
+    else:
+        assert "A rider arrives." in text
+        assert "Stable" in text and "Carol" in text
+        assert text.index("A private conversation.") < text.index("A rider arrives.")
+
+
+@pytest.mark.parametrize(("chapter_budget", "expected", "child_budgets"),
+                         ((2, (2, 0), (1, 1)), (4, (3, 1), (1, 2))))
+def test_scene_group_note_budgets_preserve_required_help_and_chapter_total(
+    chapter_budget, expected, child_budgets,
+) -> None:
+    from linguary.application.translation_units import plan_translation_units
+    from linguary.domain.content_plan import (
+        ContentPlan, Difficulty, HelpEvidence, RequiredPoint, Scene, SourceAnchor,
+    )
+
+    blocks = make_blocks(4, text="Echo" + "x" * 396)
+    section = make_section(blocks)
+    whole = make_unit(blocks, treatments=(BlockTreatment.READ_AS_IS,) * 4)
+    scenes = (
+        Scene("first", 0, blocks[0].id, blocks[1].id, "Conversation"),
+        Scene("second", 1, blocks[2].id, blocks[3].id, "Departure"),
+    )
+    difficulties = tuple(Difficulty(
+        f"d{i}", (SourceAnchor(block.id, 0, 4, "Echo"),), block.id,
+        "idiom", "critical", "explanation", (RequiredPoint("p", "Explain Echo"),),
+    ) for i, block in enumerate(blocks[:3]))
+    analysis = replace(make_analysis(whole), scenes=scenes, content_plan=ContentPlan(
+        version=3, profile="content-plan-v3", scenes=scenes, difficulties=difficulties,
+        before_you_read_evidence=(HelpEvidence(
+            difficulty_id="d2", point_id="p", artifact_kind="before_you_read.explanation",
+            artifact_key="before_you_read:0", block_id=blocks[2].id, body_excerpt="Already explained",
+        ),),
+    ))
+    units = plan_translation_units(
+        blocks, analysis.treatment_plan, id_factory=lambda: "unit",
+        max_source_chars=2000, scenes=scenes,
+    )
+    builder = ContextBuilder(
+        content_plan_profile="content-plan-v3", language_notes_per_chapter=chapter_budget,
+        max_unit_source_chars=2000,
+    )
+    # The accepted analysis allowed two owners in the original 1600-char group.
+    assert builder._analysis_note_groups(section, blocks) == ((whole.block_ids, chapter_budget),)
+    assert tuple(unit.block_ids for unit in units) == (
+        (blocks[0].id, blocks[1].id), (blocks[2].id, blocks[3].id),
+    )
+    texts = [builder.for_translation_unit(
+        document=make_document(section), section=section, unit=unit,
+        analysis=analysis, glossary=make_snapshot(),
+    ).request.input_text for unit in units]
+
+    assert f"не больше {expected[0]} языковых заметок" in texts[0]
+    assert f"не больше {expected[1]} языковых заметок" in texts[1]
+    assert sum(expected) == chapter_budget
+    merged = builder.for_translation_unit(
+        document=make_document(section), section=section, unit=whole,
+        analysis=analysis, glossary=make_snapshot(),
+    )
+    assert f"не больше {chapter_budget} языковых заметок" in merged.request.input_text
+    for block, child_budget in zip(blocks[:2], child_budgets, strict=True):
+        child = builder.for_translation_unit(
+            document=make_document(section), section=section,
+            unit=make_unit((block,), treatments=(BlockTreatment.READ_AS_IS,)),
+            analysis=analysis, glossary=make_snapshot(), recovery_child=True,
+        )
+        assert f"не больше {child_budget} языковых заметок" in child.request.input_text
+        assert "можно превысить" not in child.request.input_text
+
+
+@pytest.mark.parametrize("text", ("Echo", ""))
+def test_scene_note_budget_handles_disabled_notes_and_empty_source(text: str) -> None:
+    from linguary.domain.content_plan import Scene
+
+    blocks = make_blocks(1, text=text)
+    section = make_section(blocks)
+    unit = make_unit(blocks)
+    analysis = replace(make_analysis(unit), scenes=(
+        Scene("scene", 0, blocks[0].id, blocks[0].id, "Opening"),
+    ))
+    builder = ContextBuilder(language_notes_per_chapter=0)
+
+    context = builder.for_translation_unit(
+        document=make_document(section), section=section, unit=unit,
+        analysis=analysis, glossary=make_snapshot(),
+    )
+
+    assert "не больше 0 языковых заметок" in context.request.input_text
+
+
+def test_scene_note_budget_rejects_required_owners_over_budget_but_english_help_uses_no_notes() -> None:
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, Scene, SourceAnchor
+
+    blocks = make_blocks(1, text="Echo")
+    section = make_section(blocks)
+    unit = make_unit(blocks, treatments=(BlockTreatment.READ_AS_IS,))
+    scenes = (Scene("scene", 0, blocks[0].id, blocks[0].id, "Opening"),)
+    analysis = replace(make_analysis(unit), scenes=scenes, content_plan=ContentPlan(
+        version=3, profile="content-plan-v3", scenes=scenes, difficulties=(Difficulty(
+            "d", (SourceAnchor(blocks[0].id, 0, 4, "Echo"),), blocks[0].id,
+            "idiom", "critical", "explanation", (RequiredPoint("p", "Explain Echo"),),
+        ),),
+    ))
+    kwargs = dict(document=make_document(section), section=section, unit=unit,
+                  analysis=analysis, glossary=make_snapshot())
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", language_notes_per_chapter=0)
+    with pytest.raises(ContextBuildError, match="обязательные объяснения превышают бюджет"):
+        builder.for_translation_unit(**kwargs)
+
+    templates = snapshot_prompt_templates(
+        source_language="en", target_language="ru", reader_level="b1",
+        profile="content-plan-v3", english_help=True,
+    )
+    english_builder = ContextBuilder(
+        prompt_templates=templates, content_plan_profile="content-plan-v3",
+        language_notes_per_chapter=0,
+    )
+    context = english_builder.for_translation_unit(**kwargs)
+    assert "языковых заметок" not in context.request.input_text
+
 #: Chapter summary and instructions: analysis digest passed to each processing request.
 CHAPTER_SUMMARY = "Mr. Bennet visits the new neighbour."
 CHAPTER_INSTRUCTIONS = "Сохранять иронию рассказчика."

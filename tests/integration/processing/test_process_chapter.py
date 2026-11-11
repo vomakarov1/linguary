@@ -7,6 +7,8 @@ the actual storage delivered to users.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from processing_scenario import (
     BOOK_ID,
@@ -47,6 +49,46 @@ def stored_results(
     """Stored run results in document block order."""
     with unit_of_work.transaction() as uow:
         return uow.results.list_for_run(run_id)
+
+
+@pytest.mark.parametrize("atomic", (False, True))
+def test_prepare_uses_scene_boundaries_and_keeps_atomic_difficulty_intervals(
+    unit_of_work: SqlAlchemyUnitOfWork, atomic: bool,
+) -> None:
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, Scene, SourceAnchor
+
+    scenario = store_processing_book(unit_of_work, chapters=(("a" * 400,) * 4,))
+    block_ids = scenario.block_ids()
+    scenes = (
+        Scene("first", 0, block_ids[0], block_ids[0], "Opening"),
+        Scene("second", 1, block_ids[1], block_ids[2], "Dialogue"),
+        Scene("third", 2, block_ids[3], block_ids[3], "Departure"),
+    )
+    difficulties = (Difficulty(
+        "linked", (SourceAnchor(block_ids[0], 0, 1, "a"), SourceAnchor(block_ids[1], 0, 1, "a")),
+        block_ids[0], "grammar", "critical", "explanation", (RequiredPoint("p", "Explain relation"),),
+    ),) if atomic else ()
+    with unit_of_work.transaction() as tx:
+        analysis = tx.analyses.get_for_section(BOOK_ID, "section-1")
+        tx.analyses.save(BOOK_ID, replace(
+            analysis, scenes=scenes, content_plan=ContentPlan(
+                version=3, profile="content-plan-v3", scenes=scenes, difficulties=difficulties,
+            ),
+        ))
+    process, _ = make_process_chapter(unit_of_work, FakeLLMClient.replying([]), max_unit_source_chars=1000)
+
+    _, root_ids = process.prepare(command())
+
+    with unit_of_work.transaction() as tx:
+        roots = [tx.work.get_root(root_id) for root_id in root_ids]
+    assert tuple(tuple(root.manifest["ordered_blocks"]) for root in roots) == (
+        (block_ids[:3], block_ids[3:]) if atomic
+        else (block_ids[:1], block_ids[1:3], block_ids[3:])
+    )
+    if atomic:
+        assert tuple(tuple(interval) for interval in roots[0].manifest["atomic_intervals"]) == (
+            block_ids[:2], block_ids[2:3],
+        )
 
 
 async def test_chapter_results_are_saved_for_every_block(

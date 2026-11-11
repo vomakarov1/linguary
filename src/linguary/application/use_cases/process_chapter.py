@@ -210,6 +210,7 @@ class ProcessChapter:
                 work.analysis.treatment_plan,
                 id_factory=self._id_factory,
                 max_source_chars=self._max_unit_source_chars,
+                scenes=work.analysis.scenes,
             )
             refs = None
             conditions = tx.work.latest_conditions(command.book_id)

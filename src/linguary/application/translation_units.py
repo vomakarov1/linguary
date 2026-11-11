@@ -30,6 +30,7 @@ from linguary.domain import (
     TranslationUnitError,
     TreatmentPlan,
 )
+from linguary.domain.content_plan import Scene
 
 #: Number of source characters sent in a single processing request. PRD § 10 targets
 #: 2000-5000 source tokens; 8000 characters is ~2000 English tokens (~4 chars/token),
@@ -56,6 +57,7 @@ def plan_translation_units(
     *,
     id_factory: Callable[[], str],
     max_source_chars: int = DEFAULT_MAX_UNIT_SOURCE_CHARS,
+    scenes: Sequence[Scene] = (),
 ) -> tuple[TranslationUnit, ...]:
     """Splits chapter blocks into groups for model calls (PRD § 10).
 
@@ -66,6 +68,9 @@ def plan_translation_units(
 
     A chapter with no textual blocks (cover, illustration page) yields an empty result:
     nothing to process, no model calls.
+
+    Scene endings may close a group once it fills 40% of the size limit. Cohesive
+    runs stay intact and strict sizing takes precedence over this preference.
     """
     if max_source_chars < 1:
         raise TranslationUnitError("предел размера группы блоков должен быть положительным")
@@ -78,7 +83,7 @@ def plan_translation_units(
         return ()
     return tuple(
         TranslationUnit.of_blocks(id=id_factory(), blocks=group, plan=plan)
-        for group in _grouped(ordered, max_source_chars=max_source_chars)
+        for group in _grouped(ordered, max_source_chars=max_source_chars, scenes=scenes)
     )
 
 
@@ -149,7 +154,7 @@ def paragraph_fragment_label(index: int, total: int, language: str) -> str:
 
 
 def _grouped(
-    blocks: Sequence[DocumentBlock], *, max_source_chars: int
+    blocks: Sequence[DocumentBlock], *, max_source_chars: int, scenes: Sequence[Scene] = (),
 ) -> tuple[tuple[DocumentBlock, ...], ...]:
     """Group boundaries: cohesive runs intact, sizing divided into balanced chapter portions.
 
@@ -164,6 +169,7 @@ def _grouped(
     current: list[DocumentBlock] = []
     current_size = 0
     placed = 0
+    scene_ends = {scene.end_block_id for scene in scenes}
     for cohesive in _cohesive_runs(blocks, max_source_chars=max_source_chars):
         size = sum(len(block.text) for block in cohesive)
         if current and _closes_group(
@@ -174,6 +180,7 @@ def _grouped(
             count=count,
             total=total,
             max_source_chars=max_source_chars,
+            scene_boundary=current[-1].id in scene_ends,
         ):
             groups.append(current)
             placed += current_size
@@ -193,15 +200,17 @@ def _closes_group(
     count: int,
     total: int,
     max_source_chars: int,
+    scene_boundary: bool = False,
 ) -> bool:
     """Whether the current group should close before the next cohesive run.
 
-    Two rules: strict request size limit and proximity to the balanced chapter partition
-    boundary. The second rule prevents the chapter tail from becoming a tiny request — a chunk
-    is appended to the group as long as it brings it closer to the partition boundary rather
-    than further away.
+    The strict request limit precedes a soft scene boundary at 40% capacity.
+    Otherwise, proximity to the balanced chapter partition boundary prevents a tiny tail:
+    append a chunk while it brings the group closer to that boundary.
     """
     if current_size + size > max_source_chars:
+        return True
+    if scene_boundary and current_size * 5 >= max_source_chars * 2:
         return True
     if filled >= count - 1:
         return False
