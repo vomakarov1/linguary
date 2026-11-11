@@ -369,10 +369,9 @@ def _merged_candidates(
     are grouped via `glossary_key`: otherwise each spelling would become a separate
     mandatory decision, and decisions could diverge.
     """
-    groups: dict[str, list[GlossaryCandidateResponse]] = {}
-    for fragment in fragments:
-        for candidate in fragment.glossary_candidates:
-            groups.setdefault(glossary_key(candidate.source_text), []).append(candidate)
+    groups = _candidate_groups(
+        candidate for fragment in fragments for candidate in fragment.glossary_candidates
+    )
     return tuple(
         _merged_candidate(
             group,
@@ -382,7 +381,35 @@ def _merged_candidates(
             name_translation_policy=name_translation_policy,
             conditions_id=conditions_id,
         )
-        for group in groups.values()
+        for group in groups
+    )
+
+
+def _candidate_groups(candidates: Iterable[GlossaryCandidateResponse]) -> tuple[list[GlossaryCandidateResponse], ...]:
+    groups: dict[str, list[GlossaryCandidateResponse]] = {}
+    for candidate in candidates:
+        groups.setdefault(glossary_key(candidate.source_text), []).append(candidate)
+    return tuple(groups.values())
+
+
+def _merged_candidate_suggestion(group: Sequence[GlossaryCandidateResponse]) -> tuple[str, str, str]:
+    leading = max(group, key=lambda candidate: candidate.confidence)
+    source_text = spellings_by_preference(
+        (candidate.source_text, candidate.confidence) for candidate in group
+    )[0]
+    note = next((candidate.note for candidate in sorted(
+        group, key=lambda candidate: candidate.confidence, reverse=True
+    ) if candidate.note.strip()), "")
+    return source_text, leading.suggested_translation, note
+
+
+def merged_glossary_suggestion_keys(candidates: Iterable[GlossaryCandidateResponse]) -> frozenset[tuple[str, str, str]]:
+    """Semantic output keys, using the same independent field selection as chapter persistence."""
+    return frozenset(
+        (glossary_key(source), translation, note)
+        for source, translation, note in (
+            _merged_candidate_suggestion(group) for group in _candidate_groups(candidates)
+        )
     )
 
 
@@ -409,12 +436,11 @@ def _merged_candidate(
     of the chapter and characteristics requiring notes may not appear in every fragment.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
+    source_text, suggested_translation, note = _merged_candidate_suggestion(group)
     candidate = GlossaryCandidate.create(
         id=id,
         analysis_id=analysis_id,
-        source_text=spellings_by_preference(
-            (candidate.source_text, candidate.confidence) for candidate in group
-        )[0],
+        source_text=source_text,
         type=next(
             (
                 candidate.type
@@ -423,23 +449,14 @@ def _merged_candidate(
             ),
             leading.type,
         ),
-        suggested_translation=leading.suggested_translation,
+        suggested_translation=suggested_translation,
         confidence=leading.confidence,
         model_flagged_review=any(candidate.model_flagged_review for candidate in group),
         confidence_threshold=confidence_threshold,
         has_translation_conflict=translations_conflict(
             candidate.suggested_translation for candidate in group
         ),
-        note=next(
-            (
-                candidate.note
-                for candidate in sorted(
-                    group, key=lambda candidate: candidate.confidence, reverse=True
-                )
-                if candidate.note.strip()
-            ),
-            "",
-        ),
+        note=note,
     )
     evidence = name_translation_evidence(
         group, policy=name_translation_policy, conditions_id=conditions_id
@@ -851,6 +868,7 @@ __all__ = [
     "ChapterFragment",
     "FragmentAnalysis",
     "merge_chapter_analysis",
+    "merged_glossary_suggestion_keys",
     "plan_fragments",
 ]
 

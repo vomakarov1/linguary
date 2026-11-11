@@ -712,3 +712,91 @@ async def test_pass_save_conflicts_stale_only_unaccepted_attempts(stored_book, c
         saved = tx.analyses.get_pass(BOOK_ID, COMMAND.section_id, AnalysisPassKind.NARRATIVE)
         assert (saved is not None) == (conflict_stage == PEDAGOGICAL)
         assert tx.analyses.get_pass(BOOK_ID, COMMAND.section_id, AnalysisPassKind.PEDAGOGICAL) is None
+
+
+@pytest.mark.parametrize('suggestion_origin', ['suggested', 'skip', 'skip_without_note', 'initial', 'edited_note'])
+async def test_reader_reanalyze_recognizes_independently_merged_own_glossary_suggestion(tmp_path, suggestion_origin):
+    import json
+    from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
+    from linguary.application.use_cases.approve_glossary import (
+        ApproveGlossary, GlossaryDecision, GlossaryDecisionCommand,
+    )
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+    from linguary.composition import build_application
+    from linguary.domain import BookStatus, ConceptType, TermConcept, TermStatus, TermVariant
+    from linguary.domain.book_conditions import thaw
+
+    class FragmentClient:
+        def __init__(self):
+            self.requests = []
+        async def generate(self, request):
+            count = sum(r.stage == NARRATIVE for r in self.requests)
+            self.requests.append(request)
+            if request.stage == NARRATIVE:
+                raw = json.loads(narrative().content)
+                raw['glossary_candidates'] = [dict(source_text='Holmes', type='person',
+                    suggested_translation='Холмс' if count % 2 == 0 else 'Хоумс',
+                    confidence=.95 if count % 2 == 0 else .85,
+                    model_flagged_review=False, note='' if count % 2 == 0 else 'Частный сыщик.',
+                    name_translation_assessment=None)]
+                reply = FakeReply.of_payload(raw)
+            else:
+                reply = pedagogical()
+            return await FakeLLMClient([reply]).generate(request)
+
+    app = build_application(settings=AppSettings(
+        llm=LLMSettings(model='pinned', api_key='synthetic-secret', proxy_mode='direct'),
+        storage=StorageSettings(data_root=str(tmp_path / 'application'))),
+        llm_client=FakeLLMClient(), content_plan_profile='content-plan-v3')
+    try:
+        section = make_analysis_section(texts=('Holmes opens the door.', 'Holmes enters the room.'))
+        source = app.paths.source_epub(BOOK_ID)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b'synthetic source')
+        def suggestion(note):
+            return TermConcept('suggested-holmes', BOOK_ID, ConceptType.PERSON, 'Holmes',
+                TermStatus.SUGGESTED, note=note,
+                variants=(TermVariant('suggested-holmes', 'ru', 'Холмс'),))
+        with app.unit_of_work.transaction() as tx:
+            tx.books.add(replace(make_book_record(), source_epub_path=str(source)))
+            tx.documents.save(make_analysis_document((section,)))
+            if suggestion_origin == 'initial':
+                tx.glossary.save(suggestion('Частный сыщик.'))
+        choose = ChooseBookConditions(app.book_conditions, app.book_runtime)
+        conditions = choose(BOOK_ID, action='reanalyze', expected_revision=0, settings_revision=0,
+                            confirmed=True, reader_level='b2')
+        def pinned_context(c):
+            return ContextBuilder(content_plan_profile='content-plan-v3',
+                reader_level=c.payload['reader_level'], prompt_templates=thaw(c.payload['prompt_templates']))
+        first = await scenario(app.unit_of_work, FragmentClient(), max_fragment_blocks=1,
+                               context=pinned_context(conditions))(COMMAND)
+        candidate, = first.analysis.glossary_candidates
+        assert (candidate.suggested_translation, candidate.note) == ('Холмс', 'Частный сыщик.')
+        if suggestion_origin in {'skip', 'skip_without_note'}:
+            with app.unit_of_work.transaction() as tx:
+                tx.books.save(replace(tx.books.get(BOOK_ID), status=BookStatus.GLOSSARY_REVIEW))
+            saved = ApproveGlossary(unit_of_work=app.unit_of_work, glossary_confidence_threshold=.8)(
+                GlossaryDecisionCommand(BOOK_ID, GlossaryDecision.SKIP, source_text='Holmes',
+                    note=candidate.note if suggestion_origin == 'skip' else None))
+            assert saved.status is TermStatus.SUGGESTED
+            assert saved.variant_for('ru').text == 'Холмс'
+            assert saved.note == (candidate.note if suggestion_origin == 'skip' else '')
+        elif suggestion_origin != 'initial':
+            with app.unit_of_work.transaction() as tx:
+                tx.glossary.save(suggestion('Уточнение пользователя.' if suggestion_origin == 'edited_note'
+                                            else candidate.note))
+        fresh = choose(BOOK_ID, action='reanalyze', expected_revision=1, settings_revision=0,
+                       confirmed=True, reader_level='b1')
+        retry = FragmentClient()
+        result = await scenario(app.unit_of_work, retry, max_fragment_blocks=1,
+                                context=pinned_context(fresh))(COMMAND)
+        assert [r.stage for r in retry.requests] == (
+            [NARRATIVE, NARRATIVE, PEDAGOGICAL, PEDAGOGICAL] if suggestion_origin == 'edited_note'
+            else [PEDAGOGICAL, PEDAGOGICAL])
+        assert result.analysis.is_complete
+        if suggestion_origin == 'initial':
+            with app.unit_of_work.transaction() as tx:
+                saved_pass = tx.analyses.get_pass(BOOK_ID, COMMAND.section_id, AnalysisPassKind.NARRATIVE)
+            assert list(saved_pass.payload['input_suggestions'][0]) == ['holmes', 'Холмс', 'Частный сыщик.']
+    finally:
+        await app.aclose()

@@ -48,6 +48,7 @@ from linguary.application.analysis_merge import (
     plan_fragments,
     validate_narrative_response,
     merge_narrative_fragments,
+    merged_glossary_suggestion_keys,
     combine_staged_analysis_responses,
 )
 from linguary.application.analysis_pass_cache import decode_pass, encode_pass, pedagogical_response
@@ -292,6 +293,8 @@ class AnalyzeChapter:
             previous_inputs = {tuple(item) for item in previous_narrative.payload.get('input_suggestions', ())}
             own_outputs = {_candidate_suggestion_key(item) for item in
                 previous_narrative.payload.get('response', {}).get('glossary_candidates', ())}
+            cached_narrative = decode_pass(previous_narrative.payload, narrative=True)
+            own_outputs.update(merged_glossary_suggestion_keys(cached_narrative.glossary_candidates))
             suggestions = tuple(s for s in suggestions
                 if _suggestion_key(s, document.target_language) not in own_outputs - previous_inputs)
         expected_conditions_id = (getattr(self._llm_client, 'conditions_id', None)
