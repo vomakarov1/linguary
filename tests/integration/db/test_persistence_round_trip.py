@@ -491,3 +491,184 @@ def test_invalid_domain_scalar_types_cannot_be_saved(unit_of_work, stored_book):
     with pytest.raises(PersistenceError), unit_of_work.transaction() as uow:
         uow.documents.save(make_document())
         uow.analyses.save(BOOK_ID, replace(make_analysis(), content_plan=invalid))
+
+
+def make_pass_result(**overrides):
+    from linguary.domain import AnalysisPassKind, AnalysisPassResult
+    return AnalysisPassResult(**{
+        'id': 'pass-1', 'book_id': BOOK_ID, 'section_id': SECTION_ID,
+        'pass_kind': AnalysisPassKind.NARRATIVE, 'scope_key': '',
+        'input_sha256': '1' * 64, 'output_sha256': '2' * 64,
+        'conditions_id': None, 'attempt_id': 'attempt-1',
+        'payload': {'schema_version': 1, 'chapter_summary': 'Summary', 'scenes': [{'participants': ['Holmes']}]},
+        **overrides,
+    })
+
+
+def test_analysis_pass_result_and_chapter_scenes_round_trip(unit_of_work, stored_book):
+    from dataclasses import replace
+    from linguary.domain import AnalysisPassKind, Scene, SceneVisualFact
+    from linguary.domain.content_plan import SourceAnchor
+    from linguary.domain.content_plan import ContentPlan
+    scene = Scene('scene-1', 0, BLOCK_ID, SECOND_BLOCK_ID, 'Winston enters.',
+                  'London', ('Winston',), (SceneVisualFact(SourceAnchor(SECOND_BLOCK_ID, 0, 7, 'Winston'),
+                                                          'Winston', 'At the door'),), ('Grey light',))
+    plan = ContentPlan(version=3, profile='content-plan-v3', scenes=(scene,))
+    analysis = replace(make_analysis(), content_plan=plan, scenes=(scene,))
+    result = make_pass_result()
+    with unit_of_work.transaction() as uow:
+        uow.documents.save(make_document())
+        uow.analyses.save(BOOK_ID, analysis)
+        uow.analyses.save_pass(result)
+    with unit_of_work.transaction() as uow:
+        assert uow.analyses.get_pass(BOOK_ID, SECTION_ID, AnalysisPassKind.NARRATIVE) == result
+        restored = uow.analyses.get_for_section(BOOK_ID, SECTION_ID)
+        assert restored == analysis
+        assert restored.content_plan.sha256 == plan.sha256
+
+
+def test_analysis_pass_upsert_uses_full_key_and_preserves_other_results(unit_of_work, engine, stored_book):
+    from dataclasses import replace
+    from sqlalchemy import text
+    from linguary.domain import AnalysisPassKind
+    results = (make_pass_result(), make_pass_result(id='scene-pass', scope_key='scene-1'),
+               make_pass_result(id='ped-pass', pass_kind=AnalysisPassKind.PEDAGOGICAL))
+    with unit_of_work.transaction() as uow:
+        uow.documents.save(make_document())
+        for result in results:
+            uow.analyses.save_pass(result)
+    with engine.connect() as connection:
+        original_created = connection.execute(text("SELECT created_at FROM analysis_pass_results WHERE id='pass-1'")).scalar_one()
+    replacement = replace(results[0], id='replacement', output_sha256='3' * 64, payload={'schema_version': 2})
+    with unit_of_work.transaction() as uow:
+        uow.analyses.save_pass(replacement)
+        uow.analyses.save_pass(replacement)
+        loaded = uow.analyses.list_passes_for_section(BOOK_ID, SECTION_ID)
+        assert len(loaded) == 3
+        assert {r.id for r in loaded} == {'replacement', 'scene-pass', 'ped-pass'}
+        assert uow.analyses.get_pass(BOOK_ID, SECTION_ID, AnalysisPassKind.NARRATIVE) == replacement
+        assert uow.analyses.get_pass(BOOK_ID, SECTION_ID, AnalysisPassKind.NARRATIVE, scope_key='scene-1') == results[1]
+        assert uow.analyses.get_pass('other-book', SECTION_ID, AnalysisPassKind.NARRATIVE) is None
+        assert uow.analyses.list_passes_for_section(BOOK_ID, 'other-section') == ()
+    with engine.connect() as connection:
+        created, updated = connection.execute(text("SELECT created_at, updated_at FROM analysis_pass_results WHERE id='replacement'")).one()
+        assert created == original_created
+        assert updated >= created
+
+
+def test_analysis_pass_delete_can_filter_kind_and_preserves_chapter_analysis(unit_of_work, stored_book):
+    from linguary.domain import AnalysisPassKind
+    with unit_of_work.transaction() as uow:
+        uow.documents.save(make_document())
+        uow.analyses.save(BOOK_ID, make_analysis())
+        uow.analyses.save_pass(make_pass_result())
+        pedagogical = make_pass_result(id='p2', pass_kind=AnalysisPassKind.PEDAGOGICAL)
+        uow.analyses.save_pass(pedagogical)
+        uow.analyses.delete_passes_for_book('missing-book')
+        uow.analyses.delete_passes_for_book(BOOK_ID, pass_kind=AnalysisPassKind.NARRATIVE)
+        assert uow.analyses.list_passes_for_section(BOOK_ID, SECTION_ID) == (pedagogical,)
+        uow.analyses.delete_passes_for_book(BOOK_ID)
+        assert uow.analyses.list_passes_for_section(BOOK_ID, SECTION_ID) == ()
+        assert uow.analyses.get_for_section(BOOK_ID, SECTION_ID) == make_analysis()
+
+
+@pytest.mark.parametrize('table,identity', [('sections', SECTION_ID), ('books', BOOK_ID)])
+def test_analysis_passes_cascade_with_book_or_section(unit_of_work, engine, stored_book, table, identity):
+    from sqlalchemy import text
+    with unit_of_work.transaction() as uow:
+        uow.documents.save(make_document())
+        uow.analyses.save_pass(make_pass_result())
+    with engine.begin() as connection:
+        connection.execute(text(f'DELETE FROM {table} WHERE id=:id'), {'id': identity})
+        assert connection.execute(text('SELECT count(*) FROM analysis_pass_results')).scalar_one() == 0
+
+
+def test_analysis_pass_conditions_deletion_keeps_result(unit_of_work, engine, stored_book):
+    from sqlalchemy import text
+    from linguary.domain import AnalysisPassKind
+    with unit_of_work.transaction() as uow:
+        uow.documents.save(make_document())
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO book_conditions (id, book_id, revision, schema_version, payload_json, reproducibility, created_at) VALUES ('conditions-1', :book, 0, 1, '{}', 'full', CURRENT_TIMESTAMP)"), {'book': BOOK_ID})
+    with unit_of_work.transaction() as uow:
+        uow.analyses.save_pass(make_pass_result(conditions_id='conditions-1'))
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM book_conditions WHERE id='conditions-1'"))
+    with unit_of_work.transaction() as uow:
+        assert uow.analyses.get_pass(BOOK_ID, SECTION_ID, AnalysisPassKind.NARRATIVE) == make_pass_result()
+
+
+@pytest.mark.parametrize('version', [2, 3])
+def test_legacy_content_plan_without_scenes_stays_readable(unit_of_work, engine, stored_book, version):
+    from dataclasses import replace
+    from linguary.domain.content_plan import ContentPlan
+    plan = ContentPlan(version=version, profile=f'content-plan-v{version}')
+    with unit_of_work.transaction() as uow:
+        uow.documents.save(make_document())
+        uow.analyses.save(BOOK_ID, replace(make_analysis(), content_plan=plan))
+    with unit_of_work.transaction() as uow:
+        analysis = uow.analyses.get_for_section(BOOK_ID, SECTION_ID)
+        assert analysis.scenes == ()
+        assert analysis.content_plan == plan
+
+
+def test_analysis_passes_are_isolated_by_book_and_section(unit_of_work, stored_book):
+    from dataclasses import replace
+    from linguary.domain import AnalysisPassKind
+    first = make_document()
+    second_section = replace(first.sections[0], id='section-2', order=1,
+                             blocks=tuple(replace(b, id=f'second-{b.id}', section_id='section-2')
+                                          for b in first.sections[0].blocks))
+    other = make_document(book_id='book-2')
+    other_section = replace(other.sections[0], id='section-other',
+                            blocks=tuple(replace(b, id=f'other-{b.id}', section_id='section-other')
+                                         for b in other.sections[0].blocks))
+    other = replace(other, sections=(other_section,),
+                    resources=tuple(replace(r, id=f'other-{r.id}') for r in other.resources))
+    results = (make_pass_result(), make_pass_result(id='second-pass', section_id='section-2'),
+               make_pass_result(id='other-pass', book_id='book-2', section_id='section-other'))
+    with unit_of_work.transaction() as uow:
+        uow.books.add(make_book(book_id='book-2'))
+        uow.documents.save(replace(first, sections=(*first.sections, second_section)))
+        uow.documents.save(other)
+        for result in results:
+            uow.analyses.save_pass(result)
+        assert uow.analyses.list_passes_for_section(BOOK_ID, SECTION_ID) == (results[0],)
+        assert uow.analyses.list_passes_for_section(BOOK_ID, 'section-2') == (results[1],)
+        uow.analyses.delete_passes_for_book(BOOK_ID)
+        assert uow.analyses.get_pass('book-2', 'section-other', AnalysisPassKind.NARRATIVE) == results[2]
+
+
+def test_failed_analysis_pass_upsert_rolls_back(unit_of_work, stored_book):
+    from dataclasses import replace
+    from linguary.domain import AnalysisPassKind
+    original = make_pass_result()
+    with unit_of_work.transaction() as uow:
+        uow.documents.save(make_document())
+        uow.analyses.save_pass(original)
+    with pytest.raises(RuntimeError, match='abort transaction'):
+        with unit_of_work.transaction() as uow:
+            uow.analyses.save_pass(replace(original, id='replacement', payload={'schema_version': 2}))
+            raise RuntimeError('abort transaction')
+    with unit_of_work.transaction() as uow:
+        assert uow.analyses.get_pass(BOOK_ID, SECTION_ID, AnalysisPassKind.NARRATIVE) == original
+
+
+@pytest.mark.parametrize('field,value', [('order', True), ('visual_facts', None), ('participants', 'Holmes'),
+                                        ('unknown', 'field')])
+def test_corrupt_stored_scenes_fail_closed(unit_of_work, engine, stored_book, field, value):
+    import json
+    from dataclasses import replace
+    from sqlalchemy import text
+    from linguary.domain.content_plan import ContentPlan, Scene
+    plan = ContentPlan(version=3, profile='content-plan-v3', scenes=(Scene('s', 0, BLOCK_ID, SECOND_BLOCK_ID, 'Scene'),))
+    with unit_of_work.transaction() as uow:
+        uow.documents.save(make_document())
+        uow.analyses.save(BOOK_ID, replace(make_analysis(), content_plan=plan))
+    with engine.begin() as connection:
+        raw = json.loads(connection.execute(text('SELECT content_plan_json FROM chapter_analyses')).scalar_one())
+        raw['scenes'][0][field] = value
+        connection.execute(text('UPDATE chapter_analyses SET content_plan_json=:payload'), {'payload': json.dumps(raw)})
+    with unit_of_work.transaction() as uow:
+        with pytest.raises(PersistenceError, match='повреждённый сохранённый содержательный план'):
+            uow.analyses.get_for_section(BOOK_ID, SECTION_ID)

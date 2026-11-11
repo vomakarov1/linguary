@@ -424,3 +424,21 @@ def test_pronunciation_migration_refuses_data_loss(alembic_config, engine, conte
     with engine.connect() as connection:
         assert connection.execute(text('SELECT pronunciation_assistances_json FROM block_results')).scalar_one() == payload
         assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '0011'
+
+
+def test_analysis_pass_migration_upgrade_and_downgrade(alembic_config, engine):
+    from sqlalchemy import text
+    command.downgrade(alembic_config, '0015')
+    assert 'analysis_pass_results' not in inspect(engine).get_table_names()
+    command.upgrade(alembic_config, '0016')
+    # Alembic replaces the table through another connection; refresh pooled SQLite schema state.
+    engine.dispose()
+    indexes = {index['name'] for index in inspect(engine).get_indexes('analysis_pass_results')}
+    assert 'ix_analysis_pass_results_book_id' in indexes
+    keys = {tuple(key['column_names']) for key in inspect(engine).get_unique_constraints('analysis_pass_results')}
+    assert ('book_id', 'section_id', 'pass_kind', 'scope_key') in keys
+    with engine.connect() as connection:
+        assert connection.execute(text('SELECT count(*) FROM analysis_pass_results')).scalar_one() == 0
+    command.downgrade(alembic_config, '0015')
+    assert 'analysis_pass_results' not in inspect(engine).get_table_names()
+    assert 'chapter_analyses' in inspect(engine).get_table_names()

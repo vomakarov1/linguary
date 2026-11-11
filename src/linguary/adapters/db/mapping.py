@@ -22,6 +22,7 @@ from linguary.adapters.db.models import (
     BlockResultRow,
     BookRow,
     ChapterAnalysisRow,
+    AnalysisPassResultRow,
     DocumentBlockRow,
     GlossaryCandidateRow,
     ImportWarningRow,
@@ -38,7 +39,7 @@ from linguary.adapters.db.models import (
 )
 from linguary.application.ports.persistence import BookRecord, ExportValidationStatus, PersistenceError
 from linguary.domain.content_plan import (
-    ContentPlan, ContentEvidence, ContextFact, Difficulty, SourceAnchor, RequiredPoint, HelpEvidence,
+    ContentPlan, ContentEvidence, ContextFact, Difficulty, SourceAnchor, RequiredPoint, HelpEvidence, Scene, SceneVisualFact,
 )
 from linguary.domain.errors import DomainError
 from linguary.domain.learning import FragmentAssistance
@@ -58,6 +59,8 @@ from linguary.domain import (
     BookStatus,
     CanonicalDocument,
     ChapterAnalysis,
+    AnalysisPassKind,
+    AnalysisPassResult,
     ConceptType,
     CoverageStatus,
     DocumentBlock,
@@ -389,6 +392,7 @@ def to_analysis(
     candidates: Sequence[GlossaryCandidateRow],
 ) -> ChapterAnalysis:
     """Reconstruct domain chapter analysis from database rows."""
+    content_plan = _decode_content_plan(row.content_plan_json)
     return ChapterAnalysis(
         id=row.id,
         section_id=row.section_id,
@@ -419,7 +423,8 @@ def to_analysis(
             )
             for candidate in candidates
         ),
-        content_plan=_decode_content_plan(row.content_plan_json),
+        content_plan=content_plan,
+        scenes=content_plan.scenes if content_plan else (),
         before_you_read=tuple(
             BeforeYouReadEntry(
                 expression=entry["expression"], explanation=entry["explanation"]
@@ -427,6 +432,21 @@ def to_analysis(
             for entry in row.before_you_read_json
         ),
     )
+
+
+def to_analysis_pass_row(result: AnalysisPassResult) -> AnalysisPassResultRow:
+    return AnalysisPassResultRow(id=result.id, book_id=result.book_id, section_id=result.section_id,
+        pass_kind=result.pass_kind.value, scope_key=result.scope_key,
+        input_sha256=result.input_sha256, output_sha256=result.output_sha256,
+        conditions_id=result.conditions_id, attempt_id=result.attempt_id,
+        payload_json=_json_collections(dict(result.payload)))
+
+
+def to_analysis_pass_result(row: AnalysisPassResultRow) -> AnalysisPassResult:
+    return AnalysisPassResult(id=row.id, book_id=row.book_id, section_id=row.section_id,
+        pass_kind=AnalysisPassKind(row.pass_kind), scope_key=row.scope_key,
+        input_sha256=row.input_sha256, output_sha256=row.output_sha256,
+        conditions_id=row.conditions_id, attempt_id=row.attempt_id, payload=row.payload_json)
 
 
 # --- processing run and results ----------------------------------------------
@@ -816,6 +836,22 @@ def _context_fact(value):
         None if data['certainty'] == 'unknown' else _string(data['value']), _string(data['certainty']))
 
 
+def _scene(value: object) -> Scene:
+    fields = {"id", "order", "start_block_id", "end_block_id", "summary", "location",
+              "participants", "visual_facts", "visual_assumptions"}
+    data = _object(value, fields)
+    facts = []
+    for value in _array(data["visual_facts"]):
+        fact = _object(value, {"anchor", "subject", "detail"})
+        anchor = _object(fact["anchor"], {"block_id", "start", "end", "quote"})
+        facts.append(SceneVisualFact(SourceAnchor(_string(anchor["block_id"]), _integer(anchor["start"]),
+            _integer(anchor["end"]), _string(anchor["quote"])), _string(fact["subject"]), _string(fact["detail"])))
+    return Scene(**{name: _string(data[name]) for name in ("id", "start_block_id", "end_block_id", "summary")},
+        order=_integer(data["order"]), location=None if data["location"] is None else _string(data["location"]),
+        participants=tuple(_string(p) for p in _array(data["participants"])), visual_facts=tuple(facts),
+        visual_assumptions=tuple(_string(a) for a in _array(data["visual_assumptions"])))
+
+
 def _decode_content_plan(value: object) -> ContentPlan | None:
     if value is None:
         return None
@@ -824,12 +860,15 @@ def _decode_content_plan(value: object) -> ContentPlan | None:
         fields = {"version", "profile", "difficulties", "before_you_read_evidence"}
         if version == 3:
             fields.add('context_facts')
+        if isinstance(value, dict) and 'scenes' in value:
+            fields.add('scenes')
         data = _object(value, fields)
         return ContentPlan(
             version=_integer(data["version"]), profile=_string(data["profile"]),
             difficulties=tuple(_difficulty(item) for item in _array(data["difficulties"])),
             before_you_read_evidence=tuple(_help_evidence(item) for item in _array(data["before_you_read_evidence"])),
             context_facts=tuple(_context_fact(item) for item in _array(data['context_facts'])) if version == 3 else (),
+            scenes=tuple(_scene(item) for item in _array(data['scenes'])) if 'scenes' in data else (),
         )
     except (ValueError, TypeError, DomainError):
         raise PersistenceError("повреждённый сохранённый содержательный план") from None

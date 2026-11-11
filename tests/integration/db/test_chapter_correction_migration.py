@@ -7,6 +7,8 @@ from persistence_factories import make_book, make_document, make_run, make_trans
 
 
 def test_downgrade_preserves_results_and_bindings(alembic_config, engine, unit_of_work):
+    # Capture the correction schema before later migrations add independent tables.
+    command.downgrade(alembic_config, '0015')
     with unit_of_work.transaction() as tx:
         tx.books.add(make_book())
         tx.documents.save(make_document())

@@ -25,6 +25,8 @@ from linguary.domain import (
     BookStatus,
     CanonicalDocument,
     ChapterAnalysis,
+    AnalysisPassKind,
+    AnalysisPassResult,
     LLMCallLog,
     ProcessingRun,
     ProcessingTask,
@@ -154,6 +156,19 @@ class ChapterAnalysisRepository(Protocol):
 
     def delete_for_book(self, book_id: str) -> None:
         """Remove current analysis projections, preserving archives."""
+
+    def save_pass(self, result: AnalysisPassResult) -> None:
+        """Upsert a pass by book, section, kind and scope."""
+
+    def get_pass(self, book_id: str, section_id: str, pass_kind: AnalysisPassKind,
+                 *, scope_key: str = "") -> AnalysisPassResult | None:
+        """Accepted pass for the exact scope, or None."""
+
+    def list_passes_for_section(self, book_id: str, section_id: str) -> tuple[AnalysisPassResult, ...]:
+        """Accepted chapter passes ordered by kind and scope."""
+
+    def delete_passes_for_book(self, book_id: str, *, pass_kind: AnalysisPassKind | None = None) -> None:
+        """Delete all book passes, optionally limited to a kind."""
 
 
 class ProcessingRunRepository(Protocol):

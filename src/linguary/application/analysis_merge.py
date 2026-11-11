@@ -24,7 +24,7 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, SourceAnchor, artifact_key
+from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, Scene, SceneVisualFact, SourceAnchor, artifact_key
 from linguary.domain.llm_log import Violation
 
 from linguary.application.block_labels import without_block_labels
@@ -35,6 +35,12 @@ from linguary.application.llm_dto import (
     ChapterAnalysisResponse,
     GlossaryCandidateResponse,
     QuotedContentPlanResponse,
+    NarrativeAnalysisResponse,
+    PedagogicalAnalysisResponse,
+    QuotedContextFactResponse,
+    QuotedSceneResponse,
+    QuotedSceneVisualFactResponse,
+    QuotedSourceAnchorResponse,
 )
 from linguary.domain import (
     BeforeYouReadEntry,
@@ -933,6 +939,167 @@ def _substance(text: str) -> str:
     return "".join(re.findall(r"\w+", without_footnote_markers(text).casefold()))
 
 
+def resolve_scenes(
+    scenes: Sequence[QuotedSceneResponse],
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str],
+    visible_texts_by_alias: Mapping[str, str],
+    *,
+    ordered_block_ids: Sequence[str],
+) -> tuple[Scene, ...]:
+    """Resolve scene references within the visible chapter or fragment."""
+    positions = {block_id: index for index, block_id in enumerate(ordered_block_ids)}
+    resolved = []
+    previous_end = -1
+    for order, raw in enumerate(scenes):
+        start, end = aliases.get(raw.start_block_id), aliases.get(raw.end_block_id)
+        if (start not in positions or end not in positions
+                or raw.start_block_id not in visible_texts_by_alias
+                or raw.end_block_id not in visible_texts_by_alias
+                or start not in texts or end not in texts
+                or positions[start] > positions[end] or positions[start] <= previous_end):
+            raise _analysis_error(
+                'границы сцен должны принадлежать главе, идти по порядку и не пересекаться',
+                rule_code='scene_bounds', block_ids=(start, end, *ordered_block_ids),
+            )
+        facts = []
+        for fact in raw.visual_facts:
+            anchor = _resolve_quoted_anchor(fact.anchor.block_id, fact.anchor.quote,
+                                           aliases, texts, visible_texts_by_alias, strict=True)
+            if anchor is None:
+                raise _analysis_error('цитата визуального факта не разрешается в исходном блоке',
+                                      rule_code='unresolved_quote', block_ids=(start, end))
+            if anchor.block_id not in positions or not positions[start] <= positions[anchor.block_id] <= positions[end]:
+                raise _analysis_error('визуальный факт находится вне сцены',
+                                      rule_code='scene_visual_anchor_out_of_bounds', block_ids=(anchor.block_id,))
+            facts.append(SceneVisualFact(anchor, fact.subject, fact.detail))
+        item = Scene('pending', order, start, end, raw.summary, raw.location,
+                     raw.participants, tuple(facts), raw.visual_assumptions)
+        resolved.append(replace(item, id=item.canonical_id))
+        previous_end = positions[end]
+    return tuple(resolved)
+
+
+def validate_narrative_response(
+    payload: NarrativeAnalysisResponse,
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str],
+    visible_texts_by_alias: Mapping[str, str],
+    *,
+    ordered_block_ids: Sequence[str],
+    mandatory_facts: Mapping[str, Mapping[str, str]] | None = None,
+    is_notes_only: bool = False,
+) -> tuple[tuple[Scene, ...], tuple[ContextFact, ...]]:
+    """Validate complete scene coverage and source-bound narrative facts."""
+    if is_notes_only and payload.scenes:
+        raise _analysis_error('служебный раздел не должен содержать сцены',
+                              rule_code='notes_only_scenes', block_ids=ordered_block_ids)
+    scenes = resolve_scenes(payload.scenes, aliases, texts, visible_texts_by_alias,
+                            ordered_block_ids=ordered_block_ids)
+    if not is_notes_only and ordered_block_ids:
+        positions = {block: index for index, block in enumerate(ordered_block_ids)}
+        next_start = 0
+        for item in scenes:
+            if positions[item.start_block_id] != next_start:
+                break
+            next_start = positions[item.end_block_id] + 1
+        if next_start != len(ordered_block_ids):
+            raise _analysis_error('карта сцен должна непрерывно покрывать все блоки главы',
+                                  rule_code='scene_bounds', block_ids=ordered_block_ids)
+    scoped_aliases = {alias: block for alias, block in aliases.items() if block in ordered_block_ids}
+    response = ChapterAnalysisResponse(payload.translation_instructions, payload.chapter_summary,
+        content_plan=QuotedContentPlanResponse(context_facts=payload.context_facts))
+    plan = content_plan_from_response(response, scoped_aliases, texts,
+                                      visible_texts_by_alias=visible_texts_by_alias)
+    if plan is None:
+        raise _unresolved_quote_error(response, scoped_aliases, texts, visible_texts_by_alias,
+                                      {v: k for k, v in scoped_aliases.items()})
+    validate_fact_glossary(plan, mandatory_facts or {}, {v: k for k, v in scoped_aliases.items()})
+    return scenes, plan.context_facts
+
+
+def _quoted_scene(scene: Scene) -> QuotedSceneResponse:
+    return QuotedSceneResponse(scene.start_block_id, scene.end_block_id, scene.summary,
+        scene.location, scene.participants,
+        tuple(QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse(f.anchor.block_id, f.anchor.quote),
+                                            f.subject, f.detail) for f in scene.visual_facts),
+        scene.visual_assumptions)
+
+
+def _quoted_fact(fact: ContextFact) -> QuotedContextFactResponse:
+    return QuotedContextFactResponse(fact.id, fact.kind,
+        tuple(QuotedSourceAnchorResponse(a.block_id, a.quote) for a in fact.anchors),
+        QuotedSourceAnchorResponse(fact.subject_anchor.block_id, fact.subject_anchor.quote),
+        fact.value, fact.certainty)
+
+
+def merge_narrative_fragments(
+    fragments: Sequence[tuple[NarrativeAnalysisResponse, tuple[Scene, ...], tuple[ContextFact, ...]]],
+) -> tuple[NarrativeAnalysisResponse, tuple[Scene, ...], tuple[ContextFact, ...]]:
+    """Merge validated fragments; returned quoted references use stable block IDs.
+
+    Callers resolving this payload must explicitly expose identity aliases for the
+    current chapter, together with its visible text. Local b1 aliases are never reused.
+    """
+    if not fragments:
+        raise AnalysisMergeError('нет фрагментов повествовательного анализа')
+    scenes: list[Scene] = []
+    facts: dict[str, ContextFact] = {}
+    candidates = []
+    instruction_fragments = []
+    previous_had_scene = False
+    for index, (raw, resolved, context_facts) in enumerate(fragments):
+        instruction_fragments.append(FragmentAnalysis(index, raw.translation_instructions, raw.chapter_summary))
+        for candidate in raw.glossary_candidates:
+            if candidate not in candidates:
+                candidates.append(candidate)
+        for fact in context_facts:
+            facts.setdefault(fact.canonical_id, replace(fact, id=fact.canonical_id))
+        current = list(resolved)
+        implicit_continuation = (
+            previous_had_scene and current
+            and scenes[-1].location is not None and bool(scenes[-1].location.strip())
+            and scenes[-1].location == current[0].location
+            and bool(scenes[-1].participants)
+            and set(scenes[-1].participants) == set(current[0].participants)
+        )
+        if (previous_had_scene and current
+                and ((raw.scenes and raw.scenes[0].continues_previous_scene) or implicit_continuation)):
+            prev, first = scenes.pop(), current.pop(0)
+            merged = replace(prev, end_block_id=first.end_block_id,
+                summary=' '.join(dict.fromkeys((prev.summary, first.summary))),
+                location=prev.location or first.location,
+                participants=tuple(dict.fromkeys((*prev.participants, *first.participants))),
+                visual_facts=tuple(dict.fromkeys((*prev.visual_facts, *first.visual_facts))),
+                visual_assumptions=tuple(dict.fromkeys((*prev.visual_assumptions, *first.visual_assumptions))))
+            scenes.append(merged)
+        scenes.extend(current)
+        previous_had_scene = bool(resolved)
+    normalized = []
+    for index, item in enumerate(scenes):
+        item = replace(item, order=index)
+        normalized.append(replace(item, id=item.canonical_id))
+    result = NarrativeAnalysisResponse(_merged_instructions(instruction_fragments), fragments[-1][0].chapter_summary,
+        tuple(candidates), tuple(_quoted_fact(f) for f in facts.values()), tuple(_quoted_scene(s) for s in normalized))
+    return result, tuple(normalized), tuple(facts.values())
+
+
+def combine_staged_analysis_responses(
+    narrative: NarrativeAnalysisResponse,
+    pedagogical: PedagogicalAnalysisResponse,
+    *,
+    resolved_scenes: Sequence[Scene] = (),
+) -> ChapterAnalysisResponse:
+    """Assemble both pass contracts without changing pedagogical reference aliases."""
+    return ChapterAnalysisResponse(narrative.translation_instructions,
+        pedagogical.reader_chapter_summary or narrative.chapter_summary,
+        narrative.glossary_candidates, pedagogical.treatment_plan, pedagogical.before_you_read,
+        QuotedContentPlanResponse(difficulties=pedagogical.difficulties,
+            before_you_read_evidence=pedagogical.before_you_read_evidence,
+            context_facts=narrative.context_facts,
+            scenes=tuple(_quoted_scene(s) for s in resolved_scenes) if resolved_scenes else narrative.scenes))
+
+
 def content_plan_from_response(
     payload: ChapterAnalysisResponse,
     aliases: Mapping[str, str],
@@ -1115,14 +1282,21 @@ def content_plan_from_response(
         mapped.validate(texts)
         facts.append(replace(mapped, id=mapped.canonical_id))
     return ContentPlan(version=payload.content_plan.version, profile=payload.content_plan.profile,
-        difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence), context_facts=tuple(facts))
+        difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence), context_facts=tuple(facts),
+        scenes=(resolve_scenes(payload.content_plan.scenes, aliases, texts, visible_texts_by_alias,
+                               ordered_block_ids=tuple(dict.fromkeys(aliases.values()))) if is_quoted else ()))
 
 
-def _resolve_quoted_anchor(block_alias, quote, aliases, texts, visible_texts_by_alias):
-    """Resolve a quote in both views of its source block."""
+def _resolve_quoted_anchor(block_alias, quote, aliases, texts, visible_texts_by_alias, *, strict=False):
+    """Resolve both source views; visual facts require a verbatim quote."""
     block_id = aliases.get(block_alias)
     if block_id is None or texts is None or block_id not in texts or block_alias not in visible_texts_by_alias:
         return None
+    if strict:
+        start = texts[block_id].find(quote)
+        if start < 0 or quote not in visible_texts_by_alias[block_alias]:
+            return None
+        return SourceAnchor(block_id=block_id, start=start, end=start + len(quote), quote=quote)
     visible_span = find_quote_span(visible_texts_by_alias[block_alias], quote)
     source_span = find_quote_span(texts[block_id], quote)
     if visible_span is None or source_span is None:

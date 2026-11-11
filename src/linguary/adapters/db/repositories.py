@@ -16,12 +16,14 @@ import json
 
 from sqlalchemy import JSON, LargeBinary, cast, delete, func, or_, select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.dialects.sqlite import insert
 
 from linguary.adapters.db import mapping
 from linguary.adapters.db.models import (
     BlockResultRow,
     BookRow,
     ChapterAnalysisRow,
+    AnalysisPassResultRow,
     DocumentBlockRow,
     GlossaryCandidateRow,
     ImportWarningRow,
@@ -42,6 +44,8 @@ from linguary.domain import (
     BookImportWarning,
     CanonicalDocument,
     ChapterAnalysis,
+    AnalysisPassKind,
+    AnalysisPassResult,
     LLMCallLog,
     ProcessingRun,
     ProcessingRunStatus,
@@ -297,6 +301,40 @@ class SqlAlchemyChapterAnalysisRepository:
             )
             for row in rows
         )
+
+    def save_pass(self, result: AnalysisPassResult) -> None:
+        row = mapping.to_analysis_pass_row(result)
+        now = datetime.now(UTC)
+        values = {column.name: getattr(row, column.name) for column in AnalysisPassResultRow.__table__.columns
+                  if column.name not in {"created_at", "updated_at"}}
+        statement = insert(AnalysisPassResultRow).values(**values, created_at=now, updated_at=now)
+        statement = statement.on_conflict_do_update(
+            index_elements=["book_id", "section_id", "pass_kind", "scope_key"],
+            set_={**{key: getattr(statement.excluded, key) for key in values}, "updated_at": now},
+        )
+        self._session.execute(statement)
+        self._session.flush()
+
+    def get_pass(self, book_id: str, section_id: str, pass_kind: AnalysisPassKind,
+                 *, scope_key: str = "") -> AnalysisPassResult | None:
+        row = self._session.scalars(select(AnalysisPassResultRow).where(
+            AnalysisPassResultRow.book_id == book_id, AnalysisPassResultRow.section_id == section_id,
+            AnalysisPassResultRow.pass_kind == pass_kind.value, AnalysisPassResultRow.scope_key == scope_key,
+        )).one_or_none()
+        return None if row is None else mapping.to_analysis_pass_result(row)
+
+    def list_passes_for_section(self, book_id: str, section_id: str) -> tuple[AnalysisPassResult, ...]:
+        rows = self._session.scalars(select(AnalysisPassResultRow).where(
+            AnalysisPassResultRow.book_id == book_id, AnalysisPassResultRow.section_id == section_id,
+        ).order_by(AnalysisPassResultRow.pass_kind, AnalysisPassResultRow.scope_key)).all()
+        return tuple(mapping.to_analysis_pass_result(row) for row in rows)
+
+    def delete_passes_for_book(self, book_id: str, *, pass_kind: AnalysisPassKind | None = None) -> None:
+        statement = delete(AnalysisPassResultRow).where(AnalysisPassResultRow.book_id == book_id)
+        if pass_kind is not None:
+            statement = statement.where(AnalysisPassResultRow.pass_kind == pass_kind.value)
+        self._session.execute(statement)
+        self._session.flush()
 
     def _to_analysis(self, row: ChapterAnalysisRow) -> ChapterAnalysis:
         """Assemble domain analysis along with treatment plan and candidates."""

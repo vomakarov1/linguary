@@ -266,6 +266,26 @@ class ChapterAnalysisRow(Base):
     content_plan_json: Mapped[dict[str, Any] | None] = mapped_column(ContentObjectJSON(), nullable=True)
 
 
+class AnalysisPassResultRow(Base):
+    """Accepted result of an individual analysis pass, independent of its projection."""
+
+    __tablename__ = "analysis_pass_results"
+    __table_args__ = (UniqueConstraint("book_id", "section_id", "pass_kind", "scope_key"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    book_id: Mapped[str] = mapped_column(ForeignKey("books.id", ondelete="CASCADE"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id", ondelete="CASCADE"))
+    pass_kind: Mapped[str] = mapped_column(String)
+    scope_key: Mapped[str] = mapped_column(String)
+    input_sha256: Mapped[str] = mapped_column(String)
+    output_sha256: Mapped[str] = mapped_column(String)
+    conditions_id: Mapped[str | None] = mapped_column(ForeignKey("book_conditions.id", ondelete="SET NULL"))
+    attempt_id: Mapped[str | None] = mapped_column(String)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(ContentObjectJSON())
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
 class TreatmentPlanItemRow(Base):
     """Treatment mode for a single block in a chapter treatment plan."""
 
