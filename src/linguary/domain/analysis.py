@@ -7,10 +7,11 @@ An incomplete analysis prevents launching primary processing for that chapter.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 
-from linguary.domain.content_plan import ContentPlan
+from linguary.domain.content_plan import ContentPlan, Scene
 from linguary.domain.errors import AnalysisIncompleteError, DomainError
 from linguary.domain.glossary import GlossaryCandidate
 from linguary.domain.learning import BeforeYouReadEntry
@@ -31,8 +32,10 @@ class ChapterAnalysis:
     before_you_read: tuple[BeforeYouReadEntry, ...] = ()
 
     content_plan: ContentPlan | None = None
+    scenes: tuple[Scene, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "scenes", tuple(self.scenes))
         if not self.id.strip():
             raise DomainError("идентификатор анализа главы пуст")
         if not self.section_id.strip():
@@ -61,6 +64,7 @@ class ChapterAnalysis:
         glossary_candidates: Iterable[GlossaryCandidate] = (),
         before_you_read: Iterable[BeforeYouReadEntry] = (),
         content_plan: ContentPlan | None = None,
+        scenes: Iterable[Scene] | None = None,
     ) -> ChapterAnalysis:
         """Creates an analysis, computing plan coverage completeness for chapter blocks."""
         return cls(
@@ -73,6 +77,7 @@ class ChapterAnalysis:
             glossary_candidates=tuple(glossary_candidates),
             before_you_read=tuple(before_you_read),
             content_plan=content_plan,
+            scenes=tuple(scenes) if scenes is not None else (content_plan.scenes if content_plan else ()),
         )
 
     @property
@@ -93,3 +98,34 @@ class ChapterAnalysis:
             raise AnalysisIncompleteError(
                 f"анализ главы {self.section_id} неполон: обработку запускать нельзя"
             )
+
+
+class AnalysisPassKind(StrEnum):
+    NARRATIVE = "narrative"
+    PEDAGOGICAL = "pedagogical"
+    ILLUSTRATION_PREP = "illustration_prep"
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisPassResult:
+    id: str
+    book_id: str
+    section_id: str
+    pass_kind: AnalysisPassKind
+    scope_key: str
+    input_sha256: str
+    output_sha256: str
+    conditions_id: str | None
+    attempt_id: str | None
+    payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if not all(value.strip() for value in (self.id, self.book_id, self.section_id)):
+            raise DomainError("результат прохода требует идентификатор, книгу и главу")
+        try:
+            object.__setattr__(self, "pass_kind", AnalysisPassKind(self.pass_kind))
+        except ValueError:
+            raise DomainError("неизвестный вид прохода анализа") from None
+        for value in (self.input_sha256, self.output_sha256):
+            if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+                raise DomainError("неверная контрольная сумма результата прохода")

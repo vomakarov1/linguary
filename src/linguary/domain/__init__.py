@@ -7,7 +7,8 @@ The public API of the layer is gathered here: the application layer imports enti
 `from linguary.domain import DocumentBlock` rather than from private submodules.
 """
 
-from linguary.domain.analysis import ChapterAnalysis
+from linguary.domain.analysis import AnalysisPassKind, AnalysisPassResult, ChapterAnalysis
+from linguary.domain.content_plan import Scene, SceneVisualFact
 from linguary.domain.book_status import (
     BOOK_STATUS_TRANSITIONS,
     BookEvent,
@@ -115,6 +116,10 @@ __all__ = [
     "BOOK_STATUS_TRANSITIONS",
     "ActiveRunConflictError",
     "AnalysisIncompleteError",
+    "AnalysisPassKind",
+    "AnalysisPassResult",
+    "Scene",
+    "SceneVisualFact",
     "BeforeYouReadEntry",
     "BlockIdentity",
     "BlockOrderError",

@@ -289,6 +289,10 @@ class TranslationResultResponse:
 
 __all__ = [
     "ContentPlanResponse",
+    "QuotedSceneVisualFactResponse",
+    "QuotedSceneResponse",
+    "NarrativeAnalysisResponse",
+    "PedagogicalAnalysisResponse",
     "HelpEvidenceResponse",
     "BeforeYouReadEntryResponse",
     "BlockResultResponse",
@@ -381,6 +385,59 @@ class QuotedContextFactResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class QuotedSceneVisualFactResponse:
+    anchor: QuotedSourceAnchorResponse
+    subject: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class QuotedSceneResponse:
+    start_block_id: str
+    end_block_id: str
+    summary: str
+    location: str | None = None
+    participants: tuple[str, ...] = ()
+    visual_facts: tuple[QuotedSceneVisualFactResponse, ...] = ()
+    visual_assumptions: tuple[str, ...] = ()
+    continues_previous_scene: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "participants", tuple(self.participants))
+        object.__setattr__(self, "visual_facts", tuple(self.visual_facts))
+        object.__setattr__(self, "visual_assumptions", tuple(self.visual_assumptions))
+
+
+@dataclass(frozen=True, slots=True)
+class NarrativeAnalysisResponse:
+    translation_instructions: str
+    chapter_summary: str
+    glossary_candidates: tuple[GlossaryCandidateResponse, ...] = ()
+    context_facts: tuple[QuotedContextFactResponse, ...] = ()
+    scenes: tuple[QuotedSceneResponse, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "glossary_candidates", tuple(self.glossary_candidates))
+        object.__setattr__(self, "context_facts", tuple(self.context_facts))
+        object.__setattr__(self, "scenes", tuple(self.scenes))
+
+
+@dataclass(frozen=True, slots=True)
+class PedagogicalAnalysisResponse:
+    treatment_plan: tuple[TreatmentPlanItemResponse, ...] = ()
+    before_you_read: tuple[BeforeYouReadEntryResponse, ...] = ()
+    difficulties: tuple[QuotedDifficultyResponse, ...] = ()
+    before_you_read_evidence: tuple[HelpEvidenceResponse, ...] = ()
+    reader_chapter_summary: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "treatment_plan", tuple(self.treatment_plan))
+        object.__setattr__(self, "before_you_read", tuple(self.before_you_read))
+        object.__setattr__(self, "difficulties", tuple(self.difficulties))
+        object.__setattr__(self, "before_you_read_evidence", tuple(self.before_you_read_evidence))
+
+
+@dataclass(frozen=True, slots=True)
 class QuotedContentPlanResponse:
     """v3 plan whose source references have not yet been resolved."""
 
@@ -389,11 +446,13 @@ class QuotedContentPlanResponse:
     version: int = 3
     profile: str = 'content-plan-v3'
     context_facts: tuple[QuotedContextFactResponse, ...] = ()
+    scenes: tuple[QuotedSceneResponse, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, 'difficulties', tuple(self.difficulties))
         object.__setattr__(self, 'before_you_read_evidence', tuple(self.before_you_read_evidence))
         object.__setattr__(self, 'context_facts', tuple(self.context_facts))
+        object.__setattr__(self, 'scenes', tuple(self.scenes))
         if type(self.version) is not int or self.version != 3 or self.profile != 'content-plan-v3':
             raise LLMPayloadError('неизвестная версия содержательного плана')
         ids = [difficulty.id for difficulty in self.difficulties]

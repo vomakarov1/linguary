@@ -866,6 +866,8 @@ def _encode_content_plan(value: ContentPlan | None) -> dict[str, Any] | None:
     if type(value) is not ContentPlan:
         raise PersistenceError("некорректный содержательный план для сохранения")
     data = _json_collections(asdict(value))
+    if not value.scenes:
+        data.pop("scenes")
     if value.version == 2:
         data.pop('context_facts')
     else:

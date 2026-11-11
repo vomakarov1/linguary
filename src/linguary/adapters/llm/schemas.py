@@ -139,6 +139,12 @@ class TranslationResultSchema(_ResponseModel):
 
 __all__ = [
     "BeforeYouReadEntrySchema",
+    "QuotedSceneVisualFactSchema",
+    "QuotedSceneSchema",
+    "NarrativeAnalysisSchema",
+    "NarrativeAnalysisWithNameAssessmentSchema",
+    "PedagogicalAnalysisSchema",
+    "PedagogicalAnalysisA2Schema",
     "BlockResultSchema",
     "ChapterAnalysisSchema",
     "GlossaryCandidateSchema",
@@ -360,3 +366,43 @@ class TranslationV3WithPronunciationSchema(_PronunciationCandidatesSchema, Trans
 
 class TranslationV4WithPronunciationSchema(_PronunciationCandidatesSchema, TranslationResultV4Schema):
     pass
+
+
+class QuotedSceneVisualFactSchema(_ResponseModel):
+    anchor: QuotedSourceAnchorSchema
+    subject: str = Field(min_length=1)
+    detail: str = Field(min_length=1)
+
+
+class QuotedSceneSchema(_ResponseModel):
+    start_block_id: str = Field(min_length=1)
+    end_block_id: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    location: str | None = None
+    participants: list[str] = Field(default_factory=list)
+    visual_facts: list[QuotedSceneVisualFactSchema] = Field(default_factory=list)
+    visual_assumptions: list[str] = Field(default_factory=list)
+    continues_previous_scene: bool = False
+
+
+class NarrativeAnalysisSchema(_ResponseModel):
+    translation_instructions: str = Field(min_length=1)
+    chapter_summary: str = Field(min_length=1)
+    glossary_candidates: list[GlossaryCandidateSchema]
+    context_facts: list[QuotedContextFactSchema]
+    scenes: list[QuotedSceneSchema]
+
+
+class NarrativeAnalysisWithNameAssessmentSchema(NarrativeAnalysisSchema):
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+
+
+class PedagogicalAnalysisSchema(_ResponseModel):
+    treatment_plan: list[TreatmentPlanItemSchema]
+    before_you_read: list[BeforeYouReadEntrySchema]
+    difficulties: list[QuotedDifficultySchema]
+    before_you_read_evidence: list[HelpEvidenceSchema]
+
+
+class PedagogicalAnalysisA2Schema(PedagogicalAnalysisSchema):
+    reader_chapter_summary: str = Field(min_length=1)

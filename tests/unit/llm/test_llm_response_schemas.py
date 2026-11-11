@@ -465,3 +465,60 @@ def test_v5_schema_omits_constant_fields_while_v1_schema_unchanged() -> None:
         assert actual_sha == expected_sha
 
 
+
+
+@pytest.mark.parametrize('kind_name,version', [
+    ('chapter_analysis_narrative', 2), ('chapter_analysis_narrative', True),
+    ('chapter_analysis_pedagogical', 0), ('chapter_analysis_pedagogical', 3),
+    ('chapter_analysis_pedagogical', True),
+])
+def test_staged_schema_rejects_unknown_contract_versions(kind_name, version):
+    with pytest.raises(LLMResponseFormatError):
+        schema_for(LLMResponseKind(kind_name), contract_version=version)
+
+
+@pytest.mark.parametrize('summary', [None, '', '   '])
+def test_pedagogical_a2_schema_requires_nonempty_reader_summary(summary):
+    model = schema_for(LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL, contract_version=2)
+    data = {'treatment_plan': [], 'before_you_read': [], 'difficulties': [], 'before_you_read_evidence': []}
+    if summary is not None:
+        data['reader_chapter_summary'] = summary
+    with pytest.raises(ValidationError):
+        model.model_validate(data)
+
+
+def test_pedagogical_b2_schema_forbids_reader_summary():
+    model = schema_for(LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL)
+    with pytest.raises(ValidationError):
+        model.model_validate({'treatment_plan': [], 'before_you_read': [], 'difficulties': [],
+                             'before_you_read_evidence': [], 'reader_chapter_summary': 'unexpected'})
+
+
+@pytest.mark.parametrize('name_policy', [None, 1])
+@pytest.mark.parametrize('kind_name,version', [
+    ('chapter_analysis_narrative', 1), ('chapter_analysis_pedagogical', 1),
+    ('chapter_analysis_pedagogical', 2),
+])
+def test_staged_provider_schemas_are_strict(kind_name, version, name_policy):
+    wire = strict_json_schema(schema_for(LLMResponseKind(kind_name), contract_version=version,
+                                        name_translation_policy_version=name_policy))
+    objects = [node for node in _walk(wire) if isinstance(node, dict) and node.get('type') == 'object']
+    assert objects
+    assert all(node.get('additionalProperties') is False for node in objects)
+    assert all(set(node['required']) == set(node['properties']) for node in objects)
+
+
+@pytest.mark.parametrize('field', ['start_block_id', 'end_block_id', 'summary'])
+def test_scene_schema_rejects_empty_required_fields(field):
+    from linguary.adapters.llm.schemas import QuotedSceneSchema
+    data = {'start_block_id': 'b1', 'end_block_id': 'b2', 'summary': 'A scene.', field: ' '}
+    with pytest.raises(ValidationError):
+        QuotedSceneSchema.model_validate(data)
+
+
+@pytest.mark.parametrize('field', ['subject', 'detail'])
+def test_visual_fact_schema_rejects_empty_description(field):
+    from linguary.adapters.llm.schemas import QuotedSceneVisualFactSchema
+    data = {'anchor': {'block_id': 'b1', 'quote': 'Holmes'}, 'subject': 'Holmes', 'detail': 'coat', field: ' '}
+    with pytest.raises(ValidationError):
+        QuotedSceneVisualFactSchema.model_validate(data)

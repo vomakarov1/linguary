@@ -25,6 +25,13 @@ from linguary.domain.llm_log import Violation
 
 from linguary.adapters.llm.schemas import (
     HelpEvidenceSchema,
+    QuotedSceneSchema,
+    QuotedDifficultySchema,
+    QuotedContextFactSchema,
+    NarrativeAnalysisSchema,
+    NarrativeAnalysisWithNameAssessmentSchema,
+    PedagogicalAnalysisSchema,
+    PedagogicalAnalysisA2Schema,
     PronunciationCandidateSchema,
     TranslationWithPronunciationSchema,
     TranslationV2WithPronunciationSchema,
@@ -62,6 +69,10 @@ from linguary.application.llm_dto import (
     QuotedContextFactResponse,
     FragmentAssistanceResponse,
     HelpEvidenceResponse,
+    QuotedSceneResponse,
+    QuotedSceneVisualFactResponse,
+    NarrativeAnalysisResponse,
+    PedagogicalAnalysisResponse,
     BeforeYouReadEntryResponse,
     BlockResultResponse,
     ChapterAnalysisResponse,
@@ -88,6 +99,8 @@ SCHEMAS: Mapping[LLMResponseKind, type[BaseModel]] = {
     LLMResponseKind.CHAPTER_CORRECTION_REVIEW: ChapterCorrectionReviewSchema,
     LLMResponseKind.QUALITY_REVIEW: QualityReviewSchema,
     LLMResponseKind.CHAPTER_ANALYSIS: ChapterAnalysisSchema,
+    LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE: NarrativeAnalysisSchema,
+    LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL: PedagogicalAnalysisSchema,
     LLMResponseKind.TRANSLATION_RESULT: TranslationResultSchema,
 }
 
@@ -118,6 +131,15 @@ def schema_for(
         type(name_translation_policy_version) is not int or name_translation_policy_version != 1
     ):
         raise LLMResponseFormatError("неизвестная версия политики передачи имён")
+    if kind == LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE:
+        if type(contract_version) is not int or contract_version != 1:
+            raise LLMResponseFormatError("неизвестная версия повествовательного анализа")
+        return (NarrativeAnalysisWithNameAssessmentSchema
+                if name_translation_policy_version == 1 else NarrativeAnalysisSchema)
+    if kind == LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL:
+        if type(contract_version) is not int or contract_version not in {1, 2}:
+            raise LLMResponseFormatError("неизвестная версия педагогического анализа")
+        return PedagogicalAnalysisA2Schema if contract_version == 2 else PedagogicalAnalysisSchema
     if kind == LLMResponseKind.QUALITY_REVIEW:
         if contract_version != 1 or name_translation_policy_version is not None:
             raise LLMResponseFormatError("неизвестная версия вычитки")
@@ -201,7 +223,7 @@ def parse_payload(
             candidate_items = raw_object.pop('pronunciation_candidates')
             schema = schema_for(kind, contract_version=contract_version,
                                 name_translation_policy_version=name_translation_policy_version)
-    if kind == LLMResponseKind.CHAPTER_ANALYSIS and name_translation_policy_version == 1:
+    if kind in {LLMResponseKind.CHAPTER_ANALYSIS, LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE} and name_translation_policy_version == 1:
         if isinstance(raw_object, dict) and isinstance(raw_object.get("glossary_candidates"), list):
             for candidate in raw_object["glossary_candidates"]:
                 if isinstance(candidate, dict):
@@ -288,6 +310,24 @@ def _to_dto(validated: BaseModel) -> LLMPayload:
         return validated.to_dto()
     if isinstance(validated, QualityReviewSchema):
         return validated.to_dto()
+    if isinstance(validated, NarrativeAnalysisSchema):
+        return NarrativeAnalysisResponse(
+            translation_instructions=validated.translation_instructions,
+            chapter_summary=validated.chapter_summary,
+            glossary_candidates=tuple(_glossary_candidate(item) for item in validated.glossary_candidates),
+            context_facts=tuple(_quoted_context_fact(item, index)
+                                for index, item in enumerate(validated.context_facts, start=1)),
+            scenes=tuple(_quoted_scene(item) for item in validated.scenes),
+        )
+    if isinstance(validated, PedagogicalAnalysisSchema):
+        return PedagogicalAnalysisResponse(
+            treatment_plan=tuple(_plan_item(item) for item in validated.treatment_plan),
+            before_you_read=tuple(_before_you_read(item) for item in validated.before_you_read),
+            difficulties=tuple(_quoted_difficulty(item) for item in validated.difficulties),
+            before_you_read_evidence=tuple(HelpEvidenceResponse(**item.model_dump())
+                                           for item in validated.before_you_read_evidence),
+            reader_chapter_summary=getattr(validated, "reader_chapter_summary", None),
+        )
     if isinstance(validated, ChapterAnalysisSchema):
         return _chapter_analysis(validated)
     if isinstance(validated, TranslationResultSchema):
@@ -449,26 +489,49 @@ def _quoted_content_plan(schema: QuotedContentPlanSchema) -> QuotedContentPlanRe
     return QuotedContentPlanResponse(
         version=schema.version,
         profile=schema.profile,
-        difficulties=tuple(QuotedDifficultyResponse(
-            id=difficulty.id,
-            anchors=tuple(QuotedSourceAnchorResponse(**anchor.model_dump())
-                          for anchor in difficulty.anchors),
-            owner_block_id=difficulty.owner_block_id,
-            kind=difficulty.kind,
-            priority=difficulty.priority,
-            help_kind=difficulty.help_kind,
-            required_points=tuple(RequiredPoint(**point.model_dump())
-                                  for point in difficulty.required_points),
-        ) for difficulty in schema.difficulties),
+        difficulties=tuple(_quoted_difficulty(item) for item in schema.difficulties),
         before_you_read_evidence=tuple(HelpEvidenceResponse(**item.model_dump())
                                        for item in getattr(schema, 'before_you_read_evidence', ())),
-        context_facts=tuple(QuotedContextFactResponse(
-            id=item.id.strip() or f"cf-{index}",
-            kind=item.kind,
-            anchors=tuple(QuotedSourceAnchorResponse(**anchor.model_dump())
-                          for anchor in item.anchors),
-            subject_anchor=QuotedSourceAnchorResponse(**item.subject_anchor.model_dump()),
-            value=item.value,
-            certainty=item.certainty,
-        ) for index, item in enumerate(schema.context_facts, start=1)),
+        context_facts=tuple(_quoted_context_fact(item, index)
+                            for index, item in enumerate(schema.context_facts, start=1)),
+    )
+
+
+def _quoted_difficulty(schema: QuotedDifficultySchema) -> QuotedDifficultyResponse:
+    return QuotedDifficultyResponse(
+        id=schema.id,
+        anchors=tuple(QuotedSourceAnchorResponse(**anchor.model_dump()) for anchor in schema.anchors),
+        owner_block_id=schema.owner_block_id,
+        kind=schema.kind,
+        priority=schema.priority,
+        help_kind=schema.help_kind,
+        required_points=tuple(RequiredPoint(**point.model_dump()) for point in schema.required_points),
+    )
+
+
+def _quoted_context_fact(schema: QuotedContextFactSchema, index: int) -> QuotedContextFactResponse:
+    return QuotedContextFactResponse(
+        id=schema.id.strip() or f"cf-{index}",
+        kind=schema.kind,
+        anchors=tuple(QuotedSourceAnchorResponse(**anchor.model_dump()) for anchor in schema.anchors),
+        subject_anchor=QuotedSourceAnchorResponse(**schema.subject_anchor.model_dump()),
+        value=schema.value,
+        certainty=schema.certainty,
+    )
+
+
+def _quoted_scene(schema: QuotedSceneSchema) -> QuotedSceneResponse:
+    return QuotedSceneResponse(
+        start_block_id=schema.start_block_id,
+        end_block_id=schema.end_block_id,
+        summary=schema.summary,
+        location=schema.location,
+        participants=tuple(schema.participants),
+        visual_facts=tuple(QuotedSceneVisualFactResponse(
+            anchor=QuotedSourceAnchorResponse(**item.anchor.model_dump()),
+            subject=item.subject,
+            detail=item.detail,
+        ) for item in schema.visual_facts),
+        visual_assumptions=tuple(schema.visual_assumptions),
+        continues_previous_scene=schema.continues_previous_scene,
     )

@@ -136,12 +136,58 @@ class ContextFact:
 
 
 @dataclass(frozen=True, slots=True)
+class SceneVisualFact:
+    anchor: SourceAnchor
+    subject: str
+    detail: str
+
+    def __post_init__(self) -> None:
+        if not self.subject.strip() or not self.detail.strip():
+            raise DomainError("визуальный факт требует субъект и описание")
+
+    def validate(self, texts: Mapping[str, str]) -> None:
+        self.anchor.validate(texts)
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class Scene:
+    id: str
+    order: int
+    start_block_id: str
+    end_block_id: str
+    summary: str
+    location: str | None = None
+    participants: tuple[str, ...] = ()
+    visual_facts: tuple[SceneVisualFact, ...] = ()
+    visual_assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not all(value.strip() for value in (
+            self.id, self.start_block_id, self.end_block_id, self.summary,
+        )) or type(self.order) is not int or self.order < 0:
+            raise DomainError("сцена требует идентификатор, границы, описание и неотрицательный порядок")
+        object.__setattr__(self, "participants", tuple(self.participants))
+        object.__setattr__(self, "visual_facts", tuple(self.visual_facts))
+        object.__setattr__(self, "visual_assumptions", tuple(self.visual_assumptions))
+
+    @property
+    def canonical_id(self) -> str:
+        value = asdict(self)
+        value.pop("id")
+        return canonical_sha({"version": 3, **value})
+
+
+@dataclass(frozen=True, slots=True)
 class ContentPlan:
     version: int = 2
     profile: str = "content-plan-v2"
     difficulties: tuple[Difficulty, ...] = ()
     before_you_read_evidence: tuple[HelpEvidence, ...] = ()
     context_facts: tuple[ContextFact, ...] = ()
+    scenes: tuple[Scene, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "difficulties", tuple(sorted(self.difficulties, key=lambda d: d.id)))
@@ -152,6 +198,9 @@ class ContentPlan:
         object.__setattr__(self, 'context_facts', tuple(sorted(self.context_facts, key=lambda fact: fact.id)))
         if self.version == 2 and self.context_facts:
             raise DomainError('контекстные факты не входят в прежнюю версию плана')
+        object.__setattr__(self, "scenes", tuple(self.scenes))
+        if self.version == 2 and self.scenes:
+            raise DomainError("сцены не входят в прежнюю версию плана")
         fact_ids = [fact.id for fact in self.context_facts]
         if len(fact_ids) != len(set(fact_ids)):
             raise DomainError('идентификаторы контекстных фактов повторяются')
@@ -175,6 +224,8 @@ class ContentPlan:
     @property
     def sha256(self) -> str:
         value = asdict(self)
+        if not self.scenes:
+            value.pop("scenes")
         if self.version == 2:
             value.pop('context_facts')
         else:

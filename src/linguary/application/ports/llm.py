@@ -32,13 +32,16 @@ from typing import Protocol
 
 from linguary.application.errors import ApplicationError
 from linguary.application.correction_dto import ChapterCorrectionResponse, ChapterCorrectionReviewResponse
-from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
+from linguary.application.llm_dto import (
+    ChapterAnalysisResponse, TranslationResultResponse,
+    NarrativeAnalysisResponse, PedagogicalAnalysisResponse,
+)
 from linguary.domain.llm_log import CallContext, Violation
 from linguary.application.quality_context import QualityReviewResponse
 from linguary.domain import LLMCallStage, TokenUsage
 
 #: Structured responses that the model can return (PRD § 23).
-type LLMPayload = ChapterAnalysisResponse | TranslationResultResponse | QualityReviewResponse | ChapterCorrectionResponse | ChapterCorrectionReviewResponse
+type LLMPayload = NarrativeAnalysisResponse | PedagogicalAnalysisResponse | ChapterAnalysisResponse | TranslationResultResponse | QualityReviewResponse | ChapterCorrectionResponse | ChapterCorrectionReviewResponse
 
 
 class LLMError(ApplicationError):
@@ -130,6 +133,8 @@ class LLMResponseKind(StrEnum):
     CHAPTER_CORRECTION = "chapter_correction"
     CHAPTER_CORRECTION_REVIEW = "chapter_correction_review"
     CHAPTER_ANALYSIS = "chapter_analysis"
+    CHAPTER_ANALYSIS_NARRATIVE = "chapter_analysis_narrative"
+    CHAPTER_ANALYSIS_PEDAGOGICAL = "chapter_analysis_pedagogical"
     TRANSLATION_RESULT = "translation_result"
 
 

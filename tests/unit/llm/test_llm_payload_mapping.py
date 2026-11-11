@@ -454,3 +454,103 @@ def test_parse_payload_strips_markdown_code_fences(fence_header: str) -> None:
     assert caught.value.violation.rule_code == "response_parse"
 
 
+
+
+def narrative_payload():
+    return {
+        'translation_instructions': 'Сохраняй сухой тон рассказчика.',
+        'chapter_summary': 'Holmes reads the letter.',
+        'glossary_candidates': [{'source_text': 'Baker Street', 'type': 'place',
+            'suggested_translation': 'Бейкер-стрит', 'confidence': 0.95,
+            'model_flagged_review': False, 'note': None}],
+        'context_facts': [{'kind': 'speaker',
+            'anchors': [{'block_id': 'b1', 'quote': 'Look at this'}],
+            'subject_anchor': {'block_id': 'b1', 'quote': 'Look at this'},
+            'value': 'Holmes', 'certainty': 'explicit'}],
+        'scenes': [{'start_block_id': 'b1', 'end_block_id': 'b2',
+            'summary': 'Обсуждение письма.', 'location': '221B Baker Street',
+            'participants': ['Holmes', 'Watson'],
+            'visual_facts': [{'anchor': {'block_id': 'b1', 'quote': ' blue envelope '},
+                'subject': 'Holmes', 'detail': 'держит синий конверт'}],
+            'visual_assumptions': ['утренний свет'], 'continues_previous_scene': True}],
+    }
+
+
+def pedagogical_payload():
+    return {
+        'treatment_plan': [{'source_block_id': 'b1', 'treatment': 'TRANSLATE'}],
+        'before_you_read': [{'expression': 'by Jove', 'explanation': 'восклицание'}],
+        'difficulties': [{'id': 'd1', 'anchors': [{'block_id': 'b1', 'quote': 'by Jove'}],
+            'owner_block_id': 'b1', 'kind': 'idiom', 'priority': 'useful',
+            'help_kind': 'explanation', 'required_points': [{'id': 'p1', 'description': 'восклицание'}]}],
+        'before_you_read_evidence': [{'difficulty_id': 'd1', 'point_id': 'p1',
+            'artifact_kind': 'before_you_read.explanation', 'source_block_id': 'b1',
+            'artifact_index': 0, 'body_excerpt': 'восклицание'}],
+    }
+
+
+def test_parse_narrative_analysis_payload_maps_scenes_facts_and_candidates():
+    from linguary.application.llm_dto import NarrativeAnalysisResponse, QuotedSceneResponse
+    dto = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE, as_content(narrative_payload()))
+    assert isinstance(dto, NarrativeAnalysisResponse)
+    assert dto.translation_instructions == 'Сохраняй сухой тон рассказчика.'
+    assert dto.chapter_summary == 'Holmes reads the letter.'
+    assert dto.glossary_candidates[0].type is ConceptType.PLACE
+    assert dto.glossary_candidates[0].note == ''
+    assert dto.context_facts[0].id == 'cf-1'
+    assert dto.context_facts[0].subject_anchor.quote == 'Look at this'
+    value, = dto.scenes
+    assert isinstance(value, QuotedSceneResponse)
+    assert (value.start_block_id, value.end_block_id) == ('b1', 'b2')
+    assert value.location == '221B Baker Street'
+    assert value.participants == ('Holmes', 'Watson')
+    assert value.visual_assumptions == ('утренний свет',)
+    assert value.continues_previous_scene is True
+    assert value.visual_facts[0].anchor.quote == ' blue envelope '
+    assert value.visual_facts[0].subject == 'Holmes'
+    assert value.visual_facts[0].detail == 'держит синий конверт'
+
+
+def test_parse_narrative_analysis_preserves_name_assessment_and_missing_fallback():
+    data = narrative_payload()
+    data['glossary_candidates'][0]['name_translation_assessment'] = {
+        'applied_method': 'sound', 'eligible_without_review': True,
+        'review_reasons': [], 'rationale': 'Звучание', 'opaque_name': False,
+    }
+    dto = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE, as_content(data), name_translation_policy_version=1)
+    assert dto.glossary_candidates[0].name_translation_assessment.applied_method is NameTranslationMethod.SOUND
+    data['glossary_candidates'][0].pop('name_translation_assessment')
+    dto = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE, as_content(data), name_translation_policy_version=1)
+    assert dto.glossary_candidates[0].name_translation_assessment is None
+
+
+def test_parse_pedagogical_analysis_payload_with_and_without_a2_summary():
+    from linguary.application.llm_dto import PedagogicalAnalysisResponse
+    data = pedagogical_payload()
+    dto = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL, as_content(data))
+    assert isinstance(dto, PedagogicalAnalysisResponse)
+    assert dto.reader_chapter_summary is None
+    assert dto.treatment_plan[0].treatment is BlockTreatment.TRANSLATE
+    assert dto.before_you_read[0].expression == 'by Jove'
+    assert dto.difficulties[0].anchors[0].quote == 'by Jove'
+    assert dto.difficulties[0].required_points[0].description == 'восклицание'
+    assert dto.before_you_read_evidence[0].body_excerpt == 'восклицание'
+    summary = 'Holmes reads a letter.\n\nХолмс читает письмо.'
+    dto_a2 = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+        as_content(data | {'reader_chapter_summary': summary}), contract_version=2)
+    assert dto_a2.reader_chapter_summary == summary
+
+
+def test_quoted_scene_and_staged_dtos_normalize_sequences():
+    from linguary.application.llm_dto import (
+        QuotedSceneResponse, QuotedContentPlanResponse, NarrativeAnalysisResponse, PedagogicalAnalysisResponse,
+    )
+    value = QuotedSceneResponse('b1', 'b2', 'A scene.', participants=['Holmes'],
+                               visual_facts=[], visual_assumptions=['daylight'])
+    assert value.participants == ('Holmes',)
+    assert value.visual_facts == ()
+    assert value.visual_assumptions == ('daylight',)
+    assert value.continues_previous_scene is False
+    assert QuotedContentPlanResponse(scenes=[value]).scenes == (value,)
+    assert NarrativeAnalysisResponse('Tone.', 'Summary.', scenes=[value]).scenes == (value,)
+    assert PedagogicalAnalysisResponse(difficulties=[]).difficulties == ()
