@@ -55,10 +55,20 @@ def pedagogical_response(analysis: ChapterAnalysis, *, reader_level: str) -> Ped
     if plan is None:
         raise ValueError('учебный проход требует содержательный план')
     evidence = []
+    entries_With_index = [
+        (i, {"expression": e.expression, "explanation": e.explanation})
+        for i, e in enumerate(analysis.before_you_read)
+    ]
+    index_cache: dict[tuple[str, str], dict[str, int]] = {}
     for item in plan.before_you_read_evidence:
-        index = next(i for i, e in enumerate(analysis.before_you_read)
-            if artifact_key(item.artifact_kind, item.block_id,
-                {'expression': e.expression, 'explanation': e.explanation}) == item.artifact_key)
+        by_key = index_cache.get((item.artifact_kind, item.block_id))
+        if by_key is None:
+            by_key = {
+                artifact_key(item.artifact_kind, item.block_id, payload): i
+                for i, payload in entries_With_index
+            }
+            index_cache[(item.artifact_kind, item.block_id)] = by_key
+        index = by_key[item.artifact_key]
         evidence.append(HelpEvidenceResponse(item.difficulty_id, item.point_id, item.artifact_kind,
             item.block_id, index, item.body_excerpt))
     return PedagogicalAnalysisResponse(

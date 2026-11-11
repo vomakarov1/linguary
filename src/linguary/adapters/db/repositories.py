@@ -314,6 +314,12 @@ class SqlAlchemyChapterAnalysisRepository:
         )
         self._session.execute(statement)
         self._session.flush()
+        self._expunge_pass_rows(
+            book_id=result.book_id,
+            section_id=result.section_id,
+            pass_kind=result.pass_kind.value,
+            scope_key=result.scope_key,
+        )
 
     def get_pass(self, book_id: str, section_id: str, pass_kind: AnalysisPassKind,
                  *, scope_key: str = "") -> AnalysisPassResult | None:
@@ -329,12 +335,61 @@ class SqlAlchemyChapterAnalysisRepository:
         ).order_by(AnalysisPassResultRow.pass_kind, AnalysisPassResultRow.scope_key)).all()
         return tuple(mapping.to_analysis_pass_result(row) for row in rows)
 
+    def list_passes_for_book(
+        self, book_id: str, *, pass_kind: AnalysisPassKind | None = None, scope_key: str | None = ""
+    ) -> tuple[AnalysisPassResult, ...]:
+        statement = select(AnalysisPassResultRow).where(AnalysisPassResultRow.book_id == book_id)
+        if pass_kind is not None:
+            statement = statement.where(AnalysisPassResultRow.pass_kind == pass_kind.value)
+        if scope_key is not None:
+            statement = statement.where(AnalysisPassResultRow.scope_key == scope_key)
+        rows = self._session.scalars(
+            statement.order_by(AnalysisPassResultRow.section_id, AnalysisPassResultRow.pass_kind, AnalysisPassResultRow.scope_key)
+        ).all()
+        return tuple(mapping.to_analysis_pass_result(row) for row in rows)
+
+    def delete_fragment_passes_for_section(
+        self, book_id: str, section_id: str, pass_kind: AnalysisPassKind
+    ) -> None:
+        statement = delete(AnalysisPassResultRow).where(
+            AnalysisPassResultRow.book_id == book_id,
+            AnalysisPassResultRow.section_id == section_id,
+            AnalysisPassResultRow.pass_kind == pass_kind.value,
+            AnalysisPassResultRow.scope_key != "",
+        )
+        self._session.execute(statement)
+        self._session.flush()
+        self._expunge_pass_rows(book_id=book_id, section_id=section_id, pass_kind=pass_kind.value)
+
     def delete_passes_for_book(self, book_id: str, *, pass_kind: AnalysisPassKind | None = None) -> None:
         statement = delete(AnalysisPassResultRow).where(AnalysisPassResultRow.book_id == book_id)
         if pass_kind is not None:
             statement = statement.where(AnalysisPassResultRow.pass_kind == pass_kind.value)
         self._session.execute(statement)
         self._session.flush()
+        self._expunge_pass_rows(
+            book_id=book_id,
+            pass_kind=pass_kind.value if pass_kind is not None else None,
+        )
+
+    def _expunge_pass_rows(
+        self,
+        *,
+        book_id: str,
+        section_id: str | None = None,
+        pass_kind: str | None = None,
+        scope_key: str | None = None,
+    ) -> None:
+        for obj in list(self._session.identity_map.values()):
+            if not isinstance(obj, AnalysisPassResultRow) or obj.book_id != book_id:
+                continue
+            if section_id is not None and obj.section_id != section_id:
+                continue
+            if pass_kind is not None and obj.pass_kind != pass_kind:
+                continue
+            if scope_key is not None and obj.scope_key != scope_key:
+                continue
+            self._session.expunge(obj)
 
     def _to_analysis(self, row: ChapterAnalysisRow) -> ChapterAnalysis:
         """Assemble domain analysis along with treatment plan and candidates."""

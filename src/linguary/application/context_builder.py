@@ -421,6 +421,7 @@ class _LazyTranslationInput:
     recovery_child: bool = False
     pure_read_as_is_aliases: frozenset[str] = frozenset()
     pronunciation_version: int | None = None
+    regeneration: bool = False
 
     def __call__(self) -> str:
         return self.builder._translation_input(
@@ -434,6 +435,7 @@ class _LazyTranslationInput:
             recovery_child=self.recovery_child,
             pure_read_as_is_aliases=self.pure_read_as_is_aliases,
             pronunciation_version=self.pronunciation_version,
+            regeneration=self.regeneration,
         )
 
     def _fields_tuple(self) -> tuple[object, ...]:
@@ -448,6 +450,7 @@ class _LazyTranslationInput:
             self.recovery_child,
             self.pure_read_as_is_aliases,
             self.pronunciation_version,
+            self.regeneration,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -876,8 +879,12 @@ class ContextBuilder:
                 (order < self._language_notes_per_chapter % fragment_count)
                 if language_notes_limit is None else language_notes_limit),
             pedagogical=True)
+        aliases_by_block_id = {b_id: alias for alias, b_id in context.block_ids_by_alias.items()}
         accepted = '\n\nПринятый повествовательный анализ:\n' + json.dumps(
-            dict(chapter_summary=narrative_summary, context_facts=[asdict(f) for f in context_facts]),
+            dict(
+                chapter_summary=narrative_summary,
+                context_facts=_pedagogical_context_facts(context_facts, aliases_by_block_id),
+            ),
             ensure_ascii=False, sort_keys=True)
         return replace(context, request=replace(context.request,
             kind=LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
@@ -1074,6 +1081,7 @@ class ContextBuilder:
             ), self._name_translation_policy),
             neighbours=self._neighbours(section, unit, policy_version=policy.version, document=document),
             policy_version=policy.version,
+            regeneration=True,
         )
 
     def _translation_context(
@@ -1089,6 +1097,7 @@ class ContextBuilder:
         neighbours: Sequence[_NeighbourBlocks],
         recovery_child: bool = False,
         policy_version: str = LEGACY_TRANSLATION_POLICY,
+        regeneration: bool = False,
     ) -> TranslationContext:
         """Ready translation request for given blocks along with response parsing setup."""
         if analysis.content_plan is not None and self._content_plan_profile != analysis.content_plan.profile:
@@ -1156,6 +1165,7 @@ class ContextBuilder:
             recovery_child=recovery_child,
             pure_read_as_is_aliases=pure_read_as_is_aliases,
             pronunciation_version=pronunciation_version,
+            regeneration=regeneration,
         )
         input_text = self._translation_input(**input_args, neighbours=neighbours)
         mandatory_input = (
@@ -1170,6 +1180,7 @@ class ContextBuilder:
                 recovery_child=recovery_child,
                 pure_read_as_is_aliases=pure_read_as_is_aliases,
                 pronunciation_version=pronunciation_version,
+                regeneration=regeneration,
             )
             if neighbours and policy_version != LEGACY_TRANSLATION_POLICY
             else None
@@ -1218,6 +1229,7 @@ class ContextBuilder:
         recovery_child: bool = False,
         pure_read_as_is_aliases: frozenset[str] = frozenset(),
         pronunciation_version: int | None = None,
+        regeneration: bool = False,
     ) -> str:
         """Processing request prompt text: header, chapter digest, glossary, and blocks.
 
@@ -1230,6 +1242,8 @@ class ContextBuilder:
             budget = _scene_notes_budget(
                 analysis, section, unit, per_chapter=self._language_notes_per_chapter,
             )
+            if regeneration and self._language_notes_per_chapter > 0 and textual_blocks(section):
+                budget = max(1, budget)
         else:
             budget = notes_budget(
                 unit_chars=sum(len(item.block.text) for item in unit.items),
@@ -2106,18 +2120,38 @@ def _scene_notes_budget(
 ) -> int:
     """Additive block allowances preserve mandatory help across scene/recovery boundaries.
 
-    Reserve one note per uncovered READ_AS_IS explanation owner, then apportion the
-    remainder by source length. Disjoint groups cannot receive more than the chapter
-    allowance, even after atomic merges or recovery splits.
+    Reserve one note per uncovered READ_AS_IS explanation owner, then reserve one note
+    for uncovered explanation owners on other treatments up to the chapter limit, and
+    apportion the remainder by source length. Disjoint groups cannot receive more than
+    the chapter allowance, even after atomic merges or recovery splits.
     """
+    uncovered = _uncovered_difficulties(analysis)
     owners = {
-        difficulty.owner_block_id for difficulty in _uncovered_difficulties(analysis)
+        difficulty.owner_block_id for difficulty in uncovered
         if difficulty.help_kind == "explanation"
         and analysis.treatment_plan.treatment_for(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
     }
     if len(owners) > per_chapter:
         raise ContextBuildError("обязательные объяснения превышают бюджет заметок главы")
     blocks = textual_blocks(section)
+    if len(owners) < per_chapter:
+        extra_owners = {
+            difficulty.owner_block_id for difficulty in uncovered
+            if difficulty.owner_block_id not in owners
+            and (
+                difficulty.help_kind == "explanation"
+                or (
+                    difficulty.kind == "grammar"
+                    and analysis.treatment_plan.treatment_for(difficulty.owner_block_id)
+                    is BlockTreatment.GLOSSARY_ONLY
+                )
+            )
+        }
+        for block in blocks:
+            if len(owners) >= per_chapter:
+                break
+            if block.id in extra_owners:
+                owners.add(block.id)
     chapter_chars = sum(len(block.text) for block in blocks)
     remaining = per_chapter - len(owners)
     targets = set(unit.block_ids)
@@ -2713,6 +2747,28 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     }, ensure_ascii=False, separators=(",", ":"))
 
 
+def _pedagogical_context_facts(
+    context_facts: Sequence[ContextFact],
+    aliases_by_block_id: Mapping[str, str],
+) -> list[dict[str, object]]:
+    facts: list[dict[str, object]] = []
+    related: dict[str, str] = {}
+    for fact in context_facts:
+        if fact.subject_anchor.block_id not in aliases_by_block_id:
+            continue
+        value = fact.to_dict()
+        value["id"] = f"f{len(facts) + 1}"
+        for anchor in (*value["anchors"], value["subject_anchor"]):
+            source_id = anchor["block_id"]
+            if source_id not in aliases_by_block_id:
+                related.setdefault(source_id, f"related-source-{len(related) + 1}")
+            anchor["block_id"] = aliases_by_block_id.get(source_id, related.get(source_id))
+            anchor.pop("start", None)
+            anchor.pop("end", None)
+        facts.append(value)
+    return facts
+
+
 def _pedagogical_instructions(source_language: str, target_language: str, reader_level: str, english_help: bool) -> str:
     instructions = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(source_language=source_language,
         target_language=target_language, reader_level=reader_level.upper())
@@ -2794,7 +2850,7 @@ selection_reason: unpredictable_spelling, unpredictable_stress или context_de
         result['name_translation_policy'] = {'version': policy.version, 'strategy': policy.strategy.value}
         for key in ('analysis', 'fragment', 'translation', 'regeneration'):
             result[key] = _with_name_policy(result[key], policy, analysis=key in ('analysis', 'fragment'))
-    if profile == 'content-plan-v3':
+    if profile == 'content-plan-v3' or analysis_contract_version == 5:
         result['narrative_analysis'] = _with_name_policy(
             _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(**languages), policy, analysis=True)
         result['pedagogical_analysis'] = _pedagogical_instructions(

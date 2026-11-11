@@ -164,6 +164,11 @@ class BookConditionsService:
         effective_v3 = (profile == 'content-plan-v3'
                         or profile == 'legacy-v1' and payload['reader_level'] == 'a2'
                         and not english_help)
+        payload['staged_analysis'] = bool(
+            payload.get('llm_parameters', {}).get('staged_analysis', False)
+            and effective_v3
+            and not continue_legacy
+        )
         analysis_contract_version = 5 if effective_v3 and not continue_legacy else None
         validators_version = payload.get('versions', {}).get('validators', 1)
         if english_help or reader_level is not None or pronunciation_help_enabled or validators_version == 4:

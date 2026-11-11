@@ -167,6 +167,16 @@ class ChapterAnalysisRepository(Protocol):
     def list_passes_for_section(self, book_id: str, section_id: str) -> tuple[AnalysisPassResult, ...]:
         """Accepted chapter passes ordered by kind and scope."""
 
+    def list_passes_for_book(
+        self, book_id: str, *, pass_kind: AnalysisPassKind | None = None, scope_key: str | None = ""
+    ) -> tuple[AnalysisPassResult, ...]:
+        """Accepted passes for a book, optionally filtered by kind and scope."""
+
+    def delete_fragment_passes_for_section(
+        self, book_id: str, section_id: str, pass_kind: AnalysisPassKind
+    ) -> None:
+        """Delete intermediate fragment passes once the full chapter pass is saved."""
+
     def delete_passes_for_book(self, book_id: str, *, pass_kind: AnalysisPassKind | None = None) -> None:
         """Delete all book passes, optionally limited to a kind."""
 

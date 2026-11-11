@@ -836,4 +836,112 @@ def test_quality_projection_batches_root_scopes_and_attempts_queries() -> None:
     assert fetched_missing == [regen_att_id]
 
 
+def test_remaining_time_and_stage_estimate_account_for_staged_analysis() -> None:
+    from linguary.application.book_overview import _stage_estimate
+
+    document = _sample_document(chapters=3)
+    tasks = (
+        ProcessingTask(
+            id="t-1",
+            book_id="book-1",
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="sec-1",
+            status=TaskStatus.SUCCEEDED,
+        ),
+        ProcessingTask(
+            id="t-2",
+            book_id="book-1",
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="sec-2",
+            status=TaskStatus.RUNNING,
+        ),
+        ProcessingTask(
+            id="t-3",
+            book_id="book-1",
+            task_type=TaskType.ANALYZE_CHAPTER,
+            scope_id="sec-3",
+            status=TaskStatus.PENDING,
+        ),
+    )
+    calls = (
+        LLMCallLog(
+            id="call-1-nar",
+            book_id="book-1",
+            stage=LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
+            provider="openai",
+            model="gpt-test",
+            started_at=datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+            duration_ms=20_000,
+            attempt=1,
+            success=True,
+            task_id="t-1",
+        ),
+        LLMCallLog(
+            id="call-1-ped",
+            book_id="book-1",
+            stage=LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
+            provider="openai",
+            model="gpt-test",
+            started_at=datetime(2026, 11, 8, 12, 1, tzinfo=UTC),
+            duration_ms=30_000,
+            attempt=1,
+            success=True,
+            task_id="t-1",
+        ),
+        # In-flight narrative pass of running task t-2 must not inflate completed chapter durations.
+        LLMCallLog(
+            id="call-2-nar",
+            book_id="book-1",
+            stage=LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
+            provider="openai",
+            model="gpt-test",
+            started_at=datetime(2026, 11, 8, 12, 2, tzinfo=UTC),
+            duration_ms=20_000,
+            attempt=1,
+            success=True,
+            task_id="t-2",
+        ),
+    )
+    progress = BookProgress(
+        total_sections=3,
+        analyzed_sections=1,
+        planned_blocks=1,
+        processed_blocks=0,
+    )
+    estimate = _remaining_time(
+        status=BookStatus.ANALYZING,
+        progress=progress,
+        document=document,
+        tasks=tasks,
+        calls=calls,
+        concurrency=1,
+        requests_per_minute=None,
+    )
+    assert estimate is not None
+    assert estimate.seconds == 100
+
+    single_est = _stage_estimate(
+        status=BookStatus.IMPORTED,
+        document=document,
+        analyses=(),
+        tasks=(),
+        done_block_ids=set(),
+        input_price_per_mtok=None,
+        output_price_per_mtok=None,
+        staged_analysis=False,
+    )
+    staged_est = _stage_estimate(
+        status=BookStatus.IMPORTED,
+        document=document,
+        analyses=(),
+        tasks=(),
+        done_block_ids=set(),
+        input_price_per_mtok=None,
+        output_price_per_mtok=None,
+        staged_analysis=True,
+    )
+    assert staged_est["input_tokens"] == 2 * single_est["input_tokens"]
+
+
+
 

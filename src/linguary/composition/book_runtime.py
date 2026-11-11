@@ -87,7 +87,7 @@ def conditions_payload(book, settings, revision, profile):
     return {'schema_version': 1, 'name_translation_policy': {'version': 1, 'strategy': settings.reading.name_translation_strategy},
         'pronunciation_help_enabled': False, 'pronunciation_variant': None,
         'source_language': book.source_language, 'target_language': book.target_language,
-        'staged_analysis': settings.llm.staged_analysis,
+        'staged_analysis': bool(settings.llm.staged_analysis and profile == 'content-plan-v3'),
         'reader_level': settings.reading.normalized_level, 'models': {'analysis': settings.llm.effective_analysis_model,
         'analysis_passes': {kind: settings.llm.effective_analysis_pass_model(kind)
                             for kind in ('narrative', 'pedagogical')},

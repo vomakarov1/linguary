@@ -800,3 +800,262 @@ async def test_reader_reanalyze_recognizes_independently_merged_own_glossary_sug
             assert list(saved_pass.payload['input_suggestions'][0]) == ['holmes', 'Холмс', 'Частный сыщик.']
     finally:
         await app.aclose()
+
+
+def test_pedagogical_context_facts_use_fragment_aliases_and_strip_offsets(stored_book):
+    import json
+    from linguary.application.analysis_merge import ChapterFragment
+    from linguary.domain.content_plan import ContextFact, SourceAnchor
+
+    _, _, _ = stored_book
+    section = make_analysis_section(texts=('Holmes enters.', 'She smiles.', 'Watson nods.'))
+    document = make_analysis_document((section,))
+    b0, b1, b2 = section.blocks
+    facts = (
+        ContextFact(
+            id='a' * 64,
+            kind='gender',
+            anchors=(SourceAnchor(b0.id, 0, 6, 'Holmes'), SourceAnchor(b1.id, 0, 3, 'She')),
+            subject_anchor=SourceAnchor(b1.id, 0, 3, 'She'),
+            value='female',
+            certainty='explicit',
+        ),
+        ContextFact(
+            id='b' * 64,
+            kind='gender',
+            anchors=(SourceAnchor(b2.id, 0, 6, 'Watson'),),
+            subject_anchor=SourceAnchor(b2.id, 0, 6, 'Watson'),
+            value='male',
+            certainty='explicit',
+        ),
+    )
+    fragment = ChapterFragment(order=1, blocks=(b1,))
+    context = builder().for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary='Holmes enters and she smiles.',
+        context_facts=facts,
+        fragment=fragment,
+        fragment_count=3,
+    )
+    prompt = context.request.input_text
+    assert b0.id not in prompt
+    assert b1.id not in prompt
+    assert b2.id not in prompt
+    assert 'a' * 64 not in prompt
+    payload_str = prompt.split('Принятый повествовательный анализ:\n', 1)[1]
+    parsed = json.loads(payload_str)
+    assert len(parsed['context_facts']) == 1
+    fact_json = parsed['context_facts'][0]
+    assert fact_json['id'] == 'f1'
+    assert fact_json['subject_anchor'] == {'block_id': 'b1', 'quote': 'She'}
+    assert sorted(fact_json['anchors'], key=lambda a: a['block_id']) == [
+        {'block_id': 'b1', 'quote': 'She'},
+        {'block_id': 'related-source-1', 'quote': 'Holmes'},
+    ]
+
+
+async def test_multi_fragment_narrative_findings_keep_all_instructions_and_sanitize_scene(stored_book):
+    import json
+    _, uow, _ = stored_book
+    section = make_analysis_section(texts=('Holmes opens door 1.', 'Note text.', 'Holmes opens door 2.'))
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+    raw_1 = json.loads(narrative(('b1',)).content)
+    raw_1['translation_instructions'] = 'Keep instruction one.'
+    raw_1['scenes'][0]['visual_facts'] = [
+        dict(anchor=dict(block_id='b1', quote='door'), subject='door', detail='Open door.')
+    ]
+    raw_2 = json.loads(narrative(('b1',)).content)
+    raw_2['translation_instructions'] = 'Keep instruction two.'
+    client = FakeLLMClient([
+        FakeReply.of_payload(raw_1),
+        FakeReply.of_payload(raw_2),
+        narrative(('b1',)),
+        pedagogical(('b1',)),
+        pedagogical(('b1',)),
+        pedagogical(('b1',)),
+    ])
+    await scenario(uow, client, max_fragment_blocks=1)(COMMAND)
+    third_narrative_prompt = client.requests[2].input_text
+    assert 'Keep instruction one.' in third_narrative_prompt
+    assert 'Keep instruction two.' in third_narrative_prompt
+    assert 'Последняя сцена: {' in third_narrative_prompt
+    for block in section.blocks:
+        assert block.id not in third_narrative_prompt
+    assert 'scene_id' not in third_narrative_prompt
+
+
+async def test_multi_fragment_pedagogical_remaps_stem_duplicate_byr_with_different_explanation_and_retries_merge_conflict(stored_book):
+    _, uow, _ = stored_book
+    section = make_analysis_section(texts=('Holmes opens a door.', 'Holmes shuts a door.'))
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    frag1_ped = pedagogical(
+        ('b1',),
+        difficulties=[difficulty(quote='Holmes')],
+        before_you_read=[dict(expression='Holmes', explanation='Первое объяснение имени сыщика.')],
+        before_you_read_evidence=[dict(
+            difficulty_id='d1', point_id='p1', artifact_kind='before_you_read.explanation',
+            source_block_id='b1', artifact_index=0, body_excerpt='Первое объяснение имени сыщика.',
+        )],
+    )
+    frag2_ped_stem_diff_explanation = pedagogical(
+        ('b1',),
+        difficulties=[difficulty(quote='Holmes')],
+        before_you_read=[dict(expression='Holmes', explanation='Второе независимое объяснение имени.')],
+        before_you_read_evidence=[dict(
+            difficulty_id='d1', point_id='p1', artifact_kind='before_you_read.explanation',
+            source_block_id='b1', artifact_index=0, body_excerpt='Второе независимое объяснение имени.',
+        )],
+    )
+    client = FakeLLMClient([
+        narrative(('b1',)),
+        narrative(('b1',)),
+        frag1_ped,
+        frag2_ped_stem_diff_explanation,
+    ])
+    result = await scenario(uow, client, max_fragment_blocks=1)(COMMAND)
+    assert len(result.analysis.before_you_read) == 1
+    assert len(result.analysis.content_plan.before_you_read_evidence) == 2
+    assert all(
+        ev.body_excerpt == 'Первое объяснение имени сыщика.'
+        for ev in result.analysis.content_plan.before_you_read_evidence
+    )
+
+
+async def test_multi_fragment_pass_persists_completed_fragments_and_cleans_up_on_completion(stored_book):
+    _, uow, _ = stored_book
+    section = make_analysis_section(texts=('Holmes opens door 1.', 'Holmes opens door 2.'))
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+    client = FakeLLMClient([
+        narrative(('b1',)),
+        narrative(('b1',)),
+        pedagogical(('b1',)),
+        LLMTransportError('second pedagogical fragment failed'),
+    ])
+    with pytest.raises(LLMTransportError, match='second pedagogical fragment failed'):
+        await scenario(uow, client, max_fragment_blocks=1)(COMMAND)
+    with uow.transaction() as tx:
+        passes = tx.analyses.list_passes_for_section(BOOK_ID, COMMAND.section_id)
+        assert [(p.pass_kind, bool(p.scope_key)) for p in passes] == [
+            (AnalysisPassKind.NARRATIVE, False),
+            (AnalysisPassKind.PEDAGOGICAL, True),
+        ]
+    retry = FakeLLMClient([pedagogical(('b1',))])
+    result = await scenario(uow, retry, max_fragment_blocks=1)(COMMAND)
+    assert [r.stage for r in retry.requests] == [PEDAGOGICAL]
+    assert result.attempts == 1
+    with uow.transaction() as tx:
+        passes_after = tx.analyses.list_passes_for_section(BOOK_ID, COMMAND.section_id)
+        assert [(p.pass_kind, p.scope_key) for p in passes_after] == [
+            (AnalysisPassKind.NARRATIVE, ''),
+            (AnalysisPassKind.PEDAGOGICAL, ''),
+        ]
+
+
+async def test_multi_chapter_reanalyze_after_skip_reuses_narrative_across_all_chapters(tmp_path):
+    import json
+    from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
+    from linguary.application.use_cases.approve_glossary import (
+        ApproveGlossary, GlossaryDecision, GlossaryDecisionCommand,
+    )
+    from linguary.application.use_cases.reset_processing import ChooseBookConditions
+    from linguary.composition import build_application
+    from linguary.domain import BookStatus
+    from linguary.domain.book_conditions import thaw
+
+    app = build_application(
+        settings=AppSettings(
+            llm=LLMSettings(model='pinned', api_key='synthetic-secret', proxy_mode='direct'),
+            storage=StorageSettings(data_root=str(tmp_path / 'application')),
+        ),
+        llm_client=FakeLLMClient(),
+        content_plan_profile='content-plan-v3',
+    )
+    try:
+        sec1 = make_analysis_section(section_id='section-1', order=0, texts=('Holmes opens the door.',))
+        sec2 = make_analysis_section(section_id='section-2', order=1, texts=('Holmes enters the room.',))
+        source = app.paths.source_epub(BOOK_ID)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b'synthetic source')
+        with app.unit_of_work.transaction() as tx:
+            tx.books.add(replace(make_book_record(), source_epub_path=str(source)))
+            tx.documents.save(make_analysis_document((sec1, sec2)))
+        choose = ChooseBookConditions(app.book_conditions, app.book_runtime)
+        conditions = choose(
+            BOOK_ID, action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, reader_level='b2'
+        )
+
+        def pinned_context(c):
+            return ContextBuilder(
+                content_plan_profile='content-plan-v3',
+                reader_level=c.payload['reader_level'],
+                prompt_templates=thaw(c.payload['prompt_templates']),
+            )
+
+        raw1 = json.loads(narrative().content)
+        raw1['glossary_candidates'] = [dict(
+            source_text='Holmes', type='person', suggested_translation='Холмс',
+            confidence=.95, model_flagged_review=False, note='Частный сыщик.',
+            name_translation_assessment=None,
+        )]
+        await scenario(
+            app.unit_of_work,
+            FakeLLMClient([FakeReply.of_payload(raw1), pedagogical()]),
+            context=pinned_context(conditions),
+        )(AnalyzeChapterCommand(BOOK_ID, 'section-1'))
+        await scenario(
+            app.unit_of_work,
+            FakeLLMClient([narrative(), pedagogical()]),
+            context=pinned_context(conditions),
+        )(AnalyzeChapterCommand(BOOK_ID, 'section-2'))
+
+        with app.unit_of_work.transaction() as tx:
+            tx.books.save(replace(tx.books.get(BOOK_ID), status=BookStatus.GLOSSARY_REVIEW))
+        ApproveGlossary(unit_of_work=app.unit_of_work, glossary_confidence_threshold=.8)(
+            GlossaryDecisionCommand(BOOK_ID, GlossaryDecision.SKIP, source_text='Holmes', note=None)
+        )
+
+        fresh = choose(
+            BOOK_ID, action='reanalyze', expected_revision=1, settings_revision=0, confirmed=True, reader_level='b1'
+        )
+        client1 = FakeLLMClient([pedagogical()])
+        await scenario(app.unit_of_work, client1, context=pinned_context(fresh))(
+            AnalyzeChapterCommand(BOOK_ID, 'section-1')
+        )
+        assert [r.stage for r in client1.requests] == [PEDAGOGICAL]
+
+        client2 = FakeLLMClient([pedagogical()])
+        await scenario(app.unit_of_work, client2, context=pinned_context(fresh))(
+            AnalyzeChapterCommand(BOOK_ID, 'section-2')
+        )
+        assert [r.stage for r in client2.requests] == [PEDAGOGICAL]
+    finally:
+        await app.aclose()
+
+
+def test_save_pass_updates_loaded_row_in_same_sqlalchemy_session(stored_book):
+    from linguary.domain import AnalysisPassResult
+    _, uow, _ = stored_book
+    first = AnalysisPassResult(
+        id='pass-1', book_id=BOOK_ID, section_id='section-1', pass_kind=AnalysisPassKind.NARRATIVE,
+        scope_key='', input_sha256='1' * 64, output_sha256='a' * 64, conditions_id=None,
+        attempt_id='att-1', payload={'schema_version': 1, 'response': {'v': 1}},
+    )
+    second = AnalysisPassResult(
+        id='pass-2', book_id=BOOK_ID, section_id='section-1', pass_kind=AnalysisPassKind.NARRATIVE,
+        scope_key='', input_sha256='2' * 64, output_sha256='b' * 64, conditions_id=None,
+        attempt_id='att-2', payload={'schema_version': 1, 'response': {'v': 2}},
+    )
+    with uow.transaction() as tx:
+        tx.analyses.save_pass(first)
+        loaded_1 = tx.analyses.get_pass(BOOK_ID, 'section-1', AnalysisPassKind.NARRATIVE)
+        assert loaded_1.input_sha256 == '1' * 64
+        tx.analyses.save_pass(second)
+        loaded_2 = tx.analyses.get_pass(BOOK_ID, 'section-1', AnalysisPassKind.NARRATIVE)
+        assert loaded_2.input_sha256 == '2' * 64
+        assert loaded_2.attempt_id == 'att-2'
+

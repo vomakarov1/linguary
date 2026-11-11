@@ -405,12 +405,13 @@ def _merged_candidate_suggestion(group: Sequence[GlossaryCandidateResponse]) -> 
 
 def merged_glossary_suggestion_keys(candidates: Iterable[GlossaryCandidateResponse]) -> frozenset[tuple[str, str, str]]:
     """Semantic output keys, using the same independent field selection as chapter persistence."""
-    return frozenset(
-        (glossary_key(source), translation, note)
-        for source, translation, note in (
-            _merged_candidate_suggestion(group) for group in _candidate_groups(candidates)
-        )
-    )
+    keys: set[tuple[str, str, str]] = set()
+    for group in _candidate_groups(candidates):
+        source, translation, note = _merged_candidate_suggestion(group)
+        norm_source = glossary_key(source)
+        keys.add((norm_source, translation, note))
+        keys.add((norm_source, translation, ""))
+    return frozenset(keys)
 
 
 def _merged_candidate(
@@ -1411,6 +1412,8 @@ def _merged_content_plan(fragments: Sequence[FragmentAnalysis]) -> ContentPlan |
         if representative is None:
             raise AnalysisMergeError("слияние удалило BYR со свидетельством")
         body_excerpt = _align_byr_evidence_excerpt(representative, item.body_excerpt)
+        if body_excerpt is None:
+            body_excerpt = _align_byr_evidence_excerpt(representative, representative.explanation)
         if body_excerpt is None:
             continue
         remapped = replace(

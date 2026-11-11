@@ -2183,6 +2183,81 @@ def test_translation_context_to_aliases_prevents_prefix_collision_and_english_he
     assert "языковых заметок" not in recovery_context.request.input_text
 
 
+def test_scene_note_budget_reserves_allowance_for_translate_explanation_and_regeneration() -> None:
+    from linguary.application.translation_units import plan_translation_units
+    from linguary.domain.content_plan import (
+        ContentPlan, Difficulty, RequiredPoint, Scene, SourceAnchor,
+    )
+
+    short_block = make_block(order=0, text="Short idiom.")
+    long_block = make_block(order=1, text="Plain narrative. " * 200)
+    blocks = (short_block, long_block)
+    section = make_section(blocks)
+    whole = make_unit(blocks, treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE))
+    scenes = (
+        Scene("s1", 0, short_block.id, short_block.id, "Short scene"),
+        Scene("s2", 1, long_block.id, long_block.id, "Long scene"),
+    )
+    difficulties = (
+        Difficulty(
+            "d1",
+            (SourceAnchor(short_block.id, 0, 5, "Short"),),
+            short_block.id,
+            "idiom",
+            "critical",
+            "explanation",
+            (RequiredPoint("p1", "Explain idiom"),),
+        ),
+    )
+    analysis = replace(
+        make_analysis(whole),
+        scenes=scenes,
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            scenes=scenes,
+            difficulties=difficulties,
+        ),
+    )
+    units = (
+        make_unit((short_block,), treatments=(BlockTreatment.TRANSLATE,)),
+        make_unit((long_block,), treatments=(BlockTreatment.TRANSLATE,)),
+    )
+    builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        language_notes_per_chapter=2,
+        max_unit_source_chars=4000,
+    )
+    unit_texts = [
+        builder.for_translation_unit(
+            document=make_document(section),
+            section=section,
+            unit=u,
+            analysis=analysis,
+            glossary=make_snapshot(),
+        ).request.input_text
+        for u in units
+    ]
+    assert "не больше 1 языковых заметок" in unit_texts[0]
+    assert "не больше 1 языковых заметок" in unit_texts[1]
+
+    no_diff_analysis = replace(
+        analysis,
+        content_plan=ContentPlan(
+            version=3, profile="content-plan-v3", scenes=scenes, difficulties=()
+        ),
+    )
+    regen_context = builder.for_block_regeneration(
+        document=make_document(section),
+        section=section,
+        unit=make_unit((short_block,), treatments=(BlockTreatment.TRANSLATE,)),
+        analysis=no_diff_analysis,
+        glossary=make_snapshot(),
+    )
+    assert "не больше 1 языковых заметок" in regen_context.request.input_text
+
+
+
 
 
 

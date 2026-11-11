@@ -584,3 +584,18 @@ def test_old_v3_conditions_keep_single_pass_without_new_templates_or_settings():
     assert pinned.llm.staged_analysis is False
     assert pinned.llm.effective_analysis_pass_model('narrative') == 'gpt-test'
     assert pinned.llm.effective_analysis_pass_model('pedagogical') == 'gpt-test'
+
+
+def test_conditions_payload_disables_staged_analysis_for_non_v3_profile():
+    settings = replace(
+        _make_settings(),
+        llm=replace(_make_settings().llm, staged_analysis=True),
+    )
+    book = SimpleNamespace(source_language="en", target_language="ru")
+    legacy_payload = conditions_payload(book, settings, 1, "legacy-v1")
+    v2_payload = conditions_payload(book, settings, 1, "content-plan-v2")
+    v3_payload = conditions_payload(book, settings, 1, "content-plan-v3")
+    assert legacy_payload["staged_analysis"] is False
+    assert v2_payload["staged_analysis"] is False
+    assert v3_payload["staged_analysis"] is True
+

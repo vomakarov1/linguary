@@ -627,6 +627,7 @@ def book_overview(
         done_block_ids=done_block_ids,
         input_price_per_mtok=input_price_per_mtok,
         output_price_per_mtok=output_price_per_mtok,
+        staged_analysis=bool((quality.get("conditions") or {}).get("staged_analysis", False)),
     )
     return BookOverview(
         book=book,
@@ -664,6 +665,7 @@ def _stage_estimate(
     done_block_ids: set[str],
     input_price_per_mtok: float | None,
     output_price_per_mtok: float | None,
+    staged_analysis: bool = False,
 ) -> Mapping[str, object]:
     """Local pre-run or remaining-work token and cost estimate without external calls."""
     if document is None or status not in {
@@ -725,7 +727,14 @@ def _stage_estimate(
     blocks_count = len(remaining_blocks)
     characters_count = sum(len(block.text) for block in remaining_blocks)
     if blocks_count > 0:
-        input_tokens = sections_count * 600 + blocks_count * 40 + math.ceil(characters_count / 3.8)
+        pass_multiplier = (
+            2
+            if staged_analysis and status in {BookStatus.IMPORTED, BookStatus.ANALYZING}
+            else 1
+        )
+        input_tokens = pass_multiplier * (
+            sections_count * 600 + blocks_count * 40 + math.ceil(characters_count / 3.8)
+        )
         output_tokens = blocks_count * 35 + math.ceil(characters_count / 3.2)
     else:
         input_tokens = 0
@@ -1510,18 +1519,43 @@ def _remaining_time(
         )
     if active == 0:
         return None
-    task_ids = {task.id for task in stage_tasks}
+    task_ids = (
+        {task.id for task in stage_tasks if task.status is TaskStatus.SUCCEEDED}
+        if stage is LLMCallStage.CHAPTER_ANALYSIS
+        else {task.id for task in stage_tasks}
+    )
     call_stages = (
         (LLMCallStage.CHAPTER_CORRECTION, LLMCallStage.CHAPTER_CORRECTION_REVIEW)
         if stage is LLMCallStage.CHAPTER_CORRECTION
         else tuple(_ANALYSIS_STAGES.values()) if stage is LLMCallStage.CHAPTER_ANALYSIS
         else (stage,)
     )
-    durations = [
-        call.duration_ms
+    matched_calls = [
+        call
         for call in calls
         if call.stage in call_stages and call.success and call.task_id in task_ids
     ]
+    if (
+        stage is LLMCallStage.CHAPTER_ANALYSIS
+        and requests_per_minute is None
+        and any(
+            call.stage
+            in {
+                LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
+                LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
+            }
+            for call in matched_calls
+        )
+    ):
+        durations_by_task: dict[str, int] = {}
+        for call in matched_calls:
+            if call.task_id is not None:
+                durations_by_task[call.task_id] = (
+                    durations_by_task.get(call.task_id, 0) + call.duration_ms
+                )
+        durations = list(durations_by_task.values())
+    else:
+        durations = [call.duration_ms for call in matched_calls]
     if stage is LLMCallStage.CHAPTER_ANALYSIS:
         completed = progress.planned_blocks
         remaining = _textual_block_count(document) - completed
