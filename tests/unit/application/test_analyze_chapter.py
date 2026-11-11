@@ -1204,6 +1204,7 @@ async def test_process_chapter_reuses_source_texts_and_defers_reconcile_until_co
         section_id=ch1.id,
         treatment_plan=plan,
         content_plan=None,
+        scenes=(),
         translation_instructions="",
         chapter_summary="",
         before_you_read=(),
