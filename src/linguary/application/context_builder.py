@@ -54,11 +54,13 @@ from linguary.application.reader_text import learner_instructions
 from linguary.application.llm_dto import (
     BlockResultResponse,
     ChapterAnalysisResponse,
+    NarrativeAnalysisResponse,
+    PedagogicalAnalysisResponse,
     TranslationResultResponse,
 )
-from linguary.application.ports.llm import LLMRequest
+from linguary.application.ports.llm import LLMRequest, LLMResponseKind
 from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY, require_policy
-from linguary.domain.content_plan import ContentPlan, artifact_key
+from linguary.domain.content_plan import ContentPlan, ContextFact, artifact_key, canonical_sha
 from linguary.domain import BeforeYouReadEntry
 from linguary.application.retry_policy import (
     ExpectedBlock,
@@ -142,6 +144,48 @@ explanation требует объясняющего BYR, языковой зам
 Перевод, цитата и пересказ не заменяют объяснение. Не повышай квоты.
 Если BYR уже покрывает аспект, не требуй лишней заметки.
 Не выдумывай связи с невидимыми частями. Пустой план допустим.
+"""
+
+_NARRATIVE_ANALYSIS_INSTRUCTIONS = """\
+Проход narrative-v1. Анализируй только исходные блоки этой главы или фрагмента.
+Язык оригинала: {source_language}; язык перевода: {target_language}.
+Верни glossary_candidates, translation_instructions, chapter_summary, context_facts и scenes.
+chapter_summary — фактическая сводка событий на языке оригинала (3–6 предложений);
+для фрагмента продолжи сводку с начала главы по предыдущим находкам.
+glossary_candidates: source_text, type, suggested_translation, confidence,
+model_flagged_review, note. Соблюдай обязательные решения глоссария.
+context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
+value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
+Каждая опора: block_id и дословная quote из видимого текста. Не возвращай смещения.
+scenes: start_block_id, end_block_id, summary, location, participants,
+visual_facts, visual_assumptions, continues_previous_scene.
+Сцены должны непрерывно покрывать все переданные блоки в исходном порядке,
+без пересечений и пропусков. Для служебных разделов scenes всегда пуст.
+visual_facts содержат anchor {{block_id, quote}}, subject, detail: только
+подтверждённые дословными цитатами визуальные сведения внутри этой сцены.
+Неподтверждённые детали отделяй в visual_assumptions; не выдавай их за факты.
+У первой сцены нового фрагмента укажи continues_previous_scene=true, если она
+продолжает последнюю сцену предыдущего фрагмента.
+Не возвращай учебный план, трудности, BYR или адаптированный пересказ.
+"""
+
+_PEDAGOGICAL_ANALYSIS_INSTRUCTIONS = """\
+Проход pedagogical-v1. Язык оригинала: {source_language}; язык перевода: {target_language}.
+Уровень читателя: {reader_level}. Исходные блоки — источник точных цитат.
+Принятые повествовательные факты и решения глоссария обязательны.
+Верни treatment_plan: source_block_id и treatment для каждого видимого b1..bN ровно один раз.
+Верни difficulties, before_you_read и before_you_read_evidence (допустимы пустые списки).
+Каждая трудность: id, anchors [{{block_id, quote}}], owner_block_id, kind,
+priority, help_kind, required_points [{{id, description}}]. Копируй quote дословно,
+не раскрывай сокращения и не возвращай start/end. Владелец входит в anchors.
+Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
+lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR.
+Для TRANSLATE и READ_AS_IS используй explanation. Перевод и цитата не заменяют объяснение.
+BYR: expression, explanation; объяснение на языке перевода, без указаний переводчику.
+Свидетельство BYR: difficulty_id, point_id, artifact_kind=before_you_read.explanation,
+source_block_id, artifact_index (с нуля), body_excerpt — точная часть explanation.
+Соблюдай квоты запроса, пределы заметок по блокам и группам. Не повышай бюджеты.
+Не возвращай glossary_candidates, translation_instructions, context_facts или scenes.
 """
 _CONTENT_PLAN_PROCESSING = """
 Профиль content-plan-v2, инструкция content-plan-v2.1.
@@ -345,7 +389,7 @@ class ChapterAnalysisContext(AliasedBlocksContext):
     """
 
     section_id: str
-    request: LLMRequest[ChapterAnalysisResponse]
+    request: LLMRequest[ChapterAnalysisResponse | NarrativeAnalysisResponse | PedagogicalAnalysisResponse]
     block_ids_by_alias: Mapping[str, str]
     expectation: ResultExpectation
     visible_texts_by_alias: Mapping[str, str] = field(default_factory=dict)
@@ -770,6 +814,112 @@ class ContextBuilder:
     @property
     def name_translation_policy(self) -> NameTranslationPolicy | None:
         return self._name_translation_policy
+
+    def for_chapter_narrative_analysis(
+        self, document: CanonicalDocument, section: DocumentSection,
+        accumulated_candidates: Iterable[GlossaryCandidate] = (),
+        user_decisions: Iterable[TermConcept] | None = None,
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None = None,
+        *, fragment: ChapterFragment | None = None, fragment_count: int = 1,
+        findings: FragmentFindings | None = None,
+    ) -> ChapterAnalysisContext:
+        """Narrative source and glossary context, independent of reader settings."""
+        if fragment_count < 1 or fragment is not None and fragment.order >= fragment_count:
+            raise ContextBuildError('фрагмент не входит в указанное число частей главы')
+        blocks = fragment.blocks if fragment is not None else textual_blocks(section)
+        if not blocks:
+            raise ContextBuildError(f"глава {section.id} не содержит текстовых блоков")
+        aliases = {_alias(i): b.id for i, b in enumerate(blocks, 1)}
+        visible = {a: source_text_for_model(b) for a, b in zip(aliases, blocks, strict=True)}
+        instructions = self._prompt_templates.get('narrative_analysis') or _with_name_policy(
+            _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language=document.source_language,
+                target_language=document.target_language), self._name_translation_policy, analysis=True)
+        if document.is_front_matter(section) or section.is_notes_only:
+            instructions += '\nЭто служебный раздел: верни scenes=[].'
+        return ChapterAnalysisContext(section_id=section.id,
+            request=LLMRequest(kind=LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE,
+                instructions=instructions, input_text=self._chapter_input(
+                    document=document, section=section, blocks=blocks,
+                    accumulated_candidates=accumulated_candidates, user_decisions=user_decisions,
+                    nonbinding_suggestions=nonbinding_suggestions,
+                    fragment_label=_fragment_label(fragment.order, fragment_count) if fragment else None,
+                    findings=findings, visible_texts_by_alias=visible),
+                name_translation_policy_version=self._name_translation_policy.version if self._name_translation_policy else None),
+            block_ids_by_alias=aliases, visible_texts_by_alias=visible,
+            expectation=ResultExpectation(target_language=document.target_language,
+                blocks=tuple(ExpectedBlock(block_id=a) for a in aliases)),
+            before_you_read_limit=0, language_notes_per_chapter=0)
+
+    def for_chapter_pedagogical_analysis(
+        self, document: CanonicalDocument, section: DocumentSection, *,
+        narrative_summary: str, context_facts: Sequence[ContextFact] = (),
+        accumulated_candidates: Iterable[GlossaryCandidate] = (),
+        user_decisions: Iterable[TermConcept] | None = None,
+        fragment: ChapterFragment | None = None, fragment_count: int = 1,
+        before_you_read_limit: int | None = None,
+        language_notes_limit: int | None = None,
+    ) -> ChapterAnalysisContext:
+        """Source-bound pedagogical context with existing chapter and group budgets."""
+        if fragment_count < 1 or fragment is not None and fragment.order >= fragment_count:
+            raise ContextBuildError('фрагмент не входит в указанное число частей главы')
+        order = fragment.order if fragment else 0
+        instructions = self._prompt_templates.get('pedagogical_analysis') or _pedagogical_instructions(
+            document.source_language, document.target_language, self._reader_level, self._english_help)
+        context = self._chapter_context(document=document, section=section,
+            blocks=fragment.blocks if fragment else textual_blocks(section),
+            accumulated_candidates=accumulated_candidates, user_decisions=user_decisions,
+            nonbinding_suggestions=(), instructions=instructions,
+            fragment_label=_fragment_label(order, fragment_count) if fragment else None,
+            before_you_read_limit=(10 // fragment_count + (order < 10 % fragment_count)
+                if before_you_read_limit is None else before_you_read_limit),
+            language_notes_limit=(self._language_notes_per_chapter // fragment_count +
+                (order < self._language_notes_per_chapter % fragment_count)
+                if language_notes_limit is None else language_notes_limit),
+            pedagogical=True)
+        accepted = '\n\nПринятый повествовательный анализ:\n' + json.dumps(
+            dict(chapter_summary=narrative_summary, context_facts=[asdict(f) for f in context_facts]),
+            ensure_ascii=False, sort_keys=True)
+        return replace(context, request=replace(context.request,
+            kind=LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+            contract_version=2 if self._reader_level == 'a2' else 1,
+            input_text=context.request.input_text + accepted))
+
+    def narrative_input_sha256(
+        self, document: CanonicalDocument, section: DocumentSection,
+        accumulated_candidates: Iterable[GlossaryCandidate] = (),
+        user_decisions: Iterable[TermConcept] | None = None,
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None = None,
+        *, model_dependencies: Mapping[str, object] | None = None,
+        max_fragment_blocks: int = 40,
+    ) -> str:
+        context = self.for_chapter_narrative_analysis(document, section, accumulated_candidates,
+            user_decisions, nonbinding_suggestions)
+        return canonical_sha(dict(schema_version=1, source=[(b.id, b.text) for b in textual_blocks(section)],
+            source_language=document.source_language, target_language=document.target_language,
+            name_policy=asdict(self._name_translation_policy) if self._name_translation_policy else None,
+            instructions=context.request.instructions, input=context.request.input_text,
+            model=dict(model_dependencies or {}), max_fragment_blocks=max_fragment_blocks))
+
+    def pedagogical_input_sha256(
+        self, document: CanonicalDocument, section: DocumentSection, *,
+        narrative_output_sha256: str, narrative_summary: str = '',
+        context_facts: Sequence[ContextFact] = (),
+        accumulated_candidates: Iterable[GlossaryCandidate] = (),
+        user_decisions: Iterable[TermConcept] | None = None,
+        model_dependencies: Mapping[str, object] | None = None,
+        max_fragment_blocks: int = 40,
+    ) -> str:
+        context = self.for_chapter_pedagogical_analysis(document, section,
+            narrative_summary=narrative_summary, context_facts=context_facts,
+            accumulated_candidates=accumulated_candidates, user_decisions=user_decisions)
+        return canonical_sha(dict(schema_version=1, narrative_output_sha256=narrative_output_sha256,
+            source=[(b.id, b.text) for b in textual_blocks(section)],
+            instructions=context.request.instructions, input=context.request.input_text,
+            contract_version=context.request.contract_version, reader_level=self._reader_level,
+            english_help=self._english_help, before_you_read_limit=context.before_you_read_limit,
+            notes=context.language_notes_per_chapter, note_limits=dict(context.note_limits_by_block or {}),
+            note_groups=context.note_group_limits, model=dict(model_dependencies or {}),
+            max_fragment_blocks=max_fragment_blocks))
 
     def for_chapter_analysis(
         self,
@@ -1255,6 +1405,7 @@ class ContextBuilder:
         findings: FragmentFindings | None = None,
         before_you_read_limit: int = 10,
         language_notes_limit: int | None = None,
+        pedagogical: bool = False,
     ) -> ChapterAnalysisContext:
         """Ready request for chapter blocks along with response parsing metadata."""
         aliases = {_alias(index): block.id for index, block in enumerate(blocks, start=1)}
@@ -1276,7 +1427,8 @@ class ContextBuilder:
         if candidate:
             default_analysis = (_CONTENT_PLAN_ANALYSIS_V5 if self._analysis_contract_version == 5
                                 else _CONTENT_PLAN_ANALYSIS_V3) if version == 3 else _CONTENT_PLAN_ANALYSIS
-            instructions += "\n" + self._prompt_templates.get("content_analysis", default_analysis)
+            if not pedagogical:
+                instructions += "\n" + self._prompt_templates.get("content_analysis", default_analysis)
             if version == 3 and not self._english_help:
                 learner_quality = self._prompt_templates.get(
                     "learner_quality", learner_instructions(self._reader_level)
@@ -2513,6 +2665,20 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     }, ensure_ascii=False, separators=(",", ":"))
 
 
+def _pedagogical_instructions(source_language: str, target_language: str, reader_level: str, english_help: bool) -> str:
+    instructions = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(source_language=source_language,
+        target_language=target_language, reader_level=reader_level.upper())
+    if english_help:
+        instructions += '\nВсе блоки READ_AS_IS; before_you_read и before_you_read_evidence пусты. Помощь появится рядом с оригиналом; lexical_hint допустим для READ_AS_IS.'
+    else:
+        instructions += '\n' + _reader_level_treatment_guidance(reader_level)
+    if reader_level == 'a2':
+        instructions += '\nВерни reader_chapter_summary: простой пересказ на языке оригинала и перевод на русский, ровно два абзаца через пустую строку. Для фрагмента продолжи пересказ с начала главы.'
+    else:
+        instructions += '\nНе возвращай пересказ: принятая фактическая сводка уже сохранена.'
+    return instructions
+
+
 def snapshot_prompt_templates(*, source_language, target_language, reader_level, profile="legacy-v1", english_help=False, name_translation_policy=None, pronunciation_help_enabled=False, validators_version=1, analysis_contract_version=None):
     """Render immutable instruction templates without book text or secrets."""
     if analysis_contract_version is None and profile == "content-plan-v3":
@@ -2580,4 +2746,9 @@ selection_reason: unpredictable_spelling, unpredictable_stress или context_de
         result['name_translation_policy'] = {'version': policy.version, 'strategy': policy.strategy.value}
         for key in ('analysis', 'fragment', 'translation', 'regeneration'):
             result[key] = _with_name_policy(result[key], policy, analysis=key in ('analysis', 'fragment'))
+    if profile == 'content-plan-v3':
+        result['narrative_analysis'] = _with_name_policy(
+            _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(**languages), policy, analysis=True)
+        result['pedagogical_analysis'] = _pedagogical_instructions(
+            source_language, target_language, reader_level, english_help)
     return result

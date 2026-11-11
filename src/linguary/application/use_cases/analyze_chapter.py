@@ -1,11 +1,12 @@
 """Chapter analysis use case and analysis task sequence (PRD § 13-14, ADR § 3).
 
-`AnalyzeChapter` executes a single model request per chapter and saves `ChapterAnalysis`:
+By default, `AnalyzeChapter` executes a single model request per chapter and saves `ChapterAnalysis`:
 glossary candidates, chapter translation instructions, block treatment plan, `Before You Read`,
 and a brief chapter event summary. No separate preparatory requests are made (for glossary,
 plan, or summary), and there is no separate pass for recounting previous chapter events:
 the `Previously in Chapter ...` section is assembled by the exporter from chapter `N-1`'s summary
-(PRD § 19.2).
+(PRD § 19.2). Opt-in content-plan-v3 analysis runs narrative and pedagogical requests
+sequentially, persisting each validated pass before assembling the complete chapter.
 
 A chapter that does not fit into a single request is a fallback scenario (PRD § 14): it is sent
 to the model in sequential fragments, and its analysis is assembled from the fragment responses
@@ -30,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from uuid import uuid4
 
 from linguary.application.analysis_merge import (
@@ -45,13 +46,18 @@ from linguary.application.analysis_merge import (
     merge_chapter_analysis,
     name_translation_evidence,
     plan_fragments,
+    validate_narrative_response,
+    merge_narrative_fragments,
+    combine_staged_analysis_responses,
 )
+from linguary.application.analysis_pass_cache import decode_pass, encode_pass, pedagogical_response
 from linguary.application.block_labels import without_block_labels
 from linguary.application.context_builder import (
     ChapterAnalysisContext,
     ContextBuilder,
     FragmentFindings,
     textual_blocks,
+    source_text_for_model,
 )
 from linguary.application.errors import ApplicationError
 from linguary.application.reader_text import (
@@ -60,7 +66,7 @@ from linguary.application.reader_text import (
     validate_a2_summary,
 )
 from linguary.application.glossary_review import candidates_with_decisions
-from linguary.application.llm_dto import ChapterAnalysisResponse
+from linguary.application.llm_dto import ChapterAnalysisResponse, NarrativeAnalysisResponse, PedagogicalAnalysisResponse
 from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import LLMClient, LLMRequest, LLMResponseFormatError
 from linguary.application.ports.language_detection import LanguageDetector
@@ -68,7 +74,8 @@ from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.validators.mixed_script import mixed_script_word
 from linguary.application.task_runner import TaskQueue
-from linguary.domain.content_plan import ContentPlan
+from linguary.domain.content_plan import ContentPlan, ContextFact, Scene, canonical_sha
+from linguary.domain.book_conditions import thaw
 from linguary.domain.errors import DomainError
 from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.domain import (
@@ -91,6 +98,8 @@ from linguary.domain import (
     TermConcept,
     apply_book_event,
     glossary_key,
+    AnalysisPassKind,
+    AnalysisPassResult,
 )
 
 #: Sleep between model call attempts. The application layer does not own the event loop,
@@ -147,6 +156,7 @@ class AnalyzeChapter:
         conditions_id: str | None = None,
         max_concurrency: int = 1,
         seed_first_chapter: bool = False,
+        staged_analysis: bool = False,
     ) -> None:
         self._unit_of_work = unit_of_work
         self._llm_client = llm_client
@@ -159,6 +169,7 @@ class AnalyzeChapter:
         self._conditions_id = conditions_id
         self._max_concurrency = max_concurrency
         self._seed_first_chapter = seed_first_chapter
+        self._staged_analysis = staged_analysis
         self._id_factory = id_factory or _new_id
         self._sleep = sleep or asyncio.sleep
         from contextvars import ContextVar
@@ -197,6 +208,12 @@ class AnalyzeChapter:
                 analysis = self._front_matter_analysis(section, blocks, id=self._id_factory())
                 self._save(command.book_id, analysis, task_id=command.task_id)
                 return AnalyzeChapterResult(analysis=analysis)
+            if self._staged_analysis and self._context_builder._content_plan_profile == 'content-plan-v3':
+                analysis, attempts, usage = await self._analyze_staged(
+                    command, document, section, accumulated, user_decisions, nonbinding_suggestions,
+                    concepts or ())
+                self._save(command.book_id, analysis, task_id=command.task_id)
+                return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
             fragments = list(plan_fragments(blocks, max_blocks=self._max_fragment_blocks))
             if len(fragments) == 1:
                 attempts = 1
@@ -254,6 +271,335 @@ class AnalyzeChapter:
                 self._llm_client._attempts.reset(token_attempts)
             if token_responses is not None:
                 self._llm_client._responses.reset(token_responses)
+
+    async def _analyze_staged(
+        self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
+        accumulated: Sequence[GlossaryCandidate], user_decisions: Sequence[TermConcept],
+        suggestions: Sequence[TermConcept], concepts: Sequence[TermConcept],
+    ) -> tuple[ChapterAnalysis, int, TokenUsage | None]:
+        blocks = textual_blocks(section)
+        aliases = {b.id: b.id for b in blocks}
+        texts = {b.id: b.text for b in blocks}
+        visible = {b.id: source_text_for_model(b) for b in blocks}
+        with self._unit_of_work.transaction() as tx:
+            work = getattr(tx, 'work', None)
+            conditions = work.latest_conditions(command.book_id) if work else None
+            previous_narrative = tx.analyses.get_pass(command.book_id, section.id, AnalysisPassKind.NARRATIVE)
+        # A suggestion generated by this pass is output, not a new upstream dependency.
+        # Keep suggestions that were already inputs even if the model repeated them.
+        if previous_narrative is not None:
+            self._verify_cached_pass(previous_narrative)
+            previous_inputs = {tuple(item) for item in previous_narrative.payload.get('input_suggestions', ())}
+            own_outputs = {_candidate_suggestion_key(item) for item in
+                previous_narrative.payload.get('response', {}).get('glossary_candidates', ())}
+            suggestions = tuple(s for s in suggestions
+                if _suggestion_key(s, document.target_language) not in own_outputs - previous_inputs)
+        expected_conditions_id = (getattr(self._llm_client, 'conditions_id', None)
+                                  or self._conditions_id or (conditions.id if conditions else None))
+        dependencies = conditions.payload if conditions else {}
+        narrative_hash = self._context_builder.narrative_input_sha256(document, section,
+            accumulated, user_decisions, suggestions,
+            model_dependencies=_pass_model_dependencies(dependencies, AnalysisPassKind.NARRATIVE),
+            max_fragment_blocks=self._max_fragment_blocks)
+        saved = self._cached_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash)
+        attempts = 0
+        usages = []
+        if saved is None:
+            narrative_parts, count, usage = await self._run_staged_fragments(
+                command, document, section, accumulated, user_decisions, suggestions, concepts,
+                pass_kind=AnalysisPassKind.NARRATIVE)
+            attempts += count
+            usages.append(usage)
+            narrative, scenes, facts = merge_narrative_fragments(narrative_parts)
+            validate_narrative_response(narrative, aliases, texts, visible,
+                ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
+                mandatory_facts=glossary_context_constraints(concepts))
+            saved = self._save_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash,
+                                    narrative, expected_conditions_id,
+                                    input_suggestions=tuple(_suggestion_key(s, document.target_language)
+                                                            for s in suggestions))
+        else:
+            narrative = decode_pass(saved.payload, narrative=True)
+            scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
+                ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
+                mandatory_facts=glossary_context_constraints(concepts))
+        pedagogical_hash = self._context_builder.pedagogical_input_sha256(document, section,
+            narrative_output_sha256=saved.output_sha256, narrative_summary=narrative.chapter_summary,
+            context_facts=facts, accumulated_candidates=accumulated, user_decisions=user_decisions,
+            model_dependencies=_pass_model_dependencies(dependencies, AnalysisPassKind.PEDAGOGICAL),
+            max_fragment_blocks=self._max_fragment_blocks)
+        saved_pedagogical = self._cached_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash)
+        if saved_pedagogical is None:
+            parts, count, usage = await self._run_staged_fragments(
+                command, document, section, accumulated, user_decisions, suggestions, concepts,
+                pass_kind=AnalysisPassKind.PEDAGOGICAL, narrative=narrative, facts=facts)
+            attempts += count
+            usages.append(usage)
+            merged = merge_chapter_analysis(parts, id=self._id_factory(), section_id=section.id,
+                expected_block_ids=tuple(aliases),
+                glossary_confidence_threshold=self._glossary_confidence_threshold,
+                id_factory=self._id_factory)
+            pedagogical = pedagogical_response(merged, reader_level=self._context_builder._reader_level)
+            analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
+                                             accumulated, user_decisions)
+            self._save_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash,
+                            pedagogical, expected_conditions_id)
+        else:
+            pedagogical = decode_pass(saved_pedagogical.payload, narrative=False)
+            analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
+                                             accumulated, user_decisions)
+        return analysis, attempts, _total_usage(usages)
+
+    def _assemble_staged(
+        self, narrative: NarrativeAnalysisResponse, pedagogical: PedagogicalAnalysisResponse,
+        scenes: Sequence[Scene], document: CanonicalDocument, section: DocumentSection,
+        accumulated: Sequence[GlossaryCandidate], user_decisions: Sequence[TermConcept],
+    ) -> ChapterAnalysis:
+        blocks = textual_blocks(section)
+        context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
+            narrative_summary=narrative.chapter_summary, accumulated_candidates=accumulated,
+            user_decisions=user_decisions)
+        # Both saved DTOs use stable references scoped to this chapter.
+        context = replace(context, block_ids_by_alias={b.id: b.id for b in blocks},
+            visible_texts_by_alias={b.id: source_text_for_model(b) for b in blocks},
+            expectation=replace(context.expectation,
+                blocks=tuple(replace(e, block_id=b.id) for e, b in
+                             zip(context.expectation.blocks, blocks, strict=True))))
+        payload = combine_staged_analysis_responses(narrative, pedagogical, resolved_scenes=scenes)
+        _ensure_plan_covers_chapter(payload, context)
+        plan = self._validate_pedagogical(payload, context, blocks)
+        analysis = merge_chapter_analysis([FragmentAnalysis.of_response(payload, order=0,
+            block_ids_by_alias=context.block_ids_by_alias, texts={b.id: b.text for b in blocks},
+            visible_texts_by_alias=context.visible_texts_by_alias, resolved_content_plan=plan)],
+            id=self._id_factory(), section_id=section.id, expected_block_ids=tuple(b.id for b in blocks),
+            glossary_confidence_threshold=self._glossary_confidence_threshold,
+            id_factory=self._id_factory, name_translation_policy=self._name_translation_policy,
+            conditions_id=self._conditions_id)
+        return replace(analysis, content_plan=plan, scenes=tuple(scenes))
+
+    def _validate_pedagogical(
+        self, payload: ChapterAnalysisResponse, context: ChapterAnalysisContext,
+        blocks: Sequence[DocumentBlock],
+    ) -> ContentPlan | None:
+        return validate_content_plan(payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
+            english_help=self._context_builder._english_help,
+            before_you_read_limit=context.before_you_read_limit,
+            language_notes_per_chapter=context.language_notes_per_chapter,
+            note_limits_by_block=context.note_limits_by_block, note_group_limits=context.note_group_limits,
+            visible_texts_by_alias=context.visible_texts_by_alias)
+
+    async def _run_staged_fragments(
+        self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
+        accumulated: Sequence[GlossaryCandidate], user_decisions: Sequence[TermConcept],
+        suggestions: Sequence[TermConcept], concepts: Sequence[TermConcept], *, pass_kind: AnalysisPassKind,
+        narrative: NarrativeAnalysisResponse | None = None, facts: Sequence[ContextFact] = (),
+    ) -> tuple[list, int, TokenUsage | None]:
+        fragments = plan_fragments(textual_blocks(section), max_blocks=self._max_fragment_blocks)
+        is_narrative = pass_kind is AnalysisPassKind.NARRATIVE
+        notes = self._context_builder._language_notes_per_chapter
+        queue = [(fragment,
+            0 if is_narrative else 10 // len(fragments) + (fragment.order < 10 % len(fragments)),
+            0 if is_narrative else notes // len(fragments) + (fragment.order < notes % len(fragments)))
+            for fragment in fragments]
+        parts, usages = [], []
+        attempts = 0
+        while queue:
+            fragment, byr_quota, note_quota = queue.pop(0)
+            fragment = replace(fragment, order=len(parts))
+            total = len(parts) + 1 + len(queue)
+            if is_narrative:
+                previous = None
+                if parts:
+                    raw, previous_scenes, _ = parts[-1]
+                    previous = FragmentFindings(summary=raw.chapter_summary,
+                        instructions=raw.translation_instructions +
+                            ('\nПоследняя сцена: ' + str(asdict(previous_scenes[-1])) if previous_scenes else ''),
+                        expressions=())
+                context = self._context_builder.for_chapter_narrative_analysis(document, section,
+                    accumulated, user_decisions, suggestions, fragment=fragment if total > 1 else None,
+                    fragment_count=total, findings=previous)
+            else:
+                context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
+                    narrative_summary=narrative.chapter_summary, context_facts=facts,
+                    accumulated_candidates=accumulated, user_decisions=user_decisions,
+                    fragment=fragment if total > 1 else None, fragment_count=total,
+                    before_you_read_limit=byr_quota, language_notes_limit=note_quota)
+                if parts:
+                    context = replace(context, request=replace(context.request,
+                        input_text=context.request.input_text + '\nУже найдено в предыдущих частях главы:\n' +
+                            'Пересказ: ' + parts[-1].chapter_summary + '\nВыражения BYR: ' +
+                            ', '.join(e.expression for p in parts for e in p.before_you_read)))
+            context = replace(context, request=context.request.with_logging(book_id=command.book_id,
+                stage=LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE if is_narrative else LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
+                task_id=command.task_id, scope_id=section.id, ordered_block_ids=fragment.block_ids))
+
+            def validate(payload):
+                if is_narrative:
+                    _ensure_candidates_single_script(payload, context)
+                    return validate_narrative_response(payload, context.block_ids_by_alias,
+                        {b.id: b.text for b in fragment.blocks}, context.visible_texts_by_alias,
+                        ordered_block_ids=fragment.block_ids,
+                        is_notes_only=section.is_notes_only or document.is_front_matter(section),
+                        mandatory_facts=glossary_context_constraints(concepts))
+                combined = combine_staged_analysis_responses(
+                    NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
+                if self._context_builder._reader_level == 'a2':
+                    validate_a2_summary(payload.reader_chapter_summary or '',
+                        source_texts=tuple(b.text for b in fragment.blocks), source_language=document.source_language,
+                        language_detector=self._language_detector)
+                _ensure_plan_covers_chapter(combined, context)
+                return self._validate_pedagogical(combined, context, fragment.blocks)
+
+            try:
+                payload, resolved, count, usage = await self._request_staged(context, validate)
+            except LLMResponseFormatError as error:
+                if not error.truncated or len(fragment.blocks) <= 1:
+                    raise
+                attempts += getattr(error, 'analysis_attempts', 1)
+                usages.append(error.usage)
+                midpoint = len(fragment.blocks) // 2
+                # Accepted siblings already own their shares. Split only this parent's
+                # remaining allocation, including on repeated truncation of its children.
+                queue[:0] = [
+                    (ChapterFragment(0, fragment.blocks[:midpoint]), (byr_quota + 1) // 2, (note_quota + 1) // 2),
+                    (ChapterFragment(0, fragment.blocks[midpoint:]), byr_quota // 2, note_quota // 2)]
+                continue
+            attempts += count
+            usages.append(usage)
+            if is_narrative:
+                parts.append((payload, *resolved))
+            else:
+                combined = combine_staged_analysis_responses(
+                    NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
+                parts.append(FragmentAnalysis.of_response(combined, order=len(parts),
+                    block_ids_by_alias=context.block_ids_by_alias, resolved_content_plan=resolved))
+        return parts, attempts, _total_usage(usages)
+
+    async def _request_staged[ResolutionT](
+        self, context: ChapterAnalysisContext,
+        validate: Callable[[NarrativeAnalysisResponse | PedagogicalAnalysisResponse], ResolutionT],
+    ) -> tuple[NarrativeAnalysisResponse | PedagogicalAnalysisResponse, ResolutionT, int, TokenUsage | None]:
+        request, attempts, usages = context.request, 0, []
+        while True:
+            attempts += 1
+            response = None
+            try:
+                response = await self._llm_client.generate(request)
+                usages.append(response.usage)
+                if response.truncated:
+                    raise LLMResponseFormatError('ответ модели оборван по лимиту выходных токенов',
+                        raw_content=response.raw_content, truncated=True, usage=response.usage,
+                        cost=response.cost, provider=response.provider, model=response.model,
+                        call_context=response.call_context)
+                try:
+                    response = replace(response, payload=_prepare_staged_payload(response.payload))
+                    resolved = validate(response.payload)
+                    if isinstance(response.payload, PedagogicalAnalysisResponse):
+                        record_reader_warnings(self._unit_of_work, response,
+                            [('summary', response.payload.reader_chapter_summary or ''),
+                             *(('before_you_read.explanation', e.explanation) for e in response.payload.before_you_read)],
+                            reader_level=self._context_builder._reader_level)
+                except (ApplicationError, DomainError) as error:
+                    raise ResultValidationError(str(error), expectation=context.expectation,
+                        violation=getattr(error, 'violation', None)) from error
+            except Exception as error:
+                if response is not None:
+                    record_rejection(self._unit_of_work, response, error)
+                    if hasattr(self._llm_client, 'reject_last'):
+                        self._llm_client.reject_last()
+                if isinstance(error, LLMResponseFormatError) and error.truncated:
+                    error.analysis_attempts = attempts
+                    error.usage = _total_usage([*usages, error.usage] if response is None else usages)
+                    raise
+                decision = self._retry_policy.decide(_worded_for_the_model(error, context),
+                    attempts=attempts, raw_content=response.raw_content if response else None)
+                if not decision.should_retry:
+                    raise
+                if decision.backoff_seconds > 0:
+                    await self._sleep(decision.backoff_seconds)
+                request = decision.next_request(request)
+                continue
+            return response.payload, resolved, attempts, _total_usage(usages)
+
+    def _cached_pass(
+        self, command: AnalyzeChapterCommand, kind: AnalysisPassKind, input_sha: str,
+    ) -> AnalysisPassResult | None:
+        with self._unit_of_work.transaction() as tx:
+            saved = tx.analyses.get_pass(command.book_id, command.section_id, kind)
+        if saved is None or saved.input_sha256 != input_sha:
+            return None
+        self._verify_cached_pass(saved)
+        return saved
+
+    def _verify_cached_pass(self, saved: AnalysisPassResult) -> None:
+        kind = saved.pass_kind
+        try:
+            decoded = decode_pass(saved.payload, narrative=kind is AnalysisPassKind.NARRATIVE)
+            normalized = encode_pass(decoded)
+            if kind is AnalysisPassKind.NARRATIVE:
+                keys = saved.payload['input_suggestions']
+                if (not isinstance(keys, (tuple, list)) or any(
+                    not isinstance(item, (tuple, list)) or len(item) != 3
+                    or any(not isinstance(part, str) for part in item) for item in keys)):
+                    raise ValueError('неверный список входных подсказок')
+                normalized['input_suggestions'] = keys
+            if (canonical_sha(thaw(saved.payload)) != saved.output_sha256
+                    or canonical_sha(normalized) != saved.output_sha256):
+                raise ValueError('не совпадает контрольная сумма')
+        except (ValueError, TypeError, KeyError, AttributeError, ApplicationError, DomainError) as error:
+            raise AnalyzeChapterError(f'сохранённый проход {kind.value} повреждён или несовместим') from error
+
+    def _save_pass(
+        self, command: AnalyzeChapterCommand, kind: AnalysisPassKind, input_sha: str,
+        payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse, conditions_id: str | None,
+        *, input_suggestions: Sequence[tuple[str, str, str]] = (),
+    ) -> AnalysisPassResult:
+        from linguary.application.book_conditions import ConditionsError
+        try:
+            return self._save_pass_current(command, kind, input_sha, payload, conditions_id,
+                                           input_suggestions=input_suggestions)
+        except ConditionsError:
+            self._finalize_stale_responses()
+            raise
+
+    def _save_pass_current(
+        self, command: AnalyzeChapterCommand, kind: AnalysisPassKind, input_sha: str,
+        payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse, conditions_id: str | None,
+        *, input_suggestions: Sequence[tuple[str, str, str]] = (),
+    ) -> AnalysisPassResult:
+        from linguary.application.book_conditions import ConditionsError
+        encoded = encode_pass(payload)
+        if kind is AnalysisPassKind.NARRATIVE:
+            encoded['input_suggestions'] = input_suggestions
+        with self._unit_of_work.transaction() as tx:
+            work = getattr(tx, 'work', None)
+            if conditions_id is not None:
+                latest = work.latest_conditions(command.book_id)
+                if latest is None or latest.id != conditions_id:
+                    raise ConditionsError('conditions_revision_conflict')
+                service = getattr(self._llm_client, 'service', None)
+                if service is not None:
+                    service.verify_source(tx.books.get(command.book_id), latest)
+                if command.task_id is not None and tx.tasks.get(command.task_id) is None:
+                    raise ConditionsError('task_no_longer_active')
+            attempts = getattr(self._llm_client, 'attempts', ())
+            saved = AnalysisPassResult(id=self._id_factory(), book_id=command.book_id,
+                section_id=command.section_id, pass_kind=kind, scope_key='', input_sha256=input_sha,
+                output_sha256=canonical_sha(encoded), conditions_id=conditions_id,
+                attempt_id=attempts[-1] if attempts else None, payload=encoded)
+            previous = tx.analyses.get_pass(command.book_id, command.section_id, kind)
+            if previous is not None and work is not None:
+                work.archive_artifacts([dict(book_id=command.book_id, kind='analysis_pass',
+                    scope_id=command.section_id + ':' + kind.value, conditions_id=previous.conditions_id,
+                    attempt_id=previous.attempt_id, body=dict(schema_version=1, pass_kind=kind.value,
+                        input_sha256=previous.input_sha256, output_sha256=previous.output_sha256,
+                        payload=thaw(previous.payload)))])
+            tx.analyses.save_pass(saved)
+            for response in getattr(self._llm_client, 'responses', ()):
+                attempt = tx.work.get_attempt(response.call_context.attempt_id)
+                if attempt.state == 'validated':
+                    finalize_response(self._unit_of_work, response, 'accepted', transaction=tx)
+        return saved
 
     def _front_matter_analysis(
         self, section: DocumentSection, blocks: Sequence[DocumentBlock], *, id: str
@@ -742,9 +1088,21 @@ class AnalyzeChapter:
         try:
             self._save_current(book_id, analysis, task_id=task_id)
         except ConditionsError:
-            for response in getattr(self._llm_client, 'responses', ()):
-                finalize_response(self._unit_of_work, response, 'stale')
+            self._finalize_stale_responses()
             raise
+
+    def _finalize_stale_responses(self) -> None:
+        responses = getattr(self._llm_client, 'responses', ())
+        if not responses:
+            return
+        with self._unit_of_work.transaction() as transaction:
+            for response in responses:
+                if response.call_context is None:
+                    continue
+                attempt = transaction.work.get_attempt(response.call_context.attempt_id)
+                if (attempt is not None and attempt.state == 'validated'
+                        and attempt.outcome.get('decision') not in {'accepted', 'rejected', 'stale'}):
+                    finalize_response(self._unit_of_work, response, 'stale', transaction=transaction)
 
     def _save_current(self, book_id: str, analysis: ChapterAnalysis, *, task_id=None) -> None:
         """Saves chapter analysis in a single short transaction."""
@@ -1356,3 +1714,42 @@ __all__ = [
     "IdFactory",
     "Sleep",
 ]
+
+
+def _pass_model_dependencies(payload: Mapping, kind: AnalysisPassKind) -> dict:
+    """Only this pass's public generation dependencies, never credentials/revisions."""
+    models = payload.get('models', {})
+    params = payload.get('llm_parameters', {})
+    route = payload.get('route', {})
+    return dict(model=models.get('analysis_passes', {}).get(kind.value) or models.get('analysis')
+        or params.get('analysis_model') or params.get('model', ''),
+        provider=route.get('provider', params.get('provider', '')),
+        base_url=route.get('base_url', ''),
+        temperature=params.get('temperature'), max_output_tokens=params.get('max_output_tokens'))
+
+
+def _candidate_suggestion_key(candidate: Mapping) -> tuple[str, str, str]:
+    return (glossary_key(candidate['source_text']), candidate['suggested_translation'], candidate['note'])
+
+
+def _suggestion_key(suggestion: TermConcept | GlossaryCandidate, language: str) -> tuple[str, str, str]:
+    if isinstance(suggestion, TermConcept):
+        variant = suggestion.variant_for(language)
+        return (glossary_key(suggestion.canonical_source_text), variant.text if variant else '', suggestion.note)
+    return (glossary_key(suggestion.source_text), suggestion.suggested_translation, suggestion.note)
+
+
+def _prepare_staged_payload(
+    payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse,
+) -> NarrativeAnalysisResponse | PedagogicalAnalysisResponse:
+    if isinstance(payload, NarrativeAnalysisResponse):
+        prepared = prepare_analysis_payload(ChapterAnalysisResponse(payload.translation_instructions,
+            payload.chapter_summary, glossary_candidates=payload.glossary_candidates))
+        return replace(payload, chapter_summary=prepared.chapter_summary,
+                       glossary_candidates=prepared.glossary_candidates)
+    combined = combine_staged_analysis_responses(
+        NarrativeAnalysisResponse('Accepted narrative.', 'Accepted summary.'), payload)
+    prepared = prepare_analysis_payload(combined)
+    return replace(payload, before_you_read=prepared.before_you_read,
+        before_you_read_evidence=prepared.content_plan.before_you_read_evidence,
+        reader_chapter_summary=prepared.chapter_summary if payload.reader_chapter_summary is not None else None)
