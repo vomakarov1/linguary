@@ -663,3 +663,138 @@ async def test_ensure_initial_for_analysis_creates_or_reuses_matching_conditions
         await app.aclose()
 
 
+async def test_staged_runtime_uses_pinned_models_and_reuses_narrative_on_reanalyze(tmp_path, monkeypatch):
+    from linguary.adapters.llm import OpenAICompatibleLLMClient
+    from linguary.domain import AnalysisPassKind
+    from linguary.application.book_overview import book_overview
+    from linguary.application.use_cases.reset_processing import ResetProcessing, ResetProcessingCommand
+    bodies = []
+
+    async def post(client, body):
+        bodies.append(body)
+        kind = body['response_format']['json_schema']['name']
+        if kind == 'chapter_analysis_narrative':
+            payload = dict(translation_instructions='Keep the voice.', chapter_summary='The cat sat.',
+                glossary_candidates=[], context_facts=[], scenes=[dict(start_block_id='b1',
+                    end_block_id='b1', summary='The cat sits.', location=None, participants=[],
+                    visual_facts=[], visual_assumptions=[])])
+        elif kind == 'chapter_analysis_pedagogical':
+            payload = dict(treatment_plan=[dict(source_block_id='b1', treatment='READ_AS_IS')],
+                before_you_read=[], difficulties=[], before_you_read_evidence=[])
+            if sum(b['response_format']['json_schema']['name'] == kind for b in bodies) == 1:
+                payload['treatment_plan'] = []  # Valid schema, rejected coverage, then retry.
+            if 'reader_chapter_summary' in body['response_format']['json_schema']['schema']['properties']:
+                payload['reader_chapter_summary'] = 'The cat sat.\n\nКот сидел.'
+        else:
+            raise AssertionError(f'Unexpected request kind: {kind}')
+        usage = dict(prompt_tokens=100, completion_tokens=25)
+        if kind == 'chapter_analysis_narrative':
+            usage['cost'] = 0.02
+        return dict(model=body['model'], usage=usage,
+            choices=[dict(finish_reason='stop', message=dict(content=json.dumps(payload)))])
+
+    monkeypatch.setattr(OpenAICompatibleLLMClient, '_post', post)
+    settings = AppSettings(llm=LLMSettings(model='base', analysis_model='analysis',
+        narrative_analysis_model='story', pedagogical_analysis_model='teaching', staged_analysis=True,
+        max_output_tokens=16000, api_key='synthetic-secret', proxy_mode='direct'),
+        storage=StorageSettings(data_root=str(tmp_path / 'data')))
+    app = build_application(settings=settings, content_plan_profile='content-plan-v3')
+    try:
+        document = store_imported(app)
+        await app.analysis.start('book-1')
+        done = await drain_tasks(app)
+        assert all(t.status is TaskStatus.SUCCEEDED for t in done), [(t.status, t.last_error) for t in done]
+        assert [(b['response_format']['json_schema']['name'], b['model'], b['max_completion_tokens'])
+                for b in bodies] == [('chapter_analysis_narrative', 'story', 16000),
+                                     ('chapter_analysis_pedagogical', 'teaching', 16000),
+                                     ('chapter_analysis_pedagogical', 'teaching', 16000)]
+        with app.unit_of_work.transaction() as tx:
+            calls = tx.llm_calls.list_for_book('book-1')
+            for call in calls:
+                assert tx.work.get_attempt(call.attempt_id).context['assigned_model'] == call.model
+            first = tx.analyses.get_pass('book-1', document.sections[0].id, AnalysisPassKind.NARRATIVE)
+            assert first is not None
+        old_conditions = app.book_conditions.require('book-1')
+        # Current global model must never alter an already pinned route.
+        await app.system_settings.save(SystemSettingsUpdate(provider='openai_compatible', model='global',
+            base_url='https://api.openai.com/v1', requests_per_minute=None, concurrency=1), expected_revision=0)
+        pinned = app.book_runtime.settings_for(old_conditions)
+        assert pinned.llm.staged_analysis is True
+        assert pinned.llm.effective_analysis_pass_model('narrative') == 'story'
+        choice = ChooseBookConditions(app.book_conditions, app.book_runtime)
+        for revision, level, help_mode in [(1, 'a2', False), (2, 'b2', True)]:
+            choice('book-1', action='reanalyze', expected_revision=revision,
+                settings_revision=1, confirmed=True, reader_level=level, english_help=help_mode)
+            before = len(bodies)
+            await app.analysis.start('book-1')
+            done = await drain_tasks(app)
+            assert all(t.status is TaskStatus.SUCCEEDED for t in done), [(t.status, t.last_error) for t in done]
+            assert [b['response_format']['json_schema']['name'] for b in bodies[before:]] == ['chapter_analysis_pedagogical']
+            with app.unit_of_work.transaction() as tx:
+                assert tx.analyses.get_pass('book-1', document.sections[0].id, AnalysisPassKind.NARRATIVE) == first
+                analysis = tx.analyses.list_for_book('book-1')[0]
+                assert analysis.chapter_summary == ('The cat sat.\n\nКот сидел.' if level == 'a2' else 'The cat sat.')
+        overview = book_overview(app.unit_of_work, 'book-1')
+        stats = overview.ordinary_cost['analysis']
+        assert stats['calls'] == 5
+        assert stats['prompt_tokens'] == 500
+        assert stats['completion_tokens'] == 125
+        assert stats['cost_usd'] is None
+        assert stats['known_spent_usd'] == '0.02'
+        assert stats['unknown_calls'] == 4
+        assert stats['passes']['narrative']['cost_usd'] == '0.02'
+        assert stats['passes']['pedagogical']['cost_usd'] is None
+        assert stats['passes']['narrative']['calls'] == 1
+        assert stats['passes']['pedagogical']['calls'] == 4
+        with app.unit_of_work.transaction() as tx:
+            tx.books.save(replace(tx.books.get('book-1'), status=BookStatus.PROCESSING))
+            passes = tx.analyses.list_passes_for_section('book-1', document.sections[0].id)
+        ResetProcessing(unit_of_work=app.unit_of_work)(ResetProcessingCommand('book-1'))
+        with app.unit_of_work.transaction() as tx:
+            assert tx.analyses.list_passes_for_section('book-1', document.sections[0].id) == passes
+            assert tx.analyses.list_for_book('book-1')[0] == analysis
+    finally:
+        await app.aclose()
+
+
+@pytest.mark.parametrize('historical_snapshot', [False, True])
+async def test_continue_legacy_with_current_opt_in_keeps_single_pass(tmp_path, historical_snapshot):
+    settings = AppSettings(llm=LLMSettings(model='base', api_key='synthetic-secret',
+        staged_analysis=True, narrative_analysis_model='story', pedagogical_analysis_model='teaching',
+        proxy_mode='direct'), storage=StorageSettings(data_root=str(tmp_path / 'data')))
+    fake = FakeLLMClient([FakeReply.of_payload(dict(
+        treatment_plan=[dict(source_block_id='b1', treatment='READ_AS_IS')],
+        glossary_candidates=[], translation_instructions='Keep the voice.', chapter_summary='The cat sat.',
+        before_you_read=[], content_plan=dict(version=3, profile='content-plan-v3',
+            difficulties=[], context_facts=[], before_you_read_evidence=[])))])
+    app = build_application(settings=settings, llm_client=fake, content_plan_profile='content-plan-v3')
+    try:
+        store_imported(app)
+        conditions = ChooseBookConditions(app.book_conditions, app.book_runtime)('book-1',
+            action='continue_legacy', expected_revision=0, settings_revision=0, confirmed=True)
+        assert conditions.payload['staged_analysis'] is False
+        if historical_snapshot:
+            from linguary.domain.book_conditions import thaw
+            from uuid import uuid4
+            payload = thaw(conditions.payload)
+            payload.pop('staged_analysis')
+            payload['models'].pop('analysis_passes')
+            for key in ('staged_analysis', 'narrative_analysis_model', 'pedagogical_analysis_model'):
+                payload['llm_parameters'].pop(key)
+            for key in ('narrative_analysis', 'pedagogical_analysis'):
+                payload['prompt_templates'].pop(key)
+            payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
+            conditions = replace(conditions, id=str(uuid4()), revision=2, payload=payload)
+            with app.unit_of_work.transaction() as tx:
+                tx.work.add_conditions(conditions)
+        await app.analysis.start('book-1')
+        done = await drain_tasks(app)
+        assert all(t.status is TaskStatus.SUCCEEDED for t in done)
+        assert [r.stage.value for r in fake.requests] == ['chapter_analysis']
+        assert app.book_conditions.require('book-1').id == conditions.id
+        from linguary.application.book_overview import book_overview
+        stats = book_overview(app.unit_of_work, 'book-1').ordinary_cost['analysis']
+        assert stats['calls'] == stats['passes']['single']['calls'] == 1
+        assert stats['passes']['narrative']['calls'] == stats['passes']['pedagogical']['calls'] == 0
+    finally:
+        await app.aclose()

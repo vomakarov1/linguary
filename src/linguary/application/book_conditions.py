@@ -119,6 +119,8 @@ class BookConditionsService:
             payload.setdefault('checks', {})['seed_first_chapter'] = seed_first_chapter
         from linguary.application.context_builder import snapshot_prompt_templates
         if continue_legacy:
+            payload['staged_analysis'] = False
+            payload.setdefault('llm_parameters', {})['staged_analysis'] = False
             payload.pop('name_translation_policy', None)
             payload['prompt_templates'] = snapshot_prompt_templates(
                 source_language=book.source_language, target_language=book.target_language,

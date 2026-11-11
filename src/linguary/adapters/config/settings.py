@@ -146,6 +146,9 @@ class LLMSettings:
     base_url: str = DEFAULT_BASE_URL
     model: str = ""
     analysis_model: str = ""
+    narrative_analysis_model: str = ""
+    pedagogical_analysis_model: str = ""
+    staged_analysis: bool = False
     processing_model: str = ""
     correction_model: str = ""
     api_key: str | None = field(default=None, repr=False)
@@ -164,6 +167,11 @@ class LLMSettings:
 
     def __post_init__(self) -> None:
         validate_proxy(self.proxy_mode, self.proxy_url)
+        if type(self.staged_analysis) is not bool:
+            raise SettingsError("поэтапный анализ должен быть логическим значением")
+        for model in (self.narrative_analysis_model, self.pedagogical_analysis_model):
+            if not isinstance(model, str):
+                raise SettingsError("модель прохода анализа должна быть строкой")
         if not isinstance(self.correction_model, str):
             raise SettingsError("модель исправления должна быть строкой")
         if not self.provider.strip():
@@ -199,6 +207,12 @@ class LLMSettings:
     def effective_analysis_model(self) -> str:
         """Model for analysis: explicit analysis_model or fallback to model."""
         return self.analysis_model.strip() or self.model
+
+    def effective_analysis_pass_model(self, pass_kind: str) -> str:
+        """Explicit pass model, falling back to the shared analysis model."""
+        model = {'narrative': self.narrative_analysis_model,
+                 'pedagogical': self.pedagogical_analysis_model}.get(pass_kind, '')
+        return model.strip() or self.effective_analysis_model
 
     @property
     def effective_processing_model(self) -> str:

@@ -57,7 +57,7 @@ from linguary.adapters.epub import (
 from linguary.adapters.epub.pronunciation_notices import load_pronunciation_source_notices
 from linguary.adapters.llm import LoggingLLMClient, RateLimitedLLMClient
 from linguary.adapters.llm.logging import LoggedObserver
-from linguary.domain.llm_log import TokenPricing
+from linguary.domain.llm_log import LLMCallStage, TokenPricing
 from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.domain.book_conditions import thaw
 from linguary.adapters.runtime import (
@@ -109,7 +109,7 @@ from linguary.application.use_cases.retry_task import RetryTask
 from linguary.application.use_cases.restart_translation import RestartTranslation
 from linguary.application.use_cases.pause_book import PauseBook, ResumeBook
 from linguary.application.validators import TranslationResultValidator
-from linguary.composition.llm import ConfiguredLLMClient
+from linguary.composition.llm import ConfiguredLLMClient, StageRoutedLLMClient
 from linguary.composition.migrations import apply_migrations
 from linguary.composition.paths import DataPaths
 from linguary.domain import (
@@ -397,6 +397,19 @@ def build_application(
             on_logged=on_logged,
             model_name=processing_model or "not_configured",
         )
+        if candidate.llm.staged_analysis and profile == 'content-plan-v3':
+            clients_by_model = {analysis_model: analysis_client}
+            stages = {}
+            for stage, kind in ((LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE, 'narrative'),
+                                (LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL, 'pedagogical')):
+                pass_model = candidate.llm.effective_analysis_pass_model(kind)
+                if pass_model not in clients_by_model:
+                    clients_by_model[pass_model] = _model_client(
+                        candidate, inner=llm_client if llm_client is not None else configured_client.client_for(pass_model),
+                        unit_of_work=unit_of_work, limiter=rate_limiter,
+                        on_logged=on_logged, model_name=pass_model or 'not_configured')
+                stages[stage] = clients_by_model[pass_model]
+            analysis_client = StageRoutedLLMClient(analysis_client, stages)
         if conditions is not None:
             analysis_client = ProvenanceClient(analysis_client, book_conditions, conditions.id)
             processing_client = ProvenanceClient(processing_client, book_conditions, conditions.id)
@@ -644,6 +657,7 @@ def _analysis_sequence(
             conditions_id=conditions_id,
             max_concurrency=settings.worker.concurrency,
             seed_first_chapter=settings.checks.seed_first_chapter,
+            staged_analysis=settings.llm.staged_analysis,
         ),
     )
 

@@ -14,8 +14,10 @@ retries it manually.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 
+from linguary.domain import LLMCallStage
 from linguary.adapters.config import LLMSettings
 from linguary.adapters.llm import OpenAICompatibleLLMClient
 from linguary.application.ports.llm import (
@@ -40,6 +42,9 @@ class ConfiguredLLMClient(LLMClient):
                 self._settings.effective_analysis_model,
                 self._settings.effective_processing_model,
             }
+            if self._settings.staged_analysis:
+                models.update(self._settings.effective_analysis_pass_model(kind)
+                              for kind in ('narrative', 'pedagogical'))
             for model in models:
                 if model:
                     self._connected(model)
@@ -97,4 +102,17 @@ class _ModelBoundLLMClient(LLMClient):
         return await self._parent.generate_for(request, model=self._model)
 
 
-__all__ = ["ConfiguredLLMClient"]
+class StageRoutedLLMClient(LLMClient):
+    """Dispatch stages through their existing logging and shared rate wrappers."""
+
+    def __init__(self, default: LLMClient, stages: Mapping[LLMCallStage, LLMClient]) -> None:
+        self._default = default
+        self._stages = dict(stages)
+
+    async def generate[PayloadT: LLMPayload](
+        self, request: LLMRequest[PayloadT]
+    ) -> LLMResponse[PayloadT]:
+        return await self._stages.get(request.stage, self._default).generate(request)
+
+
+__all__ = ["ConfiguredLLMClient", "StageRoutedLLMClient"]

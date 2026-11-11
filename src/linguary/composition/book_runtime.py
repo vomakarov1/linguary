@@ -16,7 +16,7 @@ from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask, TaskStatus
 from linguary.domain.book_conditions import thaw
 from linguary.domain.recovery import CallAttempt
-from linguary.domain.llm_log import CallContext
+from linguary.domain.llm_log import CallContext, LLMCallStage
 from linguary.domain.name_translation import NameTranslationPolicy
 from linguary.application.diagnostics import diagnostics_for
 from linguary.application.recovery import RecoveryError
@@ -87,7 +87,10 @@ def conditions_payload(book, settings, revision, profile):
     return {'schema_version': 1, 'name_translation_policy': {'version': 1, 'strategy': settings.reading.name_translation_strategy},
         'pronunciation_help_enabled': False, 'pronunciation_variant': None,
         'source_language': book.source_language, 'target_language': book.target_language,
+        'staged_analysis': settings.llm.staged_analysis,
         'reader_level': settings.reading.normalized_level, 'models': {'analysis': settings.llm.effective_analysis_model,
+        'analysis_passes': {kind: settings.llm.effective_analysis_pass_model(kind)
+                            for kind in ('narrative', 'pedagogical')},
         'processing': settings.llm.effective_processing_model}, 'route': route_snapshot(settings.llm),
         'llm_parameters': llm, 'checks': asdict(settings.checks), 'profile': profile,
         'recovery_policy': asdict(settings.recovery),
@@ -96,6 +99,16 @@ def conditions_payload(book, settings, revision, profile):
                      'schemas': {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 5}[profile],
                      'prompts': 5 if profile == 'content-plan-v3' else 1}, 'prompt_templates': templates,
         'prompt_sha256': payload_digest(templates), 'settings_revision': revision}
+
+
+def assigned_model_for(payload, stage):
+    """Use only designated models from this book's immutable conditions."""
+    models = payload['models']
+    kind = {LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE: 'narrative',
+            LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL: 'pedagogical'}.get(stage)
+    if kind is not None:
+        return models.get('analysis_passes', {}).get(kind) or models['analysis']
+    return models['analysis' if stage == LLMCallStage.CHAPTER_ANALYSIS else 'processing']
 
 
 class BoundTaskQueue:
@@ -222,7 +235,7 @@ class ProvenanceClient:
                 context = CallContext(conditions_id=conditions.id, task_id=request.task_id, run_id=request.run_id,
                     stage=request.stage.value, scope_id=request.scope_id or request.stage.value,
                     ordered_block_ids=request.ordered_block_ids, attempt_id=str(uuid4()), generation=0,
-                    assigned_model=conditions.payload['models']['analysis' if request.stage.value == 'chapter_analysis' else 'processing'],
+                    assigned_model=assigned_model_for(conditions.payload, request.stage),
                     prompt_hash=sha256(request.instructions.encode()).hexdigest())
                 request = replace(request, call_context=context)
                 attempt = CallAttempt(context.attempt_id, request.book_id, conditions_id=conditions.id,
@@ -393,6 +406,9 @@ class BookRuntimeResolver:
             raise ConditionsError('route_unavailable')
         llm = LLMSettings(**{
             **thaw(payload['llm_parameters']),
+            'staged_analysis': payload.get('staged_analysis', False),
+            'narrative_analysis_model': payload['models'].get('analysis_passes', {}).get('narrative', ''),
+            'pedagogical_analysis_model': payload['models'].get('analysis_passes', {}).get('pedagogical', ''),
             'base_url': current.llm.base_url,
             'proxy_url': current.llm.proxy_url,
             'api_key': current.llm.api_key,

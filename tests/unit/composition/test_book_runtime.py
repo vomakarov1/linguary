@@ -544,3 +544,43 @@ async def test_bound_task_queue_enqueue_notifies_work_available_after_commit() -
     )
     assert plain_task.id == "task-2"
 
+
+
+def test_conditions_pin_staged_choice_and_both_pass_models():
+    settings = replace(_make_settings(), llm=replace(_make_settings().llm,
+        staged_analysis=True, analysis_model='analysis', narrative_analysis_model='story',
+        pedagogical_analysis_model='teaching'))
+    conditions = _make_conditions(settings)
+    assert conditions.payload['staged_analysis'] is True
+    assert conditions.payload['models']['analysis_passes'] == {
+        'narrative': 'story', 'pedagogical': 'teaching'}
+    runtime = SimpleNamespace(current=SimpleNamespace(settings=replace(settings,
+        llm=replace(settings.llm, narrative_analysis_model='new-story',
+                    pedagogical_analysis_model='new-teaching', staged_analysis=False))))
+    pinned = BookRuntimeResolver(_make_service(conditions), runtime, None).settings_for(conditions)
+    assert pinned.llm.staged_analysis is True
+    assert pinned.llm.effective_analysis_pass_model('narrative') == 'story'
+    assert pinned.llm.effective_analysis_pass_model('pedagogical') == 'teaching'
+
+
+def test_old_v3_conditions_keep_single_pass_without_new_templates_or_settings():
+    from linguary.application.book_conditions import payload_digest
+    from linguary.domain.book_conditions import thaw
+    settings = _make_settings()
+    conditions = _make_conditions(settings)
+    payload = thaw(conditions.payload)
+    payload.pop('staged_analysis', None)
+    payload['models'].pop('analysis_passes', None)
+    for key in ('staged_analysis', 'narrative_analysis_model', 'pedagogical_analysis_model'):
+        payload['llm_parameters'].pop(key, None)
+    for key in ('narrative_analysis', 'pedagogical_analysis'):
+        payload['prompt_templates'].pop(key, None)
+    payload['prompt_sha256'] = payload_digest(payload['prompt_templates'])
+    old = replace(conditions, payload=payload)
+    current = replace(settings, llm=replace(settings.llm, staged_analysis=True,
+        narrative_analysis_model='new-story', pedagogical_analysis_model='new-teaching'))
+    pinned = BookRuntimeResolver(_make_service(old),
+        SimpleNamespace(current=SimpleNamespace(settings=current)), None).settings_for(old)
+    assert pinned.llm.staged_analysis is False
+    assert pinned.llm.effective_analysis_pass_model('narrative') == 'gpt-test'
+    assert pinned.llm.effective_analysis_pass_model('pedagogical') == 'gpt-test'

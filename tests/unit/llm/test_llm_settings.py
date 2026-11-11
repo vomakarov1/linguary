@@ -437,3 +437,36 @@ def test_reading_settings_loaded_from_environment(tmp_path: Path) -> None:
 
 
 
+
+
+def test_llm_settings_resolves_per_pass_models_with_fallback():
+    settings = LLMSettings(model='default', analysis_model='analysis',
+        narrative_analysis_model=' narrative ', api_key='secret')
+    assert settings.effective_analysis_pass_model('narrative') == 'narrative'
+    assert settings.effective_analysis_pass_model('pedagogical') == 'analysis'
+    assert settings.effective_analysis_pass_model('illustration_prep') == 'analysis'
+    assert LLMSettings(model='default').effective_analysis_pass_model('narrative') == 'default'
+
+
+def test_staged_analysis_models_and_opt_in_load_from_file_and_environment(tmp_path):
+    settings = load_settings(environ={'LINGUARY_LLM_PEDAGOGICAL_ANALYSIS_MODEL': 'teaching'},
+        config_path=write_config(tmp_path, '''[llm]
+staged_analysis = true
+narrative_analysis_model = "story"
+pedagogical_analysis_model = "file-teaching"
+'''))
+    assert settings.llm.staged_analysis is True
+    assert settings.llm.effective_analysis_pass_model('narrative') == 'story'
+    assert settings.llm.effective_analysis_pass_model('pedagogical') == 'teaching'
+    assert load_settings(environ={'LINGUARY_LLM_STAGED_ANALYSIS': 'false'},
+        config_path=write_config(tmp_path, '[llm]\nstaged_analysis = true')).llm.staged_analysis is False
+    assert LLMSettings().staged_analysis is False
+
+
+@pytest.mark.parametrize('overrides', [
+    {'staged_analysis': 'true'}, {'narrative_analysis_model': None},
+    {'pedagogical_analysis_model': 1},
+])
+def test_invalid_staged_settings_are_rejected(overrides):
+    with pytest.raises(SettingsError):
+        LLMSettings(**overrides)

@@ -325,12 +325,13 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
     from linguary.domain.book_conditions import thaw
     conditions = transaction.work.latest_conditions(book.id)
     summary = dict(conditions_id=None, revision=None, reader_level=None, english_help=None, profile=None, models={}, state='unknown', name_translation_state='not_saved', name_translation_policy=None,
-        source_language=book.source_language, pronunciation_help_enabled=False, pronunciation_variant=None, seed_first_chapter=False)
+        source_language=book.source_language, staged_analysis=False, pronunciation_help_enabled=False, pronunciation_variant=None, seed_first_chapter=False)
     if conditions is not None:
         policy = conditions.payload.get('name_translation_policy')
         summary.update(conditions_id=conditions.id, revision=conditions.revision,
             reader_level=conditions.payload.get('reader_level'), english_help=conditions.payload.get('english_help'), profile=conditions.payload.get('profile'),
             models=thaw(conditions.payload.get('models', {})), state='saved',
+            staged_analysis=conditions.payload.get('staged_analysis', False),
             name_translation_state='configured' if policy is not None else 'legacy',
             name_translation_policy=thaw(policy) if policy is not None else None,
             pronunciation_help_enabled=conditions.pronunciation_help_enabled,
@@ -501,10 +502,38 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
         and call.stage == LLMCallStage.BLOCK_REGENERATION), Decimal('0'))
     ordinary_cost = dict(currency='USD', known_spent_usd=str(known_cost),
         unknown_calls=sum(call.cost is None for call in ordinary), regeneration_spent_usd=str(regeneration_cost),
-        regeneration_unknown_calls=sum(call.cost is None for call in ordinary if call.stage == LLMCallStage.BLOCK_REGENERATION))
+        regeneration_unknown_calls=sum(call.cost is None for call in ordinary if call.stage == LLMCallStage.BLOCK_REGENERATION),
+        analysis=_analysis_call_statistics(ordinary))
     return dict(conditions=summary, reproducibility='unknown' if conditions is None else conditions.reproducibility,
         recovery=recovery, quality_review=quality_review_state(transaction, book.id),
         epub_ready=epub_ready, ordinary_cost=ordinary_cost)
+
+
+_ANALYSIS_STAGES = {
+    'single': LLMCallStage.CHAPTER_ANALYSIS,
+    'narrative': LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE,
+    'pedagogical': LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
+}
+
+
+def _call_statistics(calls):
+    """Count every physical attempt; unknown prices and token totals stay unknown."""
+    known_cost = sum((call.cost for call in calls if call.cost is not None), Decimal('0'))
+    unknown_cost = sum(call.cost is None for call in calls)
+    result = dict(calls=len(calls), failed_calls=sum(not call.success for call in calls),
+        cost_usd=None if unknown_cost else str(known_cost), known_spent_usd=str(known_cost),
+        unknown_calls=unknown_cost)
+    for name in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+        values = [getattr(call.usage, name, None) for call in calls]
+        result[name] = None if any(value is None for value in values) else sum(values)
+    return result
+
+
+def _analysis_call_statistics(calls):
+    analysis = [call for call in calls if call.stage in _ANALYSIS_STAGES.values()]
+    return {**_call_statistics(analysis), 'passes': {
+        kind: _call_statistics([call for call in analysis if call.stage == stage])
+        for kind, stage in _ANALYSIS_STAGES.items()}}
 
 
 def list_books(
@@ -1485,6 +1514,7 @@ def _remaining_time(
     call_stages = (
         (LLMCallStage.CHAPTER_CORRECTION, LLMCallStage.CHAPTER_CORRECTION_REVIEW)
         if stage is LLMCallStage.CHAPTER_CORRECTION
+        else tuple(_ANALYSIS_STAGES.values()) if stage is LLMCallStage.CHAPTER_ANALYSIS
         else (stage,)
     )
     durations = [
