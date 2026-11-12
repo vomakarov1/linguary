@@ -401,7 +401,7 @@ class PedagogicalAnalysisSchema(_ResponseModel):
     treatment_plan: list[TreatmentPlanItemSchema]
     before_you_read: list[BeforeYouReadEntrySchema]
     difficulties: list[QuotedDifficultySchema]
-    before_you_read_evidence: list[HelpEvidenceSchema]
+    before_you_read_evidence: list[HelpEvidenceSchema] = Field(default_factory=list)
 
 
 class PedagogicalAnalysisA2Schema(PedagogicalAnalysisSchema):

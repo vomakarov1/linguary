@@ -209,8 +209,14 @@ def difficulty(alias='b1', quote='Holmes', *, kind='explanation'):
                 required_points=[dict(id='p1', description='Объяснить условие')])
 
 
-@pytest.mark.parametrize('invalid', [dict(difficulties=[difficulty(quote='missing')]),
-    dict(difficulties=[difficulty(kind='lexical_hint')])])
+@pytest.mark.parametrize('invalid', [
+    dict(difficulties=[difficulty(quote='missing')]),
+    dict(difficulties=[difficulty(kind='lexical_hint')]),
+    dict(
+        difficulties=[difficulty(kind='lexical_hint')],
+        before_you_read=[dict(expression='Holmes', explanation='Главный сыщик истории.')],
+    ),
+])
 async def test_pedagogical_invalid_quotes_and_channels_preserve_narrative(stored_book, invalid):
     _, uow, _ = stored_book
     client = FakeLLMClient([narrative(), pedagogical(**invalid), pedagogical()])
@@ -1058,4 +1064,68 @@ def test_save_pass_updates_loaded_row_in_same_sqlalchemy_session(stored_book):
         loaded_2 = tx.analyses.get_pass(BOOK_ID, 'section-1', AnalysisPassKind.NARRATIVE)
         assert loaded_2.input_sha256 == '2' * 64
         assert loaded_2.attempt_id == 'att-2'
+
+
+async def test_pedagogical_pass_receives_current_chapter_narrative_glossary_and_name_policy(stored_book):
+    import json
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+    _, uow, _ = stored_book
+    section = make_analysis_section(
+        texts=('Holmes lives on Baker Street.', 'Watson arrives at noon.')
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+
+    policy = NameTranslationPolicy(1, NameTranslationStrategy.SOUND)
+    templates = snapshot_prompt_templates(
+        source_language='en',
+        target_language='ru',
+        reader_level='a2',
+        profile='content-plan-v3',
+        name_translation_policy=policy,
+    )
+    ctx_builder = ContextBuilder(
+        content_plan_profile='content-plan-v3',
+        reader_level='a2',
+        prompt_templates=templates,
+        name_translation_policy=policy,
+    )
+
+    raw_1 = json.loads(narrative(('b1',)).content)
+    raw_1['chapter_summary'] = 'Holmes waits on Baker Street.'
+    raw_1['glossary_candidates'] = [
+        dict(
+            source_text='Baker Street',
+            type='place',
+            suggested_translation='Бейкер-стрит',
+            confidence=0.95,
+            model_flagged_review=False,
+            note='Улица в Лондоне.',
+            name_translation_assessment=None,
+        )
+    ]
+    raw_2 = json.loads(narrative(('b1',)).content)
+    raw_2['chapter_summary'] = 'Holmes waits on Baker Street and Watson arrives.'
+
+    summary_1 = 'Holmes waits on Baker Street.\n\nХолмс ждёт на Бейкер-стрит.'
+    summary_2 = (
+        'Holmes waits on Baker Street and Watson arrives.\n\n'
+        'Холмс ждёт на Бейкер-стрит, и приезжает Уотсон.'
+    )
+    client = FakeLLMClient([
+        FakeReply.of_payload(raw_1),
+        FakeReply.of_payload(raw_2),
+        pedagogical(('b1',), summary=summary_1),
+        pedagogical(('b1',), summary=summary_2),
+    ])
+    await scenario(uow, client, context=ctx_builder, max_fragment_blocks=1)(COMMAND)
+
+    ped_requests = [r for r in client.requests if r.stage == PEDAGOGICAL]
+    assert len(ped_requests) == 2
+    for req in ped_requests:
+        assert 'Передавай имена и названия по звучанию' in req.instructions
+        assert 'name_translation_assessment' not in req.instructions
+        assert '- Baker Street [place] -> Бейкер-стрит (Улица в Лондоне.)' in req.input_text
+
 

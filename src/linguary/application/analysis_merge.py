@@ -1596,6 +1596,23 @@ def validate_content_plan(
             and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
         )
         if (
+            plan.version == 3
+            and difficulty.kind == "grammar"
+            and difficulty.help_kind != "explanation"
+        ):
+            label = aliases_by_block_id.get(
+                difficulty.owner_block_id, difficulty.owner_block_id
+            )
+            msg = (
+                "грамматическая трудность требует объяснения "
+                f"({label}, {difficulty.id})"
+            )
+            raise _analysis_error(
+                msg,
+                rule_code="grammar_requires_explanation",
+                block_ids=(difficulty.owner_block_id,),
+            )
+        if (
             difficulty.help_kind == "lexical_hint"
             and not fragment_help
             and treatments.get(difficulty.owner_block_id) is not BlockTreatment.GLOSSARY_ONLY

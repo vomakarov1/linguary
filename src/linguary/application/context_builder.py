@@ -43,7 +43,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
-from linguary.application.analysis_merge import ChapterFragment
+from linguary.application.analysis_merge import (
+    ChapterFragment,
+    _candidate_groups,
+    _merged_candidate_suggestion,
+)
 from linguary.application.block_labels import without_block_labels
 from linguary.application.chapter_instructions import (
     instructions_respecting_glossary,
@@ -54,6 +58,7 @@ from linguary.application.reader_text import learner_instructions
 from linguary.application.llm_dto import (
     BlockResultResponse,
     ChapterAnalysisResponse,
+    GlossaryCandidateResponse,
     NarrativeAnalysisResponse,
     PedagogicalAnalysisResponse,
     TranslationResultResponse,
@@ -856,6 +861,7 @@ class ContextBuilder:
     def for_chapter_pedagogical_analysis(
         self, document: CanonicalDocument, section: DocumentSection, *,
         narrative_summary: str, context_facts: Sequence[ContextFact] = (),
+        glossary_candidates: Iterable[GlossaryCandidate | GlossaryCandidateResponse] = (),
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
         user_decisions: Iterable[TermConcept] | None = None,
         fragment: ChapterFragment | None = None, fragment_count: int = 1,
@@ -866,11 +872,22 @@ class ContextBuilder:
         if fragment_count < 1 or fragment is not None and fragment.order >= fragment_count:
             raise ContextBuildError('фрагмент не входит в указанное число частей главы')
         order = fragment.order if fragment else 0
-        instructions = self._prompt_templates.get('pedagogical_analysis') or _pedagogical_instructions(
-            document.source_language, document.target_language, self._reader_level, self._english_help)
+        instructions = self._prompt_templates.get('pedagogical_analysis') or _with_name_policy(
+            _pedagogical_instructions(
+                document.source_language, document.target_language, self._reader_level, self._english_help
+            ),
+            self._name_translation_policy,
+        )
+        raw_decisions = tuple(self._user_decisions if user_decisions is None else user_decisions)
+        chapter_candidates = _pedagogical_glossary_candidates(
+            glossary_candidates,
+            user_decisions=raw_decisions if self._name_translation_policy is None else (),
+            target_language=document.target_language,
+        )
         context = self._chapter_context(document=document, section=section,
             blocks=fragment.blocks if fragment else textual_blocks(section),
-            accumulated_candidates=accumulated_candidates, user_decisions=user_decisions,
+            accumulated_candidates=(*accumulated_candidates, *chapter_candidates),
+            user_decisions=user_decisions,
             nonbinding_suggestions=(), instructions=instructions,
             fragment_label=_fragment_label(order, fragment_count) if fragment else None,
             before_you_read_limit=(10 // fragment_count + (order < 10 % fragment_count)
@@ -878,7 +895,8 @@ class ContextBuilder:
             language_notes_limit=(self._language_notes_per_chapter // fragment_count +
                 (order < self._language_notes_per_chapter % fragment_count)
                 if language_notes_limit is None else language_notes_limit),
-            pedagogical=True)
+            pedagogical=True,
+            extra_match_text=narrative_summary)
         aliases_by_block_id = {b_id: alias for alias, b_id in context.block_ids_by_alias.items()}
         accepted = '\n\nПринятый повествовательный анализ:\n' + json.dumps(
             dict(
@@ -911,6 +929,7 @@ class ContextBuilder:
         self, document: CanonicalDocument, section: DocumentSection, *,
         narrative_output_sha256: str, narrative_summary: str = '',
         context_facts: Sequence[ContextFact] = (),
+        glossary_candidates: Iterable[GlossaryCandidate | GlossaryCandidateResponse] = (),
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
         user_decisions: Iterable[TermConcept] | None = None,
         model_dependencies: Mapping[str, object] | None = None,
@@ -918,6 +937,7 @@ class ContextBuilder:
     ) -> str:
         context = self.for_chapter_pedagogical_analysis(document, section,
             narrative_summary=narrative_summary, context_facts=context_facts,
+            glossary_candidates=glossary_candidates,
             accumulated_candidates=accumulated_candidates, user_decisions=user_decisions)
         return canonical_sha(dict(schema_version=1, narrative_output_sha256=narrative_output_sha256,
             source=[(b.id, b.text) for b in textual_blocks(section)],
@@ -1406,15 +1426,16 @@ class ContextBuilder:
         document: CanonicalDocument,
         section: DocumentSection,
         blocks: Sequence[DocumentBlock],
-        accumulated_candidates: Iterable[GlossaryCandidate],
+        accumulated_candidates: Iterable[GlossaryCandidate | GlossaryCandidateResponse],
         instructions: str,
         user_decisions: Iterable[TermConcept] | None,
-        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None,
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate | GlossaryCandidateResponse] | None,
         fragment_label: str | None,
         findings: FragmentFindings | None = None,
         before_you_read_limit: int = 10,
         language_notes_limit: int | None = None,
         pedagogical: bool = False,
+        extra_match_text: str = "",
     ) -> ChapterAnalysisContext:
         """Ready request for chapter blocks along with response parsing metadata."""
         aliases = {_alias(index): block.id for index, block in enumerate(blocks, start=1)}
@@ -1476,6 +1497,7 @@ class ContextBuilder:
                     findings=findings,
                     visible_texts_by_alias=visible_texts_by_alias,
                     limit_lines=limit_lines,
+                    extra_match_text=extra_match_text,
                 ),
             ),
             block_ids_by_alias=aliases,
@@ -1529,16 +1551,19 @@ class ContextBuilder:
         document: CanonicalDocument,
         section: DocumentSection,
         blocks: Sequence[DocumentBlock],
-        accumulated_candidates: Iterable[GlossaryCandidate],
+        accumulated_candidates: Iterable[GlossaryCandidate | GlossaryCandidateResponse],
         user_decisions: Iterable[TermConcept] | None,
-        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None,
+        nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate | GlossaryCandidateResponse] | None,
         fragment_label: str | None,
         findings: FragmentFindings | None = None,
         visible_texts_by_alias: Mapping[str, str] | None = None,
         limit_lines: Sequence[str] = (),
+        extra_match_text: str = "",
     ) -> str:
         """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
         blocks_text = " ".join(block.text for block in blocks)
+        if extra_match_text:
+            blocks_text = f"{blocks_text} {extra_match_text}".strip()
         word_stems = _extract_word_stems(blocks_text)
         normalized_blocks_text = glossary_key(blocks_text)
 
@@ -2586,7 +2611,7 @@ def _with_name_policy(instructions: str, policy: NameTranslationPolicy | None, *
 
 def _name_context(
     decisions: Sequence[TermConcept],
-    suggestions: Sequence[TermConcept | GlossaryCandidate],
+    suggestions: Sequence[TermConcept | GlossaryCandidate | GlossaryCandidateResponse],
     language: str,
 ) -> tuple[str, str]:
     accepted: list[str] = []
@@ -2601,7 +2626,7 @@ def _name_context(
     optional: list[str] = []
     seen = set(accepted_keys)
     for item in suggestions:
-        if isinstance(item, GlossaryCandidate):
+        if isinstance(item, (GlossaryCandidate, GlossaryCandidateResponse)):
             source, kind, translation, note = item.source_text, item.type, item.suggested_translation, item.note
         else:
             variant = item.variant_for(language)
@@ -2747,6 +2772,53 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
     }, ensure_ascii=False, separators=(",", ":"))
 
 
+def _pedagogical_glossary_candidates(
+    candidates: Iterable[GlossaryCandidate | GlossaryCandidateResponse],
+    *,
+    user_decisions: Sequence[TermConcept] = (),
+    target_language: str = "",
+) -> tuple[GlossaryCandidate | GlossaryCandidateResponse, ...]:
+    items = tuple(candidates)
+    responses = [c for c in items if isinstance(c, GlossaryCandidateResponse)]
+    merged_responses: list[GlossaryCandidateResponse] = []
+    for group in _candidate_groups(responses):
+        source_text, suggested_translation, note = _merged_candidate_suggestion(group)
+        leading = max(group, key=lambda candidate: candidate.confidence)
+        merged_responses.append(
+            replace(
+                leading,
+                source_text=source_text,
+                suggested_translation=suggested_translation,
+                note=note,
+            )
+        )
+    combined: list[GlossaryCandidate | GlossaryCandidateResponse] = [
+        *(c for c in items if not isinstance(c, GlossaryCandidateResponse)),
+        *merged_responses,
+    ]
+    if not user_decisions or not target_language:
+        return tuple(combined)
+    decisions_by_key = {
+        glossary_key(d.canonical_source_text): (d, variant)
+        for d in user_decisions
+        if d.status.is_user_decision
+        and (variant := d.variant_for(target_language)) is not None
+        and variant.status.is_user_decision
+    }
+    if not decisions_by_key:
+        return tuple(combined)
+    return tuple(
+        replace(
+            item,
+            suggested_translation=decision_pair[1].text,
+            note=decision_pair[0].note.strip() or item.note,
+        )
+        if (decision_pair := decisions_by_key.get(glossary_key(item.source_text))) is not None
+        else item
+        for item in combined
+    )
+
+
 def _pedagogical_context_facts(
     context_facts: Sequence[ContextFact],
     aliases_by_block_id: Mapping[str, str],
@@ -2853,6 +2925,9 @@ selection_reason: unpredictable_spelling, unpredictable_stress или context_de
     if profile == 'content-plan-v3' or analysis_contract_version == 5:
         result['narrative_analysis'] = _with_name_policy(
             _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(**languages), policy, analysis=True)
-        result['pedagogical_analysis'] = _pedagogical_instructions(
-            source_language, target_language, reader_level, english_help)
+        result['pedagogical_analysis'] = _with_name_policy(
+            _pedagogical_instructions(
+                source_language, target_language, reader_level, english_help),
+            policy,
+        )
     return result

@@ -539,6 +539,13 @@ def test_parse_pedagogical_analysis_payload_with_and_without_a2_summary():
     dto_a2 = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
         as_content(data | {'reader_chapter_summary': summary}), contract_version=2)
     assert dto_a2.reader_chapter_summary == summary
+    without_evidence = {k: v for k, v in data.items() if k != 'before_you_read_evidence'}
+    dto_omitted = parse_payload(
+        LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+        as_content(without_evidence | {'reader_chapter_summary': summary}),
+        contract_version=2,
+    )
+    assert dto_omitted.before_you_read_evidence == ()
 
 
 def test_quoted_scene_and_staged_dtos_normalize_sequences():

@@ -362,7 +362,8 @@ class AnalyzeChapter:
                 mandatory_facts=glossary_context_constraints(concepts))
         pedagogical_hash = self._context_builder.pedagogical_input_sha256(document, section,
             narrative_output_sha256=saved.output_sha256, narrative_summary=narrative.chapter_summary,
-            context_facts=facts, accumulated_candidates=accumulated, user_decisions=user_decisions,
+            context_facts=facts, glossary_candidates=narrative.glossary_candidates,
+            accumulated_candidates=accumulated, user_decisions=user_decisions,
             model_dependencies=_pass_model_dependencies(dependencies, AnalysisPassKind.PEDAGOGICAL),
             max_fragment_blocks=self._max_fragment_blocks)
         cached_pedagogical = self._cached_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash)
@@ -398,7 +399,9 @@ class AnalyzeChapter:
     ) -> ChapterAnalysis:
         blocks = textual_blocks(section)
         context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
-            narrative_summary=narrative.chapter_summary, accumulated_candidates=accumulated,
+            narrative_summary=narrative.chapter_summary,
+            glossary_candidates=narrative.glossary_candidates,
+            accumulated_candidates=accumulated,
             user_decisions=user_decisions)
         # Both saved DTOs use stable references scoped to this chapter.
         context = replace(context, block_ids_by_alias={b.id: b.id for b in blocks},
@@ -486,6 +489,7 @@ class AnalyzeChapter:
             else:
                 context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
                     narrative_summary=narrative.chapter_summary, context_facts=facts,
+                    glossary_candidates=narrative.glossary_candidates,
                     accumulated_candidates=accumulated, user_decisions=user_decisions,
                     fragment=fragment if total > 1 else None, fragment_count=total,
                     before_you_read_limit=byr_quota, language_notes_limit=note_quota)
