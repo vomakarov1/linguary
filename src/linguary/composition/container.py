@@ -397,7 +397,13 @@ def build_application(
             on_logged=on_logged,
             model_name=processing_model or "not_configured",
         )
-        if candidate.llm.staged_analysis and profile == 'content-plan-v3':
+        supports_staged_analysis = llm_client is None or bool(
+            getattr(llm_client, 'supports_staged_analysis', False)
+        )
+        effective_staged_analysis = (
+            candidate.llm.staged_analysis and supports_staged_analysis
+        )
+        if effective_staged_analysis and profile == 'content-plan-v3':
             clients_by_model = {analysis_model: analysis_client}
             stages = {}
             for stage, kind in ((LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE, 'narrative'),
@@ -438,7 +444,10 @@ def build_application(
             settings=candidate,
             configured_client=configured_client,
             analysis=_analysis_sequence(
-                settings=candidate, unit_of_work=unit_of_work,
+                settings=replace(
+                    candidate,
+                    llm=replace(candidate.llm, staged_analysis=effective_staged_analysis),
+                ), unit_of_work=unit_of_work,
                 task_queue=queue, model=analysis_client, content_plan_profile=profile, prompt_templates=templates,
                 name_translation_policy=policy, conditions_id=conditions_id,
                 start_processing=_start_book_processing,

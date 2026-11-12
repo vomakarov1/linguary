@@ -148,7 +148,7 @@ class LLMSettings:
     analysis_model: str = ""
     narrative_analysis_model: str = ""
     pedagogical_analysis_model: str = ""
-    staged_analysis: bool = False
+    staged_analysis: bool = True
     processing_model: str = ""
     correction_model: str = ""
     api_key: str | None = field(default=None, repr=False)

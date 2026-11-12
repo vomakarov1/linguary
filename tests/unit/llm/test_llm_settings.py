@@ -460,7 +460,8 @@ pedagogical_analysis_model = "file-teaching"
     assert settings.llm.effective_analysis_pass_model('pedagogical') == 'teaching'
     assert load_settings(environ={'LINGUARY_LLM_STAGED_ANALYSIS': 'false'},
         config_path=write_config(tmp_path, '[llm]\nstaged_analysis = true')).llm.staged_analysis is False
-    assert LLMSettings().staged_analysis is False
+    assert load_settings(environ={}, config_path=write_config(tmp_path, '')).llm.staged_analysis is True
+    assert LLMSettings().staged_analysis is True
 
 
 @pytest.mark.parametrize('overrides', [

@@ -695,7 +695,7 @@ async def test_staged_runtime_uses_pinned_models_and_reuses_narrative_on_reanaly
 
     monkeypatch.setattr(OpenAICompatibleLLMClient, '_post', post)
     settings = AppSettings(llm=LLMSettings(model='base', analysis_model='analysis',
-        narrative_analysis_model='story', pedagogical_analysis_model='teaching', staged_analysis=True,
+        narrative_analysis_model='story', pedagogical_analysis_model='teaching',
         max_output_tokens=16000, api_key='synthetic-secret', proxy_mode='direct'),
         storage=StorageSettings(data_root=str(tmp_path / 'data')))
     app = build_application(settings=settings, content_plan_profile='content-plan-v3')
