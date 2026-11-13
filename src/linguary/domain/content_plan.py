@@ -44,6 +44,19 @@ class RequiredPoint:
             raise DomainError("смысловой аспект должен иметь идентификатор и описание")
 
 
+DIFFICULTY_KINDS = frozenset({
+    "wordplay",
+    "semantic_relation",
+    "grammar",
+    "cultural_reference",
+    "idiom",
+    "vocabulary",
+    "false_friend",
+    "speech_style",
+    "parody",
+})
+
+
 @dataclass(frozen=True, slots=True)
 class Difficulty:
     id: str
@@ -59,7 +72,7 @@ class Difficulty:
         object.__setattr__(self, "required_points", tuple(sorted(self.required_points, key=lambda p: p.id)))
         if not self.id.strip() or not self.anchors or self.owner_block_id not in {a.block_id for a in self.anchors}:
             raise DomainError("трудность должна иметь единственного владельца среди привязок")
-        if self.kind not in {"wordplay", "semantic_relation", "grammar", "cultural_reference", "idiom", "vocabulary"}:
+        if self.kind not in DIFFICULTY_KINDS:
             raise DomainError("неизвестный вид трудности")
         if self.priority not in {"critical", "useful"} or self.help_kind not in {"explanation", "lexical_hint"}:
             raise DomainError("неизвестный приоритет или канал помощи")

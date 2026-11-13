@@ -132,6 +132,8 @@ class GlossaryCandidate:
     translation variant: character grammatical gender, title declension, speech register.
     Without it, a book-level decision splinters into separate chapter decisions (PRD § 11):
     the name appears consistently from the glossary, but words agreeing with it diverge across chapters.
+
+    `description` is optional text on the candidate and defaults to an empty string.
     """
 
     id: str
@@ -144,6 +146,7 @@ class GlossaryCandidate:
     requires_review: bool
     note: str = ""
     name_translation_evidence: NameTranslationEvidence | None = None
+    description: str = ""
 
     def __post_init__(self) -> None:
         if not self.id.strip():
