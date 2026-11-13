@@ -80,6 +80,7 @@ from linguary.application.llm_dto import (
     GlossaryHintResponse,
     LanguageNoteResponse,
     LLMPayloadError,
+    SegmentTreatmentResponse,
     TranslationResultResponse,
     TreatmentPlanItemResponse,
 )
@@ -364,6 +365,7 @@ def _glossary_candidate(schema: GlossaryCandidateSchema) -> GlossaryCandidateRes
         confidence=schema.confidence,
         model_flagged_review=schema.model_flagged_review,
         note=(schema.note or "").strip(),
+        description=schema.description,
         name_translation_assessment=(
             NameTranslationAssessment(
                 applied_method=schema.name_translation_assessment.applied_method,
@@ -383,6 +385,10 @@ def _plan_item(schema: TreatmentPlanItemSchema) -> TreatmentPlanItemResponse:
     return TreatmentPlanItemResponse(
         source_block_id=schema.source_block_id,
         treatment=BlockTreatment(schema.treatment),
+        segments=tuple(
+            SegmentTreatmentResponse(item.index, BlockTreatment(item.treatment))
+            for item in schema.segments
+        ),
     )
 
 

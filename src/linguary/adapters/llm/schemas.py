@@ -15,7 +15,8 @@ response they indicate that the model did not adhere to the schema.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import copy
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -34,6 +35,57 @@ class _ResponseModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+# Поля учебного контракта остаются в модели, но не входят в замороженную строгую схему v1.
+_V1_ANALYSIS_FIELDS = {
+    "TreatmentPlanItemSchema": frozenset({"segments"}),
+    "GlossaryCandidateSchema": frozenset({"description"}),
+}
+
+
+def _referenced_defs(schema: dict[str, Any]) -> set[str]:
+    defs = schema.get("$defs")
+    if not isinstance(defs, dict):
+        return set()
+    seen: set[str] = set()
+    stack: list[Any] = [{key: value for key, value in schema.items() if key != "$defs"}]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                name = ref.rsplit("/", 1)[-1]
+                if name not in seen:
+                    seen.add(name)
+                    if name in defs:
+                        stack.append(defs[name])
+            stack.extend(value for key, value in node.items() if key != "$ref")
+        elif isinstance(node, list):
+            stack.extend(node)
+    return seen
+
+
+def _v1_analysis_wire_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    schema = copy.deepcopy(schema)
+    defs = schema.get("$defs")
+    if not isinstance(defs, dict):
+        return schema
+    for name, fields in _V1_ANALYSIS_FIELDS.items():
+        node = defs.get(name)
+        if not isinstance(node, dict):
+            continue
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            for field in fields:
+                properties.pop(field, None)
+        required = node.get("required")
+        if isinstance(required, list):
+            node["required"] = [item for item in required if item not in fields]
+    used = _referenced_defs(schema)
+    for name in [name for name in defs if name not in used]:
+        defs.pop(name)
+    return schema
+
+
 class GlossaryCandidateSchema(_ResponseModel):
     """Кандидат глоссария, найденный моделью в главе.
 
@@ -47,6 +99,14 @@ class GlossaryCandidateSchema(_ResponseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     model_flagged_review: bool
     note: str | None
+    description: str = ""
+
+
+class SegmentTreatmentSchema(_ResponseModel):
+    """Режим одного сегмента. Индекс начинается с 1."""
+
+    index: int = Field(ge=1, strict=True)
+    treatment: TextualTreatment
 
 
 class TreatmentPlanItemSchema(_ResponseModel):
@@ -58,6 +118,7 @@ class TreatmentPlanItemSchema(_ResponseModel):
 
     source_block_id: str = Field(min_length=1)
     treatment: TextualTreatment
+    segments: list[SegmentTreatmentSchema] = Field(default_factory=list)
 
 
 class BeforeYouReadEntrySchema(_ResponseModel):
@@ -75,6 +136,13 @@ class ChapterAnalysisSchema(_ResponseModel):
     treatment_plan: list[TreatmentPlanItemSchema]
     before_you_read: list[BeforeYouReadEntrySchema]
     chapter_summary: str = Field(min_length=1)
+
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        schema = super().model_json_schema(*args, **kwargs)
+        if cls is not ChapterAnalysisSchema:
+            return schema
+        return _v1_analysis_wire_schema(schema)
 
 
 class GlossaryHintSchema(_ResponseModel):
@@ -150,6 +218,7 @@ __all__ = [
     "GlossaryCandidateSchema",
     "GlossaryHintSchema",
     "LanguageNoteSchema",
+    "SegmentTreatmentSchema",
     "TextualTreatment",
     "TranslationResultSchema",
     "TreatmentPlanItemSchema",
@@ -203,7 +272,10 @@ class DifficultySchema(_ResponseModel):
     id: str = Field(min_length=1)
     anchors: list[SourceAnchorSchema] = Field(min_length=1)
     owner_block_id: str = Field(min_length=1)
-    kind: Literal['wordplay', 'semantic_relation', 'grammar', 'cultural_reference', 'idiom', 'vocabulary']
+    kind: Literal[
+        'wordplay', 'semantic_relation', 'grammar', 'cultural_reference', 'idiom', 'vocabulary',
+        'false_friend', 'speech_style', 'parody',
+    ]
     priority: Literal['critical', 'useful']
     help_kind: Literal['explanation', 'lexical_hint']
     required_points: list[RequiredPointSchema] = Field(min_length=1)

@@ -6,7 +6,7 @@ from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse, GlossaryCandidateResponse, HelpEvidenceResponse,
     NarrativeAnalysisResponse, PedagogicalAnalysisResponse, QuotedContextFactResponse,
     QuotedDifficultyResponse, QuotedSceneResponse, QuotedSceneVisualFactResponse,
-    QuotedSourceAnchorResponse, TreatmentPlanItemResponse,
+    QuotedSourceAnchorResponse, SegmentTreatmentResponse, TreatmentPlanItemResponse,
 )
 from linguary.domain import BlockTreatment, ChapterAnalysis, ConceptType
 from linguary.domain.book_conditions import thaw
@@ -15,7 +15,22 @@ from linguary.domain.name_translation import NameTranslationAssessment
 
 
 def encode_pass(payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse) -> dict:
-    return {'schema_version': 1, 'response': asdict(payload)}
+    response = asdict(payload)
+    # Пустые новые поля не пишем: проход, сохранённый до них, остаётся той же контрольной суммы.
+    for candidate in response.get('glossary_candidates', ()):
+        if candidate.get('description') == '':
+            candidate.pop('description', None)
+    for item in response.get('treatment_plan', ()):
+        if not item.get('segments'):
+            item.pop('segments', None)
+    return {'schema_version': 1, 'response': response}
+
+
+def _cached_plan_item(raw: Mapping) -> TreatmentPlanItemResponse:
+    return TreatmentPlanItemResponse(
+        raw['source_block_id'], BlockTreatment(raw['treatment']),
+        tuple(SegmentTreatmentResponse(segment['index'], BlockTreatment(segment['treatment']))
+              for segment in raw.get('segments', ())))
 
 
 def decode_pass(payload: Mapping, *, narrative: bool) -> NarrativeAnalysisResponse | PedagogicalAnalysisResponse:
@@ -39,8 +54,7 @@ def decode_pass(payload: Mapping, *, narrative: bool) -> NarrativeAnalysisRespon
         return NarrativeAnalysisResponse(body['translation_instructions'], body['chapter_summary'],
             tuple(candidates), facts, scenes)
     return PedagogicalAnalysisResponse(
-        treatment_plan=tuple(TreatmentPlanItemResponse(i['source_block_id'], BlockTreatment(i['treatment']))
-                             for i in body['treatment_plan']),
+        treatment_plan=tuple(_cached_plan_item(i) for i in body['treatment_plan']),
         before_you_read=tuple(BeforeYouReadEntryResponse(**e) for e in body['before_you_read']),
         difficulties=tuple(QuotedDifficultyResponse(**{**d,
             'anchors': tuple(anchor(a) for a in d['anchors']),
@@ -72,7 +86,13 @@ def pedagogical_response(analysis: ChapterAnalysis, *, reader_level: str) -> Ped
         evidence.append(HelpEvidenceResponse(item.difficulty_id, item.point_id, item.artifact_kind,
             item.block_id, index, item.body_excerpt))
     return PedagogicalAnalysisResponse(
-        treatment_plan=tuple(TreatmentPlanItemResponse(i.block_id, i.treatment) for i in analysis.treatment_plan.items),
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(i.block_id, i.treatment, tuple(
+                SegmentTreatmentResponse(index, treatment)
+                for index, treatment in enumerate(i.segment_treatments, start=1)
+            ))
+            for i in analysis.treatment_plan.items
+        ),
         before_you_read=tuple(BeforeYouReadEntryResponse(e.expression, e.explanation) for e in analysis.before_you_read),
         difficulties=tuple(QuotedDifficultyResponse(d.id,
             tuple(QuotedSourceAnchorResponse(a.block_id, a.quote) for a in d.anchors),

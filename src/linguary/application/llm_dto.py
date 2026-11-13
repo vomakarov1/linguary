@@ -49,6 +49,7 @@ class GlossaryCandidateResponse:
     model_flagged_review: bool
     note: str = ""
     name_translation_assessment: NameTranslationAssessment | None = None
+    description: str = ""
 
     def __post_init__(self) -> None:
         if not self.source_text.strip():
@@ -64,17 +65,35 @@ class GlossaryCandidateResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class SegmentTreatmentResponse:
+    """Textual treatment of one segment. `index` starts at 1."""
+
+    index: int
+    treatment: BlockTreatment
+
+    def __post_init__(self) -> None:
+        if type(self.index) is not int or self.index < 1:
+            raise LLMPayloadError("индекс сегмента начинается с 1")
+        if not self.treatment.is_textual:
+            raise LLMPayloadError(f"режим сегмента {self.index} должен быть текстовым")
+
+
+@dataclass(frozen=True, slots=True)
 class TreatmentPlanItemResponse:
     """Model-suggested treatment mode for a single block (PRD § 10.1).
 
     The plan becomes the source of truth only after persistence: during processing,
     the `treatment` field in model response confirms this plan rather than overriding it.
+
+    `segments` is empty when `treatment` applies to the whole block.
     """
 
     source_block_id: str
     treatment: BlockTreatment
+    segments: tuple[SegmentTreatmentResponse, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "segments", tuple(self.segments))
         if not self.source_block_id.strip():
             raise LLMPayloadError("элемент плана обработки не привязан к блоку")
         if not self.treatment.is_textual:
@@ -301,6 +320,7 @@ __all__ = [
     "GlossaryHintResponse",
     "LLMPayloadError",
     "LanguageNoteResponse",
+    "SegmentTreatmentResponse",
     "TranslationResultResponse",
     "TreatmentPlanItemResponse",
 ]
