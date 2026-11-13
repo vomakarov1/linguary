@@ -26,7 +26,7 @@ from linguary.domain.errors import (
 )
 from linguary.domain.glossary import ConceptType, TermStatus
 from linguary.domain.learning import LanguageNote, FragmentAssistance
-from linguary.domain.treatment import BlockTreatment, TreatmentPlan
+from linguary.domain.treatment import BlockTreatment, TreatmentPlan, strongest_treatment
 from linguary.domain.pronunciation import PronunciationAssistance
 
 
@@ -71,6 +71,8 @@ class BlockProcessingResult:
     Composition rules are determined by the treatment from the persisted plan (PRD § 14, § 15):
     full translation is required and permitted only for `TRANSLATE`; for `GLOSSARY_ONLY`
     glossary hints are mandatory; for `READ_AS_IS` there is neither translation nor hints.
+    Each segment keeps its own mode. The block mode is only the strongest of them,
+    and `translated_text` joins the translations of `TRANSLATE` segments.
     """
 
     block_id: str
@@ -82,6 +84,8 @@ class BlockProcessingResult:
     content_evidence: ContentEvidence | tuple[()] = ()
     fragment_assistances: tuple[FragmentAssistance, ...] = ()
     pronunciation_assistances: tuple[PronunciationAssistance, ...] = ()
+    segment_treatments: tuple[BlockTreatment, ...] = ()
+    segment_translations: tuple[str | None, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.block_id.strip():
@@ -124,6 +128,60 @@ class BlockProcessingResult:
                 raise BlockResultError(
                     f"заметка {note.id} привязана к другому блоку: {note.block_id}"
                 )
+        self._ensure_segment_translation()
+
+    def rebuild_translation(self) -> str | None:
+        """Joins non-empty segment translations. None when no segment is translated."""
+        parts = [text for text in self.segment_translations if text and text.strip()]
+        if not parts:
+            return None
+        return " ".join(parts)
+
+    def _ensure_segment_translation(self) -> None:
+        """Checks per-segment modes, translations, and glossary hints."""
+        treatments = self.segment_treatments
+        translations = self.segment_translations
+        if not treatments and not translations:
+            return
+        if len(treatments) != len(translations):
+            raise BlockResultError(
+                f"число переводов сегментов блока {self.block_id} не совпадает с числом режимов"
+            )
+        if any(not treatment.is_textual for treatment in treatments):
+            raise BlockResultError(
+                f"режим сегмента блока {self.block_id} должен быть текстовым"
+            )
+        for treatment, translation in zip(treatments, translations, strict=True):
+            has_text = bool(translation and translation.strip())
+            if treatment.requires_translation and not has_text:
+                raise BlockResultError(
+                    f"для сегмента блока {self.block_id} с режимом TRANSLATE обязателен перевод"
+                )
+            if not treatment.requires_translation and translation is not None:
+                raise BlockResultError(
+                    f"для сегмента блока {self.block_id} с режимом {treatment} перевод недопустим"
+                )
+        if self.translated_text != self.rebuild_translation():
+            raise BlockResultError(
+                f"полный перевод блока {self.block_id} "
+                "должен совпадать со склейкой переводов сегментов"
+            )
+        if any(treatment is BlockTreatment.GLOSSARY_ONLY for treatment in treatments):
+            if not self.glossary_hints:
+                raise BlockResultError(
+                    f"для блока {self.block_id} обязательны словарные подсказки"
+                )
+        elif (
+            all(treatment is BlockTreatment.READ_AS_IS for treatment in treatments)
+            and self.glossary_hints
+        ):
+            raise BlockResultError(
+                f"для блока {self.block_id} с режимом READ_AS_IS словарные подсказки недопустимы"
+            )
+        if self.treatment is not strongest_treatment(treatments):
+            raise BlockResultError(
+                f"режим блока {self.block_id} должен быть сильнейшим из режимов сегментов"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,11 +190,23 @@ class TranslationUnitItem:
 
     block: DocumentBlock
     treatment: BlockTreatment
+    segment_treatments: tuple[BlockTreatment, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.treatment.is_textual:
             raise NonTextualBlockError(
                 f"блок {self.block.id} с режимом {self.treatment} не передаётся модели"
+            )
+        segments = self.segment_treatments
+        if not segments:
+            return
+        if any(not treatment.is_textual for treatment in segments):
+            raise NonTextualBlockError(
+                f"блок {self.block.id} содержит нетекстовый режим сегмента"
+            )
+        if len(segments) < 2 or self.treatment is not strongest_treatment(segments):
+            raise TranslationUnitError(
+                f"режим блока {self.block.id} не согласован с режимами сегментов"
             )
 
 
@@ -186,13 +256,22 @@ class TranslationUnit:
         ordered = tuple(blocks)
         if not ordered:
             raise TranslationUnitError(f"группа блоков {id} пуста")
+        items: list[TranslationUnitItem] = []
+        for block in ordered:
+            resolved = plan.segment_treatments_for(block.id, len(block.segment_spans))
+            # Identical modes stay collapsed, matching the plan and legacy results.
+            segment_treatments = () if len(set(resolved)) == 1 else resolved
+            items.append(
+                TranslationUnitItem(
+                    block=block,
+                    treatment=plan.treatment_for(block.id),
+                    segment_treatments=segment_treatments,
+                )
+            )
         return cls(
             id=id,
             section_id=ordered[0].section_id,
-            items=tuple(
-                TranslationUnitItem(block=block, treatment=plan.treatment_for(block.id))
-                for block in ordered
-            ),
+            items=tuple(items),
         )
 
     @property
@@ -216,8 +295,9 @@ class TranslationUnit:
         """Blocking validations for results of the entire unit (PRD § 15).
 
         Validates presence of all expected blocks, absence of unknown blocks, order
-        preservation, and treatment match with the plan. Any violation aborts persistence
-        of the entire unit: partially persisted results are disallowed.
+        preservation, and match of the block mode and segment modes with the plan.
+        Any violation aborts persistence of the entire unit: partially persisted
+        results are disallowed.
         """
         expected = self.block_ids
         returned = tuple(result.block_id for result in results)
@@ -235,12 +315,16 @@ class TranslationUnit:
             raise BlockOrderError(
                 f"порядок блоков в результате группы {self.id} не совпадает с исходным"
             )
-        for result in results:
-            planned = self.treatment_for(result.block_id)
-            if result.treatment is not planned:
+        for result, item in zip(results, self.items, strict=True):
+            if result.treatment is not item.treatment:
                 raise TreatmentMismatchError(
                     f"режим блока {result.block_id} в ответе модели ({result.treatment}) "
-                    f"не совпадает с планом ({planned})"
+                    f"не совпадает с планом ({item.treatment})"
+                )
+            if result.segment_treatments != item.segment_treatments:
+                raise TreatmentMismatchError(
+                    f"режимы сегментов блока {result.block_id} в ответе модели "
+                    "не совпадают с планом"
                 )
 
 
