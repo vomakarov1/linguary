@@ -85,6 +85,7 @@ from linguary.domain import (
     InlineAnnotationType,
     SupportStatus,
     TranslationUnit,
+    TranslationUnitItem,
     TreatmentPlan,
     footnote_marker,
     footnote_references,
@@ -1149,6 +1150,9 @@ class ContextBuilder:
             instructions += '\n' + self._prompt_templates['pronunciation_processing']
         if policy_version != LEGACY_TRANSLATION_POLICY:
             instructions += "\n" + _TRANSLATION_CONTEXT_V2
+        shape = _shape_instructions(unit)
+        if shape:
+            instructions = instructions.rstrip() + "\n\n" + shape
         if unit.section_id != section.id:
             raise ContextBuildError(
                 f"группа {unit.id} собрана из блоков главы {unit.section_id}, "
@@ -1234,6 +1238,7 @@ class ContextBuilder:
                         block_id=alias,
                         treatment=item.treatment,
                         context_only=alias in pure_read_as_is_aliases,
+                        segment_treatments=_stored_segment_modes(item),
                     )
                     for alias, item in zip(aliases, unit.items, strict=True)
                 ),
@@ -2407,8 +2412,9 @@ def _model_text_pieces(
 ) -> tuple[tuple[str, tuple[int, ...]], ...]:
     """Text shown to the model, with the original offset of every kept character.
 
-    Footnote calls are omitted in analysis. A marker inserted for translation has no
-    original offset. The caller strips the joined text the same way as before.
+    Footnote calls are omitted in analysis. A translation marker keeps the offset of
+    its call, so the segment that contains the call also contains `[^N]`. The caller
+    strips the joined text the same way as before.
     """
     text = block.text
     end = _back_link_start(block) if block.type is BlockType.FOOTNOTE else len(text)
@@ -2425,7 +2431,9 @@ def _model_text_pieces(
         if before_end > position:
             pieces.append((text[position:before_end], tuple(range(position, before_end))))
         if footnote_markers:
-            pieces.append((footnote_marker(ordinal), ()))
+            # Маркер стоит на месте вызова: сегмент с этим смещением сохраняет [^N].
+            marker = footnote_marker(ordinal)
+            pieces.append((marker, (reference.start,) * len(marker)))
         position = reference.end
     if end > position:
         pieces.append((text[position:end], tuple(range(position, end))))
@@ -2454,15 +2462,35 @@ def source_text_for_model(block: DocumentBlock, *, footnote_markers: bool = Fals
 
 def _analysis_visible_origins(block: DocumentBlock) -> tuple[str, tuple[int, ...]]:
     """Visible analysis text and the `block.text` offset of each of its characters."""
+    return _visible_text_origins(block, footnote_markers=False)
+
+
+def _visible_text_origins(
+    block: DocumentBlock, *, footnote_markers: bool,
+) -> tuple[str, tuple[int, ...]]:
+    """Видимый текст и смещение в `block.text` каждого оставленного символа.
+
+    Разбор тот же, что у анализа: крайние пробелы снимаются со всего блока.
+    При `footnote_markers` маркер `[^N]` получает смещение своего вызова.
+    """
     chars: list[str] = []
     origins: list[int] = []
-    for piece, piece_origins in _model_text_pieces(block, footnote_markers=False):
+    for piece, piece_origins in _model_text_pieces(block, footnote_markers=footnote_markers):
         chars.extend(piece)
         origins.extend(piece_origins)
     raw = "".join(chars)
     visible = raw.strip()
     lead = len(raw) - len(raw.lstrip())
     return visible, tuple(origins[lead:lead + len(visible)])
+
+
+def _text_inside_span(visible: str, origins: tuple[int, ...], start: int, end: int) -> str:
+    """Часть видимого текста со смещениями в полуинтервале [start, end)."""
+    return "".join(
+        char
+        for char, origin in zip(visible, origins, strict=True)
+        if start <= origin < end
+    )
 
 
 def _back_link_start(block: DocumentBlock) -> int:
@@ -2500,22 +2528,85 @@ def _points_to_book_anchor(target: str | None) -> bool:
     return bool(separator and fragment)
 
 
+# Только для запроса, где хотя бы один блок показан строками сегментов.
+_SEGMENT_TRANSLATION_RULE = (
+    "Для блока, показанного строками сегментов, верни segments с переводом "
+    "каждого сегмента в режиме TRANSLATE, оставь translated_text null и не "
+    "переноси смысл между сегментами."
+)
+
+# Только для запроса, в котором есть блок POEM. В тексте модели остаётся `\n\n`.
+_POEM_TRANSLATION_RULE = (
+    "Стихотворный блок переводи построчно, без рифмы, с тем же числом строк, "
+    "что и в оригинале; пустые строки строф сохраняй как \\n\\n."
+)
+
+
+def _shape_instructions(unit: TranslationUnit) -> str:
+    """Дополнение инструкции: сегменты и стихи только когда они есть в запросе."""
+    parts: list[str] = []
+    if any(len(item.block.segments) >= 2 for item in unit.items):
+        parts.append(_SEGMENT_TRANSLATION_RULE)
+    if any(item.block.type is BlockType.POEM for item in unit.items):
+        parts.append(_POEM_TRANSLATION_RULE)
+    return "\n\n".join(parts)
+
+
+def _stored_segment_modes(item: TranslationUnitItem) -> tuple[BlockTreatment, ...]:
+    """Режим каждого сохранённого сегмента. Пустой кортеж — один промежуток.
+
+    Пустые `segment_treatments` означают, что у всех сегментов режим блока.
+    Один сохранённый сегмент в блок не записывается, поэтому `[bN.1]` не нужен.
+    """
+    block = item.block
+    if len(block.segments) < 2:
+        return ()
+    modes = item.segment_treatments or (item.treatment,) * len(block.segments)
+    if len(modes) != len(block.segments):
+        raise ContextBuildError(
+            f"у блока {block.id} {len(modes)} режимов сегментов "
+            f"на {len(block.segments)} сегментов"
+        )
+    return modes
+
+
+def _format_unit_block(
+    index: int,
+    item: TranslationUnitItem,
+    pure_read_as_is_aliases: frozenset[str],
+) -> str:
+    """Строка блока и, для нескольких сегментов, пара строк на каждый сегмент."""
+    alias = _alias(index)
+    header = f"[{alias}] режим {item.treatment}"
+    if alias in pure_read_as_is_aliases:
+        header += " (только для контекста, в blocks не возвращать)"
+    modes = _stored_segment_modes(item)
+    if not modes:
+        return f"{header}\n{source_text_for_model(item.block, footnote_markers=True)}"
+    visible, origins = _visible_text_origins(item.block, footnote_markers=True)
+    parts = [header]
+    for number, (segment, mode) in enumerate(
+        zip(item.block.segments, modes, strict=True), start=1,
+    ):
+        segment_text = _text_inside_span(visible, origins, segment.start, segment.end)
+        parts.append(f"[{alias}.{number}] режим {mode}\n{segment_text}")
+    return "\n".join(parts)
+
+
 def _unit_blocks(
     unit: TranslationUnit,
     pure_read_as_is_aliases: frozenset[str] = frozenset(),
     *,
     pronunciation_version: int | None = None,
 ) -> str:
-    """Group blocks with aliases along with their treatment modes."""
+    """Блоки группы с псевдонимами и режимами.
+
+    Многосегментный блок — строка блока и текст каждого сохранённого сегмента.
+    Блок без сохранённых сегментов остаётся двумя строками, без `[bN.1]`.
+    """
     lines = ["Блоки для обработки:"]
     lines.extend(
-        f"[{_alias(index)}] режим {item.treatment}"
-        + (
-            " (только для контекста, в blocks не возвращать)"
-            if _alias(index) in pure_read_as_is_aliases
-            else ""
-        )
-        + f"\n{source_text_for_model(item.block, footnote_markers=True)}"
+        _format_unit_block(index, item, pure_read_as_is_aliases)
         for index, item in enumerate(unit.items, start=1)
     )
     if pure_read_as_is_aliases and pronunciation_version:
@@ -2697,14 +2788,10 @@ def _labeled_segment_body(block: DocumentBlock, alias: str) -> str | None:
     if len(block.segments) < 2:
         return None
     visible, origins = _analysis_visible_origins(block)
-    lines: list[str] = []
-    for index, segment in enumerate(block.segments, start=1):
-        segment_text = "".join(
-            char
-            for char, origin in zip(visible, origins, strict=True)
-            if segment.start <= origin < segment.end
-        )
-        lines.append(f"[{alias}.{index}] {segment_text}")
+    lines = [
+        f"[{alias}.{index}] {_text_inside_span(visible, origins, segment.start, segment.end)}"
+        for index, segment in enumerate(block.segments, start=1)
+    ]
     return "\n".join(lines)
 
 

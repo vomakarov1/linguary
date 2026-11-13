@@ -28,9 +28,10 @@ from linguary.application.llm_dto import (
     TranslationResultResponse,
 )
 from linguary.application.ports.llm import LLMResponseKind
-from linguary.application.retry_policy import ResultValidationError
+from linguary.application.retry_policy import ResultValidationError, build_repair_instruction
 from linguary.domain import (
     BeforeYouReadEntry,
+    BlockSegment,
     BlockTreatment,
     BlockType,
     BookMetadata,
@@ -48,6 +49,7 @@ from linguary.domain import (
     TermStatus,
     TranslationUnit,
     TreatmentPlan,
+    TreatmentPlanItem,
 )
 
 SOURCE_LANGUAGE = "en"
@@ -2257,6 +2259,340 @@ def test_scene_note_budget_reserves_allowance_for_translate_explanation_and_rege
     assert "не больше 1 языковых заметок" in regen_context.request.input_text
 
 
+_SEGMENT_TRANSLATION_RULE = (
+    "Для блока, показанного строками сегментов, верни segments с переводом "
+    "каждого сегмента в режиме TRANSLATE, оставь translated_text null и не "
+    "переноси смысл между сегментами."
+)
+_POEM_TRANSLATION_RULE = (
+    "Стихотворный блок переводи построчно, без рифмы, с тем же числом строк, "
+    "что и в оригинале; пустые строки строф сохраняй как \\n\\n."
+)
+
+
+def _span_block(
+    *,
+    order: int,
+    text: str,
+    cuts: tuple[int, ...],
+    block_type: BlockType = BlockType.PARAGRAPH,
+    annotations: tuple[InlineAnnotation, ...] = (),
+) -> DocumentBlock:
+    """Block with stored spans. One cut-free cover is normalized away by the block."""
+    points = (0, *cuts, len(text))
+    return replace(
+        make_block(order=order, text=text, type=block_type),
+        inline_annotations=annotations,
+        segments=tuple(
+            BlockSegment(points[index], points[index + 1], index)
+            for index in range(len(points) - 1)
+        ),
+    )
+
+
+def _segmented_processing_unit() -> tuple[tuple[DocumentBlock, ...], TranslationUnit]:
+    """Mixed, uniform, footnoted, one-span, read-as-is, and a collapsed single span."""
+    mixed = _span_block(
+        order=0, text="Alpha went home. Beta stayed.", cuts=("Alpha went home. Beta stayed.".index("Beta"),),
+    )
+    uniform = _span_block(
+        order=1,
+        text="Gamma left early. Delta remained.",
+        cuts=("Gamma left early. Delta remained.".index("Delta"),),
+    )
+    foot = "Call home.1 Then leave."
+    mark = foot.index("1")
+    footnoted = _span_block(
+        order=2,
+        text=foot,
+        cuts=(mark,),
+        annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=mark,
+                end=mark + 1,
+                target=f"{SECTION_ID}.xhtml#fn1",
+            ),
+        ),
+    )
+    single = make_block(order=3, text="Short line.")
+    read_as_is = _span_block(
+        order=4,
+        text="Plain words here. More plain words.",
+        cuts=("Plain words here. More plain words.".index("More"),),
+    )
+    covered = _span_block(order=5, text="Only one span.", cuts=())
+    blocks = (mixed, uniform, footnoted, single, read_as_is, covered)
+    plan = TreatmentPlan(
+        SECTION_ID,
+        (
+            TreatmentPlanItem(
+                mixed.id,
+                BlockTreatment.TRANSLATE,
+                (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+                (0, 1),
+            ),
+            TreatmentPlanItem(uniform.id, BlockTreatment.TRANSLATE),
+            TreatmentPlanItem(
+                footnoted.id,
+                BlockTreatment.TRANSLATE,
+                (BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+                (0, 1),
+            ),
+            TreatmentPlanItem(single.id, BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItem(read_as_is.id, BlockTreatment.READ_AS_IS),
+            TreatmentPlanItem(covered.id, BlockTreatment.TRANSLATE),
+        ),
+    )
+    return blocks, TranslationUnit.of_blocks(id="unit-seg", blocks=blocks, plan=plan)
+
+
+def _processing_context(unit: TranslationUnit):
+    chapter = make_section(unit.blocks)
+    return ContextBuilder().for_translation_unit(
+        document=make_document(chapter),
+        section=chapter,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+
+
+def test_unit_input_lists_segments_with_treatments() -> None:
+    """A multi-segment block lists the strongest mode, then each segment mode and its text."""
+    blocks, unit = _segmented_processing_unit()
+    mixed, uniform, footnoted, single, read_as_is, covered = blocks
+    assert covered.segments == ()
+    assert unit.items[1].segment_treatments == ()
+    assert unit.items[0].segment_treatments == (
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    )
+
+    context = _processing_context(unit)
+    expected = "\n\n".join((
+        "[b1] режим TRANSLATE\n"
+        "[b1.1] режим GLOSSARY_ONLY\n"
+        "Alpha went home. \n"
+        "[b1.2] режим TRANSLATE\n"
+        "Beta stayed.",
+        "[b2] режим TRANSLATE\n"
+        "[b2.1] режим TRANSLATE\n"
+        "Gamma left early. \n"
+        "[b2.2] режим TRANSLATE\n"
+        "Delta remained.",
+        "[b3] режим TRANSLATE\n"
+        "[b3.1] режим READ_AS_IS\n"
+        "Call home.\n"
+        "[b3.2] режим TRANSLATE\n"
+        "[^1] Then leave.",
+        "[b4] режим GLOSSARY_ONLY\n"
+        f"{single.text}",
+        "[b5] режим READ_AS_IS (только для контекста, в blocks не возвращать)\n"
+        "[b5.1] режим READ_AS_IS\n"
+        "Plain words here. \n"
+        "[b5.2] режим READ_AS_IS\n"
+        "More plain words.",
+        "[b6] режим TRANSLATE\n"
+        f"{covered.text}",
+    ))
+    text = context.request.input_text
+    assert text.endswith("Блоки для обработки:\n\n" + expected)
+    assert "сильнейший" not in text
+    assert "[b4.1]" not in text
+    assert "[b6.1]" not in text
+    assert mixed.text not in text
+    assert uniform.text not in text
+    assert footnoted.text not in text
+    assert read_as_is.text not in text
+    assert "[^1]" in text
+    assert "home.1" not in text
+
+
+def test_instructions_require_segments_for_segmented_block() -> None:
+    """Segment lines require per-segment translations; a one-span block does not."""
+    from linguary.application.context_builder import translation_unit_instructions
+
+    base = translation_unit_instructions(source_language="en", target_language="ru")
+    _blocks, unit = _segmented_processing_unit()
+    segmented = _processing_context(unit)
+    plain = build_context()[0]
+
+    assert segmented.request.instructions == base + "\n\n" + _SEGMENT_TRANSLATION_RULE
+    assert _POEM_TRANSLATION_RULE not in segmented.request.instructions
+    assert plain.request.instructions == base
+    assert _SEGMENT_TRANSLATION_RULE not in plain.request.instructions
+
+
+def test_retry_instructions_list_segments_and_treatments() -> None:
+    """Retry text lists each stored segment index and its mode; a one-span block stays one line."""
+    _blocks, unit = _segmented_processing_unit()
+    context = _processing_context(unit)
+    treatments = [block.segment_treatments for block in context.expectation.blocks]
+
+    assert treatments == [
+        (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+        (BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        (),
+        (BlockTreatment.READ_AS_IS, BlockTreatment.READ_AS_IS),
+        (),
+    ]
+    assert context.expectation.blocks[4].context_only is True
+    assert [block.treatment for block in context.expectation.blocks] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+    ]
+
+    repair = build_repair_instruction(context.expectation)
+    assert (
+        "- b1: режим обработки TRANSLATE\n"
+        "  - 1: режим GLOSSARY_ONLY\n"
+        "  - 2: режим TRANSLATE"
+    ) in repair
+    assert (
+        "- b2: режим обработки TRANSLATE\n"
+        "  - 1: режим TRANSLATE\n"
+        "  - 2: режим TRANSLATE"
+    ) in repair
+    assert (
+        "- b3: режим обработки TRANSLATE\n"
+        "  - 1: режим READ_AS_IS\n"
+        "  - 2: режим TRANSLATE"
+    ) in repair
+    assert "- b5" not in repair
+    assert (
+        "- b4: режим обработки GLOSSARY_ONLY\n"
+        "- b6: режим обработки TRANSLATE\n"
+        "Целевой язык результата — ru."
+    ) in repair
+
+
+def test_poem_instruction_requires_line_and_stanza_preservation() -> None:
+    """A poem request, including regeneration, keeps lines and blank stanza breaks."""
+    from linguary.application.context_builder import (
+        block_regeneration_instructions,
+        translation_unit_instructions,
+    )
+
+    poem_text = "Roses are red\n\nViolets are blue"
+    poem = make_block(order=0, text=poem_text, type=BlockType.POEM)
+    poem_unit = make_unit((poem,), treatments=(BlockTreatment.TRANSLATE,))
+    section = make_section((poem,))
+    document = make_document(section)
+    analysis = make_analysis(poem_unit)
+    glossary = make_snapshot()
+    builder = ContextBuilder()
+    translated = builder.for_translation_unit(
+        document=document, section=section, unit=poem_unit, analysis=analysis, glossary=glossary,
+    )
+    regenerated = builder.for_block_regeneration(
+        document=document, section=section, unit=poem_unit, analysis=analysis, glossary=glossary,
+    )
+    translation_base = translation_unit_instructions(source_language="en", target_language="ru")
+    regeneration_base = block_regeneration_instructions(source_language="en", target_language="ru")
+    assert translated.request.instructions == translation_base + "\n\n" + _POEM_TRANSLATION_RULE
+    assert regenerated.request.instructions == regeneration_base + "\n\n" + _POEM_TRANSLATION_RULE
+    assert _SEGMENT_TRANSLATION_RULE not in translated.request.instructions
+    assert _SEGMENT_TRANSLATION_RULE not in regenerated.request.instructions
+    assert poem_text in translated.request.input_text
+    assert "[b1.1]" not in translated.request.input_text
+    assert poem_text in regenerated.request.input_text
+
+    split = poem_text.index("Violets")
+    segmented_poem = _span_block(order=0, text=poem_text, cuts=(split,), block_type=BlockType.POEM)
+    segmented_unit = TranslationUnit.of_blocks(
+        id="unit-poem",
+        blocks=(segmented_poem,),
+        plan=TreatmentPlan(
+            SECTION_ID,
+            (TreatmentPlanItem(segmented_poem.id, BlockTreatment.TRANSLATE),),
+        ),
+    )
+    segmented_section = make_section((segmented_poem,))
+    segmented_regen = builder.for_block_regeneration(
+        document=make_document(segmented_section),
+        section=segmented_section,
+        unit=segmented_unit,
+        analysis=make_analysis(segmented_unit),
+        glossary=glossary,
+    )
+    assert segmented_regen.request.instructions == (
+        regeneration_base + "\n\n" + _SEGMENT_TRANSLATION_RULE + "\n\n" + _POEM_TRANSLATION_RULE
+    )
+    assert "[b1.1] режим TRANSLATE\nRoses are red\n\n" in segmented_regen.request.input_text
+    assert "[b1.2] режим TRANSLATE\nViolets are blue" in segmented_regen.request.input_text
+
+    paragraph = make_block(order=1, text="A plain sentence.")
+    neighbour_section = make_section((poem, paragraph))
+    paragraph_unit = make_unit((paragraph,), treatments=(BlockTreatment.TRANSLATE,))
+    paragraph_regen = builder.for_block_regeneration(
+        document=make_document(neighbour_section),
+        section=neighbour_section,
+        unit=paragraph_unit,
+        analysis=make_analysis(paragraph_unit),
+        glossary=glossary,
+    )
+    assert paragraph_regen.request.instructions == regeneration_base
+    assert poem_text in paragraph_regen.request.input_text
+
+
+def test_regeneration_input_lists_segments() -> None:
+    """Regeneration shows the same segment lines as group processing and does not repeat the block."""
+    text = "Alpha went home. Beta stayed."
+    target = _span_block(order=1, text=text, cuts=(text.index("Beta"),))
+    before = make_block(order=0, text="Before the scene.")
+    after = make_block(order=2, text="After the scene stays whole.")
+    unit = TranslationUnit.of_blocks(
+        id="unit-regen",
+        blocks=(target,),
+        plan=TreatmentPlan(
+            SECTION_ID,
+            (
+                TreatmentPlanItem(
+                    target.id,
+                    BlockTreatment.TRANSLATE,
+                    (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+                    (0, 1),
+                ),
+            ),
+        ),
+    )
+    section = make_section((before, target, after))
+    document = make_document(section)
+    analysis = make_analysis(unit)
+    glossary = make_snapshot()
+    builder = ContextBuilder()
+    kwargs = dict(
+        document=document, section=section, unit=unit, analysis=analysis, glossary=glossary,
+    )
+    regenerated = builder.for_block_regeneration(**kwargs)
+    translated = builder.for_translation_unit(**kwargs)
+
+    def tail(value: str) -> str:
+        return value[value.index("Блоки для обработки:"):]
+
+    expected = (
+        "[b1] режим TRANSLATE\n"
+        "[b1.1] режим GLOSSARY_ONLY\n"
+        "Alpha went home. \n"
+        "[b1.2] режим TRANSLATE\n"
+        "Beta stayed."
+    )
+    assert tail(regenerated.request.input_text) == tail(translated.request.input_text)
+    assert expected in regenerated.request.input_text
+    assert regenerated.request.input_text.count("[b1.1]") == 1
+    assert regenerated.request.input_text.count("[b1.2]") == 1
+    assert text not in regenerated.request.input_text
+    assert "Before the scene." in regenerated.request.input_text
+    assert "After the scene stays whole." in regenerated.request.input_text
+    assert "[b2]" not in regenerated.request.input_text
+    assert _SEGMENT_TRANSLATION_RULE in regenerated.request.instructions
+    assert _POEM_TRANSLATION_RULE not in regenerated.request.instructions
 
 
 

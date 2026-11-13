@@ -383,13 +383,19 @@ def build_repair_instruction(
 
 
 def _format_block_lines(blocks: Sequence[ExpectedBlock]) -> list[str]:
-    return [
-        f"- {block.block_id}"
-        if block.treatment is None
-        else f"- {block.block_id}: режим обработки {block.treatment}"
-        for block in blocks
-        if not block.context_only
-    ]
+    lines: list[str] = []
+    for block in blocks:
+        if block.context_only:
+            continue
+        if block.treatment is None:
+            lines.append(f"- {block.block_id}")
+        else:
+            lines.append(f"- {block.block_id}: режим обработки {block.treatment}")
+        lines.extend(
+            f"  - {index}: режим {treatment}"
+            for index, treatment in enumerate(block.segment_treatments, start=1)
+        )
+    return lines
 
 
 def _block_lines(expectation: ResultExpectation) -> list[str]:
