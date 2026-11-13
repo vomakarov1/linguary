@@ -26,6 +26,7 @@ from linguary.adapters.config import CheckSettings
 from linguary.application.llm_dto import (
     BlockResultResponse,
     GlossaryHintResponse,
+    SegmentTranslationResponse,
     TranslationResultResponse,
 )
 from linguary.application.retry_policy import (
@@ -33,15 +34,22 @@ from linguary.application.retry_policy import (
     ResultExpectation,
     ResultValidationError,
 )
+from linguary.application.validators import expectation_for_unit
 from linguary.application.validators.tails import normalized_tail
 from linguary.domain import (
     BlockProcessingResult,
+    BlockSegment,
     BlockTreatment,
+    BlockType,
+    DocumentBlock,
     InlineAnnotation,
     InlineAnnotationType,
     ResultWarningKind,
     TranslationUnit,
+    TreatmentPlan,
+    TreatmentPlanItem,
 )
+from linguary.domain.treatment import strongest_treatment
 
 #: Full translation longer than the language check threshold, remaining in the source language.
 ENGLISH_TRANSLATION = (
@@ -559,6 +567,7 @@ def test_rejection_carries_expected_blocks_and_treatments() -> None:
         BlockTreatment.TRANSLATE,
         BlockTreatment.GLOSSARY_ONLY,
     )
+    assert tuple(block.segment_treatments for block in expectation.blocks) == ((), ())
 
 
 def test_scenario_expectation_replaces_the_default() -> None:
@@ -1156,4 +1165,344 @@ def test_truncation_allows_british_unclosed_opening_quote_and_rejects_broken_clo
     )
     assert _unbalanced("«Иди «туда.", source=unclosed_source) == "кавычки"
     assert _unbalanced("Иди туда.»", source=unclosed_source) == "кавычки"
+
+
+def _segmented(
+    parts: tuple[str, ...],
+    treatments: tuple[BlockTreatment, ...],
+    *,
+    type: BlockType = BlockType.PARAGRAPH,
+    annotations: tuple[InlineAnnotation, ...] = (),
+) -> tuple[TranslationUnit, DocumentBlock]:
+    """A multi-segment block and the unit `of_blocks` builds from its plan."""
+    text = "".join(parts)
+    offset = 0
+    segments: list[BlockSegment] = []
+    for index, part in enumerate(parts):
+        segments.append(BlockSegment(offset, offset + len(part), index))
+        offset += len(part)
+    block = replace(
+        make_block(order=0, text=text, type=type),
+        segments=tuple(segments),
+        inline_annotations=annotations,
+    )
+    plan = TreatmentPlan(
+        section_id=block.section_id,
+        items=(
+            TreatmentPlanItem(
+                block_id=block.id,
+                treatment=strongest_treatment(treatments),
+                segment_treatments=treatments,
+                sentence_indexes=tuple(range(len(treatments))),
+            ),
+        ),
+    )
+    unit = TranslationUnit.of_blocks(id="unit-1", blocks=(block,), plan=plan)
+    return unit, block
+
+
+def _segmented_response(
+    block: DocumentBlock,
+    translations: tuple[tuple[int, str], ...],
+    *,
+    treatment: BlockTreatment,
+    hints: tuple[GlossaryHintResponse, ...] = (),
+) -> TranslationResultResponse:
+    """Segment response with `translated_text` left empty."""
+    return make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block.id,
+                treatment=treatment,
+                translated_text=None,
+                glossary_hints=hints,
+                segments=tuple(
+                    SegmentTranslationResponse(index=index, translated_text=text)
+                    for index, text in translations
+                ),
+            ),
+        )
+    )
+
+
+def test_missing_translate_segment_rejected() -> None:
+    """Each TRANSLATE span needs a translation. A missing index is not optional."""
+    unit, block = _segmented(
+        ("First sentence.", " Second sentence."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+    )
+    payload = _segmented_response(
+        block,
+        ((1, "Первое предложение."),),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+
+    message = str(rejection(payload, unit=unit))
+
+    assert "сегмента 2" in message
+    assert "TRANSLATE" in message
+    assert unit.items[0].segment_treatments == ()
+    expectation = expectation_for_unit(unit, target_language=TARGET_LANGUAGE)
+    assert expectation.blocks[0].segment_treatments == (
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    )
+
+
+def test_translation_for_glossary_segment_rejected() -> None:
+    """A translation is allowed only on a TRANSLATE span."""
+    unit, block = _segmented(
+        ("Rare word.", " Clear sentence."),
+        (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+    )
+    payload = _segmented_response(
+        block,
+        ((1, "Редкое слово."), (2, "Ясное предложение.")),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(make_hint(),),
+    )
+
+    message = str(rejection(payload, unit=unit))
+
+    assert "сегмента 1" in message
+    assert "GLOSSARY_ONLY" in message
+    assert "недопустим" in message
+
+
+def test_duplicate_segment_index_rejected() -> None:
+    """One index names one span. A repeated index is rejected."""
+    unit, block = _segmented(
+        ("First sentence.", " Second sentence."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+    )
+    payload = _segmented_response(
+        block,
+        ((1, "Первое предложение."), (1, "Снова первое.")),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+
+    assert "указан дважды" in str(rejection(payload, unit=unit))
+
+
+def test_segment_index_outside_range_rejected() -> None:
+    """Indexes are 1-based positions in `segment_spans` and cannot run past the end."""
+    unit, block = _segmented(
+        ("First sentence.", " Second sentence."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+    )
+    payload = _segmented_response(
+        block,
+        (
+            (1, "Первое предложение."),
+            (2, "Второе предложение."),
+            (3, "Лишний перевод."),
+        ),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+
+    message = str(rejection(payload, unit=unit))
+
+    assert "вне диапазона" in message
+    assert "1..2" in message
+
+
+def test_segments_rejected_for_single_span_block() -> None:
+    """Fewer than two stored segments keep the block translation. `segments` is rejected."""
+    block = make_block(order=0)
+    unit = make_unit((block,))
+    payload = make_response(
+        (
+            BlockResultResponse(
+                source_block_id=block.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                segments=(SegmentTranslationResponse(index=1, translated_text="Перевод."),),
+            ),
+        )
+    )
+
+    assert "segments" in str(rejection(payload, unit=unit))
+
+
+def test_mixed_block_result_built_from_segments() -> None:
+    """A mixed block stores one mode and one translation slot per span, joined for the block."""
+    unit, block = _segmented(
+        ("Rare word.", " Clear sentence."),
+        (BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE),
+    )
+    payload = _segmented_response(
+        block,
+        ((2, "Ясное предложение."),),
+        treatment=BlockTreatment.TRANSLATE,
+        hints=(make_hint(),),
+    )
+
+    (result,) = validate(payload, unit=unit)
+
+    assert result.treatment is BlockTreatment.TRANSLATE
+    assert result.segment_treatments == (
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    )
+    assert result.segment_translations == (None, "Ясное предложение.")
+    assert result.translated_text == "Ясное предложение."
+    assert result.glossary_hints[0].translation == "заповедный"
+    assert expectation_for_unit(unit, target_language=TARGET_LANGUAGE).blocks[0].segment_treatments == (
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    )
+
+
+def test_footnote_markers_isolated_to_segment_range() -> None:
+    """A `[^N]` marker is kept only in the segment whose span contains that reference."""
+    left = "See note.1"
+    right = " Then go."
+    unit, block = _segmented(
+        (left, right),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+        annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=left.index("1"),
+                end=left.index("1") + 1,
+                target="section-1.xhtml#fn1",
+            ),
+        ),
+    )
+    allowed = _segmented_response(
+        block,
+        ((2, "Потом иди."), (1, "Смотри.[^1][^7]")),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+
+    (result,) = validate(allowed, unit=unit)
+
+    assert unit.items[0].segment_treatments == ()
+    assert result.segment_treatments == (
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    )
+    assert result.segment_translations == ("Смотри.[^1]", "Потом иди.")
+    assert result.translated_text == "Смотри.[^1] Потом иди."
+
+    foreign = _segmented_response(
+        block,
+        ((1, "Смотри."), (2, "Потом [^1] иди.")),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    message = str(rejection(foreign, unit=unit))
+    assert "[^1]" in message
+    assert "сегмента 2" in message
+    assert "другому сегменту" in message
+
+
+def test_poem_stanza_and_line_count_match() -> None:
+    """A poem keeps every line from `split('\\n')`, including a blank stanza line."""
+    source = "Twinkle, twinkle.\n\nLittle star."
+    block = make_block(order=0, text=source, type=BlockType.POEM)
+    unit = make_unit((block,))
+    matched = "Мерцай, мерцай.\n\nЗвёздочка."
+
+    assert validate(
+        make_response((make_block_result(block, translated_text=matched),)),
+        unit=unit,
+    )[0].translated_text == matched
+
+    for translated in ("Мерцай, мерцай.\nЗвёздочка.", "Звёздочка."):
+        message = str(
+            rejection(
+                make_response((make_block_result(block, translated_text=translated),)),
+                unit=unit,
+            )
+        )
+        assert "строк" in message
+        assert "включая пустые" in message
+        assert str(len(source.split("\n"))) in message
+        assert str(len(translated.split("\n"))) in message
+
+
+def test_truncation_validator_checks_only_translated_segments() -> None:
+    """Quote pairing and terminal punctuation run on TRANSLATE slices, not the mixed block."""
+    unit, block = _segmented(
+        ('He said "hello', " She left."),
+        (BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+    )
+    accepted = _segmented_response(
+        block,
+        ((2, "Она ушла."),),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert validate(accepted, unit=unit)[0].segment_translations == (None, "Она ушла.")
+
+    unfinished = _segmented_response(
+        block,
+        ((2, "Она ушла"),),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert "терминальной пунктуацией" in str(rejection(unfinished, unit=unit))
+
+    open_quote = _segmented_response(
+        block,
+        ((2, "Она сказала «пока."),),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert "не закрыты кавычки" in str(rejection(open_quote, unit=unit))
+
+
+def test_language_check_uses_joined_segment_translations() -> None:
+    """Language is checked once on the joined translation, not on each short slice."""
+    first = "It is a truth universally acknowledged in this town."
+    second = "A single man in possession of fortune wants a wife."
+    assert len(first) <= 80
+    assert len(second) <= 80
+    assert len(f"{first} {second}") > 80
+    unit, block = _segmented(
+        ("First sentence here.", " Second sentence here."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+    )
+    payload = _segmented_response(
+        block,
+        ((1, first), (2, second)),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+
+    message = str(rejection(payload, unit=unit))
+
+    assert f"перевод блока {block.id} не на языке {TARGET_LANGUAGE}" in message
+
+
+def test_service_message_in_segment_translation_rejected() -> None:
+    """A service message inside one segment still rejects the block."""
+    unit, block = _segmented(
+        ("Do this now.", " And that too."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+    )
+    payload = _segmented_response(
+        block,
+        (
+            (1, "Извините, но я не могу выполнить этот запрос."),
+            (2, "И это тоже."),
+        ),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+
+    assert "не могу выполнить" in str(rejection(payload, unit=unit))
+
+
+def test_segment_translation_tail_is_normalized() -> None:
+    """A false truncation tail is normalized on the segment before it is stored."""
+    unit, block = _segmented(
+        ("He said:", " Done."),
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+    )
+    payload = _segmented_response(
+        block,
+        ((1, "Он сказал:—"), (2, "Готово.")),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+
+    (result,) = validate(payload, unit=unit)
+
+    assert result.segment_translations == ("Он сказал:", "Готово.")
+    assert result.translated_text == "Он сказал: Готово."
 

@@ -3,7 +3,8 @@
 Language compliance is determined by the share of target alphabet letters among all letters
 in the text. The check applies only to full translations longer than a configurable minimum:
 a short string may legitimately consist of a proper name, and a glossary hint consists of
-the source language word it was written for.
+the source language word it was written for. A segmented block is checked once, on the
+same join the stored result keeps.
 
 The alphabet is defined only for the MVP target language — Russian (PRD § 1). For other
 target languages, the share of "target alphabet characters" is undefined and validation
@@ -13,6 +14,7 @@ is skipped: this is safer than counting a foreign alphabet's share and rejecting
 from __future__ import annotations
 
 from linguary.application.llm_dto import TranslationResultResponse
+from linguary.application.validators.treatment import joined_segment_translation
 
 #: Target languages whose alphabet is known to the application. Key is the book language code without region.
 _TARGET_ALPHABETS: dict[str, tuple[str, str]] = {"ru": ("Ѐ", "ӿ")}
@@ -30,7 +32,8 @@ def language_violation(
     if alphabet is None:
         return None
     for block in payload.blocks:
-        text = block.translated_text
+        # One check on the join a segmented result stores, not on each slice.
+        text = joined_segment_translation(block)
         if text is None or len(text) <= min_length:
             continue
         share = _alphabet_share(text, alphabet=alphabet)

@@ -11,15 +11,17 @@ than truncation. A heading, caption, or list item legitimately ends without a pe
 dialogue conventionally opens quotes on each paragraph while closing them only on the last. Therefore
 terminal punctuation is required in translation only where the source block ends with it, and an
 unclosed pair is considered truncation only when the original lacked such an imbalance.
+A block with several segments is checked per `TRANSLATE` slice, not as one string.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 
-from linguary.application.llm_dto import TranslationResultResponse
-from linguary.domain import TranslationUnit
+from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
+from linguary.application.validators.treatment import planned_segment_modes
+from linguary.domain import BlockTreatment, TranslationUnit, TranslationUnitItem
 
 #: Punctuation marks that conclude a completed sentence.
 _TERMINAL_PUNCTUATION = frozenset(".!?…:;")
@@ -47,26 +49,62 @@ def truncation_violation(
     """
     if truncated:
         return "провайдер сообщил об обрыве ответа по лимиту выходных токенов"
-    sources = {item.block.id: item.block.text for item in unit.items}
+    items = {item.block.id: item for item in unit.items}
     for block in payload.blocks:
-        text = block.translated_text
-        if text is None:
+        item = items.get(block.source_block_id)
+        if item is None:
             continue
-        violation = _text_violation(
-            text, source=sources[block.source_block_id], block_id=block.source_block_id
-        )
-        if violation is not None:
-            return violation
+        for segment_index, source, text in _checked_translations(block, item):
+            violation = _text_violation(
+                text,
+                source=source,
+                block_id=block.source_block_id,
+                segment_index=segment_index,
+            )
+            if violation is not None:
+                return violation
     return None
 
 
-def _text_violation(text: str, *, source: str, block_id: str) -> str | None:
+def _checked_translations(
+    block: BlockResultResponse, item: TranslationUnitItem
+) -> Iterator[tuple[int | None, str, str]]:
+    """TRANSLATE slices to compare. A one-span block yields the whole text once."""
+    modes = planned_segment_modes(item)
+    if not modes:
+        if block.translated_text is None:
+            return
+        yield None, item.block.text, block.translated_text
+        return
+    by_index = {segment.index: segment.translated_text for segment in block.segments}
+    for index, (span, mode) in enumerate(
+        zip(item.block.segment_spans, modes, strict=True), start=1
+    ):
+        if mode is not BlockTreatment.TRANSLATE:
+            continue
+        text = by_index.get(index)
+        if text is None:
+            continue
+        yield index, item.block.text[span.start:span.end], text
+
+
+def _subject(block_id: str, segment_index: int | None) -> str:
+    """Russian noun phrase naming the translation that failed the check."""
+    if segment_index is None:
+        return f"блока {block_id}"
+    return f"сегмента {segment_index} блока {block_id}"
+
+
+def _text_violation(
+    text: str, *, source: str, block_id: str, segment_index: int | None = None
+) -> str | None:
     """Truncation indicator for a single translation relative to its original."""
+    subject = _subject(block_id, segment_index)
     if _ends_with_punctuation(source) and not _ends_with_punctuation(text):
-        return f"перевод блока {block_id} не заканчивается терминальной пунктуацией"
+        return f"перевод {subject} не заканчивается терминальной пунктуацией"
     unbalanced = _unbalanced(text, source=source)
     if unbalanced is not None:
-        return f"в переводе блока {block_id} не закрыты {unbalanced}"
+        return f"в переводе {subject} не закрыты {unbalanced}"
     return None
 
 
@@ -129,21 +167,22 @@ def truncation_diagnostic(payload, *, unit, truncated):
                 Violation('provider_truncated', 'translation_unit', 'unit',
                           tuple(item.block.id for item in unit.items), ('translated_text',),
                           'Провайдер сообщил об обрыве ответа'))
-    sources = {item.block.id: item.block.text for item in unit.items}
+    items = {item.block.id: item for item in unit.items}
     for block in payload.blocks:
-        if block.translated_text is None:
+        item = items.get(block.source_block_id)
+        if item is None:
             continue
-        source = sources[block.source_block_id]
-        text = block.translated_text
-        if _ends_with_punctuation(source) and not _ends_with_punctuation(text):
-            code, safe_message = 'terminal_punctuation', 'Перевод не завершён терминальной пунктуацией'
-        else:
-            unbalanced = _unbalanced(text, source=source)
-            if unbalanced is None:
-                continue
-            code = 'quote_balance' if unbalanced == 'кавычки' else 'bracket_balance'
-            safe_message = 'Нарушена парность кавычек' if code == 'quote_balance' else 'Нарушена парность скобок'
-        return (_text_violation(text, source=source, block_id=block.source_block_id),
-                Violation(code, 'translation_unit', 'local', (block.source_block_id,),
-                          ('translated_text',), safe_message))
+        for segment_index, source, text in _checked_translations(block, item):
+            if _ends_with_punctuation(source) and not _ends_with_punctuation(text):
+                code, safe_message = 'terminal_punctuation', 'Перевод не завершён терминальной пунктуацией'
+            else:
+                unbalanced = _unbalanced(text, source=source)
+                if unbalanced is None:
+                    continue
+                code = 'quote_balance' if unbalanced == 'кавычки' else 'bracket_balance'
+                safe_message = 'Нарушена парность кавычек' if code == 'quote_balance' else 'Нарушена парность скобок'
+            return (_text_violation(text, source=source, block_id=block.source_block_id,
+                                    segment_index=segment_index),
+                    Violation(code, 'translation_unit', 'local', (block.source_block_id,),
+                              ('translated_text',), safe_message))
     return None
