@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 from analysis_fakes import sequential_ids
 from processing_fakes import SECTION_ID, make_block, make_blocks, make_plan
@@ -266,3 +269,38 @@ def test_scene_boundary_does_not_split_cohesive_blocks() -> None:
     )
 
     assert sizes(units) == (800,)
+
+
+def test_no_split_group_references_in_source() -> None:
+    """`src/` no longer names split paragraphs or fragment presentation."""
+    root = Path(__file__).resolve().parents[3] / "src"
+    markers = ("split_group", "linguary-paragraph-fragment")
+    found = [
+        f"{path.relative_to(root.parent)}:{number}: {line.strip()}"
+        for path in root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if any(marker in line for marker in markers)
+    ]
+
+    assert found == []
+
+
+def test_translation_units_keep_block_whole() -> None:
+    """Blocks that share a split_group attribute are not glued into one unit."""
+    leading = make_block(order=0, text="a" * 400)
+    first = replace(
+        make_block(order=1, text="b" * 400),
+        attributes={"split_group": "/body/p[2]"},
+    )
+    second = replace(
+        make_block(order=2, text="c" * 400),
+        attributes={"split_group": "/body/p[2]"},
+    )
+
+    units = plan_units((leading, first, second), max_source_chars=1000)
+
+    assert tuple(unit.block_ids for unit in units) == (
+        (leading.id, first.id),
+        (second.id,),
+    )

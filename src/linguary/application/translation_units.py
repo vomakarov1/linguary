@@ -19,8 +19,6 @@ they remain the concern of importer and exporter (PRD § 10.1).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from math import ceil
-from typing import TypeVar
 
 from linguary.application.context_builder import is_textual
 from linguary.domain import (
@@ -38,11 +36,6 @@ from linguary.domain.content_plan import Scene
 #: a full Russian translation of that volume with vocabulary hints, language notes, and
 #: JSON wrapping consumes ~5000-6000 tokens.
 DEFAULT_MAX_UNIT_SOURCE_CHARS = 8000
-PARAGRAPH_FRAGMENT_MIN_CHARS = 250
-PARAGRAPH_FRAGMENT_TARGET_CHARS = 300
-PARAGRAPH_FRAGMENT_MAX_CHARS = 350
-
-_FragmentT = TypeVar("_FragmentT")
 
 #: Block types occurring contiguously as a cohesive whole: list item, poem stanza, quote, table.
 #: Splitting a list midway deprives the model of its start, while poetry loses its stanza context.
@@ -85,72 +78,6 @@ def plan_translation_units(
         TranslationUnit.of_blocks(id=id_factory(), blocks=group, plan=plan)
         for group in _grouped(ordered, max_source_chars=max_source_chars, scenes=scenes)
     )
-
-
-def group_paragraph_fragments(
-    fragments: Sequence[_FragmentT],
-    *,
-    text_of: Callable[[_FragmentT], str],
-    target_chars: int = PARAGRAPH_FRAGMENT_TARGET_CHARS,
-) -> tuple[tuple[_FragmentT, ...], ...]:
-    """Balance fragments into readable paragraph-sized groups.
-
-    EPUB import stores long paragraphs as source fragments so they can be processed safely.
-    Presentation joins adjacent fragments into groups near `target_chars`, without capping the
-    number of groups and while keeping source fragments intact.
-    """
-    values = tuple(fragments)
-    if len(values) <= 1:
-        return (values,) if values else ()
-    if target_chars < 1:
-        raise ValueError("целевой размер группы должен быть положительным")
-
-    lengths = tuple(len(text_of(fragment)) for fragment in values)
-    total = sum(lengths)
-    if total == 0:
-        return (values,)
-    min_count = min(
-        len(values), max(1, ceil(total / PARAGRAPH_FRAGMENT_MAX_CHARS))
-    )
-    max_count = min(
-        len(values), max(1, total // PARAGRAPH_FRAGMENT_MIN_CHARS)
-    )
-    counts = (
-        range(min_count, max_count + 1)
-        if min_count <= max_count
-        else {min_count, max_count}
-    )
-    group_count = min(
-        counts, key=lambda count: (abs(total / count - target_chars), -count)
-    )
-    boundaries = [0]
-    for length in lengths:
-        boundaries.append(boundaries[-1] + length)
-
-    groups: list[tuple[_FragmentT, ...]] = []
-    start = 0
-    for group_index in range(group_count - 1):
-        remaining_groups = group_count - group_index - 1
-        last_end = len(values) - remaining_groups
-        target_boundary = total * (group_index + 1) / group_count
-        end = min(
-            range(start + 1, last_end + 1),
-            key=lambda candidate: abs(boundaries[candidate] - target_boundary),
-        )
-        groups.append(values[start:end])
-        start = end
-    groups.append(values[start:])
-    return tuple(groups)
-
-
-def paragraph_fragment_label(index: int, total: int, language: str) -> str:
-    """Short ordinal label shown in the source language."""
-    language = language.lower().replace("_", "-").split("-", 1)[0]
-    if language == "ru":
-        return f"Часть {index} из {total}"
-    if language == "en":
-        return f"Part {index} of {total}"
-    return f"{index} / {total}"
 
 
 def _grouped(
@@ -244,9 +171,6 @@ def _cohesive_runs(
 
 def _is_cohesive_with(previous: DocumentBlock, block: DocumentBlock) -> bool:
     """Whether adjacent blocks form a single cohesive unit."""
-    prev_split = previous.attributes.get("split_group")
-    if prev_split and prev_split == block.attributes.get("split_group"):
-        return True
     if previous.parent_id is not None and previous.parent_id == block.parent_id:
         return True
     return previous.type is block.type and block.type in _COHESIVE_BLOCK_TYPES
@@ -263,7 +187,5 @@ def _split_oversized(
 
 __all__ = [
     "DEFAULT_MAX_UNIT_SOURCE_CHARS",
-    "group_paragraph_fragments",
-    "paragraph_fragment_label",
     "plan_translation_units",
 ]
