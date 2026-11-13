@@ -162,7 +162,7 @@ model_flagged_review, note, description. Соблюдай обязательны
 description для person и place — строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
 context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
-Каждая опора: block_id и дословная quote из видимого текста. Не возвращай смещения.
+Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
 scenes: start_block_id, end_block_id, summary, location, participants,
 visual_facts, visual_assumptions, continues_previous_scene.
 Сцены должны непрерывно покрывать все переданные блоки в исходном порядке,
@@ -185,7 +185,7 @@ _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS = """\
 Верни difficulties, before_you_read и before_you_read_evidence (допустимы пустые списки).
 Каждая трудность: id, anchors [{{block_id, quote}}], owner_block_id, kind,
 priority, help_kind, required_points [{{id, description}}]. Копируй quote дословно,
-не раскрывай сокращения и не возвращай start/end. Владелец входит в anchors.
+не раскрывай сокращения. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end]. Владелец входит в anchors.
 false_friend — слово похоже на русское, значит другое.
 speech_style — диалект, акцент, особенности речи; только первое появление особенности персонажа.
 parody — в required_points назвать исходный текст.
@@ -218,22 +218,26 @@ subject_anchor, value, certainty (explicit, inferred, unknown).
 """
 _CONTENT_PLAN_ANALYSIS_V5 = (
     _CONTENT_PLAN_ANALYSIS_V3
-    .replace('anchors [{block_id, start, end, quote}]', 'anchors [{block_id, quote}]')
     .replace(
         'Смещения — Unicode\nкодовые точки точного исходного текста, end исключён; quote=text[start:end].\n'
         'Копируй quote ДОСЛОВНО из текста блока, не раскрывай и не меняй сокращения '
         '(например, she’s нельзя заменять на she is).',
-        'Укажи для каждой опоры только block_id и quote. Не возвращай start/end: приложение '
-        'найдёт точные координаты. Копируй quote посимвольно из видимого текста блока, '
-        'не раскрывай и не меняй сокращения (например, she’s нельзя заменять на she is).',
+        'Копируй quote ДОСЛОВНО из текста блока, не раскрывай и не меняй сокращения '
+        '(например, she’s нельзя заменять на she is). '
+        'Если цитата в блоке одна, start и end не возвращай. '
+        'Если цитата встречается больше одного раза, верни start и end этого вхождения, '
+        'quote == text[start:end].',
     )
     .replace(
         'Каждая привязка содержит видимый block_id, точные start/end и дословную quote.\n'
         'Не исправляй цитату и смещения; subject_anchor проверяется отдельно от anchors.',
-        'Каждая привязка содержит только видимый block_id и дословную quote; координаты '
-        'не возвращай. Не исправляй цитату; subject_anchor проверяется отдельно от anchors.',
+        'Каждая привязка содержит видимый block_id и дословную quote. '
+        'Если цитата в блоке одна, start и end не возвращай. '
+        'Если цитата встречается больше одного раза, верни start и end этого вхождения, '
+        'quote == text[start:end]. '
+        'Не исправляй цитату; subject_anchor проверяется отдельно от anchors.',
     )
-    + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5: у опор нет полей start и end.\n'
+    + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5.\n'
 )
 _CONTENT_PLAN_PROCESSING_V3 = _CONTENT_PLAN_PROCESSING.replace('content-plan-v2.1', 'learner-quality-v3.1').replace('content-plan-v2', 'content-plan-v3') + """
 Служебные context_facts применяй только к назначенным субъектам и их точным исходным привязкам.
@@ -261,18 +265,19 @@ before_you_read всегда должен быть пустым: помощь
 """
 _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS_V5 = (
     _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS
-    .replace('start, end и quote', 'quote')
     .replace(
         'Смещения — индексы Unicode-кодовых точек, end не включается; quote обязан точно\n'
         'совпадать с текстом.',
-        'Копируй quote дословно из видимого текста блока; start/end не возвращай, '
-        'приложение вычислит координаты.',
+        'Копируй quote дословно из видимого текста блока. '
+        'Если цитата в блоке одна, start и end не возвращай. '
+        'Если цитата встречается больше одного раза, верни start и end этого вхождения, '
+        'quote == text[start:end].',
     )
     .replace(
         'Сохраняй точные привязки и степень',
         'Сохраняй дословные цитаты и степень',
     )
-    + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5: у опор нет полей start и end.\n'
+    + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5.\n'
 )
 
 _ENGLISH_HELP_CONTENT_PLAN_PROCESSING = """\

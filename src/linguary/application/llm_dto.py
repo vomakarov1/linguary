@@ -366,14 +366,24 @@ class ContentPlanResponse:
 
 @dataclass(frozen=True, slots=True)
 class QuotedSourceAnchorResponse:
-    """Unresolved, exact quote returned by the v5 analysis contract."""
+    """Unresolved, exact quote returned by the v5 analysis contract.
+
+    `start` and `end` name one occurrence when the quote is repeated.
+    Both stay unset when the quote occurs once.
+    """
 
     block_id: str
     quote: str
+    start: int | None = None
+    end: int | None = None
 
     def __post_init__(self) -> None:
         if not self.block_id.strip() or not self.quote.strip():
             raise LLMPayloadError('цитата требует видимый блок и непустой текст')
+        if (self.start is not None and type(self.start) is not int) or (
+            self.end is not None and type(self.end) is not int
+        ):
+            raise LLMPayloadError('смещение цитаты должно быть целым числом')
 
 
 @dataclass(frozen=True, slots=True)

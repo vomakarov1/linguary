@@ -631,7 +631,15 @@ async def test_late_pedagogical_split_preserves_byr_parent_quota_with_evidence(s
 async def test_late_pedagogical_split_preserves_parent_note_budget(stored_book):
     import re
     _, uow, _ = stored_book
-    section = make_analysis_section(texts=tuple('Holmes opens the door. ' + 'x' * 5001 for _ in range(18)))
+    # Nine blocks stay under the 24_000-character cap, so the chapter still splits as [9, 9].
+    # A block that receives a note stays above half of an 8_000-character processing group,
+    # so two such notes are not asked to share one group.
+    lead = 'Holmes opens the door. '
+    noted = {0, 1, 2, 3, 9, 10, 13, 14}
+    section = make_analysis_section(texts=tuple(
+        lead + 'x' * (4500 - len(lead) if index in noted else 0)
+        for index in range(18)
+    ))
     with uow.transaction() as tx:
         tx.documents.save(make_analysis_document((section,)))
     class NoteBudgetFollowingClient:

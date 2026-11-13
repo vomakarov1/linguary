@@ -134,13 +134,13 @@ def test_old_merge_unchanged() -> None:
 
 
 def test_long_chapter_is_split_into_equal_fragments() -> None:
-    """A chapter exceeding the limit is split into equal consecutive fragments."""
+    """A chapter over the block cap closes each fragment at that cap."""
     blocks = chapter_blocks(9)
 
     fragments = plan_fragments(blocks, max_blocks=4)
 
     assert [fragment.order for fragment in fragments] == [0, 1, 2]
-    assert [len(fragment.blocks) for fragment in fragments] == [3, 3, 3]
+    assert [len(fragment.blocks) for fragment in fragments] == [4, 4, 1]
     assert [
         block.id for fragment in fragments for block in fragment.blocks
     ] == [block.id for block in blocks]
@@ -1108,12 +1108,10 @@ def test_resolve_quoted_anchor_resolves_repeated_quote_in_block() -> None:
     texts = {"block-1": block_text}
     visible = {"b1": block_text}
 
+    from linguary.domain.content_plan import SourceAnchor
+
     anchor = _resolve_quoted_anchor("b1", "Wait", aliases, texts, visible)
-    assert anchor is not None
-    assert anchor.block_id == "block-1"
-    assert anchor.start == 0
-    assert anchor.end == 4
-    assert anchor.quote == "Wait"
+    assert not isinstance(anchor, SourceAnchor)
 
     payload = ChapterAnalysisResponse(
         translation_instructions="Сохраняй смысл.",
@@ -1137,8 +1135,7 @@ def test_resolve_quoted_anchor_resolves_repeated_quote_in_block() -> None:
     )
     plan = content_plan_from_response(payload, aliases, texts, visible_texts_by_alias=visible)
     assert plan is not None
-    assert len(plan.difficulties) == 1
-    assert plan.difficulties[0].anchors[0].quote == "Wait"
+    assert plan.difficulties == ()
 
 
 def test_validate_content_plan_attaches_local_canonical_violation_and_parses_composite_gender_notes() -> None:
@@ -1440,4 +1437,187 @@ def test_same_byr_prefix_preserves_multiword_idioms_and_keeps_make_a_grab_overla
     assert _same_byr_prefix(("give", "way"), ("giving", "way", "to")) is True
     assert _same_byr_prefix(("keep", "watch"), ("keeping", "watch", "over")) is True
     assert _same_byr_prefix(("turn", "tail"), ("turning", "tail", "quickly")) is True
+
+
+def _text_blocks(*texts: str) -> tuple[DocumentBlock, ...]:
+    return tuple(
+        make_analysis_block(section_id=SECTION_ID, order=index, text=text)
+        for index, text in enumerate(texts)
+    )
+
+
+def test_fragment_splits_on_char_budget_and_keeps_block_whole() -> None:
+    """A fragment ends at 40 blocks or 24 000 source characters, without cutting a block."""
+    from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_CHARS
+
+    assert DEFAULT_MAX_FRAGMENT_CHARS == 24_000
+    piece = "a" * 12_000
+    fragments = plan_fragments(_text_blocks(piece, piece, piece))
+    assert [len(fragment.blocks) for fragment in fragments] == [2, 1]
+    assert [fragment.blocks[0].text for fragment in fragments] == [piece, piece]
+
+    huge = "b" * (DEFAULT_MAX_FRAGMENT_CHARS + 1)
+    fragments = plan_fragments(_text_blocks(huge, "tail"))
+    assert [len(fragment.blocks) for fragment in fragments] == [1, 1]
+    assert fragments[0].blocks[0].text == huge
+    assert fragments[1].blocks[0].text == "tail"
+
+    many = chapter_blocks(41)
+    fragments = plan_fragments(many)
+    assert [len(fragment.blocks) for fragment in fragments] == [40, 1]
+    assert [block.id for fragment in fragments for block in fragment.blocks] == [
+        block.id for block in many
+    ]
+
+
+def _quote_payload(*difficulties, facts=()):
+    from linguary.application.llm_dto import QuotedContentPlanResponse
+
+    return ChapterAnalysisResponse(
+        translation_instructions="Сохраняй смысл.",
+        chapter_summary="Сводка.",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),),
+        content_plan=QuotedContentPlanResponse(difficulties=difficulties, context_facts=facts),
+    )
+
+
+def _difficulty(quote, *, start=None, end=None, difficulty_id="d1", owner="b1", point="Explain"):
+    from linguary.application.llm_dto import QuotedDifficultyResponse, QuotedSourceAnchorResponse
+    from linguary.domain.content_plan import RequiredPoint
+
+    return QuotedDifficultyResponse(
+        id=difficulty_id,
+        anchors=(QuotedSourceAnchorResponse(owner, quote, start, end),),
+        owner_block_id=owner,
+        kind="idiom",
+        priority="critical",
+        help_kind="explanation",
+        required_points=(RequiredPoint("p1", point),),
+    )
+
+
+def _fact(quote, *, start=None, end=None, fact_id="f1"):
+    from linguary.application.llm_dto import QuotedContextFactResponse, QuotedSourceAnchorResponse
+
+    anchor = QuotedSourceAnchorResponse("b1", quote, start, end)
+    return QuotedContextFactResponse(fact_id, "gender", (anchor,), anchor, "male", "explicit")
+
+
+def test_unique_quote_binds_without_offset() -> None:
+    """A quote that occurs once is bound by its text, with no start or end."""
+    from linguary.application.analysis_merge import content_plan_from_response
+
+    text = "Mr Wonka smiled politely."
+    aliases = {"b1": "block-1"}
+    texts = {"block-1": text}
+    visible = {"b1": text}
+    plan = content_plan_from_response(
+        _quote_payload(_difficulty("politely")),
+        aliases,
+        texts,
+        visible_texts_by_alias=visible,
+    )
+    assert plan is not None
+    anchor = plan.difficulties[0].anchors[0]
+    start = text.index("politely")
+    assert (anchor.block_id, anchor.start, anchor.end, anchor.quote) == (
+        "block-1",
+        start,
+        start + len("politely"),
+        "politely",
+    )
+
+
+def test_repeated_quote_with_exact_offset_accepted() -> None:
+    """A repeated quote binds only the occurrence named by start and end."""
+    from linguary.adapters.llm.schemas import QuotedSourceAnchorSchema
+    from linguary.application.analysis_merge import content_plan_from_response
+    from linguary.application.analysis_pass_cache import decode_pass, encode_pass
+    from linguary.application.llm_dto import (
+        NarrativeAnalysisResponse,
+        QuotedContextFactResponse,
+        QuotedSourceAnchorResponse,
+    )
+
+    text = "Wait for him. Wait until dark."
+    second = text.index("Wait", 1)
+    aliases = {"b1": "block-1"}
+    texts = {"block-1": text}
+    visible = {"b1": text}
+    plan = content_plan_from_response(
+        _quote_payload(_difficulty("Wait", start=second, end=second + len("Wait"))),
+        aliases,
+        texts,
+        visible_texts_by_alias=visible,
+    )
+    assert plan is not None
+    anchor = plan.difficulties[0].anchors[0]
+    assert (anchor.start, anchor.end, anchor.quote) == (second, second + 4, "Wait")
+    assert anchor.start != 0
+
+    parsed = QuotedSourceAnchorSchema.model_validate(
+        {"block_id": "b1", "quote": "Wait", "start": second, "end": second + 4, "note": "лишнее"}
+    )
+    assert (parsed.start, parsed.end, parsed.quote) == (second, second + 4, "Wait")
+    omitted = QuotedSourceAnchorSchema.model_validate({"block_id": "b1", "quote": "Wait"})
+    assert omitted.start is None and omitted.end is None
+
+    repeated = QuotedSourceAnchorResponse("b1", "Wait", second, second + 4)
+    unique = QuotedSourceAnchorResponse("b1", "dark")
+    encoded = encode_pass(NarrativeAnalysisResponse(
+        "Keep.", "Summary.",
+        context_facts=(QuotedContextFactResponse("f", "gender", (repeated,), unique, "male", "explicit"),),
+    ))
+    stored = encoded["response"]["context_facts"][0]
+    assert stored["anchors"][0]["start"] == second
+    assert stored["anchors"][0]["end"] == second + 4
+    assert "start" not in stored["subject_anchor"]
+    assert "end" not in stored["subject_anchor"]
+    restored = decode_pass(encoded, narrative=True)
+    assert restored.context_facts[0].anchors[0].start == second
+    assert restored.context_facts[0].subject_anchor.start is None
+
+
+def test_repeated_quote_without_offset_drops_anchor_not_plan() -> None:
+    """A missing or inexact offset removes that anchor; the rest of the plan stays."""
+    from linguary.application.analysis_merge import content_plan_from_response, validate_content_plan
+    from linguary.application.llm_dto import QuotedDifficultyResponse, QuotedSourceAnchorResponse
+    from linguary.domain.content_plan import RequiredPoint
+
+    text = "Wait for him. Wait until dark."
+    aliases = {"b1": "block-1"}
+    texts = {"block-1": text}
+    visible = {"b1": text}
+    kept = _difficulty("dark", difficulty_id="kept", point="Explain dark")
+    mixed = QuotedDifficultyResponse(
+        id="mixed",
+        anchors=(
+            QuotedSourceAnchorResponse("b1", "Wait"),
+            QuotedSourceAnchorResponse("b1", "dark"),
+        ),
+        owner_block_id="b1",
+        kind="vocabulary",
+        priority="useful",
+        help_kind="explanation",
+        required_points=(RequiredPoint("p1", "Explain the ending"),),
+    )
+    payload = _quote_payload(
+        _difficulty("Wait", difficulty_id="repeated"),
+        _difficulty("Wait", start=1, end=5, difficulty_id="near", point="Nearby offset"),
+        kept,
+        mixed,
+        facts=(
+            _fact("Wait", fact_id="bad-subject"),
+            _fact("dark", fact_id="good-subject"),
+        ),
+    )
+    plan = content_plan_from_response(payload, aliases, texts, visible_texts_by_alias=visible)
+    assert plan is not None
+    quotes = {anchor.quote for difficulty in plan.difficulties for anchor in difficulty.anchors}
+    assert quotes == {"dark"}
+    assert len(plan.difficulties) == 2
+    assert {fact.subject_anchor.quote for fact in plan.context_facts} == {"dark"}
+    validated = validate_content_plan(payload, aliases, texts, visible_texts_by_alias=visible)
+    assert validated is not None
+    assert {anchor.quote for difficulty in validated.difficulties for anchor in difficulty.anchors} == {"dark"}
 

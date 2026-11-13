@@ -37,6 +37,7 @@ from uuid import uuid4
 
 from linguary.application.analysis_merge import (
     DEFAULT_MAX_FRAGMENT_BLOCKS,
+    DEFAULT_MAX_FRAGMENT_CHARS,
     ChapterFragment,
     FragmentAnalysis,
     before_you_read_entries,
@@ -222,7 +223,9 @@ class AnalyzeChapter:
                     concepts or ())
                 self._save(command.book_id, analysis, task_id=command.task_id)
                 return AnalyzeChapterResult(analysis=analysis, attempts=attempts, usage=usage)
-            fragments = list(plan_fragments(blocks, max_blocks=self._max_fragment_blocks))
+            fragments = list(plan_fragments(
+                blocks, max_blocks=self._max_fragment_blocks, max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
+            ))
             if len(fragments) == 1:
                 attempts = 1
                 try:
@@ -446,7 +449,9 @@ class AnalyzeChapter:
         narrative: NarrativeAnalysisResponse | None = None, facts: Sequence[ContextFact] = (),
         chapter_input_sha: str | None = None, expected_conditions_id: str | None = None,
     ) -> tuple[list, int, TokenUsage | None]:
-        fragments = plan_fragments(textual_blocks(section), max_blocks=self._max_fragment_blocks)
+        fragments = plan_fragments(
+            textual_blocks(section), max_blocks=self._max_fragment_blocks, max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
+        )
         is_narrative = pass_kind is AnalysisPassKind.NARRATIVE
         notes = self._context_builder._language_notes_per_chapter
         queue = [(fragment,

@@ -334,6 +334,8 @@ class QuotedSourceAnchorSchema(_ResponseModel):
     model_config = ConfigDict(extra="ignore")
     block_id: str = Field(min_length=1)
     quote: Annotated[str, StringConstraints(strip_whitespace=False, min_length=1)]
+    start: int | None = Field(default=None, strict=True)
+    end: int | None = Field(default=None, strict=True)
 
     @model_validator(mode="after")
     def _check_quote(self):

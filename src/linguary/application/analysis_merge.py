@@ -64,6 +64,8 @@ from linguary.domain.name_translation import (
 
 #: Fallback limit if provider does not report output token capacity.
 DEFAULT_MAX_FRAGMENT_BLOCKS = 40
+#: Source-text cap of one analysis fragment. A single block may exceed it.
+DEFAULT_MAX_FRAGMENT_CHARS = 24_000
 #: Upper-bound estimate of response tokens per analyzed block from real runs.
 TOKENS_PER_ANALYSED_BLOCK = 200
 MAX_BEFORE_YOU_READ = 10
@@ -296,30 +298,35 @@ def plan_fragments(
     blocks: Sequence[DocumentBlock],
     *,
     max_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
+    max_chars: int = DEFAULT_MAX_FRAGMENT_CHARS,
 ) -> tuple[ChapterFragment, ...]:
-    """Splits textual blocks of a chapter into sequential analysis fragments (PRD § 14).
+    """Splits textual blocks into sequential analysis fragments.
 
-    A chapter fitting into a single request remains a single fragment: chunking is
-    a fallback path, not the default. A long chapter is divided into equal block
-    counts rather than slicing off maximum-sized chunks: a one-paragraph tail would
-    produce a contextless fragment and an extra call.
+    A fragment closes when the next block would pass `max_blocks` or `max_chars`
+    of source text, whichever comes first. A block is never divided, even when
+    that block alone is longer than `max_chars`.
     """
     if max_blocks < 1:
         raise AnalysisMergeError("размер фрагмента главы должен быть положительным")
-    total = len(blocks)
-    if total == 0:
+    if max_chars < 1:
+        raise AnalysisMergeError("предел знаков фрагмента главы должен быть положительным")
+    if not blocks:
         return ()
-    count = -(-total // max_blocks)
-    size, remainder = divmod(total, count)
-    fragments: list[ChapterFragment] = []
-    start = 0
-    for order in range(count):
-        length = size + (1 if order < remainder else 0)
-        fragments.append(
-            ChapterFragment(order=order, blocks=tuple(blocks[start : start + length]))
-        )
-        start += length
-    return tuple(fragments)
+    groups: list[list[DocumentBlock]] = [[]]
+    chars = 0
+    for block in blocks:
+        length = len(block.text)
+        current = groups[-1]
+        if current and (len(current) >= max_blocks or chars + length > max_chars):
+            groups.append([])
+            chars = 0
+            current = groups[-1]
+        current.append(block)
+        chars += length
+    return tuple(
+        ChapterFragment(order=order, blocks=tuple(group))
+        for order, group in enumerate(groups)
+    )
 
 
 def merge_chapter_analysis(
@@ -958,6 +965,7 @@ def deduplicate_book_before_you_read(
 
 __all__ = [
     "DEFAULT_MAX_FRAGMENT_BLOCKS",
+    "DEFAULT_MAX_FRAGMENT_CHARS",
     "MAX_BEFORE_YOU_READ",
     "TOKENS_PER_ANALYSED_BLOCK",
     "before_you_read_entries",
@@ -978,28 +986,23 @@ __all__ = [
 ]
 
 
-def find_quote_span(
-    text: str, quote: str, *, estimated_start: int = 0
-) -> tuple[int, int, str] | None:
-    """Locates quote occurrences in text accounting for typography and whitespace."""
+def _exact_quote_spans(text: str, quote: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
     if not text or not quote:
-        return None
-
-    # Search for exact matches
-    exact_matches: list[tuple[int, int, str]] = []
-    idx = 0
+        return spans
     quote_len = len(quote)
+    position = 0
     while True:
-        pos = text.find(quote, idx)
-        if pos == -1:
+        found = text.find(quote, position)
+        if found < 0:
             break
-        exact_matches.append((pos, pos + quote_len, text[pos : pos + quote_len]))
-        idx = pos + 1
+        spans.append((found, found + quote_len, text[found : found + quote_len]))
+        position = found + 1
+    return spans
 
-    if exact_matches:
-        return min(exact_matches, key=lambda m: abs(m[0] - estimated_start))
 
-    # Lenient search accounting for variants of quotes, apostrophes, and dashes
+def _lenient_quote_pattern(quote: str) -> str:
+    """Typography-tolerant pattern used when the quote is not an exact substring."""
     pattern_parts: list[str] = []
     for ch in quote:
         if ch in ("'", "’", "‘", "`"):
@@ -1019,26 +1022,46 @@ def find_quote_span(
     pattern = re.sub(r"\b(do|does|did|is|are|was|were|have|has|had|could|would|should|must)(?:\\s\+not|n\['’‘`\]t)\b", r"\1(?:\\s+not|n['’‘`]t)", pattern, flags=re.I)
     pattern = re.sub(r"\b(?:will\\s\+not|won\['’‘`\]t)\b", r"(?:will\\s+not|won['’‘`]t)", pattern, flags=re.I)
     pattern = re.sub(r"\b(?:can\\s\+not|cannot|can\['’‘`\]t)\b", r"(?:can\\s+not|cannot|can['’‘`]t)", pattern, flags=re.I)
+    return pattern
+
+
+def _quote_spans(text: str, quote: str) -> list[tuple[int, int, str]]:
+    """Every occurrence, exact first, then the same lenient fallbacks as before."""
+    if not text or not quote:
+        return []
+    exact = _exact_quote_spans(text, quote)
+    if exact:
+        return exact
     try:
-        regex_matches = [
-            (m.start(), m.end(), text[m.start() : m.end()])
-            for m in re.finditer(pattern, text)
+        pattern = _lenient_quote_pattern(quote)
+        matches = [
+            (match.start(), match.end(), text[match.start() : match.end()])
+            for match in re.finditer(pattern, text)
         ]
-        if regex_matches:
-            return min(regex_matches, key=lambda m: abs(m[0] - estimated_start))
-        ci_matches = list(re.finditer(pattern, text, flags=re.IGNORECASE))
-        if ci_matches:
-            best = min(ci_matches, key=lambda m: abs(m.start() - estimated_start))
-            return (best.start(), best.end(), text[best.start() : best.end()])
+        if matches:
+            return matches
+        folded = list(re.finditer(pattern, text, flags=re.IGNORECASE))
+        if folded:
+            return [
+                (match.start(), match.end(), text[match.start() : match.end()])
+                for match in folded
+            ]
     except re.error:
         pass
-
-    # Search without surrounding punctuation
     stripped = quote.strip(" \t\r\n.,;:!?\"'«»()[]“”‘’—–")
     if stripped and stripped != quote:
-        return find_quote_span(text, stripped, estimated_start=estimated_start)
+        return _quote_spans(text, stripped)
+    return []
 
-    return None
+
+def find_quote_span(
+    text: str, quote: str, *, estimated_start: int = 0
+) -> tuple[int, int, str] | None:
+    """Locates quote occurrences in text accounting for typography and whitespace."""
+    spans = _quote_spans(text, quote)
+    if not spans:
+        return None
+    return min(spans, key=lambda span: abs(span[0] - estimated_start))
 
 
 def _quote_matches_anchor(quote: str, anchor_quote: str, difficulty_kind: str) -> bool:
@@ -1087,9 +1110,11 @@ def resolve_scenes(
             )
         facts = []
         for fact in raw.visual_facts:
-            anchor = _resolve_quoted_anchor(fact.anchor.block_id, fact.anchor.quote,
-                                           aliases, texts, visible_texts_by_alias, strict=True)
-            if anchor is None:
+            anchor = _resolve_quoted_anchor(
+                fact.anchor.block_id, fact.anchor.quote, aliases, texts, visible_texts_by_alias,
+                start=fact.anchor.start, end=fact.anchor.end, strict=True,
+            )
+            if not isinstance(anchor, SourceAnchor):
                 raise _analysis_error('цитата визуального факта не разрешается в исходном блоке',
                                       rule_code='unresolved_quote', block_ids=(start, end))
             if anchor.block_id not in positions or not positions[start] <= positions[anchor.block_id] <= positions[end]:
@@ -1141,18 +1166,22 @@ def validate_narrative_response(
     return scenes, plan.context_facts
 
 
+def _quoted_anchor(anchor: SourceAnchor) -> QuotedSourceAnchorResponse:
+    return QuotedSourceAnchorResponse(anchor.block_id, anchor.quote, anchor.start, anchor.end)
+
+
 def _quoted_scene(scene: Scene) -> QuotedSceneResponse:
     return QuotedSceneResponse(scene.start_block_id, scene.end_block_id, scene.summary,
         scene.location, scene.participants,
-        tuple(QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse(f.anchor.block_id, f.anchor.quote),
-                                            f.subject, f.detail) for f in scene.visual_facts),
+        tuple(QuotedSceneVisualFactResponse(_quoted_anchor(f.anchor), f.subject, f.detail)
+              for f in scene.visual_facts),
         scene.visual_assumptions)
 
 
 def _quoted_fact(fact: ContextFact) -> QuotedContextFactResponse:
     return QuotedContextFactResponse(fact.id, fact.kind,
-        tuple(QuotedSourceAnchorResponse(a.block_id, a.quote) for a in fact.anchors),
-        QuotedSourceAnchorResponse(fact.subject_anchor.block_id, fact.subject_anchor.quote),
+        tuple(_quoted_anchor(a) for a in fact.anchors),
+        _quoted_anchor(fact.subject_anchor),
         fact.value, fact.certainty)
 
 
@@ -1240,6 +1269,7 @@ def content_plan_from_response(
 
     resolved_difficulties = []
     resolved_facts = []
+    dropped_difficulty_ids: set[str] = set()
     if is_quoted:
         if visible_texts_by_alias is None:
             return None
@@ -1247,26 +1277,27 @@ def content_plan_from_response(
             owner_block_id = aliases.get(difficulty.owner_block_id)
             if owner_block_id is None:
                 return None
-            anchors = tuple(
-                _resolve_quoted_anchor(anchor.block_id, anchor.quote, aliases, texts,
-                                       visible_texts_by_alias)
-                for anchor in difficulty.anchors
+            anchors = _bind_quoted_anchors(
+                difficulty.anchors, aliases, texts, visible_texts_by_alias,
             )
-            if any(anchor is None for anchor in anchors):
+            if anchors is _MISSING:
                 return None
+            if not anchors or owner_block_id not in {item.block_id for item in anchors}:
+                dropped_difficulty_ids.add(difficulty.id)
+                continue
             resolved_difficulties.append((difficulty, anchors, owner_block_id))
         for fact in payload.content_plan.context_facts:
-            anchors = tuple(
-                _resolve_quoted_anchor(anchor.block_id, anchor.quote, aliases, texts,
-                                       visible_texts_by_alias)
-                for anchor in fact.anchors
+            anchors = _bind_quoted_anchors(
+                fact.anchors, aliases, texts, visible_texts_by_alias,
             )
             subject_anchor = _resolve_quoted_anchor(
                 fact.subject_anchor.block_id, fact.subject_anchor.quote, aliases, texts,
-                visible_texts_by_alias,
+                visible_texts_by_alias, start=fact.subject_anchor.start, end=fact.subject_anchor.end,
             )
-            if subject_anchor is None or any(anchor is None for anchor in anchors):
+            if anchors is _MISSING or subject_anchor is _MISSING:
                 return None
+            if subject_anchor is _AMBIGUOUS or not anchors:
+                continue
             resolved_facts.append((fact, anchors, subject_anchor))
 
     difficulties = []
@@ -1364,6 +1395,8 @@ def content_plan_from_response(
                                 )
     else:
         for item in payload.content_plan.before_you_read_evidence:
+            if item.difficulty_id in dropped_difficulty_ids:
+                continue
             if item.artifact_kind != "before_you_read.explanation" or item.artifact_index >= len(payload.before_you_read):
                 raise AnalysisMergeError("свидетельство анализа не ссылается на существующий BYR")
             entry = payload.before_you_read[item.artifact_index]
@@ -1410,22 +1443,57 @@ def content_plan_from_response(
                                ordered_block_ids=tuple(dict.fromkeys(aliases.values()))) if is_quoted else ()))
 
 
-def _resolve_quoted_anchor(block_alias, quote, aliases, texts, visible_texts_by_alias, *, strict=False):
-    """Resolve both source views; visual facts require a verbatim quote."""
+_MISSING = object()
+_AMBIGUOUS = object()
+
+
+def _classify_quote(text: str, quote: str, start, end, *, strict: bool):
+    """One span binds by text. A repeated quote binds only at an exact offset."""
+    spans = _exact_quote_spans(text, quote) if strict else _quote_spans(text, quote)
+    if not spans:
+        return _MISSING
+    if len(spans) == 1:
+        return spans[0]
+    if (
+        type(start) is int and type(end) is int
+        and 0 <= start < end <= len(text)
+        and text[start:end] == quote
+        and any(span[0] == start and span[1] == end for span in spans)
+    ):
+        return (start, end, quote)
+    return _AMBIGUOUS
+
+
+def _resolve_quoted_anchor(
+    block_alias, quote, aliases, texts, visible_texts_by_alias, *, start=None, end=None, strict=False,
+):
+    """Resolve both source views. A missing quote rejects; an ambiguous one does not bind."""
     block_id = aliases.get(block_alias)
     if block_id is None or texts is None or block_id not in texts or block_alias not in visible_texts_by_alias:
-        return None
-    if strict:
-        start = texts[block_id].find(quote)
-        if start < 0 or quote not in visible_texts_by_alias[block_alias]:
-            return None
-        return SourceAnchor(block_id=block_id, start=start, end=start + len(quote), quote=quote)
-    visible_span = find_quote_span(visible_texts_by_alias[block_alias], quote)
-    source_span = find_quote_span(texts[block_id], quote)
-    if visible_span is None or source_span is None:
-        return None
-    start, end, actual_quote = source_span
-    return SourceAnchor(block_id=block_id, start=start, end=end, quote=actual_quote)
+        return _MISSING
+    source = _classify_quote(texts[block_id], quote, start, end, strict=strict)
+    visible = _classify_quote(visible_texts_by_alias[block_alias], quote, start, end, strict=strict)
+    if source is _MISSING or visible is _MISSING:
+        return _MISSING
+    if source is _AMBIGUOUS or visible is _AMBIGUOUS:
+        return _AMBIGUOUS
+    source_start, source_end, actual_quote = source
+    return SourceAnchor(block_id=block_id, start=source_start, end=source_end, quote=actual_quote)
+
+
+def _bind_quoted_anchors(anchors, aliases, texts, visible_texts_by_alias):
+    """Keep anchors that bind. A quote absent from either view rejects the plan."""
+    kept = []
+    for anchor in anchors:
+        resolved = _resolve_quoted_anchor(
+            anchor.block_id, anchor.quote, aliases, texts, visible_texts_by_alias,
+            start=anchor.start, end=anchor.end,
+        )
+        if resolved is _MISSING:
+            return _MISSING
+        if resolved is not _AMBIGUOUS:
+            kept.append(resolved)
+    return tuple(kept)
 
 
 def _unique_exact_span(text, quote):

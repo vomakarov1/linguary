@@ -1419,3 +1419,53 @@ def test_instructions_have_no_language_reference_requirement() -> None:
     assert "Языковая справка" not in narrative.request.instructions
     assert "Языковая справка" not in legacy.request.instructions
 
+
+_OFFSET_ONCE = "Если цитата в блоке одна, start и end не возвращай."
+_OFFSET_REPEATED = (
+    "Если цитата встречается больше одного раза, верни start и end этого вхождения, "
+    "quote == text[start:end]."
+)
+
+
+def test_instructions_request_offset_only_for_repeated_quote() -> None:
+    """V5 prompts ask for start and end only when the quote occurs more than once."""
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_ANALYSIS_V5,
+        _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS_V5,
+        _NARRATIVE_ANALYSIS_INSTRUCTIONS,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+    )
+
+    english = _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS_V5.format(reader_level="B1")
+    narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="en", target_language="ru")
+    pedagogical = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="B1",
+    )
+    templates = snapshot_prompt_templates(
+        source_language="en", target_language="ru", reader_level="b1",
+        profile="content-plan-v3",
+    )
+    english_templates = snapshot_prompt_templates(
+        source_language="en", target_language="ru", reader_level="b1",
+        profile="content-plan-v3", english_help=True,
+    )
+    texts = (
+        _CONTENT_PLAN_ANALYSIS_V5,
+        english,
+        narrative,
+        pedagogical,
+        templates["content_analysis"],
+        templates["narrative_analysis"],
+        templates["pedagogical_analysis"],
+        english_templates["content_analysis"],
+    )
+    for text in texts:
+        assert _OFFSET_ONCE in text
+        assert _OFFSET_REPEATED in text
+        assert "у опор нет полей start и end" not in text
+        assert "Не возвращай смещения" not in text
+        assert "приложение найдёт точные координаты" not in text
+        assert "приложение вычислит координаты" not in text
+    assert "CHAPTER_ANALYSIS v5" in _CONTENT_PLAN_ANALYSIS_V5
+    assert "CHAPTER_ANALYSIS v5" in english
+

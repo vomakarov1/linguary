@@ -14,6 +14,30 @@ from linguary.domain.content_plan import RequiredPoint, artifact_key
 from linguary.domain.name_translation import NameTranslationAssessment
 
 
+def _omit_absent_offsets(anchor: dict) -> None:
+    if anchor.get('start') is None:
+        anchor.pop('start', None)
+    if anchor.get('end') is None:
+        anchor.pop('end', None)
+
+
+def _omit_absent_anchor_offsets(response: dict) -> None:
+    for fact in response.get('context_facts') or ():
+        for anchor in fact.get('anchors') or ():
+            _omit_absent_offsets(anchor)
+        subject = fact.get('subject_anchor')
+        if subject:
+            _omit_absent_offsets(subject)
+    for scene in response.get('scenes') or ():
+        for visual in scene.get('visual_facts') or ():
+            anchor = visual.get('anchor')
+            if anchor:
+                _omit_absent_offsets(anchor)
+    for difficulty in response.get('difficulties') or ():
+        for anchor in difficulty.get('anchors') or ():
+            _omit_absent_offsets(anchor)
+
+
 def encode_pass(payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse) -> dict:
     response = asdict(payload)
     # Пустые новые поля не пишем: проход, сохранённый до них, остаётся той же контрольной суммы.
@@ -23,6 +47,7 @@ def encode_pass(payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse
     for item in response.get('treatment_plan', ()):
         if not item.get('segments'):
             item.pop('segments', None)
+    _omit_absent_anchor_offsets(response)
     return {'schema_version': 1, 'response': response}
 
 
@@ -95,7 +120,7 @@ def pedagogical_response(analysis: ChapterAnalysis, *, reader_level: str) -> Ped
         ),
         before_you_read=tuple(BeforeYouReadEntryResponse(e.expression, e.explanation) for e in analysis.before_you_read),
         difficulties=tuple(QuotedDifficultyResponse(d.id,
-            tuple(QuotedSourceAnchorResponse(a.block_id, a.quote) for a in d.anchors),
+            tuple(QuotedSourceAnchorResponse(a.block_id, a.quote, a.start, a.end) for a in d.anchors),
             d.owner_block_id, d.kind, d.priority, d.help_kind, d.required_points) for d in plan.difficulties),
         before_you_read_evidence=tuple(evidence),
         reader_chapter_summary=analysis.chapter_summary if reader_level == 'a2' else None)
