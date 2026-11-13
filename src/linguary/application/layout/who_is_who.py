@@ -36,8 +36,9 @@ _LISTED_TYPES = (ConceptType.PERSON, ConceptType.PLACE)
 class WhoEntry:
     """One person or place, from the chapter where the key is first seen.
 
-    `name_method` is set only for mixed and creative translations. Other
-    methods stay in `NAME_METHOD_LABELS` but are not written on the entry.
+    `name_method` is the highest-confidence observation when that method is
+    mixed or creative. Ties keep the first observation. Other methods stay
+    in `NAME_METHOD_LABELS` but are not written on the entry.
     """
 
     source: str
@@ -155,16 +156,16 @@ def _translation(
 
 
 def _name_method(candidate: GlossaryCandidate) -> str | None:
-    """Label for the first assessment, and only when it is mixed or creative."""
+    """Label of the highest-confidence observation, when it is mixed or creative.
+
+    Several observations can share that confidence. The first of them is used.
+    Another method, or an observation with no assessment, stays unlabeled.
+    """
     evidence = candidate.name_translation_evidence
     if evidence is None:
         return None
-    for observation in evidence.observations:
-        assessment = observation.assessment
-        if assessment is None:
-            continue
-        method = assessment.applied_method
-        if method not in _SHOWN_METHODS:
-            return None
-        return NAME_METHOD_LABELS[method.value]
-    return None
+    observation = max(evidence.observations, key=lambda item: item.confidence)
+    assessment = observation.assessment
+    if assessment is None or assessment.applied_method not in _SHOWN_METHODS:
+        return None
+    return NAME_METHOD_LABELS[assessment.applied_method.value]

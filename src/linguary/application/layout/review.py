@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from linguary.application.explained_expressions import _same_word, expression_words
+from linguary.application.explained_expressions import _overlaps, _same_word, expression_words
 from linguary.application.layout.who_is_who import _content_chapter_numbers
 from linguary.domain import BlockProcessingResult, CanonicalDocument, DocumentSection
 
@@ -180,9 +180,13 @@ def _already_noted(
     hints: Sequence[_Hint],
     noted: Sequence[tuple[str, ...]],
 ) -> bool:
-    """Whether any form of this expression is already noted in the chapter."""
+    """Whether a current hint or note excerpt is this expression.
+
+    A contiguous inflection counts when the shorter side is at least half
+    the longer side, the same rule as `explained_expressions`.
+    """
     return any(
-        _same_words(hints[index].words, words)
+        _overlaps(hints[index].words, words)
         for index in indexes
         for words in noted
     )

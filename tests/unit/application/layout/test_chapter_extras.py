@@ -520,6 +520,36 @@ def test_review_skips_expressions_noted_in_chapter() -> None:
     )
 
 
+def test_review_skips_expression_inside_longer_note() -> None:
+    """A longer current-chapter excerpt still notes the expression.
+
+    `the white rabbit` notes `white rabbit`, and `heaved to the pier` notes
+    `heave to`. Both forms occur in the chapter, so the note is what drops them.
+    """
+    past = _block("ch-1", "ch-1.xhtml", 0, "Chapter prose.")
+    current = _block(
+        "ch-2",
+        "ch-2.xhtml",
+        0,
+        "More prose. She heaved to the lanterns beside the white rabbit.",
+    )
+    first = _content("ch-1", 0, (past,))
+    second = _content("ch-2", 1, (current,))
+    document = _document((first, second))
+    results = {
+        past.id: _result(past, (
+            ("heave to", "лечь в дрейф"),
+            ("white rabbit", "белый кролик"),
+            ("lantern", "фонарь"),
+        )),
+        current.id: _result(current, (), ("heaved to the pier", "the white rabbit")),
+    }
+
+    assert chapter_review(document, results, section_id=second.id, reader_level="a2") == (
+        ReviewEntry("lantern", "фонарь", 1),
+    )
+
+
 def test_review_limit_by_level() -> None:
     """Nearer chapters fill the cap before older ones. An unknown level is empty."""
     assert REVIEW_DISTANCES == (1, 3, 7)
@@ -638,4 +668,72 @@ def test_name_method_shown_only_for_mixed_and_creative() -> None:
         "Creative": "вольный перевод",
         "Uncertain": None,
         "Plain": None,
+    }
+
+
+def test_name_method_follows_highest_confidence_observation() -> None:
+    """The label is the highest-confidence fragment, not the first assessment.
+
+    A later creative observation outranks an earlier sound one, so the row
+    shows the creative translation with its label. Equal confidence keeps the
+    first of those maxima.
+    """
+    section = _content("ch-1", 0)
+    document = _document((section,))
+
+    def observation(
+        translation: str,
+        confidence: float,
+        method: NameTranslationMethod,
+    ) -> NameTranslationObservation:
+        return NameTranslationObservation(
+            translation,
+            confidence,
+            False,
+            NameTranslationAssessment(method, True, (), "Оценка способа"),
+        )
+
+    def named(
+        candidate_id: str,
+        source: str,
+        translation: str,
+        observations: tuple[NameTranslationObservation, ...],
+    ) -> GlossaryCandidate:
+        return GlossaryCandidate(
+            id=candidate_id,
+            analysis_id="a1",
+            source_text=source,
+            type=ConceptType.PERSON,
+            suggested_translation=translation,
+            confidence=max(item.confidence for item in observations),
+            model_flagged_review=False,
+            requires_review=True,
+            name_translation_evidence=NameTranslationEvidence(
+                1,
+                "conditions-1",
+                1,
+                NameTranslationStrategy.MEANING,
+                observations,
+            ),
+        )
+
+    analysis = _analysis("a1", section.id, (
+        named("hatter", "Hatter", "Шляпник", (
+            observation("Хаттер", 0.4, NameTranslationMethod.SOUND),
+            observation("Шляпник", 0.9, NameTranslationMethod.CREATIVE),
+        )),
+        named("hare", "Hare", "Заяц", (
+            observation("Заяц", 0.8, NameTranslationMethod.CREATIVE),
+            observation("Хэар", 0.8, NameTranslationMethod.SOUND),
+        )),
+    ))
+
+    listed = {
+        entry.source: (entry.translation, entry.name_method)
+        for entry in chapter_who_is_who(document, (analysis,), (), section_id=section.id)
+    }
+
+    assert listed == {
+        "Hatter": ("Шляпник", "вольный перевод"),
+        "Hare": ("Заяц", "вольный перевод"),
     }
