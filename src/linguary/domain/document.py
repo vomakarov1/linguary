@@ -3,6 +3,8 @@
 The model is independent of EPUB (PRD § 7): after import, all remaining application
 logic operates solely on these entities. `DocumentBlock` is the unit of display,
 processing result, and regeneration; it is never split or merged (ADR § 3).
+Segments are markup inside a block (offsets and a sentence index), not a division
+of the block into smaller blocks.
 """
 
 from __future__ import annotations
@@ -110,11 +112,60 @@ class SourceReference:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockSegment:
+    """Half-open markup span inside one block, not a separate block.
+
+    Offsets refer to `DocumentBlock.text`. Spans of the same sentence share
+    `sentence_index`. A zero-length span exists only as the derived cover of an
+    empty block; stored segments are rejected when empty.
+    """
+
+    start: int
+    end: int
+    sentence_index: int = 0
+
+    def __post_init__(self) -> None:
+        if self.start < 0:
+            raise DocumentStructureError("начало сегмента не может быть отрицательным")
+        if self.end < self.start:
+            raise DocumentStructureError("конец сегмента раньше его начала")
+        if self.sentence_index < 0:
+            raise DocumentStructureError("индекс предложения не может быть отрицательным")
+
+
+def _stored_block_segments(
+    text: str, segments: tuple[BlockSegment, ...]
+) -> tuple[BlockSegment, ...]:
+    """Checks that segments cover `text` and drops a single covering segment.
+
+    An empty tuple means one span over the whole text. One explicit covering
+    segment is that same default, so it is not stored separately.
+    """
+    if not segments:
+        return ()
+    stored = tuple(segments)
+    offset = 0
+    length = len(text)
+    for segment in stored:
+        if segment.end <= segment.start:
+            raise DocumentStructureError("сегмент не может быть пустым")
+        if segment.start != offset or segment.end > length:
+            raise DocumentStructureError("сегменты блока должны непрерывно покрывать текст")
+        offset = segment.end
+    if offset != length:
+        raise DocumentStructureError("сегменты блока должны непрерывно покрывать текст")
+    if len(stored) == 1:
+        return ()
+    return stored
+
+
+@dataclass(frozen=True, slots=True)
 class DocumentBlock:
     """Stable unit of source text and processing results.
 
     `parent_id` describes nesting for lists, footnotes, and compound blocks; `attributes`
-    stores technical import properties that do not affect text.
+    stores technical import properties that do not affect text. `segments` is markup
+    inside this block: an empty tuple means one span over the whole text.
     """
 
     id: str
@@ -127,6 +178,7 @@ class DocumentBlock:
     inline_annotations: tuple[InlineAnnotation, ...] = ()
     parent_id: str | None = None
     attributes: Mapping[str, str] = field(default_factory=dict)
+    segments: tuple[BlockSegment, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -149,6 +201,7 @@ class DocumentBlock:
                     "встроенная разметка выходит за пределы текста блока"
                 )
         object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
+        object.__setattr__(self, "segments", _stored_block_segments(self.text, self.segments))
 
     @classmethod
     def create(
@@ -164,6 +217,7 @@ class DocumentBlock:
         inline_annotations: tuple[InlineAnnotation, ...] = (),
         parent_id: str | None = None,
         attributes: Mapping[str, str] | None = None,
+        segments: tuple[BlockSegment, ...] = (),
     ) -> DocumentBlock:
         """Creates a block with a stable identifier (PRD § 8)."""
         return cls(
@@ -181,7 +235,19 @@ class DocumentBlock:
             inline_annotations=inline_annotations,
             parent_id=parent_id,
             attributes=attributes or {},
+            segments=segments,
         )
+
+    @property
+    def segment_spans(self) -> tuple[BlockSegment, ...]:
+        """Spans covering the block text.
+
+        Stored segments are markup inside the block. When none are stored, the block
+        is one span `[0, len(text))` with sentence index 0.
+        """
+        if self.segments:
+            return self.segments
+        return (BlockSegment(0, len(self.text), 0),)
 
 
 #: Blocks that do not turn a notes page into a chapter: its heading and page breaks.

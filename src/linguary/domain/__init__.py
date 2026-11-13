@@ -21,6 +21,7 @@ from linguary.domain.book_status import (
     status_after_task_failure,
 )
 from linguary.domain.document import (
+    BlockSegment,
     BlockType,
     BookImportWarning,
     BookMetadata,
@@ -125,6 +126,7 @@ __all__ = [
     "BlockOrderError",
     "BlockProcessingResult",
     "BlockResultError",
+    "BlockSegment",
     "BlockTreatment",
     "BlockType",
     "BookEvent",
