@@ -20,7 +20,9 @@ from linguary.application.retry_policy import ResultValidationError
 from linguary.domain.book_conditions import WorkStateError
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
 from linguary.web.dependencies import CurrentApplication
-from linguary.web.schemas import BookResultResponse, ResultGroupResponse, TaskResponse, ResolveCorrectionInput
+from linguary.web.schemas import (
+    BookResultResponse, ResultBlockResponse, TaskResponse, ResolveCorrectionInput, reading_units,
+)
 from linguary.web.views import render, wants_html
 from linguary.web.routes.quality import quality_page_context
 
@@ -77,11 +79,10 @@ def get_book_result(
     if not header_only:
         tasks = _regeneration_tasks(summary.tasks)
         for chapter in response.chapters:
-            for group in chapter.groups:
-                for member in group.member_blocks:
-                    current = tasks.get(member.block_id)
-                    if current is not None:
-                        member.regeneration_task = TaskResponse.of_task(current)
+            for block in chapter.blocks:
+                current = tasks.get(block.block_id)
+                if current is not None:
+                    block.regeneration_task = TaskResponse.of_task(current)
     export_task = next((task for task in summary.tasks
                         if task.task_type is TaskType.EXPORT_BOOK
                         and task.status is not TaskStatus.SUCCEEDED), None)
@@ -126,15 +127,15 @@ def get_book_result(
 
 @router.get(
     "/books/{book_id}/blocks",
-    response_model=list[ResultGroupResponse],
+    response_model=list[ResultBlockResponse],
 )
 def get_book_result_blocks(
     request: Request,
     application: CurrentApplication,
     book_id: str,
     block_id: list[str] = Query(...),
-) -> list[ResultGroupResponse] | object:
-    """Return selected result groups from one book snapshot for batch polling."""
+) -> list[ResultBlockResponse] | object:
+    """Return selected result blocks from one book snapshot for batch polling."""
     if len(block_id) > 128 or any(len(identifier) > 512 for identifier in block_id):
         raise HTTPException(status_code=422, detail="Некорректный список блоков.")
     responses = _result_block_responses(application, book_id, block_id)
@@ -150,11 +151,11 @@ def get_book_result_blocks(
 
 @router.get(
     "/books/{book_id}/blocks/{block_id}",
-    response_model=ResultGroupResponse,
+    response_model=ResultBlockResponse,
 )
 def get_book_result_block(
     request: Request, application: CurrentApplication, book_id: str, block_id: str
-) -> ResultGroupResponse | object:
+) -> ResultBlockResponse | object:
     """Return a single result block for polling after regeneration."""
     response = _result_block_response(application, book_id, block_id)
     if _wants_result_block_fragment(request):
@@ -174,12 +175,12 @@ def get_book_result_block(
 
 @router.post(
     "/books/{book_id}/blocks/{block_id}/regenerate",
-    response_model=ResultGroupResponse,
+    response_model=ResultBlockResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def regenerate_book_block(
     request: Request, application: CurrentApplication, book_id: str, block_id: str
-) -> ResultGroupResponse | object:
+) -> ResultBlockResponse | object:
     """Enqueue block regeneration and return the fragment for the selected block only."""
     task = await application.regeneration.start(book_id, block_id)
     response = _result_block_response(application, book_id, block_id, task=task)
@@ -198,7 +199,7 @@ async def regenerate_book_block(
     return response
 
 
-@router.post('/books/{book_id}/correction-candidates/{candidate_id}/resolve', response_model=ResultGroupResponse)
+@router.post('/books/{book_id}/correction-candidates/{candidate_id}/resolve', response_model=ResultBlockResponse)
 async def resolve_correction_candidate(request: Request, application: CurrentApplication,
                                        book_id: str, candidate_id: str):
     is_json = request.headers.get('content-type', '').split(';')[0] == 'application/json'
@@ -271,7 +272,7 @@ def _result_block_response(
     block_id: str,
     *,
     task: ProcessingTask | None = None,
-) -> ResultGroupResponse:
+) -> ResultBlockResponse:
     """Construct the block DTO along with its current regeneration task, if any."""
     response, = _result_block_responses(application, book_id, (block_id,), task=task)
     return response
@@ -283,8 +284,8 @@ def _result_block_responses(
     block_ids: Sequence[str],
     *,
     task: ProcessingTask | None = None,
-) -> tuple[ResultGroupResponse, ...]:
-    """Build selected result groups while taking one book snapshot and pronunciation projection."""
+) -> tuple[ResultBlockResponse, ...]:
+    """Build selected result blocks from one book snapshot and pronunciation projection."""
     requested_ids = tuple(dict.fromkeys(block_ids))
     try:
         snapshot = book_result(
@@ -306,7 +307,7 @@ def _result_block_responses(
     for chapter in snapshot.chapters:
         for block in chapter.blocks:
             if block.block.id in requested_set:
-                selected_blocks.append(block)
+                selected_blocks.append((chapter, block))
                 found_ids.add(block.block.id)
     missing_ids = requested_set - found_ids
     if missing_ids:
@@ -332,10 +333,13 @@ def _result_block_responses(
     except TypeError:
         pronunciations = project_pronunciations(blocks_seq, results_map)
     return tuple(
-        ResultGroupResponse.of_group((block,), tasks=tasks, block_id=block.block.id,
-                                      source_language=snapshot.book.source_language,
-                                      pronunciations=pronunciations)
-        for block in selected_blocks
+        ResultBlockResponse.of_block(
+            block,
+            regeneration_task=tasks.get(block.block.id),
+            pronunciations=pronunciations,
+            units=reading_units(chapter, block.block.id),
+        )
+        for chapter, block in selected_blocks
     )
 
 

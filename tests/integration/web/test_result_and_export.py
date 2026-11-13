@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from web_scenario import (
     continue_legacy,
     SOURCE_TEXT,
+    TRANSLATED_TEXT,
     failed_task,
     hinted_result,
     repetition_warning,
@@ -26,10 +27,12 @@ from linguary.composition import Application, drain_tasks
 from linguary.web.routes.export import download_filename
 from linguary.domain import (
     BlockProcessingResult,
+    BlockSegment,
     BlockTreatment,
     BlockType,
     BookStatus,
     DocumentBlock,
+    LanguageNote,
     InlineAnnotation,
     InlineAnnotationType,
     ProcessingTask,
@@ -650,6 +653,234 @@ def test_result_block_shows_footnote_marker_as_the_original_label() -> None:
     assert response.translated_text == "Её лицо.[1] Жаль."
 
 
+def test_result_api_returns_units_per_block(client: TestClient, application: Application) -> None:
+    """Each block carries the chapter layout's units, including separate note labels."""
+    from linguary.application.book_overview import ResultChapterSummary
+    from linguary.application.layout.book import ChapterLayout
+    from linguary.domain.content_plan import (
+        ContentEvidence,
+        ContentPlan,
+        ContextFact,
+        Difficulty,
+        HelpEvidence,
+        RequiredPoint,
+        SourceAnchor,
+        artifact_key,
+    )
+    from linguary.web.schemas import ResultChapterResponse
+
+    text = "Alice said hello."
+    poem = "Twinkle."
+    scenario = store_book(
+        application,
+        status=BookStatus.COMPLETED,
+        chapters=((text, poem),),
+    )
+    paragraph, verse = scenario.section().ordered_blocks
+    verse = replace(verse, type=BlockType.POEM)
+    section = scenario.section()
+    document = replace(scenario.document, sections=(replace(section, blocks=(paragraph, verse)),))
+    hello = text.index("hello")
+    note = LanguageNote(
+        id="ln-hello",
+        block_id=paragraph.id,
+        original_excerpt="hello",
+        note="Пояснение.",
+    )
+    note_key = artifact_key(
+        "language_note.note",
+        paragraph.id,
+        {
+            "original_excerpt": note.original_excerpt,
+            "note": note.note,
+            "translated_excerpt": note.translated_excerpt,
+        },
+    )
+    grammar = Difficulty(
+        "d-grammar",
+        (SourceAnchor(paragraph.id, hello, hello + len("hello"), "hello"),),
+        paragraph.id,
+        "grammar",
+        "useful",
+        "explanation",
+        (RequiredPoint("p-grammar", "Explain the form"),),
+    )
+    idiom = Difficulty(
+        "d-idiom",
+        (SourceAnchor(paragraph.id, 0, len("Alice"), "Alice"),),
+        paragraph.id,
+        "idiom",
+        "useful",
+        "explanation",
+        (RequiredPoint("p-idiom", "Explain the phrase"),),
+    )
+    speaker = ContextFact(
+        "speaker-alice",
+        "speaker",
+        (SourceAnchor(paragraph.id, 0, len("Alice"), "Alice"),),
+        SourceAnchor(paragraph.id, 0, len("Alice"), "Alice"),
+        "Alice",
+        "explicit",
+    )
+    plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(grammar, idiom),
+        context_facts=(speaker,),
+    )
+    evidences = (
+        HelpEvidence("d-grammar", "p-grammar", "language_note.note", paragraph.id, note_key, note.note),
+        HelpEvidence("d-idiom", "p-idiom", "language_note.note", paragraph.id, note_key, note.note),
+    )
+    with application.unit_of_work.transaction() as uow:
+        analysis = uow.analyses.get_for_section(scenario.book_id, section.id)
+        assert analysis is not None
+        uow.documents.save(document)
+        uow.analyses.save(scenario.book_id, replace(analysis, content_plan=plan))
+    start_run(
+        application,
+        scenario,
+        results=(
+            replace(
+                translated_result(paragraph.id),
+                language_notes=(note,),
+                content_evidence=ContentEvidence(plan.sha256, evidences, version=3),
+            ),
+            translated_result(verse.id),
+        ),
+    )
+
+    body = client.get(f"/books/{scenario.book_id}/result").json()
+    chapter = body["chapters"][0]
+    assert "groups" not in chapter
+    blocks = {block["block_id"]: block for block in chapter["blocks"]}
+    spoken = blocks[paragraph.id]["units"]
+    assert spoken == [{
+        "start": 0,
+        "end": len(text),
+        "original": text,
+        "translation": TRANSLATED_TEXT,
+        "speaker": "Alice",
+        "notes": [{
+            "number": 1,
+            "labels": ["Грамматика.", "Идиома."],
+            "term": None,
+            "ipa": None,
+            "variant": None,
+            "body": ["Пояснение."],
+            "marker_end": hello + len("hello"),
+        }],
+        "continues": False,
+        "ends_paragraph": True,
+        "lines": False,
+    }]
+    assert spoken[0]["notes"][0]["labels"] != ["Грамматика., Идиома."]
+    assert blocks[verse.id]["units"] == [{
+        "start": 0,
+        "end": len(poem),
+        "original": poem,
+        "translation": TRANSLATED_TEXT,
+        "speaker": None,
+        "notes": [],
+        "continues": False,
+        "ends_paragraph": True,
+        "lines": True,
+    }]
+    polled = client.get(f"/books/{scenario.book_id}/blocks/{paragraph.id}").json()
+    assert polled["units"] == spoken
+    assert "member_block_ids" not in polled
+    assert "member_blocks" not in polled
+
+    bare = ResultBlockSummary(block=paragraph, chapter_number=1)
+    without_layout = ResultChapterResponse.of_chapter(ResultChapterSummary(
+        section_id=section.id, chapter_number=1, title="Chapter", blocks=(bare,), layout=None,
+    ))
+    omitted = ResultChapterResponse.of_chapter(ResultChapterSummary(
+        section_id=section.id,
+        chapter_number=1,
+        title="Chapter",
+        blocks=(bare,),
+        layout=ChapterLayout(section.id, 1, {}, (), ()),
+    ))
+    assert without_layout.blocks[0].units == ()
+    assert omitted.blocks[0].units == ()
+
+
+def test_regenerate_block_still_works(client: TestClient, application: Application) -> None:
+    """Regeneration still enqueues the same block and returns that block, not a group."""
+    scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
+    block_id = scenario.block_ids()[0]
+    text = scenario.section().ordered_blocks[0].text
+    start_run(
+        application,
+        scenario,
+        results=tuple(translated_result(identifier) for identifier in scenario.block_ids()),
+    )
+    continue_legacy(application, scenario.book_id)
+
+    response = client.post(f"/books/{scenario.book_id}/blocks/{block_id}/regenerate")
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["block_id"] == block_id
+    assert "member_block_ids" not in body
+    assert "member_blocks" not in body
+    assert "groups" not in body
+    assert body["units"] == [{
+        "start": 0,
+        "end": len(text),
+        "original": text,
+        "translation": TRANSLATED_TEXT,
+        "speaker": None,
+        "notes": [],
+        "continues": False,
+        "ends_paragraph": True,
+        "lines": False,
+    }]
+    assert body["regeneration_task"]["task_type"] == TaskType.REGENERATE_BLOCK.value
+    assert body["regeneration_task"]["scope_id"] == block_id
+    assert body["regeneration_task"]["status"] == TaskStatus.PENDING.value
+
+
+def test_mixed_block_shows_translation_only_under_translated_unit(
+    client: TestClient, application: Application,
+) -> None:
+    """An untranslated unit stays empty and does not inherit the block's joined translation."""
+    text = "Plain words. Clear words."
+    assert (text[:12], text[12:]) == ("Plain words.", " Clear words.")
+    scenario = store_book(application, status=BookStatus.COMPLETED, chapters=((text,),))
+    block = scenario.section().ordered_blocks[0]
+    segmented = replace(block, segments=(
+        BlockSegment(0, 12, 0),
+        BlockSegment(12, len(text), 1),
+    ))
+    section = scenario.section()
+    document = replace(scenario.document, sections=(replace(section, blocks=(segmented,)),))
+    joined = "Ясные слова."
+    with application.unit_of_work.transaction() as uow:
+        uow.documents.save(document)
+    start_run(application, scenario, results=(BlockProcessingResult(
+        segmented.id,
+        BlockTreatment.TRANSLATE,
+        translated_text=joined,
+        segment_treatments=(BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        segment_translations=(None, joined),
+    ),))
+
+    body = client.get(f"/books/{scenario.book_id}/blocks/{segmented.id}").json()
+    book = client.get(f"/books/{scenario.book_id}/result").json()
+
+    assert body["translated_text"] == joined
+    assert [(unit["start"], unit["end"], unit["original"], unit["translation"]) for unit in body["units"]] == [
+        (0, 12, "Plain words.", None),
+        (12, len(text), " Clear words.", joined),
+    ]
+    assert body["units"][0]["translation"] is None
+    assert [unit["continues"] for unit in body["units"]] == [False, True]
+    assert [unit["ends_paragraph"] for unit in body["units"]] == [False, True]
+    assert book["chapters"][0]["blocks"][0]["units"] == body["units"]
+
+
 def _split_result_scenario(application):
     from linguary.domain.learning import FragmentAssistance
     from linguary.domain.content_plan import SourceAnchor
@@ -684,24 +915,26 @@ def test_result_groups_only_adjacent_parts_and_keeps_exact_occurrences(client, a
     ids = scenario.block_ids()
     texts = [block.text for block in scenario.section().ordered_blocks]
     body = client.get(f"/books/{scenario.book_id}/result").json()
-    groups = body["chapters"][0]["groups"]
-    assert [group["member_block_ids"] for group in groups] == [[block_id] for block_id in ids]
-    assert [group["original_text"] for group in groups] == texts
-    assert original not in {group["original_text"] for group in groups}
-    assert groups[0]["fragment_assistance"][0]["anchors"][0] == {
+    blocks = body["chapters"][0]["blocks"]
+    assert "groups" not in body["chapters"][0]
+    assert [block["block_id"] for block in blocks] == list(ids)
+    assert [block["original_text"] for block in blocks] == texts
+    assert original not in {block["original_text"] for block in blocks}
+    assert blocks[0]["fragment_assistance"][0]["anchors"][0] == {
         "block_id": ids[0], "start": 2, "end": 13, "quote": "Hard phrase"}
-    assert groups[1]["fragment_assistance"][0]["anchors"][0] == {
+    assert blocks[1]["fragment_assistance"][0]["anchors"][0] == {
         "block_id": ids[1], "start": 17, "end": 28, "quote": "Hard phrase"}
-    assert groups[2]["fragment_assistance"] == []
-    assert groups[3]["fragment_assistance"] == []
+    assert blocks[2]["fragment_assistance"] == []
+    assert blocks[3]["fragment_assistance"] == []
     html = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
     assert html.count('class="fragment-assistance"') == 2
     assert html.index(texts[0]) < html.index('class="fragment-assistance"')
-    for block_id, group in zip(ids[:2], groups[:2], strict=True):
+    for block_id, block in zip(ids[:2], blocks[:2], strict=True):
         polled = client.get(f"/books/{scenario.book_id}/blocks/{block_id}")
-        assert polled.json()["member_block_ids"] == [block_id]
-        assert polled.json()["original_text"] == group["original_text"]
-        assert polled.json()["fragment_assistance"] == group["fragment_assistance"]
+        assert polled.json()["block_id"] == block_id
+        assert "member_block_ids" not in polled.json()
+        assert polled.json()["original_text"] == block["original_text"]
+        assert polled.json()["fragment_assistance"] == block["fragment_assistance"]
 
 
 def test_group_marks_unresolved_help_without_changing_the_source(client, application):
@@ -710,11 +943,13 @@ def test_group_marks_unresolved_help_without_changing_the_source(client, applica
     with application.unit_of_work.transaction() as uow:
         uow.results.replace_results(scenario.run_id, [results[0], replace(results[1], fragment_assistances=(item,)), *results[2:]])
     response = client.get(f"/books/{scenario.book_id}/blocks/{scenario.block_ids()[1]}")
-    assert response.json()["member_block_ids"] == [scenario.block_ids()[1]]
-    assert response.json()["original_text"] == scenario.section().ordered_blocks[1].text
-    assert response.json()["original_text"] != original
-    assert response.json()["fragment_assistance"][0]["kind"] == "unresolved"
-    assert response.json()["fragment_assistance"][0]["text"] is None
+    body = response.json()
+    assert body["block_id"] == scenario.block_ids()[1]
+    assert "member_block_ids" not in body
+    assert body["original_text"] == scenario.section().ordered_blocks[1].text
+    assert body["original_text"] != original
+    assert body["fragment_assistance"][0]["kind"] == "unresolved"
+    assert body["fragment_assistance"][0]["text"] is None
     html = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
     assert 'data-kind="unresolved"' in html
     assert "Трудность пока не объяснена" in html
@@ -757,11 +992,12 @@ def test_group_polling_preserves_siblings_during_member_regeneration(client, app
         assert helps[1 - index] not in response.text
         assert f'id="block-{block_id}"' in response.text
         assert f'id="block-{ids[1 - index]}"' not in response.text
-        group = client.get(f"/books/{scenario.book_id}/blocks/{block_id}").json()
-        assert group["member_block_ids"] == [block_id]
-        assert group["original_text"] == block_text
+        block = client.get(f"/books/{scenario.book_id}/blocks/{block_id}").json()
+        assert block["block_id"] == block_id
+        assert "member_block_ids" not in block
+        assert block["original_text"] == block_text
         anchors = results[index].fragment_assistances[0].anchors
-        assert [item["anchors"] for item in group["fragment_assistance"]] == [[
+        assert [item["anchors"] for item in block["fragment_assistance"]] == [[
             {"block_id": anchor.block_id, "start": anchor.start, "end": anchor.end,
              "quote": anchor.quote} for anchor in anchors
         ]]
@@ -824,9 +1060,8 @@ def test_result_tasks_are_loaded_once_without_per_member_reads(
     elif fragment == 'html':
         assert 'data-result-block' in response.text
     else:
-        groups = [response.json()] if fragment == 'block' else response.json()['chapters'][0]['groups']
-        members = [member for group in groups for member in group['member_blocks']]
-        tasks = {member['block_id']: member['regeneration_task'] for member in members}
+        blocks = [response.json()] if fragment == 'block' else response.json()['chapters'][0]['blocks']
+        tasks = {block['block_id']: block['regeneration_task'] for block in blocks}
         assert tasks[ids[0]]['status'] == 'pending'
         if fragment == 'block':
             assert set(tasks) == {ids[0]}
@@ -932,7 +1167,7 @@ def test_pronunciation_result_and_fragment_contract(client, application, monkeyp
     identifier = scenario.block_ids(1)[0]
     fragment = client.get(f'/books/{scenario.book_id}/blocks/{identifier}').json()
     assert fragment['pronunciation_assistances'] == [repeated]
-    assert fragment['member_blocks'][0]['pronunciation_assistances'] == [repeated]
+    assert 'member_blocks' not in fragment
     response = client.get(f'/books/{scenario.book_id}/blocks/{identifier}',
                           headers={'accept': 'text/html', 'x-linguary-fragment': 'result-block'})
     assert response.status_code == 200
@@ -2004,12 +2239,13 @@ def test_pending_corrections_filter_recomputes_primary_pronunciations_and_preser
         f"/books/{scenario.book_id}/result?filter=pending_corrections"
     ).json()
     assert len(filtered_json["chapters"]) == 1
-    groups = filtered_json["chapters"][0]["groups"]
-    assert len(groups) == 2
-    assert groups[0]["pronunciation_assistances"][0]["is_primary"] is True
-    assert groups[0]["pronunciation_assistances"][0]["hint_id"] == "ph-ch2-colonel"
-    assert groups[1]["pronunciation_assistances"][0]["is_primary"] is False
-    assert groups[1]["pronunciation_assistances"][0]["hint_id"] == "ph-ch2-colonel"
+    blocks = filtered_json["chapters"][0]["blocks"]
+    assert "groups" not in filtered_json["chapters"][0]
+    assert len(blocks) == 2
+    assert blocks[0]["pronunciation_assistances"][0]["is_primary"] is True
+    assert blocks[0]["pronunciation_assistances"][0]["hint_id"] == "ph-ch2-colonel"
+    assert blocks[1]["pronunciation_assistances"][0]["is_primary"] is False
+    assert blocks[1]["pronunciation_assistances"][0]["hint_id"] == "ph-ch2-colonel"
 
     filtered_html = client.get(
         f"/books/{scenario.book_id}/result?filter=pending_corrections",

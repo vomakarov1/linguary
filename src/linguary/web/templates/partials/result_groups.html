@@ -16,7 +16,7 @@
         </section>
       {% endif %}
     {% endif %}
-    {% for block in chapter.groups %}
+    {% for block in chapter.blocks %}
       {% set book_id = data.book_id %}
       {% include "partials/result_block.html" %}
     {% endfor %}

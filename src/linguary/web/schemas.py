@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Self
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -36,8 +36,8 @@ from linguary.application.book_overview import (
 )
 from linguary.application.pronunciation_projection import PronunciationOccurrence, project_pronunciations
 from linguary.application.glossary_review import GlossaryReview, GlossaryReviewItem
+from linguary.application.layout.units import LayoutUnit, NumberedNote
 from linguary.application.ports.persistence import BookRecord
-from linguary.application.translation_units import group_paragraph_fragments
 from linguary.application.use_cases.approve_glossary import GlossaryDecision
 from linguary.application.use_cases.reset_processing import ResetProcessingResult
 from linguary.domain import (
@@ -683,6 +683,70 @@ class ResolveCorrectionInput(BaseModel):
         return self
 
 
+def reading_units(chapter: ResultChapterSummary, block_id: str) -> tuple[LayoutUnit, ...]:
+    """Units already on `chapter.layout`. No layout, or no entry, is empty."""
+    layout = getattr(chapter, "layout", None)
+    if layout is None:
+        return ()
+    found = layout.units.get(block_id)
+    if not found:
+        return ()
+    return tuple(found)
+
+
+class ResultNoteResponse(BaseModel):
+    """One note under a reading unit. `labels` stay separate strings."""
+
+    number: int | None
+    labels: tuple[str, ...] = ()
+    term: str | None = None
+    ipa: str | None = None
+    variant: str | None = None
+    body: tuple[str, ...] = ()
+    marker_end: int | None = None
+
+    @classmethod
+    def of_note(cls, item: NumberedNote) -> ResultNoteResponse:
+        note = item.note
+        return cls(
+            number=item.number,
+            labels=tuple(note.labels),
+            term=note.term,
+            ipa=note.ipa,
+            variant=note.variant,
+            body=tuple(note.body),
+            marker_end=note.marker_end,
+        )
+
+
+class ResultUnitResponse(BaseModel):
+    """One reading unit. `translation` is only that unit's own text."""
+
+    start: int
+    end: int
+    original: str
+    translation: str | None = None
+    speaker: str | None = None
+    notes: tuple[ResultNoteResponse, ...] = ()
+    continues: bool
+    ends_paragraph: bool
+    lines: bool
+
+    @classmethod
+    def of_unit(cls, unit: LayoutUnit, text: str) -> ResultUnitResponse:
+        return cls(
+            start=unit.start,
+            end=unit.end,
+            original=text[unit.start:unit.end],
+            translation=unit.translation,
+            speaker=unit.speaker,
+            notes=tuple(ResultNoteResponse.of_note(item) for item in unit.notes),
+            continues=unit.continues,
+            ends_paragraph=unit.ends_paragraph,
+            lines=unit.lines,
+        )
+
+
 class ResultBlockResponse(BaseModel):
     """Original text and model assistance for a single stable book block."""
 
@@ -700,6 +764,8 @@ class ResultBlockResponse(BaseModel):
     regeneration_task: TaskResponse | None = None
     pronunciation_assistances: tuple[PronunciationOccurrenceResponse, ...] = ()
     correction_candidates: tuple[dict, ...] = ()
+    fragment_assistance: tuple[dict[str, Any], ...] = ()
+    units: tuple[ResultUnitResponse, ...] = ()
 
     @classmethod
     def of_block(
@@ -708,6 +774,7 @@ class ResultBlockResponse(BaseModel):
         *,
         regeneration_task: ProcessingTask | None = None,
         pronunciations: Sequence[PronunciationOccurrence] = (),
+        units: Sequence[LayoutUnit] = (),
     ) -> ResultBlockResponse:
         """Assembles result block or target fragment for regeneration."""
         result = summary.result
@@ -716,6 +783,12 @@ class ResultBlockResponse(BaseModel):
             correction_candidates=tuple(dict(c) for c in summary.correction_candidates),
             pronunciation_assistances=tuple(PronunciationOccurrenceResponse.of_occurrence(item)
                 for item in pronunciations if item.block_id == summary.block.id),
+            fragment_assistance=(
+                tuple(asdict(item) for item in result.fragment_assistances)
+                if result is not None
+                else ()
+            ),
+            units=tuple(ResultUnitResponse.of_unit(unit, summary.block.text) for unit in units),
             block_id=summary.block.id,
             section_id=summary.block.section_id,
             chapter_number=summary.chapter_number,
@@ -761,44 +834,6 @@ class ResultBlockResponse(BaseModel):
         )
 
 
-class ResultGroupResponse(ResultBlockResponse):
-    """One exact source paragraph with the original computational members."""
-
-    source_language: str = "en"
-    member_block_ids: tuple[str, ...]
-    member_blocks: tuple[ResultBlockResponse, ...]
-    fragment_assistance: tuple[dict[str, Any], ...] = ()
-
-    @property
-    def display_groups(self) -> tuple[tuple[ResultBlockResponse, ...], ...]:
-        """Balanced presentation groups for a fully translated split paragraph."""
-        if len(self.member_blocks) <= 1 or not all(
-            member.translated_text is not None for member in self.member_blocks
-        ):
-            return (self.member_blocks,)
-        return group_paragraph_fragments(
-            self.member_blocks, text_of=lambda member: member.original_text
-        )
-
-    @classmethod
-    def of_group(cls, summaries: Sequence[ResultBlockSummary], *, tasks: Mapping[str, ProcessingTask] | None = None,
-                 source_language: str = "en",
-                 block_id: str | None = None,
-                 pronunciations: Sequence[PronunciationOccurrence] = ()) -> ResultGroupResponse:
-        from dataclasses import asdict
-
-        members = tuple(ResultBlockResponse.of_block(summary,
-            regeneration_task=(tasks or {}).get(summary.block.id), pronunciations=pronunciations) for summary in summaries)
-        selected = next((member for member in members if member.block_id == block_id), members[0])
-        data = selected.model_dump()
-        data["pronunciation_assistances"] = tuple(item for member in members for item in member.pronunciation_assistances)
-        data["original_text"] = "".join(summary.block.text for summary in summaries)
-        return cls(**data, source_language=source_language,
-                   member_block_ids=tuple(member.block_id for member in members), member_blocks=members,
-                   fragment_assistance=tuple(asdict(item) for summary in summaries if summary.result is not None
-                                             for item in summary.result.fragment_assistances))
-
-
 _READING_SUPPORT_COVERAGE_LABELS = {
     'not_evaluated': 'Поддержка не оценена',
     'pending': 'Проверка поддержки ещё не завершена',
@@ -822,7 +857,6 @@ class ResultChapterResponse(BaseModel):
     title: str
     is_notes: bool = False
     blocks: tuple[ResultBlockResponse, ...] = ()
-    groups: tuple[ResultGroupResponse, ...] = ()
     before_you_read: tuple[BeforeYouReadResponse, ...] = ()
     support_coverage: str = 'not_evaluated'
     support_coverage_label: str = _READING_SUPPORT_COVERAGE_LABELS['not_evaluated']
@@ -830,7 +864,6 @@ class ResultChapterResponse(BaseModel):
 
     @classmethod
     def of_chapter(cls, chapter: ResultChapterSummary, *,
-                   source_language: str = "en",
                    pronunciations: Sequence[PronunciationOccurrence] = ()) -> ResultChapterResponse:
         return cls(
             section_id=chapter.section_id,
@@ -842,9 +875,8 @@ class ResultChapterResponse(BaseModel):
             support_coverage=chapter.support_coverage,
             support_coverage_label=_READING_SUPPORT_COVERAGE_LABELS[chapter.support_coverage],
             unresolved_count=chapter.unresolved_count,
-            blocks=tuple(ResultBlockResponse.of_block(block, pronunciations=pronunciations) for block in chapter.blocks),
-            groups=tuple(ResultGroupResponse.of_group(
-                (block,), source_language=source_language, pronunciations=pronunciations
+            blocks=tuple(ResultBlockResponse.of_block(
+                block, pronunciations=pronunciations, units=reading_units(chapter, block.block.id),
             ) for block in chapter.blocks),
         )
 
@@ -902,11 +934,7 @@ class BookResultResponse(BaseModel):
             ),
             warnings=BookWarningsResponse.of_warnings(result.warnings),
             chapters=tuple(
-                ResultChapterResponse.of_chapter(
-                    chapter,
-                    source_language=result.book.source_language,
-                    pronunciations=pronunciations,
-                )
+                ResultChapterResponse.of_chapter(chapter, pronunciations=pronunciations)
                 for chapter in result.chapters
             ),
         )
@@ -1129,6 +1157,8 @@ __all__ = [
     "ResetProcessingResponse",
     "ResultBlockResponse",
     "ResultChapterResponse",
+    "ResultNoteResponse",
+    "ResultUnitResponse",
     "ResultWarningResponse",
     "ServerConfigResponse",
     "StorageConfigResponse",
