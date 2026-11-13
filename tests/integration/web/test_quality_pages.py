@@ -424,14 +424,15 @@ def test_partial_book_result_and_book_overview_avoid_loading_unaffected_chapter_
     SqlAlchemyBlockResultRepository.get_many = _spy_get_many  # type: ignore[method-assign]
     SqlAlchemyBlockResultRepository.list_for_run = _spy_list_for_run  # type: ignore[method-assign]
     try:
-        # 1. Partial `book_result` loads full results only for target_block_ids (`b_ch2_1`), not Chapter 1
+        # 1. Partial `book_result` loads full results only for target_block_ids (`b_ch2_1`), not Chapter 1.
+        # The reading layout then loads the whole run once through `build_layout_inputs`.
         partial = book_result(
             application.unit_of_work,
             scenario.book_id,
             include_quality=False,
             block_ids=(b_ch2_1,),
         )
-        assert list_for_run_calls == 0
+        assert list_for_run_calls == 1
         assert get_many_calls == [(b_ch2_1,)]
         assert partial.prior_pronunciation_hints[("colonel", "uk", "ˈkɜː.nəl")] == "ph-ch1"
 

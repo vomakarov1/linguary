@@ -19,11 +19,15 @@ from dataclasses import dataclass, field, replace
 
 from linguary.application.context_builder import textual_blocks
 from linguary.application.errors import ApplicationError
+from linguary.application.layout.book import (
+    ChapterLayout,
+    build_book_layout,
+    build_layout_inputs,
+)
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
-    BlockType,
     BookImportWarning,
     BookStatus,
     CanonicalDocument,
@@ -250,24 +254,6 @@ class ResultBlockSummary:
     correction_candidates: tuple[Mapping, ...] = ()
 
 
-def result_groups(blocks: Sequence[ResultBlockSummary]) -> tuple[tuple[ResultBlockSummary, ...], ...]:
-    """Group adjacent source parts without joining unrelated occurrences."""
-    groups: list[list[ResultBlockSummary]] = []
-    for block in blocks:
-        key = block.block.attributes.get("split_group")
-        if (
-            groups
-            and key
-            and block.block.type in (BlockType.PARAGRAPH, BlockType.QUOTE)
-            and groups[-1][-1].block.type is block.block.type
-            and groups[-1][-1].block.attributes.get("split_group") == key
-        ):
-            groups[-1].append(block)
-        else:
-            groups.append([block])
-    return tuple(tuple(group) for group in groups)
-
-
 @dataclass(frozen=True, slots=True)
 class BeforeYouReadSummary:
     """Chapter preparation after applying its existing reader presentation policy."""
@@ -288,6 +274,7 @@ class ResultChapterSummary:
     before_you_read: tuple[BeforeYouReadSummary, ...] = ()
     support_coverage: str = 'not_evaluated'
     unresolved_count: int = 0
+    layout: ChapterLayout | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -846,8 +833,10 @@ def book_result(
 ) -> BookResultSummary:
     """Processing results by block in stable original document order.
 
-    Document, plan, and results are read in a single transaction: book warnings are
-    derived from the same dataset without a secondary query.
+    Document, plan, and results are read in one transaction. The reading layout
+    is projected after that transaction closes, through `build_layout_inputs`,
+    because the loader opens a transaction of its own. No document, or
+    `include_chapters` false, leaves `layout` unset and does not call the loader.
     """
     from linguary.domain.book_conditions import WorkStateError
 
@@ -1090,6 +1079,11 @@ def book_result(
             prior_pronunciation_hints=prior_pronunciation_hints,
             warnings=BookWarnings(),
         )
+    chapter_layouts: Mapping[str, ChapterLayout] = {}
+    if document is not None and selected_sections:
+        chapter_layouts = build_book_layout(
+            build_layout_inputs(unit_of_work, book_id)
+        ).chapters
     treatments = {
         item.block_id: item.treatment
         for analysis in analyses
@@ -1116,6 +1110,7 @@ def book_result(
                 before_you_read=_result_before_you_read(analysis) if not is_notes_or_front else (),
                 support_coverage=coverage,
                 unresolved_count=unresolved_count,
+                layout=chapter_layouts.get(section.id),
                 blocks=tuple(
                     ResultBlockSummary(
                         block=block,
@@ -1335,7 +1330,7 @@ def _correction_candidates_projection(transaction, book_id, run, *, document, an
         if not candidate_is_current(transaction, sections[candidate.section_id], candidate):
             continue
         payload = candidate.payload
-        allowed = ('translated_text', 'glossary_hints', 'language_notes')
+        allowed = ('translated_text', 'glossary_hints', 'language_notes', 'segment_translations')
         projected.append(dict(candidate_id=candidate.candidate_id, block_id=candidate.block_id,
             state=candidate.state, proposal_sha256=candidate.proposal_sha256, input_sha256=candidate.input_sha256,
             original_text=payload['original']['text'],
@@ -1350,30 +1345,26 @@ def _correction_candidates_projection(transaction, book_id, run, *, document, an
 def result_block(
     unit_of_work: UnitOfWork, book_id: str, block_id: str
 ) -> tuple[ResultBlockSummary, ...]:
-    """Read only the adjacent group containing the requested block."""
+    """Read the one requested block."""
     with _read_transaction(unit_of_work) as transaction:
         _book(transaction, book_id)
         document = transaction.documents.get(book_id)
         located = _locate_block(document, block_id)
         if located is None:
             raise ResultBlockNotFoundError(f"блока {block_id} нет в книге {book_id}")
-        chapter_number, section_id, _ = located
-        section = next(section for section in document.ordered_sections if section.id == section_id)
-        groups = result_groups(tuple(ResultBlockSummary(block=b, chapter_number=chapter_number)
-                                     for b in section.ordered_blocks))
-        members = next(group for group in groups if any(b.block.id == block_id for b in group))
+        chapter_number, section_id, block = located
         analysis = transaction.analyses.get_for_section(book_id, section_id)
         run = transaction.runs.active_for_book(book_id)
         candidates = _correction_candidates_projection(
             transaction, book_id, run, document=document, analyses=(analysis,), section_id=section_id,
         )
-        return tuple(ResultBlockSummary(
-            block=member.block,
+        return (ResultBlockSummary(
+            block=block,
             chapter_number=chapter_number,
-            treatment=_planned_treatment(analysis, member.block.id),
-            result=transaction.results.get(run.id, member.block.id) if run is not None else None,
-            correction_candidates=tuple(c for c in candidates if c['block_id'] == member.block.id),
-        ) for member in members)
+            treatment=_planned_treatment(analysis, block.id),
+            result=transaction.results.get(run.id, block.id) if run is not None else None,
+            correction_candidates=tuple(c for c in candidates if c['block_id'] == block.id),
+        ),)
 
 
 def _warnings_of(

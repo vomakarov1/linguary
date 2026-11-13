@@ -444,9 +444,10 @@ def test_book_result_without_quality_skips_quality_projection_queries() -> None:
         tasks=SimpleNamespace(list_for_book=lambda book_id: ()),
         runs=SimpleNamespace(active_for_book=lambda book_id: None),
         results=SimpleNamespace(list_for_run=lambda run_id: ()),
+        glossary=SimpleNamespace(list_for_book=lambda book_id: ()),
         llm_calls=SimpleNamespace(list_for_book=_unexpected),
         work=SimpleNamespace(
-            latest_conditions=_unexpected,
+            latest_conditions=lambda book_id: None,
             list_roots=_unexpected,
             list_reviews=_unexpected,
             get_binding=lambda kind, entity_id: None,

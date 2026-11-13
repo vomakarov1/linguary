@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import ValidationError
 
-from linguary.application.book_overview import book_result, result_groups, ResultBlockNotFoundError
+from linguary.application.book_overview import book_result, ResultBlockNotFoundError
 from linguary.application.pronunciation_projection import project_pronunciations
 from linguary.application.use_cases.retry_task import RetryTaskCommand
 from linguary.application.use_cases.resolve_correction_candidate import (
@@ -61,18 +61,16 @@ def get_book_result(
     if not header_only and result_filter == "pending_corrections":
         filtered_chapters = []
         for chapter in summary.chapters:
-            kept_groups = [
-                group
-                for group in result_groups(chapter.blocks)
+            kept_blocks = tuple(
+                block
+                for block in chapter.blocks
                 if any(
                     candidate.get("state") == "awaiting_human"
-                    for member in group
-                    for candidate in member.correction_candidates
+                    for candidate in block.correction_candidates
                 )
-            ]
-            if not kept_groups:
+            )
+            if not kept_blocks:
                 continue
-            kept_blocks = tuple(member for group in kept_groups for member in group)
             filtered_chapters.append(replace(chapter, blocks=kept_blocks))
         effective_summary = replace(summary, chapters=tuple(filtered_chapters))
     response = BookResultResponse.of_result(effective_summary)
@@ -303,15 +301,13 @@ def _result_block_responses(
         except TypeError:
             snapshot = book_result(application.unit_of_work, book_id)
     requested_set = set(requested_ids)
-    selected_groups = []
+    selected_blocks = []
     found_ids: set[str] = set()
     for chapter in snapshot.chapters:
-        for group in result_groups(chapter.blocks):
-            matching_ids = [member.block.id for member in group
-                            if member.block.id in requested_set]
-            if matching_ids:
-                selected_groups.append((group, matching_ids[0]))
-                found_ids.update(matching_ids)
+        for block in chapter.blocks:
+            if block.block.id in requested_set:
+                selected_blocks.append(block)
+                found_ids.add(block.block.id)
     missing_ids = requested_set - found_ids
     if missing_ids:
         missing_id = next(block_id for block_id in requested_ids if block_id in missing_ids)
@@ -336,10 +332,10 @@ def _result_block_responses(
     except TypeError:
         pronunciations = project_pronunciations(blocks_seq, results_map)
     return tuple(
-        ResultGroupResponse.of_group(group, tasks=tasks, block_id=block_id,
+        ResultGroupResponse.of_group((block,), tasks=tasks, block_id=block.block.id,
                                       source_language=snapshot.book.source_language,
                                       pronunciations=pronunciations)
-        for group, block_id in selected_groups
+        for block in selected_blocks
     )
 
 

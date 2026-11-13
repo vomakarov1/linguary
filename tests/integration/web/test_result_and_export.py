@@ -388,7 +388,7 @@ def test_batch_result_block_fragment_uses_one_snapshot_for_requested_groups(
     assert response.status_code == 200
     tree = html.fromstring(response.text)
     assert tree.get("data-result-blocks") is not None
-    assert len(tree.xpath('./article[@data-result-block]')) == 2
+    assert len(tree.xpath('./article[@data-result-block]')) == 3
     returned_ids = set(tree.xpath('.//form[@data-regenerate-form]/@data-block-id'))
     assert returned_ids == set(block_ids[:3])
     assert len(snapshots) == len(projections) == 1
@@ -680,24 +680,28 @@ def _split_result_scenario(application):
 
 
 def test_result_groups_only_adjacent_parts_and_keeps_exact_occurrences(client, application):
-    scenario, results, original = _split_result_scenario(application)
+    scenario, _, original = _split_result_scenario(application)
     ids = scenario.block_ids()
+    texts = [block.text for block in scenario.section().ordered_blocks]
     body = client.get(f"/books/{scenario.book_id}/result").json()
     groups = body["chapters"][0]["groups"]
-    assert [group["member_block_ids"] for group in groups] == [list(ids[:2]), [ids[2]], [ids[3]]]
-    assert groups[0]["original_text"] == original
+    assert [group["member_block_ids"] for group in groups] == [[block_id] for block_id in ids]
+    assert [group["original_text"] for group in groups] == texts
+    assert original not in {group["original_text"] for group in groups}
     assert groups[0]["fragment_assistance"][0]["anchors"][0] == {
         "block_id": ids[0], "start": 2, "end": 13, "quote": "Hard phrase"}
-    assert groups[0]["fragment_assistance"][1]["anchors"][0] == {
+    assert groups[1]["fragment_assistance"][0]["anchors"][0] == {
         "block_id": ids[1], "start": 17, "end": 28, "quote": "Hard phrase"}
+    assert groups[2]["fragment_assistance"] == []
+    assert groups[3]["fragment_assistance"] == []
     html = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
-    assert html.count('class="fragment-assistance"') == 1
-    assert html.index(original) < html.index('class="fragment-assistance"')
-    for block_id in ids[:2]:
+    assert html.count('class="fragment-assistance"') == 2
+    assert html.index(texts[0]) < html.index('class="fragment-assistance"')
+    for block_id, group in zip(ids[:2], groups[:2], strict=True):
         polled = client.get(f"/books/{scenario.book_id}/blocks/{block_id}")
-        assert polled.json()["member_block_ids"] == list(ids[:2])
-        assert polled.json()["original_text"] == original
-        assert polled.json()["fragment_assistance"] == groups[0]["fragment_assistance"]
+        assert polled.json()["member_block_ids"] == [block_id]
+        assert polled.json()["original_text"] == group["original_text"]
+        assert polled.json()["fragment_assistance"] == group["fragment_assistance"]
 
 
 def test_group_marks_unresolved_help_without_changing_the_source(client, application):
@@ -706,9 +710,11 @@ def test_group_marks_unresolved_help_without_changing_the_source(client, applica
     with application.unit_of_work.transaction() as uow:
         uow.results.replace_results(scenario.run_id, [results[0], replace(results[1], fragment_assistances=(item,)), *results[2:]])
     response = client.get(f"/books/{scenario.book_id}/blocks/{scenario.block_ids()[1]}")
-    assert response.json()["original_text"] == original
-    assert response.json()["fragment_assistance"][1]["kind"] == "unresolved"
-    assert response.json()["fragment_assistance"][1]["text"] is None
+    assert response.json()["member_block_ids"] == [scenario.block_ids()[1]]
+    assert response.json()["original_text"] == scenario.section().ordered_blocks[1].text
+    assert response.json()["original_text"] != original
+    assert response.json()["fragment_assistance"][0]["kind"] == "unresolved"
+    assert response.json()["fragment_assistance"][0]["text"] is None
     html = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
     assert 'data-kind="unresolved"' in html
     assert "Трудность пока не объяснена" in html
@@ -720,10 +726,15 @@ def test_group_polling_preserves_siblings_during_member_regeneration(client, app
     ids = scenario.block_ids()
     continue_legacy(application, scenario.book_id)
     headers = {"accept": "text/html", "x-linguary-fragment": "result-block"}
+    own_text = scenario.section().ordered_blocks[1].text
     pending = client.post(f"/books/{scenario.book_id}/blocks/{ids[1]}/regenerate", headers=headers)
     assert pending.status_code == 200, pending.text
-    assert original in pending.text
+    assert own_text in pending.text
+    assert original not in pending.text
+    assert f'id="block-{ids[0]}"' not in pending.text
     assert pending.text.count('class="fragment-assistance"') == 1
+    assert "Help 1" in pending.text
+    assert "Help 0" not in pending.text
     assert 'data-active-task="true"' in pending.text
     with application.unit_of_work.transaction() as uow:
         task = next(task for task in uow.tasks.list_for_book(scenario.book_id)
@@ -733,23 +744,27 @@ def test_group_polling_preserves_siblings_during_member_regeneration(client, app
         if not failed:
             updated = replace(results[1], fragment_assistances=(replace(results[1].fragment_assistances[0], text="Updated help"),))
             uow.results.replace_results(scenario.run_id, [results[0], updated, *results[2:]])
-    for block_id in ids[:2]:
+    helps = ("Help 0", "Help 1" if failed else "Updated help")
+    for index, block_id in enumerate(ids[:2]):
+        block_text = scenario.section().ordered_blocks[index].text
         response = client.get(f"/books/{scenario.book_id}/blocks/{block_id}", headers=headers)
         assert response.status_code == 200
-        assert original in response.text
+        assert block_text in response.text
+        assert original not in response.text
         assert 'data-active-task="true"' not in response.text
         assert response.text.count('class="fragment-assistance"') == 1
-        assert "Help 0" in response.text
-        assert ("Help 1" if failed else "Updated help") in response.text
-        assert all(f'id="block-{member}"' in response.text for member in ids[:2])
+        assert helps[index] in response.text
+        assert helps[1 - index] not in response.text
+        assert f'id="block-{block_id}"' in response.text
+        assert f'id="block-{ids[1 - index]}"' not in response.text
         group = client.get(f"/books/{scenario.book_id}/blocks/{block_id}").json()
-        assert group["member_block_ids"] == list(ids[:2])
-        assert group["original_text"] == original
-        assert [item["anchors"] for item in group["fragment_assistance"]] == [
-            [{"block_id": anchor.block_id, "start": anchor.start, "end": anchor.end,
-              "quote": anchor.quote} for anchor in result.fragment_assistances[0].anchors]
-            for result in results[:2]
-        ]
+        assert group["member_block_ids"] == [block_id]
+        assert group["original_text"] == block_text
+        anchors = results[index].fragment_assistances[0].anchors
+        assert [item["anchors"] for item in group["fragment_assistance"]] == [[
+            {"block_id": anchor.block_id, "start": anchor.start, "end": anchor.end,
+             "quote": anchor.quote} for anchor in anchors
+        ]]
 
 
 @pytest.fixture
@@ -813,10 +828,13 @@ def test_result_tasks_are_loaded_once_without_per_member_reads(
         members = [member for group in groups for member in group['member_blocks']]
         tasks = {member['block_id']: member['regeneration_task'] for member in members}
         assert tasks[ids[0]]['status'] == 'pending'
-        assert tasks[ids[1]]['status'] == 'failed'
-        if fragment == 'book':
-            assert tasks[ids[2]] is None
-            assert tasks[ids[3]] is None
+        if fragment == 'block':
+            assert set(tasks) == {ids[0]}
+        else:
+            assert tasks[ids[1]]['status'] == 'failed'
+            if fragment == 'book':
+                assert tasks[ids[2]] is None
+                assert tasks[ids[3]] is None
 
 
 def _pronunciation_results(application):
@@ -1061,9 +1079,10 @@ def test_result_groups_fragment_keeps_group_members_and_tasks(client, applicatio
             task_type=TaskType.REGENERATE_BLOCK, status=state,
             last_error=failed_task(scenario).last_error if state is TaskStatus.FAILED else None))
     tree = _groups_tree(client, scenario)
-    assert len(tree.xpath('.//*[@data-result-block]')) == 3
+    assert len(tree.xpath('.//*[@data-result-block]')) == 4
     assert len(tree.xpath('.//*[@data-active-task="true"]')) == 2
-    assert tree.xpath('.//*[@class="source"]')[0].text == original
+    assert tree.xpath('.//*[@class="source"]')[0].text == scenario.section().ordered_blocks[0].text
+    assert original not in tree.text_content()
     assert tree.xpath('//form[@data-regenerate-form]/@action') == [
         f'/books/{scenario.book_id}/blocks/{identifier}/regenerate' for identifier in ids]
     assert tree.xpath('//form[@data-regenerate-form]/@data-block-id') == list(ids)
@@ -2032,7 +2051,7 @@ def test_result_header_fragment_preserves_epub_ready_and_pause_without_building_
 ) -> None:
     from lxml import html
     from linguary.application import book_overview as overview_module
-    from linguary.application.book_overview import book_result, result_groups
+    from linguary.application.book_overview import book_result
     from linguary.web.routes import result as result_route
 
     scenario = store_book(
@@ -2044,39 +2063,6 @@ def test_result_header_fragment_preserves_epub_ready_and_pause_without_building_
     src = application.paths.source_epub(scenario.book_id)
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_bytes(b"synthetic header epub")
-
-    section = scenario.section(0)
-    b0, b1 = section.ordered_blocks
-    q0 = replace(
-        b0,
-        type=BlockType.QUOTE,
-        attributes={"tag": "blockquote", "split_group": "/body/blockquote[1]", "split_index": "1", "split_total": "2"},
-    )
-    q1 = replace(
-        b1,
-        type=BlockType.QUOTE,
-        attributes={"tag": "blockquote", "split_group": "/body/blockquote[1]", "split_index": "2", "split_total": "2"},
-    )
-    p_other = DocumentBlock.create(
-        document_id=scenario.book_id,
-        section_id=section.id,
-        type=BlockType.PARAGRAPH,
-        order=2,
-        text="Trailing paragraph with same split_group key.",
-        source_reference=SourceReference(resource_path="ch1.xhtml", structural_path="/body/p[1]"),
-        attributes={"tag": "p", "split_group": "/body/blockquote[1]"},
-    )
-    grouped = result_groups(
-        (
-            ResultBlockSummary(block=q0, chapter_number=1),
-            ResultBlockSummary(block=q1, chapter_number=1),
-            ResultBlockSummary(block=p_other, chapter_number=1),
-        )
-    )
-    assert [[item.block.id for item in group] for group in grouped] == [
-        [q0.id, q1.id],
-        [p_other.id],
-    ]
 
     with application.unit_of_work.transaction() as tx:
         rec = tx.books.get(scenario.book_id)

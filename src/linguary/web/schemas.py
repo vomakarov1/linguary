@@ -29,7 +29,6 @@ from linguary.application.book_overview import (
     PlanBlockSummary,
     ProcessingPlanSummary,
     ResultBlockSummary,
-    result_groups,
     ResultChapterSummary,
     ResultWarningEntry,
     RunningChapter,
@@ -845,8 +844,8 @@ class ResultChapterResponse(BaseModel):
             unresolved_count=chapter.unresolved_count,
             blocks=tuple(ResultBlockResponse.of_block(block, pronunciations=pronunciations) for block in chapter.blocks),
             groups=tuple(ResultGroupResponse.of_group(
-                group, source_language=source_language, pronunciations=pronunciations
-            ) for group in result_groups(chapter.blocks)),
+                (block,), source_language=source_language, pronunciations=pronunciations
+            ) for block in chapter.blocks),
         )
 
 
