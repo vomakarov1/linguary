@@ -1053,7 +1053,8 @@ class CorrectChapter:
                 quotes = tuple(anchor.quote for anchor in assistance.anchors)
                 if multi_segment:
                     translation_duplicate = any(
-                        translation_covers_anchor(candidate, anchor, source)
+                        anchor.block_id == candidate.block_id
+                        and translation_covers_anchor(candidate, anchor, source)
                         for anchor in assistance.anchors
                     )
                 else:

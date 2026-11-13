@@ -310,7 +310,8 @@ class TranslationCall:
                     assistance = resolve_fragment_assistances(context.content_plan, mapped, results, call_source_texts,
                         owner_block_ids=owners, before_you_read=context.before_you_read,
                         glossary_entries=() if resolved_glossary is None else resolved_glossary.mandatory_entries,
-                        validators_version=validators_version)
+                        validators_version=validators_version,
+                        blocks=tuple(item.block for item in unit.items))
                     results = tuple(replace(r, fragment_assistances=assistance[r.block_id]) for r in results)
                 elif context.content_plan is not None:
                     owners = tuple(r.block_id for r in results)

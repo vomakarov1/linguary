@@ -491,6 +491,7 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
 
 def resolve_fragment_assistances(plan, payload, results, source_texts, *, owner_block_ids, before_you_read=(), glossary_entries=(), validators_version=1, blocks=()):
     """Bind structural assistance to the accepted plan; this is not a language assessment."""
+    from linguary.application.correction import translation_covers_anchor
     from linguary.domain.learning import FragmentAssistance
     owners = set(owner_block_ids)
     if validators_version == 4:
@@ -538,15 +539,22 @@ def resolve_fragment_assistances(plan, payload, results, source_texts, *, owner_
             occurrences.add(occurrence)
         result = by_owner[difficulty.owner_block_id]
         anchor_quotes = tuple(without_footnote_markers(a.quote).strip() for a in difficulty.anchors)
-        owner_block = blocks_by_id.get(difficulty.owner_block_id)
-        if owner_block is not None and len(owner_block.segments) >= 2:
-            from linguary.application.correction import translation_covers_anchor
-            translation_duplicate = any(
-                translation_covers_anchor(result, anchor, owner_block)
-                for anchor in difficulty.anchors
-            )
-        else:
-            translation_duplicate = bool(result.translated_text)
+        translation_duplicate = False
+        for anchor in difficulty.anchors:
+            anchor_block = blocks_by_id.get(anchor.block_id)
+            anchor_result = by_owner.get(anchor.block_id)
+            if (
+                anchor_block is not None
+                and len(anchor_block.segments) >= 2
+                and anchor_result is not None
+            ):
+                if translation_covers_anchor(anchor_result, anchor, anchor_block):
+                    translation_duplicate = True
+                    break
+            elif anchor.block_id == difficulty.owner_block_id:
+                translation_duplicate = bool(result.translated_text)
+                if translation_duplicate:
+                    break
         if (translation_duplicate
                 or any(_matches_full_anchor(hint.original, anchor_quotes) for hint in result.glossary_hints)
                 or any(_matches_full_anchor(note.original_excerpt, anchor_quotes) for note in result.language_notes)

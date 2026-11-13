@@ -71,8 +71,10 @@ def merge_corrected_segments(previous, returned) -> tuple[SegmentTranslationResp
 
 
 def translation_covers_anchor(result, anchor, block) -> bool:
-    """True when the anchor starts inside a TRANSLATE span of a multi-segment block."""
-    segments = tuple(getattr(block, 'segments', ()) or ()) if block is not None else ()
+    """True when the anchor starts inside a TRANSLATE span of this block."""
+    if block is None or getattr(anchor, 'block_id', None) != block.id:
+        return False
+    segments = tuple(getattr(block, 'segments', ()) or ())
     treatments = tuple(getattr(result, 'segment_treatments', ()) or ())
     if len(segments) >= 2 and len(treatments) == len(segments):
         for span, treatment in zip(segments, treatments, strict=True):

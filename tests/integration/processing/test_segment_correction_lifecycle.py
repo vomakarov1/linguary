@@ -521,6 +521,88 @@ def test_assistance_allowed_in_untranslated_segment_of_mixed_block() -> None:
         bind(plain_block, hinted_result, len(_FIRST), len(_SOURCE), _SECOND.strip())
 
 
+def test_foreign_anchor_is_not_judged_by_the_owner_span() -> None:
+    """Якорь блока B не покрыт переводом A, даже если смещение попадает в TRANSLATE-промежуток A."""
+    owner, owner_result = _mixed_block(BlockTreatment.READ_AS_IS)
+    other = _paragraph(1, _SOURCE, _spans())
+    other_result = _result(
+        other,
+        (None, _BETA),
+        (BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+    )
+    own_anchor = SourceAnchor(owner.id, len(_FIRST), len(_SOURCE), _SECOND)
+    foreign_in_owner_translate = SourceAnchor(other.id, 0, len("Alpha"), "Alpha")
+    assistance = FragmentAssistance(
+        "d-span",
+        ("p1",),
+        "sentence_rephrase",
+        "Короткое пояснение смысла.",
+        (own_anchor, foreign_in_owner_translate),
+    )
+    section = _section(owner)
+    inputs = _inputs(
+        section,
+        _analysis(
+            section,
+            (
+                TreatmentPlanItem(
+                    owner.id,
+                    BlockTreatment.TRANSLATE,
+                    (BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+                    sentence_indexes=(0, 1),
+                ),
+            ),
+        ),
+        {owner.id: replace(owner_result, fragment_assistances=(assistance,))},
+        english_help=True,
+    )
+    kept, = _handler(inputs)._candidates(
+        None,
+        inputs,
+        ChapterCorrectionResponse(blocks=(UnchangedBlockResponse(owner.id),)),
+    )
+    assert {anchor.block_id for anchor in kept.fragment_assistances[0].anchors} == {owner.id, other.id}
+
+    def bind(anchors: tuple[SourceAnchor, ...]):
+        payload = TranslationResultResponse(
+            fragment_assistances=(
+                FragmentAssistanceResponse(
+                    "d-span",
+                    ("p1",),
+                    "sentence_rephrase",
+                    "Короткое пояснение смысла.",
+                ),
+            )
+        )
+        return resolve_fragment_assistances(
+            ContentPlan(
+                difficulties=(
+                    Difficulty(
+                        "d-span",
+                        anchors,
+                        owner.id,
+                        "idiom",
+                        "critical",
+                        "explanation",
+                        (RequiredPoint("p1", "Смысл фразы"),),
+                    ),
+                )
+            ),
+            payload,
+            (owner_result, other_result),
+            {owner.id: owner.text, other.id: other.text},
+            owner_block_ids=(owner.id,),
+            blocks=(owner, other),
+        )
+
+    bound = bind((own_anchor, foreign_in_owner_translate))
+    assert {anchor.block_id for anchor in bound[owner.id][0].anchors} == {owner.id, other.id}
+
+    foreign_in_own_translate = SourceAnchor(other.id, len(_FIRST), len(_SOURCE), _SECOND)
+    with pytest.raises(ResultValidationError, match="дублирует"):
+        bind((own_anchor, foreign_in_own_translate))
+
+
 def _stored(unit_of_work: SqlAlchemyUnitOfWork):
     with unit_of_work.transaction() as tx:
         return tx.results.list_for_run(RUN_ID)
