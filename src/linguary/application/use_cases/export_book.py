@@ -9,7 +9,11 @@ rules and decisions based on the external validator's report.
 Export operates in two modes (PRD § 20). Full mode builds the book with translations, vocabulary
 hints, and learning materials, and is available only for books without mandatory unfinished tasks.
 `structure_only` mode builds the same book without processing results: it verifies the technical
-`import -> export` cycle without LLM calls and serves as a CLI diagnostic.
+`import -> export` cycle without LLM calls and serves as a CLI diagnostic. Both modes pass a
+reading layout. It is projected after the export transaction closes, because the shared loader
+opens a transaction of its own. `structure_only` drops processing results from that projection,
+so translations and help are absent, while source units, analyses, and glossary concepts remain.
+Full export projects the results the readiness loader returned.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from linguary.application.errors import ApplicationError
+from linguary.application.layout.book import BookLayout, build_book_layout, build_layout_inputs
 from linguary.application.ports.epub import (
     EpubWriteRequest,
     EpubWriter,
@@ -154,6 +159,7 @@ class ExportBook:
                 block_results=plan.block_results,
                 learning_materials=plan.learning_materials,
                 verified_body_sections=plan.verified_body_sections,
+                layout=plan.layout,
             )
         )
         validation = self._validate(exported.path, command)
@@ -236,7 +242,11 @@ class ExportBook:
         return latest
 
     def _plan(self, command: ExportBookCommand) -> _ExportPlan:
-        """Reads everything needed by the exporter in a single short transaction."""
+        """Reads exporter inputs, then projects the reading layout.
+
+        Export rows are read in one short transaction. The layout loader opens
+        its own transaction only after that one has closed.
+        """
         with self._unit_of_work.transaction() as transaction:
             if command.mode is ExportMode.STRUCTURE_ONLY:
                 book = transaction.books.get(command.book_id)
@@ -249,31 +259,47 @@ class ExportBook:
                     raise ExportBookError(
                         f"книга {command.book_id} не импортирована: экспортировать нечего"
                     )
-                return _ExportPlan(
+                plan = _ExportPlan(
                     document=document,
                     stored_resource_paths=transaction.documents.stored_resource_paths(
                         command.book_id
                     ),
                     source_epub_path=book.source_epub_path,
                 )
-            book, document, results, analyses = self._load_validated_export_inputs(
-                transaction, command.book_id
-            )
-            return _ExportPlan(
-                document=document,
-                stored_resource_paths=transaction.documents.stored_resource_paths(
-                    command.book_id
-                ),
-                source_epub_path=book.source_epub_path,
-                block_results={result.block_id: result for result in results},
-                learning_materials=_learning_materials(
+            else:
+                book, document, results, analyses = self._load_validated_export_inputs(
+                    transaction, command.book_id
+                )
+                plan = _ExportPlan(
                     document=document,
-                    analyses=analyses,
-                    results=results,
-                ),
-                verified_body_sections=frozenset(a.section_id for a in analyses
-                    if a.content_plan is not None and a.content_plan.version == 3),
-            )
+                    stored_resource_paths=transaction.documents.stored_resource_paths(
+                        command.book_id
+                    ),
+                    source_epub_path=book.source_epub_path,
+                    block_results={result.block_id: result for result in results},
+                    learning_materials=_learning_materials(
+                        document=document,
+                        analyses=analyses,
+                        results=results,
+                    ),
+                    verified_body_sections=frozenset(a.section_id for a in analyses
+                        if a.content_plan is not None and a.content_plan.version == 3),
+                )
+        return replace(plan, layout=self._reading_layout(command, plan))
+
+    def _reading_layout(self, command: ExportBookCommand, plan: _ExportPlan) -> BookLayout:
+        """Project the book after the export transaction has closed.
+
+        The shared loader opens its own transaction. A call inside `_plan`'s
+        transaction raises `PersistenceError`. `structure_only` drops processing
+        results. Full export keeps the results the readiness loader returned.
+        """
+        inputs = build_layout_inputs(self._unit_of_work, command.book_id)
+        if command.mode is ExportMode.STRUCTURE_ONLY:
+            inputs = replace(inputs, results={})
+        else:
+            inputs = replace(inputs, results=dict(plan.block_results))
+        return build_book_layout(inputs)
 
     def _validate(self, path: str, command: ExportBookCommand) -> _ValidationOutcome:
         """Outcome of external validation of the assembled file (PRD § 20).
@@ -383,6 +409,7 @@ class _ExportPlan:
     block_results: Mapping[str, BlockProcessingResult] = field(default_factory=dict)
     learning_materials: Mapping[str, LearningMaterial] = field(default_factory=dict)
     verified_body_sections: frozenset[str] = frozenset()
+    layout: BookLayout | None = None
 
 
 @dataclass(frozen=True, slots=True)

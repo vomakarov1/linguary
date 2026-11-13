@@ -14,6 +14,12 @@ from linguary.adapters.epub import (
     EpubExportWriter,
     FilesystemEpubResourceStore,
 )
+from linguary.application.layout.book import (
+    BookLayout,
+    build_book_layout,
+    build_layout_inputs,
+)
+from linguary.application.ports.epub import EpubWriteRequest, ExportedBook
 from linguary.application.ports.export_validation import (
     ExportIssueSeverity,
     ExportValidationIssue,
@@ -31,11 +37,20 @@ from linguary.application.use_cases.export_book import (
 )
 from linguary.application.use_cases.import_book import ImportBook, ImportBookCommand
 from linguary.domain import (
+    BeforeYouReadEntry,
     BookStatus,
     BlockProcessingResult,
     BlockTreatment,
+    CanonicalDocument,
+    ChapterAnalysis,
+    ConceptType,
+    CoverageStatus,
+    DocumentBlock,
+    DocumentSection,
     ErrorType,
+    GlossaryCandidate,
     GlossarySnapshot,
+    LanguageNote,
     LLMSettingsSnapshot,
     ProcessingRun,
     ProcessingRunStatus,
@@ -43,6 +58,10 @@ from linguary.domain import (
     TaskError,
     TaskStatus,
     TaskType,
+    TermConcept,
+    TermStatus,
+    TermVariant,
+    TreatmentPlan,
 )
 
 BOOK_ID = "book-1"
@@ -57,6 +76,18 @@ class FakeValidator:
     def validate(self, request: ExportValidationRequest) -> ExportValidationReport:
         """Returns the prepared report regardless of book contents."""
         return replace(self.report, report_path=request.report_path)
+
+
+class RecordingWriter:
+    """Writer double: keeps the export request and does not assemble an EPUB."""
+
+    def __init__(self) -> None:
+        self.request: EpubWriteRequest | None = None
+
+    def write(self, request: EpubWriteRequest) -> ExportedBook:
+        """Records `request` and reports its target path as the assembled file."""
+        self.request = request
+        return ExportedBook(path=request.target_path)
 
 
 @pytest.fixture
@@ -77,11 +108,16 @@ def imported(unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path) -> str:
 
 
 def export(
-    unit_of_work: SqlAlchemyUnitOfWork, *, validator: FakeValidator | None = None
+    unit_of_work: SqlAlchemyUnitOfWork,
+    *,
+    validator: FakeValidator | None = None,
+    writer: RecordingWriter | None = None,
 ) -> ExportBook:
     """Export use case configured for the test store."""
     return ExportBook(
-        unit_of_work=unit_of_work, writer=EpubExportWriter(), validator=validator
+        unit_of_work=unit_of_work,
+        writer=writer if writer is not None else EpubExportWriter(),
+        validator=validator,
     )
 
 
@@ -491,4 +527,196 @@ def test_export_ensure_ready_and_downloadable_task_use_read_transaction(
     legacy_exporter.ensure_ready(BOOK_ID)
     assert legacy_exporter.downloadable_task(BOOK_ID).id == export_task.id
     assert fallback_calls == 2
+
+
+def _content_block(document: CanonicalDocument) -> tuple[DocumentSection, DocumentBlock]:
+    """First textual block of a content chapter in the imported fixture."""
+    for section in document.ordered_sections:
+        if document.is_front_matter(section) or section.is_notes_only:
+            continue
+        for block in textual_blocks(section):
+            if block.text.strip():
+                return section, block
+    raise AssertionError("в фикстуре нет текстового блока содержательной главы")
+
+
+def _translated_result(block: DocumentBlock) -> BlockProcessingResult:
+    """One full translation plus a language note, so the projection has help."""
+    spans = block.segment_spans
+    translations = tuple(f"перевод-{index}" for index in range(len(spans)))
+    excerpt = block.text.strip().split()[0]
+    return BlockProcessingResult(
+        block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text=" ".join(translations),
+        language_notes=(LanguageNote("note-layout", block.id, excerpt, "Пояснение к фрагменту."),),
+        segment_treatments=(BlockTreatment.TRANSLATE,) * len(spans),
+        segment_translations=translations,
+    )
+
+
+def _store_reading_sources(
+    unit_of_work: SqlAlchemyUnitOfWork, *, create_run: bool
+) -> tuple[str, str]:
+    """Store a translation, a note, a chapter analysis, and a glossary decision.
+
+    The book status is left untouched. `create_run` opens the active run when
+    the caller has not already made the book ready for full export.
+    """
+    with unit_of_work.transaction() as transaction:
+        document = transaction.documents.get(BOOK_ID)
+        assert document is not None
+        section, block = _content_block(document)
+        if create_run:
+            transaction.runs.add(
+                ProcessingRun(
+                    id="run-1",
+                    book_id=BOOK_ID,
+                    status=ProcessingRunStatus.ACTIVE,
+                    glossary_snapshot=GlossarySnapshot(),
+                    llm_settings_snapshot=LLMSettingsSnapshot(provider="fake", model="fake-1"),
+                )
+            )
+            transaction.results.replace_results(
+                "run-1",
+                [
+                    BlockProcessingResult(item.id, BlockTreatment.READ_AS_IS)
+                    for chapter in document.sections
+                    for item in textual_blocks(chapter)
+                    if item.id != block.id
+                ],
+            )
+        transaction.results.replace_results("run-1", [_translated_result(block)])
+        analysis_id = "analysis-layout"
+        transaction.analyses.save(
+            BOOK_ID,
+            ChapterAnalysis(
+                id=analysis_id,
+                section_id=section.id,
+                coverage_status=CoverageStatus.INCOMPLETE,
+                treatment_plan=TreatmentPlan(section.id),
+                translation_instructions="Держи имена.",
+                chapter_summary="Кратко.",
+                glossary_candidates=(
+                    GlossaryCandidate(
+                        id="candidate-layout",
+                        analysis_id=analysis_id,
+                        source_text="Wren Calder",
+                        type=ConceptType.PERSON,
+                        suggested_translation="Врен Колдер",
+                        confidence=0.9,
+                        model_flagged_review=False,
+                        requires_review=True,
+                        description="Путник.",
+                    ),
+                ),
+                before_you_read=(
+                    BeforeYouReadEntry("hedgerows", "Живые изгороди вдоль дороги."),
+                ),
+            ),
+        )
+        transaction.glossary.save(
+            TermConcept(
+                id="concept-layout",
+                book_id=BOOK_ID,
+                type=ConceptType.PERSON,
+                canonical_source_text="Wren Calder",
+                status=TermStatus.APPROVED,
+                variants=(
+                    TermVariant("concept-layout", "ru", "Рен Колдер", TermStatus.APPROVED),
+                ),
+            )
+        )
+    return section.id, block.id
+
+
+def _units(layout: BookLayout) -> tuple[object, ...]:
+    """Every reading unit in chapter order."""
+    return tuple(
+        unit
+        for chapter in layout.chapters.values()
+        for grouped in chapter.units.values()
+        for unit in grouped
+    )
+
+
+def test_export_passes_book_layout(
+    imported: str,
+    unit_of_work: SqlAlchemyUnitOfWork,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full export keeps readiness and passes the projection of the loader results."""
+    make_ready(unit_of_work)
+    section_id, block_id = _store_reading_sources(unit_of_work, create_run=False)
+    writer = RecordingWriter()
+    exporter = export(unit_of_work, writer=writer)
+    calls: list[str] = []
+    original = exporter._load_validated_export_inputs
+
+    def spy_load(transaction: object, book_id: str) -> object:
+        calls.append(book_id)
+        return original(transaction, book_id)
+
+    monkeypatch.setattr(exporter, "_load_validated_export_inputs", spy_load)
+
+    exporter(command(tmp_path))
+
+    assert calls == [BOOK_ID]
+    request = writer.request
+    assert request is not None
+    inputs = build_layout_inputs(unit_of_work, BOOK_ID)
+    assert dict(request.block_results) == dict(inputs.results)
+    assert isinstance(request.layout, BookLayout)
+    assert request.layout == build_book_layout(replace(inputs, results=dict(request.block_results)))
+    units = request.layout.chapters[section_id].units[block_id]
+    assert any(unit.translation for unit in units)
+    assert any(unit.notes for unit in units)
+    assert request.layout.who_is_who[0].translation == "Рен Колдер"
+    assert "before_you_read" in request.layout.features.sections
+    assert status_of(unit_of_work)[0] is BookStatus.COMPLETED
+
+
+def test_structure_only_layout_without_help(
+    imported: str, unit_of_work: SqlAlchemyUnitOfWork, tmp_path: Path
+) -> None:
+    """Structure-only still projects source units, analyses, and glossary decisions.
+
+    Processing results stay in storage and are not required to be export-ready.
+    The layout passed to the writer is built from an empty result map, so
+    translations and notes are absent.
+    """
+    section_id, block_id = _store_reading_sources(unit_of_work, create_run=True)
+    writer = RecordingWriter()
+
+    export(unit_of_work, writer=writer)(command(tmp_path, mode=ExportMode.STRUCTURE_ONLY))
+
+    request = writer.request
+    assert request is not None
+    assert request.block_results == {}
+    inputs = build_layout_inputs(unit_of_work, BOOK_ID)
+    assert inputs.results and inputs.analyses and inputs.concepts
+    assert isinstance(request.layout, BookLayout)
+    without_results = build_book_layout(replace(inputs, results={}))
+    assert request.layout == without_results
+    assert request.layout != build_book_layout(inputs)
+    assert request.layout != build_book_layout(replace(inputs, results={}, analyses=()))
+    assert request.layout != build_book_layout(replace(inputs, results={}, concepts=()))
+    document = inputs.document
+    for section in document.ordered_sections:
+        chapter = request.layout.chapters[section.id]
+        assert tuple(chapter.units) == tuple(block.id for block in section.ordered_blocks)
+        for block in section.ordered_blocks:
+            unit, = chapter.units[block.id]
+            assert (unit.start, unit.end) == (0, len(block.text))
+            assert unit.translation is None
+            assert unit.notes == ()
+    helped = without_results.chapters[section_id].units[block_id]
+    assert helped[0].translation is None and helped[0].notes == ()
+    assert any(unit.translation for unit in build_book_layout(inputs).chapters[section_id].units[block_id])
+    assert request.layout.who_is_who[0].translation == "Рен Колдер"
+    assert request.layout.who_is_who[0].description == "Путник."
+    assert "before_you_read" in request.layout.features.sections
+    assert not any(unit.notes for unit in _units(request.layout))
+    assert status_of(unit_of_work) == (BookStatus.IMPORTED, None)
 

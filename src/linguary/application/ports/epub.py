@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from linguary.domain import (
     BlockProcessingResult,
@@ -21,6 +21,10 @@ from linguary.domain import (
     DomainError,
     LearningMaterial,
 )
+
+if TYPE_CHECKING:
+    # A runtime import cycles through retry_policy back into this module.
+    from linguary.application.layout.book import BookLayout
 
 
 def normalize_language_code(code: str) -> str:
@@ -167,6 +171,8 @@ class EpubWriteRequest:
     markup from the source.
     `verified_body_sections` identifies v3 sections whose final bodies must be rendered
     unchanged; other sections retain the historical Before You Read cleanup.
+    `layout` is the reading projection. The writer may ignore it until rendering
+    uses that projection. Existing requests stay valid when it is omitted.
     """
 
     document: CanonicalDocument
@@ -176,6 +182,7 @@ class EpubWriteRequest:
     block_results: Mapping[str, BlockProcessingResult] = field(default_factory=dict)
     learning_materials: Mapping[str, LearningMaterial] = field(default_factory=dict)
     verified_body_sections: frozenset[str] = frozenset()
+    layout: BookLayout | None = None
 
     def __post_init__(self) -> None:
         if not self.target_path.strip():
