@@ -485,11 +485,11 @@ def test_structure_only_layout_whole_blocks_no_notes() -> None:
 
 
 def test_repeated_speech_style_same_speaker_dropped() -> None:
-    """The later speech style of one speaker loses its label. The plan stays.
+    """The later speech style of one speaker leaves no note. The plan stays.
 
     `a-drawl` sorts before `z-drawl`, and the second fact is only inferred.
-    Reading order still keeps the earlier explicit occurrence. The stored
-    plans are the same objects and still contain both difficulties.
+    Reading order still keeps the earlier explicit occurrence, label and body.
+    The stored plans are the same objects and still contain both difficulties.
     """
     first = _block("one", 0, "Alice drawled softly.")
     second = _block("two", 0, "Alice drawled softly.")
@@ -531,10 +531,11 @@ def test_repeated_speech_style_same_speaker_dropped() -> None:
     assert _labels(layout, second.id) == ()
     kept = [note for note in _notes(layout, first.id) if note.origin != "speaker"]
     dropped = [note for note in _notes(layout, second.id) if note.origin != "speaker"]
+    assert kept[0].labels == ("Речь персонажа.",)
     assert kept[0].difficulty_kinds == ("speech_style",)
     assert kept[0].body == ("первое появление",)
-    assert dropped[0].difficulty_kinds == ()
-    assert dropped[0].body == ("повтор",)
+    assert dropped == []
+    assert tuple(note.body for note in _notes(layout, second.id)) == (("Говорит Alice",),)
     assert layout.chapters[first_section.id].units[first.id][0].speaker == "Alice"
     assert layout.chapters[second_section.id].units[second.id][0].speaker == "Alice"
 
@@ -616,6 +617,11 @@ def test_unmatched_speaker_not_shown() -> None:
     assert units[hatter.id][0].speaker != "Шляпник"
     assert all(unit.speaker != "female" for block_units in units.values() for unit in block_units)
     assert "f-alice" in {fact.id for fact in plan.context_facts}
+    assert units[alice.id][0].notes[0].number is None
+    assert units[alice.id][0].notes[0].note.body == ("Говорит Алиса",)
+    assert layout.features.has_speakers is True
+    assert layout.features.has_notes is False
+    assert "Маленькая цифра после слова" not in "\n".join(layout.legend)
 
 
 def test_features_collected_for_legend() -> None:

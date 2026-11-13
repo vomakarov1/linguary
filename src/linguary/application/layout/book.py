@@ -107,8 +107,10 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
     """Project `inputs` into chapters, legend lines, and the book-level lists.
 
     Speakers are explicit or inferred speaker facts. A repeated speech-style
-    difficulty for the same speaker is removed from the plan copy passed to
-    `block_notes`. The stored plan is not changed. There is no Previously list.
+    difficulty for the same speaker is removed from the plan copy and from the
+    assistance on the result copy passed to `block_notes`, so the later note
+    is absent. The stored plan and the stored result are not changed. There
+    is no Previously list.
     """
     document = inputs.document
     numbers = _content_chapter_numbers(document)
@@ -126,7 +128,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             if result is not None:
                 notes = block_notes(
                     block,
-                    result,
+                    _result_without(result, dropped),
                     plan,
                     pronunciations,
                     english_help=inputs.english_help,
@@ -347,6 +349,23 @@ def _plan_without(plan: ContentPlan | None, dropped: frozenset[str]) -> ContentP
     return replace(plan, difficulties=kept, before_you_read_evidence=evidence)
 
 
+def _result_without(
+    result: BlockProcessingResult,
+    dropped: frozenset[str],
+) -> BlockProcessingResult:
+    """Copy without assistance for a dropped speech style. The stored result stays.
+
+    `block_notes` still emits that assistance after the difficulty leaves the
+    plan. Omitting it drops the note, label and body. Other help stays.
+    """
+    if not dropped:
+        return result
+    kept = tuple(item for item in result.fragment_assistances if item.difficulty_id not in dropped)
+    if len(kept) == len(result.fragment_assistances):
+        return result
+    return replace(result, fragment_assistances=kept)
+
+
 def _features(
     chapters: Mapping[str, ChapterLayout],
     analyses: Sequence[ChapterAnalysis],
@@ -355,7 +374,9 @@ def _features(
 
     `previously` is not set: that list is not projected. Before You Read is a
     section key when a content chapter's analysis has entries. Labels are the
-    strings written on notes, not kind ids that lost their label.
+    strings written on notes, not kind ids that lost their label. `has_notes`
+    is true only when some note has a number. An unnumbered «Говорит …» note
+    sets `has_speakers` and does not turn on the numbered-notes line.
     """
     units = [
         unit
@@ -378,7 +399,7 @@ def _features(
         sections.add("before_you_read")
     return LayoutFeatures(
         has_translation=any(unit.translation for unit in units),
-        has_notes=any(unit.notes for unit in units),
+        has_notes=any(item.number is not None for unit in units for item in unit.notes),
         labels=frozenset(label for note in notes for label in note.labels),
         has_ipa=any(note.ipa for note in notes),
         has_poems=any(unit.lines for unit in units),
