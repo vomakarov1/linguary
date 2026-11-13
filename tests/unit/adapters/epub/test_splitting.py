@@ -785,21 +785,30 @@ def test_comma_before_conjunction_before_word_boundary() -> None:
 
 
 def test_word_fallback_only_without_punctuation() -> None:
-    """Without clause punctuation a long sentence breaks on spaces, not inside a hyphenated word."""
-    text = _repeat("well-known", 650) + "."
-    assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
-    assert not any(mark in text for mark in (";", ":", "—", "–", " - ", ","))
+    """Without clause punctuation a long sentence breaks on spaces, not inside a hyphenated word.
 
-    segments = segment_text(text)
-    _assert_exact_cover(text, segments)
-    assert len(segments) > 1
-    for segment in segments:
-        assert segment.sentence_index == 0
-        assert segment.end - segment.start <= SEGMENT_MAX_CHARS
-        if segment.start:
-            assert text[segment.start - 1].isspace()
-            assert not text[segment.start].isspace()
-        assert "-" not in text[segment.start : segment.start + 1]
+    Lengths 701–719 are the window where a two-way split aimed at 300 characters
+    must exceed 350, while three word parts still fit.
+    """
+    samples = (
+        _repeat("well-known", 650) + ".",
+        _repeat("well-known", 701),
+    )
+    assert 701 <= len(samples[1]) <= 719
+    for text in samples:
+        assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
+        assert not any(mark in text for mark in (";", ":", "—", "–", " - ", ","))
+
+        segments = segment_text(text)
+        _assert_exact_cover(text, segments)
+        assert len(segments) > 1
+        for segment in segments:
+            assert segment.sentence_index == 0
+            assert segment.end - segment.start <= SEGMENT_MAX_CHARS
+            if segment.start:
+                assert text[segment.start - 1].isspace()
+                assert not text[segment.start].isspace()
+            assert "-" not in text[segment.start : segment.start + 1]
 
 
 def test_segment_never_cuts_footnote_reference() -> None:

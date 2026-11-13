@@ -599,10 +599,74 @@ def _clause_points(text: str, start: int, end: int, level: str) -> list[int]:
 
 
 def _word_split_target(max_segment_chars: int) -> int:
-    """Target length whose existing word-split cap is `max_segment_chars`."""
+    """Balance hint for `_split_span_by_words`. Not a hard cap on each part."""
     if max_segment_chars == SPLIT_MAX_PART_CHARS:
         return SPLIT_TARGET_CHARS
     return max(1, round(max_segment_chars * SPLIT_TARGET_CHARS / SPLIT_MAX_PART_CHARS))
+
+
+def _word_boundary_indexes(text: str, start: int, end: int) -> list[int]:
+    span_len = end - start
+    return [
+        start + match.end()
+        for match in re.finditer(r"\s+", text[start:end])
+        if 0 < match.end() < span_len
+    ]
+
+
+def _fit_word_spans(
+    text: str,
+    start: int,
+    end: int,
+    max_segment_chars: int,
+) -> list[tuple[int, int]] | None:
+    """Word cuts with every part within the cap, or None if a word is longer.
+
+    Among part counts that can stay within the cap, the one closest to the
+    balance target wins. `_split_span_by_words` can pick fewer parts than
+    that when its minimum-part window disagrees with the cap.
+    """
+    span_len = end - start
+    if span_len <= max_segment_chars:
+        return [(start, end)]
+    boundaries = _word_boundary_indexes(text, start, end)
+    edges = [start, *boundaries, end]
+    if any(right - left > max_segment_chars for left, right in zip(edges, edges[1:])):
+        return None
+
+    target = _word_split_target(max_segment_chars)
+    min_parts = ceil(span_len / max_segment_chars)
+    max_parts = len(boundaries) + 1
+
+    def place(part_count: int) -> list[tuple[int, int]] | None:
+        chosen = [start]
+        for part_index in range(1, part_count):
+            remaining = part_count - part_index
+            earliest = max(chosen[-1] + 1, end - max_segment_chars * remaining)
+            latest = min(chosen[-1] + max_segment_chars, end - remaining)
+            if earliest > latest:
+                return None
+            ideal = start + round(span_len * part_index / part_count)
+            candidates = [point for point in boundaries if earliest <= point <= latest]
+            if not candidates:
+                return None
+            chosen.append(min(candidates, key=lambda point: (abs(point - ideal), point)))
+        chosen.append(end)
+        if any(
+            chosen[index + 1] - chosen[index] > max_segment_chars
+            for index in range(part_count)
+        ):
+            return None
+        return list(zip(chosen, chosen[1:]))
+
+    fitted: list[tuple[int, list[tuple[int, int]]]] = []
+    for part_count in range(min_parts, max_parts + 1):
+        placed = place(part_count)
+        if placed is not None:
+            fitted.append((part_count, placed))
+    if not fitted:
+        return None
+    return min(fitted, key=lambda item: (abs(span_len / item[0] - target), -item[0]))[1]
 
 
 def _split_sentence(
@@ -639,6 +703,12 @@ def _split_sentence(
         end,
         target_chars=_word_split_target(max_segment_chars),
     )
+    # The helper's count can exceed the cap when min-part and max-part disagree
+    # (701–719 characters want two parts near 300, but each half is over 350).
+    if any(span_end - span_start > max_segment_chars for span_start, span_end in word_spans):
+        fitted = _fit_word_spans(text, start, end, max_segment_chars)
+        if fitted is not None:
+            word_spans = fitted
     interior = [span_end for _, span_end in word_spans[:-1]]
     boundaries = _boundaries_respecting_protected(start, end, interior, protected)
     return [
