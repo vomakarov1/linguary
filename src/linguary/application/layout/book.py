@@ -109,17 +109,19 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
     Speakers are explicit or inferred speaker facts. A repeated speech-style
     difficulty for the same speaker is removed from the plan copy and from the
     assistance on the result copy passed to `block_notes`, so the later note
-    is absent. The stored plan and the stored result are not changed. There
-    is no Previously list.
+    is absent. The id is dropped only in the section that owns that later
+    style. The stored plan and the stored result are not changed. There is
+    no Previously list.
     """
     document = inputs.document
     numbers = _content_chapter_numbers(document)
     facts = _speaker_facts(inputs.analyses)
-    dropped = _repeated_speech_style_ids(document, inputs.analyses, facts)
+    dropped_by_section = _repeated_speech_style_ids(document, inputs.analyses, facts)
     plans = _plans_by_section(inputs.analyses)
     pronunciations = project_pronunciations(tuple(document.blocks()), inputs.results)
     chapters: dict[str, ChapterLayout] = {}
     for section in document.ordered_sections:
+        dropped = dropped_by_section.get(section.id, frozenset())
         plan = _plan_without(plans.get(section.id), dropped)
         units: dict[str, tuple[LayoutUnit, ...]] = {}
         for block in section.ordered_blocks:
@@ -255,12 +257,14 @@ def _repeated_speech_style_ids(
     document: CanonicalDocument,
     analyses: Sequence[ChapterAnalysis],
     facts: Sequence[ContextFact],
-) -> frozenset[str]:
-    """Later speech-style difficulties of one speaker, in reading order.
+) -> dict[str, frozenset[str]]:
+    """Later speech-style difficulties of one speaker, by owning section.
 
     The same source name is one speaker across chapters, whether the fact is
     explicit or inferred. The earliest anchor wins, not the difficulty id.
     A style that overlaps no shown speaker is not repeated and is not listed.
+    Difficulty ids repeat across plans, so each dropped id is recorded only
+    for the section that owns that later style.
     """
     positions = _block_positions(document)
     anchors_by_speaker: dict[str, list[SourceAnchor]] = {}
@@ -268,7 +272,7 @@ def _repeated_speech_style_ids(
         if not isinstance(fact.value, str):
             continue
         anchors_by_speaker.setdefault(glossary_key(fact.value), []).extend(fact.anchors)
-    grouped: dict[str, list[tuple[tuple[int, int, int, str], str]]] = {}
+    grouped: dict[str, list[tuple[tuple[int, int, int, str], str, str]]] = {}
     for analysis in analyses:
         plan = analysis.content_plan
         if plan is None:
@@ -280,14 +284,17 @@ def _repeated_speech_style_ids(
             for key, anchors in anchors_by_speaker.items():
                 if not _overlaps(difficulty.anchors, anchors):
                     continue
-                grouped.setdefault(key, []).append((position, difficulty.id))
-    kept: set[str] = set()
-    later: set[str] = set()
+                grouped.setdefault(key, []).append((position, analysis.section_id, difficulty.id))
+    kept: set[tuple[str, str]] = set()
+    later: set[tuple[str, str]] = set()
     for items in grouped.values():
         items.sort()
-        kept.add(items[0][1])
-        later.update(difficulty_id for _, difficulty_id in items[1:])
-    return frozenset(later - kept)
+        kept.add((items[0][1], items[0][2]))
+        later.update((section_id, difficulty_id) for _, section_id, difficulty_id in items[1:])
+    dropped: dict[str, set[str]] = {}
+    for section_id, difficulty_id in later - kept:
+        dropped.setdefault(section_id, set()).add(difficulty_id)
+    return {section_id: frozenset(ids) for section_id, ids in dropped.items()}
 
 
 def _block_positions(document: CanonicalDocument) -> dict[str, tuple[int, int]]:

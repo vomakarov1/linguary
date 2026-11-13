@@ -540,6 +540,76 @@ def test_repeated_speech_style_same_speaker_dropped() -> None:
     assert layout.chapters[second_section.id].units[second.id][0].speaker == "Alice"
 
 
+def test_repeated_speech_style_id_scoped_to_its_chapter() -> None:
+    """A difficulty id is unique only inside one plan.
+
+    Both chapters use ``d1`` for Alice's speech style, so the later note is
+    dropped in chapter 2 and the earlier note stays. Chapter 1's grammar
+    difficulty uses ``d3``, the same id as chapter 2's other dropped style.
+    That grammar note stays.
+    """
+    first = _block("one", 0, "Alice drawled softly.")
+    grammar_block = _block("one", 1, "She had a curious dream.")
+    repeated = _block("two", 0, "Alice drawled softly.")
+    again = _block("two", 1, "Alice drawled once more.")
+    early = _difficulty(first, "drawled", "speech_style", "d1")
+    grammar = _difficulty(grammar_block, "curious", "grammar", "d3")
+    late = _difficulty(repeated, "drawled", "speech_style", "d1")
+    late_style = _difficulty(again, "drawled", "speech_style", "d3")
+    early_fact = _fact("f-early", first, "Alice drawled softly.", "Alice", "explicit")
+    late_fact = _fact("f-late", repeated, "Alice drawled softly.", "Alice", "inferred")
+    again_fact = _fact("f-again", again, "Alice drawled once more.", "Alice", "explicit")
+    first_plan = _plan(early, grammar, facts=(early_fact,))
+    second_plan = _plan(late, late_style, facts=(late_fact, again_fact))
+    first_section = _section("one", 0, "Chapter 1", (first, grammar_block))
+    second_section = _section("two", 1, "Chapter 2", (repeated, again))
+    analyses = (
+        _analysis("a-one", first_section.id, plan=first_plan),
+        _analysis("a-two", second_section.id, plan=second_plan),
+    )
+    results = {
+        first.id: BlockProcessingResult(
+            first.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(early, "первое появление", "sentence_rephrase"),),
+        ),
+        grammar_block.id: BlockProcessingResult(
+            grammar_block.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(grammar, "странное время", "sentence_rephrase"),),
+        ),
+        repeated.id: BlockProcessingResult(
+            repeated.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(late, "повтор", "sentence_rephrase"),),
+        ),
+        again.id: BlockProcessingResult(
+            again.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(late_style, "ещё стиль", "sentence_rephrase"),),
+        ),
+    }
+    layout = build_book_layout(_inputs(
+        _document((first_section, second_section)),
+        results,
+        analyses,
+    ))
+
+    assert analyses[0].content_plan is first_plan
+    assert analyses[1].content_plan is second_plan
+    assert [item.id for item in first_plan.difficulties] == ["d1", "d3"]
+    assert [item.id for item in second_plan.difficulties] == ["d1", "d3"]
+    kept = [note for note in _notes(layout, first.id) if note.origin != "speaker"]
+    grammar_notes = [note for note in _notes(layout, grammar_block.id) if note.origin != "speaker"]
+    assert kept[0].labels == ("Речь персонажа.",)
+    assert kept[0].body == ("первое появление",)
+    assert grammar_notes[0].labels == ("Грамматика.",)
+    assert grammar_notes[0].difficulty_kinds == ("grammar",)
+    assert grammar_notes[0].body == ("странное время",)
+    assert [note for note in _notes(layout, repeated.id) if note.origin != "speaker"] == []
+    assert [note for note in _notes(layout, again.id) if note.origin != "speaker"] == []
+
+
 def test_speech_style_without_speaker_not_dropped() -> None:
     """Speech styles that overlap no speaker fact both stay, in either order."""
     rough = _block("one", 0, "The sailor spoke roughly today.")
