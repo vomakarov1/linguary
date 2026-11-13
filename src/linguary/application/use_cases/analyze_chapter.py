@@ -354,7 +354,8 @@ class AnalyzeChapter:
             narrative, scenes, facts = merge_narrative_fragments(narrative_parts)
             validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
-                mandatory_facts=glossary_context_constraints(concepts))
+                mandatory_facts=glossary_context_constraints(concepts),
+                blocks=blocks, source_offsets=True)
             saved = self._save_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash,
                                     narrative, expected_conditions_id,
                                     input_suggestions=tuple(_suggestion_key(s, document.target_language)
@@ -364,7 +365,8 @@ class AnalyzeChapter:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved.attempt_id))
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
-                mandatory_facts=glossary_context_constraints(concepts))
+                mandatory_facts=glossary_context_constraints(concepts),
+                blocks=blocks, source_offsets=True)
         pedagogical_hash = self._context_builder.pedagogical_input_sha256(document, section,
             narrative_output_sha256=saved.output_sha256, narrative_summary=narrative.chapter_summary,
             context_facts=facts, glossary_candidates=narrative.glossary_candidates,
@@ -420,7 +422,7 @@ class AnalyzeChapter:
                 language_detector=self._language_detector)
         payload = combine_staged_analysis_responses(narrative, pedagogical, resolved_scenes=scenes)
         _ensure_plan_covers_chapter(payload, context)
-        plan = self._validate_pedagogical(payload, context, blocks)
+        plan = self._validate_pedagogical(payload, context, blocks, source_offsets=True)
         analysis = merge_chapter_analysis([FragmentAnalysis.of_response(payload, order=0,
             block_ids_by_alias=context.block_ids_by_alias, texts={b.id: b.text for b in blocks},
             visible_texts_by_alias=context.visible_texts_by_alias, resolved_content_plan=plan,
@@ -433,14 +435,15 @@ class AnalyzeChapter:
 
     def _validate_pedagogical(
         self, payload: ChapterAnalysisResponse, context: ChapterAnalysisContext,
-        blocks: Sequence[DocumentBlock],
+        blocks: Sequence[DocumentBlock], *, source_offsets: bool = False,
     ) -> ContentPlan | None:
         return validate_content_plan(payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
             english_help=self._context_builder._english_help,
             before_you_read_limit=context.before_you_read_limit,
             language_notes_per_chapter=context.language_notes_per_chapter,
             note_limits_by_block=context.note_limits_by_block, note_group_limits=context.note_group_limits,
-            visible_texts_by_alias=context.visible_texts_by_alias)
+            visible_texts_by_alias=context.visible_texts_by_alias, blocks=blocks,
+            source_offsets=source_offsets)
 
     async def _run_staged_fragments(
         self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
@@ -517,7 +520,8 @@ class AnalyzeChapter:
                         {b.id: b.text for b in fragment.blocks}, context.visible_texts_by_alias,
                         ordered_block_ids=fragment.block_ids,
                         is_notes_only=section.is_notes_only or document.is_front_matter(section),
-                        mandatory_facts=glossary_context_constraints(concepts))
+                        mandatory_facts=glossary_context_constraints(concepts),
+                        blocks=fragment.blocks)
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
                 if self._context_builder._reader_level == 'a2':
@@ -1140,6 +1144,7 @@ class AnalyzeChapter:
                         note_limits_by_block=context.note_limits_by_block,
                         note_group_limits=context.note_group_limits,
                         visible_texts_by_alias=context.visible_texts_by_alias,
+                        blocks=blocks,
                     )
                     if request.contract_version in {3, 5}:
                         if resolved_concepts is None:
@@ -1212,6 +1217,7 @@ class AnalyzeChapter:
                 else content_plan_from_response(
                     payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
                     visible_texts_by_alias=context.visible_texts_by_alias,
+                    blocks=blocks,
                 )
             ),
         )

@@ -1621,3 +1621,130 @@ def test_repeated_quote_without_offset_drops_anchor_not_plan() -> None:
     assert validated is not None
     assert {anchor.quote for difficulty in validated.difficulties for anchor in difficulty.anchors} == {"dark"}
 
+
+def _footnote_block(text: str, call: str, *, at: int | None = None):
+    """Paragraph whose footnote call is `call`, so the model does not see those characters."""
+    from linguary.domain import InlineAnnotation, InlineAnnotationType
+
+    start = text.index(call) if at is None else at
+    return replace(
+        make_analysis_block(section_id=SECTION_ID, order=0, text=text),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=start,
+                end=start + len(call),
+                target="section-1.xhtml#fn1",
+            ),
+        ),
+    )
+
+
+def test_repeated_quote_offset_binds_visible_span_then_source_coordinates() -> None:
+    """Model start/end address the visible text; the anchor stores the source span."""
+    from linguary.application.analysis_merge import content_plan_from_response
+    from linguary.application.context_builder import _analysis_visible_origins
+
+    block = _footnote_block("Wait 1 Wait until dark.", "1")
+    visible, origins = _analysis_visible_origins(block)
+    quote = "Wait"
+    visible_start = visible.index(quote, visible.index(quote) + 1)
+    visible_end = visible_start + len(quote)
+    source_start, source_end = origins[visible_start], origins[visible_end - 1] + 1
+    assert visible != block.text
+    assert (visible_start, visible_end) != (source_start, source_end)
+    assert block.text[source_start:source_end] == quote
+    assert visible[visible_start:visible_end] == quote
+
+    aliases = {"b1": block.id}
+    texts = {block.id: block.text}
+    shown = {"b1": visible}
+    plan = content_plan_from_response(
+        _quote_payload(_difficulty(quote, start=visible_start, end=visible_end)),
+        aliases,
+        texts,
+        visible_texts_by_alias=shown,
+        blocks=(block,),
+    )
+    assert plan is not None
+    anchor = plan.difficulties[0].anchors[0]
+    assert (anchor.start, anchor.end, anchor.quote) == (source_start, source_end, quote)
+
+    again = content_plan_from_response(
+        _quote_payload(_difficulty(quote, start=anchor.start, end=anchor.end)),
+        aliases,
+        texts,
+        visible_texts_by_alias=shown,
+        blocks=(block,),
+    )
+    assert again is not None
+    assert (again.difficulties[0].anchors[0].start, again.difficulties[0].anchors[0].end) == (
+        source_start,
+        source_end,
+    )
+
+    # The second Holmes is the footnote call, so the word is unique in the visible text.
+    named_text = "Holmes saw Holmes there."
+    named = _footnote_block(named_text, "Holmes", at=named_text.rindex("Holmes"))
+    named_visible, named_origins = _analysis_visible_origins(named)
+    assert named_visible.count("Holmes") == 1
+    assert named.text.count("Holmes") == 2
+    body = named_visible.index("Holmes")
+    plan = content_plan_from_response(
+        _quote_payload(_difficulty("Holmes", difficulty_id="name", point="Who Holmes is")),
+        {"b1": named.id},
+        {named.id: named.text},
+        visible_texts_by_alias={"b1": named_visible},
+        blocks=(named,),
+    )
+    assert plan is not None
+    kept = plan.difficulties[0].anchors[0]
+    assert (kept.start, kept.end, kept.quote) == (named_origins[body], named_origins[body] + len("Holmes"), "Holmes")
+
+
+def test_repeated_visual_quote_without_offset_keeps_the_plan() -> None:
+    """A repeated visual quote with a missing or wrong offset drops that fact, not the plan."""
+    from linguary.application.analysis_merge import content_plan_from_response
+    from linguary.application.llm_dto import (
+        QuotedSceneResponse,
+        QuotedSceneVisualFactResponse,
+        QuotedSourceAnchorResponse,
+    )
+
+    text = "Wait for him. Wait until dark."
+    aliases = {"b1": "block-1"}
+    texts = {"block-1": text}
+    visible = {"b1": text}
+    kept = _difficulty("dark", difficulty_id="kept", point="Explain dark")
+
+    def plan_for(anchor: QuotedSourceAnchorResponse):
+        scene = QuotedSceneResponse(
+            "b1",
+            "b1",
+            "He waits.",
+            visual_facts=(
+                QuotedSceneVisualFactResponse(anchor, "He", "Waiting"),
+                QuotedSceneVisualFactResponse(
+                    QuotedSourceAnchorResponse("b1", "dark"), "Sky", "Dark",
+                ),
+            ),
+        )
+        payload = _quote_payload(kept)
+        return content_plan_from_response(
+            replace(payload, content_plan=replace(payload.content_plan, scenes=(scene,))),
+            aliases,
+            texts,
+            visible_texts_by_alias=visible,
+        )
+
+    plan = plan_for(QuotedSourceAnchorResponse("b1", "Wait"))
+    assert plan is not None
+    assert {item.anchors[0].quote for item in plan.difficulties} == {"dark"}
+    assert len(plan.scenes) == 1
+    assert [fact.anchor.quote for fact in plan.scenes[0].visual_facts] == ["dark"]
+
+    shifted = plan_for(QuotedSourceAnchorResponse("b1", "Wait", 1, 5))
+    assert shifted is not None
+    assert {item.anchors[0].quote for item in shifted.difficulties} == {"dark"}
+    assert [fact.anchor.quote for fact in shifted.scenes[0].visual_facts] == ["dark"]
+

@@ -195,6 +195,7 @@ class FragmentAnalysis:
                 else content_plan_from_response(
                     payload, block_ids_by_alias, texts=texts,
                     visible_texts_by_alias=visible_texts_by_alias,
+                    blocks=blocks,
                 )
             ),
         )
@@ -1092,6 +1093,8 @@ def resolve_scenes(
     visible_texts_by_alias: Mapping[str, str],
     *,
     ordered_block_ids: Sequence[str],
+    blocks: Sequence[DocumentBlock] | None = None,
+    source_offsets: bool = False,
 ) -> tuple[Scene, ...]:
     """Resolve scene references within the visible chapter or fragment."""
     positions = {block_id: index for index, block_id in enumerate(ordered_block_ids)}
@@ -1113,7 +1116,10 @@ def resolve_scenes(
             anchor = _resolve_quoted_anchor(
                 fact.anchor.block_id, fact.anchor.quote, aliases, texts, visible_texts_by_alias,
                 start=fact.anchor.start, end=fact.anchor.end, strict=True,
+                blocks=blocks, source_offsets=source_offsets,
             )
+            if anchor is _AMBIGUOUS:
+                continue
             if not isinstance(anchor, SourceAnchor):
                 raise _analysis_error('цитата визуального факта не разрешается в исходном блоке',
                                       rule_code='unresolved_quote', block_ids=(start, end))
@@ -1137,13 +1143,16 @@ def validate_narrative_response(
     ordered_block_ids: Sequence[str],
     mandatory_facts: Mapping[str, Mapping[str, str]] | None = None,
     is_notes_only: bool = False,
+    blocks: Sequence[DocumentBlock] | None = None,
+    source_offsets: bool = False,
 ) -> tuple[tuple[Scene, ...], tuple[ContextFact, ...]]:
     """Validate complete scene coverage and source-bound narrative facts."""
     if is_notes_only and payload.scenes:
         raise _analysis_error('служебный раздел не должен содержать сцены',
                               rule_code='notes_only_scenes', block_ids=ordered_block_ids)
     scenes = resolve_scenes(payload.scenes, aliases, texts, visible_texts_by_alias,
-                            ordered_block_ids=ordered_block_ids)
+                            ordered_block_ids=ordered_block_ids, blocks=blocks,
+                            source_offsets=source_offsets)
     if not is_notes_only and ordered_block_ids:
         positions = {block: index for index, block in enumerate(ordered_block_ids)}
         next_start = 0
@@ -1158,7 +1167,8 @@ def validate_narrative_response(
     response = ChapterAnalysisResponse(payload.translation_instructions, payload.chapter_summary,
         content_plan=QuotedContentPlanResponse(context_facts=payload.context_facts))
     plan = content_plan_from_response(response, scoped_aliases, texts,
-                                      visible_texts_by_alias=visible_texts_by_alias)
+                                      visible_texts_by_alias=visible_texts_by_alias,
+                                      blocks=blocks, source_offsets=source_offsets)
     if plan is None:
         raise _unresolved_quote_error(response, scoped_aliases, texts, visible_texts_by_alias,
                                       {v: k for k, v in scoped_aliases.items()})
@@ -1258,6 +1268,8 @@ def content_plan_from_response(
     texts: Mapping[str, str] | None = None,
     *,
     visible_texts_by_alias: Mapping[str, str] | None = None,
+    blocks: Sequence[DocumentBlock] | None = None,
+    source_offsets: bool = False,
 ) -> ContentPlan | None:
     """Replaces local aliases and computes stable application references."""
     if payload.content_plan is None:
@@ -1279,6 +1291,7 @@ def content_plan_from_response(
                 return None
             anchors = _bind_quoted_anchors(
                 difficulty.anchors, aliases, texts, visible_texts_by_alias,
+                blocks=blocks, source_offsets=source_offsets,
             )
             if anchors is _MISSING:
                 return None
@@ -1289,10 +1302,12 @@ def content_plan_from_response(
         for fact in payload.content_plan.context_facts:
             anchors = _bind_quoted_anchors(
                 fact.anchors, aliases, texts, visible_texts_by_alias,
+                blocks=blocks, source_offsets=source_offsets,
             )
             subject_anchor = _resolve_quoted_anchor(
                 fact.subject_anchor.block_id, fact.subject_anchor.quote, aliases, texts,
                 visible_texts_by_alias, start=fact.subject_anchor.start, end=fact.subject_anchor.end,
+                blocks=blocks, source_offsets=source_offsets,
             )
             if anchors is _MISSING or subject_anchor is _MISSING:
                 return None
@@ -1440,54 +1455,120 @@ def content_plan_from_response(
     return ContentPlan(version=payload.content_plan.version, profile=payload.content_plan.profile,
         difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence), context_facts=tuple(facts),
         scenes=(resolve_scenes(payload.content_plan.scenes, aliases, texts, visible_texts_by_alias,
-                               ordered_block_ids=tuple(dict.fromkeys(aliases.values()))) if is_quoted else ()))
+                               ordered_block_ids=tuple(dict.fromkeys(aliases.values())),
+                               blocks=blocks, source_offsets=source_offsets) if is_quoted else ()))
 
 
 _MISSING = object()
 _AMBIGUOUS = object()
 
 
-def _classify_quote(text: str, quote: str, start, end, *, strict: bool):
-    """One span binds by text. A repeated quote binds only at an exact offset."""
-    spans = _exact_quote_spans(text, quote) if strict else _quote_spans(text, quote)
-    if not spans:
-        return _MISSING
-    if len(spans) == 1:
-        return spans[0]
+def _analysis_origins(block_alias, aliases, texts, visible_texts_by_alias, blocks):
+    """Source offset of each visible character. Identity when the model saw `block.text`."""
+    visible = visible_texts_by_alias[block_alias]
+    block_id = aliases.get(block_alias)
+    source = texts[block_id] if texts is not None and block_id in texts else None
+    if blocks and block_id is not None and source is not None:
+        block = next((item for item in blocks if item.id == block_id), None)
+        if block is not None and block.text == source:
+            from linguary.application.context_builder import _analysis_visible_origins
+
+            computed, origins = _analysis_visible_origins(block)
+            if computed == visible and len(origins) == len(visible):
+                return origins
+    if source is not None and source == visible:
+        return tuple(range(len(visible)))
+    return None
+
+
+def _source_span(origins, start: int, end: int, source: str):
+    """Map a visible `[start, end)` through character origins. The span must stay contiguous."""
+    if origins is None or not (0 <= start < end <= len(origins)):
+        return None
+    piece = origins[start:end]
+    if any(piece[index] + 1 != piece[index + 1] for index in range(len(piece) - 1)):
+        return None
+    source_start = piece[0]
+    source_end = piece[-1] + 1
+    if source_end > len(source):
+        return None
+    return source_start, source_end, source[source_start:source_end]
+
+
+def _visible_offset_span(visible: str, quote: str, spans, start, end):
     if (
         type(start) is int and type(end) is int
-        and 0 <= start < end <= len(text)
-        and text[start:end] == quote
+        and 0 <= start < end <= len(visible)
+        and visible[start:end] == quote
         and any(span[0] == start and span[1] == end for span in spans)
     ):
-        return (start, end, quote)
-    return _AMBIGUOUS
+        return next(span for span in spans if span[0] == start and span[1] == end)
+    return None
+
+
+def _source_offset_span(source: str, origins, quote: str, spans, start, end):
+    """Domain anchors store source coordinates. Accept that image of one visible span."""
+    if not (
+        origins is not None
+        and type(start) is int and type(end) is int
+        and 0 <= start < end <= len(source)
+        and source[start:end] == quote
+    ):
+        return None
+    matched = None
+    for span in spans:
+        mapped = _source_span(origins, span[0], span[1], source)
+        if mapped is not None and mapped[0] == start and mapped[1] == end and mapped[2] == quote:
+            if matched is not None:
+                return None
+            matched = span
+    return matched
 
 
 def _resolve_quoted_anchor(
-    block_alias, quote, aliases, texts, visible_texts_by_alias, *, start=None, end=None, strict=False,
+    block_alias, quote, aliases, texts, visible_texts_by_alias, *,
+    start=None, end=None, strict=False, blocks=None, source_offsets=False,
 ):
-    """Resolve both source views. A missing quote rejects; an ambiguous one does not bind."""
+    """Bind on the visible text, then store source coordinates.
+
+    One visible span binds by text. A repeated quote binds at the model's visible
+    offset or at the source offset stored on a domain anchor. `source_offsets` accepts
+    only that stored image, so a colliding visible index is not chosen again. A quote
+    the model did not see rejects the plan. A missing or inexact offset does not bind.
+    """
     block_id = aliases.get(block_alias)
     if block_id is None or texts is None or block_id not in texts or block_alias not in visible_texts_by_alias:
         return _MISSING
-    source = _classify_quote(texts[block_id], quote, start, end, strict=strict)
-    visible = _classify_quote(visible_texts_by_alias[block_alias], quote, start, end, strict=strict)
-    if source is _MISSING or visible is _MISSING:
+    visible = visible_texts_by_alias[block_alias]
+    source = texts[block_id]
+    spans = _exact_quote_spans(visible, quote) if strict else _quote_spans(visible, quote)
+    if not spans:
         return _MISSING
-    if source is _AMBIGUOUS or visible is _AMBIGUOUS:
+    origins = _analysis_origins(block_alias, aliases, texts, visible_texts_by_alias, blocks)
+    if len(spans) == 1:
+        chosen = spans[0]
+    elif source_offsets:
+        chosen = _source_offset_span(source, origins, quote, spans, start, end)
+    else:
+        chosen = _visible_offset_span(visible, quote, spans, start, end)
+        if chosen is None:
+            chosen = _source_offset_span(source, origins, quote, spans, start, end)
+    if chosen is None:
         return _AMBIGUOUS
-    source_start, source_end, actual_quote = source
+    mapped = _source_span(origins, chosen[0], chosen[1], source)
+    if mapped is None or mapped[2] != chosen[2]:
+        return _MISSING if origins is None else _AMBIGUOUS
+    source_start, source_end, actual_quote = mapped
     return SourceAnchor(block_id=block_id, start=source_start, end=source_end, quote=actual_quote)
 
 
-def _bind_quoted_anchors(anchors, aliases, texts, visible_texts_by_alias):
-    """Keep anchors that bind. A quote absent from either view rejects the plan."""
+def _bind_quoted_anchors(anchors, aliases, texts, visible_texts_by_alias, *, blocks=None, source_offsets=False):
+    """Keep anchors that bind. A quote absent from the visible text rejects the plan."""
     kept = []
     for anchor in anchors:
         resolved = _resolve_quoted_anchor(
             anchor.block_id, anchor.quote, aliases, texts, visible_texts_by_alias,
-            start=anchor.start, end=anchor.end,
+            start=anchor.start, end=anchor.end, blocks=blocks, source_offsets=source_offsets,
         )
         if resolved is _MISSING:
             return _MISSING
@@ -1700,6 +1781,8 @@ def validate_content_plan(
     note_group_limits: Sequence[tuple[Sequence[str], int]] = (),
     visible_texts_by_alias: Mapping[str, str] | None = None,
     mandatory_facts: Mapping[str, Mapping[str, str]] | None = None,
+    blocks: Sequence[DocumentBlock] | None = None,
+    source_offsets: bool = False,
 ) -> ContentPlan | None:
     """Validates source anchors and channel eligibility prior to accepting the response."""
     aliases_by_block_id = {bid: alias for alias, bid in (aliases or {}).items() if bid}
@@ -1708,6 +1791,8 @@ def validate_content_plan(
         aliases,
         texts=texts,
         visible_texts_by_alias=visible_texts_by_alias,
+        blocks=blocks,
+        source_offsets=source_offsets,
     )
     if plan is None:
         if payload.content_plan is not None:
