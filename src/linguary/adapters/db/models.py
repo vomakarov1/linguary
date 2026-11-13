@@ -165,6 +165,9 @@ class DocumentBlockRow(Base):
     """Stable document block: unit of text, result, and regeneration."""
 
     __tablename__ = "document_blocks"
+    # Do not fetch the server default of segments_json: an older schema has no such column,
+    # and INSERT RETURNING would fail there.
+    __mapper_args__ = {"eager_defaults": False}
     __table_args__ = (
         UniqueConstraint("section_id", "order"),
         Index("ix_document_blocks_book_id_section_id", "book_id", "section_id"),
@@ -190,6 +193,9 @@ class DocumentBlockRow(Base):
     )
     source_reference_json: Mapped[dict[str, Any]] = mapped_column(JSON)
     support_status: Mapped[str] = mapped_column(String)
+    segments_json: Mapped[list[list[int]]] = mapped_column(
+        JSON, nullable=False, server_default="[]"
+    )
 
 
 class ResourceRow(Base):
@@ -299,6 +305,7 @@ class TreatmentPlanItemRow(Base):
     block_id: Mapped[str] = mapped_column(String)
     treatment: Mapped[str] = mapped_column(String)
     position: Mapped[int] = mapped_column()
+    segment_treatments_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
 
 class GlossaryCandidateRow(Base):
@@ -320,6 +327,7 @@ class GlossaryCandidateRow(Base):
     name_translation_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(
         ContentObjectJSON(), nullable=True
     )
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
 class ProcessingRunRow(Base):
@@ -418,6 +426,10 @@ class BlockResultRow(Base):
     content_evidence_json: Mapped[dict[str, Any] | None] = mapped_column(ContentObjectJSON(), nullable=True)
     pronunciation_assistances_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     fragment_assistance_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    segment_treatments_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    segment_translations_json: Mapped[list[str | None] | None] = mapped_column(
+        JSON, nullable=True
+    )
 
 
 class LanguageNoteRow(Base):

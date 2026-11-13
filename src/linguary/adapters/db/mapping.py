@@ -52,6 +52,7 @@ from linguary.domain.name_translation import (
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockProcessingResult,
+    BlockSegment,
     BlockTreatment,
     BlockType,
     BookImportWarning,
@@ -153,9 +154,23 @@ def to_section_row(book_id: str, section: DocumentSection) -> SectionRow:
     )
 
 
+def _segments_json(segments: tuple[BlockSegment, ...]) -> list[list[int]]:
+    """Stored spans. An empty tuple is an empty list: one span over the whole text."""
+    return [[segment.start, segment.end, segment.sentence_index] for segment in segments]
+
+
+def _segments(payload: object) -> tuple[BlockSegment, ...]:
+    """Restore stored spans. An empty list is the domain empty tuple."""
+    if not payload:
+        return ()
+    return tuple(
+        BlockSegment(start=item[0], end=item[1], sentence_index=item[2]) for item in payload
+    )
+
+
 def to_block_row(book_id: str, block: DocumentBlock) -> DocumentBlockRow:
     """Convert a document block to a database row."""
-    return DocumentBlockRow(
+    row = DocumentBlockRow(
         id=block.id,
         book_id=book_id,
         section_id=block.section_id,
@@ -180,6 +195,11 @@ def to_block_row(book_id: str, block: DocumentBlock) -> DocumentBlockRow:
         },
         support_status=block.support_status.value,
     )
+    # An empty tuple stays out of INSERT so a schema before this column still accepts the row.
+    # The server default is the same empty list.
+    if block.segments:
+        row.segments_json = _segments_json(block.segments)
+    return row
 
 
 def to_block(row: DocumentBlockRow) -> DocumentBlock:
@@ -203,6 +223,7 @@ def to_block(row: DocumentBlockRow) -> DocumentBlock:
         ),
         parent_id=row.parent_id,
         attributes=dict(row.attributes_json),
+        segments=_segments(row.segments_json),
     )
 
 
@@ -357,15 +378,54 @@ def to_analysis_row(book_id: str, analysis: ChapterAnalysis) -> ChapterAnalysisR
     )
 
 
+def _segment_treatment_json(
+    treatments: tuple[BlockTreatment, ...],
+) -> list[str] | None:
+    """Treatment strings, or NULL when the block mode applies to every segment."""
+    if not treatments:
+        return None
+    return [treatment.value for treatment in treatments]
+
+
+def _segment_treatments(payload: object) -> tuple[BlockTreatment, ...]:
+    """Restore segment modes. NULL and an empty list are the domain empty tuple."""
+    if not payload:
+        return ()
+    return tuple(BlockTreatment(item) for item in payload)
+
+
+def _treatment_plan_item(row: TreatmentPlanItemRow) -> TreatmentPlanItem:
+    """Convert a treatment plan row to a domain item."""
+    treatments = _segment_treatments(row.segment_treatments_json)
+    return TreatmentPlanItem(
+        block_id=row.block_id,
+        treatment=BlockTreatment(row.treatment),
+        segment_treatments=treatments,
+        # Indexes are not stored. The constructor checks them and then drops them.
+        sentence_indexes=tuple(range(len(treatments))),
+    )
+
+
+def _plan_item_row(
+    analysis_id: str, position: int, item: TreatmentPlanItem
+) -> TreatmentPlanItemRow:
+    """Convert one plan item. NULL segment modes are left unset."""
+    row = TreatmentPlanItemRow(
+        analysis_id=analysis_id,
+        block_id=item.block_id,
+        treatment=item.treatment.value,
+        position=position,
+    )
+    treatments = _segment_treatment_json(item.segment_treatments)
+    if treatments is not None:
+        row.segment_treatments_json = treatments
+    return row
+
+
 def to_plan_item_rows(analysis: ChapterAnalysis) -> list[TreatmentPlanItemRow]:
     """Convert chapter treatment plan items to database rows preserving order."""
     return [
-        TreatmentPlanItemRow(
-            analysis_id=analysis.id,
-            block_id=item.block_id,
-            treatment=item.treatment.value,
-            position=position,
-        )
+        _plan_item_row(analysis.id, position, item)
         for position, item in enumerate(analysis.treatment_plan.items)
     ]
 
@@ -383,6 +443,7 @@ def to_candidate_row(candidate: GlossaryCandidate) -> GlossaryCandidateRow:
         requires_review=candidate.requires_review,
         note=candidate.note,
         name_translation_evidence_json=_encode_name_translation_evidence(candidate.name_translation_evidence),
+        description=candidate.description,
     )
 
 
@@ -400,9 +461,7 @@ def to_analysis(
         treatment_plan=TreatmentPlan(
             section_id=row.section_id,
             items=tuple(
-                TreatmentPlanItem(
-                    block_id=item.block_id, treatment=BlockTreatment(item.treatment)
-                )
+                _treatment_plan_item(item)
                 for item in sorted(plan_items, key=lambda item: item.position)
             ),
         ),
@@ -420,6 +479,7 @@ def to_analysis(
                 requires_review=candidate.requires_review,
                 note=candidate.note or "",
                 name_translation_evidence=_decode_name_translation_evidence(candidate.name_translation_evidence_json),
+                description=candidate.description or "",
             )
             for candidate in candidates
         ),
@@ -501,9 +561,25 @@ def to_run(row: ProcessingRunRow) -> ProcessingRun:
     )
 
 
+def _segment_translation_json(
+    translations: tuple[str | None, ...],
+) -> list[str | None] | None:
+    """Segment translations, or NULL when the result has no per-segment texts."""
+    if not translations:
+        return None
+    return list(translations)
+
+
+def _segment_translations(payload: object) -> tuple[str | None, ...]:
+    """Restore segment translations. NULL and an empty list are the domain empty tuple."""
+    if not payload:
+        return ()
+    return tuple(payload)
+
+
 def to_result_row(run_id: str, result: BlockProcessingResult) -> BlockResultRow:
     """Convert a block processing result to a database row."""
-    return BlockResultRow(
+    row = BlockResultRow(
         run_id=run_id,
         block_id=result.block_id,
         treatment=result.treatment.value,
@@ -516,6 +592,14 @@ def to_result_row(run_id: str, result: BlockProcessingResult) -> BlockResultRow:
             for hint in result.glossary_hints
         ],
     )
+    # Unset NULL keeps an insert valid on a schema that does not have these columns yet.
+    treatments = _segment_treatment_json(result.segment_treatments)
+    if treatments is not None:
+        row.segment_treatments_json = treatments
+    translations = _segment_translation_json(result.segment_translations)
+    if translations is not None:
+        row.segment_translations_json = translations
+    return row
 
 
 def to_note_rows(run_id: str, result: BlockProcessingResult) -> list[LanguageNoteRow]:
@@ -583,6 +667,8 @@ def to_block_result(
             ResultWarning(kind=ResultWarningKind(warning.kind), message=warning.message)
             for warning in warnings
         ),
+        segment_treatments=_segment_treatments(row.segment_treatments_json),
+        segment_translations=_segment_translations(row.segment_translations_json),
     )
 
 
