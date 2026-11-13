@@ -1,8 +1,9 @@
 """Review list for one chapter: earlier hints brought back on a schedule.
 
 A hint qualifies when its content chapter is 1, 3, or 7 before the current
-one and the expression has a single translation in the book. Nothing is
-stored and no model is called.
+one, the expression has a single translation in the book, and its word forms
+occur in the current section's source text. Nothing is stored and no model
+is called.
 """
 
 from __future__ import annotations
@@ -51,7 +52,9 @@ def chapter_review(
     The same expression scheduled from more than one distance is one entry,
     and `first_chapter` is the earliest of those chapters. An expression
     already present as a hint or language note in this chapter is excluded.
-    An unknown or missing reader level returns an empty tuple.
+    So is one whose words do not occur in this section's source text.
+    An inflected form counts. Translation text does not. An unknown or
+    missing reader level returns an empty tuple.
     """
     if not isinstance(reader_level, str):
         return ()
@@ -64,6 +67,7 @@ def chapter_review(
         return ()
     hints = _hints(document, results)
     noted = _noted_words(section, results)
+    source = _source_words(section)
     chosen: list[tuple[int, int, ReviewEntry]] = []
     for indexes in _groups(hints):
         translations = {_translation_key(hints[index].translation) for index in indexes}
@@ -71,6 +75,8 @@ def chapter_review(
             continue
         scheduled = [hints[index] for index in indexes if _scheduled(hints[index], current)]
         if not scheduled or _already_noted(indexes, hints, noted):
+            continue
+        if not _occurs(indexes, hints, source):
             continue
         earliest = min(scheduled, key=lambda item: (item.chapter, item.appearance))
         nearest = min(scheduled, key=lambda item: (current - _chapter(item), item.appearance))
@@ -112,6 +118,37 @@ def _hints(
                 if chapter is not None:
                     appearance += 1
     return tuple(found)
+
+
+def _source_words(section: DocumentSection) -> tuple[tuple[str, ...], ...]:
+    """Words of each block in this section. Windows do not cross blocks."""
+    return tuple(
+        words
+        for block in section.ordered_blocks
+        if (words := expression_words(block.text))
+    )
+
+
+def _occurs(
+    indexes: Sequence[int],
+    hints: Sequence[_Hint],
+    sequences: Sequence[tuple[str, ...]],
+) -> bool:
+    """Whether any inflected form of the expression appears in the source.
+
+    Matching uses the stem comparison in `explained_expressions`. A raw
+    substring of a longer word does not count, and neither does a translation.
+    """
+    for index in indexes:
+        pattern = hints[index].words
+        width = len(pattern)
+        for words in sequences:
+            if width > len(words):
+                continue
+            limit = len(words) - width + 1
+            if any(_same_words(pattern, words[start : start + width]) for start in range(limit)):
+                return True
+    return False
 
 
 def _noted_words(

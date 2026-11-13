@@ -226,18 +226,29 @@ def _chapters(
 ) -> tuple[CanonicalDocument, dict[str, BlockProcessingResult], tuple[str, ...]]:
     """Content chapters only. `specs[chapter][block]` is that block's hints.
 
-    Returns the document, results for blocks that have hints, and section ids
-    in content order.
+    The last chapter is the one under review. Its first block repeats every
+    hint form so the occurrence check can see them. Returns the document,
+    results for blocks that have hints, and section ids in content order.
     """
     sections: list[DocumentSection] = []
     results: dict[str, BlockProcessingResult] = {}
     section_ids: list[str] = []
+    surfaced = " ".join(
+        original
+        for blocks in specs
+        for hints in blocks
+        for original, _translation in hints
+    )
+    last = len(specs) - 1
     for index, blocks in enumerate(specs):
         section_id = f"ch-{index + 1}"
         resource = f"{section_id}.xhtml"
         built = []
         for block_order, hints in enumerate(blocks):
-            block = _block(section_id, resource, block_order, "Chapter prose.")
+            text = "Chapter prose."
+            if index == last and block_order == 0 and surfaced:
+                text = f"{text} {surfaced}."
+            block = _block(section_id, resource, block_order, text)
             built.append(block)
             if hints:
                 results[block.id] = _result(block, hints)
@@ -418,6 +429,41 @@ def test_review_uses_scheduled_chapters() -> None:
     )
 
 
+def test_review_omits_form_missing_from_current_chapter() -> None:
+    """A scheduled hint is omitted unless the current chapter's source uses its form.
+
+    `lanterns` keeps `lantern`, and `heaved to` keeps `heave to`. The translation
+    and a glued `oddphrase` do not keep `odd phrase`.
+    """
+    past = _block("ch-1", "ch-1.xhtml", 0, "Past prose.")
+    current = _block(
+        "ch-2",
+        "ch-2.xhtml",
+        0,
+        "She heaved to the lanterns near an oddphrase mark.",
+    )
+    first = _content("ch-1", 0, (past,))
+    second = _content("ch-2", 1, (current,))
+    document = _document((first, second))
+    results = {
+        past.id: _result(past, (
+            ("lantern", "фонарь"),
+            ("heave to", "лечь в дрейф"),
+            ("odd phrase", "странная фраза"),
+        )),
+        current.id: BlockProcessingResult(
+            current.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="odd phrase",
+        ),
+    }
+
+    assert chapter_review(document, results, section_id=second.id, reader_level="a2") == (
+        ReviewEntry("lantern", "фонарь", 1),
+        ReviewEntry("heave to", "лечь в дрейф", 1),
+    )
+
+
 def test_review_skips_ambiguous_word() -> None:
     """A word with two translations anywhere in the book is left out."""
     document, results, section_ids = _chapters((
@@ -451,7 +497,12 @@ def test_review_skips_expressions_noted_in_chapter() -> None:
     Word forms share a stem: `heaved to` notes `heave to`.
     """
     past = _block("ch-1", "ch-1.xhtml", 0, "Chapter prose.")
-    current_hints = _block("ch-2", "ch-2.xhtml", 0, "More prose.")
+    current_hints = _block(
+        "ch-2",
+        "ch-2.xhtml",
+        0,
+        "More prose. Heaved to the kid gloves and the white rabbit.",
+    )
     first = _content("ch-1", 0, (past,))
     second = _content("ch-2", 1, (current_hints,))
     document = _document((first, second))
@@ -519,8 +570,13 @@ def test_review_limit_by_level() -> None:
 def test_front_matter_does_not_shift_review_distance() -> None:
     """A contents page and a notes page between chapters do not change distances."""
     opening = _block("ch-1", "ch-1.xhtml", 0, "Opening prose.")
-    middle = _block("ch-2", "ch-2.xhtml", 0, "Middle prose.")
-    closing = _block("ch-3", "ch-3.xhtml", 0, "Closing prose.")
+    middle = _block("ch-2", "ch-2.xhtml", 0, "Middle prose. opening phrase.")
+    closing = _block(
+        "ch-3",
+        "ch-3.xhtml",
+        0,
+        "Closing prose. middle phrase and the opening phrase.",
+    )
     first = _content("ch-1", 0, (opening,))
     front = _front(1, "contents")
     second = _content("ch-2", 2, (middle,))
