@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-import pytest
-
-from linguary.adapters.epub.inline import InlineContent
 from linguary.adapters.epub.splitting import (
     SEGMENT_MAX_CHARS,
     SEGMENT_MIN_BLOCK_CHARS,
     SPLIT_MAX_PART_CHARS,
     SPLIT_MIN_CHARS,
-    SPLIT_MIN_SENTENCES,
     segment_text,
-    split_inline_content,
     split_paragraph,
     split_sentences,
 )
-from linguary.domain import BlockSegment, InlineAnnotation, InlineAnnotationType
+from linguary.domain import BlockSegment
 
 
 def test_split_sentences_skips_short_paragraphs() -> None:
@@ -197,153 +192,6 @@ def test_split_sentences_text_reconstruction_invariant() -> None:
             assert slices[i][1] == slices[i + 1][0]
 
 
-def test_split_inline_content_shifts_annotation_offsets() -> None:
-    """Annotation offsets are correctly shifted using the [start - offset, end - offset) formula."""
-    text = "First sentence is simple. Second sentence contains bold text inside it."
-    bold_target = "bold text"
-    bold_start = text.index(bold_target)
-    bold_end = bold_start + len(bold_target)
-
-    content = InlineContent(
-        text=text,
-        annotations=(
-            InlineAnnotation(type=InlineAnnotationType.BOLD, start=bold_start, end=bold_end),
-        ),
-        anchor_ids=("p-1",),
-    )
-
-    fragments = split_inline_content(content, min_chars=1)
-    assert len(fragments) == 2
-
-    # First fragment contains no markup
-    assert fragments[0].annotations == ()
-
-    # Second fragment contains shifted markup
-    assert len(fragments[1].annotations) == 1
-    shifted_ann = fragments[1].annotations[0]
-    assert shifted_ann.type is InlineAnnotationType.BOLD
-    offset = len(fragments[0].text)
-    assert shifted_ann.start == bold_start - offset
-    assert shifted_ann.end == bold_end - offset
-    assert fragments[1].text[shifted_ann.start : shifted_ann.end] == bold_target
-
-
-def test_split_inline_content_clips_spanning_annotations() -> None:
-    """Spanning markup (e.g. italics over multiple sentences) is clipped at boundaries."""
-    text = "First sentence is here. Second sentence follows."
-    # Italic spans part of the first sentence and part of the second
-    italic_start = text.index("sentence is here")
-    italic_end = text.index("follows") + len("follows")
-
-    content = InlineContent(
-        text=text,
-        annotations=(
-            InlineAnnotation(type=InlineAnnotationType.ITALIC, start=italic_start, end=italic_end),
-        ),
-    )
-
-    fragments = split_inline_content(content, min_chars=1)
-    assert len(fragments) == 2
-
-    # In the first fragment, markup is clipped at the fragment boundary
-    assert len(fragments[0].annotations) == 1
-    ann0 = fragments[0].annotations[0]
-    assert ann0.type is InlineAnnotationType.ITALIC
-    assert ann0.start == italic_start
-    assert ann0.end == len(fragments[0].text)
-
-    # In the second fragment, markup starts at 0 and ends at the relative offset
-    assert len(fragments[1].annotations) == 1
-    ann1 = fragments[1].annotations[0]
-    assert ann1.type is InlineAnnotationType.ITALIC
-    assert ann1.start == 0
-    offset = len(fragments[0].text)
-    assert ann1.end == italic_end - offset
-
-
-def test_split_inline_content_preserves_footnote_references() -> None:
-    """Footnote references are not bisected and are preserved in their respective fragments."""
-    text = "First sentence with note.1 Second sentence with note.2"
-    fn1_start = text.index("1")
-    fn1_end = fn1_start + 1
-    fn2_start = text.rindex("2")
-    fn2_end = fn2_start + 1
-
-    content = InlineContent(
-        text=text,
-        annotations=(
-            InlineAnnotation(
-                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
-                start=fn1_start,
-                end=fn1_end,
-                target="notes.xhtml#fn1",
-            ),
-            InlineAnnotation(
-                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
-                start=fn2_start,
-                end=fn2_end,
-                target="notes.xhtml#fn2",
-            ),
-        ),
-    )
-
-    fragments = split_inline_content(content, min_chars=1)
-    assert len(fragments) == 2
-
-    # First fragment preserves fn1
-    assert len(fragments[0].annotations) == 1
-    assert fragments[0].annotations[0] == InlineAnnotation(
-        type=InlineAnnotationType.FOOTNOTE_REFERENCE,
-        start=fn1_start,
-        end=fn1_end,
-        target="notes.xhtml#fn1",
-    )
-
-    # Second fragment preserves fn2 with shift
-    assert len(fragments[1].annotations) == 1
-    offset = len(fragments[0].text)
-    assert fragments[1].annotations[0] == InlineAnnotation(
-        type=InlineAnnotationType.FOOTNOTE_REFERENCE,
-        start=fn2_start - offset,
-        end=fn2_end - offset,
-        target="notes.xhtml#fn2",
-    )
-
-
-def test_split_inline_content_anchors_assigned_to_first_fragment() -> None:
-    """Block anchors are assigned only to the first fragment; subsequent fragments receive empty tuples."""
-    content = InlineContent(
-        text="First sentence here. Second sentence here. Third sentence here.",
-        anchor_ids=("anchor-1", "anchor-2"),
-    )
-
-    fragments = split_inline_content(content, min_chars=1)
-    assert len(fragments) == 2
-    assert "".join(fragment.text for fragment in fragments) == content.text
-    assert fragments[0].anchor_ids == ("anchor-1", "anchor-2")
-    assert fragments[1].anchor_ids == ()
-
-
-def test_split_inline_content_returns_original_if_short_and_splits_long_text() -> None:
-    """Short content is preserved as-is, while long text falls back to word boundaries."""
-    short_content = InlineContent(
-        text="Short text.",
-        anchor_ids=("a1",),
-    )
-    result_short = split_inline_content(short_content)
-    assert result_short == (short_content,)
-
-    monolithic_content = InlineContent(
-        text="Monolithic word " * 100,
-        anchor_ids=("a2",),
-    )
-    result_monolithic = split_inline_content(monolithic_content)
-    assert len(result_monolithic) > 1
-    assert "".join(fragment.text for fragment in result_monolithic) == monolithic_content.text
-    assert result_monolithic[0].anchor_ids == monolithic_content.anchor_ids
-    assert all(not fragment.anchor_ids for fragment in result_monolithic[1:])
-
-
 def test_split_sentences_preserves_country_abbreviations() -> None:
     """Abbreviations U.S., U.K., E.U. are not treated as end-of-sentence before a capital letter."""
     text = (
@@ -363,49 +211,6 @@ def test_split_sentences_preserves_country_abbreviations() -> None:
     assert fragments[2].startswith("Officials from the E.U. Parliament")
     assert fragments[2].endswith("adoption of the treaty. ")
     assert fragments[3].startswith("Finally, all parties")
-
-
-def test_split_inline_content_monotonic_boundaries_with_overlapping_footnotes() -> None:
-    """Shifting footnote boundary does not violate monotonic boundaries when a footnote overlaps the next boundary."""
-    s1 = "Sentence one is right here. "
-    s2 = "Sentence two is here. "
-    s3 = "Sentence three follows."
-    text = s1 + s2 + s3
-    b1 = len(s1)
-    b2 = len(s1) + len(s2)
-
-    fn_start = b1 - 3
-    fn_end = b2 + 2
-
-    content = InlineContent(
-        text=text,
-        annotations=(
-            InlineAnnotation(
-                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
-                start=fn_start,
-                end=fn_end,
-                target="notes.xhtml#fn_wide",
-            ),
-        ),
-    )
-
-    fragments = split_inline_content(content, min_chars=1)
-    assert len(fragments) >= 1
-    reconstructed = "".join(f.text for f in fragments)
-    assert reconstructed == text
-    for f in fragments:
-        assert len(f.text) > 0
-
-    fn_to_end = InlineAnnotation(
-        type=InlineAnnotationType.FOOTNOTE_REFERENCE,
-        start=b1 - 2,
-        end=len(text),
-        target="notes.xhtml#fn_end",
-    )
-    content_end = InlineContent(text=text, annotations=(fn_to_end,))
-    fragments_end = split_inline_content(content_end, min_chars=1)
-    assert len(fragments_end) == 1
-    assert fragments_end[0].text == text
 
 
 def test_split_sentences_preserves_compound_numbered_markers() -> None:
@@ -524,7 +329,7 @@ def test_split_paragraph_keeps_unequal_sentences_intact_without_mid_sentence_cut
 
 
 def test_split_paragraph_splits_oversized_single_sentence_at_word_boundaries() -> None:
-    """Oversized single sentences (> max_sentence_part) fall back to word boundaries while preserving text, markup, and normal sentences."""
+    """Oversized single sentences fall back to word boundaries and keep later sentences whole."""
     max_part = max(SPLIT_MAX_PART_CHARS, SPLIT_MIN_CHARS - 50)
     oversized_single = (
         "Throughout the remarkably intricate parliamentary debate concerning maritime navigation "
@@ -540,32 +345,6 @@ def test_split_paragraph_splits_oversized_single_sentence_at_word_boundaries() -
     for start, _ in single_slices[1:]:
         assert oversized_single[start - 1].isspace()
         assert not oversized_single[start].isspace()
-
-    italic_phrase = "regional customs regulations"
-    italic_start = oversized_single.rindex(italic_phrase)
-    italic_end = italic_start + len(italic_phrase)
-    annotated = InlineContent(
-        text=oversized_single,
-        annotations=(
-            InlineAnnotation(
-                type=InlineAnnotationType.ITALIC,
-                start=italic_start,
-                end=italic_end,
-            ),
-        ),
-        anchor_ids=("para-oversized",),
-    )
-    fragments = split_inline_content(annotated)
-    assert len(fragments) == len(single_slices)
-    assert "".join(f.text for f in fragments) == oversized_single
-    assert fragments[0].anchor_ids == ("para-oversized",)
-    recovered_italic = "".join(
-        frag.text[ann.start : ann.end]
-        for frag in fragments
-        for ann in frag.annotations
-        if ann.type is InlineAnnotationType.ITALIC
-    )
-    assert recovered_italic == italic_phrase
 
     normal_second = (
         " Nevertheless, when the final bell rang across the chamber, the exhausted clerk "

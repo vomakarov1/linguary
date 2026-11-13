@@ -365,13 +365,16 @@ def test_reader_and_writer_split_and_regroup_long_leaf_blockquotes_preserving_ne
         manifest_paths=frozenset({"sec_1.xhtml"}),
     )
     builder.walk(parsed_body, _BlockContext())
-    assert len(builder.blocks) > 1
-    assert all(b.type is BlockType.QUOTE for b in builder.blocks)
+    assert len(builder.blocks) == 1
+    assert builder.blocks[0].type is BlockType.QUOTE
+    assert builder.blocks[0].text == long_quote
+    assert "split_group" not in builder.blocks[0].attributes
 
     roundtrip_root = render_split_blocks(builder.blocks)
     roundtrip_chapter = roundtrip_root.find(f".//{_XHTML}section")
     assert roundtrip_chapter is not None
     roundtrip_quotes = roundtrip_chapter.findall(f"{_XHTML}blockquote")
     assert len(roundtrip_quotes) == 1
+    assert "".join(roundtrip_quotes[0].itertext()) == long_quote
     assert not roundtrip_quotes[0].xpath('.//*[contains(@class, "linguary-split-continuation")]')
 

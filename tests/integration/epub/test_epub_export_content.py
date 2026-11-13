@@ -629,49 +629,47 @@ def test_fragment_assistance_follows_the_complete_split_original(tmp_path: Path)
     )
     dry = run_export(source, tmp_path=tmp_path / "dry")
     parts = paragraphs_of(dry.imported.document, 0)
-    assert len(parts) > 1
-    assert len({part.attributes["split_group"] for part in parts}) == 1
-    anchors = tuple(SourceAnchor(part.id, 0, 10, part.text[:10]) for part in parts)
+    assert len(parts) == 1
+    part = parts[0]
+    assert "split_group" not in part.attributes
+    assert len(part.segment_spans) > 1
+    assert "".join(part.text[span.start:span.end] for span in part.segment_spans) == part.text
+    anchors = (SourceAnchor(part.id, 0, 10, part.text[:10]),)
     help_item = FragmentAssistance(
         "one-difficulty", ("one-point",), "sentence_rephrase",
         "The traveller continued along the road.", anchors,
     )
     result = BlockProcessingResult(
-        parts[0].id, BlockTreatment.READ_AS_IS, fragment_assistances=(help_item,),
+        part.id, BlockTreatment.READ_AS_IS, fragment_assistances=(help_item,),
     )
-    run = run_export(source, tmp_path=tmp_path / "full", block_results={parts[0].id: result})
+    run = run_export(source, tmp_path=tmp_path / "full", block_results={part.id: result})
     root = documents_of(run.path)["OEBPS/chapter.xhtml"]
-    fragment_containers = [
+    assert [
         node for node in elements(root, "div")
         if "linguary-paragraph-fragment" in (node.get("class") or "").split()
-    ]
+    ] == []
     originals = [
         paragraph
-        for fragment in fragment_containers
-        for paragraph in elements(fragment, "p")
-        if paragraph.getparent() is fragment
-        if "linguary-fragment-label" not in (paragraph.get("class") or "").split()
+        for paragraph in elements(root, "p")
+        if paragraph.get("class") is None and "Repeated phrase." in "".join(paragraph.itertext())
     ]
-    assert len(originals) > 1
-    assert "".join("".join(paragraph.itertext()) for paragraph in originals) == "".join(
-        part.text for part in parts
-    )
+    assert len(originals) == 1
     original = originals[0]
+    assert "".join(original.itertext()) == part.text
     container = original.getnext()
     assert container.get("class") == "linguary-fragment-help"
     assert len(root.xpath('//*[@class="linguary-fragment-help"]')) == 1
     assert len(container) == 1
     assert next(iter(elements(original, "b"))).text == "Repeated phrase."
     source_link = next(
-        a for paragraph in originals for a in elements(paragraph, "a")
+        a for a in elements(original, "a")
         if a.get("href") == "https://example.com"
     )
     assert source_link.text == "linked ending"
     assert sum(
         a.get("class") == "linguary-help-reference"
-        for paragraph in originals
-        for a in elements(paragraph, "a")
-    ) == len(parts)
+        for a in elements(original, "a")
+    ) == 1
 
 
 def pronunciation_book(tmp_path):

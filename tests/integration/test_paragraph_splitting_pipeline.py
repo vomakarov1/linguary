@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from epub_builder import build_epub, xhtml_document
 from export_pipeline import documents_of, elements, run_export
 
 from linguary.adapters.epub import verify_exported_epub
+from linguary.adapters.epub.splitting import segment_text
 from linguary.adapters.validation import EpubCheckValidator
 from linguary.application.ports.export_validation import (
     ExportIssueSeverity,
@@ -22,9 +24,11 @@ from linguary.application.translation_units import plan_translation_units
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
+    BlockType,
     InlineAnnotationType,
     TreatmentPlan,
 )
+from linguary.domain.identifiers import build_block_id
 
 
 def _create_test_epub_with_composite_paragraphs(tmp_path: Path) -> Path:
@@ -64,92 +68,8 @@ def _create_test_epub_with_composite_paragraphs(tmp_path: Path) -> Path:
     )
 
 
-def test_pipeline_import_process_and_export_split_paragraphs(tmp_path: Path) -> None:
-    """Full lifecycle of importing a book with composite paragraphs, grouping processing, and exporting to EPUB."""
-    source_epub = _create_test_epub_with_composite_paragraphs(tmp_path)
-
-    run = run_export(source_epub, tmp_path=tmp_path, book_id="split-book")
-    assert run.path.is_file()
-
-    sections = run.imported.document.ordered_sections
-    assert len(sections) == 1
-    blocks = sections[0].ordered_blocks
-
-    split_blocks = [b for b in blocks if "split_group" in b.attributes]
-    assert len(split_blocks) == 3
-    assert split_blocks[0].text.endswith("opening words. ")
-    assert split_blocks[1].text.endswith("squeaky chalk. ")
-    assert split_blocks[2].text.endswith("sit down.")
-
-    base_path = split_blocks[0].attributes["split_group"]
-    total = split_blocks[0].attributes["split_total"]
-    assert total == str(len(split_blocks))
-
-    for k, block in enumerate(split_blocks, start=1):
-        assert block.attributes["split_group"] == base_path
-        assert block.attributes["split_index"] == str(k)
-        assert block.attributes["split_total"] == total
-        assert block.source_reference.structural_path.endswith(f"/text()[{k}]")
-
-    plan = TreatmentPlan.of_treatments(
-        sections[0].id,
-        [(block.id, BlockTreatment.TRANSLATE) for block in blocks],
-    )
-    import itertools
-    counter = itertools.count(1)
-    units = plan_translation_units(
-        blocks,
-        plan,
-        id_factory=lambda: f"unit-{next(counter)}",
-        max_source_chars=2000,
-    )
-
-    split_block_ids = {b.id for b in split_blocks}
-    containing_units = [u for u in units if any(bid in split_block_ids for bid in u.block_ids)]
-    assert len(containing_units) == 1, "All composite paragraph fragments must be grouped into a single TranslationUnit"
-    assert all(bid in containing_units[0].block_ids for bid in split_block_ids)
-
-    assert verify_exported_epub(run.path) == ()
-
-    exported_docs = documents_of(run.path)
-    assert len(exported_docs) >= 1
-    chapter_doc = next(iter(exported_docs.values()))
-
-    p_elements = elements(chapter_doc, "p")
-    continuation_elements = [
-        p for p in p_elements if "linguary-split-continuation" in (p.get("class") or "")
-    ]
-    assert continuation_elements == []
-
-    fragment_containers = [
-        node for node in elements(chapter_doc, "div")
-        if "linguary-paragraph-fragment" in (node.get("class") or "").split()
-    ]
-    original_paragraphs = [
-        paragraph
-        for fragment in fragment_containers
-        for paragraph in elements(fragment, "p")
-        if paragraph.getparent() is fragment
-        if "linguary-fragment-label" not in (paragraph.get("class") or "").split()
-    ]
-    assert len(original_paragraphs) > 1
-    assert "".join("".join(paragraph.itertext()) for paragraph in original_paragraphs) == "".join(
-        block.text for block in split_blocks
-    )
-    bold = [node for paragraph in original_paragraphs for node in elements(paragraph, "b")]
-    assert bold
-    expected_bold = "".join(
-        block.text[annotation.start:annotation.end]
-        for block in split_blocks
-        for annotation in block.inline_annotations
-        if annotation.type is InlineAnnotationType.BOLD
-    )
-    assert "".join("".join(node.itertext()) for node in bold) == expected_bold
-    assert expected_bold.startswith("The White Rabbit")
-
-
 def test_epubcheck_validity_for_split_paragraphs(tmp_path: Path) -> None:
-    """Exported EPUB with styled paragraph fragments is valid per EPUB 3 standard (0 errors in EPUBCheck)."""
+    """An exported long paragraph, stored as one block, is valid EPUB 3."""
     source_epub = _create_test_epub_with_composite_paragraphs(tmp_path)
 
     run_temp = run_export(source_epub, tmp_path=tmp_path, book_id="validation-book")
@@ -180,3 +100,87 @@ def test_epubcheck_validity_for_split_paragraphs(tmp_path: Path) -> None:
 
     if report.available:
         assert len(report.errors) == 0, f"EPUBCheck errors: {report.errors}"
+
+
+def test_pipeline_imports_single_block_with_segments(tmp_path: Path) -> None:
+    """A long paragraph is imported, planned, and exported as one block with segments."""
+    source_epub = _create_test_epub_with_composite_paragraphs(tmp_path)
+    run = run_export(source_epub, tmp_path=tmp_path, book_id="split-book")
+    assert run.path.is_file()
+
+    sections = run.imported.document.ordered_sections
+    assert len(sections) == 1
+    blocks = sections[0].ordered_blocks
+    assert [block.type for block in blocks] == [
+        BlockType.HEADING,
+        BlockType.PARAGRAPH,
+        BlockType.PARAGRAPH,
+        BlockType.PARAGRAPH,
+    ]
+    assert blocks[1].text == "Opening short paragraph before the courtroom scene."
+    assert blocks[3].text == "Closing short paragraph after the courtroom scene."
+
+    composite = blocks[2]
+    assert composite.source_reference.element_id == "composite-p"
+    assert composite.source_reference.structural_path == "/html[1]/body[1]/p[2]"
+    assert "/text()" not in composite.source_reference.structural_path
+    assert composite.id == build_block_id(
+        document_id="split-book",
+        source_resource_path="chapter1.xhtml",
+        structural_path="/html[1]/body[1]/p[2]",
+    )
+    assert composite.text.endswith("sit down.")
+    assert "opening words." in composite.text
+    assert "squeaky chalk." in composite.text
+    expected = segment_text(composite.text)
+    assert len(expected) > 1
+    assert composite.segments == expected
+    assert all(
+        "split_group" not in block.attributes
+        and "split_index" not in block.attributes
+        and "split_total" not in block.attributes
+        for block in blocks
+    )
+
+    plan = TreatmentPlan.of_treatments(
+        sections[0].id,
+        [(block.id, BlockTreatment.TRANSLATE) for block in blocks],
+    )
+    counter = itertools.count(1)
+    units = plan_translation_units(
+        blocks,
+        plan,
+        id_factory=lambda: f"unit-{next(counter)}",
+        max_source_chars=2000,
+    )
+    containing_units = [unit for unit in units if composite.id in unit.block_ids]
+    assert len(containing_units) == 1
+
+    assert verify_exported_epub(run.path) == ()
+    chapter_doc = next(iter(documents_of(run.path).values()))
+    assert [
+        paragraph
+        for paragraph in elements(chapter_doc, "p")
+        if "linguary-split-continuation" in (paragraph.get("class") or "")
+    ] == []
+    assert [
+        node
+        for node in elements(chapter_doc, "div")
+        if "linguary-paragraph-fragment" in (node.get("class") or "").split()
+    ] == []
+    originals = [
+        paragraph
+        for paragraph in elements(chapter_doc, "p")
+        if "The White Rabbit" in "".join(paragraph.itertext())
+    ]
+    assert len(originals) == 1
+    assert "".join(originals[0].itertext()) == composite.text
+    bold = elements(originals[0], "b")
+    expected_bold = "".join(
+        composite.text[annotation.start : annotation.end]
+        for annotation in composite.inline_annotations
+        if annotation.type is InlineAnnotationType.BOLD
+    )
+    assert bold
+    assert "".join("".join(node.itertext()) for node in bold) == expected_bold
+    assert expected_bold.startswith("The White Rabbit")

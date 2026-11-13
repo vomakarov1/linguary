@@ -10,6 +10,9 @@ Block IDs are calculated by the domain factory `DocumentBlock.create` based on t
 `document_id + source_resource_path + structural_path` (ALG-01, PRD § 8); the structural path
 is an absolute XPath with tag sibling indices, depending strictly on the element's position
 in the document and independent of its text content.
+
+A paragraph or quote is one block. Sentence spans from `segment_text` are stored on that
+block, not as sibling blocks, and a split index `text()[k]` is not appended to its path.
 """
 
 from __future__ import annotations
@@ -40,10 +43,7 @@ from linguary.adapters.epub.resources import (
     package_path,
     unreadable_epub_message,
 )
-from linguary.adapters.epub.splitting import (
-    SPLIT_MIN_CHARS,
-    split_inline_content,
-)
+from linguary.adapters.epub.splitting import segment_text
 from linguary.adapters.epub.support_matrix import (
     DroppedBlockLog,
     DropReason,
@@ -59,6 +59,7 @@ from linguary.application.ports.epub import (
     normalize_language_code,
 )
 from linguary.domain import (
+    BlockSegment,
     BlockType,
     BookImportWarning,
     BookMetadata,
@@ -67,6 +68,7 @@ from linguary.domain import (
     DocumentResource,
     DocumentSection,
     ImportWarningKind,
+    InlineAnnotationType,
     SourceReference,
     SupportStatus,
 )
@@ -730,19 +732,6 @@ class _SectionBuilder:
         if reason is not None:
             self._drops.record(reason, structural_path)
             return
-        if (
-            block_type in (BlockType.PARAGRAPH, BlockType.QUOTE)
-            and len(content.text) >= SPLIT_MIN_CHARS
-        ):
-            split_blocks = self._split_and_add_paragraph(
-                element=element,
-                structural_path=structural_path,
-                content=content,
-                context=context,
-                block_type=block_type,
-            )
-            if split_blocks:
-                return
         self._add_block(
             element=element,
             structural_path=structural_path,
@@ -751,65 +740,6 @@ class _SectionBuilder:
             support_status=block_support_status(block_type),
             context=context,
         )
-
-    def _split_and_add_paragraph(
-        self,
-        element: etree._Element | None,
-        structural_path: str,
-        content: InlineContent,
-        context: _BlockContext,
-        *,
-        block_type: BlockType = BlockType.PARAGRAPH,
-    ) -> list[DocumentBlock]:
-        """Splits a long paragraph into balanced source fragments near 300 characters."""
-        fragments = split_inline_content(content)
-        if len(fragments) <= 1:
-            return []
-
-        total_parts = len(fragments)
-        base_xpath = structural_path
-        element_id = element.get("id") if element is not None else None
-        default_tag = "blockquote" if block_type is BlockType.QUOTE else "p"
-        tag = (local_name(element) if element is not None else None) or default_tag
-        result_blocks: list[DocumentBlock] = []
-
-        for k, fragment in enumerate(fragments, start=1):
-            sub_path = f"{base_xpath}/text()[{k}]"
-            if k == 1:
-                attrs = dict(self._attributes(element, content=fragment, element_id=element_id))
-            else:
-                attrs = {"tag": tag}
-                if fragment.anchor_ids:
-                    attrs["anchor_ids"] = " ".join(fragment.anchor_ids)
-
-            attrs["split_group"] = base_xpath
-            attrs["split_index"] = str(k)
-            attrs["split_total"] = str(total_parts)
-
-            block = DocumentBlock.create(
-                document_id=self._book_id,
-                section_id=self.section_id,
-                type=block_type,
-                order=self._order,
-                text=fragment.text,
-                source_reference=SourceReference(
-                    resource_path=self._resource_path,
-                    structural_path=sub_path,
-                    element_id=element_id if k == 1 else None,
-                ),
-                support_status=block_support_status(block_type),
-                inline_annotations=fragment.annotations,
-                parent_id=context.parent_id,
-                attributes=attrs,
-            )
-            self.blocks.append(block)
-            self._order += 1
-            self._last_block = block
-            if k == 1:
-                self._pending_anchor_ids.clear()
-            result_blocks.append(block)
-
-        return result_blocks
 
     def _flush_run(
         self, run: _InlineRun, *, container: etree._Element, context: _BlockContext
@@ -822,19 +752,6 @@ class _SectionBuilder:
             return
         block_type = context.inherited_type or BlockType.PARAGRAPH
         structural_path = f"{_structural_path(container)}/text()[{run.index}]"
-        if (
-            block_type in (BlockType.PARAGRAPH, BlockType.QUOTE)
-            and len(content.text) >= SPLIT_MIN_CHARS
-        ):
-            split_blocks = self._split_and_add_paragraph(
-                element=None,
-                structural_path=structural_path,
-                content=content,
-                context=context,
-                block_type=block_type,
-            )
-            if split_blocks:
-                return
         self._add_block(
             element=None,
             structural_path=structural_path,
@@ -871,6 +788,7 @@ class _SectionBuilder:
             inline_annotations=content.annotations,
             parent_id=context.parent_id,
             attributes=self._attributes(element, content=content, element_id=element_id),
+            segments=_import_segments(type, content),
         )
         self.blocks.append(block)
         self._order += 1
@@ -958,6 +876,29 @@ class _SectionBuilder:
         return InlineContentBuilder(
             resource_path=self._resource_path, footnote_ids=self._footnote_ids
         )
+
+
+def _import_segments(
+    block_type: BlockType, content: InlineContent
+) -> tuple[BlockSegment, ...]:
+    """Sentence spans for a paragraph or quote. Other blocks stay unmarked.
+
+    A single empty span is not stored: `DocumentBlock` rejects an empty segment.
+    One non-empty covering span is passed through and collapsed by `DocumentBlock`.
+    """
+    if block_type not in (BlockType.PARAGRAPH, BlockType.QUOTE):
+        return ()
+    segments = segment_text(
+        content.text,
+        protected=tuple(
+            (annotation.start, annotation.end)
+            for annotation in content.annotations
+            if annotation.type is InlineAnnotationType.FOOTNOTE_REFERENCE
+        ),
+    )
+    if len(segments) == 1 and segments[0].start == segments[0].end:
+        return ()
+    return segments
 
 
 def _is_structural(element: etree._Element) -> bool:

@@ -6,8 +6,7 @@ splitting abbreviations, initials, quotes, or ellipses; long sentences fall back
 boundaries.
 
 `segment_text` marks clause-aware spans inside one block and does not divide the block.
-`split_inline_content` remains until P3.T2 as the import adapter: it still projects
-`split_paragraph` fragments, so a long paragraph stays several blocks.
+Import stores those spans on the paragraph or quote instead of creating sibling blocks.
 """
 
 from __future__ import annotations
@@ -17,8 +16,7 @@ from bisect import bisect_left
 from collections.abc import Sequence
 from math import ceil
 
-from linguary.adapters.epub.inline import InlineContent
-from linguary.domain import BlockSegment, InlineAnnotation, InlineAnnotationType
+from linguary.domain import BlockSegment
 
 SPLIT_MIN_CHARS: int = 600
 SPLIT_MIN_SENTENCES: int = 2
@@ -759,84 +757,4 @@ def segment_text(
             )
         )
     return tuple(segments)
-
-
-def split_inline_content(
-    content: InlineContent,
-    *,
-    min_chars: int = SPLIT_MIN_CHARS,
-    min_sentences: int = SPLIT_MIN_SENTENCES,
-) -> tuple[InlineContent, ...]:
-    """Projects inline markup and anchors onto balanced paragraph fragments.
-
-    Temporary import adapter until P3.T2. Boundaries still come from
-    `split_paragraph`, so a long paragraph remains several blocks. Clause-aware
-    spans for one unsplit block are `segment_text` and are not applied here.
-
-    Markup offsets are recalculated via `[start - offset, end - offset)`,
-    spanning annotations are clipped at fragment boundaries, footnote references are never cut
-    across, and anchors of the original paragraph attach to the first fragment. Sentence breaks
-    are preferred; a long sentence can fall back to a word boundary to stay near the target size.
-    If splitting does not occur, a single-element tuple of the original `content` object is
-    returned.
-    """
-    slices = split_paragraph(
-        content.text,
-        min_chars=min_chars,
-        min_sentences=min_sentences,
-    )
-    if len(slices) <= 1:
-        return (content,)
-
-    # Ensure slice boundaries do not bisect footnote references
-    boundaries = [s[0] for s in slices] + [slices[-1][1]]
-    adjusted_boundaries = [0]
-    for b in boundaries[1:-1]:
-        changed = True
-        while changed:
-            changed = False
-            for ann in content.annotations:
-                if ann.type is InlineAnnotationType.FOOTNOTE_REFERENCE and ann.start < b < ann.end:
-                    new_b = max(b, ann.end)
-                    if new_b != b:
-                        b = new_b
-                        changed = True
-        if b > adjusted_boundaries[-1] and b < boundaries[-1]:
-            adjusted_boundaries.append(b)
-    adjusted_boundaries.append(boundaries[-1])
-
-    if len(adjusted_boundaries) <= 2:
-        return (content,)
-
-    fragments: list[InlineContent] = []
-    for i in range(len(adjusted_boundaries) - 1):
-        slice_start = adjusted_boundaries[i]
-        slice_end = adjusted_boundaries[i + 1]
-        offset = slice_start
-        frag_text = content.text[slice_start:slice_end]
-
-        frag_annotations: list[InlineAnnotation] = []
-        for ann in content.annotations:
-            clipped_start = max(ann.start, slice_start)
-            clipped_end = min(ann.end, slice_end)
-            if clipped_end > clipped_start:
-                frag_annotations.append(
-                    InlineAnnotation(
-                        type=ann.type,
-                        start=clipped_start - offset,
-                        end=clipped_end - offset,
-                        target=ann.target,
-                    )
-                )
-
-        frag_anchors = content.anchor_ids if i == 0 else ()
-        fragments.append(
-            InlineContent(
-                text=frag_text,
-                annotations=tuple(frag_annotations),
-                anchor_ids=frag_anchors,
-            )
-        )
-
-    return tuple(fragments)
 
