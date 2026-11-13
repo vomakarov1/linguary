@@ -1,4 +1,29 @@
-<div data-result-groups data-result-url="/books/{{ data.book_id }}/result{% if result_filter == 'pending_corrections' %}?filter=pending_corrections{% endif %}" data-blocks-url="/books/{{ data.book_id }}/blocks">
+<div data-result-page data-result-url="/books/{{ data.book_id }}/result{% if result_filter == 'pending_corrections' %}?filter=pending_corrections{% endif %}" data-blocks-url="/books/{{ data.book_id }}/blocks">
+{% if data.legend or data.ipa_key %}
+  <section class="lg-sec">
+    {% if data.legend %}
+      <h3>Как устроена эта книга</h3>
+      {% for line in data.legend %}
+        <p>{% if data.ipa_key and 'Ключ к знакам' in line %}{{ line.partition('Ключ к знакам')[0] }}<a href="#ipa-key">Ключ к знакам</a>{{ line.partition('Ключ к знакам')[2] }}{% else %}{{ line }}{% endif %}</p>
+      {% endfor %}
+    {% endif %}
+    {% if data.ipa_key %}
+      <h3 id="ipa-key">Ключ к транскрипции</h3>
+      <p>Здесь только знаки, которые встречаются в этой книге. Русские соответствия приблизительны.</p>
+      <table class="lg-key">
+        <thead>
+          <tr><th>Знак</th><th>Пример</th><th>Как звучит</th></tr>
+        </thead>
+        <tbody>
+          {% for row in data.ipa_key %}
+            <tr><td>{{ row.symbol }}</td><td>{{ row.example }}</td><td>{{ row.description }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p><a class="pronunciation-source-notices" href="{{ request.url_for('pronunciation_sources') }}">Источники транскрипций и лицензии</a></p>
+    {% endif %}
+  </section>
+{% endif %}
 {% for chapter in data.chapters %}
   <section class="chapter">
     <h2>{% if chapter.is_notes %}Сноски - {{ chapter.title }}{% else %}Глава {{ chapter.chapter_number }} - {{ chapter.title }}{% endif %}</h2>

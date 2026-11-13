@@ -47,7 +47,7 @@ document.addEventListener("submit", async (event) => {
     return;
   }
 
-  resultGroupsPendingFocus = captureResultFocus(block.closest("[data-result-groups]"));
+  resultGroupsPendingFocus = captureResultFocus(block.closest("[data-result-page]"));
   if (button instanceof HTMLButtonElement) {
     button.disabled = true;
     button.textContent = "Обновляется";
@@ -75,7 +75,7 @@ document.addEventListener("submit", async (event) => {
     submitted = true;
     resultGroupsGeneration += 1;
     resultGroupsRefreshNeeded = true;
-    const root = document.querySelector("[data-result-groups]");
+    const root = document.querySelector("[data-result-page]");
     if (root instanceof HTMLElement) {
       replaceResultGroup(root, blockId, await response.text());
     }
@@ -141,7 +141,7 @@ async function submitResolveCandidateForm(event, form) {
       throw new Error(`Request failed: ${response.status}`);
     }
     const markup = await response.text();
-    const root = document.querySelector("[data-result-groups]");
+    const root = document.querySelector("[data-result-page]");
     let replacement = null;
     if (root instanceof HTMLElement) {
       replacement = replaceResultGroup(root, blockId, markup);
@@ -167,7 +167,7 @@ async function submitResolveCandidateForm(event, form) {
   }
 }
 
-function isPendingCorrectionsFilterActive(root = document.querySelector("[data-result-groups]")) {
+function isPendingCorrectionsFilterActive(root = document.querySelector("[data-result-page]")) {
   if (root instanceof HTMLElement && root.dataset.resultUrl) {
     try {
       const url = new URL(root.dataset.resultUrl, window.location.href);
@@ -187,7 +187,7 @@ function isPendingCorrectionsFilterActive(root = document.querySelector("[data-r
   }
 }
 
-function hasResolvedFilteredBlock(root = document.querySelector("[data-result-groups]")) {
+function hasResolvedFilteredBlock(root = document.querySelector("[data-result-page]")) {
   if (!(root instanceof HTMLElement) || !isPendingCorrectionsFilterActive(root)) {
     return false;
   }
@@ -347,14 +347,14 @@ async function refreshResultBlocks(blockIds) {
   for (let offset = 0; offset < blockIds.length; offset += RESULT_BLOCK_BATCH_SIZE) {
     await refreshResultBlockBatch(blockIds.slice(offset, offset + RESULT_BLOCK_BATCH_SIZE));
   }
-  const root = document.querySelector("[data-result-groups]");
+  const root = document.querySelector("[data-result-page]");
   if (hasResolvedFilteredBlock(root)) {
     await refreshResultGroups();
   }
 }
 
 async function refreshResultBlockBatch(blockIds) {
-  const root = document.querySelector("[data-result-groups]");
+  const root = document.querySelector("[data-result-page]");
   if (!(root instanceof HTMLElement) || !root.dataset.blocksUrl) {
     throw new Error("Missing result groups root");
   }
@@ -375,7 +375,7 @@ async function refreshResultBlockBatch(blockIds) {
     throw new Error(`Request failed: ${response.status}`);
   }
 
-  const currentRoot = document.querySelector("[data-result-groups]");
+  const currentRoot = document.querySelector("[data-result-page]");
   if (currentRoot !== root) {
     return null;
   }
@@ -429,7 +429,7 @@ async function refreshResultBlockBatch(blockIds) {
 }
 
 async function refreshActiveResultBlocks() {
-  const root = document.querySelector("[data-result-groups]");
+  const root = document.querySelector("[data-result-page]");
   if (!(root instanceof HTMLElement)) {
     throw new Error("Missing result groups root");
   }
@@ -453,7 +453,7 @@ async function refreshResultGroups() {
   resultGroupsRefreshNeeded = true;
   resultGroupsRequest = (async () => {
     while (true) {
-      const root = document.querySelector("[data-result-groups]");
+      const root = document.querySelector("[data-result-page]");
       if (!(root instanceof HTMLElement) || !root.dataset.resultUrl) {
         throw new Error("Missing result groups root");
       }
@@ -477,7 +477,7 @@ async function refreshResultGroups() {
       if (generation !== resultGroupsGeneration) {
         continue;
       }
-      if (!root.isConnected || document.querySelector("[data-result-groups]") !== root) {
+      if (!root.isConnected || document.querySelector("[data-result-page]") !== root) {
         throw new Error("Result groups root was detached");
       }
       const template = document.createElement("template");
@@ -486,8 +486,8 @@ async function refreshResultGroups() {
       if (
         !(replacement instanceof HTMLElement) ||
         template.content.children.length !== 1 ||
-        template.content.querySelectorAll("[data-result-groups]").length !== 1 ||
-        !replacement.matches("[data-result-groups]") ||
+        template.content.querySelectorAll("[data-result-page]").length !== 1 ||
+        !replacement.matches("[data-result-page]") ||
         replacement.dataset.resultUrl !== root.dataset.resultUrl
       ) {
         throw new Error("Invalid result groups response");
@@ -529,7 +529,7 @@ async function refreshResultGroups() {
 
 function pollResultGroups(attempt = 1) {
   resultGroupsAttempt = attempt;
-  const root = document.querySelector("[data-result-groups]");
+  const root = document.querySelector("[data-result-page]");
   const hasActiveTasks = root instanceof HTMLElement &&
     Boolean(root.querySelector("[data-active-task='true']"));
   if (hasActiveTasks) {
@@ -547,7 +547,7 @@ function pollResultGroups(attempt = 1) {
     resultGroupsAttempt = attempt + 1;
     try {
       await refreshActiveResultBlocks();
-      const currentRoot = document.querySelector("[data-result-groups]");
+      const currentRoot = document.querySelector("[data-result-page]");
       if (
         currentRoot instanceof HTMLElement &&
         (hasResolvedFilteredBlock(currentRoot) ||

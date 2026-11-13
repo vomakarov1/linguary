@@ -24,6 +24,7 @@ from linguary.application.layout.book import (
     build_book_layout,
     build_layout_inputs,
 )
+from linguary.application.layout.ipa_reference import IpaSymbol
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.domain import (
     BlockProcessingResult,
@@ -296,6 +297,8 @@ class BookResultSummary:
     is_paused: bool = False
     reading_support: Mapping = field(default_factory=dict)
     prior_pronunciation_hints: Mapping[tuple[str, str, str], str] = field(default_factory=dict)
+    legend: tuple[str, ...] = ()
+    ipa_key: tuple[IpaSymbol, ...] = ()
 
 
 def _read_transaction(unit_of_work: UnitOfWork):
@@ -1080,10 +1083,13 @@ def book_result(
             warnings=BookWarnings(),
         )
     chapter_layouts: Mapping[str, ChapterLayout] = {}
+    legend: tuple[str, ...] = ()
+    ipa_key: tuple[IpaSymbol, ...] = ()
     if document is not None and selected_sections:
-        chapter_layouts = build_book_layout(
-            build_layout_inputs(unit_of_work, book_id)
-        ).chapters
+        layout = build_book_layout(build_layout_inputs(unit_of_work, book_id))
+        chapter_layouts = layout.chapters
+        legend = layout.legend
+        ipa_key = layout.ipa_key
     treatments = {
         item.block_id: item.treatment
         for analysis in analyses
@@ -1135,6 +1141,8 @@ def book_result(
         chapters=tuple(chapters),
         reading_support=reading_support,
         prior_pronunciation_hints=prior_pronunciation_hints,
+        legend=legend,
+        ipa_key=ipa_key,
         warnings=_warnings_of(
             document=document,
             import_warnings=import_warnings,

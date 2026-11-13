@@ -36,6 +36,7 @@ from linguary.application.book_overview import (
 )
 from linguary.application.pronunciation_projection import PronunciationOccurrence, project_pronunciations
 from linguary.application.glossary_review import GlossaryReview, GlossaryReviewItem
+from linguary.application.layout.ipa_reference import IpaSymbol
 from linguary.application.layout.units import LayoutUnit, NumberedNote
 from linguary.application.ports.persistence import BookRecord
 from linguary.application.use_cases.approve_glossary import GlossaryDecision
@@ -881,6 +882,18 @@ class ResultChapterResponse(BaseModel):
         )
 
 
+class IpaKeyEntryResponse(BaseModel):
+    """One row of the book IPA key."""
+
+    symbol: str
+    example: str
+    description: str
+
+    @classmethod
+    def of_symbol(cls, item: IpaSymbol) -> IpaKeyEntryResponse:
+        return cls(symbol=item.symbol, example=item.example, description=item.description)
+
+
 class BookResultResponse(BaseModel):
     """Block-by-block result view with warnings and EPUBCheck outcome."""
 
@@ -902,6 +915,8 @@ class BookResultResponse(BaseModel):
     pause_requested: bool = False
     is_paused: bool = False
     reading_support: dict = Field(default_factory=dict)
+    legend: tuple[str, ...] = ()
+    ipa_key: tuple[IpaKeyEntryResponse, ...] = ()
 
     @classmethod
     def of_result(cls, result: BookResultSummary) -> BookResultResponse:
@@ -933,6 +948,8 @@ class BookResultResponse(BaseModel):
                 else None
             ),
             warnings=BookWarningsResponse.of_warnings(result.warnings),
+            legend=tuple(result.legend),
+            ipa_key=tuple(IpaKeyEntryResponse.of_symbol(item) for item in result.ipa_key),
             chapters=tuple(
                 ResultChapterResponse.of_chapter(chapter, pronunciations=pronunciations)
                 for chapter in result.chapters
@@ -1140,6 +1157,7 @@ __all__ = [
     "EpubCheckConfigResponse",
     "ErrorResponse",
     "GlossaryDecisionRequest",
+    "IpaKeyEntryResponse",
     "GlossaryHintResponse",
     "GlossaryItemResponse",
     "GlossaryNoteRequest",

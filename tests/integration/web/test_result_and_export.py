@@ -6,6 +6,7 @@ from dataclasses import replace
 from urllib.parse import quote
 
 import pytest
+from lxml import html
 
 from fastapi.testclient import TestClient
 from web_scenario import (
@@ -25,6 +26,21 @@ from linguary.application.book_overview import ResultBlockSummary
 from linguary.application.ports.persistence import ExportValidationStatus
 from linguary.composition import Application, drain_tasks
 from linguary.web.routes.export import download_filename
+
+
+def _plain_source(node) -> str:
+    """Reading-unit source with marker links removed and line breaks kept."""
+    parts: list[str] = []
+    if node.text:
+        parts.append(node.text)
+    for child in node:
+        if child.tag == "br":
+            parts.append("\n")
+        elif child.tag != "a" or "lg-ref" not in (child.get("class") or "").split():
+            parts.append(_plain_source(child))
+        if child.tail:
+            parts.append(child.tail)
+    return "".join(parts)
 from linguary.domain import (
     BlockProcessingResult,
     BlockSegment,
@@ -926,9 +942,15 @@ def test_result_groups_only_adjacent_parts_and_keeps_exact_occurrences(client, a
         "block_id": ids[1], "start": 17, "end": 28, "quote": "Hard phrase"}
     assert blocks[2]["fragment_assistance"] == []
     assert blocks[3]["fragment_assistance"] == []
-    html = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
-    assert html.count('class="fragment-assistance"') == 2
-    assert html.index(texts[0]) < html.index('class="fragment-assistance"')
+    page = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text)
+    assert 'class="fragment-assistance"' not in html.tostring(page, encoding=str)
+    for index in (0, 1):
+        article = page.xpath('//article[@data-result-block]')[index]
+        source = article.xpath('.//p[@class="lg-src"]')[0]
+        notes = article.xpath('.//ol[@class="lg-notes"]')[0]
+        assert _plain_source(source) == texts[index]
+        assert f"Help {index}" in notes.text_content()
+        assert list(source.getparent()).index(source) < list(notes.getparent()).index(notes)
     for block_id, block in zip(ids[:2], blocks[:2], strict=True):
         polled = client.get(f"/books/{scenario.book_id}/blocks/{block_id}")
         assert polled.json()["block_id"] == block_id
@@ -950,9 +972,13 @@ def test_group_marks_unresolved_help_without_changing_the_source(client, applica
     assert body["original_text"] != original
     assert body["fragment_assistance"][0]["kind"] == "unresolved"
     assert body["fragment_assistance"][0]["text"] is None
-    html = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
-    assert 'data-kind="unresolved"' in html
-    assert "Трудность пока не объяснена" in html
+    page = client.get(f"/books/{scenario.book_id}/result", headers={"accept": "text/html"}).text
+    rendered = html.fromstring(page)
+    second = rendered.xpath('//article[@data-result-block]')[1]
+    assert 'data-kind="unresolved"' not in page
+    assert "Трудность пока не объяснена" not in page
+    assert "Help 1" not in second.text_content()
+    assert _plain_source(second.xpath('.//p[@class="lg-src"]')[0]) == scenario.section().ordered_blocks[1].text
 
 
 @pytest.mark.parametrize("failed", [False, True], ids=["updated", "failed"])
@@ -964,12 +990,13 @@ def test_group_polling_preserves_siblings_during_member_regeneration(client, app
     own_text = scenario.section().ordered_blocks[1].text
     pending = client.post(f"/books/{scenario.book_id}/blocks/{ids[1]}/regenerate", headers=headers)
     assert pending.status_code == 200, pending.text
-    assert own_text in pending.text
-    assert original not in pending.text
+    pending_tree = html.fromstring(pending.text)
+    assert _plain_source(pending_tree.xpath('.//p[@class="lg-src"]')[0]) == own_text
+    assert original not in pending_tree.text_content()
     assert f'id="block-{ids[0]}"' not in pending.text
-    assert pending.text.count('class="fragment-assistance"') == 1
-    assert "Help 1" in pending.text
-    assert "Help 0" not in pending.text
+    assert 'class="fragment-assistance"' not in pending.text
+    assert "Help 1" in pending_tree.text_content()
+    assert "Help 0" not in pending_tree.text_content()
     assert 'data-active-task="true"' in pending.text
     with application.unit_of_work.transaction() as uow:
         task = next(task for task in uow.tasks.list_for_book(scenario.book_id)
@@ -983,13 +1010,14 @@ def test_group_polling_preserves_siblings_during_member_regeneration(client, app
     for index, block_id in enumerate(ids[:2]):
         block_text = scenario.section().ordered_blocks[index].text
         response = client.get(f"/books/{scenario.book_id}/blocks/{block_id}", headers=headers)
+        rendered = html.fromstring(response.text)
         assert response.status_code == 200
-        assert block_text in response.text
-        assert original not in response.text
+        assert _plain_source(rendered.xpath('.//p[@class="lg-src"]')[0]) == block_text
+        assert original not in rendered.text_content()
         assert 'data-active-task="true"' not in response.text
-        assert response.text.count('class="fragment-assistance"') == 1
-        assert helps[index] in response.text
-        assert helps[1 - index] not in response.text
+        assert 'class="fragment-assistance"' not in response.text
+        assert helps[index] in rendered.text_content()
+        assert helps[1 - index] not in rendered.text_content()
         assert f'id="block-{block_id}"' in response.text
         assert f'id="block-{ids[1 - index]}"' not in response.text
         block = client.get(f"/books/{scenario.book_id}/blocks/{block_id}").json()
@@ -1134,16 +1162,21 @@ def test_pronunciation_notice_link_and_escaped_attribution(client, application):
     assert response.status_code == 200
     tree = html.fromstring(response.text)
     assert not tree.xpath('//script[@id="source-injection"]')
-    assert '<script id="source-injection">bad</script>' in ''.join(tree.itertext())
-    links = tree.xpath('//details[contains(@class,"ipa-guide")]/following-sibling::p[1]/a[@class="pronunciation-source-notices"]')
-    assert links and all(link.get('href').endswith('/pronunciation-sources') for link in links)
+    assert 'source-injection' not in response.text
+    links = tree.xpath('//table[@class="lg-key"]/following-sibling::p[1]/a[@class="pronunciation-source-notices"]')
+    assert len(links) == 1 and links[0].get('href').endswith('/pronunciation-sources')
 
 
 def test_legacy_pronunciation_attribution_still_visible(client, application):
     scenario = _pronunciation_results(application)
     response = client.get(f'/books/{scenario.book_id}/result', headers={'accept': 'text/html'})
     assert response.status_code == 200
-    assert 'Invented test data' in response.text and 'entry-1' in response.text
+    tree = html.fromstring(response.text)
+    link, = tree.xpath('//a[@class="pronunciation-source-notices"]')
+    assert link.get('href').endswith('/pronunciation-sources')
+    assert '/zɔːp/' in response.text
+    assert 'Invented test data' not in response.text and 'entry-1' not in response.text
+    assert 'private-' not in response.text
 
 
 def test_pronunciation_result_and_fragment_contract(client, application, monkeypatch):
@@ -1207,10 +1240,10 @@ def _groups_tree(client, scenario):
     response = client.get(f'/books/{scenario.book_id}/result', headers=GROUPS_HEADERS)
     assert response.status_code == 200
     tree = html.fromstring(response.text)
-    assert tree.get('data-result-groups') is not None
+    assert tree.get('data-result-page') is not None
     assert tree.get('data-result-url') == f'/books/{scenario.book_id}/result'
     assert tree.get('data-blocks-url') == f'/books/{scenario.book_id}/blocks'
-    for link in tree.xpath('.//a[@class="pronunciation-repeat"]'):
+    for link in tree.xpath('.//a[@class="lg-ref"]'):
         assert len(tree.xpath('//*[@id=$target]', target=link.get('href')[1:])) == 1
     return tree
 
@@ -1223,7 +1256,7 @@ def test_result_groups_fragment_matches_full_book_snapshot(client, application, 
     scenario = _pronunciation_results(application)
     endpoint = f'/books/{scenario.book_id}/result'
     full = html.fromstring(client.get(endpoint, headers={'accept': 'text/html'}).text)
-    expected, = full.xpath('//*[@data-result-groups]')
+    expected, = full.xpath('//*[@data-result-page]')
     original = route.book_result
     original_projection = schemas.project_pronunciations
     snapshots, projections = [], []
@@ -1249,20 +1282,20 @@ def test_result_groups_fragment_matches_full_book_snapshot(client, application, 
     assert html.tostring(actual, with_tail=False) == html.tostring(expected, with_tail=False)
     refreshed = _groups_tree(client, scenario)
     assert not refreshed.xpath('.//a[@class="pronunciation-repeat"]')
-    assert len(refreshed.xpath('.//*[@class="pronunciation"]')) == 1
+    assert len(refreshed.xpath('.//span[@class="lg-ipa"]')) == 1
 
 
 def test_pronunciation_groups_refresh_promotes_later_primary(client, application):
     scenario = _pronunciation_results(application)
     before = _groups_tree(client, scenario)
-    old_id = before.xpath('.//*[@class="pronunciation"]')[0].get('id')
+    old_id = before.xpath('.//span[@class="lg-ipa"]/ancestor::li[1]')[0].get('id')
     with application.unit_of_work.transaction() as tx:
         results = tx.results.list_for_run(scenario.run_id)
         tx.results.replace_results(scenario.run_id, [
             replace(result, pronunciation_assistances=()) if result.block_id == scenario.block_ids()[0]
             else result for result in results])
     after = _groups_tree(client, scenario)
-    primary, = after.xpath('.//*[@class="pronunciation"]')
+    primary, = after.xpath('.//span[@class="lg-ipa"]/ancestor::li[1]')
     assert primary.get('id') != old_id
     assert primary.xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids(1)[0]}'
     assert not after.xpath('.//a[@class="pronunciation-repeat"]')
@@ -1276,14 +1309,16 @@ def test_pronunciation_groups_refresh_demotes_old_primary(client, application):
             replace(result, pronunciation_assistances=()) if result.block_id == scenario.block_ids()[0]
             else result for result in results])
     before = _groups_tree(client, scenario)
-    assert before.xpath('.//*[@class="pronunciation"]')[0].xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids(1)[0]}'
+    assert before.xpath('.//span[@class="lg-ipa"]')[0].xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids(1)[0]}'
     with application.unit_of_work.transaction() as tx:
         tx.results.replace_results(scenario.run_id, list(results))
     after = _groups_tree(client, scenario)
-    primary, = after.xpath('.//*[@class="pronunciation"]')
-    repeated, = after.xpath('.//a[@class="pronunciation-repeat"]')
-    assert primary.xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids()[0]}'
-    assert repeated.get('href') == f'#{primary.get("id")}'
+    notes = after.xpath('.//span[@class="lg-ipa"]')
+    assert len(notes) == 2
+    assert not after.xpath('.//a[@class="pronunciation-repeat"]')
+    assert [note.xpath('ancestor::article')[0].get('id') for note in notes] == [
+        f'block-{scenario.block_ids()[0]}', f'block-{scenario.block_ids(1)[0]}',
+    ]
 
 
 def test_pronunciation_groups_refresh_splits_changed_ipa(client, application):
@@ -1299,8 +1334,8 @@ def test_pronunciation_groups_refresh_splits_changed_ipa(client, application):
             updated.append(result)
         tx.results.replace_results(scenario.run_id, updated)
     after = _groups_tree(client, scenario)
-    assert len(after.xpath('.//*[@class="pronunciation"]')) == 2
-    assert len(set(after.xpath('//*[@class="pronunciation"]/@id'))) == 2
+    assert len(after.xpath('.//span[@class="lg-ipa"]')) == 2
+    assert len(set(after.xpath('//ol[@class="lg-notes"]/li/@id'))) == 2
     assert not after.xpath('.//a[@class="pronunciation-repeat"]')
     assert '/zɒp/' in after.text_content() and '/zɔːp/' in after.text_content()
 
@@ -1316,7 +1351,7 @@ def test_result_groups_fragment_keeps_group_members_and_tasks(client, applicatio
     tree = _groups_tree(client, scenario)
     assert len(tree.xpath('.//*[@data-result-block]')) == 4
     assert len(tree.xpath('.//*[@data-active-task="true"]')) == 2
-    assert tree.xpath('.//*[@class="source"]')[0].text == scenario.section().ordered_blocks[0].text
+    assert _plain_source(tree.xpath('.//p[@class="lg-src"]')[0]) == scenario.section().ordered_blocks[0].text
     assert original not in tree.text_content()
     assert tree.xpath('//form[@data-regenerate-form]/@action') == [
         f'/books/{scenario.book_id}/blocks/{identifier}/regenerate' for identifier in ids]
@@ -2252,9 +2287,10 @@ def test_pending_corrections_filter_recomputes_primary_pronunciations_and_preser
         headers={"accept": "text/html"},
     )
     assert filtered_html.status_code == 200
-    assert 'id="ph-ch2-colonel"' in filtered_html.text
+    assert filtered_html.text.count('class="lg-ipa"') == 2
     assert "/ˈkɜː.nəl/" in filtered_html.text
-    assert 'href="#ph-ch2-colonel"' in filtered_html.text
+    assert 'class="pronunciation-repeat"' not in filtered_html.text
+    assert "ph-ch2-colonel" not in filtered_html.text
     assert "ph-ch1-colonel" not in filtered_html.text
     page_tree = html.fromstring(filtered_html.text)
     assert (

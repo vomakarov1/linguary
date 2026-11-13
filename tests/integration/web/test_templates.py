@@ -14,6 +14,7 @@ from web_scenario import (
     hinted_result,
     start_run,
     store_book,
+    store_task,
     translated_result,
 )
 
@@ -25,16 +26,48 @@ from linguary.application.use_cases.approve_glossary import (
 from linguary.composition import Application
 from linguary.domain import (
     BlockProcessingResult,
+    BlockSegment,
     BlockTreatment,
+    BlockType,
     BookStatus,
     ConceptType,
+    ErrorType,
     GlossaryHint,
+    LanguageNote,
+    ProcessingTask,
+    TaskError,
+    TaskStatus,
+    TaskType,
 )
-from linguary.domain.content_plan import SourceAnchor
+from linguary.domain.content_plan import (
+    ContentEvidence,
+    ContentPlan,
+    ContextFact,
+    Difficulty,
+    HelpEvidence,
+    RequiredPoint,
+    SourceAnchor,
+    artifact_key,
+)
 from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
 
 HTML_HEADERS = {"accept": "text/html"}
 RESULT_FRAGMENT_HEADERS = {**HTML_HEADERS, "x-linguary-fragment": "result-block"}
+
+
+def _plain_source(node) -> str:
+    """Reading-unit source with marker links removed and line breaks kept."""
+    parts: list[str] = []
+    if node.text:
+        parts.append(node.text)
+    for child in node:
+        if child.tag == "br":
+            parts.append("\n")
+        elif child.tag != "a" or "lg-ref" not in (child.get("class") or "").split():
+            parts.append(_plain_source(child))
+        if child.tail:
+            parts.append(child.tail)
+    return "".join(parts)
 
 
 def _pronunciation_book(
@@ -87,17 +120,19 @@ def test_pronunciation_template_primary_and_repeat(
     scenario = _pronunciation_book(application, variant=variant)
     response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
     tree = html.fromstring(response.text)
-    primary, = tree.xpath('//*[@class="pronunciation"]')
-    repeated, = tree.xpath('//a[@class="pronunciation-repeat"]')
+    notes = tree.xpath('//ol[@class="lg-notes"]/li')
 
-    assert primary.get("id")
-    assert "zorp" in primary.text_content() and "/ˈzɔːp/" in primary.text_content()
-    assert variant.upper() in primary.text_content()
-    assert "Invented test data" in primary.text_content()
-    assert "entry-invented" in primary.text_content()
-    assert repeated.get("href") == f'#{primary.get("id")}'
-    assert "zorp" in repeated.text_content() and variant.upper() in repeated.text_content()
-    assert response.text.count("/ˈzɔːp/") == 1
+    assert len(notes) == 2
+    assert not tree.xpath('//a[@class="pronunciation-repeat"]')
+    for note in notes:
+        term = note.xpath('./span[@class="lg-term"]')[0]
+        ipa = note.xpath('./span[@class="lg-ipa"]')[0]
+        assert term.text == "zorp"
+        assert ipa.text == "/ˈzɔːp/"
+        assert (ipa.tail or "").strip() == f"({variant.upper()})"
+    assert response.text.count("/ˈzɔːp/") == 2
+    assert "Invented test data" not in response.text
+    assert "entry-invented" not in response.text
     assert "private-" not in response.text
 
 
@@ -107,8 +142,8 @@ def test_pronunciation_template_without_translation(
     scenario = _pronunciation_book(application, texts=("zorp",))
     tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
 
-    assert tree.xpath('//*[@class="pronunciation"]')
-    assert not tree.xpath('//*[@class="translation"]')
+    assert tree.xpath('//span[@class="lg-ipa"]')
+    assert not tree.xpath('//p[@class="lg-tr"] | //*[@class="translation"]')
     assert "В оригинале" in tree.text_content()
 
 
@@ -117,8 +152,8 @@ def test_pronunciation_template_combines_dictionary_meaning(
 ) -> None:
     scenario = _pronunciation_book(application, texts=("A zorp.",), meaning=True)
     tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
-    primary, = tree.xpath('//*[@class="pronunciation"]')
-    item = primary.getparent()
+    ipa, = tree.xpath('//span[@class="lg-ipa"]')
+    item = ipa.getparent()
 
     assert item.tag == "li"
     assert "выдуманное значение" in item.text_content()
@@ -132,10 +167,12 @@ def test_pronunciation_template_ambiguous_dictionary_occurrences_stay_separate(
 ) -> None:
     scenario = _pronunciation_book(application, texts=("zorp and zorp",), meaning=True)
     tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
-    primary, = tree.xpath('//*[@class="pronunciation"]')
+    note, = tree.xpath('//ol[@class="lg-notes"]/li')
 
-    assert "выдуманное значение" not in primary.getparent().text_content()
-    assert len(tree.xpath('//a[@class="pronunciation-repeat"]')) == 1
+    assert "выдуманное значение" in note.text_content()
+    assert note.xpath('./span[@class="lg-ipa"]')
+    assert not tree.xpath('//a[@class="pronunciation-repeat"]')
+    assert len(tree.xpath('//span[@class="lg-ipa"]')) == 1
     assert tree.text_content().count("выдуманное значение") == 1
 
 
@@ -145,10 +182,10 @@ def test_pronunciation_template_original_unchanged(
     original = '“zorp” <em> & zorp…'
     scenario = _pronunciation_book(application, texts=(original,))
     tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
-    source, = tree.xpath('//p[@class="source"]')
+    source, = tree.xpath('//p[@class="lg-src"]')
 
-    assert source.text_content() == original
-    assert len(source) == 0
+    assert _plain_source(source) == original
+    assert not source.xpath('.//*[not(self::a[@class="lg-ref"] or self::sup)]')
 
 
 def test_pronunciation_template_fragment_refresh(
@@ -158,17 +195,17 @@ def test_pronunciation_template_fragment_refresh(
     primary_response = client.get(
         f"/books/{scenario.book_id}/blocks/{scenario.block_ids()[0]}", headers=RESULT_FRAGMENT_HEADERS,
     )
-    primary, = html.fromstring(primary_response.text).xpath('//*[@class="pronunciation"]')
+    primary = html.fromstring(primary_response.text)
+    assert primary.xpath('//span[@class="lg-ipa"]')[0].text == "/ˈzɔːp/"
+    assert 'class="lg-key"' not in primary_response.text
     for _ in range(2):
         response = client.get(
             f"/books/{scenario.book_id}/blocks/{scenario.block_ids(1)[0]}", headers=RESULT_FRAGMENT_HEADERS,
         )
         tree = html.fromstring(response.text)
-        repeated, = tree.xpath('//a[@class="pronunciation-repeat"]')
-        assert repeated.get("href") == f'#{primary.get("id")}'
-        assert not tree.xpath('//*[@class="pronunciation"]')
-        assert tree.xpath('//details[@class="ipa-guide"]/summary')
-        assert tree.xpath('//p[@class="source"]')[0].text_content() == "zorp"
+        assert tree.xpath('//span[@class="lg-ipa"]')[0].text == "/ˈzɔːp/"
+        assert not tree.xpath('//a[@class="pronunciation-repeat"] | //details[@class="ipa-guide"] | //table[@class="lg-key"]')
+        assert _plain_source(tree.xpath('//p[@class="lg-src"]')[0]) == "zorp"
 
     identifier = scenario.block_ids(1)[0]
     with application.unit_of_work.transaction() as uow:
@@ -183,30 +220,31 @@ def test_pronunciation_template_fragment_refresh(
         f"/books/{scenario.book_id}/blocks/{identifier}", headers=RESULT_FRAGMENT_HEADERS,
     )
     tree = html.fromstring(response.text)
-    refreshed, = tree.xpath('//*[@class="pronunciation"]')
-    assert "/ˈzɛp/" in refreshed.text_content()
-    assert refreshed.get("id") != primary.get("id")
-    assert not tree.xpath('//a[@class="pronunciation-repeat"]')
-    assert tree.xpath('//details[@class="ipa-guide"]/summary')
-    assert tree.xpath('//p[@class="source"]')[0].text_content() == "zorp"
+    assert tree.xpath('//span[@class="lg-ipa"]')[0].text == "/ˈzɛp/"
+    assert not tree.xpath('//a[@class="pronunciation-repeat"] | //details[@class="ipa-guide"] | //table[@class="lg-key"]')
+    assert _plain_source(tree.xpath('//p[@class="lg-src"]')[0]) == "zorp"
 
 
 def test_pronunciation_ipa_guide_visible_and_keyboard_accessible(
     client: TestClient, application: Application
 ) -> None:
     scenario = _pronunciation_book(application, texts=("zorp",))
-    response = client.get(
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+    fragment = client.get(
         f"/books/{scenario.book_id}/blocks/{scenario.block_ids()[0]}", headers=RESULT_FRAGMENT_HEADERS,
     )
     tree = html.fromstring(response.text)
-    guide, = tree.xpath('//details[@class="ipa-guide"]')
-    summary = guide[0]
+    table, = tree.xpath('//table[@class="lg-key"]')
 
-    assert summary.tag == "summary" and summary.text_content().strip() == "Как читать IPA"
-    assert summary.get("tabindex") is None and summary.get("role") is None
-    assert not guide.xpath('.//script | .//iframe | .//a | .//*[@hidden] | .//*[@aria-hidden="true"]')
-    for text in ("Международный фонетический алфавит", "ˈ", "ˌ", "ː", "основное", "вторичное", "долг"):
-        assert text in guide.text_content()
+    assert not tree.xpath('//details[@class="ipa-guide"]')
+    assert 'class="lg-key"' not in fragment.text
+    assert table.get("hidden") is None
+    assert not table.xpath('.//script | .//iframe | .//*[@hidden] | .//*[@aria-hidden="true"]')
+    assert "ˈ" in table.text_content() and "ː" in table.text_content()
+    assert "ударение на следующем слоге" in table.text_content()
+    assert "звук долгий" in table.text_content()
+    assert "Международный фонетический алфавит" not in response.text
+    assert "вторичное" not in response.text
 
 
 def test_pronunciation_template_escapes_attribution(
@@ -214,11 +252,13 @@ def test_pronunciation_template_escapes_attribution(
 ) -> None:
     label = '<script>alert("source")</script>'
     scenario = _pronunciation_book(application, texts=("zorp",), source_label=label)
-    tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
-    primary, = tree.xpath('//*[@class="pronunciation"]')
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+    tree = html.fromstring(response.text)
 
-    assert label in primary.text_content()
-    assert not primary.xpath('.//script | .//a')
+    assert tree.xpath('//span[@class="lg-ipa"]')
+    assert not tree.xpath('//script[not(@src)]')
+    assert "alert(" not in response.text
+    assert label not in response.text
 
 
 def test_pronunciation_template_without_confirmed_assistance(
@@ -870,7 +910,7 @@ def test_result_groups_wrapper_and_refresh_url(client, application):
     endpoint = f'/books/{scenario.book_id}/result'
     for headers in (HTML_HEADERS, {**HTML_HEADERS, 'x-linguary-fragment': 'result-groups'}):
         tree = html.fromstring(client.get(endpoint, headers=headers).text)
-        root, = tree.xpath('//*[@data-result-groups]')
+        root, = tree.xpath('//*[@data-result-page]')
         assert root.get('data-result-url') == endpoint
         assert len(root.xpath('.//*[@data-result-block]')) == 2
         assert not root.xpath('.//*[@data-result-header] | .//form[contains(@action, "/reset")]')
@@ -881,12 +921,11 @@ def test_result_groups_template_keeps_pronunciation_guide_and_original(client, a
     scenario = _pronunciation_book(application, texts=(original, 'zorp'))
     tree = html.fromstring(client.get(f'/books/{scenario.book_id}/result', headers={
         **HTML_HEADERS, 'x-linguary-fragment': 'result-groups'}).text)
-    root, = tree.xpath('//*[@data-result-groups]')
-    assert root.xpath('.//p[@class="source"]/text()') == [original, 'zorp']
-    assert len(root.xpath('.//details[@class="ipa-guide"]/summary')) == 2
-    assert len(root.xpath('.//*[@class="pronunciation"]')) == 1
-    link, = root.xpath('.//a[@class="pronunciation-repeat"]')
-    assert len(root.xpath('.//*[@id=$target]', target=link.get('href')[1:])) == 1
+    root, = tree.xpath('//*[@data-result-page]')
+    assert [_plain_source(source) for source in root.xpath('.//p[@class="lg-src"]')] == [original, 'zorp']
+    assert len(root.xpath('.//table[@class="lg-key"]')) == 1
+    assert not root.xpath('.//details[@class="ipa-guide"] | .//a[@class="pronunciation-repeat"]')
+    assert len(root.xpath('.//span[@class="lg-ipa"]')) == 2
 
 
 def test_result_page_versions_updated_script(client, application):
@@ -894,3 +933,267 @@ def test_result_page_versions_updated_script(client, application):
     tree = html.fromstring(client.get(f'/books/{scenario.book_id}/result', headers=HTML_HEADERS).text)
     assert tree.xpath('//script/@src')[0].endswith('/static/linguary.js?v=4')
     assert tree.xpath('//link[@rel="stylesheet"]/@href')[0].endswith('/static/linguary.css?v=4')
+
+
+def _units_book(application: Application) -> WebScenario:
+    """Two-part paragraph with a marked note and a speaker, plus a poem note without a marker."""
+    paragraph = "Alice heard a tale. Then she left."
+    poem = "How doth\nImprove,\n\nAnd pour"
+    scenario = store_book(
+        application,
+        book_id="book-layout-units",
+        status=BookStatus.COMPLETED,
+        chapters=((paragraph, poem),),
+    )
+    paragraph_id, poem_id = scenario.block_ids()
+    cut = paragraph.index(" Then")
+    tale_end = paragraph.index("tale") + len("tale")
+    then_at = paragraph.index("Then")
+    tale = LanguageNote("note-tale", paragraph_id, "tale", "Сказка здесь — история.")
+    tale_key = artifact_key(
+        "language_note.note",
+        paragraph_id,
+        {
+            "original_excerpt": tale.original_excerpt,
+            "note": tale.note,
+            "translated_excerpt": tale.translated_excerpt,
+        },
+    )
+    tale_anchor = SourceAnchor(paragraph_id, tale_end - len("tale"), tale_end, "tale")
+    point = RequiredPoint("form", "Explain the form")
+    difficulties = (
+        Difficulty("grammar", (tale_anchor,), paragraph_id, "grammar", "useful", "explanation", (point,)),
+        Difficulty(
+            "idiom",
+            (tale_anchor,),
+            paragraph_id,
+            "idiom",
+            "useful",
+            "explanation",
+            (RequiredPoint("sense", "Explain the sense"),),
+        ),
+    )
+    evidence = (
+        HelpEvidence("grammar", "form", "language_note.note", paragraph_id, tale_key, tale.note),
+        HelpEvidence("idiom", "sense", "language_note.note", paragraph_id, tale_key, tale.note),
+    )
+    speaker = SourceAnchor(paragraph_id, then_at, then_at + len("Then"), "Then")
+    plan = ContentPlan(
+        3,
+        "content-plan-v3",
+        difficulties,
+        evidence,
+        context_facts=(
+            ContextFact("speaker-alice", "speaker", (speaker,), speaker, "Alice", "explicit"),
+        ),
+    )
+    with application.unit_of_work.transaction() as tx:
+        document = tx.documents.get(scenario.book_id)
+        analysis = tx.analyses.get_for_section(scenario.book_id, scenario.section().id)
+        section = document.ordered_sections[0]
+        first, second = section.ordered_blocks
+        blocks = (
+            replace(
+                first,
+                segments=(BlockSegment(0, cut, 0), BlockSegment(cut, len(paragraph), 1)),
+            ),
+            replace(second, type=BlockType.POEM),
+        )
+        tx.documents.save(replace(document, sections=(replace(section, blocks=blocks),)))
+        tx.analyses.save(scenario.book_id, replace(analysis, content_plan=plan))
+    poem_note = LanguageNote("note-poem", poem_id, "absent-excerpt", "Без маркера.")
+    start_run(
+        application,
+        scenario,
+        results=(
+            BlockProcessingResult(
+                paragraph_id,
+                BlockTreatment.TRANSLATE,
+                "Потом она ушла.",
+                language_notes=(tale,),
+                content_evidence=ContentEvidence(plan.sha256, evidence, version=3),
+                segment_treatments=(BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+                segment_translations=(None, "Потом она ушла."),
+            ),
+            BlockProcessingResult(
+                poem_id,
+                BlockTreatment.TRANSLATE,
+                "Как крокодил\nСвой хвост,\n\nИ льёт",
+                language_notes=(poem_note,),
+            ),
+        ),
+    )
+    return scenario
+
+
+def _two_part_page(application: Application, book_id: str) -> WebScenario:
+    """One paragraph split into a source part and a translated part."""
+    text = "Plain words. Clear words."
+    cut = text.index(" Clear")
+    scenario = store_book(
+        application,
+        book_id=book_id,
+        status=BookStatus.COMPLETED,
+        chapters=((text,),),
+    )
+    block_id = scenario.block_ids()[0]
+    with application.unit_of_work.transaction() as tx:
+        document = tx.documents.get(scenario.book_id)
+        analysis = tx.analyses.get_for_section(scenario.book_id, scenario.section().id)
+        section = document.ordered_sections[0]
+        block = section.ordered_blocks[0]
+        saved = replace(
+            block,
+            segments=(BlockSegment(0, cut, 0), BlockSegment(cut, len(text), 1)),
+        )
+        tx.documents.save(replace(document, sections=(replace(section, blocks=(saved,)),)))
+        tx.analyses.save(scenario.book_id, analysis)
+    start_run(
+        application,
+        scenario,
+        results=(
+            BlockProcessingResult(
+                block_id,
+                BlockTreatment.TRANSLATE,
+                "Ясные слова.",
+                segment_treatments=(BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+                segment_translations=(None, "Ясные слова."),
+            ),
+        ),
+    )
+    return scenario
+
+
+def test_result_page_renders_units_like_book(client: TestClient, application: Application) -> None:
+    """Reading units use the book classes, markers, speaker span, and one legend."""
+    scenario = _units_book(application)
+    endpoint = f"/books/{scenario.book_id}/result"
+    response = client.get(endpoint, headers=HTML_HEADERS)
+    tree = html.fromstring(response.text)
+    paragraph, poem = tree.xpath("//article")
+    units = paragraph.xpath('./div[contains(concat(" ", @class, " "), " lg-unit ")]')
+    assert [unit.get("class") for unit in units] == ["lg-unit", "lg-unit lg-cont lg-end"]
+    original, translated = units
+    assert not original.xpath('./p[@class="lg-tr"]')
+    source = original.xpath('./p[@class="lg-src"]')[0]
+    link = source.xpath('./a[@class="lg-ref"]')[0]
+    assert source.text == "Alice heard a tale"
+    assert link.tail == "."
+    assert link.get("href") == f'#{original.xpath("./ol[@class=\'lg-notes\']/li")[0].get("id")}'
+    assert link.xpath("./sup")[0].text == "1"
+    kinds = original.xpath('.//span[@class="lg-kind"]')
+    assert [kind.text for kind in kinds] == ["Грамматика.", "Идиома."]
+    assert all("," not in (kind.text or "") for kind in kinds)
+    speaker = translated.xpath('./p[@class="lg-tr"]/span[@class="lg-speaker"]')[0]
+    assert speaker.text == "Alice"
+    assert "Потом она ушла." not in speaker.text_content()
+    assert (speaker.tail or "").lstrip() == "Потом она ушла."
+    poem_source = poem.xpath('.//p[@class="lg-src"]')[0]
+    poem_text = "How doth\nImprove,\n\nAnd pour"
+    assert len(poem_source.xpath("./br")) == poem_text.count("\n")
+    assert b"<br" in html.tostring(poem_source).split(b"Improve,")[1].split(b"And pour")[0]
+    assert poem_source.xpath("./br")[1].tail is None or poem_source.xpath("./br")[1].getnext().tag == "br"
+    bare = poem.xpath('.//ol[@class="lg-notes"]/li')
+    assert len(bare) == 1 and "Без маркера." in bare[0].text_content()
+    assert not bare[0].xpath('.//span[@class="lg-num"]')
+    assert not poem.xpath('.//a[@class="lg-ref"]')
+    legend = client.get(endpoint).json()["legend"]
+    shown = tree.xpath('//section[@class="lg-sec"]')
+    assert len(shown) == 1
+    assert [item.text_content() for item in shown[0].xpath("./p")] == list(legend)
+    assert response.text.count("Как устроена эта книга") == 1
+    assert not tree.xpath('//table[@class="lg-key"]')
+    assert "Абзац оригинала всегда идёт первым." in legend
+
+
+def test_no_part_labels_in_web(client: TestClient, application: Application) -> None:
+    """The page has continuing units and no part captions, frames, or group root."""
+    scenario = _two_part_page(application, "book-no-parts")
+    page = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+    tree = html.fromstring(page.text)
+
+    assert "Часть " not in page.text
+    assert "Part " not in page.text
+    assert "result-fragment" not in page.text
+    assert "linguary-paragraph-fragment" not in page.text
+    assert tree.xpath('//*[contains(concat(" ", @class, " "), " lg-cont ")]')
+    stylesheet = client.get("/static/linguary.css").text
+    script = client.get("/static/linguary.js").text
+    assert ".result-fragment" not in stylesheet
+    assert ".lg-unit" in stylesheet
+    assert "data-result-groups" not in script
+    assert "data-result-page" in script
+
+
+def test_block_actions_kept(
+    configured_client: TestClient, configured_application: Application
+) -> None:
+    """Refresh, the task line, and a correction stay inside the unit article."""
+    from test_correction_candidates_ui import _seed_book_with_awaiting_human_candidate
+
+    book_id, block_id, _candidate = _seed_book_with_awaiting_human_candidate(
+        configured_application, book_id="book-actions-kept"
+    )
+    store_task(
+        configured_application,
+        task=ProcessingTask(
+            id="regen-kept",
+            book_id=book_id,
+            task_type=TaskType.REGENERATE_BLOCK,
+            scope_id=block_id,
+            status=TaskStatus.FAILED,
+            last_error=TaskError(type=ErrorType.TRANSIENT, message="сбой", detail="x"),
+        ),
+    )
+    tree = html.fromstring(
+        configured_client.get(f"/books/{book_id}/result", headers=HTML_HEADERS).text
+    )
+    form = tree.xpath(f'//form[@data-regenerate-form][@data-block-id="{block_id}"]')[0]
+    article = form.xpath("ancestor::article[1]")[0]
+    button = form.xpath("./button")[0]
+
+    assert button.text == "Обновить"
+    assert button.get("disabled") is None
+    assert "Задача: Повторная генерация блока /" in article.text_content()
+    assert article.xpath('.//details[@class="correction-candidate"]')
+    assert article.xpath('./div[contains(concat(" ", @class, " "), " lg-unit ")]')
+
+
+def test_ipa_table_rendered_in_web(client: TestClient, application: Application) -> None:
+    """The IPA key is one table for the book. An empty key renders no block."""
+    scenario = _pronunciation_book(application)
+    endpoint = f"/books/{scenario.book_id}/result"
+    tree = html.fromstring(client.get(endpoint, headers=HTML_HEADERS).text)
+    payload = client.get(endpoint).json()
+    rows = payload.get("ipa_key")
+    assert rows, sorted(payload)
+    table, = tree.xpath('//table[@class="lg-key"]')
+
+    assert len(tree.xpath('//section[contains(concat(" ", @class, " "), " chapter ")]')) == 2
+    assert not table.xpath('ancestor::section[contains(concat(" ", @class, " "), " chapter ")]')
+    assert [cell.text_content() for cell in table.xpath("./thead//th")] == ["Знак", "Пример", "Как звучит"]
+    body = table.xpath("./tbody/tr")
+    assert len(body) == len(rows) > 0
+    for row, item in zip(body, rows, strict=True):
+        cells = [cell.text_content() for cell in row.xpath("./td")]
+        assert cells == [item["symbol"], item["example"], item["description"]]
+
+    quiet = store_book(
+        application,
+        book_id="book-no-ipa",
+        status=BookStatus.COMPLETED,
+        chapters=(("Plain sentence.",),),
+    )
+    start_run(
+        application,
+        quiet,
+        results=(BlockProcessingResult(quiet.block_ids()[0], BlockTreatment.READ_AS_IS),),
+    )
+    quiet_endpoint = f"/books/{quiet.book_id}/result"
+    page = client.get(quiet_endpoint, headers=HTML_HEADERS)
+    payload = client.get(quiet_endpoint).json()
+    assert payload["legend"] == []
+    assert payload["ipa_key"] == []
+    assert "Как устроена эта книга" not in page.text
+    assert "Ключ к транскрипции" not in page.text
+    assert 'class="lg-key"' not in page.text

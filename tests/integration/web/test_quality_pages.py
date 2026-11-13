@@ -176,7 +176,7 @@ def test_no_internal_ids_in_learning_text(client, application):
     scenario = store_book(application, status=BookStatus.READY_TO_EXPORT)
     start_run(application, scenario, results=[translated_result(b) for b in scenario.block_ids()])
     tree = html.fromstring(client.get(f'/books/{scenario.book_id}/result', headers=HTML).text)
-    layers = tree.xpath('//p[@class="source" or @class="translation"]')
+    layers = tree.xpath('//p[@class="lg-src" or @class="lg-tr"]')
     visible = ' '.join(layer.text_content() for layer in layers)
     assert 'It is a truth universally acknowledged.' in visible and 'Общепризнанная истина' in visible
     assert all(block_id not in visible for block_id in scenario.block_ids())
@@ -324,7 +324,9 @@ def test_partial_book_result_preserves_primary_pronunciation_hint_id_across_chap
         headers={**HTML, "X-Linguary-Fragment": "result-block"},
     )
     assert fragment.status_code == 200
-    assert 'href="#ph-primary-chapter-1"' in fragment.text
+    assert 'class="lg-ipa"' in fragment.text and '/ˈkɜː.nəl/' in fragment.text
+    assert 'href="#ph-primary-chapter-1"' not in fragment.text
+    assert 'id="ph-primary-chapter-1"' not in fragment.text
     assert 'id="ph-secondary-chapter-2"' not in fragment.text
 
 

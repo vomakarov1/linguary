@@ -492,32 +492,91 @@ pre code {
   padding: 1rem;
 }
 
-.result-fragment {
-  margin: 1rem 0;
-  padding: 0.85rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
+.lg-unit {
+  margin: 0 0 0.7em;
+  page-break-inside: avoid;
+  break-inside: avoid;
+  color: inherit;
 }
 
-.result-fragment-header {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 0.6rem;
+.lg-unit.lg-end {
+  margin-bottom: 1.4em;
 }
 
-.result-fragment-label {
-  color: var(--muted);
-  font-size: 0.8rem;
-  font-weight: 700;
+.lg-cont > .lg-src {
+  text-indent: 0;
 }
 
-.result-fragment .translation {
-  margin-left: 0.5rem;
-  padding-left: 0.75rem;
-  border-left: 2px solid var(--accent-2);
+.lg-tr {
+  margin: 0.25em 0 0 1em;
+  padding-left: 0.7em;
+  border-left: 0.12em solid;
+  font-size: 0.9em;
+  color: inherit;
+  hyphens: auto;
+  page-break-before: avoid;
+  break-before: avoid;
+}
+
+.lg-notes {
+  list-style: none;
+  margin: 0.25em 0 0 1em;
+  padding-left: 1.7em;
+  font-size: 0.85em;
+  color: inherit;
+  page-break-before: avoid;
+  break-before: avoid;
+}
+
+.lg-notes > li {
+  text-indent: -1em;
+}
+
+a.lg-ref {
+  text-decoration: none;
+  color: inherit;
+}
+
+a.lg-ref sup {
+  font-size: 0.7em;
+}
+
+.lg-sec {
+  margin: 0.4em 0 1.6em;
+  font-size: 0.9em;
+  color: inherit;
+  hyphens: auto;
+}
+
+.lg-sec h3 {
+  margin: 0.8em 0 0.2em;
+  font-size: 1em;
+  page-break-after: avoid;
+  break-after: avoid;
+  color: inherit;
+}
+
+.lg-sec p {
+  margin: 0.25em 0;
+  text-indent: 0;
+  color: inherit;
+}
+
+.lg-key {
+  width: 100%;
+  margin: 0.4em 0;
+  font-size: 0.95em;
+  border-collapse: collapse;
+  color: inherit;
+}
+
+.lg-key th,
+.lg-key td {
+  padding: 0.2em 0.6em 0.2em 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 0.04em solid;
+  color: inherit;
 }
 
 .result-block[aria-busy="true"] {
