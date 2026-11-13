@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import KW_ONLY, dataclass, field, replace
 import re
 from typing import Literal
 
 from linguary.application.analysis_merge import find_quote_span
 from linguary.application.llm_dto import (
     BlockResultResponse, GlossaryHintResponse, LanguageNoteResponse, LLMPayloadError,
+    SegmentTranslationResponse,
 )
 from linguary.domain import BlockTreatment
 from linguary.domain.book_conditions import freeze, thaw
@@ -80,6 +81,8 @@ class CorrectedBlockResponse:
     glossary_hints: tuple[GlossaryHintResponse, ...]
     language_notes: tuple[LanguageNoteResponse, ...]
     status: Literal['corrected'] = field(default='corrected', init=False)
+    _: KW_ONLY
+    segments: tuple[SegmentTranslationResponse, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.block_id, str) or not self.block_id.strip():
@@ -90,19 +93,26 @@ class CorrectedBlockResponse:
             raise LLMPayloadError('исправленный перевод должен быть непустым текстом или null')
         object.__setattr__(self, 'glossary_hints', tuple(self.glossary_hints))
         object.__setattr__(self, 'language_notes', tuple(self.language_notes))
+        object.__setattr__(self, 'segments', tuple(self.segments))
         if any(not isinstance(hint, GlossaryHintResponse) for hint in self.glossary_hints):
             raise LLMPayloadError('неверный тип исправленной словарной подсказки')
         if any(not isinstance(note, LanguageNoteResponse) or note.source_block_id != self.block_id
                for note in self.language_notes):
             raise LLMPayloadError('исправленная заметка относится к чужому блоку')
+        if any(not isinstance(segment, SegmentTranslationResponse) for segment in self.segments):
+            raise LLMPayloadError('неверный перевод сегмента')
+        if self.segments and self.translated_text is not None:
+            raise LLMPayloadError('для блока с переводами сегментов полный перевод блока недопустим')
 
     def validate_treatment(self, treatment: BlockTreatment) -> None:
         """Use the saved treatment; the model cannot select one."""
         if not isinstance(self.glossary_hints, tuple) or not isinstance(self.language_notes, tuple):
             raise LLMPayloadError('частичное предложение исправления должно быть материализовано до проверки режима')
         if treatment.is_textual:
-            BlockResultResponse(self.block_id, treatment, self.translated_text, self.glossary_hints)
-        elif self.translated_text is not None or self.glossary_hints:
+            BlockResultResponse(
+                self.block_id, treatment, self.translated_text, self.glossary_hints, self.segments,
+            )
+        elif self.translated_text is not None or self.glossary_hints or self.segments:
             raise LLMPayloadError('нетекстовый блок не допускает перевода и подсказок')
         if self.language_notes and not treatment.allows_language_notes:
             raise LLMPayloadError('режим блока не допускает языковых заметок')
@@ -160,6 +170,7 @@ class ChapterCorrectionResponse:
                         block.glossary_hints,
                         new_notes,
                         block.issues,
+                        segments=block.segments,
                     )
                 )
             elif isinstance(block, CorrectedBlockResponse):
@@ -173,6 +184,7 @@ class ChapterCorrectionResponse:
                         block.translated_text,
                         block.glossary_hints,
                         new_notes,
+                        segments=block.segments,
                     )
                 )
             else:
@@ -343,17 +355,37 @@ class ProposedBlockResponse(CorrectedBlockResponse):
                 for note in self.language_notes
             ):
                 raise LLMPayloadError('исправленная заметка относится к чужому блоку')
+        object.__setattr__(self, 'segments', tuple(self.segments))
+        if any(not isinstance(segment, SegmentTranslationResponse) for segment in self.segments):
+            raise LLMPayloadError('неверный перевод сегмента')
+        if self.segments and self.translated_text is not None:
+            raise LLMPayloadError('для блока с переводами сегментов полный перевод блока недопустим')
         object.__setattr__(self, 'issues', tuple(self.issues))
         if not self.issues or any(not isinstance(i, CorrectionIssue) for i in self.issues):
             raise LLMPayloadError('предложение исправления требует основания')
 
     def materialize_for(self, previous) -> ProposedBlockResponse:
+        stored_translations = tuple(getattr(previous, 'segment_translations', ()) or ())
+        stored_treatments = tuple(getattr(previous, 'segment_treatments', ()) or ())
+        multi = len(stored_translations) >= 2 or len(stored_treatments) >= 2
+        if self.segments and not multi:
+            raise LLMPayloadError(
+                f'для блока {self.block_id} без нескольких сегментов список segments недопустим'
+            )
+        if multi and self.translated_text is not None:
+            raise LLMPayloadError(
+                f'для блока {self.block_id} с сегментами полный перевод блока недопустим'
+            )
         requires_translation = getattr(
             previous.treatment,
             'requires_translation',
             previous.treatment == BlockTreatment.TRANSLATE,
         )
-        if self.translated_text is None and requires_translation:
+        if multi:
+            from linguary.application.correction import merge_corrected_segments
+            translated_text = None
+            segments = merge_corrected_segments(previous, self.segments)
+        elif self.translated_text is None and requires_translation:
             if (
                 any(
                     i.field_path == 'translated_text'
@@ -365,8 +397,10 @@ class ProposedBlockResponse(CorrectedBlockResponse):
             ):
                 raise LLMPayloadError(f'для блока {self.block_id} обязателен полный перевод')
             translated_text = previous.translated_text
+            segments = ()
         else:
             translated_text = self.translated_text
+            segments = ()
         glossary_hints = (
             tuple(
                 GlossaryHintResponse(original=h.original, translation=h.translation, note=h.note)
@@ -394,6 +428,7 @@ class ProposedBlockResponse(CorrectedBlockResponse):
             glossary_hints,
             language_notes,
             self.issues,
+            segments=segments,
         )
 
 
@@ -545,10 +580,16 @@ def proposed_block_from_payload(payload):
                                       item['problem'], item['minimal_fix_reason']))
     raw_hints = payload.get('glossary_hints')
     raw_notes = payload.get('language_notes')
+    raw_segments = payload.get('segments') or ()
     return ProposedBlockResponse(
         payload['block_id'],
         payload.get('translated_text'),
         None if raw_hints is None else tuple(GlossaryHintResponse(**h) for h in raw_hints),
         None if raw_notes is None else tuple(LanguageNoteResponse(**n) for n in raw_notes),
         tuple(issues),
+        segments=tuple(
+            item if isinstance(item, SegmentTranslationResponse)
+            else SegmentTranslationResponse(item['index'], item['translated_text'])
+            for item in raw_segments
+        ),
     )

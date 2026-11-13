@@ -4,13 +4,15 @@ from typing import Literal
 
 from pydantic import ConfigDict, Field
 
-from linguary.adapters.llm.schemas import _ResponseModel, GlossaryHintSchema, LanguageNoteSchema
+from linguary.adapters.llm.schemas import (
+    _ResponseModel, GlossaryHintSchema, LanguageNoteSchema, SegmentTranslationSchema,
+)
 from linguary.application.correction_dto import (
     ChapterCorrectionResponse, CorrectedBlockResponse, UnchangedBlockResponse,
     ChapterCorrectionV2Response, ProposedBlockResponse, CorrectionIssue,
     CurrentQuoteEvidence, CurrentAbsenceEvidence, CorrectionVerdict, ChapterCorrectionReviewResponse,
 )
-from linguary.application.llm_dto import GlossaryHintResponse, LanguageNoteResponse
+from linguary.application.llm_dto import GlossaryHintResponse, LanguageNoteResponse, SegmentTranslationResponse
 
 
 class CorrectionModel(_ResponseModel):
@@ -28,6 +30,7 @@ class CorrectedBlockSchema(CorrectionModel):
     translated_text: str | None
     glossary_hints: list[GlossaryHintSchema]
     language_notes: list[LanguageNoteSchema]
+    segments: list[SegmentTranslationSchema] = Field(default_factory=list)
 
 
 class ChapterCorrectionSchema(CorrectionModel):
@@ -43,6 +46,7 @@ class ChapterCorrectionSchema(CorrectionModel):
                     block.block_id, block.translated_text,
                     tuple(GlossaryHintResponse(**hint.model_dump()) for hint in block.glossary_hints),
                     tuple(LanguageNoteResponse(**note.model_dump()) for note in block.language_notes),
+                    segments=_segment_responses(block.segments),
                 ))
         return ChapterCorrectionResponse(tuple(blocks))
 
@@ -81,6 +85,7 @@ class ProposedBlockSchema(CorrectionModel):
     glossary_hints: list[GlossaryHintSchema] | None = None
     language_notes: list[LanguageNoteSchema] | None = None
     issues: list[CorrectionIssueSchema] = Field(min_length=1)
+    segments: list[SegmentTranslationSchema] = Field(default_factory=list)
 
 
 class ChapterCorrectionV2Schema(CorrectionModel):
@@ -95,7 +100,12 @@ class ChapterCorrectionV2Schema(CorrectionModel):
                 None if b.glossary_hints is None else tuple(GlossaryHintResponse(**h.model_dump()) for h in b.glossary_hints),
                 None if b.language_notes is None else tuple(LanguageNoteResponse(**n.model_dump()) for n in b.language_notes),
                 tuple(i.to_dto() for i in b.issues),
+                segments=_segment_responses(b.segments),
             ) for b in self.blocks))
+
+
+def _segment_responses(segments) -> tuple[SegmentTranslationResponse, ...]:
+    return tuple(SegmentTranslationResponse(item.index, item.translated_text) for item in segments)
 
 
 class CorrectionVerdictSchema(CorrectionModel):

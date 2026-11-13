@@ -25,6 +25,7 @@ from linguary.application.context_builder import (
     textual_blocks,
 )
 from linguary.application.correction_dto import CorrectionSnapshot, CorrectionSnapshotV2, parse_correction_snapshot
+from linguary.application.llm_dto import SegmentTranslationResponse
 from linguary.domain import (
     BlockProcessingResult, BlockTreatment, BookStatus, CanonicalDocument, ChapterAnalysis, DocumentBlock,
     DocumentSection, DomainError, ProcessingRun, ProcessingTask, TaskStatus, TaskType,
@@ -39,7 +40,52 @@ def original_block_payload(block):
     payload['source_reference'] = asdict(block.source_reference)
     payload['inline_annotations'] = [asdict(annotation) for annotation in block.inline_annotations]
     payload['attributes'] = dict(block.attributes)
+    payload['segments'] = [asdict(segment) for segment in block.segments]
     return payload
+
+
+def segments_for_correction_request(result: Mapping) -> list[dict] | None:
+    """Slots of a multi-segment block. A one-span block keeps the whole-block shape."""
+    treatments = tuple(result.get('segment_treatments') or ())
+    translations = tuple(result.get('segment_translations') or ())
+    if len(treatments) < 2 and len(translations) < 2:
+        return None
+    return [
+        {'index': index, 'translated_text': text}
+        for index, text in enumerate(translations, start=1)
+        if isinstance(text, str) and text.strip()
+    ]
+
+
+def merge_corrected_segments(previous, returned) -> tuple[SegmentTranslationResponse, ...]:
+    """A returned index replaces that slot. An omitted index keeps the stored text."""
+    stored = tuple(getattr(previous, 'segment_translations', ()) or ())
+    returned_segments = tuple(returned or ())
+    returned_indexes = {segment.index for segment in returned_segments}
+    kept = tuple(
+        SegmentTranslationResponse(index, text)
+        for index, text in enumerate(stored, start=1)
+        if isinstance(text, str) and text.strip() and index not in returned_indexes
+    )
+    return returned_segments + kept
+
+
+def translation_covers_anchor(result, anchor, block) -> bool:
+    """True when the anchor starts inside a TRANSLATE span of a multi-segment block."""
+    segments = tuple(getattr(block, 'segments', ()) or ()) if block is not None else ()
+    treatments = tuple(getattr(result, 'segment_treatments', ()) or ())
+    if len(segments) >= 2 and len(treatments) == len(segments):
+        for span, treatment in zip(segments, treatments, strict=True):
+            if span.start <= anchor.start < span.end:
+                return treatment is BlockTreatment.TRANSLATE
+        return False
+    if len(segments) >= 2 and not treatments:
+        if getattr(result, 'treatment', None) is BlockTreatment.TRANSLATE:
+            for span in segments:
+                if span.start <= anchor.start < span.end:
+                    return True
+        return False
+    return bool(getattr(result, 'translated_text', None))
 
 
 def _encoded_json_bytes(value) -> bytes:

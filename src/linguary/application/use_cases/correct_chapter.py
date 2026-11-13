@@ -17,7 +17,8 @@ from linguary.application.context_builder import _extract_word_stems, _matches_c
 from linguary.application.correction import (
     correction_inputs, original_block_payload, reconcile_corrections, task_matches_inputs, unchecked_blocks,
     current_correction_candidates, candidate_is_current, model_correction_blocks,
-    correction_input_fingerprint,
+    correction_input_fingerprint, merge_corrected_segments, segments_for_correction_request,
+    translation_covers_anchor,
 )
 from linguary.application.correction_dto import (
     ChapterCorrectionResponse, CorrectedBlockResponse, ChapterCorrectionV2Response,
@@ -634,6 +635,10 @@ def _llm_block_result(
             out[key] = assistances
         else:
             out[key] = value
+    segments = segments_for_correction_request(result)
+    if segments is not None:
+        out['translated_text'] = None
+        out['segments'] = segments
     return out
 
 
@@ -908,9 +913,18 @@ class CorrectChapter:
                 section_quote_fragments = source_quote_fragments(b.text for b in inputs.section.ordered_blocks)
             unit = TranslationUnit.of_blocks(id=str(uuid4()), blocks=(originals[block.block_id],),
                                             plan=inputs.analysis.treatment_plan)
+            source = originals[block.block_id]
+            returned_segments = tuple(block.segments)
+            if len(source.segments) >= 2 and block.translated_text is None:
+                response_segments = merge_corrected_segments(previous, returned_segments)
+                response_text = None
+            else:
+                response_segments = returned_segments
+                response_text = block.translated_text
             payload = TranslationResultResponse(
                 blocks=(BlockResultResponse(block.block_id, previous.treatment,
-                    block.translated_text, block.glossary_hints),), language_notes=block.language_notes)
+                    response_text, block.glossary_hints, response_segments),),
+                language_notes=block.language_notes)
             validated, = self.validator.validate(payload, unit=unit,
                 target_language=inputs.document.target_language, note_id_factory=notes)
             # Preserve identifiers of notes surviving a correction at the same source anchor.
@@ -936,10 +950,19 @@ class CorrectChapter:
                     used.add(old.id)
                 restored_notes.append(replace(note, id=note.id if old is None else old.id,
                     original_excerpt=raw.original_excerpt, translated_excerpt=raw.translated_excerpt))
+            slots = validated.segment_translations
             candidate = replace(previous, translated_text=validated.translated_text,
+                segment_translations=slots,
+                segment_treatments=(
+                    validated.segment_treatments
+                    if slots or validated.segment_treatments
+                    else previous.segment_treatments
+                ),
                 glossary_hints=tuple(replace(h, original=raw.original)
                     for h, raw in zip(validated.glossary_hints, block.glossary_hints, strict=True)),
                 language_notes=tuple(restored_notes))
+            if slots:
+                candidate = replace(candidate, translated_text=candidate.rebuild_translation())
             candidate, = ReaderTextPolicy().prepare_results((candidate,), section_quote_fragments)
             if plan is not None and not english_help and candidate.treatment.is_textual:
                 byr = () if inputs.section.is_notes_only else inputs.analysis.before_you_read
@@ -1016,11 +1039,29 @@ class CorrectChapter:
         )
         for candidate in candidates:
             block_treatment = treatments.get(candidate.block_id, candidate.treatment)
+            source = originals.get(candidate.block_id)
+            multi_segment = (
+                source is not None
+                and len(source.segments) >= 2
+                and (
+                    len(candidate.segment_treatments) == len(source.segments)
+                    or not candidate.segment_treatments
+                )
+            )
             for assistance in (candidate.fragment_assistances
                                if inputs.conditions.payload.get('english_help', False) else ()):
                 quotes = tuple(anchor.quote for anchor in assistance.anchors)
+                if multi_segment:
+                    translation_duplicate = any(
+                        translation_covers_anchor(candidate, anchor, source)
+                        for anchor in assistance.anchors
+                    )
+                else:
+                    translation_duplicate = (
+                        bool(candidate.translated_text) and block_treatment != BlockTreatment.TRANSLATE
+                    )
                 if (
-                    (bool(candidate.translated_text) and block_treatment != BlockTreatment.TRANSLATE)
+                    translation_duplicate
                     or any(_same_quote(h.original, q) for h in candidate.glossary_hints for q in quotes)
                     or any(_same_quote(n.original_excerpt, q) for n in candidate.language_notes for q in quotes)
                 ):
