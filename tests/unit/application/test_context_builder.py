@@ -1181,3 +1181,241 @@ def test_translation_input_and_lazy_input_append_pronunciation_note_preserving_b
         not in ctx_non_mixed.without_optional_neighbours().request.input_text
     )
 
+
+_LONG_BLOCK = "Alpha went home. Beta stayed."
+_SHORT_BLOCK = "Short reply."
+_SINGLE_BLOCK = "Only one."
+_SEGMENT_RULE = (
+    "Верни segments с режимом каждого сегмента, только если режим различается внутри блока, иначе []."
+)
+_BLOCK_MODES_ALLOWED = "Разные режимы внутри одного блока допустимы."
+_SENTENCE_MODES_FORBIDDEN = "Разные режимы внутри одного предложения запрещены."
+_FALSE_FRIEND_KIND = "false_friend — слово похоже на русское, значит другое."
+_SPEECH_STYLE_KIND = (
+    "speech_style — диалект, акцент, особенности речи; только первое появление особенности персонажа."
+)
+_PARODY_KIND = "parody — в required_points назвать исходный текст."
+_DESCRIPTION_RULE = (
+    "description для person и place — строго до первого упоминания в данной главе "
+    "и по прошлым главам, без спойлеров текущей и будущих глав."
+)
+
+
+def _segmented_chapter():
+    """A long block with two spans, a short block, and one span stored then dropped."""
+    from dataclasses import replace
+
+    from linguary.domain import BlockSegment
+
+    split = _LONG_BLOCK.index("Beta")
+    long_block = replace(
+        make_analysis_block(section_id="section-1", order=0, text=_LONG_BLOCK),
+        segments=(
+            BlockSegment(0, split, 0),
+            BlockSegment(split, len(_LONG_BLOCK), 1),
+        ),
+    )
+    short_block = make_analysis_block(section_id="section-1", order=1, text=_SHORT_BLOCK)
+    single_block = replace(
+        make_analysis_block(section_id="section-1", order=2, text=_SINGLE_BLOCK),
+        segments=(BlockSegment(0, len(_SINGLE_BLOCK), 0),),
+    )
+    section = make_analysis_section(
+        section_id="section-1",
+        blocks=(long_block, short_block, single_block),
+    )
+    return section, make_analysis_document((section,)), long_block
+
+
+def _staged_builder() -> ContextBuilder:
+    return ContextBuilder(content_plan_profile="content-plan-v3", reader_level="b1")
+
+
+def test_pedagogical_input_labels_segments_of_long_block() -> None:
+    """A multi-segment block is `[bN]` plus `[bN.k]`; one stored span is not `[bN.1]`."""
+    section, document, long_block = _segmented_chapter()
+    context = _staged_builder().for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Alice meets the rabbit.",
+    )
+    split = _LONG_BLOCK.index("Beta")
+    labeled = "\n".join(
+        f"[b1.{index}] {_LONG_BLOCK[segment.start:segment.end]}"
+        for index, segment in enumerate(long_block.segments, start=1)
+    )
+    input_text = context.request.input_text
+
+    assert long_block.segments[0].start == 0
+    assert _LONG_BLOCK[:split].endswith(" ")
+    assert f"[b1]\n{labeled}" in input_text
+    assert "[b1.1] " in input_text
+    assert "[b1.2] Beta stayed." in input_text
+    assert f"[b2]\n{_SHORT_BLOCK}" in input_text
+    assert "[b2.1]" not in input_text
+    assert f"[b3]\n{_SINGLE_BLOCK}" in input_text
+    assert "[b3.1]" not in input_text
+
+
+def test_narrative_input_keeps_plain_text() -> None:
+    """Narrative input stays continuous text even when the block stores several spans."""
+    section, document, _long_block = _segmented_chapter()
+    context = _staged_builder().for_chapter_narrative_analysis(document, section)
+    input_text = context.request.input_text
+
+    assert f"[b1]\n{_LONG_BLOCK}" in input_text
+    assert f"[b2]\n{_SHORT_BLOCK}" in input_text
+    assert f"[b3]\n{_SINGLE_BLOCK}" in input_text
+    assert "[b1.1]" not in input_text
+    assert "[b1.2]" not in input_text
+    assert "[b2.1]" not in input_text
+    assert "[b3.1]" not in input_text
+
+
+def test_quotes_resolved_without_segment_labels() -> None:
+    """Quote matching uses the unlabeled visible text, not the pedagogical segment lines."""
+    from linguary.application.analysis_merge import find_quote_span
+    from linguary.application.context_builder import source_text_for_model
+
+    section, document, long_block = _segmented_chapter()
+    context = _staged_builder().for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Alice meets the rabbit.",
+    )
+    visible = context.visible_texts_by_alias["b1"]
+    quote = "Beta stayed."
+    start = _LONG_BLOCK.index(quote)
+
+    assert "[b1.2] Beta stayed." in context.request.input_text
+    assert visible == source_text_for_model(long_block) == _LONG_BLOCK
+    assert "[b1.1]" not in visible
+    assert "[b1.2]" not in visible
+    assert find_quote_span(visible, quote) == (start, start + len(quote), quote)
+    assert find_quote_span(visible, f"[b1.2] {quote}") is None
+
+    from dataclasses import replace
+
+    from linguary.domain import BlockSegment, InlineAnnotation, InlineAnnotationType
+
+    foot = "Alpha went home.1 Beta stayed."
+    mark = foot.index("1")
+    foot_block = replace(
+        make_analysis_block(section_id="section-1", order=0, text=foot),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=mark,
+                end=mark + 1,
+                target="section-1.xhtml#fn1",
+            ),
+        ),
+        segments=(
+            BlockSegment(0, mark + 1, 0),
+            BlockSegment(mark + 1, len(foot), 1),
+        ),
+    )
+    foot_section = make_analysis_section(section_id="section-1", blocks=(foot_block,))
+    foot_context = _staged_builder().for_chapter_pedagogical_analysis(
+        make_analysis_document((foot_section,)),
+        foot_section,
+        narrative_summary="Alice meets the rabbit.",
+    )
+    foot_visible = foot_context.visible_texts_by_alias["b1"]
+    assert foot_visible == source_text_for_model(foot_block) == "Alpha went home. Beta stayed."
+    assert "[b1.1] Alpha went home." in foot_context.request.input_text
+    assert "[b1.2]  Beta stayed." in foot_context.request.input_text
+    assert "home.1" not in foot_context.request.input_text
+    assert "1" not in foot_visible
+    foot_start = foot_visible.index(quote)
+    assert find_quote_span(foot_visible, quote) == (foot_start, foot_start + len(quote), quote)
+
+
+def test_pedagogical_instructions_describe_new_kinds() -> None:
+    """Pedagogical instructions name segment treatments and the three new difficulty kinds."""
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b1",
+        profile="content-plan-v3",
+    )
+    section, document, _long_block = _segmented_chapter()
+    live = _staged_builder().for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Alice meets the rabbit.",
+    )
+    from_template = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="b1",
+        prompt_templates=templates,
+    ).for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Alice meets the rabbit.",
+    )
+    expected = (
+        _SEGMENT_RULE,
+        _BLOCK_MODES_ALLOWED,
+        _SENTENCE_MODES_FORBIDDEN,
+        _FALSE_FRIEND_KIND,
+        _SPEECH_STYLE_KIND,
+        _PARODY_KIND,
+    )
+    for instructions in (
+        templates["pedagogical_analysis"],
+        live.request.instructions,
+        from_template.request.instructions,
+    ):
+        for phrase in expected:
+            assert phrase in instructions
+
+
+def test_narrative_instructions_request_spoiler_free_description() -> None:
+    """Person and place descriptions stay before the first mention and out of later chapters."""
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b1",
+        profile="content-plan-v3",
+    )
+    section, document, _long_block = _segmented_chapter()
+    context = _staged_builder().for_chapter_narrative_analysis(document, section)
+    from_template = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="b1",
+        prompt_templates=templates,
+    ).for_chapter_narrative_analysis(document, section)
+
+    for instructions in (
+        templates["narrative_analysis"],
+        context.request.instructions,
+        from_template.request.instructions,
+    ):
+        assert _DESCRIPTION_RULE in instructions
+
+
+def test_instructions_have_no_language_reference_requirement() -> None:
+    """Neither pass asks the model to insert the words «Языковая справка»."""
+    import inspect
+
+    import linguary.application.context_builder as context_builder_module
+    import linguary.application.reader_text as reader_text_module
+    from linguary.application.reader_text import learner_instructions
+
+    assert "Языковая справка" not in inspect.getsource(reader_text_module)
+    assert "Языковая справка" not in inspect.getsource(context_builder_module)
+    for level in ("a2", "b1", "b2", "c1"):
+        assert "Языковая справка" not in learner_instructions(level)
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        profile="content-plan-v3",
+    )
+    for key in ("learner_quality", "pedagogical_analysis", "narrative_analysis", "analysis", "fragment"):
+        assert "Языковая справка" not in templates[key]
+    section = make_analysis_section()
+    document = make_analysis_document((section,))
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="b2")
+    pedagogical = builder.for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="A factual summary.",
+    )
+    narrative = builder.for_chapter_narrative_analysis(document, section)
+    legacy = builder.for_chapter_analysis(document=document, section=section)
+    assert "Языковая справка" not in pedagogical.request.instructions
+    assert "Языковая справка" not in narrative.request.instructions
+    assert "Языковая справка" not in legacy.request.instructions
+

@@ -158,7 +158,8 @@ _NARRATIVE_ANALYSIS_INSTRUCTIONS = """\
 chapter_summary — фактическая сводка событий на языке оригинала (3–6 предложений);
 для фрагмента продолжи сводку с начала главы по предыдущим находкам.
 glossary_candidates: source_text, type, suggested_translation, confidence,
-model_flagged_review, note. Соблюдай обязательные решения глоссария.
+model_flagged_review, note, description. Соблюдай обязательные решения глоссария.
+description для person и place — строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
 context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
 Каждая опора: block_id и дословная quote из видимого текста. Не возвращай смещения.
@@ -179,10 +180,15 @@ _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS = """\
 Уровень читателя: {reader_level}. Исходные блоки — источник точных цитат.
 Принятые повествовательные факты и решения глоссария обязательны.
 Верни treatment_plan: source_block_id и treatment для каждого видимого b1..bN ровно один раз.
+Верни segments с режимом каждого сегмента, только если режим различается внутри блока, иначе [].
+Разные режимы внутри одного блока допустимы. Разные режимы внутри одного предложения запрещены.
 Верни difficulties, before_you_read и before_you_read_evidence (допустимы пустые списки).
 Каждая трудность: id, anchors [{{block_id, quote}}], owner_block_id, kind,
 priority, help_kind, required_points [{{id, description}}]. Копируй quote дословно,
 не раскрывай сокращения и не возвращай start/end. Владелец входит в anchors.
+false_friend — слово похоже на русское, значит другое.
+speech_style — диалект, акцент, особенности речи; только первое появление особенности персонажа.
+parody — в required_points назвать исходный текст.
 Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
 lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR.
 Для TRANSLATE и READ_AS_IS используй explanation. Перевод и цитата не заменяют объяснение.
@@ -1498,6 +1504,7 @@ class ContextBuilder:
                     visible_texts_by_alias=visible_texts_by_alias,
                     limit_lines=limit_lines,
                     extra_match_text=extra_match_text,
+                    label_segments=pedagogical,
                 ),
             ),
             block_ids_by_alias=aliases,
@@ -1559,6 +1566,7 @@ class ContextBuilder:
         visible_texts_by_alias: Mapping[str, str] | None = None,
         limit_lines: Sequence[str] = (),
         extra_match_text: str = "",
+        label_segments: bool = False,
     ) -> str:
         """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
         blocks_text = " ".join(block.text for block in blocks)
@@ -1626,7 +1634,9 @@ class ContextBuilder:
                 f"Указания: {findings.instructions}\n"
                 f"Выражения: {', '.join(findings.expressions)}"
             )
-        parts.append(_chapter_blocks(blocks, visible_texts_by_alias))
+        parts.append(_chapter_blocks(
+            blocks, visible_texts_by_alias, label_segments=label_segments,
+        ))
         if limit_lines:
             parts.append("\n".join(limit_lines))
         return "\n\n".join(parts)
@@ -2387,6 +2397,36 @@ def _neighbour_context(neighbours: Sequence[_NeighbourBlocks]) -> str:
     return "\n\n".join(lines)
 
 
+def _model_text_pieces(
+    block: DocumentBlock, *, footnote_markers: bool,
+) -> tuple[tuple[str, tuple[int, ...]], ...]:
+    """Text shown to the model, with the original offset of every kept character.
+
+    Footnote calls are omitted in analysis. A marker inserted for translation has no
+    original offset. The caller strips the joined text the same way as before.
+    """
+    text = block.text
+    end = _back_link_start(block) if block.type is BlockType.FOOTNOTE else len(text)
+    pieces: list[tuple[str, tuple[int, ...]]] = []
+    position = 0
+    for ordinal, reference in enumerate(footnote_references(block), start=1):
+        if reference.start < position or reference.end > end:
+            continue
+        before_end = reference.start
+        if not footnote_markers and before_end > position and text[before_end - 1] == " " and (
+            reference.end == end or text[reference.end] == " "
+        ):
+            before_end -= 1
+        if before_end > position:
+            pieces.append((text[position:before_end], tuple(range(position, before_end))))
+        if footnote_markers:
+            pieces.append((footnote_marker(ordinal), ()))
+        position = reference.end
+    if end > position:
+        pieces.append((text[position:end], tuple(range(position, end))))
+    return tuple(pieces)
+
+
 def source_text_for_model(block: DocumentBlock, *, footnote_markers: bool = False) -> str:
     """Block text as presented to the model.
 
@@ -2403,24 +2443,21 @@ def source_text_for_model(block: DocumentBlock, *, footnote_markers: bool = Fals
     inserts original links in their place. In other cases — chapter analysis, neighbouring paragraphs —
     the call reference is simply omitted.
     """
-    text = block.text
-    end = _back_link_start(block) if block.type is BlockType.FOOTNOTE else len(text)
-    pieces: list[str] = []
-    position = 0
-    for ordinal, reference in enumerate(footnote_references(block), start=1):
-        if reference.start < position or reference.end > end:
-            continue
-        before = text[position : reference.start]
-        if not footnote_markers and before.endswith(" ") and (
-            reference.end == end or text[reference.end] == " "
-        ):
-            before = before[:-1]
-        pieces.append(before)
-        if footnote_markers:
-            pieces.append(footnote_marker(ordinal))
-        position = reference.end
-    pieces.append(text[position:end])
-    return "".join(pieces).strip()
+    raw = "".join(piece for piece, _origins in _model_text_pieces(block, footnote_markers=footnote_markers))
+    return raw.strip()
+
+
+def _analysis_visible_origins(block: DocumentBlock) -> tuple[str, tuple[int, ...]]:
+    """Visible analysis text and the `block.text` offset of each of its characters."""
+    chars: list[str] = []
+    origins: list[int] = []
+    for piece, piece_origins in _model_text_pieces(block, footnote_markers=False):
+        chars.extend(piece)
+        origins.extend(piece_origins)
+    raw = "".join(chars)
+    visible = raw.strip()
+    lead = len(raw) - len(raw.lstrip())
+    return visible, tuple(origins[lead:lead + len(visible)])
 
 
 def _back_link_start(block: DocumentBlock) -> int:
@@ -2645,15 +2682,45 @@ def _name_context(
     )
 
 
+def _labeled_segment_body(block: DocumentBlock, alias: str) -> str | None:
+    """`[alias.k]` lines when the block stores more than one span.
+
+    `segments == ()` is one span and stays unlabeled. `k` starts at 1 and follows
+    the stored spans. Each line is the part of the analysis visible text inside
+    that span, so a quote of the line still matches `source_text_for_model`.
+    """
+    if len(block.segments) < 2:
+        return None
+    visible, origins = _analysis_visible_origins(block)
+    lines: list[str] = []
+    for index, segment in enumerate(block.segments, start=1):
+        segment_text = "".join(
+            char
+            for char, origin in zip(visible, origins, strict=True)
+            if segment.start <= origin < segment.end
+        )
+        lines.append(f"[{alias}.{index}] {segment_text}")
+    return "\n".join(lines)
+
+
 def _chapter_blocks(
     blocks: Sequence[DocumentBlock], visible_texts_by_alias: Mapping[str, str] | None = None,
+    *, label_segments: bool = False,
 ) -> str:
     """Textual blocks of chapter under aliases."""
     lines = ["Текстовые блоки главы:"]
-    lines.extend(
-        f"[{_alias(index)}]\n{visible_texts_by_alias[_alias(index)] if visible_texts_by_alias is not None and _alias(index) in visible_texts_by_alias else source_text_for_model(block)}"
-        for index, block in enumerate(blocks, start=1)
-    )
+    rendered: list[str] = []
+    for index, block in enumerate(blocks, start=1):
+        alias = _alias(index)
+        labeled = _labeled_segment_body(block, alias) if label_segments else None
+        if labeled is not None:
+            body = labeled
+        elif visible_texts_by_alias is not None and alias in visible_texts_by_alias:
+            body = visible_texts_by_alias[alias]
+        else:
+            body = source_text_for_model(block)
+        rendered.append(f"[{alias}]\n{body}")
+    lines.extend(rendered)
     return "\n\n".join(lines)
 
 
