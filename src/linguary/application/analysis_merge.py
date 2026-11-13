@@ -41,12 +41,14 @@ from linguary.application.llm_dto import (
     QuotedSceneResponse,
     QuotedSceneVisualFactResponse,
     QuotedSourceAnchorResponse,
+    TreatmentPlanItemResponse,
 )
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockTreatment,
     CanonicalDocument,
     ChapterAnalysis,
+    ConceptType,
     DocumentBlock,
     GlossaryCandidate,
     TreatmentPlan,
@@ -160,17 +162,18 @@ class FragmentAnalysis:
         texts: Mapping[str, str] | None = None,
         visible_texts_by_alias: Mapping[str, str] | None = None,
         resolved_content_plan: ContentPlan | None = None,
+        blocks: Sequence[DocumentBlock] | None = None,
     ) -> FragmentAnalysis:
         """Fragment response with plan mapped to chapter block IDs.
 
         The plan is assembled in document order: `block_ids_by_alias` enumerates
         fragment blocks as received by the model. A block omitted by the fragment
         is excluded from the plan and will trigger incomplete chapter coverage during merge.
+        `blocks` supply `segment_spans` for response `segments`. An empty segment
+        list means the block treatment covers the whole block.
         """
-        treatments = {
-            item.source_block_id: item.treatment for item in payload.treatment_plan
-        }
-        unknown = sorted(set(treatments) - set(block_ids_by_alias))
+        reported = {item.source_block_id for item in payload.treatment_plan}
+        unknown = sorted(reported - set(block_ids_by_alias))
         if unknown:
             raise AnalysisMergeError(
                 f"фрагмент {order} вернул режимы для чужих блоков: {unknown}"
@@ -179,10 +182,8 @@ class FragmentAnalysis:
             order=order,
             translation_instructions=without_block_labels(payload.translation_instructions),
             chapter_summary=payload.chapter_summary if payload.content_plan is not None and payload.content_plan.version == 3 else without_block_labels(payload.chapter_summary),
-            treatments=tuple(
-                TreatmentPlanItem(block_id=block_id, treatment=treatments[alias])
-                for alias, block_id in block_ids_by_alias.items()
-                if alias in treatments
+            treatments=plan_items_from_response(
+                payload, block_ids_by_alias=block_ids_by_alias, blocks=blocks,
             ),
             glossary_candidates=payload.glossary_candidates,
             before_you_read=payload.before_you_read,
@@ -195,6 +196,100 @@ class FragmentAnalysis:
                 )
             ),
         )
+
+
+_DESCRIBED_CANDIDATE_TYPES = frozenset({ConceptType.PERSON, ConceptType.PLACE})
+
+
+def kept_candidate_description(
+    candidate_type: ConceptType, responses: Iterable[GlossaryCandidateResponse]
+) -> str:
+    """Description is kept only for a person or a place.
+
+    Among duplicates, the highest-confidence non-empty description wins.
+    """
+    if candidate_type not in _DESCRIBED_CANDIDATE_TYPES:
+        return ""
+    described = [
+        item for item in responses
+        if item.type is candidate_type and item.description.strip()
+    ]
+    if not described:
+        return ""
+    return max(described, key=lambda item: item.confidence).description
+
+
+def plan_items_from_response(
+    payload: ChapterAnalysisResponse,
+    *,
+    block_ids_by_alias: Mapping[str, str],
+    blocks: Sequence[DocumentBlock] | None = None,
+    require_all: bool = False,
+) -> tuple[TreatmentPlanItem, ...]:
+    """Plan rows in document order.
+
+    A missing alias is skipped unless `require_all` is set. Empty response
+    `segments` mean the block treatment covers every span.
+    """
+    response_by_alias = {item.source_block_id: item for item in payload.treatment_plan}
+    blocks_by_id = {block.id: block for block in blocks} if blocks is not None else {}
+    items: list[TreatmentPlanItem] = []
+    for alias, block_id in block_ids_by_alias.items():
+        response_item = response_by_alias.get(alias)
+        if response_item is None:
+            if require_all:
+                raise KeyError(alias)
+            continue
+        block = blocks_by_id.get(block_id) if blocks is not None else None
+        items.append(_plan_item_from_response(response_item, block_id=block_id, block=block))
+    return tuple(items)
+
+
+def _plan_item_from_response(
+    item: TreatmentPlanItemResponse,
+    *,
+    block_id: str,
+    block: DocumentBlock | None,
+) -> TreatmentPlanItem:
+    """Map 1-based segment indexes onto `block.segment_spans`.
+
+    The block treatment must already be the strongest segment mode. Identical
+    modes collapse to an empty `segment_treatments` in the constructor, and
+    spans of one sentence must share a mode.
+    """
+    if not item.segments:
+        return TreatmentPlanItem(block_id=block_id, treatment=item.treatment)
+    if block is None:
+        raise AnalysisMergeError(
+            f"режимы сегментов блока {block_id} нельзя собрать без самого блока"
+        )
+    spans = block.segment_spans
+    if len(spans) < 2:
+        raise AnalysisMergeError(
+            f"блок {block_id} состоит из одного сегмента, режимы сегментов не задаются"
+        )
+    by_index: dict[int, BlockTreatment] = {}
+    for segment in item.segments:
+        if segment.index < 1 or segment.index > len(spans):
+            raise AnalysisMergeError(
+                f"индекс сегмента {segment.index} блока {block_id} "
+                f"вне диапазона 1..{len(spans)}"
+            )
+        if segment.index in by_index:
+            raise AnalysisMergeError(
+                f"сегмент {segment.index} блока {block_id} указан повторно"
+            )
+        by_index[segment.index] = segment.treatment
+    if set(by_index) != set(range(1, len(spans) + 1)):
+        raise AnalysisMergeError(
+            f"режимы сегментов блока {block_id} покрывают не все сегменты"
+        )
+    return TreatmentPlanItem(
+        block_id=block_id,
+        treatment=item.treatment,
+        segment_treatments=tuple(by_index[index] for index in range(1, len(spans) + 1)),
+        sentence_indexes=tuple(span.sentence_index for span in spans),
+    )
 
 
 def plan_fragments(
@@ -286,24 +381,26 @@ def _merged_plan(
 
     Two fragments that assigned differing treatments to the same block yield no decision:
     the application does not choose between them, the block remains unassigned, and chapter
-    coverage is incomplete. Repeating identical treatments is not a conflict — fragments agree.
+    coverage is incomplete. Repeating an identical plan row, including segment modes,
+    is not a conflict — fragments agree.
     """
-    decided: dict[str, BlockTreatment] = {}
+    decided: dict[str, TreatmentPlanItem] = {}
     conflicting: set[str] = set()
     for fragment in fragments:
         for item in fragment.treatments:
             previous = decided.get(item.block_id)
             if previous is None:
-                decided[item.block_id] = item.treatment
-            elif previous is not item.treatment:
+                decided[item.block_id] = item
+            elif previous != item:
                 conflicting.add(item.block_id)
     for block_id in conflicting:
         del decided[block_id]
     known = set(expected)
     order = [block_id for block_id in expected if block_id in decided]
     order.extend(block_id for block_id in decided if block_id not in known)
-    return TreatmentPlan.of_treatments(
-        section_id, ((block_id, decided[block_id]) for block_id in order)
+    return TreatmentPlan(
+        section_id=section_id,
+        items=tuple(decided[block_id] for block_id in order),
     )
 
 
@@ -435,6 +532,7 @@ def _merged_candidate(
     The translation note is taken from the highest-confidence fragment that provided one:
     an empty note must not displace a non-empty one, as fragments see different portions
     of the chapter and characteristics requiring notes may not appear in every fragment.
+    A description is kept only for a person or a place, by the same confidence rule.
     """
     leading = max(group, key=lambda candidate: candidate.confidence)
     source_text, suggested_translation, note = _merged_candidate_suggestion(group)
@@ -462,7 +560,13 @@ def _merged_candidate(
     evidence = name_translation_evidence(
         group, policy=name_translation_policy, conditions_id=conditions_id
     )
-    return replace(candidate, name_translation_evidence=evidence) if evidence else candidate
+    description = kept_candidate_description(candidate.type, group)
+    changes = {}
+    if evidence is not None:
+        changes["name_translation_evidence"] = evidence
+    if description:
+        changes["description"] = description
+    return replace(candidate, **changes) if changes else candidate
 
 
 def name_translation_evidence(

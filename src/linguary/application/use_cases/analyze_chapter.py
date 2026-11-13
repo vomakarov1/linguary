@@ -44,9 +44,11 @@ from linguary.application.analysis_merge import (
     validate_content_plan,
     validate_fact_glossary,
     glossary_context_constraints,
+    kept_candidate_description,
     merge_chapter_analysis,
     name_translation_evidence,
     plan_fragments,
+    plan_items_from_response,
     validate_narrative_response,
     merge_narrative_fragments,
     merged_glossary_suggestion_keys,
@@ -418,7 +420,8 @@ class AnalyzeChapter:
         plan = self._validate_pedagogical(payload, context, blocks)
         analysis = merge_chapter_analysis([FragmentAnalysis.of_response(payload, order=0,
             block_ids_by_alias=context.block_ids_by_alias, texts={b.id: b.text for b in blocks},
-            visible_texts_by_alias=context.visible_texts_by_alias, resolved_content_plan=plan)],
+            visible_texts_by_alias=context.visible_texts_by_alias, resolved_content_plan=plan,
+            blocks=blocks)],
             id=self._id_factory(), section_id=section.id, expected_block_ids=tuple(b.id for b in blocks),
             glossary_confidence_threshold=self._glossary_confidence_threshold,
             id_factory=self._id_factory, name_translation_policy=self._name_translation_policy,
@@ -518,15 +521,17 @@ class AnalyzeChapter:
                         language_detector=self._language_detector)
                 _ensure_plan_covers_chapter(combined, context)
                 resolved_plan = self._validate_pedagogical(combined, context, fragment.blocks)
+                # The first fragment has no prior parts, but segment indexes are still rejected here.
+                candidate_part = FragmentAnalysis.of_response(
+                    combined,
+                    order=len(parts),
+                    block_ids_by_alias=context.block_ids_by_alias,
+                    texts={b.id: b.text for b in fragment.blocks},
+                    visible_texts_by_alias=context.visible_texts_by_alias,
+                    resolved_content_plan=resolved_plan,
+                    blocks=fragment.blocks,
+                )
                 if parts:
-                    candidate_part = FragmentAnalysis.of_response(
-                        combined,
-                        order=len(parts),
-                        block_ids_by_alias=context.block_ids_by_alias,
-                        texts={b.id: b.text for b in fragment.blocks},
-                        visible_texts_by_alias=context.visible_texts_by_alias,
-                        resolved_content_plan=resolved_plan,
-                    )
                     expected_so_far = tuple(
                         item.block_id
                         for part in (*parts, candidate_part)
@@ -607,7 +612,7 @@ class AnalyzeChapter:
                     block_ids_by_alias=context.block_ids_by_alias,
                     texts={b.id: b.text for b in fragment.blocks},
                     visible_texts_by_alias=context.visible_texts_by_alias,
-                    resolved_content_plan=resolved))
+                    resolved_content_plan=resolved, blocks=fragment.blocks))
         return parts, attempts, _total_usage(usages)
 
     async def _request_staged[ResolutionT](
@@ -913,6 +918,7 @@ class AnalyzeChapter:
                     texts={b.id: b.text for b in fragment.blocks},
                     visible_texts_by_alias=context.visible_texts_by_alias,
                     resolved_content_plan=self._resolved_content_plan.get(),
+                    blocks=fragment.blocks,
                 )
             )
         analysed = [replace(part, order=i) for i, part in enumerate(analysed)]
@@ -1114,6 +1120,12 @@ class AnalyzeChapter:
                              *(( 'before_you_read.explanation', entry.explanation) for entry in response.payload.before_you_read)],
                             reader_level=self._context_builder._reader_level)
                     _ensure_plan_covers_chapter(response.payload, context)
+                    plan_items_from_response(
+                        response.payload,
+                        block_ids_by_alias=context.block_ids_by_alias,
+                        blocks=blocks,
+                        require_all=True,
+                    )
                     _ensure_candidates_single_script(response.payload, context)
                     plan = validate_content_plan(
                         response.payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
@@ -1172,17 +1184,16 @@ class AnalyzeChapter:
         chapter block ordering.
         """
         analysis_id = self._id_factory()
-        treatments = {
-            item.source_block_id: item.treatment for item in payload.treatment_plan
-        }
         return ChapterAnalysis.create(
             id=analysis_id,
             section_id=section.id,
-            treatment_plan=TreatmentPlan.of_treatments(
-                section.id,
-                (
-                    (context.block_id_for(alias), treatments[alias])
-                    for alias in context.aliases
+            treatment_plan=TreatmentPlan(
+                section_id=section.id,
+                items=plan_items_from_response(
+                    payload,
+                    block_ids_by_alias=context.block_ids_by_alias,
+                    blocks=blocks,
+                    require_all=True,
                 ),
             ),
             translation_instructions=without_block_labels(payload.translation_instructions),
@@ -1222,7 +1233,7 @@ class AnalyzeChapter:
             ), name_translation_evidence=name_translation_evidence(
                 (candidate,), policy=self._name_translation_policy,
                 conditions_id=self._conditions_id,
-            ))
+            ), description=kept_candidate_description(candidate.type, (candidate,)))
             for candidate in payload.glossary_candidates
         )
 

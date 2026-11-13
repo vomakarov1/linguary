@@ -3,8 +3,8 @@ from dataclasses import replace
 
 import pytest
 from analysis_fakes import (
-    BOOK_ID, FakeLanguageDetector, analysis_reply, make_analysis_document,
-    make_analysis_section, make_book_record,
+    BOOK_ID, FakeLanguageDetector, analysis_reply, make_analysis_block,
+    make_analysis_document, make_analysis_section, make_book_record,
 )
 
 from linguary.adapters.db.engine import create_database_engine
@@ -15,7 +15,9 @@ from linguary.application.context_builder import ContextBuilder, snapshot_prompt
 from linguary.application.ports.llm import LLMResponseFormatError, LLMTransportError
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.use_cases.analyze_chapter import AnalyzeChapter, AnalyzeChapterCommand
-from linguary.domain import AnalysisPassKind, BlockType, LLMCallStage
+from linguary.domain import (
+    AnalysisPassKind, BlockSegment, BlockTreatment, BlockType, LLMCallStage,
+)
 
 NARRATIVE = LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE
 PEDAGOGICAL = LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
@@ -1127,5 +1129,161 @@ async def test_pedagogical_pass_receives_current_chapter_narrative_glossary_and_
         assert 'Передавай имена и названия по звучанию' in req.instructions
         assert 'name_translation_assessment' not in req.instructions
         assert '- Baker Street [place] -> Бейкер-стрит (Улица в Лондоне.)' in req.input_text
+
+
+def save_segmented_block(uow, parts, sentences):
+    """Replace the stored chapter with one block split into these spans."""
+    text = "".join(parts)
+    offset = 0
+    spans = []
+    for part, sentence in zip(parts, sentences, strict=True):
+        spans.append(BlockSegment(offset, offset + len(part), sentence))
+        offset += len(part)
+    block = replace(
+        make_analysis_block(section_id="section-1", order=0, text=text),
+        segments=tuple(spans),
+    )
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((make_analysis_section(blocks=(block,)),)))
+    return block
+
+
+def plan_reply(treatment, segments):
+    return pedagogical(treatment_plan=[dict(
+        source_block_id="b1", treatment=treatment, segments=segments,
+    )])
+
+
+def _plan_item(analysis, block_id):
+    return next(item for item in analysis.treatment_plan.items if item.block_id == block_id)
+
+
+async def test_segment_treatments_build_mixed_plan_item(stored_book):
+    """Segment modes are stored in span order, and the block mode is the strongest."""
+    _, uow, _ = stored_book
+    block = save_segmented_block(
+        uow, ("Holmes speaks. ", "Watson listens."), (0, 1),
+    )
+    result = await scenario(uow, FakeLLMClient([
+        narrative(),
+        plan_reply("TRANSLATE", [
+            dict(index=2, treatment="TRANSLATE"),
+            dict(index=1, treatment="READ_AS_IS"),
+        ]),
+    ]))(COMMAND)
+    item = _plan_item(result.analysis, block.id)
+    assert item.treatment is BlockTreatment.TRANSLATE
+    assert item.segment_treatments == (
+        BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE,
+    )
+
+
+async def test_different_treatments_in_same_sentence_rejected_by_merge(stored_book):
+    """Spans of one sentence cannot keep different modes."""
+    _, uow, _ = stored_book
+    save_segmented_block(
+        uow, ("Holmes speaks softly ", "and then stops."), (0, 0),
+    )
+    client = FakeLLMClient([
+        narrative(),
+        plan_reply("TRANSLATE", [
+            dict(index=1, treatment="READ_AS_IS"),
+            dict(index=2, treatment="TRANSLATE"),
+        ]),
+    ])
+    with pytest.raises(ResultValidationError, match="разные режимы"):
+        await scenario(uow, client)(COMMAND)
+
+
+async def test_partial_segment_coverage_rejected(stored_book):
+    """A missing span, a repeated index, and an index past the spans are rejected."""
+    _, uow, _ = stored_book
+    save_segmented_block(
+        uow, ("One. ", "Two. ", "Three."), (0, 1, 2),
+    )
+    cases = (
+        ([dict(index=1, treatment="READ_AS_IS"), dict(index=3, treatment="TRANSLATE")],
+         "не все сегменты"),
+        ([dict(index=1, treatment="READ_AS_IS"), dict(index=1, treatment="TRANSLATE")],
+         "повторно"),
+        ([dict(index=1, treatment="READ_AS_IS"), dict(index=4, treatment="TRANSLATE")],
+         "вне диапазона"),
+    )
+    for index, (segments, message) in enumerate(cases):
+        client = FakeLLMClient(
+            [plan_reply("TRANSLATE", segments)] if index else
+            [narrative(), plan_reply("TRANSLATE", segments)]
+        )
+        with pytest.raises(ResultValidationError, match=message):
+            await scenario(uow, client)(COMMAND)
+
+
+async def test_segments_for_short_block_rejected(stored_book):
+    """A one-span block, including a block with no stored segments, rejects segments."""
+    _, uow, _ = stored_book
+    client = FakeLLMClient([
+        narrative(),
+        plan_reply("READ_AS_IS", [dict(index=1, treatment="READ_AS_IS")]),
+    ])
+    with pytest.raises(ResultValidationError, match="одного сегмента"):
+        await scenario(uow, client)(COMMAND)
+
+
+async def test_uniform_segments_collapse_to_block_treatment(stored_book):
+    """Identical segment modes collapse, and the block mode stays that mode."""
+    _, uow, _ = stored_book
+    block = save_segmented_block(
+        uow, ("Holmes speaks. ", "Watson listens."), (0, 1),
+    )
+    result = await scenario(uow, FakeLLMClient([
+        narrative(),
+        plan_reply("GLOSSARY_ONLY", [
+            dict(index=2, treatment="GLOSSARY_ONLY"),
+            dict(index=1, treatment="GLOSSARY_ONLY"),
+        ]),
+    ]))(COMMAND)
+    item = _plan_item(result.analysis, block.id)
+    assert item.treatment is BlockTreatment.GLOSSARY_ONLY
+    assert item.segment_treatments == ()
+    assert result.analysis.treatment_plan.segment_treatments_for(block.id, 2) == (
+        BlockTreatment.GLOSSARY_ONLY, BlockTreatment.GLOSSARY_ONLY,
+    )
+
+
+async def test_description_kept_for_person_and_place_only(stored_book):
+    """A candidate description survives only for person and place."""
+    import json
+
+    _, uow, _ = stored_book
+    candidates = [
+        dict(source_text="Holmes", type="person", suggested_translation="Холмс",
+             confidence=0.95, model_flagged_review=False, note="",
+             description="Детектив с Бейкер-стрит."),
+        dict(source_text="Baker Street", type="place", suggested_translation="Бейкер-стрит",
+             confidence=0.95, model_flagged_review=False, note="",
+             description="Улица в Лондоне."),
+        dict(source_text="actual", type="term", suggested_translation="действительный",
+             confidence=0.95, model_flagged_review=False, note="",
+             description="ложный друг: не «актуальный»."),
+        dict(source_text="Scotland Yard", type="organization",
+             suggested_translation="Скотленд-Ярд", confidence=0.95,
+             model_flagged_review=False, note="", description="Лондонская полиция."),
+        dict(source_text="speckled band", type="fictional_concept",
+             suggested_translation="пёстрая лента", confidence=0.95,
+             model_flagged_review=False, note="", description="Вымышленный предмет."),
+    ]
+    raw = json.loads(narrative().content)
+    raw["glossary_candidates"] = candidates
+    result = await scenario(uow, FakeLLMClient([
+        FakeReply.of_payload(raw), pedagogical(),
+    ]))(COMMAND)
+    by_source = {item.source_text: item.description for item in result.analysis.glossary_candidates}
+    assert by_source == {
+        "Holmes": "Детектив с Бейкер-стрит.",
+        "Baker Street": "Улица в Лондоне.",
+        "actual": "",
+        "Scotland Yard": "",
+        "speckled band": "",
+    }
 
 
