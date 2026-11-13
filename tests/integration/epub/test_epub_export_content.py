@@ -166,13 +166,19 @@ def test_chapter_follows_the_order_required_by_the_specification(
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
 
     assert outline(chapter) == [
-        ("section", "linguary-before-you-read"),
+        ("section", "lg-front"),
         ("div", "lg-unit lg-end"),
         ("div", "lg-unit lg-end"),
         ("div", "lg-unit lg-end"),
         ("div", "lg-unit lg-end"),
         ("aside", ""),
     ]
+    front = next(
+        element for element in elements(chapter, "section") if element.get("class") == "lg-front"
+    )
+    assert [
+        (element.tag.rpartition("}")[2], element.get("class", "")) for element in front
+    ] == [("section", "linguary-before-you-read")]
     units = [element for element in next(iter(elements(chapter, "section"))) if element.tag.rpartition("}")[2] == "div"]
     heading, first, second, third = units
     assert [child.tag.rpartition("}")[2] for child in heading] == ["h1"]
@@ -192,6 +198,9 @@ def test_first_chapter_has_no_previously_section(source: Path, tmp_path: Path) -
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
 
     assert "linguary-previously" not in [class_ for _, class_ in outline(chapter)]
+    assert not any(
+        element.get("class") == "linguary-previously" for element in elements(chapter, "section")
+    )
 
 
 def test_second_chapter_opens_with_the_summary_of_the_first(
@@ -206,7 +215,11 @@ def test_second_chapter_opens_with_the_summary_of_the_first(
         if element.get("class") == "linguary-previously"
     )
 
-    assert outline(chapter)[0] == ("section", "linguary-previously")
+    assert outline(chapter)[0] == ("section", "lg-front")
+    front = next(
+        element for element in elements(chapter, "section") if element.get("class") == "lg-front"
+    )
+    assert front[0].get("class") == "linguary-previously"
     assert next(iter(elements(previously, "h2"))).text == "Previously in Chapter One"
     assert next(iter(elements(previously, "p"))).text == _SUMMARY
 

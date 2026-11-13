@@ -16,6 +16,27 @@ _NOTICE_HASHES = {
 }
 
 
+IPA_KEY_LINK_LABEL = 'Ключ к знакам'
+
+
+def sources_ipa_key_href(href: str | None) -> str | None:
+    """Address of the IPA key page, or none when that page is not in the book.
+
+    A blank value and an external address are not a link.
+    """
+    if not isinstance(href, str):
+        return None
+    candidate = href.strip()
+    if not candidate or _external_href(candidate):
+        return None
+    return candidate
+
+
+def _external_href(href: str) -> bool:
+    scheme, separator, _ = href.partition(':')
+    return bool(separator) and scheme.isalpha()
+
+
 def load_pronunciation_source_notices() -> str:
     """Return only the known snapshot's complete, verified notices."""
     directory = resources.files('linguary.adapters.pronunciation').joinpath('data', SNAPSHOT)

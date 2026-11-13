@@ -5,9 +5,11 @@ one `DocumentSection` corresponds to one reading-order XHTML document, retaining
 document path so that internal links remain valid without address rewriting.
 
 A chapter is assembled in reading order: `Previously in Chapter ...` from the previous chapter summary,
-`Before You Read`, then each block as reading units. Units come from `request.layout`. A missing
-layout, or a block absent from it, is one source span with no translation and no notes. The writer
-does not build the layout. The LLM does not participate in assembly.
+`Before You Read`, then each block as reading units. When a layout is present those items share one
+`section.lg-front` with the chapter's who-is-who and review, and empty items are left out. Units come
+from `request.layout`. A missing layout, or a block absent from it, is one source span with no
+translation and no notes. The writer does not build the layout. Legend, IPA key, and book who-is-who
+are documents only when those tuples are non-empty. The LLM does not participate in assembly.
 
 A `PRESERVE_OPAQUE` block is transferred using source markup from the EPUB book — otherwise anything
 the importer did not descend into would be lost: whole tables and images inside them. An opaque copy
@@ -37,9 +39,13 @@ from lxml import etree
 from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.resources import package_path
 from linguary.adapters.epub.pronunciation_notices import (
-    PronunciationNoticeBundle, pronunciation_notice_bundle,
+    IPA_KEY_LINK_LABEL,
+    PronunciationNoticeBundle,
+    pronunciation_notice_bundle,
+    sources_ipa_key_href,
 )
 from linguary.application.analysis_merge import sanitize_before_you_read_explanation
+from linguary.application.layout.book import BookLayout
 from linguary.application.ports.epub import (
     EpubExportFatalError,
     EpubImportFatalError,
@@ -176,6 +182,78 @@ p {
 .linguary-anchors {
   display: none;
 }
+
+.lg-front,
+.lg-sec {
+  margin: 0.4em 0 1.6em;
+  font-size: 0.9em;
+  color: inherit;
+  hyphens: auto;
+}
+
+.lg-front h3,
+.lg-front h4,
+.lg-sec h1,
+.lg-sec h2,
+.lg-sec h3 {
+  margin: 0.8em 0 0.2em;
+  font-size: 1em;
+  page-break-after: avoid;
+  break-after: avoid;
+  color: inherit;
+}
+
+.lg-front p,
+.lg-sec p {
+  margin: 0.25em 0;
+  text-indent: 0;
+  color: inherit;
+}
+
+.lg-entries {
+  list-style: none;
+  margin: 0.3em 0;
+  padding-left: 1.2em;
+  color: inherit;
+}
+
+.lg-entries > li {
+  margin: 0.25em 0;
+  text-indent: -1.2em;
+  page-break-inside: avoid;
+  break-inside: avoid;
+}
+
+.lg-head {
+  font-weight: bold;
+}
+
+.lg-src-ref,
+.lg-method {
+  font-style: italic;
+}
+
+.lg-key {
+  width: 100%;
+  margin: 0.4em 0;
+  font-size: 0.95em;
+  border-collapse: collapse;
+  color: inherit;
+}
+
+.lg-key th,
+.lg-key td {
+  padding: 0.2em 0.6em 0.2em 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 0.04em solid;
+  color: inherit;
+}
+
+.lg-newpage {
+  page-break-before: always;
+  break-before: page;
+}
 """
 
 
@@ -195,21 +273,31 @@ class EpubExportWriter(EpubWriter):
             notices = pronunciation_notice_bundle(request)
         except (OSError, ValueError):
             raise EpubExportFatalError('уведомления об источнике транскрипций недоступны') from None
+        used = set(payloads) | {
+            _contained_name(section.source_resource_path)
+            for section in request.document.ordered_sections
+        }
+        used.update((_NAVIGATION_FILE, _STYLESHEET_FILE, _PACKAGE_FILE))
+        pages = _book_page_hrefs(request.layout, used)
         notices_href = None
+        provenance_href = None
         media_types = dict(_resource_media_types(request))
         if notices is not None:
-            used = set(payloads) | {_contained_name(section.source_resource_path)
-                                    for section in request.document.ordered_sections}
-            used.update((_NAVIGATION_FILE, _STYLESHEET_FILE, _PACKAGE_FILE))
             notices_href = _unique_resource_name('linguary/pronunciation-sources.xhtml', used)
             provenance_href = _unique_resource_name('linguary/pronunciation-sources.json', used)
             payloads[provenance_href] = notices.provenance_json()
             media_types[provenance_href] = 'application/json'
         with _OpaqueSource(request.source_epub_path) as opaque:
             chapters = _render_chapters(request, opaque=opaque, warnings=warnings)
+        chapters = _insert_book_pages(chapters, request, pages)
         if notices is not None:
-            chapters += (_pronunciation_notices_chapter(notices, href=notices_href,
-                provenance_href=provenance_href, language=request.document.source_language),)
+            chapters += (_pronunciation_notices_chapter(
+                notices,
+                href=notices_href,
+                provenance_href=provenance_href,
+                language=request.document.source_language,
+                ipa_key_href=_ipa_key_link(notices_href, pages.ipa),
+            ),)
         known_files = (
             set(payloads)
             | {chapter.href for chapter in chapters}
@@ -251,7 +339,12 @@ class _Chapter:
 
 
 def _pronunciation_notices_chapter(
-    notices: PronunciationNoticeBundle, *, href: str, provenance_href: str, language: str,
+    notices: PronunciationNoticeBundle,
+    *,
+    href: str,
+    provenance_href: str,
+    language: str,
+    ipa_key_href: str | None = None,
 ) -> _Chapter:
     title = 'Источники транскрипций и лицензии'
     root = _xhtml_document(title=title, language=language,
@@ -260,9 +353,129 @@ def _pronunciation_notices_chapter(
     section = _sub(body, 'section', {'id': 'pronunciation-sources', 'class': 'linguary-pronunciation-sources'})
     _sub(section, 'h1').text = title
     _sub(section, 'p').text = 'Сведения об источнике добавленных транскрипций и условия использования словарных данных.'
+    link_href = sources_ipa_key_href(ipa_key_href)
+    if link_href is not None:
+        paragraph = _sub(section, 'p')
+        link = _sub(paragraph, 'a', {'href': link_href})
+        link.text = IPA_KEY_LINK_LABEL
     _sub(section, 'a', {'href': _relative_href(href, provenance_href)}).text = 'Использованные транскрипции (JSON)'
     _sub(section, 'pre').text = notices.text
     return _Chapter('linguary-pronunciation-sources', href, title, root)
+
+
+@dataclass(frozen=True, slots=True)
+class _BookPageHrefs:
+    """Generated apparatus paths. None means that tuple was empty."""
+
+    legend: str | None = None
+    ipa: str | None = None
+    who: str | None = None
+
+
+def _book_page_hrefs(layout: BookLayout | None, used: set[str]) -> _BookPageHrefs:
+    """Reserve a file only for a non-empty legend, IPA key, or book who-is-who."""
+    if layout is None:
+        return _BookPageHrefs()
+    return _BookPageHrefs(
+        legend=_unique_resource_name("linguary/legend.xhtml", used) if layout.legend else None,
+        ipa=_unique_resource_name("linguary/ipa-key.xhtml", used) if layout.ipa_key else None,
+        who=_unique_resource_name("linguary/who-is-who.xhtml", used) if layout.who_is_who else None,
+    )
+
+
+def _ipa_key_link(base: str | None, ipa_href: str | None) -> str | None:
+    """Relative link to the IPA key, or none when that page was not reserved."""
+    if base is None or ipa_href is None:
+        return None
+    return sources_ipa_key_href(f"{_relative_href(base, ipa_href)}#ipa-key")
+
+
+def _insert_book_pages(
+    chapters: Sequence[_Chapter],
+    request: EpubWriteRequest,
+    pages: _BookPageHrefs,
+) -> tuple[_Chapter, ...]:
+    """Front matter, then legend and IPA key, then the book, then who-is-who.
+
+    The sources page is appended by the caller and stays last.
+    """
+    layout = request.layout
+    if layout is None or (pages.legend is None and pages.ipa is None and pages.who is None):
+        return tuple(chapters)
+    from linguary.adapters.epub.book_pages import (
+        IPA_KEY_TITLE,
+        LEGEND_TITLE,
+        WHO_IS_WHO_TITLE,
+        ipa_key_document,
+        legend_document,
+        who_is_who_document,
+    )
+
+    leading, rest = _split_leading_front_matter(chapters, request.document)
+    target = request.document.target_language
+    source = request.document.source_language
+    front: list[_Chapter] = []
+    if pages.legend is not None:
+        front.append(
+            _Chapter(
+                "linguary-legend",
+                pages.legend,
+                LEGEND_TITLE,
+                legend_document(
+                    layout.legend,
+                    language=target,
+                    stylesheet=_relative_href(pages.legend, _STYLESHEET_FILE),
+                    ipa_key_href=_ipa_key_link(pages.legend, pages.ipa),
+                ),
+            )
+        )
+    if pages.ipa is not None:
+        front.append(
+            _Chapter(
+                "linguary-ipa-key",
+                pages.ipa,
+                IPA_KEY_TITLE,
+                ipa_key_document(
+                    layout.ipa_key,
+                    language=target,
+                    example_language=source,
+                    stylesheet=_relative_href(pages.ipa, _STYLESHEET_FILE),
+                ),
+            )
+        )
+    who: tuple[_Chapter, ...] = ()
+    if pages.who is not None:
+        who = (
+            _Chapter(
+                "linguary-who-is-who",
+                pages.who,
+                WHO_IS_WHO_TITLE,
+                who_is_who_document(
+                    layout.who_is_who,
+                    language=target,
+                    source_language=source,
+                    stylesheet=_relative_href(pages.who, _STYLESHEET_FILE),
+                ),
+            ),
+        )
+    return tuple(leading) + tuple(front) + tuple(rest) + who
+
+
+def _split_leading_front_matter(
+    chapters: Sequence[_Chapter], document: CanonicalDocument
+) -> tuple[list[_Chapter], list[_Chapter]]:
+    """Opening front matter stays ahead of the legend. Later sections keep their order."""
+    leading: list[_Chapter] = []
+    rest: list[_Chapter] = []
+    started = False
+    for chapter in chapters:
+        section = document.section(chapter.section_id)
+        if not started and document.is_front_matter(section):
+            leading.append(chapter)
+            continue
+        started = True
+        rest.append(chapter)
+    return leading, rest
 
 
 @dataclass(slots=True)
@@ -477,14 +690,41 @@ class _ChapterRenderer:
             )
         else:
             container = _sub(body, "section", {f"{{{_EPUB_NAMESPACE}}}type": "chapter"})
-            self._append_previously(container, previous)
-            self._append_before_you_read(container, section)
+            self._append_chapter_front(container, section, previous)
             self._append_blocks(
                 container, section, href=href, number=number, is_front_matter=False
             )
         return _Chapter(
             section_id=section.id, href=href, title=section.title, root=root
         )
+
+    def _append_chapter_front(
+        self,
+        container: etree._Element,
+        section: DocumentSection,
+        previous: DocumentSection | None,
+    ) -> None:
+        """One `section.lg-front` when a layout is present. Empty items are omitted.
+
+        Without a layout the historical Previously and Before You Read sections
+        stay direct children of the chapter. Front matter and notes pages do
+        not call this.
+        """
+        if self._request.layout is None:
+            self._append_previously(container, previous)
+            self._append_before_you_read(container, section)
+            return
+        from linguary.adapters.epub.book_pages import append_review, append_who
+
+        front = _element("section", {"class": "lg-front"})
+        self._append_previously(front, previous)
+        chapter = self._request.layout.chapters.get(section.id)
+        if chapter is not None:
+            append_who(front, chapter.who_is_who, source_language=self._document.source_language)
+            append_review(front, chapter.review, source_language=self._document.source_language)
+        self._append_before_you_read(front, section)
+        if len(front):
+            container.append(front)
 
     def _append_previously(
         self, container: etree._Element, previous: DocumentSection | None
