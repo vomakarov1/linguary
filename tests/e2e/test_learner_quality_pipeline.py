@@ -230,9 +230,7 @@ async def test_full_book_quality_pipeline(tmp_path, monkeypatch):
         assert [source_text(n) for n in nodes if n.get('id', '').startswith('source-')] == STORY['blocks']
         visible = '\n'.join(''.join(n.itertext()) for n in nodes)
         for result in results:
-            pieces = [text for text in result.segment_translations if text and text.strip()]
-            if pieces:
-                assert " ".join(pieces) in visible
+            assert result.translated_text in visible
             for note in result.language_notes:
                 assert note.note in visible
         assert hashlib.sha256(restarted.paths.source_epub(BOOK).read_bytes()).hexdigest() == source_sha

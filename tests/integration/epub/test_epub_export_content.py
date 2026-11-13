@@ -175,7 +175,9 @@ def test_chapter_follows_the_order_required_by_the_specification(
     ]
     units = [element for element in next(iter(elements(chapter, "section"))) if element.tag.rpartition("}")[2] == "div"]
     heading, first, second, third = units
-    assert [child.get("class") for child in heading] == ["lg-src"]
+    assert [child.tag.rpartition("}")[2] for child in heading] == ["h1"]
+    assert heading[0].get("class") is None
+    assert heading[0].text == "Chapter One"
     assert [child.get("class") for child in first] == ["lg-src", "lg-tr", "lg-notes"]
     assert [child.get("class") for child in second] == ["lg-src", "lg-notes"]
     assert [child.get("class") for child in third] == ["lg-src"]
@@ -701,7 +703,8 @@ def test_fragment_assistance_follows_the_complete_split_original(tmp_path: Path)
         for paragraph in elements(root, "p")
         if "lg-src" in (paragraph.get("class") or "").split()
     ]
-    assert "".join(_plain(paragraph) for paragraph in sources) == "Chapter One" + part.text
+    assert "".join(_plain(paragraph) for paragraph in sources) == part.text
+    assert [node.text for node in elements(root, "h1")] == ["Chapter One"]
     assert "".join(_plain(node) for node in elements(root, "b")) == "Repeated phrase."
     source_links = [
         link for link in elements(root, "a") if link.get("href") == "https://example.com"

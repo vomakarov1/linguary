@@ -303,8 +303,7 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
         if regenerate:
             assert story['difficulties'][0]['points'][-1]['body'] not in visible
         if 'glossary' in story:
-            # The approved name sits in the whole-block translation. A one-span
-            # unit does not carry that text. The rejected suggestion stays out.
+            assert story['glossary']['corrected'] in visible
             assert story['glossary']['suggested'] not in visible
             assert any(story['glossary']['note'] in request.input_text for request in client.requests[len(groups):])
         return Completed(story, plan, after, tuple(client.requests), roots, tuple(logs))

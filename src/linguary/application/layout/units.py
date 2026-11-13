@@ -64,7 +64,9 @@ def block_units(
     A part translation joins the non-empty translations of that part's
     `TRANSLATE` segments, the same way `rebuild_translation` joins them. No
     such text, including when `result` is none, leaves the translation empty.
-    `translated_text` is not copied onto a part.
+    A one-span `TRANSLATE` block is the exception: an empty slot join uses
+    `translated_text` when that string is non-empty. Two or more spans still
+    do not copy `translated_text`.
 
     `speakers` maps a dialogue line `(line_start, line_end)` to a name. The
     unit containing `line_start` (`start <= line_start < end`) records the
@@ -112,7 +114,10 @@ def _part_translation(
     result: BlockProcessingResult | None,
     treatments: tuple[BlockTreatment | None, ...],
 ) -> str | None:
-    """Join translations of this part's `TRANSLATE` segments. None when absent."""
+    """Join translations of this part's `TRANSLATE` segments.
+
+    An empty join on a one-span `TRANSLATE` block uses `translated_text`.
+    """
     if result is None:
         return None
     texts = result.segment_translations
@@ -125,9 +130,18 @@ def _part_translation(
         text = texts[index]
         if text and text.strip():
             pieces.append(text)
-    if not pieces:
-        return None
-    return " ".join(pieces)
+    if pieces:
+        return " ".join(pieces)
+    stored = result.translated_text
+    if (
+        len(treatments) == 1
+        and treatments[0] is BlockTreatment.TRANSLATE
+        and part.segments == (0,)
+        and stored
+        and stored.strip()
+    ):
+        return stored
+    return None
 
 
 def _notes_by_part(

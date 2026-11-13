@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from web_scenario import store_book, start_run, translated_result
 from test_quality_api import setup_review, recovery_fixture
-from linguary.domain import BlockTreatment, BookStatus, LLMCallLog, LLMCallStage
+from linguary.domain import BookStatus, LLMCallLog, LLMCallStage
 from linguary.domain.quality_review import QualityReview
 
 
@@ -95,17 +95,11 @@ def test_actual_epub_export_with_active_optional_task(configured_client, configu
     from linguary.application.use_cases.export_book import ExportBookCommand
     from linguary.domain import ProcessingTask, TaskType
     scenario, _ = setup_review(configured_client, configured_application)
-    results = []
-    for block in scenario.block_ids():
-        result = translated_result(block)
-        results.append(
-            replace(
-                result,
-                segment_treatments=(BlockTreatment.TRANSLATE,),
-                segment_translations=(result.translated_text,),
-            )
-        )
-    start_run(configured_application, scenario, results=results)
+    start_run(
+        configured_application,
+        scenario,
+        results=[translated_result(block) for block in scenario.block_ids()],
+    )
     with configured_application.unit_of_work.transaction() as tx:
         book = tx.books.get(scenario.book_id)
         tx.books.save(replace(book, status=BookStatus.READY_TO_EXPORT))

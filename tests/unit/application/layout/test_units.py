@@ -167,16 +167,34 @@ def test_translation_only_under_translated_part() -> None:
         (40, 60, None),
     ]
 
-    legacy_block = _block("Legacy sentence.")
-    legacy = BlockProcessingResult(
-        legacy_block.id,
+def test_one_span_translated_text_is_the_unit_translation() -> None:
+    """A one-span TRANSLATE result with only `translated_text` keeps that string."""
+    block = _block("Legacy sentence.")
+    result = BlockProcessingResult(
+        block.id,
         BlockTreatment.TRANSLATE,
         translated_text="Целиком.",
     )
-    legacy_units = block_units(legacy_block, legacy, (BlockTreatment.TRANSLATE,), (), {})
-    assert legacy.translated_text == "Целиком."
-    assert legacy.segment_translations == ()
-    assert legacy_units[0].translation is None
+    units = block_units(block, result, (BlockTreatment.TRANSLATE,), (), {})
+
+    assert result.segment_translations == ()
+    assert units[0].translation == "Целиком."
+
+    text, segments = _spans(300, 300)
+    split = _block(text, segments)
+    whole = BlockProcessingResult(
+        split.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Не копировать.",
+    )
+    parts = block_units(
+        split,
+        whole,
+        (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+        (),
+        {},
+    )
+    assert [unit.translation for unit in parts] == [None, None]
 
 
 def test_note_in_marker_part_numbering_restarts() -> None:

@@ -38,6 +38,7 @@ _REFERENCE_COLON = "Языковая справка:"
 _REFERENCE = "Языковая справка"
 _UNPREPARED = "Помощь пока не подготовлена."
 _UNPREPARED_BARE = "Помощь пока не подготовлена"
+_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
 
 
 def source_only_unit(block: DocumentBlock) -> LayoutUnit:
@@ -71,9 +72,13 @@ def render_unit(
     if unit.ends_paragraph:
         classes.append("lg-end")
     reading = _sub(host, "div", {"class": " ".join(classes)})
-    if not unit.continues:
+    heading = block.type is BlockType.HEADING
+    if not heading and not unit.continues:
         _place_anchors(reading, block, state)
-    source = _sub(reading, "p", {"class": "lg-src", "lang": source_language})
+    source_attributes = {"lang": source_language}
+    if not heading:
+        source_attributes["class"] = "lg-src"
+    source = _sub(reading, _source_tag(block), source_attributes)
     _append_replaced_content(source, block, unit)
     _append_range(
         source,
@@ -85,6 +90,8 @@ def render_unit(
     )
     prepared = _prepare_notes(unit, state)
     _insert_markers(source, unit, prepared)
+    if heading and not unit.continues:
+        _place_anchors(source, block, state)
     if unit.translation and unit.translation.strip():
         _append_translation(
             reading, block, unit, state=state, target_language=target_language
@@ -98,10 +105,18 @@ def render_unit(
         )
 
 
+def _source_tag(block: DocumentBlock) -> str:
+    """Source element. A heading keeps h1–h6, and an unknown level is h2."""
+    if block.type is not BlockType.HEADING:
+        return "p"
+    tag = block.attributes.get("tag", "")
+    return tag if tag in _HEADING_TAGS else "h2"
+
+
 def _place_anchors(
     reading: etree._Element, block: DocumentBlock, state: _SectionState
 ) -> None:
-    """First anchor becomes the unit id. The rest are empty spans."""
+    """First unused anchor becomes this element's id. The rest are empty spans."""
     pending = [
         anchor
         for anchor in _anchors(block)

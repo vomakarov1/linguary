@@ -595,3 +595,63 @@ def test_poem_stanzas_preserved() -> None:
     assert translated_children[translated_children.index("br") + 1] == "br"
     assert _plain(source) == text.replace("\n", "")
     assert _plain(translated) == translation.replace("\n", "")
+
+
+def test_heading_keeps_original_level() -> None:
+    """A heading keeps h1–h6, or h2 when the level is unknown. It is not p.lg-src."""
+    titled = _block(
+        "Chapter One",
+        block_id="heading",
+        block_type=BlockType.HEADING,
+        attributes={"tag": "h1", "anchor_ids": "chap extra"},
+    )
+    unknown = _block(
+        "Untitled",
+        block_id="unknown",
+        block_type=BlockType.HEADING,
+        order=1,
+        attributes={"tag": "div"},
+    )
+    section = DocumentSection(
+        id="sec-1",
+        document_id="book-1",
+        title="Chapter One",
+        order=0,
+        source_resource_path="chapter.xhtml",
+        blocks=(titled, unknown),
+    )
+    note = _note(None, ("Заголовок главы.",), marker_end=None)
+    root = _chapter(
+        titled,
+        unknown,
+        layout=_layout(
+            section,
+            {
+                titled.id: (_unit(titled, translation="Глава первая.", notes=(note,)),),
+                unknown.id: (_unit(unknown),),
+            },
+        ),
+    )
+    units = _units(root)
+    heading = units[0]
+    source = heading[0]
+    assert heading.get("id") is None
+    assert etree.QName(source).localname == "h1"
+    assert "lg-src" not in _classes(source)
+    assert source.get("id") == "chap"
+    assert source.get("lang") == "en"
+    assert source.text == "Chapter One"
+    assert [node.get("id") for node in source if node.get("id")] == ["extra"]
+    assert [etree.QName(child).localname for child in heading] == ["h1", "p", "ol"]
+    translation = heading[1]
+    assert "lg-tr" in _classes(translation)
+    assert _plain(translation) == "Глава первая."
+    notes = heading[2]
+    assert "lg-notes" in _classes(notes)
+    assert "Заголовок главы." in _plain(notes)
+    assert not any("lg-ref" in _classes(node) for node in _elements(notes, "a"))
+    fallback = units[1][0]
+    assert etree.QName(fallback).localname == "h2"
+    assert "lg-src" not in _classes(fallback)
+    assert fallback.text == "Untitled"
+    assert not any("lg-src" in _classes(node) for node in root.iter())
