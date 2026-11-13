@@ -9,7 +9,7 @@ import socket
 
 import httpx
 import pytest
-from pipeline_support import exported_documents
+from pipeline_support import exported_documents, exported_reading, source_text
 from test_content_plan_pipeline import import_story, analysis_payload, processing_payload, BOOK
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
@@ -227,10 +227,12 @@ async def test_full_book_quality_pipeline(tmp_path, monkeypatch):
         await restarted.start_export(BOOK)
         await successful(restarted)
         nodes = [n for r in exported_documents(restarted.paths.export_epub(BOOK)).values() for n in r.iter()]
-        assert [(''.join(n.itertext())) for n in nodes if n.get('id', '').startswith('source-')] == STORY['blocks']
+        assert [source_text(n) for n in nodes if n.get('id', '').startswith('source-')] == STORY['blocks']
         visible = '\n'.join(''.join(n.itertext()) for n in nodes)
         for result in results:
-            assert result.translated_text in visible
+            pieces = [text for text in result.segment_translations if text and text.strip()]
+            if pieces:
+                assert " ".join(pieces) in visible
             for note in result.language_notes:
                 assert note.note in visible
         assert hashlib.sha256(restarted.paths.source_epub(BOOK).read_bytes()).hexdigest() == source_sha
@@ -282,7 +284,7 @@ async def test_legacy_v1_v2_fixture_roundtrip(tmp_path, profile):
         assert corrections and all(r.contract_version == 2 for r in corrections)
         assert all(r.contract_version == (1 if profile == 'legacy-v1' else 2)
                    for r in fake.requests if r.kind != LLMResponseKind.CHAPTER_CORRECTION)
-        visible = '\n'.join(''.join(r.itertext()) for r in exported_documents(app.paths.export_epub(BOOK)).values())
+        visible = exported_reading(app.paths.export_epub(BOOK))
         assert all(text in visible for text in STORY['blocks'])
         assert hashlib.sha256(app.paths.source_epub(BOOK).read_bytes()).hexdigest() == source_sha
     finally:

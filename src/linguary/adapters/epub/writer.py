@@ -4,10 +4,10 @@ Implementation of port `linguary.application.ports.epub.EpubWriter`. Assembly is
 one `DocumentSection` corresponds to one reading-order XHTML document, retaining the source
 document path so that internal links remain valid without address rewriting.
 
-A chapter is assembled in PRD § 20 order: `Previously in Chapter ...` from the previous chapter summary,
-`Before You Read`, then each original block followed by its translation or glossary hints
-and that block's `Language Notes`. The LLM does not participate in assembly: the exporter arranges
-ready-made data into markup.
+A chapter is assembled in reading order: `Previously in Chapter ...` from the previous chapter summary,
+`Before You Read`, then each block as reading units. Units come from `request.layout`. A missing
+layout, or a block absent from it, is one source span with no translation and no notes. The writer
+does not build the layout. The LLM does not participate in assembly.
 
 A `PRESERVE_OPAQUE` block is transferred using source markup from the EPUB book — otherwise anything
 the importer did not descend into would be lost: whole tables and images inside them. An opaque copy
@@ -36,11 +36,6 @@ from lxml import etree
 
 from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.resources import package_path
-from linguary.application.pronunciation_projection import project_pronunciations
-from linguary.application.translation_units import (
-    group_paragraph_fragments,
-    paragraph_fragment_label,
-)
 from linguary.adapters.epub.pronunciation_notices import (
     PronunciationNoticeBundle, pronunciation_notice_bundle,
 )
@@ -55,7 +50,6 @@ from linguary.application.ports.epub import (
     ExportWarningKind,
 )
 from linguary.domain import (
-    BlockProcessingResult,
     BlockType,
     CanonicalDocument,
     DocumentBlock,
@@ -63,11 +57,8 @@ from linguary.domain import (
     InlineAnnotation,
     InlineAnnotationType,
     SupportStatus,
-    build_language_note_id,
-    translation_segments,
 )
 from linguary.domain.document import is_front_matter
-from linguary.domain.learning import FragmentAssistance
 
 _XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 _EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
@@ -89,22 +80,6 @@ _NCX_MEDIA_TYPE = "application/x-dtbncx+xml"
 #: Support statuses under which a resource is included in the target book.
 _EXPORTED_STATUSES = frozenset({SupportStatus.SUPPORTED, SupportStatus.PRESERVE_OPAQUE})
 
-#: Block tags by type; heading retains original level if known.
-_BLOCK_TAGS: Mapping[BlockType, str] = {
-    BlockType.PARAGRAPH: "p",
-    BlockType.HEADING: "h2",
-    BlockType.QUOTE: "p",
-    BlockType.LIST_ITEM: "li",
-    BlockType.IMAGE: "img",
-    BlockType.FOOTNOTE: "aside",
-    BlockType.POEM: "p",
-    BlockType.TABLE: "div",
-    BlockType.PAGE_BREAK: "span",
-    BlockType.OTHER: "div",
-}
-
-_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
-
 #: Consecutive blocks are grouped under a shared parent: importer splits lists
 #: and blockquotes into individual elements, and without a wrapper the book would produce a single-item list
 #: per item.
@@ -125,8 +100,8 @@ _ANNOTATION_TAGS: Mapping[InlineAnnotationType, str] = {
     InlineAnnotationType.FOOTNOTE_REFERENCE: "a",
 }
 
-#: Learning aids styling (PRD § 20): original remains the primary layer, aids are quieter with
-#: smaller font, indent, and left border rather than color alone.
+#: Reading-unit styling. The left line stays on the translation. Parts have no boxes,
+#: no background, and no generated text. Type stays at least 0.85em except the marker.
 _STYLESHEET = """/* Linguary: оформление учебных слоёв поверх оригинала книги. */
 .linguary-previously,
 .linguary-before-you-read {
@@ -134,71 +109,72 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   padding: 0.2em 0 0.2em 0.9em;
   border-left: 0.2em solid;
   font-size: 0.9em;
+  color: inherit;
 }
 
 .linguary-previously .linguary-summary-translation {
   margin-top: 0.25em;
   padding-left: 0.9em;
   font-style: italic;
+  color: inherit;
 }
 
-.linguary-paragraph-fragment {
-  margin: 1.2em 0;
-  padding: 0.6em 0.8em;
-  border: 0.08em solid;
+.lg-unit {
+  margin: 0 0 0.7em;
+  page-break-inside: avoid;
+  break-inside: avoid;
+  color: inherit;
 }
 
-.linguary-fragment-label {
-  margin: 0 0 0.5em 0;
-  font-size: 0.75em;
-  font-weight: bold;
+.lg-unit.lg-end {
+  margin-bottom: 1.4em;
 }
 
-.linguary-paragraph-fragment > .linguary-translation {
-  margin-left: 0.6em;
+.lg-cont > .lg-src {
+  text-indent: 0;
 }
 
-.linguary-translation,
-.linguary-glossary,
-.linguary-language-note {
-  margin: 0.4em 0 1em 1.2em;
-  padding-left: 0.9em;
-  border-left: 0.15em solid;
-  font-size: 0.88em;
+.lg-tr {
+  margin: 0.25em 0 0 1em;
+  padding-left: 0.7em;
+  border-left: 0.12em solid;
+  font-size: 0.9em;
+  color: inherit;
+  hyphens: auto;
+  page-break-before: avoid;
+  break-before: avoid;
 }
 
-.linguary-glossary {
+.lg-notes {
   list-style: none;
+  margin: 0.25em 0 0 1em;
+  padding-left: 1.7em;
+  font-size: 0.85em;
+  color: inherit;
+  page-break-before: avoid;
+  break-before: avoid;
 }
 
-.linguary-language-note {
-  font-style: italic;
+.lg-notes > li {
+  text-indent: -1em;
 }
 
-.linguary-language-note .linguary-excerpt {
-  font-style: normal;
+a.lg-ref {
+  text-decoration: none;
+  color: inherit;
+}
+
+a.lg-ref sup {
+  font-size: 0.7em;
+}
+
+p {
+  orphans: 2;
+  widows: 2;
 }
 
 .linguary-anchors {
   display: none;
-}
-
-.linguary-fragment-help {
-  margin: 0.5em 0 1.5em 0.9em;
-  padding-left: 0.9em;
-  border-left: 0.2em solid;
-  font-size: 0.9em;
-}
-
-.linguary-help-reference::after {
-  content: "[?]";
-  vertical-align: super;
-  font-size: 0.75em;
-}
-
-.linguary-split-continuation {
-  text-indent: 0 !important;
-  margin-top: 0.2em !important;
 }
 """
 
@@ -230,8 +206,7 @@ class EpubExportWriter(EpubWriter):
             payloads[provenance_href] = notices.provenance_json()
             media_types[provenance_href] = 'application/json'
         with _OpaqueSource(request.source_epub_path) as opaque:
-            chapters = _render_chapters(request, opaque=opaque, warnings=warnings,
-                                        pronunciation_notices_href=notices_href)
+            chapters = _render_chapters(request, opaque=opaque, warnings=warnings)
         if notices is not None:
             chapters += (_pronunciation_notices_chapter(notices, href=notices_href,
                 provenance_href=provenance_href, language=request.document.source_language),)
@@ -424,7 +399,6 @@ _is_front_matter = is_front_matter
 
 def _render_chapters(
     request: EpubWriteRequest, *, opaque: _OpaqueSource, warnings: _ExportWarnings,
-    pronunciation_notices_href: str | None = None,
 ) -> tuple[_Chapter, ...]:
     """Chapter documents in reading order.
 
@@ -432,8 +406,7 @@ def _render_chapters(
     and a story chapter following them recaps the last preceding story chapter.
     Story chapter numbering is not displaced by front matter sections.
     """
-    renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings,
-                                pronunciation_notices_href=pronunciation_notices_href)
+    renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings)
     chapters: list[_Chapter] = []
     previous: DocumentSection | None = None
     story_chapter_number = 1
@@ -463,43 +436,11 @@ class _ChapterRenderer:
         request: EpubWriteRequest,
         opaque: _OpaqueSource,
         warnings: _ExportWarnings,
-        pronunciation_notices_href: str | None = None,
     ) -> None:
         self._request = request
         self._opaque = opaque
         self._warnings = warnings
-        self._pronunciation_notices_href = pronunciation_notices_href
         self._document = request.document
-        sections = request.document.ordered_sections
-        self._pronunciations = project_pronunciations(
-            tuple(block for section in sections for block in section.ordered_blocks),
-            request.block_results,
-        )
-        self._pronunciation_ids = {}
-        self._pronunciation_targets = {}
-        self._pronunciation_references = {}
-        self._pronunciation_backlinks = {}
-        self._pronunciation_by_block = {}
-        hrefs = {}
-        for section in sections:
-            href = _contained_name(section.source_resource_path)
-            used = self._pronunciation_ids.setdefault(href, set())
-            for block in section.ordered_blocks:
-                hrefs[block.id] = href
-                used.update(_anchors(block))
-                if block.support_status is SupportStatus.PRESERVE_OPAQUE:
-                    copied = self._opaque.element(block)
-                    if copied is not None:
-                        used.update(node.get("id") for node in copied.iter() if node.get("id"))
-        for item in self._pronunciations:
-            href = hrefs[item.block_id]
-            if item.is_primary:
-                target = _unique_id("linguary-pronunciation", self._pronunciation_ids[href])
-                self._pronunciation_targets[item.hint_id] = (href, target)
-            reference = _unique_id("linguary-pronunciation-ref", self._pronunciation_ids[href])
-            self._pronunciation_references[reference] = item
-            self._pronunciation_backlinks.setdefault(item.hint_id, []).append((href, reference, item))
-            self._pronunciation_by_block.setdefault(item.block_id, []).append((item, reference))
 
     def render(
         self,
@@ -592,23 +533,14 @@ class _ChapterRenderer:
         number: int,
         is_front_matter: bool = False,
     ) -> None:
-        """Chapter blocks with aid layers, in source document order."""
+        """Chapter blocks in source order, each one rendered as reading units."""
         blocks = section.ordered_blocks
         children: dict[str, list[DocumentBlock]] = {}
         for block in blocks:
             if block.parent_id is not None:
                 children.setdefault(block.parent_id, []).append(block)
         state = _SectionState(section=section, href=href, number=number)
-        state.navigation_ids.update(self._pronunciation_ids.get(href, ()))
-        if not is_front_matter:
-            self._prepare_fragment_help(blocks, state=state)
-        for block in blocks:
-            for item, reference in self._pronunciation_by_block.get(block.id, ()):
-                target_href, target = self._pronunciation_targets[item.hint_id]
-                state.references.setdefault(block.id, []).append((
-                    item.start, item.end, item.quote, reference,
-                    _href_from_target(f"{target_href}#{target}", base=href),
-                ))
+        self._reserve_opaque_ids(blocks, state)
         roots = tuple(block for block in blocks if block.parent_id is None)
         self._append_siblings(
             container,
@@ -617,6 +549,28 @@ class _ChapterRenderer:
             state=state,
             is_front_matter=is_front_matter,
         )
+
+    def _reserve_opaque_ids(
+        self, blocks: Sequence[DocumentBlock], state: _SectionState
+    ) -> None:
+        """Ids already present in copied markup stay out of generated note ids.
+
+        A shell with children is not copied. Its identifiers are written with
+        the shell, so reserving them here would drop the targets.
+        """
+        parents = {block.parent_id for block in blocks if block.parent_id is not None}
+        for block in blocks:
+            if block.support_status is not SupportStatus.PRESERVE_OPAQUE:
+                continue
+            if block.id in parents:
+                continue
+            copied = self._opaque.element(block)
+            if copied is None:
+                continue
+            for node in copied.iter():
+                identifier = node.get("id")
+                if identifier:
+                    state.used_ids.add(identifier)
 
     def _append_siblings(
         self,
@@ -628,30 +582,10 @@ class _ChapterRenderer:
         parent_type: BlockType | None = None,
         is_front_matter: bool = False,
     ) -> None:
-        """Sibling blocks at the same level; consecutive list items and blockquotes are placed under a wrapper."""
+        """Sibling blocks. Consecutive list items and quotes share one wrapper."""
         group: etree._Element | None = None
         grouped: BlockType | None = None
-        index = 0
-        while index < len(blocks):
-            block = blocks[index]
-            parts = [block]
-            index += 1
-            split_group = block.attributes.get("split_group")
-            if (
-                split_group
-                and block.type in (BlockType.PARAGRAPH, BlockType.QUOTE)
-                and not children.get(block.id)
-            ):
-                while index < len(blocks):
-                    following = blocks[index]
-                    if (
-                        following.type is not block.type
-                        or following.attributes.get("split_group") != split_group
-                        or children.get(following.id)
-                    ):
-                        break
-                    parts.append(following)
-                    index += 1
+        for block in blocks:
             wrapper = (
                 None
                 if block.type is BlockType.QUOTE and parent_type is BlockType.QUOTE
@@ -662,44 +596,6 @@ class _ChapterRenderer:
             if wrapper is not None and group is None:
                 group, grouped = _sub(parent, wrapper), block.type
             host = group if group is not None else parent
-            if len(parts) > 1:
-                display_groups = group_paragraph_fragments(
-                    parts, text_of=lambda part: part.text
-                )
-                for group_index, group_parts in enumerate(display_groups, start=1):
-                    fragment = host
-                    if len(display_groups) > 1:
-                        fragment = _sub(
-                            host, "div", {"class": "linguary-paragraph-fragment"}
-                        )
-                        _sub(
-                            fragment,
-                            "p",
-                            {
-                                "class": "linguary-fragment-label",
-                                "lang": self._document.source_language,
-                            },
-                        ).text = paragraph_fragment_label(
-                            group_index,
-                            len(display_groups),
-                            self._document.source_language,
-                        )
-                    original = _sub(fragment, "p")
-                    for part in group_parts:
-                        for anchor in _anchors(part):
-                            if anchor not in state.used_ids:
-                                _sub(original, "span", {"id": anchor})
-                                state.used_ids.add(anchor)
-                        source_fragment = _element("span")
-                        _append_inline(source_fragment, part.text, _nestable(part.inline_annotations), state)
-                        self._insert_help_references(source_fragment, part, state=state)
-                        _append_characters(original, source_fragment.text or "")
-                        for child in list(source_fragment):
-                            original.append(child)
-                    if not is_front_matter:
-                        self._append_group_help(fragment, group_parts, state=state)
-                    self._append_pronunciation_notes(fragment, group_parts, state=state)
-                continue
             self._append_block(
                 host,
                 block,
@@ -719,261 +615,104 @@ class _ChapterRenderer:
         parent_type: BlockType | None,
         is_front_matter: bool = False,
     ) -> None:
-        """A single block: original text, nested blocks, and aid layer beneath it."""
-        nested = children.get(block.id, ())
-        element = self._append_original(
-            parent, block, nested=bool(nested), state=state, parent_type=parent_type
-        )
-        if nested and element is not None:
+        """One block: opaque markup, or a shell plus reading units and nested blocks."""
+        nested = tuple(children.get(block.id, ()))
+        if block.support_status is SupportStatus.PRESERVE_OPAQUE and not nested:
+            if self._append_opaque(parent, block, state):
+                return
+        host = parent
+        if block.type is BlockType.LIST_ITEM:
+            host = _sub(parent, "li")
+        elif (
+            block.type is BlockType.FOOTNOTE
+            and parent_type is not BlockType.FOOTNOTE
+        ):
+            # The paragraph inside a footnote is the same block type. One aside.
+            host = _sub(
+                parent, "aside", {f"{{{_EPUB_NAMESPACE}}}type": "footnote"}
+            )
+            self._attach_anchors(parent, host, block, state=state, inside=True)
+        if _renders_units(block, nested=bool(nested)):
+            self._render_units(
+                host, block, state=state, is_front_matter=is_front_matter
+            )
+        if nested:
             self._append_siblings(
-                element,
+                host,
                 nested,
                 children=children,
                 state=state,
                 parent_type=block.type,
                 is_front_matter=is_front_matter,
             )
-        help_parent = (
-            element
-            if block.type is BlockType.LIST_ITEM and element is not None
-            else parent
-        )
-        if not is_front_matter:
-            self._append_group_help(help_parent, (block,), state=state)
-        self._append_pronunciation_notes(help_parent, (block,), state=state)
 
-    def _append_original(
+    def _append_opaque(
         self,
         parent: etree._Element,
         block: DocumentBlock,
-        *,
-        nested: bool,
         state: _SectionState,
-        parent_type: BlockType | None,
-    ) -> etree._Element | None:
-        """Original block; `PRESERVE_OPAQUE` without descendants uses source markup."""
-        if block.support_status is SupportStatus.PRESERVE_OPAQUE and not nested:
-            copied = self._opaque.element(block)
-            if copied is not None:
-                self._insert_help_references(copied, block, state=state)
-                parent.append(copied)
-                self._attach_anchors(parent, copied, block, state=state, inside=False)
-                return copied
-            if not block.text and not _anchors(block):
-                return None
-            self._warnings.record(
-                ExportWarningKind.OPAQUE_FRAGMENT_LOST,
-                section_id=state.section.id,
-                detail=(
-                    f"исходная разметка конструкции "
-                    f"{block.source_reference.structural_path} документа "
-                    f"{block.source_reference.resource_path} недоступна, "
-                    f"перенесён только её текст"
-                ),
-            )
-        element = self._build_element(
-            parent, block, nested=nested, state=state, parent_type=parent_type
-        )
-        self._attach_anchors(parent, element, block, state=state, inside=True)
-        return element
+    ) -> bool:
+        """Copy source markup for a leaf the importer did not descend into.
 
-    def _build_element(
-        self,
-        parent: etree._Element,
-        block: DocumentBlock,
-        *,
-        nested: bool = False,
-        state: _SectionState,
-        parent_type: BlockType | None,
-    ) -> etree._Element:
-        """Block element based on its type, complete with text and inline markup."""
-        tag = (
-            "blockquote"
-            if nested and block.type is BlockType.QUOTE
-            else _block_tag(block, parent_type=parent_type)
-        )
-        element = _sub(parent, tag, _block_attributes(block, tag=tag))
-        host = element
-        if tag in ("aside", "blockquote") and block.text:
-            host = _sub(element, "p")
-        if block.text and local_name(host) not in _VOID_TAGS:
-            _append_inline(host, block.text, _nestable(block.inline_annotations), state)
-            self._insert_help_references(host, block, state=state)
-        return element
-
-    def _prepare_fragment_help(
-        self, blocks: Sequence[DocumentBlock], *, state: _SectionState
-    ) -> None:
-        """Allocate navigation IDs before writing references to other blocks."""
-        texts = {block.id: block.text for block in blocks}
-        state.navigation_ids.update(anchor for block in blocks for anchor in _anchors(block))
-        for block in blocks:
-            result = self._request.block_results.get(block.id)
-            for assistance in result.fragment_assistances if result else ():
-                target = _unique_id("linguary-help", state.navigation_ids)
-                references = []
-                for anchor in assistance.anchors:
-                    anchor.validate(texts)
-                    reference = _unique_id("linguary-help-ref", state.navigation_ids)
-                    state.references.setdefault(anchor.block_id, []).append(
-                        (anchor.start, anchor.end, anchor.quote, reference, f"#{target}")
-                    )
-                    references.append(reference)
-                state.assistances.setdefault(block.id, []).append(
-                    (assistance, target, tuple(references))
-                )
-
-    def _insert_help_references(
-        self, element: etree._Element, block: DocumentBlock, *, state: _SectionState
-    ) -> None:
-        """Insert navigation without changing original characters or nesting links.
-
-        Markers inside inline markup precede its outermost element. Explicit source offsets retain
-        the precise fragment, and generated marker text stays outside the author's text.
+        Returns false when the copy is missing and the text still has to be written.
         """
-        slots: list[tuple[etree._Element, bool, int, int]] = []
-        position = 0
+        copied = self._opaque.element(block)
+        if copied is not None:
+            parent.append(copied)
+            self._attach_anchors(parent, copied, block, state=state, inside=False)
+            return True
+        if not block.text and not _anchors(block):
+            return True
+        self._warnings.record(
+            ExportWarningKind.OPAQUE_FRAGMENT_LOST,
+            section_id=state.section.id,
+            detail=(
+                f"исходная разметка конструкции "
+                f"{block.source_reference.structural_path} документа "
+                f"{block.source_reference.resource_path} недоступна, "
+                f"перенесён только её текст"
+            ),
+        )
+        return False
 
-        def collect(node: etree._Element) -> None:
-            nonlocal position
-            if node.text:
-                slots.append((node, False, position, position + len(node.text)))
-                position += len(node.text)
-            for child in node:
-                if local_name(child) == "br":
-                    position += 1
-                collect(child)
-                if child.tail:
-                    slots.append((child, True, position, position + len(child.tail)))
-                    position += len(child.tail)
-
-        collect(element)
-        for start, end, quote, reference, target in sorted(
-            state.references.get(block.id, ()), key=lambda item: item[0], reverse=True
-        ):
-            marker = _element("a", {
-                "id": reference, "href": target,
-                f"{{{_EPUB_NAMESPACE}}}type": "noteref",
-                "class": "linguary-help-reference", "aria-label": quote,
-                "data-source-block": block.id,
-                "data-source-start": str(start), "data-source-end": str(end),
-            })
-            pronunciation = self._pronunciation_references.get(reference)
-            if pronunciation is not None:
-                marker.set("class", "linguary-help-reference linguary-pronunciation-reference")
-                marker.set("aria-label", f"Произношение «{quote}», {pronunciation.variant.upper()}")
-                marker.set("data-hint-id", pronunciation.hint_id)
-            for node, tail, lower, upper in slots:
-                if not lower <= start < upper:
-                    continue
-                host = node.getparent() if tail else node
-                inline = host
-                while inline is not None and inline.getparent() is not element:
-                    if inline is element:
-                        break
-                    inline = inline.getparent()
-                if inline is not None and inline is not element:
-                    inline.addprevious(marker)
-                else:
-                    value = (node.tail if tail else node.text) or ""
-                    offset = start - lower
-                    marker.tail = value[offset:]
-                    if tail:
-                        node.tail = value[:offset]
-                        node.addnext(marker)
-                    else:
-                        node.text = value[:offset]
-                        node.insert(0, marker)
-                break
-
-    def _append_pronunciation_notes(
-        self, parent: etree._Element, blocks: Sequence[DocumentBlock], *, state: _SectionState
+    def _render_units(
+        self,
+        host: etree._Element,
+        block: DocumentBlock,
+        *,
+        state: _SectionState,
+        is_front_matter: bool,
     ) -> None:
-        """One standalone note per reading, with return links for every occurrence."""
-        for block in blocks:
-            for item, _ in self._pronunciation_by_block.get(block.id, ()):
-                if not item.is_primary:
-                    continue
-                _, target = self._pronunciation_targets[item.hint_id]
-                note = _sub(parent, "aside", {
-                    "id": target, "class": "linguary-pronunciation",
-                    "data-hint-id": item.hint_id,
-                    f"{{{_EPUB_NAMESPACE}}}type": "footnote",
-                })
-                _sub(note, "p").text = f"{item.quote} /{item.ipa.strip('/')}/ — {item.variant.upper()}"
-                attribution = item.source_label
-                if item.source_ref:
-                    attribution += f" ({item.source_ref})"
-                _sub(note, "p").text = attribution
-                if self._pronunciation_notices_href is not None:
-                    _sub(note, 'a', {
-                        'class': 'linguary-pronunciation-sources-link',
-                        'href': _relative_href(state.href, self._pronunciation_notices_href) + '#pronunciation-sources',
-                    }).text = 'Источники транскрипций и лицензии'
-                _sub(note, "p", {"class": "linguary-ipa-guide"}).text = (
-                    "IPA — международная фонетическая транскрипция. "
-                    "ˈ — основное ударение, ˌ — вторичное ударение перед слогом; "
-                    "ː обозначает долготу звука."
-                )
-                for href, reference, occurrence in self._pronunciation_backlinks[item.hint_id]:
-                    _sub(note, "a", {
-                        "href": _href_from_target(f"{href}#{reference}", base=state.href),
-                        f"{{{_EPUB_NAMESPACE}}}type": "backlink",
-                        "aria-label": f"Вернуться к «{occurrence.quote}»",
-                        "data-source-block": occurrence.block_id,
-                        "data-source-start": str(occurrence.start),
-                        "data-source-end": str(occurrence.end),
-                    }).text = "↩"
+        """Units from the request layout. Front matter and a missing entry stay source-only."""
+        from linguary.adapters.epub.layout_render import render_unit
 
-    def _append_group_help(
-        self, parent: etree._Element, blocks: Sequence[DocumentBlock], *, state: _SectionState
-    ) -> None:
-        """One group after the complete original, with one footnote per difficulty."""
-        entries = [entry for block in blocks for entry in state.assistances.get(block.id, ())]
-        if entries:
-            container = _sub(parent, "div", {"class": "linguary-fragment-help"})
-            for assistance, target, references in entries:
-                aside = _sub(container, "aside", {
-                    "id": target, f"{{{_EPUB_NAMESPACE}}}type": "footnote",
-                    "class": f"linguary-assistance linguary-{assistance.kind}",
-                })
-                _sub(aside, "p").text = (
-                    assistance.text if assistance.resolved else "Помощь пока не подготовлена."
-                )
-                for reference in references:
-                    _sub(aside, "a", {"href": f"#{reference}",
-                        f"{{{_EPUB_NAMESPACE}}}type": "backlink"}).text = "↩"
-
-        translated_results = [
-            (block, result)
-            for block in blocks
-            if (result := self._request.block_results.get(block.id)) is not None
-            and result.translated_text
-            and result.translated_text.strip()
-        ]
-        if translated_results and len(translated_results) == len(blocks):
-            translation = _sub(
-                parent,
-                "p",
-                {
-                    "class": "linguary-translation",
-                    "lang": self._document.target_language,
-                },
+        for unit in self._units_for(block, state=state, is_front_matter=is_front_matter):
+            render_unit(
+                host,
+                block,
+                unit,
+                state=state,
+                source_language=self._document.source_language,
+                target_language=self._document.target_language,
             )
-            for index, (block, result) in enumerate(translated_results):
-                if index:
-                    _append_text(translation, " ")
-                self._append_translation(
-                    translation, result.translated_text.strip(), block=block, state=state
-                )
-            for block in blocks:
-                self._append_help(
-                    parent, block, state=state, include_translation=False
-                )
-            return
 
-        for block in blocks:
-            self._append_help(parent, block, state=state)
+    def _units_for(
+        self,
+        block: DocumentBlock,
+        *,
+        state: _SectionState,
+        is_front_matter: bool,
+    ):
+        from linguary.adapters.epub.layout_render import source_only_unit
+
+        if is_front_matter:
+            return (source_only_unit(block),)
+        layout = self._request.layout
+        chapter = None if layout is None else layout.chapters.get(state.section.id)
+        units = None if chapter is None else chapter.units.get(block.id)
+        if not units:
+            return (source_only_unit(block),)
+        return units
 
     def _attach_anchors(
         self,
@@ -1008,101 +747,6 @@ class _ChapterRenderer:
             host.insert(index, _element("span", {"id": anchor}))
             state.used_ids.add(anchor)
 
-    def _append_help(
-        self,
-        parent: etree._Element,
-        block: DocumentBlock,
-        *,
-        state: _SectionState,
-        include_translation: bool = True,
-    ) -> None:
-        """Translation or glossary hints and `Language Notes` for this block (PRD § 20)."""
-        result = self._request.block_results.get(block.id)
-        if result is not None:
-            self._append_result(
-                parent,
-                result,
-                block=block,
-                state=state,
-                include_translation=include_translation,
-            )
-        material = self._request.learning_materials.get(state.section.id)
-        if material is None:
-            return
-        for note in material.notes_for(block.id):
-            state.notes += 1
-            aside = _sub(
-                parent,
-                "aside",
-                {
-                    "class": "linguary-language-note",
-                    "id": _unique_id(
-                        build_language_note_id(
-                            chapter_number=state.number, ordinal=state.notes
-                        ),
-                        state.used_ids,
-                    ),
-                },
-            )
-            _append_text(
-                _sub(aside, "p", {"class": "linguary-excerpt"}), note.original_excerpt
-            )
-            _append_text(_sub(aside, "p"), note.note)
-
-    def _append_result(
-        self,
-        parent: etree._Element,
-        result: BlockProcessingResult,
-        *,
-        block: DocumentBlock,
-        state: _SectionState,
-        include_translation: bool = True,
-    ) -> None:
-        """Block translation or its glossary hints.
-
-        The `[^N]` mark in a translation becomes a link to the same footnote as the `N`-th footnote
-        reference in the original text, using the same link text. The original reference id
-        is not reused: the backlink from the footnote continues to point to the original.
-        """
-        if include_translation and result.translated_text:
-            translation = _sub(
-                parent,
-                "p",
-                {
-                    "class": "linguary-translation",
-                    "lang": self._document.target_language,
-                },
-            )
-            self._append_translation(
-                translation, result.translated_text, block=block, state=state
-            )
-        if not result.glossary_hints:
-            return
-        hints = _sub(parent, "ul", {"class": "linguary-glossary"})
-        for hint in result.glossary_hints:
-            item = _sub(hints, "li")
-            _sub(item, "span", {"class": "linguary-excerpt"}).text = hint.original
-            tail = f" — {hint.translation}"
-            if hint.note:
-                tail = f"{tail} ({hint.note})"
-            _append_text(item, tail)
-
-    def _append_translation(
-        self,
-        parent: etree._Element,
-        text: str,
-        *,
-        block: DocumentBlock,
-        state: _SectionState,
-    ) -> None:
-        for segment in translation_segments(text, block):
-            if isinstance(segment, str):
-                _append_text(parent, segment)
-                continue
-            link = _sub(parent, "a", _target_attributes(segment, state))
-            link.text = block.text[segment.start : segment.end]
-
-
 @dataclass(slots=True)
 class _SectionState:
     """Assembly state of a single chapter: allocated identifiers and note counter."""
@@ -1112,9 +756,6 @@ class _SectionState:
     number: int
     used_ids: set[str] = field(default_factory=set)
     notes: int = 0
-    navigation_ids: set[str] = field(default_factory=set)
-    references: dict[str, list[tuple[int, int, str, str, str]]] = field(default_factory=dict)
-    assistances: dict[str, list[tuple[FragmentAssistance, str, tuple[str, ...]]]] = field(default_factory=dict)
 
 
 class _OpaqueSource:
@@ -1952,45 +1593,18 @@ def _serialize(root: etree._Element) -> bytes:
     )
 
 
-def _block_tag(block: DocumentBlock, *, parent_type: BlockType | None) -> str:
-    """Element tag for a block.
+def _renders_units(block: DocumentBlock, *, nested: bool) -> bool:
+    """Whether this block contributes its own reading unit.
 
-    Headings preserve their original level, and a paragraph inside a footnote remains a paragraph:
-    block type inside a footnote is inherited from the footnote itself, and a second `aside` inside
-    the first would describe the same footnote twice.
+    An empty footnote is only a shell around nested paragraphs. Any other block
+    with text, an anchor, or no children still needs a unit, as do images and
+    page breaks.
     """
-    if block.type is BlockType.HEADING:
-        tag = block.attributes.get("tag", "")
-        return tag if tag in _HEADING_TAGS else _BLOCK_TAGS[BlockType.HEADING]
-    if block.type is BlockType.FOOTNOTE and parent_type is BlockType.FOOTNOTE:
-        return _BLOCK_TAGS[BlockType.PARAGRAPH]
-    return _BLOCK_TAGS[block.type]
-
-
-def _block_attributes(block: DocumentBlock, *, tag: str) -> dict[str, str]:
-    """Element attributes for a block: image source, description, and auxiliary markers."""
-    attributes: dict[str, str] = {}
-    if block.type is BlockType.IMAGE:
-        attributes["src"] = block.attributes.get("src", "")
-        attributes["alt"] = block.attributes.get("alt", "")
-    if tag == "aside":
-        attributes[f"{{{_EPUB_NAMESPACE}}}type"] = "footnote"
-    if block.type is BlockType.POEM:
-        attributes["class"] = "linguary-verse"
-    if block.type is BlockType.PAGE_BREAK:
-        attributes[f"{{{_EPUB_NAMESPACE}}}type"] = "pagebreak"
-    try:
-        split_index = int(str(block.attributes.get("split_index", "0")).strip())
-    except (ValueError, TypeError):
-        split_index = 0
-    if split_index > 1:
-        existing_class = attributes.get("class")
-        attributes["class"] = (
-            f"{existing_class} linguary-split-continuation"
-            if existing_class
-            else "linguary-split-continuation"
-        )
-    return attributes
+    if block.type is BlockType.FOOTNOTE and not block.text:
+        return False
+    if block.text or _anchors(block) or not nested:
+        return True
+    return block.type in (BlockType.IMAGE, BlockType.PAGE_BREAK)
 
 
 def _anchors(block: DocumentBlock) -> tuple[str, ...]:
@@ -2016,16 +1630,6 @@ def _nestable(
         ):
             kept.append(annotation)
     return tuple(kept)
-
-
-def _append_inline(
-    host: etree._Element,
-    text: str,
-    annotations: Sequence[InlineAnnotation],
-    state: _SectionState,
-) -> None:
-    """Writes block text into the element, restoring inline markup."""
-    _append_range(host, text, annotations, start=0, end=len(text), state=state)
 
 
 def _append_range(

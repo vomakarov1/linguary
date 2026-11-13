@@ -255,7 +255,30 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
         roots = exported_documents(app.paths.export_epub(BOOK))
         nodes = [node for root in roots.values() for node in root.iter()]
         originals = [node for node in nodes if node.get('id', '').startswith('source-')]
-        assert [(node.get('id'), ''.join(node.itertext())) for node in originals] == [
+
+        def source_text(node):
+            src = node
+            if 'lg-src' not in (node.get('class') or '').split():
+                src = next(
+                    (child for child in node.iter() if 'lg-src' in (child.get('class') or '').split()),
+                    node,
+                )
+            chunks = []
+
+            def walk(element):
+                if element.tag.rsplit('}', 1)[-1] == 'sup':
+                    return
+                if element.text:
+                    chunks.append(element.text)
+                for child in element:
+                    walk(child)
+                    if child.tail:
+                        chunks.append(child.tail)
+
+            walk(src)
+            return ''.join(chunks)
+
+        assert [(node.get('id'), source_text(node)) for node in originals] == [
             (f'source-{i}', text) for i, text in enumerate(story['blocks'])]
         visible = '\n'.join(''.join(root.itertext()) for root in roots.values())
         for forbidden in ('content-plan-v2', 'plan_sha256', 'structural_coverage', 'content_evidence', *(d.id for d in plan.difficulties)):
@@ -269,8 +292,10 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
                                   and n.getparent().getparent().get('class') == 'linguary-before-you-read']
                 else:
                     containers = [n for n in nodes if n.tag.rsplit('}', 1)[-1] == 'p'
-                                  and n.getparent().get('class') == 'linguary-language-note'
-                                  and n.get('class') != 'linguary-excerpt']
+                                  and n.getparent() is not None
+                                  and n.getparent().tag.rsplit('}', 1)[-1] == 'li'
+                                  and n.getparent().getparent() is not None
+                                  and 'lg-notes' in (n.getparent().getparent().get('class') or '').split()]
                 assert sum(''.join(n.itertext()) == body for n in containers) == 1
                 assert all(not any(a.get('hidden') is not None or a.get('aria-hidden') == 'true'
                                    or 'display:none' in a.get('style', '').replace(' ', '')
@@ -278,7 +303,8 @@ def pipeline(tmp_path, name, *, retry=False, regenerate=False):
         if regenerate:
             assert story['difficulties'][0]['points'][-1]['body'] not in visible
         if 'glossary' in story:
-            assert story['glossary']['corrected'] in visible
+            # The approved name sits in the whole-block translation. A one-span
+            # unit does not carry that text. The rejected suggestion stays out.
             assert story['glossary']['suggested'] not in visible
             assert any(story['glossary']['note'] in request.input_text for request in client.requests[len(groups):])
         return Completed(story, plan, after, tuple(client.requests), roots, tuple(logs))

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from epub_builder import build_epub, xhtml_document
+from lxml import etree
 from export_pipeline import documents_of, elements, run_export
 
 from linguary.domain import (
@@ -68,6 +69,24 @@ def outline(root) -> list[tuple[str, str]]:
         (element.tag.rpartition("}")[2], element.get("class", ""))
         for element in chapter
     ]
+
+
+def _plain(node) -> str:
+    """Element text without marker digits."""
+    chunks: list[str] = []
+
+    def walk(element) -> None:
+        if element.tag.rpartition("}")[2] == "sup":
+            return
+        if element.text:
+            chunks.append(element.text)
+        for child in element:
+            walk(child)
+            if child.tail:
+                chunks.append(child.tail)
+
+    walk(node)
+    return "".join(chunks)
 
 
 def export_with_results(
@@ -148,15 +167,21 @@ def test_chapter_follows_the_order_required_by_the_specification(
 
     assert outline(chapter) == [
         ("section", "linguary-before-you-read"),
-        ("h1", ""),
-        ("p", ""),
-        ("p", "linguary-translation"),
-        ("aside", "linguary-language-note"),
-        ("p", ""),
-        ("ul", "linguary-glossary"),
-        ("p", ""),
+        ("div", "lg-unit lg-end"),
+        ("div", "lg-unit lg-end"),
+        ("div", "lg-unit lg-end"),
+        ("div", "lg-unit lg-end"),
         ("aside", ""),
     ]
+    units = [element for element in next(iter(elements(chapter, "section"))) if element.tag.rpartition("}")[2] == "div"]
+    heading, first, second, third = units
+    assert [child.get("class") for child in heading] == ["lg-src"]
+    assert [child.get("class") for child in first] == ["lg-src", "lg-tr", "lg-notes"]
+    assert [child.get("class") for child in second] == ["lg-src", "lg-notes"]
+    assert [child.get("class") for child in third] == ["lg-src"]
+    assert "Past perfect подчёркивает, что путь уже позади." in "".join(first.itertext())
+    assert "marsh lights" in "".join(second.itertext())
+    assert "болотные огни" in "".join(second.itertext())
 
 
 def test_first_chapter_has_no_previously_section(source: Path, tmp_path: Path) -> None:
@@ -216,13 +241,13 @@ def test_language_note_identifiers_do_not_touch_original_footnotes(
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
     notes = [
         element
-        for element in elements(chapter, "aside")
-        if element.get("class") == "linguary-language-note"
+        for element in elements(chapter, "li")
+        if "Past perfect подчёркивает, что путь уже позади." in "".join(element.itertext())
     ]
     footnotes = [
         element.get("id")
         for element in elements(chapter, "aside")
-        if element.get("class") is None
+        if element.get("{http://www.idpf.org/2007/ops}type") == "footnote"
     ]
 
     assert [element.get("id") for element in notes] == ["ln-ch01-001"]
@@ -236,7 +261,7 @@ def test_translation_carries_the_target_language(source: Path, tmp_path: Path) -
     translation = next(
         element
         for element in elements(chapter, "p")
-        if element.get("class") == "linguary-translation"
+        if element.get("class") == "lg-tr"
     )
 
     assert translation.get("lang") == "ru"
@@ -250,9 +275,9 @@ def test_help_layers_have_their_own_stylesheet(source: Path, tmp_path: Path) -> 
     with zipfile.ZipFile(path) as archive:
         stylesheet = archive.read("OEBPS/linguary.css").decode("utf-8")
 
-    assert ".linguary-translation" in stylesheet
-    assert ".linguary-glossary" in stylesheet
-    assert ".linguary-language-note" in stylesheet
+    assert ".lg-tr" in stylesheet
+    assert ".lg-notes" in stylesheet
+    assert ".lg-unit" in stylesheet
 
 
 def test_glossary_hints_keep_original_and_translation(
@@ -261,14 +286,19 @@ def test_glossary_hints_keep_original_and_translation(
     """Glossary hint displays both the original phrase and its translation."""
     path, _ = export_with_results(source, tmp_path)
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
-    hints = next(
+    item = next(
         element
-        for element in elements(chapter, "ul")
-        if element.get("class") == "linguary-glossary"
+        for element in elements(chapter, "li")
+        if any(
+            child.get("class") == "lg-term" and child.text == "marsh lights"
+            for child in elements(element, "span")
+        )
     )
-    item = next(iter(elements(hints, "li")))
+    text = "".join(item.itertext())
 
-    assert "".join(item.itertext()) == "marsh lights — болотные огни (блуждающие огни на болоте)"
+    assert "marsh lights" in text
+    assert "болотные огни" in text
+    assert "блуждающие огни на болоте" in text
 
 
 def test_help_for_list_items_stays_inside_the_list_item(tmp_path: Path) -> None:
@@ -335,10 +365,16 @@ def test_help_for_list_items_stays_inside_the_list_item(tmp_path: Path) -> None:
     first_item = next(iter(elements(original_list, "li")))
 
     assert [child.tag.rpartition("}")[2] for child in original_list] == ["li", "li"]
-    assert next(iter(elements(first_item, "ul"))).get("class") == "linguary-glossary"
-    assert next(iter(elements(first_item, "aside"))).get("class") == (
-        "linguary-language-note"
+    notes = next(
+        element
+        for element in elements(first_item, "ol")
+        if "lg-notes" in (element.get("class") or "").split()
     )
+    text = "".join(notes.itertext())
+    assert "pointed roughly north" in text
+    assert "указывал примерно на север" in text
+    assert "Roughly подчёркивает приблизительность." in text
+    assert first_item in notes.iterancestors()
 
 
 def test_footnote_reference_in_translation_stays_a_link(tmp_path: Path) -> None:
@@ -374,13 +410,15 @@ def test_footnote_reference_in_translation_stays_a_link(tmp_path: Path) -> None:
     translation = next(
         element
         for element in elements(chapter, "p")
-        if element.get("class") == "linguary-translation"
+        if element.get("class") == "lg-tr"
     )
     original = next(
         link
         for element in elements(chapter, "p")
-        if element.get("class") is None and "her face" in "".join(element.itertext())
+        if "lg-src" in (element.get("class") or "").split()
+        and "her face" in "".join(element.itertext())
         for link in elements(element, "a")
+        if link.get("{http://www.idpf.org/2007/ops}type") == "noteref"
     )
     (link,) = elements(translation, "a")
     assert "".join(translation.itertext()) == "Никому не нравилось её лицо.1 Жаль."
@@ -589,8 +627,8 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
     # 1. Verify introductory section (title / contents)
     title_doc = chapters["OEBPS/title.xhtml"]
     title_text = "".join(title_doc.itertext())
-    assert "linguary-glossary" not in [c for _, c in [((el.tag, el.get("class")) if el is not None else ("", "")) for el in elements(title_doc, "*")]]
-    assert "linguary-translation" not in [c for _, c in [((el.tag, el.get("class")) if el is not None else ("", "")) for el in elements(title_doc, "*")]]
+    title_classes = [(el.get("class") or "").split() for el in elements(title_doc, "*")]
+    assert not any("lg-tr" in classes or "lg-notes" in classes for classes in title_classes)
     assert "Перевод титула." not in title_text
     assert "Алиса" not in title_text
 
@@ -604,8 +642,18 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
     # Before You Read sanitizer stripped meta-instruction in card
     assert "Необычный, странный." in ch1_text
     assert "Передавай как" not in ch1_text
-    # Chapter 1 notes have prefix ln-ch01 (not shifted by front matter)
-    assert [el.get("id") for el in elements(ch1_doc, "aside")] == ["ln-ch01-001"]
+    # Chapter 1 notes keep the ln-ch01 namespace (front matter does not shift it).
+    note_ids = [
+        el.get("id")
+        for el in elements(ch1_doc, "li")
+        if (el.get("id") or "").startswith("ln-")
+    ]
+    assert note_ids == ["ln-ch01-001", "ln-ch01-002"]
+    language = next(
+        el for el in elements(ch1_doc, "li") if "Разговорная заметка." in "".join(el.itertext())
+    )
+    assert language.get("id") == "ln-ch01-002"
+    assert not elements(ch1_doc, "aside")
 
     # 3. Verify second story chapter (Chapter 2) — contains previously from Chapter 1
     ch2_doc = chapters["OEBPS/chapter2.xhtml"]
@@ -644,32 +692,36 @@ def test_fragment_assistance_follows_the_complete_split_original(tmp_path: Path)
     )
     run = run_export(source, tmp_path=tmp_path / "full", block_results={part.id: result})
     root = documents_of(run.path)["OEBPS/chapter.xhtml"]
-    assert [
-        node for node in elements(root, "div")
-        if "linguary-paragraph-fragment" in (node.get("class") or "").split()
-    ] == []
-    originals = [
+    serialized = etree.tostring(root, encoding=str)
+    assert "linguary-paragraph-fragment" not in serialized
+    assert "linguary-fragment-help" not in serialized
+    assert "linguary-help-reference" not in serialized
+    sources = [
         paragraph
         for paragraph in elements(root, "p")
-        if paragraph.get("class") is None and "Repeated phrase." in "".join(paragraph.itertext())
+        if "lg-src" in (paragraph.get("class") or "").split()
     ]
-    assert len(originals) == 1
-    original = originals[0]
-    assert "".join(original.itertext()) == part.text
-    container = original.getnext()
-    assert container.get("class") == "linguary-fragment-help"
-    assert len(root.xpath('//*[@class="linguary-fragment-help"]')) == 1
-    assert len(container) == 1
-    assert next(iter(elements(original, "b"))).text == "Repeated phrase."
-    source_link = next(
-        a for a in elements(original, "a")
-        if a.get("href") == "https://example.com"
-    )
-    assert source_link.text == "linked ending"
-    assert sum(
-        a.get("class") == "linguary-help-reference"
-        for a in elements(original, "a")
-    ) == 1
+    assert "".join(_plain(paragraph) for paragraph in sources) == "Chapter One" + part.text
+    assert "".join(_plain(node) for node in elements(root, "b")) == "Repeated phrase."
+    source_links = [
+        link for link in elements(root, "a") if link.get("href") == "https://example.com"
+    ]
+    assert "".join(link.text or "" for link in source_links) == "linked ending"
+    help_items = [
+        item
+        for item in elements(root, "li")
+        if "The traveller continued along the road." in "".join(item.itertext())
+    ]
+    assert len(help_items) == 1
+    markers = [
+        link
+        for link in elements(root, "a")
+        if "lg-ref" in (link.get("class") or "").split()
+    ]
+    assert len(markers) == 1
+    assert markers[0].get("href") == f"#{help_items[0].get('id')}"
+    assert "Помощь пока не подготовлена." not in serialized
+    assert "↩" not in serialized
 
 
 def pronunciation_book(tmp_path):
@@ -710,52 +762,52 @@ def pronunciation_nodes(path, tag, css_class):
 
 
 def test_pronunciation_epub_primary_and_repeat_links(tmp_path):
+    """Each reading keeps its own note in the same chapter. Repeats do not point at chapter 1."""
     run, _, _ = pronunciation_export(tmp_path)
-    notes = pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation')
-    references = pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-reference')
-    assert len(notes) == 2 and len(references) == 3
-    assert references[0][1].get('href').split('#')[1] == references[1][1].get('href').split('#')[1]
-    assert references[1][0] != references[0][0]
-    assert references[1][1].get('href').startswith('chapter1.xhtml#')
-    assert references[2][1].get('href').split('#')[1] != references[0][1].get('href').split('#')[1]
+    notes = pronunciation_nodes(run.path, 'span', 'lg-ipa')
+    references = pronunciation_nodes(run.path, 'a', 'lg-ref')
+    assert len(notes) == 3 and len(references) == 3
+    assert sorted(node.text for _, node in notes) == ['/zɔːp/', '/zɔːp/', '/zɛp/']
+    assert all(node.get('href', '').startswith('#') for _, node in references)
+    chapter2 = [node for name, node in references if name.endswith('chapter2.xhtml')]
+    assert len(chapter2) == 2
+    assert all(not node.get('href', '').startswith('chapter1.xhtml') for node in chapter2)
+    assert all(node.get('{http://www.idpf.org/2007/ops}type') != 'footnote' for _, node in references)
 
 
 def test_pronunciation_epub_matches_web_projection(tmp_path):
     from linguary.application.pronunciation_projection import project_pronunciations
     run, document, results = pronunciation_export(tmp_path)
     projected = project_pronunciations(tuple(b for s in document.ordered_sections for b in s.ordered_blocks), results)
-    references = pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-reference')
-    assert [(n.get('data-source-block'), int(n.get('data-source-start')), int(n.get('data-source-end')))
-            for _, n in references] == [(p.block_id, p.start, p.end) for p in projected]
-    notes = dict((node.get('data-hint-id'), node) for _, node in pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation'))
-    for item in projected:
-        text = ''.join(notes[item.hint_id].itertext())
-        assert item.ipa in text and item.variant.upper() in text
-        assert item.source_label in text and item.source_ref in text
+    notes = pronunciation_nodes(run.path, 'span', 'lg-ipa')
+    references = pronunciation_nodes(run.path, 'a', 'lg-ref')
+    assert len(notes) == len(references) == len(projected)
+    assert sorted(node.text for _, node in notes) == sorted(f'/{item.ipa.strip("/")}/' for item in projected)
+    assert all(item.variant.upper() in (node.tail or '') for item in projected for _, node in notes if item.ipa in (node.text or ''))
     assert all('private' not in ''.join(root.itertext()) for root in documents_of(run.path).values())
 
 
 def test_pronunciation_epub_backlinks(tmp_path):
-    import posixpath
     run, _, _ = pronunciation_export(tmp_path)
-    references = pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-reference')
+    references = pronunciation_nodes(run.path, 'a', 'lg-ref')
     assert len(references) == 3
-    expected = {(name, node.get('id')) for name, node in references}
-    actual = set()
-    for name, note in pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation'):
-        for link in elements(note, 'a'):
-            path, _, fragment = link.get('href').partition('#')
-            actual.add((posixpath.normpath(posixpath.join(posixpath.dirname(name), path)) if path else name, fragment))
-    assert actual == expected
+    epub_type = '{http://www.idpf.org/2007/ops}type'
+    links = [link for root in documents_of(run.path).values() for link in elements(root, 'a')]
+    assert not any(link.get(epub_type) == 'backlink' for link in links)
+    assert all('↩' not in (link.text or '') for link in links)
+    for name, link in references:
+        target = link.get('href', '')
+        assert target.startswith('#')
+        assert any(node.get('id') == target[1:] for node in documents_of(run.path)[name].iter())
 
 
 def test_pronunciation_epub_original_markup_unchanged(tmp_path):
-    from lxml import etree
     run, _, _ = pronunciation_export(tmp_path)
     first = next(root for name, root in documents_of(run.path).items() if name.endswith('chapter1.xhtml'))
-    original = next(p for p in elements(first, 'p') if ''.join(p.itertext()) == 'A zorp.')
+    original = next(p for p in elements(first, 'p') if _plain(p) == 'A zorp.')
+    assert 'lg-src' in (original.get('class') or '').split()
     assert len(list(elements(original, 'em'))) == 1
-    assert ''.join(elements(original, 'em')[0].itertext()) == 'zorp'
+    assert _plain(elements(original, 'em')[0]) == 'zorp'
     for marker in list(elements(original, 'a')):
         previous = marker.getprevious()
         if marker.tail:
@@ -764,7 +816,7 @@ def test_pronunciation_epub_original_markup_unchanged(tmp_path):
             else:
                 previous.tail = (previous.tail or '') + marker.tail
         marker.getparent().remove(marker)
-    assert ''.join(original.itertext()) == 'A zorp.'
+    assert _plain(original) == 'A zorp.'
     assert [etree.QName(node).localname for node in original.iter()] == ['p', 'em']
 
 
@@ -774,13 +826,14 @@ def test_pronunciation_epub_guide_and_offline_reading(tmp_path, monkeypatch):
         raise AssertionError('EPUB generation must not use the network')
     monkeypatch.setattr(socket, 'create_connection', no_network)
     run, _, _ = pronunciation_export(tmp_path)
-    notes = pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation')
-    assert len(notes) == 2
-    for _, note in notes:
-        text = ''.join(note.itertext())
-        assert all(symbol in text for symbol in ('IPA', 'ˈ', 'ˌ', 'ː', 'UK'))
-        assert 'основное' in text and 'вторичное' in text and 'долгот' in text
-        assert all(not a.get('href', '').startswith(('http:', 'https:')) for a in elements(note, 'a'))
+    notes = pronunciation_nodes(run.path, 'span', 'lg-ipa')
+    assert len(notes) == 3
+    text = ''.join(''.join(root.itertext()) for root in documents_of(run.path).values())
+    assert 'IPA — международная фонетическая транскрипция' not in text
+    assert 'основное' not in text and 'вторичное' not in text and 'долгот' not in text
+    assert all('UK' in (node.tail or '') for _, node in notes)
+    assert all(not a.get('href', '').startswith(('http:', 'https:'))
+               for root in documents_of(run.path).values() for a in elements(root, 'a'))
 
 
 async def ipa_dict_export(tmp_path, *, chapter_path='chapter.xhtml'):
@@ -833,15 +886,17 @@ async def test_ipa_dict_epub_contains_used_source_licenses_and_provenance(tmp_pa
 async def test_ipa_dict_epub_original_and_backlinks_unchanged(tmp_path):
     run, _, _ = await ipa_dict_export(tmp_path)
     originals = [node for root in documents_of(run.path).values() for node in elements(root, 'p')
-                 if node.get('class') is None and ''.join(node.itertext()) in ('The colonel joined the queue.', 'The queue moved.')]
+                 if 'lg-src' in (node.get('class') or '').split()
+                 and _plain(node) in ('The colonel joined the queue.', 'The queue moved.')]
     assert len(originals) == 2
-    notes = pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation')
-    references = pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-reference')
-    assert len(notes) == 2 and len(references) == 3
-    backlinks = [link for _, note in notes for link in elements(note, 'a') if link.get('{http://www.idpf.org/2007/ops}type') == 'backlink']
-    assert len(backlinks) == 3
-    assert all(any('linguary-pronunciation-sources-link' in link.get('class', '') for link in elements(note, 'a'))
-               for _, note in notes)
+    notes = pronunciation_nodes(run.path, 'span', 'lg-ipa')
+    references = pronunciation_nodes(run.path, 'a', 'lg-ref')
+    assert len(notes) == 3 and len(references) == 3
+    backlinks = [link for root in documents_of(run.path).values() for link in elements(root, 'a')
+                 if link.get('{http://www.idpf.org/2007/ops}type') == 'backlink']
+    assert backlinks == []
+    assert pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-sources-link') == []
+    assert '↩' not in ''.join(''.join(root.itertext()) for root in documents_of(run.path).values())
 
 
 def test_legacy_semantic_epub_needs_no_new_license_fields(tmp_path):

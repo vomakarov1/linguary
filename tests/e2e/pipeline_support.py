@@ -93,6 +93,44 @@ def exported_text(path: Path) -> str:
     )
 
 
+def plain_text(node: etree._Element) -> str:
+    """Text of ``node`` without note-marker digits."""
+    chunks: list[str] = []
+
+    def walk(element: etree._Element) -> None:
+        if element.tag.rsplit("}", 1)[-1] == "sup":
+            return
+        if element.text:
+            chunks.append(element.text)
+        for child in element:
+            walk(child)
+            if child.tail:
+                chunks.append(child.tail)
+
+    walk(node)
+    return "".join(chunks)
+
+
+def source_text(node: etree._Element) -> str:
+    """Source sentence of a block anchor, without the note marker."""
+    src = node
+    if "lg-src" not in (node.get("class") or "").split():
+        src = next(
+            (
+                child
+                for child in node.iter()
+                if "lg-src" in (child.get("class") or "").split()
+            ),
+            node,
+        )
+    return plain_text(src)
+
+
+def exported_reading(path: Path) -> str:
+    """Book text without note-marker digits, so a source sentence stays contiguous."""
+    return "\n".join(plain_text(root) for root in exported_documents(path).values())
+
+
 def exported_documents(path: Path) -> dict[str, etree._Element]:
     """XHTML documents of assembled EPUB."""
     parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)

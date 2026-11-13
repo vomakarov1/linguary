@@ -115,7 +115,7 @@ async def test_web_pipeline_from_upload_to_download(tmp_path: Path) -> None:
             assert download.content.startswith(b"PK")
 
         book_text = exported_text(application.paths.export_epub(book_id))
-        assert "Русский перевод блока" in book_text
+        assert "звёздное стекло" in book_text
         assert "Причастие humming описывает непрерывный звук предмета." in book_text
         assert "Оборот «не должно было быть»" in book_text
         assert "Previously in Chapter" in book_text

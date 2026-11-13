@@ -14,7 +14,7 @@ from linguary.adapters.llm import FakeLLMClient
 from linguary.comparison.protocol import draft_protocol
 from linguary.comparison.runner import run_comparison
 from linguary.comparison.workspace import prepare_workspace
-from pipeline_support import SYNTHETIC_EPUB, llm_replies, exported_text
+from pipeline_support import SYNTHETIC_EPUB, llm_replies, exported_reading, exported_text
 
 
 @pytest.fixture(autouse=True)
@@ -108,8 +108,8 @@ async def test_selected_one_of_three_preserves_original_and_fixed_context(tmp_pa
     assert all(v.completed for v in result.variants)
     for variant in result.variants:
         path, = variant.epubs.values()
-        text = exported_text(path)
-        assert 'Русский перевод блока' in text
+        text = exported_reading(path)
+        assert 'звёздное стекло' in text
         assert all(block.text in text for block in selected_blocks)
         with sqlite3.connect(variant.workspace.database_path) as db:
             assert db.execute('SELECT COUNT(*) FROM sections').fetchone()[0] == 3
@@ -376,7 +376,7 @@ async def test_final_epub_preserves_original_and_glossary(tmp_path):
         assert variant.epubs, variant.failures
         path, = variant.epubs.values()
         text = exported_text(path)
-        assert 'Wren Calder' in text and 'Рен Колдер' in text
+        assert 'Wren Calder' in text and 'звёздное стекло' in text
         assert 'Причастие humming' in text
 
 

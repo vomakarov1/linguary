@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import zipfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from lxml import etree
@@ -19,6 +19,7 @@ from linguary.adapters.epub import (
     EpubExportWriter,
     FilesystemEpubResourceStore,
 )
+from linguary.application.layout.book import LayoutInputs, build_book_layout
 from linguary.application.ports.epub import (
     EpubReadRequest,
     EpubWriteRequest,
@@ -26,7 +27,7 @@ from linguary.application.ports.epub import (
     ImportedBook,
     StoreResourcesRequest,
 )
-from linguary.domain import BlockProcessingResult, LearningMaterial
+from linguary.domain import BlockProcessingResult, CanonicalDocument, LearningMaterial
 
 _XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 
@@ -72,17 +73,59 @@ def run_export(
             book_id=book_id, source_path=str(source), document=imported.document
         )
     )
+    results = dict(block_results or {})
+    layout = None
+    if results:
+        layout = build_book_layout(
+            LayoutInputs(
+                imported.document,
+                _single_span_translations(imported.document, results),
+                (),
+                (),
+                None,
+            )
+        )
     exported = EpubExportWriter().write(
         EpubWriteRequest(
             document=imported.document,
             target_path=str(tmp_path / f"{book_id}-export.epub"),
             stored_resource_paths=stored.paths,
             source_epub_path=str(export_source or source) if keep_source else None,
-            block_results=block_results or {},
+            block_results=results,
             learning_materials=learning_materials or {},
+            layout=layout,
         )
     )
     return ExportRun(imported=imported, exported=exported)
+
+
+def _single_span_translations(
+    document: CanonicalDocument,
+    results: Mapping[str, BlockProcessingResult],
+) -> dict[str, BlockProcessingResult]:
+    """Give a one-span block's whole translation to its only segment.
+
+    Older test results store the translation on `translated_text` alone.
+    The layout reads segment translations, and a single span is that whole text.
+    """
+    blocks = {block.id: block for block in document.blocks()}
+    prepared: dict[str, BlockProcessingResult] = {}
+    for block_id, result in results.items():
+        block = blocks.get(block_id)
+        if (
+            block is not None
+            and not result.segment_translations
+            and result.translated_text
+            and result.translated_text.strip()
+            and len(block.segment_spans) == 1
+        ):
+            result = replace(
+                result,
+                segment_treatments=(result.treatment,),
+                segment_translations=(result.translated_text,),
+            )
+        prepared[block_id] = result
+    return prepared
 
 
 #: Document extensions: Gutenberg releases store chapters in both `.html` and `.htm`.

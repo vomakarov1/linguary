@@ -244,17 +244,18 @@ def test_fragment_footnotes_resolve_without_colliding_with_source_ids(tmp_path: 
     root = documents_of(run.path)["OEBPS/chapter.xhtml"]
     ids = [node.get("id") for node in root.iter() if node.get("id")]
     assert len(ids) == len(set(ids))
+    assert ids.count("linguary-help") == 1
     epub_type = "{http://www.idpf.org/2007/ops}type"
-    references = [node for node in elements(root, "a") if node.get(epub_type) == "noteref"]
-    assert len(references) == 1
-    reference = references[0]
-    assert reference.get("href") != "#linguary-help"
-    assert reference.get("data-source-start") == "3"
-    assert reference.get("data-source-end") == "10"
-    target = next(node for node in root.iter() if node.get("id") == reference.get("href")[1:])
-    assert target.get(epub_type) == "footnote"
-    assert "Помощь пока не подготовлена." in "".join(target.itertext())
-    assert any(a.get("href") == f"#{reference.get('id')}" for a in elements(target, "a"))
+    text = "".join(root.itertext())
+    assert "Помощь пока не подготовлена." not in text
+    assert "↩" not in text
+    learning = [
+        node
+        for node in root.iter()
+        if set((node.get("class") or "").split()) & {"lg-unit", "lg-notes", "lg-tr", "lg-ref", "lg-src"}
+    ]
+    assert learning
+    assert all(node.get(epub_type) != "footnote" for node in learning)
     assert any(a.get("href") == "#linguary-help" for a in elements(root, "a"))
 
 
@@ -263,23 +264,37 @@ def test_pronunciation_epub_generated_ids_preserve_author_anchors(tmp_path):
     run, _, _ = pronunciation_export(tmp_path)
     assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
     first = next(root for name, root in documents_of(run.path).items() if name.endswith('chapter1.xhtml'))
-    original = next(node for node in elements(first, 'p') if node.get('id') == 'linguary-pronunciation')
-    assert ''.join(original.itertext()) == 'An existing anchor.'
-    assert len([node for node in first.iter() if node.get('id') == 'linguary-pronunciation']) == 1
+    original = next(node for node in first.iter() if node.get('id') == 'linguary-pronunciation')
+    source = next(
+        node for node in original.iter()
+        if "lg-src" in (node.get("class") or "").split()
+    )
+    chunks: list[str] = []
+
+    def walk(element) -> None:
+        if element.tag.rpartition("}")[2] == "sup":
+            return
+        if element.text:
+            chunks.append(element.text)
+        for child in element:
+            walk(child)
+            if child.tail:
+                chunks.append(child.tail)
+
+    walk(source)
+    assert "".join(chunks) == "An existing anchor."
+    assert len([node for node in first.iter() if node.get("id") == "linguary-pronunciation"]) == 1
 
 
 async def test_ipa_dict_epub_notice_links_are_internal_and_unique(tmp_path):
-    import posixpath
     from test_epub_export_content import ipa_dict_export, pronunciation_nodes
 
     run, _, _ = await ipa_dict_export(tmp_path, chapter_path='linguary/pronunciation-sources.xhtml')
     pages = pronunciation_nodes(run.path, 'section', 'linguary-pronunciation-sources')
     assert len(pages) == 1 and pages[0][0] != 'OEBPS/linguary/pronunciation-sources.xhtml'
     assert verify_exported_epub(run.path, expected_spine=spine_hrefs(run.path)) == ()
-    source_page = pages[0][0]
-    for name, note in pronunciation_nodes(run.path, 'aside', 'linguary-pronunciation'):
-        link, = [a for a in elements(note, 'a') if a.get('class') == 'linguary-pronunciation-sources-link']
-        assert not link.get('href').startswith(('http:', 'https:'))
-        path, _, fragment = link.get('href').partition('#')
-        assert posixpath.normpath(posixpath.join(posixpath.dirname(name), path)) == source_page
-        assert fragment and len(pages[0][1].xpath('.//*[@id=$value] | self::*[@id=$value]', value=fragment)) == 1
+    section = pages[0][1]
+    assert section.get('id') == 'pronunciation-sources'
+    assert pronunciation_nodes(run.path, 'a', 'linguary-pronunciation-sources-link') == []
+    for link in elements(section, 'a'):
+        assert not link.get('href', '').startswith(('http:', 'https:'))

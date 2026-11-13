@@ -110,16 +110,20 @@ async def _assert_small_book(tmp_path, monkeypatch, variant):
             assert repeated['pronunciation_assistances'] == [asdict(item) for item in projected if item.block_id == blocks[1].id]
             assert client.get('/pronunciation-sources').status_code == 200
         target = tmp_path / f'ipa-dict-{variant}.epub'
-        EpubExportWriter().write(EpubWriteRequest(document=document, target_path=str(target), block_results=stored))
+        from linguary.application.layout.book import LayoutInputs, build_book_layout
+        layout = build_book_layout(LayoutInputs(document, stored, (), (), None))
+        EpubExportWriter().write(EpubWriteRequest(
+            document=document, target_path=str(target), block_results=stored, layout=layout,
+        ))
         assert verify_exported_epub(target) == ()
         parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
         with zipfile.ZipFile(target) as archive:
             roots = [etree.fromstring(archive.read(name), parser=parser) for name in archive.namelist() if name.endswith('.xhtml')]
             provenance, = [json.loads(archive.read(name)) for name in archive.namelist() if name.endswith('pronunciation-sources.json')]
-        references = [node for root in roots for node in root.iter() if node.get('class') == 'linguary-help-reference linguary-pronunciation-reference']
-        notes = [node for root in roots for node in root.iter() if node.get('class') == 'linguary-pronunciation']
-        assert len(references) == len(projected) and len(notes) == len(expected)
-        assert sum(node.get('{http://www.idpf.org/2007/ops}type') == 'backlink' for note in notes for node in note.iter()) == len(projected)
+        references = [node for root in roots for node in root.iter() if 'lg-ref' in (node.get('class') or '').split()]
+        notes = [node for root in roots for node in root.iter() if 'lg-ipa' in (node.get('class') or '').split()]
+        assert len(references) == len(projected) and len(notes) == len(projected)
+        assert sum(node.get('{http://www.idpf.org/2007/ops}type') == 'backlink' for root in roots for node in root.iter()) == 0
         assert {entry['form']: entry['ipa'] for entry in provenance['entries']} == expected
         assert all(entry['license_id'] == ('GPL-3.0' if variant == 'uk' else 'MIT') for entry in provenance['entries'])
         for request in fake.requests:

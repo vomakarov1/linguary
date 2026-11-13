@@ -172,16 +172,23 @@ async def test_pronunciation_repeat_and_export_regression(tmp_path, monkeypatch)
             repeated = client.get(f'/books/book-1/blocks/{projected[1].block_id}').json()
             assert repeated['pronunciation_assistances'] == [asdict(projected[1])]
             target = tmp_path / 'synthetic-export.epub'
+            from linguary.application.layout.book import LayoutInputs, build_book_layout
+            layout = build_book_layout(LayoutInputs(document, stored, (), (), None))
             EpubExportWriter().write(EpubWriteRequest(document=document, target_path=str(target),
-                source_epub_path=str(source_path), block_results=stored))
+                source_epub_path=str(source_path), block_results=stored, layout=layout))
             assert verify_exported_epub(target) == ()
-            notes = pronunciation_nodes(target, 'aside', 'linguary-pronunciation')
-            references = pronunciation_nodes(target, 'a', 'linguary-pronunciation-reference')
-            assert len(notes) == 2 and len(references) == 3
-            assert [(n.get('data-source-block'), int(n.get('data-source-start')), int(n.get('data-source-end')))
-                    for _, n in references] == [(p.block_id, p.start, p.end) for p in projected]
-            assert {n.get('data-hint-id') for _, n in notes} == {p.hint_id for p in projected}
-            assert sum(len(elements(note, 'a')) for _, note in notes) == 3
+            notes = pronunciation_nodes(target, 'span', 'lg-ipa')
+            references = pronunciation_nodes(target, 'a', 'lg-ref')
+            assert len(notes) == 3 and len(references) == 3
+            assert [node.text for _, node in notes] == [f'/{ipa}/' for ipa in ('zɔːp', 'zɔːp', 'zɛp')]
+            assert all(node.get('href', '').startswith('#') for _, node in references)
+            assert all('UK' in (node.tail or '') for _, node in notes)
+            epub_type = '{http://www.idpf.org/2007/ops}type'
+            assert not any(
+                link.get(epub_type) == 'backlink'
+                for root in documents_of(target).values()
+                for link in elements(root, 'a')
+            )
             assert tuple(source.calls) == calls
     finally:
         await app.aclose()
