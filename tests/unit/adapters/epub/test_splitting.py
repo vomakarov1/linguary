@@ -6,14 +6,17 @@ import pytest
 
 from linguary.adapters.epub.inline import InlineContent
 from linguary.adapters.epub.splitting import (
+    SEGMENT_MAX_CHARS,
+    SEGMENT_MIN_BLOCK_CHARS,
     SPLIT_MAX_PART_CHARS,
     SPLIT_MIN_CHARS,
     SPLIT_MIN_SENTENCES,
+    segment_text,
     split_inline_content,
     split_paragraph,
     split_sentences,
 )
-from linguary.domain import InlineAnnotation, InlineAnnotationType
+from linguary.domain import BlockSegment, InlineAnnotation, InlineAnnotationType
 
 
 def test_split_sentences_skips_short_paragraphs() -> None:
@@ -583,4 +586,313 @@ def test_split_paragraph_splits_oversized_single_sentence_at_word_boundaries() -
     for start, _ in compound_slices[1:]:
         assert compound[start - 1].isspace()
         assert not compound[start].isspace()
+
+
+def _repeat(word: str, minimum: int) -> str:
+    """Repeats `word` until the string reaches `minimum` characters."""
+    text = word
+    while len(text) < minimum:
+        text += " " + word
+    return text
+
+
+def _assert_exact_cover(text: str, segments: tuple[BlockSegment, ...]) -> None:
+    """Spans are non-empty, ordered, contiguous, and rebuild `text`."""
+    assert segments
+    assert segments[0].start == 0
+    assert segments[-1].end == len(text)
+    cursor = 0
+    for segment in segments:
+        assert segment.start == cursor
+        assert segment.end > segment.start
+        assert segment.sentence_index >= 0
+        cursor = segment.end
+    assert cursor == len(text)
+    assert "".join(text[segment.start : segment.end] for segment in segments) == text
+
+
+def _assert_protected_intact(
+    segments: tuple[BlockSegment, ...],
+    span: tuple[int, int],
+) -> None:
+    """No segment boundary falls strictly inside a protected range."""
+    start, end = span
+    assert any(segment.start <= start and end <= segment.end for segment in segments)
+    for segment in segments[:-1]:
+        assert not (start < segment.end < end)
+
+
+def test_short_text_single_segment() -> None:
+    """Text below the block threshold is one span, even when it exceeds the segment cap."""
+    assert SEGMENT_MIN_BLOCK_CHARS == 600
+    assert SEGMENT_MAX_CHARS == 350
+
+    short = "First sentence stays. Second sentence stays too."
+    assert len(short) < SEGMENT_MIN_BLOCK_CHARS
+    assert segment_text(short) == (BlockSegment(0, len(short), 0),)
+
+    below = _repeat("zeta", SEGMENT_MIN_BLOCK_CHARS)[: SEGMENT_MIN_BLOCK_CHARS - 1]
+    assert len(below) == SEGMENT_MIN_BLOCK_CHARS - 1
+    assert segment_text(below) == (BlockSegment(0, len(below), 0),)
+
+    bulky = _repeat("quartz", 500) + "."
+    assert SEGMENT_MAX_CHARS < len(bulky) < SEGMENT_MIN_BLOCK_CHARS
+    assert segment_text(bulky) == (BlockSegment(0, len(bulky), 0),)
+
+
+def test_sentences_become_segments() -> None:
+    """At the block threshold each sentence is its own segment, in order."""
+    first = "Alpha"
+    while len(first) < 300:
+        first += " alpha"
+    first += ". "
+    second = "Beta"
+    while len(second) < 300:
+        second += " beta"
+    second += "."
+    text = first + second
+    assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
+    assert len(first) <= SEGMENT_MAX_CHARS
+    assert len(second) <= SEGMENT_MAX_CHARS
+
+    segments = segment_text(text)
+    assert segments == (
+        BlockSegment(0, len(first), 0),
+        BlockSegment(len(first), len(text), 1),
+    )
+    assert text[segments[1].start :].startswith("Beta")
+
+
+def test_long_sentence_splits_at_semicolon_first() -> None:
+    """A fitting semicolon wins over a later dash and a conjunction comma."""
+    left = _repeat("alpha", 330)
+    right = _repeat("beta", 250) + " — gently, and quietly"
+    text = f"{left}; {right}."
+    split_at = text.index(";") + 2
+    assert text[split_at - 2 : split_at] == "; "
+    assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
+    assert len(text) > SEGMENT_MAX_CHARS
+    assert split_at <= SEGMENT_MAX_CHARS
+    assert len(text) - split_at <= SEGMENT_MAX_CHARS
+    assert "—" in text[split_at:]
+    assert ", and " in text[split_at:]
+
+    segments = segment_text(text)
+    assert segments == (
+        BlockSegment(0, split_at, 0),
+        BlockSegment(split_at, len(text), 0),
+    )
+
+
+def test_long_sentence_splits_at_dash_before_word() -> None:
+    """Em dash, en dash, and a spaced hyphen are used before a word boundary."""
+    for dash in (" — ", " – ", " - "):
+        left = _repeat("delta", 300)
+        right = _repeat("epsilon", 300)
+        text = f"{left}{dash}{right}."
+        split_at = len(left) + len(dash)
+        assert ";" not in text
+        assert ":" not in text
+        assert "," not in text
+        assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
+        assert split_at <= SEGMENT_MAX_CHARS
+        assert len(text) - split_at <= SEGMENT_MAX_CHARS
+        assert text[split_at : split_at + 7] == "epsilon"
+
+        segments = segment_text(text)
+        assert segments == (
+            BlockSegment(0, split_at, 0),
+            BlockSegment(split_at, len(text), 0),
+        )
+        assert len(segments) == 2
+
+    # A semicolon that still leaves a part over the cap is skipped; dashes that fit are used.
+    skipped = (
+        f"{_repeat('aaa', 170)} — {_repeat('bbb', 170)} — "
+        f"{_repeat('ccc', 120)}; {_repeat('ddd', 124)}."
+    )
+    assert len(skipped) >= SEGMENT_MIN_BLOCK_CHARS
+    assert ":" not in skipped and "," not in skipped
+    semicolon_at = skipped.index(";") + 2
+    assert semicolon_at > SEGMENT_MAX_CHARS or len(skipped) - semicolon_at > SEGMENT_MAX_CHARS
+    dash_points = []
+    cursor = 0
+    while True:
+        found = skipped.find(" — ", cursor)
+        if found < 0:
+            break
+        dash_points.append(found + len(" — "))
+        cursor = found + len(" — ")
+    assert len(dash_points) == 2
+    bounds = [0, *dash_points, len(skipped)]
+    assert all(
+        bounds[index + 1] - bounds[index] <= SEGMENT_MAX_CHARS
+        for index in range(len(bounds) - 1)
+    )
+    segments = segment_text(skipped)
+    assert segments == tuple(
+        BlockSegment(bounds[index], bounds[index + 1], 0)
+        for index in range(len(bounds) - 1)
+    )
+    assert all(segment.end != semicolon_at for segment in segments[:-1])
+
+
+def test_comma_before_conjunction_before_word_boundary() -> None:
+    """A comma before a conjunction is a split; a comma before another word is not."""
+    decoy = ", butter and more, android things, however the hall"
+    left = _repeat("echo", 280) + decoy
+    right = _repeat("foxtrot", 280)
+    text = f"{left}, and {right}."
+    split_at = text.index(", and ") + len(", ")
+    assert text[split_at:].startswith("and ")
+    assert ";" not in text
+    assert ":" not in text
+    assert "—" not in text and "–" not in text and " - " not in text
+    assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
+    assert split_at <= SEGMENT_MAX_CHARS
+    assert len(text) - split_at <= SEGMENT_MAX_CHARS
+    assert text[:split_at].count(",") == 4
+
+    segments = segment_text(text)
+    assert segments == (
+        BlockSegment(0, split_at, 0),
+        BlockSegment(split_at, len(text), 0),
+    )
+
+    for conjunction in (
+        "but",
+        "or",
+        "nor",
+        "yet",
+        "so",
+        "which",
+        "who",
+        "when",
+        "while",
+        "because",
+        "though",
+        "although",
+        "where",
+        "if",
+    ):
+        sample = f"Left clause stays here, {conjunction} the right clause follows."
+        point = sample.index(f", {conjunction} ") + len(", ")
+        sample_segments = segment_text(sample, min_block_chars=1, max_segment_chars=40)
+        assert sample_segments == (
+            BlockSegment(0, point, 0),
+            BlockSegment(point, len(sample), 0),
+        )
+
+
+def test_word_fallback_only_without_punctuation() -> None:
+    """Without clause punctuation a long sentence breaks on spaces, not inside a hyphenated word."""
+    text = _repeat("well-known", 650) + "."
+    assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
+    assert not any(mark in text for mark in (";", ":", "—", "–", " - ", ","))
+
+    segments = segment_text(text)
+    _assert_exact_cover(text, segments)
+    assert len(segments) > 1
+    for segment in segments:
+        assert segment.sentence_index == 0
+        assert segment.end - segment.start <= SEGMENT_MAX_CHARS
+        if segment.start:
+            assert text[segment.start - 1].isspace()
+            assert not text[segment.start].isspace()
+        assert "-" not in text[segment.start : segment.start + 1]
+
+
+def test_segment_never_cuts_footnote_reference() -> None:
+    """A protected footnote range stays inside one segment, even when longer than the cap."""
+    left = _repeat("kappa", 300)
+    right = _repeat("lambda", 300)
+    semicolon_text = f"{left}; {right}."
+    semi = semicolon_text.index(";")
+    footnote = (semi, semi + 3)
+    assert len(semicolon_text) >= SEGMENT_MIN_BLOCK_CHARS
+    assert footnote[0] < semi + 2 < footnote[1]
+
+    semicolon_segments = segment_text(semicolon_text, protected=(footnote,))
+    _assert_exact_cover(semicolon_text, semicolon_segments)
+    _assert_protected_intact(semicolon_segments, footnote)
+
+    plain = _repeat("nu", 900) + "."
+    wide = (200, 600)
+    assert len(plain) >= SEGMENT_MIN_BLOCK_CHARS
+    assert wide[1] - wide[0] > SEGMENT_MAX_CHARS
+    plain_segments = segment_text(plain, protected=(wide,))
+    _assert_exact_cover(plain, plain_segments)
+    _assert_protected_intact(plain_segments, wide)
+    holder = next(
+        segment
+        for segment in plain_segments
+        if segment.start <= wide[0] and wide[1] <= segment.end
+    )
+    assert holder.end - holder.start > SEGMENT_MAX_CHARS
+
+    first = _repeat("mu", 320)
+    second = "Nu " + _repeat("nu", 280)
+    sentence_text = f"{first}. {second}."
+    sentence_point = len(first) + 2
+    assert sentence_text[sentence_point : sentence_point + 2] == "Nu"
+    sentence_footnote = (sentence_point - 2, sentence_point + 2)
+    assert len(sentence_text) >= SEGMENT_MIN_BLOCK_CHARS
+    sentence_segments = segment_text(sentence_text, protected=(sentence_footnote,))
+    _assert_exact_cover(sentence_text, sentence_segments)
+    _assert_protected_intact(sentence_segments, sentence_footnote)
+
+
+def test_segments_cover_text_exactly() -> None:
+    """Every sample is rebuilt by contiguous spans, including titles and a protected range."""
+    unit = "Mr. Smith walked with Dr. Watson. "
+    count = (SEGMENT_MIN_BLOCK_CHARS // len(unit)) + 1
+    titled = unit * count + "Then they stopped."
+    titled_segments = segment_text(titled)
+    _assert_exact_cover(titled, titled_segments)
+    assert len(titled_segments) == count + 1
+    assert [segment.sentence_index for segment in titled_segments] == list(range(count + 1))
+    assert all(not titled[segment.start :].startswith("Smith") for segment in titled_segments)
+    assert all(not titled[segment.start :].startswith("Watson") for segment in titled_segments)
+
+    samples = (
+        "Short paragraph.",
+        _repeat("alpha", 330) + "; " + _repeat("beta", 280) + ".",
+        _repeat("delta", 300) + " — " + _repeat("epsilon", 300) + ".",
+        _repeat("well-known", 650) + ".",
+    )
+    for sample in samples:
+        _assert_exact_cover(sample, segment_text(sample))
+
+    protected_text = _repeat("kappa", 300) + "; " + _repeat("lambda", 300) + "."
+    semi = protected_text.index(";")
+    protected = ((semi, semi + 3), (0, 0), (len(protected_text) + 5, len(protected_text) + 8))
+    _assert_exact_cover(protected_text, segment_text(protected_text, protected=protected))
+    _assert_protected_intact(
+        segment_text(protected_text, protected=protected),
+        (semi, semi + 3),
+    )
+
+
+def test_parts_of_sentence_share_sentence_index() -> None:
+    """Clause parts keep the sentence index; the next sentence gets the next index."""
+    left = _repeat("omicron", 250)
+    right = _repeat("pi", 250)
+    second = "Rho " + _repeat("rho", 100)
+    text = f"{left}; {right}. {second}."
+    clause_at = text.index(";") + 2
+    sentence_at = text.index(". ") + 2
+    assert text[sentence_at:].startswith("Rho ")
+    assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
+    assert clause_at <= SEGMENT_MAX_CHARS
+    assert sentence_at - clause_at <= SEGMENT_MAX_CHARS
+    assert len(text) - sentence_at <= SEGMENT_MAX_CHARS
+
+    segments = segment_text(text)
+    assert segments == (
+        BlockSegment(0, clause_at, 0),
+        BlockSegment(clause_at, sentence_at, 0),
+        BlockSegment(sentence_at, len(text), 1),
+    )
+    assert segments[0].sentence_index == segments[1].sentence_index
+    assert segments[2].sentence_index == segments[0].sentence_index + 1
 

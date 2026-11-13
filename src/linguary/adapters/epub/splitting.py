@@ -4,22 +4,32 @@ Performs intelligent division of long compound paragraphs (PRD/ADR-paragraph-spl
 into balanced reading fragments. Sentence and dialogue boundaries are preferred without
 splitting abbreviations, initials, quotes, or ellipses; long sentences fall back to word
 boundaries.
+
+`segment_text` marks clause-aware spans inside one block and does not divide the block.
+`split_inline_content` remains until P3.T2 as the import adapter: it still projects
+`split_paragraph` fragments, so a long paragraph stays several blocks.
 """
 
 from __future__ import annotations
 
 import re
 from bisect import bisect_left
+from collections.abc import Sequence
 from math import ceil
 
 from linguary.adapters.epub.inline import InlineContent
-from linguary.domain import InlineAnnotation, InlineAnnotationType
+from linguary.domain import BlockSegment, InlineAnnotation, InlineAnnotationType
 
 SPLIT_MIN_CHARS: int = 600
 SPLIT_MIN_SENTENCES: int = 2
 SPLIT_TARGET_CHARS: int = 300
 SPLIT_MIN_PART_CHARS: int = 250
 SPLIT_MAX_PART_CHARS: int = 350
+
+#: Text shorter than this is one segment. Longer text is split into sentences.
+SEGMENT_MIN_BLOCK_CHARS: int = 600
+#: A sentence longer than this is split at the first clause level that fits.
+SEGMENT_MAX_CHARS: int = 350
 
 #: Honorific titles and salutations where a trailing period is followed by a capitalized name,
 #: rather than the start of a new sentence.
@@ -178,6 +188,14 @@ _INITIAL_PATTERN = re.compile(r"(?:^|[\s\"\'\u201c(])([A-Z])$")
 _ATTRIBUTION_PATTERN = re.compile(
     r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+([a-z]+)"
 )
+
+#: Comma, whitespace, then a coordinating or subordinating conjunction as a whole word.
+_CLAUSE_CONJUNCTION_PATTERN = re.compile(
+    r",\s+(?:although|because|though|while|where|which|when|and|but|nor|yet|who|so|or|if)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_LEVELS: tuple[str, ...] = (";", ":", "dash", "conjunction")
+_DASH_MARKS: tuple[str, ...] = ("—", "–", " - ")
 
 
 def _find_split_points(text: str) -> list[int]:
@@ -463,6 +481,216 @@ def split_paragraph(
     )
 
 
+def _normalize_protected(
+    protected: Sequence[tuple[int, int]],
+    length: int,
+) -> tuple[tuple[int, int], ...]:
+    """Clamps protected ranges to `text` and merges overlaps."""
+    ranges: list[tuple[int, int]] = []
+    for start, end in protected:
+        if start < 0:
+            start = 0
+        if end > length:
+            end = length
+        if end <= start:
+            continue
+        ranges.append((start, end))
+    ranges.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in ranges:
+        if merged and start <= merged[-1][1]:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _move_past_protected(point: int, protected: Sequence[tuple[int, int]]) -> int:
+    """Moves a cut that lands inside a protected range to that range's end."""
+    changed = True
+    while changed:
+        changed = False
+        for start, end in protected:
+            if start < point < end:
+                point = end
+                changed = True
+    return point
+
+
+def _boundaries_respecting_protected(
+    start: int,
+    end: int,
+    points: Sequence[int],
+    protected: Sequence[tuple[int, int]],
+) -> list[int]:
+    """Shifts a cut inside a protected range to that range's end and drops empty cuts."""
+    boundaries = [start]
+    for point in points:
+        if point <= boundaries[-1] or point >= end:
+            continue
+        shifted = _move_past_protected(point, protected)
+        if boundaries[-1] < shifted < end:
+            boundaries.append(shifted)
+    boundaries.append(end)
+    return boundaries
+
+
+def _after_mark(text: str, mark_end: int, span_end: int) -> int:
+    point = mark_end
+    while point < span_end and text[point].isspace():
+        point += 1
+    return point
+
+
+def _marked_points(text: str, start: int, end: int, mark: str) -> list[int]:
+    points: list[int] = []
+    cursor = start
+    while cursor < end:
+        found = text.find(mark, cursor, end)
+        if found < 0:
+            break
+        point = _after_mark(text, found + len(mark), end)
+        if start < point < end:
+            points.append(point)
+        cursor = found + len(mark)
+    return points
+
+
+def _dash_points(text: str, start: int, end: int) -> list[int]:
+    points: list[int] = []
+    cursor = start
+    while cursor < end:
+        found: tuple[int, int] | None = None
+        for mark in _DASH_MARKS:
+            mark_at = text.find(mark, cursor, end)
+            if mark_at < 0:
+                continue
+            candidate = (mark_at, mark_at + len(mark))
+            if found is None or candidate[0] < found[0]:
+                found = candidate
+        if found is None:
+            break
+        _, mark_end = found
+        point = _after_mark(text, mark_end, end)
+        if start < point < end:
+            points.append(point)
+        cursor = mark_end
+    return points
+
+
+def _conjunction_points(text: str, start: int, end: int) -> list[int]:
+    points: list[int] = []
+    for match in _CLAUSE_CONJUNCTION_PATTERN.finditer(text, start, end):
+        point = match.start() + 1
+        while point < end and text[point].isspace():
+            point += 1
+        if start < point < end:
+            points.append(point)
+    return points
+
+
+def _clause_points(text: str, start: int, end: int, level: str) -> list[int]:
+    if level in {";", ":"}:
+        return _marked_points(text, start, end, level)
+    if level == "dash":
+        return _dash_points(text, start, end)
+    return _conjunction_points(text, start, end)
+
+
+def _word_split_target(max_segment_chars: int) -> int:
+    """Target length whose existing word-split cap is `max_segment_chars`."""
+    if max_segment_chars == SPLIT_MAX_PART_CHARS:
+        return SPLIT_TARGET_CHARS
+    return max(1, round(max_segment_chars * SPLIT_TARGET_CHARS / SPLIT_MAX_PART_CHARS))
+
+
+def _split_sentence(
+    text: str,
+    start: int,
+    end: int,
+    sentence_index: int,
+    protected: Sequence[tuple[int, int]],
+    max_segment_chars: int,
+) -> list[BlockSegment]:
+    """Splits one sentence at the first clause level whose parts all fit."""
+    if end - start <= max_segment_chars:
+        return [BlockSegment(start, end, sentence_index)]
+
+    for level in _CLAUSE_LEVELS:
+        boundaries = _boundaries_respecting_protected(
+            start,
+            end,
+            _clause_points(text, start, end, level),
+            protected,
+        )
+        if len(boundaries) < 3:
+            continue
+        spans = list(zip(boundaries, boundaries[1:]))
+        if all(span_end - span_start <= max_segment_chars for span_start, span_end in spans):
+            return [
+                BlockSegment(span_start, span_end, sentence_index)
+                for span_start, span_end in spans
+            ]
+
+    word_spans = _split_span_by_words(
+        text,
+        start,
+        end,
+        target_chars=_word_split_target(max_segment_chars),
+    )
+    interior = [span_end for _, span_end in word_spans[:-1]]
+    boundaries = _boundaries_respecting_protected(start, end, interior, protected)
+    return [
+        BlockSegment(span_start, span_end, sentence_index)
+        for span_start, span_end in zip(boundaries, boundaries[1:])
+    ]
+
+
+def segment_text(
+    text: str,
+    *,
+    protected: Sequence[tuple[int, int]] = (),
+    min_block_chars: int = SEGMENT_MIN_BLOCK_CHARS,
+    max_segment_chars: int = SEGMENT_MAX_CHARS,
+) -> tuple[BlockSegment, ...]:
+    """Marks clause-aware spans covering `text` inside one block.
+
+    Text shorter than `min_block_chars` is one segment with sentence index 0.
+    Longer text is split into sentences. A sentence longer than `max_segment_chars`
+    is split at the first level that keeps every part within the limit: `;`,
+    `:`, a dash (`—`, `–`, ` - `), a comma before a conjunction, then a word
+    boundary. Parts of one sentence share its `sentence_index`. Protected ranges
+    are never cut. A single covering span is returned as a segment and is not
+    collapsed to an empty tuple.
+    """
+    if len(text) < min_block_chars:
+        return (BlockSegment(0, len(text), 0),)
+
+    protected_ranges = _normalize_protected(protected, len(text))
+    sentence_boundaries = _boundaries_respecting_protected(
+        0,
+        len(text),
+        _find_split_points(text),
+        protected_ranges,
+    )
+    segments: list[BlockSegment] = []
+    for sentence_index, (start, end) in enumerate(
+        zip(sentence_boundaries, sentence_boundaries[1:])
+    ):
+        segments.extend(
+            _split_sentence(
+                text,
+                start,
+                end,
+                sentence_index,
+                protected_ranges,
+                max_segment_chars,
+            )
+        )
+    return tuple(segments)
+
+
 def split_inline_content(
     content: InlineContent,
     *,
@@ -470,6 +698,10 @@ def split_inline_content(
     min_sentences: int = SPLIT_MIN_SENTENCES,
 ) -> tuple[InlineContent, ...]:
     """Projects inline markup and anchors onto balanced paragraph fragments.
+
+    Temporary import adapter until P3.T2. Boundaries still come from
+    `split_paragraph`, so a long paragraph remains several blocks. Clause-aware
+    spans for one unsplit block are `segment_text` and are not applied here.
 
     Markup offsets are recalculated via `[start - offset, end - offset)`,
     spanning annotations are clipped at fragment boundaries, footnote references are never cut
