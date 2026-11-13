@@ -5,6 +5,7 @@ import unicodedata
 
 from linguary.application.ports.language_detection import LanguageDetector
 from linguary.application.retry_policy import ResultValidationError
+from linguary.domain import BlockProcessingResult
 from linguary.domain.llm_log import Violation
 
 _SERVICE_TOKEN = re.compile(r'\b(?:b\d+|source_block_id|difficulty_id|artifact_index)\b', re.IGNORECASE)
@@ -188,15 +189,37 @@ class ReaderTextPolicy:
     def prepare_results(self, results, protected_quotes=()):
         checked = []
         for result in results:
-            translated = self.prepare('translation', result.translated_text, protected_quotes, block_id=result.block_id) if result.translated_text is not None else None
+            segment_translations = result.segment_translations
+            if segment_translations:
+                segment_translations = tuple(
+                    self.prepare('translation', slot, protected_quotes, block_id=result.block_id)
+                    if slot and slot.strip() else slot
+                    for slot in segment_translations
+                )
+                translated = _rebuilt_translation(segment_translations)
+            else:
+                translated = self.prepare('translation', result.translated_text, protected_quotes, block_id=result.block_id) if result.translated_text is not None else None
             hints = tuple(replace(hint,
                 translation=self.prepare('glossary_hint.translation', hint.translation, (hint.original,), block_id=result.block_id),
                 note=self.prepare('glossary_hint.note', hint.note, (hint.original, hint.translation), block_id=result.block_id) if hint.note else hint.note)
                 for hint in result.glossary_hints)
             notes = tuple(replace(note, note=self.prepare('language_note.note', note.note,
                           (note.original_excerpt, note.translated_excerpt or ''), block_id=result.block_id)) for note in result.language_notes)
-            checked.append(replace(result, translated_text=translated, glossary_hints=hints, language_notes=notes))
+            checked.append(replace(
+                result,
+                translated_text=translated,
+                segment_translations=segment_translations,
+                glossary_hints=hints,
+                language_notes=notes,
+            ))
         return tuple(checked)
+
+
+def _rebuilt_translation(slots):
+    """Join via the domain method. A half-built result would reject the new slots."""
+    carrier = object.__new__(BlockProcessingResult)
+    object.__setattr__(carrier, 'segment_translations', slots)
+    return BlockProcessingResult.rebuild_translation(carrier)
 
 
 def learner_instructions(reader_level):

@@ -1,6 +1,6 @@
 """Finite durable recovery of disjoint, source-bound processing scopes."""
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
 from uuid import uuid4
@@ -109,6 +109,31 @@ def root_manifest(*, book_id, conditions_id, glossary_sha, analysis_sha, plan_sh
         policy=asdict(policy or RecoveryPolicy()), block_chars=block_chars or {},
         note_owners=list(note_owners), chapter_chars=chapter_chars, notes_per_chapter=notes_per_chapter)
     return {**value, 'root_key': _sha(value)}
+
+
+def _unit_with_stored_segments(unit, stored):
+    """The saved result keeps a uniform mode tuple that `of_blocks` collapses."""
+    items = tuple(
+        replace(item, segment_treatments=result.segment_treatments)
+        for item, result in zip(unit.items, stored, strict=True)
+    )
+    return replace(unit, items=items)
+
+
+def _historical_block(result):
+    from linguary.application.llm_dto import BlockResultResponse, GlossaryHintResponse, SegmentTranslationResponse
+    hints = tuple(
+        GlossaryHintResponse(hint.original, hint.translation, hint.note)
+        for hint in result.glossary_hints
+    )
+    segments = tuple(
+        SegmentTranslationResponse(index=position + 1, translated_text=text)
+        for position, text in enumerate(result.segment_translations)
+        if text and text.strip()
+    )
+    if segments:
+        return BlockResultResponse(result.block_id, result.treatment, None, hints, segments)
+    return BlockResultResponse(result.block_id, result.treatment, result.translated_text, hints)
 
 
 class Recovery:
@@ -245,16 +270,16 @@ class Recovery:
 
     def _validate_historical(self, transaction, work, block_ids, blocks, validator, conditions):
         from linguary.domain import TranslationUnit
-        from linguary.application.llm_dto import TranslationResultResponse, BlockResultResponse, GlossaryHintResponse, LanguageNoteResponse
+        from linguary.application.llm_dto import TranslationResultResponse, LanguageNoteResponse
         from linguary.application.validators.content_plan import validate_content_coverage, validate_saved_content_coverage
         from linguary.domain.content_plan import ContentEvidence
         unit = TranslationUnit.of_blocks(id='historical-coverage', blocks=tuple(blocks[b] for b in block_ids), plan=work.analysis.treatment_plan)
         stored = tuple(transaction.results.get(work.run.id, block) for block in block_ids)
         if any(item is None for item in stored):
             raise RecoveryError('unsafe_partition')
+        unit = _unit_with_stored_segments(unit, stored)
         unit.validate_results(stored)
-        payload = TranslationResultResponse(blocks=tuple(BlockResultResponse(result.block_id, result.treatment, result.translated_text,
-            tuple(GlossaryHintResponse(h.original, h.translation, h.note) for h in result.glossary_hints)) for result in stored),
+        payload = TranslationResultResponse(blocks=tuple(_historical_block(result) for result in stored),
             language_notes=tuple(LanguageNoteResponse(note.block_id, note.original_excerpt, note.note, note.translated_excerpt)
                                  for result in stored for note in result.language_notes))
         validator.validate(payload, unit=unit, target_language=work.target_language,

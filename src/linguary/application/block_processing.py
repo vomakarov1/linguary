@@ -505,6 +505,10 @@ class TranslationCall:
                         else result
                         for result in results
                     )
+                results = tuple(
+                    _retain_saved_segments(result, previous_results.get(result.block_id))
+                    for result in results
+                )
                 text_changed = any(
                     previous_results.get(result.block_id) != result
                     for result in results
@@ -758,6 +762,27 @@ def _can_split_truncated_scope(
             if depth >= policy["max_depth"] or leaves + 1 > policy["max_leaves"]:
                 return False
     return True
+
+
+def _retain_saved_segments(result, previous):
+    """Keep segment fields when a later replace leaves both tuples empty.
+
+    A different treatment or joined translation is stored as given: copying the
+    old slots onto it would break the domain join.
+    """
+    if previous is None:
+        return result
+    if result.segment_treatments or result.segment_translations:
+        return result
+    if not previous.segment_treatments and not previous.segment_translations:
+        return result
+    if result.treatment is not previous.treatment or result.translated_text != previous.translated_text:
+        return result
+    return replace(
+        result,
+        segment_treatments=previous.segment_treatments,
+        segment_translations=previous.segment_translations,
+    )
 
 
 def _load_result_bindings(
