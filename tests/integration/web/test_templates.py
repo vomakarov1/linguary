@@ -114,7 +114,7 @@ def _pronunciation_book(
 
 
 @pytest.mark.parametrize("variant", ["uk", "us"])
-def test_pronunciation_template_primary_and_repeat(
+def test_pronunciation_template_shows_one_ipa_note_per_block_without_repeat_or_attribution(
     client: TestClient, application: Application, variant: Literal["uk", "us"]
 ) -> None:
     scenario = _pronunciation_book(application, variant=variant)
@@ -162,7 +162,7 @@ def test_pronunciation_template_combines_dictionary_meaning(
     assert tree.text_content().count("выдуманное значение") == 1
 
 
-def test_pronunciation_template_ambiguous_dictionary_occurrences_stay_separate(
+def test_pronunciation_template_folds_a_repeated_quote_into_one_note(
     client: TestClient, application: Application
 ) -> None:
     scenario = _pronunciation_book(application, texts=("zorp and zorp",), meaning=True)
@@ -225,7 +225,7 @@ def test_pronunciation_template_fragment_refresh(
     assert _plain_source(tree.xpath('//p[@class="lg-src"]')[0]) == "zorp"
 
 
-def test_pronunciation_ipa_guide_visible_and_keyboard_accessible(
+def test_ipa_key_is_visible_once_and_the_block_fragment_has_no_guide(
     client: TestClient, application: Application
 ) -> None:
     scenario = _pronunciation_book(application, texts=("zorp",))
@@ -247,7 +247,7 @@ def test_pronunciation_ipa_guide_visible_and_keyboard_accessible(
     assert "вторичное" not in response.text
 
 
-def test_pronunciation_template_escapes_attribution(
+def test_pronunciation_template_omits_attribution_without_injecting_markup(
     client: TestClient, application: Application
 ) -> None:
     label = '<script>alert("source")</script>'
@@ -916,7 +916,7 @@ def test_result_groups_wrapper_and_refresh_url(client, application):
         assert not root.xpath('.//*[@data-result-header] | .//form[contains(@action, "/reset")]')
 
 
-def test_result_groups_template_keeps_pronunciation_guide_and_original(client, application):
+def test_result_groups_template_keeps_original_and_one_ipa_key(client, application):
     original = '  A zorp.\n'
     scenario = _pronunciation_book(application, texts=(original, 'zorp'))
     tree = html.fromstring(client.get(f'/books/{scenario.book_id}/result', headers={

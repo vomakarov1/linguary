@@ -959,7 +959,7 @@ def test_result_groups_only_adjacent_parts_and_keeps_exact_occurrences(client, a
         assert polled.json()["fragment_assistance"] == block["fragment_assistance"]
 
 
-def test_group_marks_unresolved_help_without_changing_the_source(client, application):
+def test_unresolved_kind_stays_in_json_and_the_page_omits_the_placeholder(client, application):
     scenario, results, original = _split_result_scenario(application)
     item = replace(results[1].fragment_assistances[0], kind="unresolved", text=None)
     with application.unit_of_work.transaction() as uow:
@@ -1147,7 +1147,7 @@ def test_pronunciation_notices_route_is_offline_and_allowlisted(client, monkeypa
     assert '/private/' not in failed.text
 
 
-def test_pronunciation_notice_link_and_escaped_attribution(client, application):
+def test_pronunciation_sources_link_follows_the_ipa_key_without_attribution(client, application):
     from lxml import html
 
     scenario = _pronunciation_results(application)
@@ -1167,7 +1167,7 @@ def test_pronunciation_notice_link_and_escaped_attribution(client, application):
     assert len(links) == 1 and links[0].get('href').endswith('/pronunciation-sources')
 
 
-def test_legacy_pronunciation_attribution_still_visible(client, application):
+def test_result_page_links_pronunciation_sources_and_hides_attribution(client, application):
     scenario = _pronunciation_results(application)
     response = client.get(f'/books/{scenario.book_id}/result', headers={'accept': 'text/html'})
     assert response.status_code == 200
@@ -1285,7 +1285,7 @@ def test_result_groups_fragment_matches_full_book_snapshot(client, application, 
     assert len(refreshed.xpath('.//span[@class="lg-ipa"]')) == 1
 
 
-def test_pronunciation_groups_refresh_promotes_later_primary(client, application):
+def test_pronunciation_groups_refresh_leaves_the_later_blocks_own_ipa_note(client, application):
     scenario = _pronunciation_results(application)
     before = _groups_tree(client, scenario)
     old_id = before.xpath('.//span[@class="lg-ipa"]/ancestor::li[1]')[0].get('id')
@@ -1295,13 +1295,13 @@ def test_pronunciation_groups_refresh_promotes_later_primary(client, application
             replace(result, pronunciation_assistances=()) if result.block_id == scenario.block_ids()[0]
             else result for result in results])
     after = _groups_tree(client, scenario)
-    primary, = after.xpath('.//span[@class="lg-ipa"]/ancestor::li[1]')
-    assert primary.get('id') != old_id
-    assert primary.xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids(1)[0]}'
+    note, = after.xpath('.//span[@class="lg-ipa"]/ancestor::li[1]')
+    assert note.get('id') != old_id
+    assert note.xpath('ancestor::article')[0].get('id') == f'block-{scenario.block_ids(1)[0]}'
     assert not after.xpath('.//a[@class="pronunciation-repeat"]')
 
 
-def test_pronunciation_groups_refresh_demotes_old_primary(client, application):
+def test_pronunciation_groups_refresh_restores_each_blocks_own_ipa_note(client, application):
     scenario = _pronunciation_results(application)
     with application.unit_of_work.transaction() as tx:
         results = tx.results.list_for_run(scenario.run_id)
@@ -1321,7 +1321,7 @@ def test_pronunciation_groups_refresh_demotes_old_primary(client, application):
     ]
 
 
-def test_pronunciation_groups_refresh_splits_changed_ipa(client, application):
+def test_pronunciation_groups_refresh_shows_a_changed_ipa_on_its_own_note(client, application):
     scenario = _pronunciation_results(application)
     with application.unit_of_work.transaction() as tx:
         results = tx.results.list_for_run(scenario.run_id)

@@ -234,7 +234,7 @@ def test_html_uploaded_budget_is_rejected_without_queue(configured_client, confi
         assert tx.tasks.list_for_book(scenario.book_id) == ()
 
 
-def test_partial_book_result_preserves_primary_pronunciation_hint_id_across_chapters(client, application):
+def test_partial_book_result_keeps_hint_id_in_json_and_omits_it_on_the_page(client, application):
     from linguary.application.book_overview import book_result
     from linguary.domain import BlockProcessingResult, BlockTreatment
     from linguary.domain.content_plan import SourceAnchor
