@@ -64,12 +64,14 @@ def _referenced_defs(schema: dict[str, Any]) -> set[str]:
     return seen
 
 
-def _v1_analysis_wire_schema(schema: dict[str, Any]) -> dict[str, Any]:
+def _omit_wire_fields(
+    schema: dict[str, Any], omitted: dict[str, frozenset[str]]
+) -> dict[str, Any]:
     schema = copy.deepcopy(schema)
     defs = schema.get("$defs")
     if not isinstance(defs, dict):
         return schema
-    for name, fields in _V1_ANALYSIS_FIELDS.items():
+    for name, fields in omitted.items():
         node = defs.get(name)
         if not isinstance(node, dict):
             continue
@@ -84,6 +86,16 @@ def _v1_analysis_wire_schema(schema: dict[str, Any]) -> dict[str, Any]:
     for name in [name for name in defs if name not in used]:
         defs.pop(name)
     return schema
+
+
+def _v1_analysis_wire_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    return _omit_wire_fields(schema, _V1_ANALYSIS_FIELDS)
+
+
+# Переводы сегментов принимаются моделью, но не входят в замороженную строгую схему v1.
+_V1_TRANSLATION_FIELDS = {
+    "BlockResultSchema": frozenset({"segments"}),
+}
 
 
 class GlossaryCandidateSchema(_ResponseModel):
@@ -153,6 +165,13 @@ class GlossaryHintSchema(_ResponseModel):
     note: str | None
 
 
+class SegmentTranslationSchema(_ResponseModel):
+    """Перевод одного сегмента. Индекс начинается с 1."""
+
+    index: int = Field(ge=1, strict=True)
+    translated_text: str = Field(min_length=1)
+
+
 class BlockResultSchema(_ResponseModel):
     """Результат обработки одного входного текстового блока."""
 
@@ -160,10 +179,19 @@ class BlockResultSchema(_ResponseModel):
     treatment: TextualTreatment
     translated_text: str | None
     glossary_hints: list[GlossaryHintSchema]
+    # Пустой список сохраняет проверку состава по режиму блока.
+    segments: list[SegmentTranslationSchema] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_treatment_composition(self) -> BlockResultSchema:
         """The result composition must correspond to the declared treatment (PRD § 15)."""
+        if self.segments:
+            if self.translated_text is not None:
+                raise ValueError(
+                    f"для блока {self.source_block_id} с переводами сегментов "
+                    "полный перевод блока недопустим"
+                )
+            return self
         treatment = BlockTreatment(self.treatment)
         has_translation = bool(self.translated_text and self.translated_text.strip())
         if treatment.requires_translation and not has_translation:
@@ -204,6 +232,13 @@ class TranslationResultSchema(_ResponseModel):
     blocks: list[BlockResultSchema] = Field(min_length=1)
     language_notes: list[LanguageNoteSchema]
 
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        schema = super().model_json_schema(*args, **kwargs)
+        if cls is not TranslationResultSchema:
+            return schema
+        return _omit_wire_fields(schema, _V1_TRANSLATION_FIELDS)
+
 
 __all__ = [
     "BeforeYouReadEntrySchema",
@@ -218,6 +253,7 @@ __all__ = [
     "GlossaryCandidateSchema",
     "GlossaryHintSchema",
     "LanguageNoteSchema",
+    "SegmentTranslationSchema",
     "SegmentTreatmentSchema",
     "TextualTreatment",
     "TranslationResultSchema",

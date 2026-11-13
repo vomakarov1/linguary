@@ -151,6 +151,20 @@ class ChapterAnalysisResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class SegmentTranslationResponse:
+    """Translation of one segment. `index` starts at 1."""
+
+    index: int
+    translated_text: str
+
+    def __post_init__(self) -> None:
+        if type(self.index) is not int or self.index < 1:
+            raise LLMPayloadError("индекс сегмента начинается с 1")
+        if not isinstance(self.translated_text, str) or not self.translated_text.strip():
+            raise LLMPayloadError(f"перевод сегмента {self.index} пуст")
+
+
+@dataclass(frozen=True, slots=True)
 class GlossaryHintResponse:
     """Translation of an individual word or short phrase inside a block (PRD § 10.1)."""
 
@@ -169,23 +183,33 @@ class GlossaryHintResponse:
 class BlockResultResponse:
     """Processing result for a single input textual block.
 
-    Composition depends on treatment: full translation is mandatory and allowed only for
-    `TRANSLATE`, glossary hints are mandatory for `GLOSSARY_ONLY` and forbidden
-    for `READ_AS_IS` (PRD § 15).
+    Composition depends on treatment when `segments` is empty: full translation is
+    mandatory and allowed only for `TRANSLATE`, glossary hints are mandatory for
+    `GLOSSARY_ONLY` and forbidden for `READ_AS_IS` (PRD § 15). Non-empty `segments`
+    requires `translated_text` to be absent and skips that block-level check.
     """
 
     source_block_id: str
     treatment: BlockTreatment
     translated_text: str | None = None
     glossary_hints: tuple[GlossaryHintResponse, ...] = ()
+    segments: tuple[SegmentTranslationResponse, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "segments", tuple(self.segments))
         if not self.source_block_id.strip():
             raise LLMPayloadError("результат обработки не привязан к блоку")
         if not self.treatment.is_textual:
             raise LLMPayloadError(
                 f"блок {self.source_block_id} с режимом {self.treatment} модели не передаётся"
             )
+        if self.segments:
+            if self.translated_text is not None:
+                raise LLMPayloadError(
+                    f"для блока {self.source_block_id} с переводами сегментов "
+                    "полный перевод блока недопустим"
+                )
+            return
         has_translation = bool(self.translated_text and self.translated_text.strip())
         if self.treatment.requires_translation and not has_translation:
             raise LLMPayloadError(
@@ -320,6 +344,7 @@ __all__ = [
     "GlossaryHintResponse",
     "LLMPayloadError",
     "LanguageNoteResponse",
+    "SegmentTranslationResponse",
     "SegmentTreatmentResponse",
     "TranslationResultResponse",
     "TreatmentPlanItemResponse",

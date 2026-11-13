@@ -80,6 +80,7 @@ from linguary.application.llm_dto import (
     GlossaryHintResponse,
     LanguageNoteResponse,
     LLMPayloadError,
+    SegmentTranslationResponse,
     SegmentTreatmentResponse,
     TranslationResultResponse,
     TreatmentPlanItemResponse,
@@ -418,6 +419,10 @@ def _block_result(schema: BlockResultSchema) -> BlockResultResponse:
         treatment=BlockTreatment(schema.treatment),
         translated_text=schema.translated_text or None,
         glossary_hints=tuple(_glossary_hint(item) for item in schema.glossary_hints),
+        segments=tuple(
+            SegmentTranslationResponse(item.index, item.translated_text)
+            for item in schema.segments
+        ),
     )
 
 

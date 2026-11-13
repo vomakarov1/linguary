@@ -88,13 +88,17 @@ class ExpectedBlock:
 
     `treatment` is unset where the mode is chosen by the model: in chapter analysis, the treatment
     plan is model output rather than a request constraint (PRD § 14).
+
+    `segment_treatments` is empty when the retry has no per-segment requirement.
     """
 
     block_id: str
     treatment: BlockTreatment | None = None
     context_only: bool = False
+    segment_treatments: tuple[BlockTreatment, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "segment_treatments", tuple(self.segment_treatments))
         if not self.block_id.strip():
             raise RetryPolicyError("идентификатор ожидаемого блока пуст")
         if self.treatment is not None and not self.treatment.is_textual:
