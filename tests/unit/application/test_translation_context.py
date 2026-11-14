@@ -27,6 +27,7 @@ from linguary.domain.name_translation import NameTranslationPolicy, NameTranslat
 from linguary.application.llm_dto import (
     BlockResultResponse,
     LanguageNoteResponse,
+    SegmentTranslationResponse,
     TranslationResultResponse,
 )
 from linguary.application.ports.llm import LLMResponseKind
@@ -2441,9 +2442,10 @@ def test_instructions_require_segments_for_segmented_block() -> None:
 
 
 def test_contract_v1_accepts_whole_translation_of_long_paragraph() -> None:
-    """Contract 1 keeps stored segments but accepts one translated_text.
+    """Contract 1 keeps stored segments and accepts either answer shape.
 
     The request shows the paragraph whole: no segment rule and no `[b1.1]`.
+    A whole `translated_text` is accepted, and so is an answer with `segments`.
     Contract 3 still rejects that whole answer and asks for segment lines.
     """
     import re
@@ -2493,6 +2495,7 @@ def test_contract_v1_accepts_whole_translation_of_long_paragraph() -> None:
     assert "[b1.1]" not in legacy.request.input_text
     assert text in legacy.request.input_text
     assert legacy.expectation.blocks[0].segment_treatments == ()
+    assert legacy.expectation.blocks[0].whole_translation_allowed is True
     (result,) = make_validator().validate(
         payload,
         unit=unit,
@@ -2503,10 +2506,33 @@ def test_contract_v1_accepts_whole_translation_of_long_paragraph() -> None:
     assert result.translated_text == translated
     assert result.segment_translations == ()
 
+    left = "Путник шёл по тихой дороге мимо старой мельницы и тёмного леса."
+    right = "Он не останавливался, пока огни деревни не стали близко."
+    (slotted,) = make_validator().validate(
+        make_response((
+            BlockResultResponse(
+                source_block_id=block.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text=None,
+                segments=(
+                    SegmentTranslationResponse(1, left),
+                    SegmentTranslationResponse(2, right),
+                ),
+            ),
+        )),
+        unit=unit,
+        target_language=TARGET_LANGUAGE,
+        note_id_factory=note_ids(),
+        expectation=legacy.expectation,
+    )
+    assert slotted.segment_translations == (left, right)
+    assert slotted.translated_text == f"{left} {right}"
+
     planned = _processing_context(unit, contract=3)
     assert planned.request.contract_version == 3
     assert _SEGMENT_TRANSLATION_RULE in planned.request.instructions
     assert "[b1.1]" in planned.request.input_text
+    assert planned.expectation.blocks[0].whole_translation_allowed is False
     assert planned.expectation.blocks[0].segment_treatments == (
         BlockTreatment.TRANSLATE,
         BlockTreatment.TRANSLATE,

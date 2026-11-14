@@ -1247,7 +1247,12 @@ class ContextBuilder:
                         treatment=item.treatment,
                         context_only=alias in pure_read_as_is_aliases,
                         segment_treatments=(
-                            _stored_segment_modes(item) if segment_lines else ()
+                            _stored_segment_modes(item)
+                            if segment_lines
+                            else item.segment_treatments
+                        ),
+                        whole_translation_allowed=(
+                            not segment_lines and len(item.block.segments) >= 2
                         ),
                     )
                     for alias, item in zip(aliases, unit.items, strict=True)

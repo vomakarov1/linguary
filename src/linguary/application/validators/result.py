@@ -114,8 +114,9 @@ class TranslationResultValidator:
         expected = expectation or expectation_for_unit(
             unit, target_language=target_language
         )
-        # Пустые режимы ожидания — цельный перевод, даже если документ уже нарезан.
-        unit = _unit_for_expectation(unit, expected)
+        # Цельный перевод снимает сегменты только по явному признаку и только
+        # у ответа без segments. Пустые режимы ожидания сегменты не снимают.
+        unit = _unit_for_whole_translation(unit, expected, payload)
         self._ensure(coverage_violation(payload, unit=unit), expected)
         for block in payload.blocks:
             single = replace(payload, blocks=(block,))
@@ -446,20 +447,30 @@ def _unit_for_domain_check(unit: TranslationUnit) -> TranslationUnit:
     return replace(unit, items=tuple(items))
 
 
-def _unit_for_expectation(
-    unit: TranslationUnit, expectation: ResultExpectation
+def _unit_for_whole_translation(
+    unit: TranslationUnit,
+    expectation: ResultExpectation,
+    payload: TranslationResultResponse,
 ) -> TranslationUnit:
-    """Один промежуток, если ожидание не требует перевода по сегментам.
+    """Один промежуток только у цельного ответа с явным разрешением.
 
-    Контракт 1 хранит сегменты, но строгая схема не принимает `segments`.
-    Контракты с режимом на каждый промежуток оставляют сохранённые сегменты.
+    Пустой `segment_treatments` по-прежнему значит, что требований по сегментам
+    нет, и сам сегменты не снимает. Ответ со `segments` проверяется по
+    сохранённому плану, даже если цельный перевод для этого блока допустим.
     """
     if len(expectation.blocks) != len(unit.items):
         return unit
+    answered = {block.source_block_id: block for block in payload.blocks}
     items: list[TranslationUnitItem] = []
     changed = False
     for item, spec in zip(unit.items, expectation.blocks, strict=True):
-        if spec.segment_treatments or len(item.block.segments) < 2:
+        answer = answered.get(item.block.id)
+        if (
+            answer is None
+            or answer.segments
+            or not spec.whole_translation_allowed
+            or len(item.block.segments) < 2
+        ):
             items.append(item)
             continue
         changed = True

@@ -90,12 +90,16 @@ class ExpectedBlock:
     plan is model output rather than a request constraint (PRD § 14).
 
     `segment_treatments` is empty when the retry has no per-segment requirement.
+    That empty tuple does not permit a whole-block translation.
+    `whole_translation_allowed` is the separate permission to accept one
+    `translated_text` for a block that still has stored segments.
     """
 
     block_id: str
     treatment: BlockTreatment | None = None
     context_only: bool = False
     segment_treatments: tuple[BlockTreatment, ...] = ()
+    whole_translation_allowed: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "segment_treatments", tuple(self.segment_treatments))
