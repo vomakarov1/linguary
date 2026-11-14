@@ -439,6 +439,7 @@ class _LazyTranslationInput:
     pure_read_as_is_aliases: frozenset[str] = frozenset()
     pronunciation_version: int | None = None
     regeneration: bool = False
+    segment_lines: bool = True
 
     def __call__(self) -> str:
         return self.builder._translation_input(
@@ -453,6 +454,7 @@ class _LazyTranslationInput:
             pure_read_as_is_aliases=self.pure_read_as_is_aliases,
             pronunciation_version=self.pronunciation_version,
             regeneration=self.regeneration,
+            segment_lines=self.segment_lines,
         )
 
     def _fields_tuple(self) -> tuple[object, ...]:
@@ -468,6 +470,7 @@ class _LazyTranslationInput:
             self.pure_read_as_is_aliases,
             self.pronunciation_version,
             self.regeneration,
+            self.segment_lines,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -1150,7 +1153,10 @@ class ContextBuilder:
             instructions += '\n' + self._prompt_templates['pronunciation_processing']
         if policy_version != LEGACY_TRANSLATION_POLICY:
             instructions += "\n" + _TRANSLATION_CONTEXT_V2
-        shape = _shape_instructions(unit)
+        # Контракт 1: нет плана и нет english_help. Строгая схема v1 не принимает segments.
+        contract_version = 4 if self._english_help else version
+        segment_lines = contract_version != 1
+        shape = _shape_instructions(unit, segment_lines=segment_lines)
         if shape:
             instructions = instructions.rstrip() + "\n\n" + shape
         if unit.section_id != section.id:
@@ -1201,6 +1207,7 @@ class ContextBuilder:
             pure_read_as_is_aliases=pure_read_as_is_aliases,
             pronunciation_version=pronunciation_version,
             regeneration=regeneration,
+            segment_lines=segment_lines,
         )
         input_text = self._translation_input(**input_args, neighbours=neighbours)
         mandatory_input = (
@@ -1216,6 +1223,7 @@ class ContextBuilder:
                 pure_read_as_is_aliases=pure_read_as_is_aliases,
                 pronunciation_version=pronunciation_version,
                 regeneration=regeneration,
+                segment_lines=segment_lines,
             )
             if neighbours and policy_version != LEGACY_TRANSLATION_POLICY
             else None
@@ -1225,7 +1233,7 @@ class ContextBuilder:
             unit_id=unit.id,
             request=LLMRequest.for_translation(
                 pronunciation_candidates_version=pronunciation_version,
-                contract_version=4 if self._english_help else version,
+                contract_version=contract_version,
                 name_translation_policy_version=self._name_translation_policy.version if self._name_translation_policy else None,
                 instructions=instructions,
                 input_text=input_text,
@@ -1238,7 +1246,9 @@ class ContextBuilder:
                         block_id=alias,
                         treatment=item.treatment,
                         context_only=alias in pure_read_as_is_aliases,
-                        segment_treatments=_stored_segment_modes(item),
+                        segment_treatments=(
+                            _stored_segment_modes(item) if segment_lines else ()
+                        ),
                     )
                     for alias, item in zip(aliases, unit.items, strict=True)
                 ),
@@ -1266,6 +1276,7 @@ class ContextBuilder:
         pure_read_as_is_aliases: frozenset[str] = frozenset(),
         pronunciation_version: int | None = None,
         regeneration: bool = False,
+        segment_lines: bool = True,
     ) -> str:
         """Processing request prompt text: header, chapter digest, glossary, and blocks.
 
@@ -1344,6 +1355,7 @@ class ContextBuilder:
                 unit,
                 pure_read_as_is_aliases=pure_read_as_is_aliases,
                 pronunciation_version=pronunciation_version,
+                segment_lines=segment_lines,
             ),
             _owned_content_plan(analysis, unit),
         ]
@@ -2542,10 +2554,13 @@ _POEM_TRANSLATION_RULE = (
 )
 
 
-def _shape_instructions(unit: TranslationUnit) -> str:
-    """Дополнение инструкции: сегменты и стихи только когда они есть в запросе."""
+def _shape_instructions(unit: TranslationUnit, *, segment_lines: bool) -> str:
+    """Дополнение инструкции: сегменты и стихи только когда они есть в запросе.
+
+    Контракт 1 не показывает строки сегментов и не просит поле segments.
+    """
     parts: list[str] = []
-    if any(len(item.block.segments) >= 2 for item in unit.items):
+    if segment_lines and any(len(item.block.segments) >= 2 for item in unit.items):
         parts.append(_SEGMENT_TRANSLATION_RULE)
     if any(item.block.type is BlockType.POEM for item in unit.items):
         parts.append(_POEM_TRANSLATION_RULE)
@@ -2574,13 +2589,15 @@ def _format_unit_block(
     index: int,
     item: TranslationUnitItem,
     pure_read_as_is_aliases: frozenset[str],
+    *,
+    segment_lines: bool,
 ) -> str:
     """Строка блока и, для нескольких сегментов, пара строк на каждый сегмент."""
     alias = _alias(index)
     header = f"[{alias}] режим {item.treatment}"
     if alias in pure_read_as_is_aliases:
         header += " (только для контекста, в blocks не возвращать)"
-    modes = _stored_segment_modes(item)
+    modes = _stored_segment_modes(item) if segment_lines else ()
     if not modes:
         return f"{header}\n{source_text_for_model(item.block, footnote_markers=True)}"
     visible, origins = _visible_text_origins(item.block, footnote_markers=True)
@@ -2598,15 +2615,18 @@ def _unit_blocks(
     pure_read_as_is_aliases: frozenset[str] = frozenset(),
     *,
     pronunciation_version: int | None = None,
+    segment_lines: bool = True,
 ) -> str:
     """Блоки группы с псевдонимами и режимами.
 
-    Многосегментный блок — строка блока и текст каждого сохранённого сегмента.
-    Блок без сохранённых сегментов остаётся двумя строками, без `[bN.1]`.
+    Многосегментный блок контрактов 2–4 — строка блока и текст каждого сегмента.
+    Контракт 1 и блок без сохранённых сегментов остаются двумя строками, без `[bN.1]`.
     """
     lines = ["Блоки для обработки:"]
     lines.extend(
-        _format_unit_block(index, item, pure_read_as_is_aliases)
+        _format_unit_block(
+            index, item, pure_read_as_is_aliases, segment_lines=segment_lines,
+        )
         for index, item in enumerate(unit.items, start=1)
     )
     if pure_read_as_is_aliases and pronunciation_version:

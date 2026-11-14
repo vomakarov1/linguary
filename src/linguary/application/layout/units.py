@@ -65,8 +65,9 @@ def block_units(
     `TRANSLATE` segments, the same way `rebuild_translation` joins them. No
     such text, including when `result` is none, leaves the translation empty.
     A one-span `TRANSLATE` block is the exception: an empty slot join uses
-    `translated_text` when that string is non-empty. Two or more spans still
-    do not copy `translated_text`.
+    `translated_text` when that string is non-empty. Several spans with no
+    segment translations do the same once, on one unit that covers the block.
+    A result that carries segment translations still joins only those slots.
 
     `speakers` maps a dialogue line `(line_start, line_end)` to a name. The
     unit containing `line_start` (`start <= line_start < end`) records the
@@ -82,13 +83,24 @@ def block_units(
             f"число режимов {len(chosen)} не совпадает с числом сегментов {len(spans)}"
         )
     parts = compose_parts(block, chosen)
+    whole = _whole_block_translation(result, chosen)
+    if whole is not None:
+        spans = block.segment_spans
+        parts = (
+            LayoutPart(
+                start=spans[0].start,
+                end=spans[-1].end,
+                treatment=BlockTreatment.TRANSLATE,
+                segments=tuple(range(len(spans))),
+            ),
+        )
     note_buckets = _notes_by_part(parts, notes)
     speaker_names = _speakers_by_part(parts, speakers)
     poem = block.type is BlockType.POEM
     last = len(parts) - 1
     units: list[LayoutUnit] = []
     for index, part in enumerate(parts):
-        translation = _part_translation(part, result, chosen)
+        translation = whole if whole is not None else _part_translation(part, result, chosen)
         speaker = speaker_names[index]
         part_notes = list(note_buckets[index])
         if speaker is not None and translation is None:
@@ -107,6 +119,26 @@ def block_units(
             )
         )
     return tuple(units)
+
+
+def _whole_block_translation(
+    result: BlockProcessingResult | None,
+    treatments: tuple[BlockTreatment | None, ...],
+) -> str | None:
+    """Block translation shown once when no segment slot has text.
+
+    One span stays on the fallback in `_part_translation`. Slots still win.
+    """
+    if result is None or len(treatments) < 2:
+        return None
+    if any(text and text.strip() for text in result.segment_translations):
+        return None
+    if any(mode is not BlockTreatment.TRANSLATE for mode in treatments):
+        return None
+    stored = result.translated_text
+    if not stored or not stored.strip():
+        return None
+    return stored
 
 
 def _part_translation(

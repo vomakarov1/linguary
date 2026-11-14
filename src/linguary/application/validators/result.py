@@ -114,6 +114,8 @@ class TranslationResultValidator:
         expected = expectation or expectation_for_unit(
             unit, target_language=target_language
         )
+        # Пустые режимы ожидания — цельный перевод, даже если документ уже нарезан.
+        unit = _unit_for_expectation(unit, expected)
         self._ensure(coverage_violation(payload, unit=unit), expected)
         for block in payload.blocks:
             single = replace(payload, blocks=(block,))
@@ -439,6 +441,35 @@ def _unit_for_domain_check(unit: TranslationUnit) -> TranslationUnit:
             continue
         changed = True
         items.append(replace(item, segment_treatments=modes))
+    if not changed:
+        return unit
+    return replace(unit, items=tuple(items))
+
+
+def _unit_for_expectation(
+    unit: TranslationUnit, expectation: ResultExpectation
+) -> TranslationUnit:
+    """Один промежуток, если ожидание не требует перевода по сегментам.
+
+    Контракт 1 хранит сегменты, но строгая схема не принимает `segments`.
+    Контракты с режимом на каждый промежуток оставляют сохранённые сегменты.
+    """
+    if len(expectation.blocks) != len(unit.items):
+        return unit
+    items: list[TranslationUnitItem] = []
+    changed = False
+    for item, spec in zip(unit.items, expectation.blocks, strict=True):
+        if spec.segment_treatments or len(item.block.segments) < 2:
+            items.append(item)
+            continue
+        changed = True
+        items.append(
+            replace(
+                item,
+                block=replace(item.block, segments=()),
+                segment_treatments=(),
+            )
+        )
     if not changed:
         return unit
     return replace(unit, items=tuple(items))

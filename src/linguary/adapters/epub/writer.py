@@ -114,7 +114,7 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   margin: 1.5em 0;
   padding: 0.2em 0 0.2em 0.9em;
   border-left: 0.2em solid;
-  font-size: 0.9em;
+  font-size: 1em;
   color: inherit;
 }
 
@@ -191,6 +191,7 @@ p {
   hyphens: auto;
 }
 
+.lg-front h2,
 .lg-front h3,
 .lg-front h4,
 .lg-sec h1,

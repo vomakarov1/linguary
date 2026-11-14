@@ -198,6 +198,26 @@ def _plain(node: etree._Element) -> str:
     return "".join(chunks)
 
 
+def _text_before(node: etree._Element, marker: etree._Element) -> str:
+    """Text of `node` before `marker`, not including the marker's own text."""
+    chunks: list[str] = []
+
+    def walk(element: etree._Element) -> bool:
+        if element is marker:
+            return True
+        if element.text:
+            chunks.append(element.text)
+        for child in element:
+            if walk(child):
+                return True
+            if child.tail:
+                chunks.append(child.tail)
+        return False
+
+    walk(node)
+    return "".join(chunks)
+
+
 def _source(unit: etree._Element) -> etree._Element:
     return next(node for node in _elements(unit, "p") if "lg-src" in _classes(node))
 
@@ -270,7 +290,7 @@ def test_each_marker_links_to_note_of_its_unit() -> None:
     block = _block(text, attributes={"anchor_ids": "para-1 extra-1"})
     tale_end = text.index("tale") + len("tale")
     tail_end = text.index("tail") + len("tail")
-    cut = text.index(" and ")
+    cut = text.index(" saw")
     root = _chapter(
         block,
         layout=_layout(
@@ -338,13 +358,14 @@ def test_each_marker_links_to_note_of_its_unit() -> None:
     ]
     assert kinds == ["Игра слов.", "Грамматика."]
     assert not any("," in (kind or "") for kind in kinds)
-    link = next(node for node in _elements(_source(units[0]), "a") if "lg-ref" in _classes(node))
+    source = _source(units[0])
+    link = next(node for node in _elements(source, "a") if "lg-ref" in _classes(node))
     assert link.get("href") == f"#{first_notes[0].get('id')}"
     assert _elements(link, "sup")[0].text == "1"
-    assert _plain(_source(units[0])).endswith("tale") or "tale" in _plain(_source(units[0]))
-    assert _plain(_source(units[0]))[tale_end - 0 :] or True
-    source_text = _plain(_source(units[0]))
-    assert source_text[tale_end:] == "" or source_text.endswith("tale")
+    before = _text_before(source, link)
+    assert before == text[:tale_end]
+    assert _plain(source)[len(before):] == text[tale_end:cut]
+    assert text[tale_end:cut].strip()
     translation = next(node for node in _elements(units[0], "p") if "lg-tr" in _classes(node))
     assert translation.get("lang") == "ru"
     speaker = next(node for node in _elements(translation, "span") if "lg-speaker" in _classes(node))
@@ -365,7 +386,6 @@ def test_each_marker_links_to_note_of_its_unit() -> None:
     assert [node.text for node in _elements(numbered, "span") if "lg-term" in _classes(node)] == [
         "tail"
     ]
-    assert _elements(numbered, "span")[-1].get("lang") != "ru" or True
     term = next(node for node in _elements(numbered, "span") if "lg-term" in _classes(node))
     assert term.get("lang") == "en"
     ipa = next(node for node in _elements(numbered, "span") if "lg-ipa" in _classes(node))
@@ -557,7 +577,7 @@ def test_inline_markup_preserved_across_parts() -> None:
     assert source_link.text == "link"
     assert units[0].get("id") == "first-anchor"
     assert any(node.get("id") == "second-anchor" for node in units[0].iter())
-    assert all(node.get("id") is None for node in (units[1], *units[1].iter()) if node is not units[1] or True)
+    assert all(node.get("id") is None for node in units[1].iter() if node is not units[1])
     assert units[1].get("id") is None
     assert not any(node.get("id") for node in units[1].iter())
 

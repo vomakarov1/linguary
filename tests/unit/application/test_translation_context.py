@@ -14,6 +14,8 @@ from processing_fakes import (
     make_blocks,
     make_response,
     make_unit,
+    make_validator,
+    note_ids,
 )
 
 from linguary.application.context_builder import (
@@ -2347,13 +2349,26 @@ def _segmented_processing_unit() -> tuple[tuple[DocumentBlock, ...], Translation
     return blocks, TranslationUnit.of_blocks(id="unit-seg", blocks=blocks, plan=plan)
 
 
-def _processing_context(unit: TranslationUnit):
+def _processing_context(unit: TranslationUnit, *, contract: int = 1):
+    """Translation context. Contract 3 is a content plan; contract 1 has none."""
+    from linguary.domain.content_plan import ContentPlan
+
     chapter = make_section(unit.blocks)
-    return ContextBuilder().for_translation_unit(
+    analysis = make_analysis(unit)
+    if contract == 1:
+        builder = ContextBuilder()
+    elif contract == 3:
+        builder = ContextBuilder(content_plan_profile="content-plan-v3")
+        analysis = replace(
+            analysis, content_plan=ContentPlan(version=3, profile="content-plan-v3"),
+        )
+    else:
+        raise AssertionError(contract)
+    return builder.for_translation_unit(
         document=make_document(chapter),
         section=chapter,
         unit=unit,
-        analysis=make_analysis(unit),
+        analysis=analysis,
         glossary=make_snapshot(),
     )
 
@@ -2369,7 +2384,7 @@ def test_unit_input_lists_segments_with_treatments() -> None:
         BlockTreatment.TRANSLATE,
     )
 
-    context = _processing_context(unit)
+    context = _processing_context(unit, contract=3)
     expected = "\n\n".join((
         "[b1] режим TRANSLATE\n"
         "[b1.1] режим GLOSSARY_ONLY\n"
@@ -2415,19 +2430,101 @@ def test_instructions_require_segments_for_segmented_block() -> None:
 
     base = translation_unit_instructions(source_language="en", target_language="ru")
     _blocks, unit = _segmented_processing_unit()
-    segmented = _processing_context(unit)
+    segmented = _processing_context(unit, contract=3)
     plain = build_context()[0]
 
-    assert segmented.request.instructions == base + "\n\n" + _SEGMENT_TRANSLATION_RULE
+    assert segmented.request.contract_version == 3
+    assert segmented.request.instructions.endswith("\n\n" + _SEGMENT_TRANSLATION_RULE)
     assert _POEM_TRANSLATION_RULE not in segmented.request.instructions
     assert plain.request.instructions == base
     assert _SEGMENT_TRANSLATION_RULE not in plain.request.instructions
 
 
+def test_contract_v1_accepts_whole_translation_of_long_paragraph() -> None:
+    """Contract 1 keeps stored segments but accepts one translated_text.
+
+    The request shows the paragraph whole: no segment rule and no `[b1.1]`.
+    Contract 3 still rejects that whole answer and asks for segment lines.
+    """
+    import re
+
+    sentence = (
+        "The traveller walked along the quiet road past the old mill and the dark wood, "
+        "and he did not stop until the village lights were close."
+    )
+    text = " ".join([sentence] * 6)
+    assert len(text) > 599
+    cut = text.index(" ", len(text) // 2)
+    block = _span_block(order=0, text=text, cuts=(cut,))
+    assert len(block.segments) == 2
+    unit = TranslationUnit.of_blocks(
+        id="unit-legacy",
+        blocks=(block,),
+        plan=TreatmentPlan(
+            SECTION_ID,
+            (TreatmentPlanItem(block.id, BlockTreatment.TRANSLATE),),
+        ),
+    )
+    section = make_section((block,))
+    document = make_document(section)
+    legacy = ContextBuilder().for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=make_analysis(unit),
+        glossary=make_snapshot(),
+    )
+    translated = (
+        "Путник шёл по тихой дороге мимо старой мельницы и тёмного леса "
+        "и не останавливался, пока огни деревни не стали близко. "
+        "Ветер нёс запах речной воды, а на холме уже гасли последние окна."
+    )
+    payload = make_response((
+        BlockResultResponse(
+            source_block_id=block.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text=translated,
+        ),
+    ))
+
+    assert legacy.request.contract_version == 1
+    assert _SEGMENT_TRANSLATION_RULE not in legacy.request.instructions
+    assert re.search(r"\[b\d+\.\d+\]", legacy.request.input_text) is None
+    assert "[b1.1]" not in legacy.request.input_text
+    assert text in legacy.request.input_text
+    assert legacy.expectation.blocks[0].segment_treatments == ()
+    (result,) = make_validator().validate(
+        payload,
+        unit=unit,
+        target_language=TARGET_LANGUAGE,
+        note_id_factory=note_ids(),
+        expectation=legacy.expectation,
+    )
+    assert result.translated_text == translated
+    assert result.segment_translations == ()
+
+    planned = _processing_context(unit, contract=3)
+    assert planned.request.contract_version == 3
+    assert _SEGMENT_TRANSLATION_RULE in planned.request.instructions
+    assert "[b1.1]" in planned.request.input_text
+    assert planned.expectation.blocks[0].segment_treatments == (
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    )
+    with pytest.raises(ResultValidationError, match="полный перевод блока недопустим"):
+        make_validator().validate(
+            payload,
+            unit=unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+            expectation=planned.expectation,
+        )
+
+
 def test_retry_instructions_list_segments_and_treatments() -> None:
     """Retry text lists each stored segment index and its mode; a one-span block stays one line."""
     _blocks, unit = _segmented_processing_unit()
-    context = _processing_context(unit)
+    context = _processing_context(unit, contract=3)
     treatments = [block.segment_treatments for block in context.expectation.blocks]
 
     assert treatments == [
@@ -2514,15 +2611,21 @@ def test_poem_instruction_requires_line_and_stanza_preservation() -> None:
         ),
     )
     segmented_section = make_section((segmented_poem,))
-    segmented_regen = builder.for_block_regeneration(
+    from linguary.domain.content_plan import ContentPlan
+
+    segmented_regen = ContextBuilder(content_plan_profile="content-plan-v3").for_block_regeneration(
         document=make_document(segmented_section),
         section=segmented_section,
         unit=segmented_unit,
-        analysis=make_analysis(segmented_unit),
+        analysis=replace(
+            make_analysis(segmented_unit),
+            content_plan=ContentPlan(version=3, profile="content-plan-v3"),
+        ),
         glossary=glossary,
     )
-    assert segmented_regen.request.instructions == (
-        regeneration_base + "\n\n" + _SEGMENT_TRANSLATION_RULE + "\n\n" + _POEM_TRANSLATION_RULE
+    assert segmented_regen.request.contract_version == 3
+    assert segmented_regen.request.instructions.endswith(
+        _SEGMENT_TRANSLATION_RULE + "\n\n" + _POEM_TRANSLATION_RULE
     )
     assert "[b1.1] режим TRANSLATE\nRoses are red\n\n" in segmented_regen.request.input_text
     assert "[b1.2] режим TRANSLATE\nViolets are blue" in segmented_regen.request.input_text
@@ -2564,9 +2667,13 @@ def test_regeneration_input_lists_segments() -> None:
     )
     section = make_section((before, target, after))
     document = make_document(section)
-    analysis = make_analysis(unit)
+    from linguary.domain.content_plan import ContentPlan
+
+    analysis = replace(
+        make_analysis(unit), content_plan=ContentPlan(version=3, profile="content-plan-v3"),
+    )
     glossary = make_snapshot()
-    builder = ContextBuilder()
+    builder = ContextBuilder(content_plan_profile="content-plan-v3")
     kwargs = dict(
         document=document, section=section, unit=unit, analysis=analysis, glossary=glossary,
     )

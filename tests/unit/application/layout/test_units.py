@@ -168,7 +168,11 @@ def test_translation_only_under_translated_part() -> None:
     ]
 
 def test_one_span_translated_text_is_the_unit_translation() -> None:
-    """A one-span TRANSLATE result with only `translated_text` keeps that string."""
+    """A TRANSLATE result with only `translated_text` keeps that string once.
+
+    One span uses the recorded fallback. Several spans with no segment
+    translations show the same string once, on a unit that covers the block.
+    """
     block = _block("Legacy sentence.")
     result = BlockProcessingResult(
         block.id,
@@ -185,7 +189,7 @@ def test_one_span_translated_text_is_the_unit_translation() -> None:
     whole = BlockProcessingResult(
         split.id,
         BlockTreatment.TRANSLATE,
-        translated_text="Не копировать.",
+        translated_text="Целиком на блок.",
     )
     parts = block_units(
         split,
@@ -194,7 +198,10 @@ def test_one_span_translated_text_is_the_unit_translation() -> None:
         (),
         {},
     )
-    assert [unit.translation for unit in parts] == [None, None]
+    assert whole.segment_translations == ()
+    assert [(unit.start, unit.end, unit.translation, unit.continues, unit.ends_paragraph) for unit in parts] == [
+        (0, len(text), "Целиком на блок.", False, True),
+    ]
 
 
 def test_note_in_marker_part_numbering_restarts() -> None:

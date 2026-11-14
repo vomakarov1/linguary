@@ -426,9 +426,8 @@ def _run() -> ProcessingRun:
 def test_structure_only_layout_whole_blocks_no_notes() -> None:
     """No result keeps every block whole, including a long multi-segment one.
 
-    Empty `segment_treatments` repeats the block treatment once per span, so a
-    long translated block still splits. `translated_text` is not copied onto
-    either part, and neither block grows notes.
+    A whole `translated_text` with no segment translations is shown once on a
+    unit that covers the block. Neither block grows notes.
     """
     plain = _block("chapter", 0, "Just the words.")
     long_text = "a" * 300 + "b" * 300
@@ -472,14 +471,18 @@ def test_structure_only_layout_whole_blocks_no_notes() -> None:
         None,
         (),
     )
-    split = chapter.units[repeated.id]
-    assert [(unit.start, unit.end) for unit in split] == [(0, 300), (300, 600)]
-    assert [unit.translation for unit in split] == [None, None]
-    assert [unit.notes for unit in split] == [(), ()]
-    assert (split[0].continues, split[0].ends_paragraph) == (False, False)
-    assert (split[1].continues, split[1].ends_paragraph) == (True, True)
-    assert layout.features == LayoutFeatures(False, False, frozenset(), False, False, False, frozenset())
-    assert layout.legend == ()
+    shown = chapter.units[repeated.id]
+    assert [(unit.start, unit.end, unit.translation) for unit in shown] == [
+        (0, 600, "готовый перевод"),
+    ]
+    assert shown[0].notes == ()
+    assert (shown[0].continues, shown[0].ends_paragraph) == (False, True)
+    assert layout.features == LayoutFeatures(True, False, frozenset(), False, False, False, frozenset())
+    assert layout.legend == (
+        "Абзац оригинала всегда идёт первым.",
+        "Строка с линией слева — перевод этой части абзаца. "
+        "Переведены не все абзацы: остальные вы читаете сами, с подсказками или без них.",
+    )
     assert layout.ipa_key == ()
     assert layout.who_is_who == ()
 

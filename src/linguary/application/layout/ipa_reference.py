@@ -35,7 +35,7 @@ IPA_REFERENCE: tuple[IpaSymbol, ...] = (
     IpaSymbol("aɪ", "my /maɪ/", "«ай»"),
     IpaSymbol("ɔɪ", "boy /bɔɪ/", "«ой»"),
     IpaSymbol("aʊ", "now /naʊ/", "«ау»"),
-    IpaSymbol("oʊ", "go /oʊ/ (US)", "от «о» к «у»; американский вариант /əʊ/"),
+    IpaSymbol("oʊ", "go /oʊ/ (US)", "от «о» к «у»; в UK — /əʊ/"),
     IpaSymbol("ɪə", "near /nɪə/", "от краткого «и» к неясному звуку"),
     IpaSymbol("eə", "hair /heə/", "от «э» к неясному звуку"),
     IpaSymbol("ʊə", "tour /tʊə/", "от краткого «у» к неясному звуку"),
