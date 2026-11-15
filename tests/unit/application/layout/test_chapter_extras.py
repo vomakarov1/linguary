@@ -921,6 +921,35 @@ def test_who_is_who_deduplicates_petunia_mrs_dursley_and_lily_mrs_potter() -> No
     )
 
 
+def test_who_is_who_does_not_bridge_harry_potter_and_harry_osborn() -> None:
+    """A bare given name may join one surnamed person and must not join both.
+
+    `Harry Potter` and `Harry Osborn` share only the given name. Bare `Harry`
+    may fold into one of those cards. The two surnames stay two cards.
+    """
+    first = _content("ch-1", 0)
+    document = _document((first,))
+    analysis = _analysis("a1", first.id, (
+        _candidate(
+            "a1", "potter", "Harry Potter", ConceptType.PERSON,
+            "Гарри Поттер", description="мальчик",
+        ),
+        _candidate(
+            "a1", "harry", "Harry", ConceptType.PERSON,
+            "Гарри", description="то же имя",
+        ),
+        _candidate(
+            "a1", "osborn", "Harry Osborn", ConceptType.PERSON,
+            "Гарри Озборн", description="другой Гарри",
+        ),
+    ))
+
+    assert book_who_is_who(document, (analysis,), ()) == (
+        WhoEntry("Harry Potter", "Гарри Поттер", ConceptType.PERSON, "мальчик", None, 1),
+        WhoEntry("Harry Osborn", "Гарри Озборн", ConceptType.PERSON, "другой Гарри", None, 1),
+    )
+
+
 def test_who_is_who_filters_plural_family_names_and_mistaken_non_characters() -> None:
     """Plural families and mistaken names are not people. A place is kept.
 

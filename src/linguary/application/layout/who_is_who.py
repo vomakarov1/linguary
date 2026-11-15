@@ -326,6 +326,8 @@ def _person_ref(entry: WhoEntry, index: int, description: str) -> _PersonRef:
 def _dedupe_persons(refs: list[_PersonRef]) -> tuple[WhoEntry, ...]:
     """Merge one character. Different people who only share a surname stay apart."""
     parent = list(range(len(refs)))
+    # A bare given name may join one surnamed component. It must not bridge two.
+    surnames = [_ref_surnames(ref) for ref in refs]
 
     def find(index: int) -> int:
         while parent[index] != index:
@@ -336,8 +338,14 @@ def _dedupe_persons(refs: list[_PersonRef]) -> tuple[WhoEntry, ...]:
     def union(left: int, right: int) -> None:
         left_root = find(left)
         right_root = find(right)
-        if left_root != right_root:
-            parent[right_root] = left_root
+        if left_root == right_root:
+            return
+        left_surnames = surnames[left_root]
+        right_surnames = surnames[right_root]
+        if left_surnames and right_surnames and left_surnames.isdisjoint(right_surnames):
+            return
+        parent[right_root] = left_root
+        left_surnames |= right_surnames
 
     for left in range(len(refs)):
         for right in range(left + 1, len(refs)):
