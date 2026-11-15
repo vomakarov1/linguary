@@ -54,6 +54,7 @@ from linguary.application.analysis_merge import (
     merge_narrative_fragments,
     merged_glossary_suggestion_keys,
     combine_staged_analysis_responses,
+    normalize_a2_dialogue_response,
 )
 from linguary.application.analysis_pass_cache import decode_pass, encode_pass, pedagogical_response
 from linguary.application.block_labels import without_block_labels
@@ -416,6 +417,7 @@ class AnalyzeChapter:
             expectation=replace(context.expectation,
                 blocks=tuple(replace(e, block_id=b.id) for e, b in
                              zip(context.expectation.blocks, blocks, strict=True))))
+        pedagogical = self._normalize_a2_dialogue(pedagogical, blocks, context.block_ids_by_alias)
         if self._context_builder._reader_level == 'a2':
             validate_a2_summary(pedagogical.reader_chapter_summary or '',
                 source_texts=tuple(b.text for b in blocks), source_language=document.source_language,
@@ -444,6 +446,15 @@ class AnalyzeChapter:
             note_limits_by_block=context.note_limits_by_block, note_group_limits=context.note_group_limits,
             visible_texts_by_alias=context.visible_texts_by_alias, blocks=blocks,
             source_offsets=source_offsets)
+
+    def _normalize_a2_dialogue(self, payload, blocks, block_ids_by_alias):
+        if self._context_builder._reader_level != 'a2' or self._context_builder._english_help:
+            return payload
+        if not isinstance(payload, (ChapterAnalysisResponse, PedagogicalAnalysisResponse)):
+            return payload
+        return normalize_a2_dialogue_response(
+            payload, blocks, block_ids_by_alias, reader_level='a2', english_help=False,
+        )
 
     async def _run_staged_fragments(
         self, command: AnalyzeChapterCommand, document: CanonicalDocument, section: DocumentSection,
@@ -582,10 +593,16 @@ class AnalyzeChapter:
                 saved_frag, payload = cached_frag
                 if saved_frag.attempt_id is not None:
                     self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_frag.attempt_id))
+                if not is_narrative:
+                    payload = self._normalize_a2_dialogue(
+                        payload, fragment.blocks, context.block_ids_by_alias,
+                    )
                 resolved = validate(payload)
             else:
                 try:
-                    payload, resolved, count, usage = await self._request_staged(context, validate)
+                    payload, resolved, count, usage = await self._request_staged(
+                        context, validate, blocks=fragment.blocks, normalize_dialogue=not is_narrative,
+                    )
                 except LLMResponseFormatError as error:
                     if not error.truncated or len(fragment.blocks) <= 1:
                         raise
@@ -627,6 +644,9 @@ class AnalyzeChapter:
     async def _request_staged[ResolutionT](
         self, context: ChapterAnalysisContext,
         validate: Callable[[NarrativeAnalysisResponse | PedagogicalAnalysisResponse], ResolutionT],
+        *,
+        blocks: Sequence[DocumentBlock] = (),
+        normalize_dialogue: bool = False,
     ) -> tuple[NarrativeAnalysisResponse | PedagogicalAnalysisResponse, ResolutionT, int, TokenUsage | None]:
         request, attempts, usages = context.request, 0, []
         while True:
@@ -642,6 +662,10 @@ class AnalyzeChapter:
                         call_context=response.call_context)
                 try:
                     response = replace(response, payload=_prepare_staged_payload(response.payload))
+                    if normalize_dialogue:
+                        response = replace(response, payload=self._normalize_a2_dialogue(
+                            response.payload, blocks, context.block_ids_by_alias,
+                        ))
                     resolved = validate(response.payload)
                     if isinstance(response.payload, PedagogicalAnalysisResponse):
                         record_reader_warnings(self._unit_of_work, response,
@@ -1116,6 +1140,9 @@ class AnalyzeChapter:
                 try:
                     if request.contract_version in {3, 5}:
                         response = replace(response, payload=prepare_analysis_payload(response.payload))
+                    response = replace(response, payload=self._normalize_a2_dialogue(
+                        response.payload, blocks, context.block_ids_by_alias,
+                    ))
                     if self._context_builder._reader_level == "a2":
                         validate_a2_summary(
                             response.payload.chapter_summary,

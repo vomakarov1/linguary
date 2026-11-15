@@ -1196,7 +1196,8 @@ _SPEECH_STYLE_KIND = (
 )
 _PARODY_KIND = "parody — в required_points назвать исходный текст."
 _DESCRIPTION_RULE = (
-    "description для person и place — строго до первого упоминания в данной главе "
+    "description для person и place пишется на языке перевода (ru), "
+    "строго до первого упоминания в данной главе "
     "и по прошлым главам, без спойлеров текущей и будущих глав."
 )
 
@@ -1361,6 +1362,75 @@ def test_pedagogical_instructions_describe_new_kinds() -> None:
     ):
         for phrase in expected:
             assert phrase in instructions
+
+
+def test_narrative_instructions_require_target_language_description() -> None:
+    """Person and place descriptions are written in the target language, before the first mention."""
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="de",
+        reader_level="b1",
+        profile="content-plan-v3",
+    )
+    section, document, _long_block = _segmented_chapter()
+    context = _staged_builder().for_chapter_narrative_analysis(document, section)
+    russian = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b1",
+        profile="content-plan-v3",
+    )
+
+    german = templates["narrative_analysis"]
+    assert "description для person и place пишется на языке перевода (de)" in german
+    assert "строго до первого упоминания в данной главе" in german
+    assert "без спойлеров текущей и будущих глав" in german
+    assert "языке перевода (ru)" in russian["narrative_analysis"]
+    assert "языке перевода (ru)" in context.request.instructions
+    assert "языке перевода (de)" not in context.request.instructions
+
+
+def test_a2_pedagogical_instructions_include_grammar_support_and_strict_dialogue_window() -> None:
+    """A2 pedagogy limits the short-reply window and includes grammar-support guidance."""
+    from linguary.application.context_builder import _A2_GRAMMAR_SUPPORT_GUIDANCE
+
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    section, document, _long_block = _segmented_chapter()
+    live = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+    ).for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="A short factual summary.",
+    )
+    b1 = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b1",
+        profile="content-plan-v3",
+    )
+    grammar = _A2_GRAMMAR_SUPPORT_GUIDANCE.strip()
+    window = (
+        "Окно 4–8 слов для READ_AS_IS или GLOSSARY_ONLY относится только к одной "
+        "элементарной реплике уровня A1–A2 без придаточных оборотов "
+        "(if, when, because, that), причастных оборотов (sounding relieved), "
+        "авторских предложений действия и небазовых глаголов речи "
+        "(demanded, murmured, snapped)"
+    )
+    promote = (
+        "Реплики длиннее 8 слов либо сочетающие прямую речь с авторским действием "
+        "или сложной ремаркой получают TRANSLATE."
+    )
+    for instructions in (templates["pedagogical_analysis"], live.request.instructions):
+        assert grammar in instructions
+        assert window in instructions
+        assert promote in instructions
+    assert grammar not in b1["pedagogical_analysis"]
+    assert "элементарной реплике" not in b1["pedagogical_analysis"]
 
 
 def test_narrative_instructions_request_spoiler_free_description() -> None:

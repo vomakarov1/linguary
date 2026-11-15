@@ -1295,3 +1295,240 @@ async def test_description_kept_for_person_and_place_only(stored_book):
     }
 
 
+A2_SUMMARY = 'A speaker asks for a small box.\n\nГоворящий просит небольшую коробку.'
+_LONG_QUOTE = '“Please bring the small red box from the hall before noon.”'
+_LONG_CRATE = '“Please carry the small red crate from the hall before noon.”'
+
+
+def _block(order, text, *, type=BlockType.PARAGRAPH, segments=()):
+    block = make_analysis_block(section_id='section-1', order=order, text=text, type=type)
+    return replace(block, segments=segments) if segments else block
+
+
+def _store(uow, blocks):
+    section = make_analysis_section(blocks=tuple(blocks))
+    with uow.transaction() as tx:
+        tx.documents.save(make_analysis_document((section,)))
+    return section
+
+
+def _aliases(count):
+    return tuple(f'b{index}' for index in range(1, count + 1))
+
+
+def _plan(treatments):
+    return [dict(source_block_id=alias, treatment=treatment) for alias, treatment in treatments]
+
+
+def _vocab(alias, quote, difficulty_id, *, help_kind='lexical_hint', kind='vocabulary'):
+    return dict(id=difficulty_id, anchors=[dict(block_id=alias, quote=quote)], owner_block_id=alias,
+                kind=kind, priority='useful', help_kind=help_kind,
+                required_points=[dict(id='p1', description='Объяснить значение слова в этой реплике.')])
+
+
+def _modes(analysis, blocks):
+    plan = analysis.treatment_plan
+    return {block.text: plan.treatment_for(block.id) for block in blocks}
+
+
+async def test_a2_dialogue_longer_than_eight_words_promoted_to_translate(stored_book):
+    """A quoted A2 block or dialogue segment longer than eight words becomes TRANSLATE."""
+    from sqlalchemy import update
+
+    from linguary.adapters.db.models import AnalysisPassResultRow
+    from linguary.application.analysis_pass_cache import decode_pass, encode_pass
+    from linguary.domain import BlockSegment
+    from linguary.domain.content_plan import canonical_sha
+
+    engine, uow, _ = stored_book
+    quote_block = _block(0, _LONG_QUOTE, type=BlockType.QUOTE)
+    segment_text = _LONG_QUOTE + ' The cat slept.'
+    split = len(_LONG_QUOTE)
+    segment_block = _block(1, segment_text, segments=(
+        BlockSegment(0, split, 0), BlockSegment(split, len(segment_text), 1),
+    ))
+    _store(uow, (quote_block, segment_block))
+
+    class FragmentClient:
+        async def generate(self, request):
+            aliases = _aliases(len(request.ordered_block_ids))
+            if request.stage == NARRATIVE:
+                reply = narrative(aliases)
+            elif request.ordered_block_ids == (segment_block.id,):
+                reply = pedagogical(summary=A2_SUMMARY, treatment_plan=[dict(
+                    source_block_id='b1', treatment='GLOSSARY_ONLY',
+                    segments=[dict(index=1, treatment='GLOSSARY_ONLY'),
+                              dict(index=2, treatment='READ_AS_IS')])])
+            else:
+                reply = pedagogical(aliases, summary=A2_SUMMARY)
+            return await FakeLLMClient([reply]).generate(request)
+
+    result = await scenario(uow, FragmentClient(), context=builder('a2'), max_fragment_blocks=1)(COMMAND)
+    plan = result.analysis.treatment_plan
+    assert plan.treatment_for(quote_block.id) is BlockTreatment.TRANSLATE
+    assert plan.treatment_for(segment_block.id) is BlockTreatment.TRANSLATE
+    assert plan.segment_treatments_for(segment_block.id, 2) == (
+        BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS,
+    )
+    with uow.transaction() as tx:
+        saved = tx.analyses.get_pass(BOOK_ID, COMMAND.section_id, AnalysisPassKind.PEDAGOGICAL)
+    by_id = {item['source_block_id']: item for item in saved.payload['response']['treatment_plan']}
+    assert by_id[quote_block.id]['treatment'] == 'TRANSLATE'
+    assert by_id[segment_block.id]['treatment'] == 'TRANSLATE'
+    assert [segment['treatment'] for segment in by_id[segment_block.id]['segments']] == [
+        'TRANSLATE', 'READ_AS_IS',
+    ]
+
+    decoded = decode_pass(saved.payload, narrative=False)
+    reverted = replace(decoded, treatment_plan=tuple(
+        replace(item, treatment=BlockTreatment.READ_AS_IS, segments=())
+        if item.source_block_id == quote_block.id else item
+        for item in decoded.treatment_plan))
+    encoded = encode_pass(reverted)
+    with engine.begin() as connection:
+        connection.execute(update(AnalysisPassResultRow).where(AnalysisPassResultRow.id == saved.id)
+                           .values(payload_json=encoded, output_sha256=canonical_sha(encoded)))
+    cached = await scenario(uow, FakeLLMClient(), context=builder('a2'), max_fragment_blocks=1)(COMMAND)
+    assert cached.attempts == 0
+    assert cached.analysis.treatment_plan.treatment_for(quote_block.id) is BlockTreatment.TRANSLATE
+
+    one_pass_block = _block(0, _LONG_QUOTE)
+    section = _store(uow, (one_pass_block,))
+    from analysis_fakes import analysis_reply
+    one_pass = FakeLLMClient([analysis_reply(
+        aliases=('b1',), treatment='READ_AS_IS', chapter_summary=A2_SUMMARY, before_you_read=[],
+        content_plan=dict(version=3, profile='content-plan-v3', difficulties=[],
+                          before_you_read_evidence=[], context_facts=[]))])
+    single = await AnalyzeChapter(unit_of_work=uow, llm_client=one_pass,
+        language_detector=FakeLanguageDetector(), retry_policy=RetryPolicy(max_attempts=1),
+        glossary_confidence_threshold=.8, context_builder=builder('a2'))(COMMAND)
+    assert single.analysis.treatment_plan.treatment_for(section.blocks[0].id) is BlockTreatment.TRANSLATE
+
+
+async def test_a2_dialogue_with_conditional_or_reporting_difficulty_promoted_to_translate(stored_book):
+    """A short quote is translated for a subordinator, a reporting verb, or a remark difficulty."""
+    _, uow, _ = stored_book
+    cases = (
+        ('‘Stay here if you can.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Come in,’ she demanded.', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Yes,’ he murmured.', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Stop,’ she snapped.', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Yes,’ he whispered.', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Yes,’ he said grudgingly.', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('“Call me when you arrive.”', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('"Bring it because I asked."', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Leave unless I call.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Ask whether he came today.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Wait although it is late.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Stay though it is cold.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
+        ('‘Hello,’ he said about the ledger.', 'GLOSSARY_ONLY', BlockTreatment.TRANSLATE,
+         _vocab('b13', 'ledger', 'd-ledger')),
+        ('‘Hello,’ he said about the actual.', 'GLOSSARY_ONLY', BlockTreatment.TRANSLATE,
+         _vocab('b14', 'actual', 'd-actual', kind='false_friend')),
+        ('‘Hello ledger,’ he said.', 'GLOSSARY_ONLY', BlockTreatment.GLOSSARY_ONLY,
+         _vocab('b15', 'ledger', 'd-inside')),
+        ('‘Hello,’ he said about the tense.', 'READ_AS_IS', BlockTreatment.READ_AS_IS,
+         _vocab('b16', 'tense', 'd-tense', help_kind='explanation', kind='grammar')),
+    )
+    blocks = tuple(_block(index, text) for index, (text, *_rest) in enumerate(cases))
+    _store(uow, blocks)
+    aliases = _aliases(len(blocks))
+    difficulties = [case[3] for case in cases if case[3] is not None]
+    taught = pedagogical(summary=A2_SUMMARY, treatment_plan=_plan(zip(aliases, (case[1] for case in cases), strict=True)),
+                         difficulties=difficulties)
+    result = await scenario(uow, FakeLLMClient([narrative(aliases), taught]),
+                            context=builder('a2'))(COMMAND)
+    assert _modes(result.analysis, blocks) == {block.text: case[2] for block, case in zip(blocks, cases, strict=True)}
+    by_quote = {}
+    for item in result.analysis.content_plan.difficulties:
+        by_quote.setdefault(item.anchors[0].quote, []).append(item.help_kind)
+    assert 'explanation' in by_quote['ledger']
+    assert 'lexical_hint' in by_quote['ledger']
+    assert by_quote['actual'] == ['explanation']
+    assert by_quote['tense'] == ['explanation']
+
+
+async def test_a2_promoted_glossary_only_dialogue_switches_lexical_hint_to_explanation(stored_book):
+    """Only a GLOSSARY_ONLY dialogue that becomes TRANSLATE changes lexical_hint to explanation."""
+    _, uow, _ = stored_book
+    promoted = _block(0, _LONG_QUOTE)
+    covered = _block(1, _LONG_CRATE)
+    kept = _block(2, '‘Go now!’ he said loudly.')
+    _store(uow, (promoted, covered, kept))
+    explanation = 'Это слово называет ящик, а не животное.'
+    taught = pedagogical(summary=A2_SUMMARY, treatment_plan=_plan((
+        ('b1', 'GLOSSARY_ONLY'), ('b2', 'READ_AS_IS'), ('b3', 'GLOSSARY_ONLY'),
+    )), difficulties=[
+        _vocab('b1', 'box', 'd-box'),
+        _vocab('b2', 'crate', 'd-crate'),
+        _vocab('b3', 'Go', 'd-go'),
+    ], before_you_read=[dict(expression='crate', explanation=explanation)],
+        before_you_read_evidence=[dict(difficulty_id='d-crate', point_id='p1',
+            artifact_kind='before_you_read.explanation', source_block_id='b2', artifact_index=0,
+            body_excerpt=explanation)])
+    result = await scenario(uow, FakeLLMClient([narrative(('b1', 'b2', 'b3')), taught]),
+                            context=builder('a2'))(COMMAND)
+    plan = result.analysis.treatment_plan
+    assert plan.treatment_for(promoted.id) is BlockTreatment.TRANSLATE
+    assert plan.treatment_for(covered.id) is BlockTreatment.TRANSLATE
+    assert plan.treatment_for(kept.id) is BlockTreatment.GLOSSARY_ONLY
+    by_quote = {item.anchors[0].quote: item.help_kind for item in result.analysis.content_plan.difficulties}
+    assert by_quote == {'box': 'explanation', 'crate': 'lexical_hint', 'Go': 'lexical_hint'}
+    with uow.transaction() as tx:
+        saved = tx.analyses.get_pass(BOOK_ID, COMMAND.section_id, AnalysisPassKind.PEDAGOGICAL)
+    saved_help = {item['anchors'][0]['quote']: item['help_kind']
+                  for item in saved.payload['response']['difficulties']}
+    assert saved_help['box'] == 'explanation'
+    assert saved_help['crate'] == 'lexical_hint'
+
+    one_pass_block = _block(0, _LONG_QUOTE)
+    section = _store(uow, (one_pass_block,))
+    from analysis_fakes import analysis_reply
+    one_pass = FakeLLMClient([analysis_reply(
+        aliases=('b1',), treatment='GLOSSARY_ONLY', chapter_summary=A2_SUMMARY, before_you_read=[],
+        content_plan=dict(version=3, profile='content-plan-v3', before_you_read_evidence=[], context_facts=[],
+            difficulties=[_vocab('b1', 'box', 'd-box')]))])
+    single = await AnalyzeChapter(unit_of_work=uow, llm_client=one_pass,
+        language_detector=FakeLanguageDetector(), retry_policy=RetryPolicy(max_attempts=1),
+        glossary_confidence_threshold=.8, context_builder=builder('a2'))(COMMAND)
+    assert single.analysis.treatment_plan.treatment_for(section.blocks[0].id) is BlockTreatment.TRANSLATE
+    assert single.analysis.content_plan.difficulties[0].help_kind == 'explanation'
+
+
+async def test_a2_elementary_short_dialogues_and_non_dialogue_lines_keep_mode(stored_book):
+    """Short elementary replies and lines without dialogue quotes keep their mode."""
+    import linguary.application.analysis_merge as analysis_merge
+
+    assert hasattr(analysis_merge, 'normalize_a2_dialogue_response')
+    _, uow, _ = stored_book
+    cases = (
+        ('‘Go now!’ he said loudly.', 'READ_AS_IS', BlockType.PARAGRAPH),
+        ('‘Up now!’', 'GLOSSARY_ONLY', BlockType.PARAGRAPH),
+        ('‘Yes.’', 'READ_AS_IS', BlockType.PARAGRAPH),
+        ('‘Please come over here right now,’ she said.', 'READ_AS_IS', BlockType.PARAGRAPH),
+        ('The old gardener walked slowly across the empty yard before noon.', 'GLOSSARY_ONLY', BlockType.PARAGRAPH),
+        ('He demanded an answer if the old gardener walked slowly across the yard.', 'GLOSSARY_ONLY', BlockType.PARAGRAPH),
+        ('It blinked.', 'READ_AS_IS', BlockType.PARAGRAPH),
+        (_LONG_QUOTE, 'READ_AS_IS', BlockType.LIST_ITEM),
+    )
+    blocks = tuple(_block(index, text, type=block_type) for index, (text, _mode, block_type) in enumerate(cases))
+    _store(uow, blocks)
+    aliases = _aliases(len(blocks))
+    original = _plan(zip(aliases, (case[1] for case in cases), strict=True))
+    expected = {block.text: BlockTreatment(case[1]) for block, case in zip(blocks, cases, strict=True)}
+    result = await scenario(uow, FakeLLMClient([
+        narrative(aliases), pedagogical(summary=A2_SUMMARY, treatment_plan=original),
+    ]), context=builder('a2'))(COMMAND)
+    assert _modes(result.analysis, blocks) == expected
+
+    kept = await scenario(uow, FakeLLMClient([pedagogical(treatment_plan=original)]),
+                          context=builder('b1'))(COMMAND)
+    assert _modes(kept.analysis, blocks) == expected
+
+    english_block = _block(0, _LONG_QUOTE)
+    _store(uow, (english_block,))
+    english = await scenario(uow, FakeLLMClient([narrative(), pedagogical(summary=A2_SUMMARY)]),
+                             context=builder('a2', help=True))(COMMAND)
+    assert english.analysis.treatment_plan.treatment_for(english_block.id) is BlockTreatment.READ_AS_IS
+
+

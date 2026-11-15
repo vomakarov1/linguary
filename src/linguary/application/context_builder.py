@@ -160,7 +160,7 @@ chapter_summary — фактическая сводка событий на яз
 для фрагмента продолжи сводку с начала главы по предыдущим находкам.
 glossary_candidates: source_text, type, suggested_translation, confidence,
 model_flagged_review, note, description. Соблюдай обязательные решения глоссария.
-description для person и place — строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
+description для person и place пишется на языке перевода ({target_language}), строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
 context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
 Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
@@ -1802,6 +1802,11 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 Короткая прозрачная реплика диалога длиной 4–8 слов уровня A1–A2 не требует полного \
 перевода только из-за того, что это реплика: выбирай READ_AS_IS или GLOSSARY_ONLY \
 по незнакомой лексике и понятности смысла.
+Окно 4–8 слов для READ_AS_IS или GLOSSARY_ONLY относится только к одной элементарной \
+реплике уровня A1–A2 без придаточных оборотов (if, when, because, that), причастных \
+оборотов (sounding relieved), авторских предложений действия и небазовых глаголов речи \
+(demanded, murmured, snapped). Реплики длиннее 8 слов либо сочетающие прямую речь с \
+авторским действием или сложной ремаркой получают TRANSLATE.
 Не оставляй без достаточной помощи грамматически скрытые конструкции уровня выше A2: \
 модальный перфект (например, «might have been»), придаточное с «what» в значении \
 «то, что» и отрыв предлога в конце придаточного или вопроса. Для каждой такой \
@@ -3033,6 +3038,7 @@ def _pedagogical_instructions(source_language: str, target_language: str, reader
     else:
         instructions += '\n' + _reader_level_treatment_guidance(reader_level)
     if reader_level == 'a2':
+        instructions += '\n' + _A2_GRAMMAR_SUPPORT_GUIDANCE.strip()
         instructions += '\nВерни reader_chapter_summary: простой пересказ на языке оригинала и перевод на русский, ровно два абзаца через пустую строку. Для фрагмента продолжи пересказ с начала главы.'
     else:
         instructions += '\nНе возвращай пересказ: принятая фактическая сводка уже сохранена.'

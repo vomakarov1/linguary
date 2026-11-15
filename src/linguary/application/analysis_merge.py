@@ -41,11 +41,13 @@ from linguary.application.llm_dto import (
     QuotedSceneResponse,
     QuotedSceneVisualFactResponse,
     QuotedSourceAnchorResponse,
+    SegmentTreatmentResponse,
     TreatmentPlanItemResponse,
 )
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockTreatment,
+    BlockType,
     CanonicalDocument,
     ChapterAnalysis,
     ConceptType,
@@ -58,6 +60,7 @@ from linguary.domain import (
     translations_conflict,
     without_footnote_markers,
 )
+from linguary.domain.treatment import strongest_treatment
 from linguary.domain.name_translation import (
     NameTranslationEvidence, NameTranslationObservation, NameTranslationPolicy,
 )
@@ -2014,6 +2017,242 @@ def validate_fact_glossary(
                 rule_code="glossary_fact_conflict",
                 block_ids=(block_id,),
             )
+
+
+_DIALOGUE_QUOTES = re.compile(r"‘[^‘’]*’|“[^“”]*”|\"[^\"“”‘’]*\"")
+_SUBORDINATORS = frozenset({"if", "when", "because", "although", "though", "unless", "whether"})
+_REMARK_DIFFICULTY_KINDS = frozenset({"vocabulary", "false_friend"})
+_LIGHT_DIALOGUE_TREATMENTS = frozenset({BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS})
+_DIALOGUE_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.QUOTE})
+_NONBASIC_REPORTING = frozenset({
+    "demanded", "demanding", "demands",
+    "murmured", "murmuring", "murmurs",
+    "whispered", "whispering", "whispers",
+    "snapped", "snapping", "snaps",
+    "grudgingly",
+    "muttered", "muttering", "mutters",
+    "stammered", "stammering", "stammers",
+    "gasped", "gasping", "gasps",
+    "bellowed", "bellowing", "bellows",
+    "hissed", "hissing", "hisses",
+    "growled", "growling", "growls",
+    "exclaimed", "exclaiming",
+    "sobbed", "sobbing", "sobs",
+    "pleaded", "pleading", "pleads",
+    "retorted", "retorting",
+    "barked", "barking", "barks",
+    "croaked", "croaking",
+    "spluttered", "spluttering",
+    "drawled", "drawling",
+    "sneered", "sneering",
+    "sighed", "sighing", "sighs",
+    "groaned", "groaning", "groans",
+    "yelled", "yelling", "yells",
+    "shrieked", "shrieking",
+    "whimpered", "whimpering",
+    "thundered", "thundering",
+    "roared", "roaring", "roars",
+    "inquired", "inquiring",
+    "protested", "protesting",
+    "confessed", "confessing",
+    "admitted", "admitting",
+    "announced", "announcing",
+    "declared", "declaring",
+    "remarked", "remarking",
+    "interrupted", "interrupting",
+    "warned", "warning",
+    "shouted", "shouting", "shouts",
+    "cried", "crying", "cries",
+    "mumbled", "mumbling", "mumbles",
+    "snarled", "snarling", "snarls",
+    "wailed", "wailing",
+    "screamed", "screaming", "screams",
+    "squeaked", "squeaking",
+    "rasped", "rasping",
+    "blurted", "blurting",
+    "scoffed", "scoffing",
+    "faltered", "faltering",
+    "grunted", "grunting", "grunts",
+    "snorted", "snorting",
+    "whined", "whining",
+    "boomed", "booming",
+    "spat",
+})
+
+
+def normalize_a2_dialogue_response(
+    payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
+    blocks: Sequence[DocumentBlock],
+    block_ids_by_alias: Mapping[str, str],
+    *,
+    reader_level: str | None = None,
+    english_help: bool = False,
+) -> ChapterAnalysisResponse | PedagogicalAnalysisResponse:
+    """Promote non-elementary quoted A2 dialogue from a light mode to TRANSLATE.
+
+    A paragraph or quote stays as the model left it when the reader is not A2,
+    English help is on, or the line is a short elementary reply. Promoting a
+    block or segment out of GLOSSARY_ONLY retargets its lexical hints to explanation.
+    """
+    if reader_level != "a2" or english_help:
+        return payload
+    blocks_by_id = {block.id: block for block in blocks}
+    difficulties = _response_difficulties(payload)
+    items: list[TreatmentPlanItemResponse] = []
+    regions: list[tuple[frozenset[str], int, int, str]] = []
+    changed = False
+    for item in payload.treatment_plan:
+        block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
+        if block is None or block.type not in _DIALOGUE_BLOCK_TYPES:
+            items.append(item)
+            continue
+        updated, promoted = _promote_dialogue_item(item, block, difficulties)
+        if updated is not item:
+            changed = True
+        items.append(updated)
+        regions.extend(promoted)
+    if not changed:
+        return payload
+    switched = tuple(_switch_promoted_hint(difficulty, regions) for difficulty in difficulties)
+    plan = tuple(items)
+    if isinstance(payload, PedagogicalAnalysisResponse):
+        return replace(payload, treatment_plan=plan, difficulties=switched)
+    content_plan = payload.content_plan
+    if content_plan is None:
+        return replace(payload, treatment_plan=plan)
+    return replace(payload, treatment_plan=plan, content_plan=replace(content_plan, difficulties=switched))
+
+
+def _response_difficulties(payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse):
+    if isinstance(payload, PedagogicalAnalysisResponse):
+        return payload.difficulties
+    if payload.content_plan is None:
+        return ()
+    return payload.content_plan.difficulties
+
+
+def _block_for_plan_item(source_block_id, blocks_by_id, block_ids_by_alias):
+    block_id = block_ids_by_alias.get(source_block_id)
+    if block_id is None and source_block_id in blocks_by_id:
+        block_id = source_block_id
+    if block_id is None:
+        return None
+    return blocks_by_id.get(block_id)
+
+
+def _promote_dialogue_item(item, block, difficulties):
+    owners = frozenset(part for part in (item.source_block_id, block.id) if part)
+    if item.segments:
+        spans = block.segment_spans
+        updated = []
+        regions = []
+        changed = False
+        for segment in item.segments:
+            if segment.index < 1 or segment.index > len(spans):
+                updated.append(segment)
+                continue
+            span = spans[segment.index - 1]
+            text = block.text[span.start:span.end]
+            if segment.treatment in _LIGHT_DIALOGUE_TREATMENTS and _dialogue_needs_translation(
+                text, difficulties, owners, span.start,
+            ):
+                if segment.treatment is BlockTreatment.GLOSSARY_ONLY:
+                    regions.append((owners, span.start, span.end, block.text))
+                updated.append(SegmentTreatmentResponse(segment.index, BlockTreatment.TRANSLATE))
+                changed = True
+            else:
+                updated.append(segment)
+        if not changed:
+            return item, ()
+        modes = tuple(segment.treatment for segment in updated)
+        return replace(item, treatment=strongest_treatment(modes), segments=tuple(updated)), regions
+    if item.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
+        return item, ()
+    if not _dialogue_needs_translation(block.text, difficulties, owners, 0):
+        return item, ()
+    regions = []
+    if item.treatment is BlockTreatment.GLOSSARY_ONLY:
+        regions.append((owners, 0, len(block.text), block.text))
+    return replace(item, treatment=BlockTreatment.TRANSLATE), regions
+
+
+def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
+    quotes = list(_DIALOGUE_QUOTES.finditer(text))
+    if not quotes:
+        return False
+    if len(expression_words(text)) > 8:
+        return True
+    quoted = " ".join(match.group(0)[1:-1] for match in quotes)
+    if any(word in _SUBORDINATORS for word in expression_words(quoted)):
+        return True
+    ranges = _remark_ranges(quotes, len(text))
+    remark = " ".join(text[start:end] for start, end in ranges)
+    if set(expression_words(remark)) & _NONBASIC_REPORTING:
+        return True
+    return any(
+        difficulty.kind in _REMARK_DIFFICULTY_KINDS
+        and difficulty.owner_block_id in owners
+        and any(
+            anchor.block_id in owners and _anchor_hits_ranges(anchor, text, span_start, ranges)
+            for anchor in difficulty.anchors
+        )
+        for difficulty in difficulties
+    )
+
+
+def _remark_ranges(quotes, length) -> tuple[tuple[int, int], ...]:
+    ranges = []
+    cursor = 0
+    for match in quotes:
+        if match.start() > cursor:
+            ranges.append((cursor, match.start()))
+        cursor = match.end()
+    if cursor < length:
+        ranges.append((cursor, length))
+    return tuple(ranges)
+
+
+def _anchor_hits_ranges(anchor, text, span_start, ranges) -> bool:
+    start = getattr(anchor, "start", None)
+    end = getattr(anchor, "end", None)
+    if type(start) is int and type(end) is int:
+        local_start = start - span_start
+        local_end = end - span_start
+        return any(local_start < stop and local_end > begin for begin, stop in ranges)
+    quote = getattr(anchor, "quote", "")
+    if not quote:
+        return False
+    found = 0
+    while True:
+        found = text.find(quote, found)
+        if found < 0:
+            return False
+        found_end = found + len(quote)
+        if any(found < stop and found_end > begin for begin, stop in ranges):
+            return True
+        found += 1
+
+
+def _switch_promoted_hint(difficulty, regions):
+    if difficulty.help_kind != "lexical_hint":
+        return difficulty
+    for owners, start, end, block_text in regions:
+        if difficulty.owner_block_id not in owners:
+            continue
+        window = block_text[start:end]
+        for anchor in difficulty.anchors:
+            if getattr(anchor, "block_id", None) not in owners:
+                continue
+            anchor_start = getattr(anchor, "start", None)
+            anchor_end = getattr(anchor, "end", None)
+            if type(anchor_start) is int and type(anchor_end) is int:
+                if anchor_start < end and anchor_end > start:
+                    return replace(difficulty, help_kind="explanation")
+                continue
+            quote = getattr(anchor, "quote", "")
+            if quote and quote in window:
+                return replace(difficulty, help_kind="explanation")
+    return difficulty
 
 
 def glossary_context_constraints(concepts):
