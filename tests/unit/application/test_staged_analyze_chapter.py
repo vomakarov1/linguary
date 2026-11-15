@@ -1406,7 +1406,11 @@ async def test_a2_dialogue_longer_than_eight_words_promoted_to_translate(stored_
 
 
 async def test_a2_dialogue_with_conditional_or_reporting_difficulty_promoted_to_translate(stored_book):
-    """A short quote is translated for a subordinator, a reporting verb, or a remark difficulty."""
+    """A short quote is translated for a subordinator or a non-basic reporting verb.
+
+    Remark vocabulary promotes a reply only when it is longer than eight words
+    or the speech verb is non-basic. A short elementary reply keeps its mode.
+    """
     _, uow, _ = stored_book
     cases = (
         ('‘Stay here if you can.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
@@ -1421,9 +1425,9 @@ async def test_a2_dialogue_with_conditional_or_reporting_difficulty_promoted_to_
         ('‘Ask whether he came today.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
         ('‘Wait although it is late.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
         ('‘Stay though it is cold.’', 'READ_AS_IS', BlockTreatment.TRANSLATE, None),
-        ('‘Hello,’ he said about the ledger.', 'GLOSSARY_ONLY', BlockTreatment.TRANSLATE,
+        ('‘Hello,’ he said about the ledger.', 'GLOSSARY_ONLY', BlockTreatment.GLOSSARY_ONLY,
          _vocab('b13', 'ledger', 'd-ledger')),
-        ('‘Hello,’ he said about the actual.', 'GLOSSARY_ONLY', BlockTreatment.TRANSLATE,
+        ('‘Hello,’ he said about the actual.', 'GLOSSARY_ONLY', BlockTreatment.GLOSSARY_ONLY,
          _vocab('b14', 'actual', 'd-actual', kind='false_friend')),
         ('‘Hello ledger,’ he said.', 'GLOSSARY_ONLY', BlockTreatment.GLOSSARY_ONLY,
          _vocab('b15', 'ledger', 'd-inside')),
@@ -1442,9 +1446,8 @@ async def test_a2_dialogue_with_conditional_or_reporting_difficulty_promoted_to_
     by_quote = {}
     for item in result.analysis.content_plan.difficulties:
         by_quote.setdefault(item.anchors[0].quote, []).append(item.help_kind)
-    assert 'explanation' in by_quote['ledger']
-    assert 'lexical_hint' in by_quote['ledger']
-    assert by_quote['actual'] == ['explanation']
+    assert by_quote['ledger'] == ['lexical_hint', 'lexical_hint']
+    assert by_quote['actual'] == ['lexical_hint']
     assert by_quote['tense'] == ['explanation']
 
 
@@ -1664,7 +1667,7 @@ def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
     ‘Don’t go if I call.’, ‘Get ’em if you can.’, and ‘Check the boys’ room if you can.’
     are translated. ‘I’m here.’ and ‘No,’ she said sharply. ‘Why?’ stay short exceptions.
     ‘Don’t touch the ledger.’ and ‘Check the boys’ ledger.’ keep ledger inside the reply.
-    The same word or a typographically normalized quote in a remark translates.
+    A vocabulary anchor in a short elementary remark stays glossary-only.
     """
     from linguary.application.analysis_merge import normalize_a2_dialogue_response
     from linguary.application.llm_dto import (
@@ -1734,20 +1737,182 @@ def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
         BlockTreatment.TRANSLATE,
         BlockTreatment.READ_AS_IS,
         BlockTreatment.GLOSSARY_ONLY,
-        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
         BlockTreatment.TRANSLATE,
         BlockTreatment.TRANSLATE,
         BlockTreatment.GLOSSARY_ONLY,
         BlockTreatment.GLOSSARY_ONLY,
-        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
         BlockTreatment.READ_AS_IS,
         BlockTreatment.READ_AS_IS,
     ]
     assert [item.help_kind for item in normalized.difficulties] == [
         'lexical_hint',
-        'explanation',
         'lexical_hint',
-        'explanation',
+        'lexical_hint',
+        'lexical_hint',
     ]
+
+
+def test_short_elementary_dialogue_with_adverb_difficulty_stays_or_demotes_to_glossary_only():
+    """A remark adverb does not translate a short elementary A2 reply.
+
+    ‘Shoo!’ said Mr Dursley loudly. and ‘No,’ she said sharply. ‘Why?’ stay
+    GLOSSARY_ONLY when the only difficulty is that adverb. A model TRANSLATE on
+    the same replies is demoted, and those vocabulary items become lexical hints.
+    The same reply with no difficulty is demoted to READ_AS_IS.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse, QuotedDifficultyResponse, QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    shoo = '‘Shoo!’ said Mr Dursley loudly.'
+    sharply = '‘No,’ she said sharply. ‘Why?’'
+    bare = '‘Yes,’ he said.'
+    blocks = (
+        _block(0, shoo),
+        _block(1, shoo),
+        _block(2, sharply),
+        _block(3, sharply),
+        _block(4, bare),
+    )
+    point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
+
+    def vocab(difficulty_id, alias, quote, help_kind):
+        return QuotedDifficultyResponse(
+            difficulty_id, (QuotedSourceAnchorResponse(alias, quote),), alias,
+            'vocabulary', 'useful', help_kind, point,
+        )
+
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b2', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b3', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b4', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b5', BlockTreatment.TRANSLATE),
+        ),
+        difficulties=(
+            vocab('d-shoo-translate', 'b1', 'loudly', 'explanation'),
+            vocab('d-shoo-glossary', 'b2', 'loudly', 'lexical_hint'),
+            vocab('d-sharp-translate', 'b3', 'sharply', 'explanation'),
+            vocab('d-sharp-glossary', 'b4', 'sharply', 'lexical_hint'),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.READ_AS_IS,
+    ]
+    assert [item.help_kind for item in normalized.difficulties] == [
+        'lexical_hint',
+        'lexical_hint',
+        'lexical_hint',
+        'lexical_hint',
+    ]
+
+
+def test_short_dialogue_with_non_elementary_speech_verb_still_promotes_to_translate():
+    """Demanded, snapped, a question tag, and a reply over eight words are translated."""
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import PedagogicalAnalysisResponse, TreatmentPlanItemResponse
+
+    demanded = '‘Are you up yet?’ she demanded.'
+    snapped = '‘What did you say?’ his aunt snapped through the door.'
+    tag = '‘No problems, were there?’'
+    long_reply = '‘Please bring the small red box from the hall,’ she said.'
+    blocks = (
+        _block(0, demanded),
+        _block(1, snapped),
+        _block(2, tag),
+        _block(3, long_reply),
+    )
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(f'b{index}', BlockTreatment.READ_AS_IS)
+            for index in range(1, 5)
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    ]
+
+
+def test_normalize_a2_dialogue_response_clears_before_you_read():
+    """A2 without English help drops before_you_read when nothing cites it.
+
+    PedagogicalAnalysisResponse and ChapterAnalysisResponse both lose the list
+    when before_you_read_evidence is empty. Evidence keeps the list.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        BeforeYouReadEntryResponse, ChapterAnalysisResponse, HelpEvidenceResponse,
+        PedagogicalAnalysisResponse, QuotedContentPlanResponse, TreatmentPlanItemResponse,
+    )
+
+    block = _block(0, 'It blinked.')
+    aliases = {'b1': block.id}
+    entry = BeforeYouReadEntryResponse('Holmes', 'Главный сыщик истории.')
+    evidence = HelpEvidenceResponse(
+        'd1', 'p1', 'before_you_read.explanation', 'b1', 0, entry.explanation,
+    )
+    pedagogical_cleared = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=(TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),),
+            before_you_read=(entry,),
+        ),
+        (block,), aliases, reader_level='a2', english_help=False,
+    )
+    assert pedagogical_cleared.before_you_read == ()
+
+    pedagogical_kept = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=(TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),),
+            before_you_read=(entry,),
+            before_you_read_evidence=(evidence,),
+        ),
+        (block,), aliases, reader_level='a2', english_help=False,
+    )
+    assert pedagogical_kept.before_you_read == (entry,)
+
+    chapter_cleared = normalize_a2_dialogue_response(
+        ChapterAnalysisResponse(
+            translation_instructions='Keep the voice.',
+            chapter_summary='A speaker waits.',
+            treatment_plan=(TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),),
+            before_you_read=(entry,),
+            content_plan=QuotedContentPlanResponse(),
+        ),
+        (block,), aliases, reader_level='a2', english_help=False,
+    )
+    assert chapter_cleared.before_you_read == ()
+
+    chapter_kept = normalize_a2_dialogue_response(
+        ChapterAnalysisResponse(
+            translation_instructions='Keep the voice.',
+            chapter_summary='A speaker waits.',
+            treatment_plan=(TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),),
+            before_you_read=(entry,),
+            content_plan=QuotedContentPlanResponse(before_you_read_evidence=(evidence,)),
+        ),
+        (block,), aliases, reader_level='a2', english_help=False,
+    )
+    assert chapter_kept.before_you_read == (entry,)
 
 

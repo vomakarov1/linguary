@@ -2053,6 +2053,9 @@ _NARRATIVE_GLOSSARY_SENTENCE_LIMIT = 3
 _REMARK_DIFFICULTY_KINDS = frozenset({"vocabulary", "false_friend"})
 _LIGHT_DIALOGUE_TREATMENTS = frozenset({BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS})
 _DIALOGUE_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.QUOTE})
+_BASIC_REPORTING = frozenset({
+    "said", "asked", "replied", "answered", "told", "cried", "shouted", "called",
+})
 _NONBASIC_REPORTING = frozenset({
     "demanded", "demanding", "demands",
     "murmured", "murmuring", "murmurs",
@@ -2117,20 +2120,25 @@ def normalize_a2_dialogue_response(
     reader_level: str | None = None,
     english_help: bool = False,
 ) -> ChapterAnalysisResponse | PedagogicalAnalysisResponse:
-    """Promote non-elementary quoted A2 dialogue from a light mode to TRANSLATE.
+    """Promote non-elementary quoted A2 dialogue and keep a short elementary reply light.
 
-    A paragraph or quote stays as the model left it when the reader is not A2,
-    English help is on, or the line is a short elementary reply. Promoting a
-    block or segment to TRANSLATE retargets unbacked lexical hints on that
-    block to explanation.
+    Remark vocabulary does not promote a reply of at most eight words when the
+    remark has no non-basic speech verb and the quotes have no subordinator or
+    question tag. A model TRANSLATE on that reply, with a basic speech verb and
+    at most two phrases, drops to GLOSSARY_ONLY when it has a vocabulary
+    difficulty and to READ_AS_IS otherwise. A2 without English help clears
+    before_you_read when nothing cites it. Promoting a block to TRANSLATE
+    retargets unbacked lexical hints on that block to explanation.
     """
     if reader_level != "a2" or english_help:
         return payload
+    payload = _drop_unevidenced_before_you_read(payload)
     blocks_by_id = {block.id: block for block in blocks}
     difficulties = _response_difficulties(payload)
     covered_points = _covered_byr_points(payload)
     items: list[TreatmentPlanItemResponse] = []
     promoted_blocks: list[tuple[frozenset[str], bool]] = []
+    demoted_blocks: list[frozenset[str]] = []
     changed = False
     for item in payload.treatment_plan:
         block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
@@ -2138,15 +2146,21 @@ def normalize_a2_dialogue_response(
             items.append(item)
             continue
         updated, promoted = _promote_dialogue_item(item, block, difficulties)
+        updated, demoted = _demote_elementary_reply(item, updated, block, difficulties)
         if updated is not item:
             changed = True
         items.append(updated)
-        if promoted is not None:
+        if promoted is not None and demoted is None:
             promoted_blocks.append(promoted)
+        if demoted is not None:
+            demoted_blocks.append(demoted)
     if not changed:
         return payload
     switched = tuple(
-        _switch_promoted_hint(difficulty, promoted_blocks, covered_points)
+        _switch_demoted_hint(
+            _switch_promoted_hint(difficulty, promoted_blocks, covered_points),
+            demoted_blocks,
+        )
         for difficulty in difficulties
     )
     plan = tuple(items)
@@ -2166,17 +2180,27 @@ def _response_difficulties(payload: ChapterAnalysisResponse | PedagogicalAnalysi
     return payload.content_plan.difficulties
 
 
+def _before_you_read_evidence(payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse):
+    if isinstance(payload, PedagogicalAnalysisResponse):
+        return payload.before_you_read_evidence
+    if payload.content_plan is None:
+        return ()
+    return payload.content_plan.before_you_read_evidence
+
+
+def _drop_unevidenced_before_you_read(
+    payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
+):
+    if _before_you_read_evidence(payload) or not payload.before_you_read:
+        return payload
+    return replace(payload, before_you_read=())
+
+
 def _covered_byr_points(
     payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
 ) -> dict[str, set[str]]:
-    if isinstance(payload, PedagogicalAnalysisResponse):
-        evidence = payload.before_you_read_evidence
-    elif payload.content_plan is not None:
-        evidence = payload.content_plan.before_you_read_evidence
-    else:
-        evidence = ()
     covered: dict[str, set[str]] = {}
-    for item in evidence:
+    for item in _before_you_read_evidence(payload):
         covered.setdefault(item.difficulty_id, set()).add(item.point_id)
     return covered
 
@@ -2274,8 +2298,7 @@ def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
     quotes = list(_DIALOGUE_QUOTES.finditer(text))
     if not quotes:
         return False
-    if len(expression_words(text)) > 8:
-        return True
+    long_reply = len(expression_words(text)) > 8
     quoted = " ".join(match.group(0)[1:-1] for match in quotes)
     quoted_words = expression_words(quoted)
     if any(word in _SUBORDINATORS for word in quoted_words):
@@ -2286,9 +2309,8 @@ def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
         return True
     ranges = _remark_ranges(quotes, len(text))
     remark = " ".join(text[start:end] for start, end in ranges)
-    if set(expression_words(remark)) & _NONBASIC_REPORTING:
-        return True
-    return any(
+    structural = long_reply or bool(set(expression_words(remark)) & _NONBASIC_REPORTING)
+    if structural and any(
         difficulty.kind in _REMARK_DIFFICULTY_KINDS
         and difficulty.owner_block_id in owners
         and any(
@@ -2296,7 +2318,9 @@ def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
             for anchor in difficulty.anchors
         )
         for difficulty in difficulties
-    )
+    ):
+        return True
+    return structural
 
 
 def _remark_ranges(quotes, length) -> tuple[tuple[int, int], ...]:
@@ -2336,6 +2360,71 @@ def _anchor_hits_ranges(anchor, text, span_start, ranges) -> bool:
         bool(_quote_spans(without_footnote_markers(text[begin:stop]), target))
         for begin, stop in ranges
     )
+
+
+def _demote_elementary_reply(original, updated, block, difficulties):
+    """Lower a model TRANSLATE on a short elementary reply.
+
+    Returns the item and the block owners when vocabulary hints must become
+    lexical hints. Owners stay None when the mode is unchanged or there is
+    nothing to retarget.
+    """
+    if original.treatment is not BlockTreatment.TRANSLATE or original.segments:
+        return updated, None
+    owners = frozenset(part for part in (original.source_block_id, block.id) if part)
+    mode = _elementary_reply_mode(block.text, difficulties, owners)
+    if mode is None or updated.treatment is mode:
+        return updated, None
+    demoted = replace(updated, treatment=mode)
+    if mode is not BlockTreatment.GLOSSARY_ONLY:
+        return demoted, None
+    return demoted, owners
+
+
+def _elementary_reply_mode(text, difficulties, owners):
+    if len(expression_words(text)) > 8:
+        return None
+    quotes = list(_DIALOGUE_QUOTES.finditer(text))
+    if not quotes or len(quotes) > 2:
+        return None
+    quoted = " ".join(match.group(0)[1:-1] for match in quotes)
+    quoted_words = expression_words(quoted)
+    if any(word in _SUBORDINATORS for word in quoted_words):
+        return None
+    if _QUESTION_TAG_RE.search(quoted) is not None:
+        return None
+    if len(quoted_words) >= 5 and any(sep in quoted for sep in (" \u2013 ", " \u2014 ")):
+        return None
+    ranges = _remark_ranges(quotes, len(text))
+    remark_words = set(expression_words(" ".join(text[start:end] for start, end in ranges)))
+    if remark_words & (_NONBASIC_REPORTING - _BASIC_REPORTING):
+        return None
+    if not (remark_words & _BASIC_REPORTING):
+        return None
+    related = tuple(
+        difficulty for difficulty in difficulties
+        if difficulty.owner_block_id in owners or any(
+            getattr(anchor, "block_id", None) in owners for anchor in difficulty.anchors
+        )
+    )
+    if any(difficulty.kind != "vocabulary" for difficulty in related):
+        return None
+    if related:
+        return BlockTreatment.GLOSSARY_ONLY
+    return BlockTreatment.READ_AS_IS
+
+
+def _switch_demoted_hint(difficulty, demoted_blocks: Sequence[frozenset[str]]):
+    if not demoted_blocks or difficulty.kind != "vocabulary" or difficulty.help_kind == "lexical_hint":
+        return difficulty
+    if any(
+        difficulty.owner_block_id in owners or any(
+            getattr(anchor, "block_id", None) in owners for anchor in difficulty.anchors
+        )
+        for owners in demoted_blocks
+    ):
+        return replace(difficulty, help_kind="lexical_hint")
+    return difficulty
 
 
 def _switch_promoted_hint(
