@@ -2023,12 +2023,11 @@ def validate_fact_glossary(
 # closing ’ still follows inside the same replica (boys’ room, Dursleys’,) is
 # an apostrophe, not the quote closer.
 _SINGLE_QUOTE_APOSTROPHE = (
-    r"(?<=\w)’(?=\w)"
-    r"|’(?=\w)"
-    r"|(?<=\w)’(?=(?:\s+\w|[,;:])(?:[^‘’]|(?<=\w)’(?=\w)|’(?=\w))*’)"
+    r"’(?=\w)"
+    r"|(?<=\w)’(?=(?:\s+\w|[,;:])(?:[^‘’]|’(?=\w))*’(?!\w))"
 )
 _DIALOGUE_QUOTES = re.compile(
-    rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’|“[^“”]*”|\"[^\"“”‘’]*\""
+    rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’(?!\w)|“[^“”]*”|\"[^\"“”‘’]*\""
 )
 _SUBORDINATORS = frozenset({"if", "when", "because", "although", "though", "unless", "whether"})
 _REMARK_DIFFICULTY_KINDS = frozenset({"vocabulary", "false_friend"})

@@ -1682,6 +1682,8 @@ def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
     possessive_interior = '‘Check the boys’ ledger.’'
     two_quotes = '‘No,’ she said sharply. ‘Why?’'
     typographic_remark = '‘No,’ he didn’t answer.'
+    word_close_remark = '‘Boys’ if he didn’t say.'
+    unclosed_many_apostrophes = '‘' + ' '.join(["don’t"] * 28)
     blocks = (
         _block(0, conditional),
         _block(1, short),
@@ -1692,6 +1694,8 @@ def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
         _block(6, possessive_interior),
         _block(7, two_quotes),
         _block(8, typographic_remark),
+        _block(9, word_close_remark),
+        _block(10, unclosed_many_apostrophes),
     )
     point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
 
@@ -1713,6 +1717,8 @@ def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
             TreatmentPlanItemResponse('b7', BlockTreatment.GLOSSARY_ONLY),
             TreatmentPlanItemResponse('b8', BlockTreatment.GLOSSARY_ONLY),
             TreatmentPlanItemResponse('b9', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b10', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b11', BlockTreatment.READ_AS_IS),
         ),
         difficulties=(
             vocab('d-inside', 'b3'),
@@ -1734,6 +1740,8 @@ def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
         BlockTreatment.GLOSSARY_ONLY,
         BlockTreatment.GLOSSARY_ONLY,
         BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
     ]
     assert [item.help_kind for item in normalized.difficulties] == [
         'lexical_hint',

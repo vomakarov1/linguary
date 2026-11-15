@@ -116,7 +116,7 @@ _REMARK_VERBS = frozenset({
 })
 _REMARK_WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*", re.IGNORECASE)
 _WORD_FINAL_APOSTROPHE = re.compile(
-    r"’(?=(?:\s+\w|[,;:])(?:[^‘’]|(?<=\w)’(?=\w)|’(?=\w))*’)"
+    r"’(?=(?:\s+\w|[,;:])(?:[^‘’]|’(?=\w))*’(?!\w))"
 )
 _TITLE_TRANSLATIONS = {
     "mr": "мистер",

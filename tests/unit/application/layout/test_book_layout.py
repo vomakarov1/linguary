@@ -975,6 +975,20 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
         split_text,
         segments=(BlockSegment(0, split_cut, 0), BlockSegment(split_cut, len(split_text), 0)),
     )
+    word_close = _block("one", 15, "‘Boys’ he didn’t say. Someone left.")
+    called_boys_text = "He called them ‘boys’ and didn’t wait. Then he spoke."
+    called_boys_cut = called_boys_text.index("Then")
+    called_boys = _block(
+        "one",
+        16,
+        called_boys_text,
+        segments=(
+            BlockSegment(0, called_boys_cut, 0),
+            BlockSegment(called_boys_cut, len(called_boys_text), 1),
+        ),
+    )
+    unclosed_many_text = "‘" + " ".join(["don’t"] * 28) + " wait."
+    unclosed_many = _block("one", 17, unclosed_many_text)
     facts = (
         _fact("f-said-first", said_first, "Harry", "Harry", "inferred"),
         _fact("f-name-first", name_first, "Harry", "Harry", "inferred"),
@@ -991,6 +1005,9 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
         _fact("f-dumbledore", dumbledore, "I haven’t blushed so much", "Dumbledore", "inferred"),
         _fact("f-possessive", possessive, "get ’em now", "Harry", "inferred"),
         _fact("f-split", split_block, "she demanded", "Alice", "inferred"),
+        _fact("f-word-close", word_close, "Someone left", "Harry", "inferred"),
+        _fact("f-called-boys", called_boys, "Then he spoke", "Harry", "inferred"),
+        _fact("f-unclosed-many", unclosed_many, "wait", "Harry", "inferred"),
     )
     section = _section(
         "one",
@@ -1012,6 +1029,9 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
             dumbledore,
             possessive,
             split_block,
+            word_close,
+            called_boys,
+            unclosed_many,
         ),
     )
     split_result = BlockProcessingResult(
@@ -1021,9 +1041,16 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
         segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
         segment_translations=("— Подожди меня в холле,", None),
     )
+    called_boys_result = BlockProcessingResult(
+        called_boys.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Затем он заговорил.",
+        segment_treatments=(BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        segment_translations=(None, "Затем он заговорил."),
+    )
     layout = build_book_layout(_inputs(
         _document((section,)),
-        {split_block.id: split_result},
+        {split_block.id: split_result, called_boys.id: called_boys_result},
         analyses=(_analysis(
             "a-one",
             section.id,
@@ -1055,6 +1082,9 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
     assert units[dumbledore.id][0].speaker == "Дамблдор"
     assert units[possessive.id][0].speaker == "Гарри"
     assert units[split_block.id][0].speaker == "Алиса"
+    assert units[word_close.id][0].speaker is None
+    assert [unit.speaker for unit in units[called_boys.id]] == [None, None]
+    assert units[unclosed_many.id][0].speaker == "Гарри"
 
 
 def test_collapsed_whole_block_translation_hides_mid_paragraph_speaker() -> None:
