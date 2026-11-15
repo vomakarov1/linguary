@@ -2029,7 +2029,27 @@ _SINGLE_QUOTE_APOSTROPHE = (
 _DIALOGUE_QUOTES = re.compile(
     rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’(?!\w)|“[^“”]*”|\"[^\"“”‘’]*\""
 )
-_SUBORDINATORS = frozenset({"if", "when", "because", "although", "though", "unless", "whether"})
+_SUBORDINATORS = frozenset({
+    "if",
+    "when",
+    "because",
+    "although",
+    "though",
+    "unless",
+    "whether",
+    "couldn't",
+    "wouldn't",
+    "shouldn't",
+})
+_QUESTION_TAG_RE = re.compile(
+    r",\s*(?:weren['’]t|were|isn['’]t|is|aren['’]t|are|wasn['’]t|was|"
+    r"don['’]t|do|doesn['’]t|does|didn['’]t|did|haven['’]t|have|hasn['’]t|has|"
+    r"hadn['’]t|had|won['’]t|will|wouldn['’]t|would|can['’]t|can|couldn['’]t|could|"
+    r"shouldn['’]t|should)\s+(?:there|it|he|she|they|we|you|i)\s*\?",
+    re.IGNORECASE,
+)
+_NARRATIVE_GLOSSARY_WORD_LIMIT = 25
+_NARRATIVE_GLOSSARY_SENTENCE_LIMIT = 3
 _REMARK_DIFFICULTY_KINDS = frozenset({"vocabulary", "false_friend"})
 _LIGHT_DIALOGUE_TREATMENTS = frozenset({BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS})
 _DIALOGUE_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.QUOTE})
@@ -2235,10 +2255,19 @@ def _promote_dialogue_item(item, block, difficulties):
         return replace(item, treatment=strongest, segments=tuple(updated)), promoted
     if item.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
         return item, None
-    if not _dialogue_needs_translation(block.text, difficulties, owners, 0):
-        return item, None
     had_glossary = item.treatment is BlockTreatment.GLOSSARY_ONLY
+    if not _dialogue_needs_translation(block.text, difficulties, owners, 0) and not (
+        had_glossary and _narrative_needs_translation(block)
+    ):
+        return item, None
     return replace(item, treatment=BlockTreatment.TRANSLATE), (owners, had_glossary)
+
+
+def _narrative_needs_translation(block: DocumentBlock) -> bool:
+    if len(expression_words(block.text)) >= _NARRATIVE_GLOSSARY_WORD_LIMIT:
+        return True
+    sentences = {span.sentence_index for span in block.segment_spans}
+    return len(sentences) >= _NARRATIVE_GLOSSARY_SENTENCE_LIMIT
 
 
 def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
@@ -2248,7 +2277,12 @@ def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
     if len(expression_words(text)) > 8:
         return True
     quoted = " ".join(match.group(0)[1:-1] for match in quotes)
-    if any(word in _SUBORDINATORS for word in expression_words(quoted)):
+    quoted_words = expression_words(quoted)
+    if any(word in _SUBORDINATORS for word in quoted_words):
+        return True
+    if _QUESTION_TAG_RE.search(quoted) is not None:
+        return True
+    if len(quoted_words) >= 5 and any(sep in quoted for sep in (" \u2013 ", " \u2014 ")):
         return True
     ranges = _remark_ranges(quotes, len(text))
     remark = " ".join(text[start:end] for start, end in ranges)

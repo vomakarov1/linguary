@@ -125,6 +125,18 @@ _MOTORBIKES = (
     "in his seat and yelled at Harry, his face like a gigantic beetroot with a "
     f"moustache, {_OPEN}MOTORBIKES DON{_CLOSE}T FLY!{_CLOSE}"
 )
+_BUNDLE_AND_SCAR = (
+    "He laid Harry gently on the doorstep, took a letter out of his cloak, "
+    f"tucked it inside Harry{_CLOSE}s blankets, and then came back to the other "
+    "two. For a full minute the three of them stood and looked at the little "
+    "bundle; Hagrid"
+    f"{_CLOSE}s shoulders shook, Professor McGonagall blinked furiously, and "
+    "the twinkling light that usually shone from Dumbledore"
+    f"{_CLOSE}s eyes seemed to have gone out."
+)
+_NO_PROBLEMS = f"{_OPEN}No problems, were there?{_CLOSE}"
+_COULDNT_YOU = f"{_OPEN}Couldn{_CLOSE}t you do something about it, Dumbledore?{_CLOSE}"
+_YVONNE = f"{_OPEN}What about what{_CLOSE}s-her-name, your friend \u2013 Yvonne?{_CLOSE}"
 _PIERS = (
     "Harry was glad school was over, but there was no escaping Dudley"
     f"{_CLOSE}s gang, who visited the house every single day. Piers, Dennis, "
@@ -134,7 +146,18 @@ _PIERS = (
     f"{_CLOSE}s favourite sport: Harry-hunting."
 )
 
-_REGRESSED = ("nasty", "hagrid-line", "good-luck", "demanded", "snapped", "car")
+_REGRESSED = (
+    "nasty",
+    "hagrid-line",
+    "good-luck",
+    "bundle-and-scar",
+    "no-problems",
+    "couldnt-you",
+    "demanded",
+    "snapped",
+    "yvonne",
+    "car",
+)
 _EXCEPTIONS = ("shoo", "up", "winked", "boa", "a-what", "no-why", "nearly")
 _SHOWN_SPEAKERS = {
     "nasty": "миссис Дёрсли",
@@ -143,7 +166,17 @@ _SHOWN_SPEAKERS = {
     "demanded": "тётя Петуния",
     "car": "дядя Вернон",
 }
-_HIDDEN_SPEAKERS = ("good-luck", "hagrid-line", "snapped", "motorbikes", *_EXCEPTIONS)
+_HIDDEN_SPEAKERS = (
+    "good-luck",
+    "hagrid-line",
+    "bundle-and-scar",
+    "no-problems",
+    "couldnt-you",
+    "snapped",
+    "yvonne",
+    "motorbikes",
+    *_EXCEPTIONS,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +242,34 @@ _LINES: tuple[_Line, ...] = (
         "слезая с мотоцикла. \u2014 Молодой Сириус Блэк дал мне его на время. "
         "Он у меня, сэр.\u00bb",
     ),
+    _Line(
+        "bundle-and-scar",
+        "ch1",
+        _BUNDLE_AND_SCAR,
+        BlockTreatment.GLOSSARY_ONLY,
+        "Он осторожно положил Гарри на порог, достал из плаща письмо, сунул его в "
+        "одеяльца Гарри и вернулся к остальным двоим. Целую минуту все трое стояли "
+        "и смотрели на маленький свёрток; плечи Хагрида тряслись, профессор "
+        "Макгонагалл яростно моргала, а мерцающий свет, который обычно сиял в "
+        "глазах Дамблдора, казалось, погас.",
+        hint=("tucked it inside", "сунул его внутрь", "tuck \u2014 аккуратно подсовывать."),
+    ),
+    _Line(
+        "no-problems",
+        "ch1",
+        _NO_PROBLEMS,
+        BlockTreatment.GLOSSARY_ONLY,
+        "\u2014 Проблем ведь не было, правда?",
+        hint=("were there?", "не так ли?", "Разделительный вопрос."),
+    ),
+    _Line(
+        "couldnt-you",
+        "ch1",
+        _COULDNT_YOU,
+        BlockTreatment.GLOSSARY_ONLY,
+        "\u2014 Разве ты не мог что-нибудь с ним сделать, Дамблдор?",
+        hint=("do something about it", "что-то с этим сделать", "Повлиять на ситуацию."),
+    ),
     _Line("a-what", "ch1", _A_WHAT, BlockTreatment.READ_AS_IS),
     _Line(
         "no-why",
@@ -231,6 +292,14 @@ _LINES: tuple[_Line, ...] = (
         _SNAPPED,
         BlockTreatment.GLOSSARY_ONLY,
         "\u2014 Что ты сказал? \u2014 огрызнулась тётя через дверь.",
+    ),
+    _Line(
+        "yvonne",
+        "ch2",
+        _YVONNE,
+        BlockTreatment.GLOSSARY_ONLY,
+        "\u2014 А как насчёт этой, как её там, твоей подруги \u2014 Ивонн?",
+        hint=("what\u2019s-her-name", "как её там", "Разговорная замена забытого имени."),
     ),
     _Line("nearly", "ch2", _NEARLY, BlockTreatment.READ_AS_IS),
     _Line(
@@ -389,6 +458,7 @@ def _facts(blocks: Mapping[str, DocumentBlock]) -> dict[str, tuple[ContextFact, 
     nasty = _anchor(blocks["nasty"], blocks["nasty"].text)
     oh_yes = _anchor(blocks["oh-yes"], blocks["oh-yes"].text)
     good_luck = _anchor(blocks["good-luck"], blocks["good-luck"].text)
+    good_luck_remark = _anchor(blocks["good-luck"], "he murmured")
     giant_subject = _anchor(blocks["giant"], "said the giant")
     hagrid_other = _anchor(blocks["hagrid-line"], f"{_OPEN}Hagrid,{_CLOSE}")
     demanded = _anchor(blocks["demanded"], "she demanded")
@@ -396,12 +466,13 @@ def _facts(blocks: Mapping[str, DocumentBlock]) -> dict[str, tuple[ContextFact, 
     turned = _anchor(blocks["motorbikes"], "He turned right around in his seat")
     return {
         "ch1": (
-            _fact("speaker-petunia", "Petunia Dursley (Mrs Dursley)", "inferred", nasty, (nasty,)),
-            _fact("speaker-mr-dursley", "Mr. Dursley", "inferred", oh_yes, (oh_yes,)),
-            _fact("speaker-dumbledore", "Dumbledore", "explicit", good_luck, (good_luck,)),
+            _fact("speaker-petunia", "миссис Дёрсли", "inferred", nasty, (nasty,)),
+            _fact("speaker-mr-dursley", "мистер Дёрсли", "inferred", oh_yes, (oh_yes,)),
+            _fact("speaker-dumbledore", "Дамблдор", "explicit", good_luck, (good_luck,)),
+            _fact("speaker-dumbledore-dup", "Дамблдор", "inferred", good_luck_remark, (good_luck_remark,)),
             _fact(
                 "speaker-hagrid",
-                "Hagrid (the giant on the motorbike)",
+                "Хагрид (великан на мотоцикле)",
                 "inferred",
                 giant_subject,
                 (giant_subject, hagrid_other),
@@ -417,12 +488,12 @@ def _facts(blocks: Mapping[str, DocumentBlock]) -> dict[str, tuple[ContextFact, 
             ),
             _fact(
                 "speaker-vernon",
-                "Vernon Dursley (Uncle Vernon)",
+                "Вернон Дёрсли (дядя Вернон)",
                 "inferred",
                 car,
                 (car,),
             ),
-            _fact("speaker-uncle", "Uncle Vernon", "inferred", turned, (turned,)),
+            _fact("speaker-uncle", "дядя Вернон", "inferred", turned, (turned,)),
         ),
     }
 
@@ -533,6 +604,15 @@ def _assemble(tmp_path: Path) -> _Case:
                 for key, block in blocks.items()
             ),
             difficulties=(
+                QuotedDifficultyResponse(
+                    "d-bundle",
+                    (QuotedSourceAnchorResponse(blocks["bundle-and-scar"].id, "tucked it inside"),),
+                    blocks["bundle-and-scar"].id,
+                    "vocabulary",
+                    "useful",
+                    "lexical_hint",
+                    point,
+                ),
                 QuotedDifficultyResponse(
                     "d-demanded",
                     (QuotedSourceAnchorResponse(blocks["demanded"].id, "demanded"),),
@@ -704,7 +784,7 @@ def _who_cards(page: etree._Element) -> dict[str, tuple[str, str]]:
 def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouched(
     harry_regression: _Case,
 ) -> None:
-    """Six light main replies become TRANSLATE; seven staged exceptions do not."""
+    """Ten light main blocks become TRANSLATE; seven staged exceptions do not."""
     for key in _REGRESSED:
         assert _mode(harry_regression, key) is BlockTreatment.TRANSLATE
         unit = _unit(harry_regression.pages, _BY_KEY[key].text)
@@ -713,6 +793,7 @@ def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouch
         difficulty.id: difficulty.help_kind
         for difficulty in harry_regression.normalized.difficulties
     } == {
+        "d-bundle": "explanation",
         "d-demanded": "explanation",
         "d-snapped": "explanation",
     }
@@ -721,6 +802,94 @@ def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouch
         assert _mode(harry_regression, key) is not BlockTreatment.TRANSLATE
         unit = _unit(harry_regression.pages, _BY_KEY[key].text)
         assert _translation(unit) is None
+
+
+def test_a2_review_fixes_prompt_and_speaker_rules(harry_regression: _Case) -> None:
+    """Russian/English speaker lookup and A2/SOUND/narrative prompt rules hold."""
+    from linguary.application.context_builder import ContextBuilder, snapshot_prompt_templates
+    from linguary.application.layout.book import _speaker_name
+    from linguary.domain import TermConcept, TermStatus, TermVariant
+    from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+    analyses = tuple(
+        ChapterAnalysis.create(
+            id="analysis-check",
+            section_id=harry_regression.section_ids["ch1"],
+            treatment_plan=TreatmentPlan.of_treatments(harry_regression.section_ids["ch1"], ()),
+            translation_instructions="Keep names.",
+            chapter_summary="Summary.",
+            expected_block_ids=(),
+            glossary_candidates=(
+                _candidate("analysis-check", "Mrs Dursley", "миссис Дёрсли", _MRS_DURSLEY_DESCRIPTION),
+                _candidate("analysis-check", "Dursley", "Дёрсли", _DURSLEY_DESCRIPTION),
+                _candidate("analysis-check", "Hagrid", "Хагрид", _HAGRID_DESCRIPTION),
+                _candidate("analysis-check", "Petunia", "Петуния", _PETUNIA_DESCRIPTION),
+                _candidate("analysis-check", "Vernon", "Вернон", _VERNON_DESCRIPTION),
+                GlossaryCandidate(
+                    id="analysis-check-put-outer",
+                    analysis_id="analysis-check",
+                    source_text="Put-Outer",
+                    type=ConceptType.FICTIONAL_CONCEPT,
+                    suggested_translation="Гаситель",
+                    confidence=0.9,
+                    model_flagged_review=False,
+                    requires_review=False,
+                ),
+            ),
+        )
+        for _ in (1,)
+    )
+    concepts = (
+        TermConcept(
+            id="concept-dumbledore",
+            book_id=_BOOK_ID,
+            type=ConceptType.PERSON,
+            canonical_source_text="Albus Dumbledore",
+            status=TermStatus.APPROVED,
+            variants=(TermVariant("concept-dumbledore", "ru", "Альбус Дамблдор", TermStatus.APPROVED),),
+        ),
+    )
+    for raw, expected in (
+        ("Petunia Dursley (Mrs Dursley)", "миссис Дёрсли"),
+        ("миссис Дёрсли", "миссис Дёрсли"),
+        ("Mr. Dursley", "мистер Дёрсли"),
+        ("мистер Дёрсли", "мистер Дёрсли"),
+        ("Hagrid (the giant on the motorbike)", "Хагрид"),
+        ("Хагрид", "Хагрид"),
+        ("Aunt Petunia", "тётя Петуния"),
+        ("тётя Петуния", "тётя Петуния"),
+        ("Vernon Dursley (Uncle Vernon)", "дядя Вернон"),
+        ("дядя Вернон", "дядя Вернон"),
+        ("Альбус Дамблдор", "Альбус Дамблдор"),
+        ("Гаситель", None),
+    ):
+        assert _speaker_name(raw, concepts, analyses, "ru", document=harry_regression.document) == expected
+
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    narrative = templates["narrative_analysis"]
+    pedagogical = templates["pedagogical_analysis"]
+    assert "source_text" in narrative
+    assert "inferred" in narrative and "explicit" in narrative
+    assert "glossary_candidates" in narrative
+    assert "It winked." in pedagogical
+    assert "READ_AS_IS" in pedagogical
+
+    section = harry_regression.document.section(harry_regression.section_ids["ch1"])
+    sound_context = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=NameTranslationPolicy(
+            version=1,
+            strategy=NameTranslationStrategy.SOUND,
+        ),
+    ).for_chapter_narrative_analysis(harry_regression.document, section)
+    assert "маглы" in sound_context.request.instructions
+    assert "Поз" in sound_context.request.instructions
 
 
 def test_harry_potter_epub_has_russian_inferred_speakers_only_on_opening_dialogues(

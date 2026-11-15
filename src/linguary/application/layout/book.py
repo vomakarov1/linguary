@@ -131,6 +131,10 @@ _TITLE_TRANSLATIONS = {
     "madam": "мадам",
     "lord": "лорд",
 }
+_RUSSIAN_TITLES = {
+    glossary_key(translation): translation
+    for translation in _TITLE_TRANSLATIONS.values()
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,9 +362,13 @@ def _inferred_facts_by_block(
 ) -> dict[str, tuple[ContextFact, ...]]:
     grouped: dict[str, list[ContextFact]] = {}
     for fact in facts:
-        if fact.certainty in _UNIT_SPEAKER_CERTAINTY and isinstance(fact.value, str):
+        if fact.certainty in _SHOWN_CERTAINTY and isinstance(fact.value, str):
             grouped.setdefault(fact.subject_anchor.block_id, []).append(fact)
-    return {block_id: tuple(items) for block_id, items in grouped.items()}
+    return {
+        block_id: tuple(items)
+        for block_id, items in grouped.items()
+        if any(item.certainty in _UNIT_SPEAKER_CERTAINTY for item in items)
+    }
 
 
 def _speaker_index(
@@ -377,7 +385,11 @@ def _speaker_index(
             continue
         chosen = concept.variant_for(normalized)
         if chosen is not None and chosen.status.is_user_decision and chosen.text.strip():
-            user_by_key[key] = chosen.text.strip()
+            chosen_text = chosen.text.strip()
+            user_by_key[key] = chosen_text
+            target_key = glossary_key(chosen_text)
+            if target_key:
+                user_by_key.setdefault(target_key, chosen_text)
     russian = normalized == "ru"
     allowed = _content_section_ids(document)
     candidate_by_key: dict[str, str] = {}
@@ -394,6 +406,9 @@ def _speaker_index(
             if russian and _CYRILLIC.search(translation) is None:
                 continue
             candidate_by_key[key] = translation
+            target_key = glossary_key(translation)
+            if target_key:
+                candidate_by_key.setdefault(target_key, translation)
     return _SpeakerIndex(normalized, user_by_key, candidate_by_key)
 
 
@@ -461,8 +476,21 @@ def _speakers_for_block(
     ]
     if not block_facts:
         return {}
+    explicit_facts = [
+        fact
+        for fact in facts
+        if fact.certainty == "explicit"
+        and isinstance(fact.value, str)
+        and fact.subject_anchor.block_id == block.id
+    ]
     index = _index or _speaker_index(concepts, analyses, language, document)
     parts = _shown_parts(block, treatments, result)
+    explicit_parts = {
+        (part.start, part.end)
+        for fact in explicit_facts
+        for part in parts
+        if _part_shows_speaker(block.text, part, fact.subject_anchor.start)
+    }
     speakers: dict[tuple[int, int], str] = {}
     for fact in block_facts:
         name = _speaker_name(
@@ -477,8 +505,9 @@ def _speakers_for_block(
             continue
         anchor = fact.subject_anchor
         for part in parts:
-            if _part_shows_speaker(block.text, part, anchor.start):
-                speakers.setdefault((part.start, part.end), name)
+            bounds = (part.start, part.end)
+            if bounds not in explicit_parts and _part_shows_speaker(block.text, part, anchor.start):
+                speakers.setdefault(bounds, name)
     return speakers
 
 
@@ -517,11 +546,12 @@ def _user_translation(
         return None
     normalized = _normalized_language(language)
     for concept in concepts:
-        if glossary_key(concept.canonical_source_text) != key:
-            continue
         chosen = concept.variant_for(normalized)
-        if chosen is not None and chosen.status.is_user_decision and chosen.text.strip():
-            return chosen.text.strip()
+        if chosen is None or not chosen.status.is_user_decision or not chosen.text.strip():
+            continue
+        chosen_text = chosen.text.strip()
+        if key in {glossary_key(concept.canonical_source_text), glossary_key(chosen_text)}:
+            return chosen_text
     return None
 
 
@@ -541,14 +571,13 @@ def _candidate_translation(
         for candidate in analysis.glossary_candidates:
             if candidate.type is not ConceptType.PERSON:
                 continue
-            if glossary_key(candidate.source_text) != key:
-                continue
             translation = candidate.suggested_translation.strip()
             if not translation:
                 continue
             if russian and _CYRILLIC.search(translation) is None:
                 continue
-            return translation
+            if key in {glossary_key(candidate.source_text), glossary_key(translation)}:
+                return translation
     return None
 
 
@@ -557,13 +586,14 @@ def _titled_name_from_index(variant: str, index: _SpeakerIndex) -> str | None:
     if index.language != "ru":
         return None
     token, separator, rest = glossary_key(variant).partition(" ")
-    if not separator or token not in _TITLE_TRANSLATIONS or not rest.strip():
+    title = _TITLE_TRANSLATIONS.get(token) or _RUSSIAN_TITLES.get(token)
+    if not separator or title is None or not rest.strip():
         return None
     key = glossary_key(rest)
     translated = index.user_by_key.get(key) or index.candidate_by_key.get(key)
     if translated is None:
         return None
-    return f"{_TITLE_TRANSLATIONS[token]} {translated}"
+    return f"{title} {translated}"
 
 
 def _titled_name(

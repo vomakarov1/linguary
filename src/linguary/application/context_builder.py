@@ -157,12 +157,13 @@ _NARRATIVE_ANALYSIS_INSTRUCTIONS = """\
 Язык оригинала: {source_language}; язык перевода: {target_language}.
 Верни glossary_candidates, translation_instructions, chapter_summary, context_facts и scenes.
 chapter_summary — фактическая сводка событий на языке оригинала (3–6 предложений);
-для фрагмента продолжи сводку с начала главы по предыдущим находкам.
+для фрагмента продолжи сводку с начала главы по предыдущим находкам; ключевые предметы и понятия из glossary_candidates называй их каноническим source_text.
 glossary_candidates: source_text, type, suggested_translation, confidence,
 model_flagged_review, note, description. Соблюдай обязательные решения глоссария.
 description для person и place пишется на языке перевода ({target_language}), строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
 context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
+Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора.
 Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
 scenes: start_block_id, end_block_id, summary, location, participants,
 visual_facts, visual_assumptions, continues_previous_scene.
@@ -1797,7 +1798,8 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 - GLOSSARY_ONLY — выбирай только для коротких абзацев с прозрачной базовой грамматикой, \
 подсказывай любые слова выше уровня A2.
 - READ_AS_IS — выбирай только для самых элементарных реплик и базовых коротких фраз \
-(приветствия, простые утверждения без незнакомых слов).
+(приветствия, простые утверждения в 2–3 слова без незнакомой лексики вроде «It winked.»; \
+не переводи такие фразы в GLOSSARY_ONLY только ради пояснения рода местоимения it).
 
 Короткая прозрачная реплика диалога длиной 4–8 слов уровня A1–A2 не требует полного \
 перевода только из-за того, что это реплика: выбирай READ_AS_IS или GLOSSARY_ONLY \
@@ -2747,6 +2749,8 @@ def _with_name_policy(instructions: str, policy: NameTranslationPolicy | None, *
     if policy.strategy == NameTranslationStrategy.SOUND:
         rule = ('Передавай имена и названия по звучанию: сохраняй произношение средствами языка перевода; '
                 'не переводи смысловые части имени, не подменяй произношение побуквенной транслитерацией, '
+                'не копируй непроизносимые удвоенные согласные английской орфографии («маглы», а не «магглы»), '
+                'передавай гласный /ɔː/ (aw/au) через «о», а не «оу» («Поз», а не «Поуз»), '
                 'не усекай конечные гласные и слоги ради склоняемости (например, -ley/-ly со звучанием /li/ передавай как -ли, а не -ль) '
                 'и не заменяй корневую гласную под русское созвучие; '
                 'не бери готовые имена из известных переводов книги, если они искажают звучание '
