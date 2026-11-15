@@ -528,6 +528,11 @@ pre code {
   break-before: avoid;
 }
 
+.lg-notes p {
+  display: inline;
+  margin: 0;
+}
+
 .lg-notes > li {
   text-indent: -1em;
 }

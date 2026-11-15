@@ -55,7 +55,8 @@ def test_legend_and_ipa_key_in_spine_and_nav(tmp_path: Path) -> None:
     hrefs = spine_hrefs(path)
     legend = _index(hrefs, "legend.xhtml")
     ipa = _index(hrefs, "ipa-key.xhtml")
-    assert _index(hrefs, "cover.xhtml") < _index(hrefs, "title.xhtml") < legend < ipa
+    assert _index(hrefs, "cover.xhtml") < legend < ipa
+    assert not any(href.endswith("title.xhtml") for href in hrefs)
     assert ipa < _index(hrefs, "chapter1.xhtml")
     assert _toc(path) == list(hrefs)
 
@@ -72,7 +73,8 @@ def test_legend_and_ipa_key_in_spine_and_nav(tmp_path: Path) -> None:
     empty_hrefs = spine_hrefs(empty)
     assert not any(href.endswith("legend.xhtml") for href in empty_hrefs)
     assert "Как устроена эта книга" not in _toc_titles(empty)
-    assert _index(empty_hrefs, "title.xhtml") < _index(empty_hrefs, "ipa-key.xhtml")
+    assert not any(href.endswith("title.xhtml") for href in empty_hrefs)
+    assert _index(empty_hrefs, "cover.xhtml") < _index(empty_hrefs, "ipa-key.xhtml")
     assert _index(empty_hrefs, "ipa-key.xhtml") < _index(empty_hrefs, "chapter1.xhtml")
     assert _toc(empty) == list(empty_hrefs)
 
@@ -125,38 +127,30 @@ def test_chapter_front_order(tmp_path: Path) -> None:
     front = chapter[0]
     assert [child.get("class") for child in front] == [
         "linguary-previously",
-        "lg-who",
         "lg-review",
-        "linguary-before-you-read",
     ]
-    previously, who, review, before = list(front)
+    previously, review = list(front)
     assert _heading(elements(previously, "h2")[0]) == "Previously in Chapter One"
     assert "".join(elements(previously, "p")[0].itertext()) == _SUMMARY
-    assert [_heading(node) for node in elements(who, "h3")] == ["Кто есть кто"]
-    assert [_heading(node) for node in elements(who, "h4")] == ["Персонажи", "Места"]
-    who_text = "".join(who.itertext())
-    assert who_text.index("the Mouse") < who_text.index("Cheshire")
-    assert "Зверёк в воде." in who_text
-    assert all(node.get("class") != "lg-method" for node in elements(who, "span"))
-    assert "вольный перевод" not in who_text
-    assert "Alice" not in who_text and "Pat" not in who_text and "Впервые" not in who_text
+    chapter_text = "".join(chapter.itertext())
+    assert "Кто есть кто" not in chapter_text
+    assert "the Mouse" not in chapter_text
+    assert "Before You Read" not in chapter_text
     review_text = "".join(review.itertext())
     assert "Повторим" in review_text
     assert "tired" in review_text and "устала" in review_text and "(гл. I)" in review_text
-    assert _heading(elements(before, "h2")[0]) == "Before You Read"
-    assert elements(before, "dt")[0].text == _BYR_EXPRESSION
-    assert _BYR_EXPLANATION in "".join(elements(before, "dd")[0].itertext())
 
-    third = _chapter_section(_document(path, "chapter3.xhtml"))
-    assert [child.get("class") for child in third[0]] == ["lg-who"]
-    third_text = "".join(third[0].itertext())
-    assert "Pat" in third_text
+    third_root = _document(path, "chapter3.xhtml")
+    assert not _fronts(third_root)
+    third_text = "".join(third_root.itertext())
+    assert "Pat" not in third_text
     assert "Previously" not in third_text
     assert "Повторим" not in third_text
     assert "Before You Read" not in third_text
     assert "the Mouse" not in third_text
 
-    for name in ("cover.xhtml", "title.xhtml", "chapter1.xhtml", "notes.xhtml"):
+    assert not any(href.endswith("title.xhtml") for href in spine_hrefs(path))
+    for name in ("cover.xhtml", "chapter1.xhtml", "notes.xhtml"):
         root = _document(path, name)
         assert not _fronts(root)
         text = "".join(root.itertext())

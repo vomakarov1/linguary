@@ -161,6 +161,11 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
   break-before: avoid;
 }
 
+.lg-notes p {
+  display: inline;
+  margin: 0;
+}
+
 .lg-notes > li {
   text-indent: -1em;
 }
@@ -276,7 +281,7 @@ class EpubExportWriter(EpubWriter):
             raise EpubExportFatalError('уведомления об источнике транскрипций недоступны') from None
         used = set(payloads) | {
             _contained_name(section.source_resource_path)
-            for section in request.document.ordered_sections
+            for section in _exported_sections(request)
         }
         used.update((_NAVIGATION_FILE, _STYLESHEET_FILE, _PACKAGE_FILE))
         pages = _book_page_hrefs(request.layout, used)
@@ -412,7 +417,7 @@ def _insert_book_pages(
         who_is_who_document,
     )
 
-    leading, rest = _split_leading_front_matter(chapters, request.document)
+    leading, rest = _split_leading_front_matter(chapters, request)
     target = request.document.target_language
     source = request.document.source_language
     front: list[_Chapter] = []
@@ -462,14 +467,37 @@ def _insert_book_pages(
     return tuple(leading) + tuple(front) + tuple(rest) + who
 
 
+def _exported_sections(request: EpubWriteRequest) -> tuple[DocumentSection, ...]:
+    """Sections written into a book.
+
+    Without a layout, every section is exported. A learner layout keeps the
+    cover and drops every other front-matter section.
+    """
+    sections = request.document.ordered_sections
+    if request.layout is None:
+        return sections
+    return tuple(
+        section
+        for section in sections
+        if not (
+            request.document.is_front_matter(section)
+            and not request.document.is_cover_section(section)
+        )
+    )
+
+
 def _split_leading_front_matter(
-    chapters: Sequence[_Chapter], document: CanonicalDocument
+    chapters: Sequence[_Chapter], request: EpubWriteRequest
 ) -> tuple[list[_Chapter], list[_Chapter]]:
     """Opening front matter stays ahead of the legend. Later sections keep their order."""
+    document = request.document
+    exported = {section.id for section in _exported_sections(request)}
     leading: list[_Chapter] = []
     rest: list[_Chapter] = []
     started = False
     for chapter in chapters:
+        if chapter.section_id not in exported:
+            continue
         section = document.section(chapter.section_id)
         if not started and document.is_front_matter(section):
             leading.append(chapter)
@@ -537,10 +565,17 @@ def _resource_payloads(
     A declared copy missing from disk is a different matter: the store is corrupted,
     and assembling a book with a missing required resource is forbidden.
     """
+    skipped_sections = {
+        _contained_name(section.source_resource_path)
+        for section in request.document.ordered_sections
+        if section.id not in {item.id for item in _exported_sections(request)}
+    }
     for resource in request.document.resources:
         if resource.support_status not in _EXPORTED_STATUSES:
             continue
         if resource.media_type == _NCX_MEDIA_TYPE:
+            continue
+        if _contained_name(resource.source_path) in skipped_sections:
             continue
         stored = request.stored_resource_paths.get(resource.source_path)
         if stored is None:
@@ -624,7 +659,7 @@ def _render_chapters(
     chapters: list[_Chapter] = []
     previous: DocumentSection | None = None
     story_chapter_number = 1
-    for section in request.document.ordered_sections:
+    for section in _exported_sections(request):
         is_front = request.document.is_front_matter(section)
         number = 0 if is_front else story_chapter_number
         chapters.append(
@@ -715,15 +750,15 @@ class _ChapterRenderer:
             self._append_previously(container, previous)
             self._append_before_you_read(container, section)
             return
-        from linguary.adapters.epub.book_pages import append_review, append_who
+        from linguary.adapters.epub.book_pages import append_review
 
         front = _element("section", {"class": "lg-front"})
         self._append_previously(front, previous)
         chapter = self._request.layout.chapters.get(section.id)
         if chapter is not None:
-            append_who(front, chapter.who_is_who, source_language=self._document.source_language)
             append_review(front, chapter.review, source_language=self._document.source_language)
-        self._append_before_you_read(front, section)
+        if "before_you_read" in self._request.layout.features.sections:
+            self._append_before_you_read(front, section)
         if len(front):
             container.append(front)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from lxml import etree
 
@@ -400,6 +401,58 @@ def test_each_marker_links_to_note_of_its_unit() -> None:
         _source(units[1])
     ]
     assert "Говорит Алиса" in "".join(unnumbered.itertext())
+
+
+def test_notes_rendered_inline_with_footnote_number() -> None:
+    """Parts of one note share the footnote number's line, joined by an em dash."""
+    text = "Alice heard a tale."
+    block = _block(text)
+    section = DocumentSection(
+        id="sec-1",
+        document_id="book-1",
+        title="Chapter One",
+        order=0,
+        source_resource_path="chapter.xhtml",
+        blocks=(block,),
+    )
+    root = _chapter(
+        block,
+        layout=_layout(
+            section,
+            {
+                block.id: (
+                    _unit(
+                        block,
+                        notes=(
+                            _note(
+                                1,
+                                ("история", "не хвост", "третья"),
+                                marker_end=text.index("tale") + len("tale"),
+                            ),
+                        ),
+                    ),
+                )
+            },
+        ),
+    )
+    item = next(
+        node
+        for node in _elements(root, "li")
+        if "lg-notes" in _classes(node.getparent())
+    )
+    paragraphs = [node for node in item if etree.QName(node).localname == "p"]
+    assert [_plain(node) for node in paragraphs] == ["история", "не хвост", "третья"]
+    assert [node.tail for node in paragraphs[:-1]] == [" — ", " — "]
+    assert not paragraphs[-1].tail
+    number = next(node for node in _elements(item, "span") if "lg-num" in _classes(node))
+    assert number.text == "1"
+    assert _elements(item, "br") == []
+    visible = re.sub(r"\s+", " ", "".join(item.itertext())).strip()
+    assert visible.index("1") < visible.index("история — не хвост — третья")
+    stylesheet = Path(__file__).resolve().parents[4] / "src" / "linguary" / "web" / "static" / "linguary.css"
+    rule = ".lg-notes p { display: inline; margin: 0; }"
+    assert rule in re.sub(r"\s+", " ", _STYLESHEET)
+    assert rule in re.sub(r"\s+", " ", stylesheet.read_text(encoding="utf-8"))
 
 
 def test_no_unprepared_help_or_reference_prefix() -> None:

@@ -36,6 +36,14 @@ KIND_LABELS: Mapping[str, str | None] = {
 
 _REFERENCE_COLON = "Языковая справка:"
 _REFERENCE = "Языковая справка"
+_EDITORIAL_TAILS = (
+    "; вариант стоит проверить",
+    ". Вариант стоит проверить.",
+)
+_AGREEMENT_NOTE_PREFIXES = (
+    "разговорное подтверждение чужих слов",
+    "говорящий соглашается и ссылается",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +172,7 @@ def _hint_draft(
     }
     ids = _ids_for(evidences, keys)
     parts = [hint.translation]
-    if hint.note and hint.note.strip():
+    if hint.note and hint.note.strip() and not _agreement_restatement(hint.note):
         parts.append(hint.note)
     return _Draft(
         label_ids=ids,
@@ -289,16 +297,40 @@ def _last_anchor_end(block_id: str, anchors: Sequence[SourceAnchor]) -> int | No
 
 
 def _body(*parts: str) -> tuple[str, ...]:
-    """Drop the language-reference phrase. A piece that becomes empty is omitted.
+    """Drop the language-reference phrase and editorial tails.
 
-    The colon form is removed first so a following colon is not left behind.
+    A piece that becomes empty is omitted. The colon form of the reference
+    phrase is removed first so a following colon is not left behind.
     """
     cleaned = []
     for part in parts:
-        text = part.replace(_REFERENCE_COLON, "").replace(_REFERENCE, "").strip()
+        text = part.replace(_REFERENCE_COLON, "").replace(_REFERENCE, "")
+        text = _strip_editorial_tail(text)
         if text:
             cleaned.append(text)
     return tuple(cleaned)
+
+
+def _strip_editorial_tail(text: str) -> str:
+    """Remove a trailing self-check remark. The same words mid-sentence stay."""
+    current = text.strip()
+    changed = True
+    while changed:
+        changed = False
+        for tail in _EDITORIAL_TAILS:
+            if current.endswith(tail):
+                current = current[: -len(tail)].rstrip()
+                changed = True
+                break
+    return current
+
+
+def _agreement_restatement(note: str) -> bool:
+    """True when a hint note only restates that the speaker agrees."""
+    text = _strip_editorial_tail(
+        note.replace(_REFERENCE_COLON, "").replace(_REFERENCE, "")
+    ).casefold()
+    return any(text.startswith(prefix) for prefix in _AGREEMENT_NOTE_PREFIXES)
 
 
 def _collapse(drafts: Sequence[_Draft], plan: ContentPlan | None) -> list[LayoutNote]:

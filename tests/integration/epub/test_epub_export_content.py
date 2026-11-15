@@ -14,8 +14,18 @@ from pathlib import Path
 import pytest
 from epub_builder import build_epub, xhtml_document
 from lxml import etree
-from export_pipeline import documents_of, elements, run_export
+from export_pipeline import documents_of, elements, run_export, spine_hrefs
 
+from linguary.adapters.epub import (
+    EbookLibEpubReader,
+    EpubExportWriter,
+    FilesystemEpubResourceStore,
+)
+from linguary.application.ports.epub import (
+    EpubReadRequest,
+    EpubWriteRequest,
+    StoreResourcesRequest,
+)
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockProcessingResult,
@@ -69,6 +79,72 @@ def outline(root) -> list[tuple[str, str]]:
         (element.tag.rpartition("}")[2], element.get("class", ""))
         for element in chapter
     ]
+
+
+def _front_matter_slots(path: Path, filename: str) -> tuple[bool, bool, bool, bool]:
+    """Whether `filename` is in the archive, the spine, nav.xhtml, and toc.ncx.
+
+    The exporter does not emit a legacy NCX. A missing `toc.ncx` does not list
+    the file; when one is present, its text decides.
+    """
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        nav = archive.read("OEBPS/nav.xhtml").decode("utf-8")
+        ncx = "\n".join(
+            archive.read(name).decode("utf-8")
+            for name in names
+            if name.endswith("toc.ncx")
+        )
+    spine = spine_hrefs(path)
+    return (
+        any(name.endswith(filename) for name in names),
+        any(href.endswith(filename) for href in spine),
+        filename in nav,
+        filename in ncx,
+    )
+
+
+def _expect_front_matter_file(path: Path, filename: str, *, listed: bool) -> None:
+    """`listed` files stay in the archive, spine, and nav. NCX agrees when it exists."""
+    archive, spine, nav, in_ncx = _front_matter_slots(path, filename)
+    assert (archive, spine, nav) == (listed, listed, listed)
+    with zipfile.ZipFile(path) as zip_archive:
+        has_ncx = any(name.endswith("toc.ncx") for name in zip_archive.namelist())
+    if has_ncx:
+        assert in_ncx is listed
+    else:
+        assert in_ncx is False
+
+
+def _write_without_layout(
+    source: Path,
+    tmp_path: Path,
+    book_id: str,
+    results: Mapping[str, BlockProcessingResult],
+    materials: Mapping[str, LearningMaterial],
+) -> Path:
+    """Export the same results with `layout=None`, so front matter stays in the book."""
+    imported = EbookLibEpubReader().read(
+        EpubReadRequest(book_id=book_id, source_path=str(source), target_language="ru")
+    )
+    stored = FilesystemEpubResourceStore(root=tmp_path / "storage").store(
+        StoreResourcesRequest(
+            book_id=book_id, source_path=str(source), document=imported.document
+        )
+    )
+    target = tmp_path / f"{book_id}-export.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=imported.document,
+            target_path=str(target),
+            stored_resource_paths=stored.paths,
+            source_epub_path=str(source),
+            block_results=dict(results),
+            learning_materials=materials,
+            layout=None,
+        )
+    )
+    return target
 
 
 def _plain(node) -> str:
@@ -166,19 +242,17 @@ def test_chapter_follows_the_order_required_by_the_specification(
     chapter = documents_of(path)["OEBPS/chapter1.xhtml"]
 
     assert outline(chapter) == [
-        ("section", "lg-front"),
         ("div", "lg-unit lg-end"),
         ("div", "lg-unit lg-end"),
         ("div", "lg-unit lg-end"),
         ("div", "lg-unit lg-end"),
         ("aside", ""),
     ]
-    front = next(
+    # No analysis puts `before_you_read` on the layout, so the card is omitted.
+    assert not [
         element for element in elements(chapter, "section") if element.get("class") == "lg-front"
-    )
-    assert [
-        (element.tag.rpartition("}")[2], element.get("class", "")) for element in front
-    ] == [("section", "linguary-before-you-read")]
+    ]
+    assert "Before You Read" not in "".join(chapter.itertext())
     units = [element for element in next(iter(elements(chapter, "section"))) if element.tag.rpartition("}")[2] == "div"]
     heading, first, second, third = units
     assert [child.tag.rpartition("}")[2] for child in heading] == ["h1"]
@@ -528,7 +602,8 @@ def test_notes_page_is_translated_but_not_dressed_as_a_chapter(
     following = "".join(chapters["OEBPS/chapter2.xhtml"].itertext())
     assert "Summary of Chapter One." in following
     assert "Summary of Notes." not in following
-    assert "idiom of Chapter Two" in following
+    assert "idiom of Chapter Two" not in following
+    assert "Before You Read" not in following
 
 
 def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
@@ -639,8 +714,17 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
 
     chapters = documents_of(run.path)
 
-    # 1. Verify introductory section (title / contents)
-    title_doc = chapters["OEBPS/title.xhtml"]
+    # Learner export (layout from the results) drops the title page entirely.
+    _expect_front_matter_file(run.path, "title.xhtml", listed=False)
+    plain_path = _write_without_layout(
+        epub_path,
+        tmp_path / "plain",
+        "book-front-matter",
+        results,
+        materials,
+    )
+    _expect_front_matter_file(plain_path, "title.xhtml", listed=True)
+    title_doc = documents_of(plain_path)["OEBPS/title.xhtml"]
     title_text = "".join(title_doc.itertext())
     title_classes = [(el.get("class") or "").split() for el in elements(title_doc, "*")]
     assert not any("lg-tr" in classes or "lg-notes" in classes for classes in title_classes)
@@ -654,9 +738,12 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
     assert "linguary-previously" not in ch1_classes
     assert "Previously" not in ch1_text
     assert "title page" not in ch1_text
-    # Before You Read sanitizer stripped meta-instruction in card
-    assert "Необычный, странный." in ch1_text
-    assert "Передавай как" not in ch1_text
+    # This layout has no `before_you_read` section key, so the card stays out.
+    assert "Before You Read" not in ch1_text
+    assert "Необычный, странный." not in ch1_text
+    plain_ch1 = "".join(documents_of(plain_path)["OEBPS/chapter1.xhtml"].itertext())
+    assert "Необычный, странный." in plain_ch1
+    assert "Передавай как" not in plain_ch1
     # Chapter 1 notes keep the ln-ch01 namespace (front matter does not shift it).
     note_ids = [
         el.get("id")
@@ -678,6 +765,70 @@ def test_front_matter_and_first_story_chapter_rules(tmp_path: Path) -> None:
     assert "Previously in Chapter One" in ch2_text
     assert "Alice follows the White Rabbit" in ch2_text
 
+
+def test_learner_export_keeps_cover_and_drops_other_front_matter(tmp_path: Path) -> None:
+    """Learner export keeps the cover and leaves every other front-matter section out."""
+    epub_path = build_epub(
+        tmp_path / "cover-and-front.epub",
+        documents={
+            "cover.xhtml": xhtml_document("<h1>Cover</h1><p>The cloak.</p>", title="Cover"),
+            "title.xhtml": xhtml_document("<h1>The Great Novel</h1>", title="Title Page"),
+            "dedication.xhtml": xhtml_document("<p>For my friends.</p>", title="Dedication"),
+            "chapter1.xhtml": xhtml_document(
+                "<h1>Chapter One</h1><p>The tale starts on this page.</p>",
+                title="Chapter One",
+            ),
+        },
+        toc=[
+            ("cover.xhtml", "Cover"),
+            ("title.xhtml", "Title Page"),
+            ("dedication.xhtml", "Dedication"),
+            ("chapter1.xhtml", "Chapter One"),
+        ],
+        title="The Great Novel",
+    )
+    dry = run_export(epub_path, tmp_path=tmp_path / "dry", book_id="book-cover")
+    document = dry.imported.document
+
+    def section_at(suffix: str):
+        found = [
+            section
+            for section in document.ordered_sections
+            if section.source_resource_path.replace("\\", "/").endswith(suffix)
+        ]
+        assert len(found) == 1, [
+            section.source_resource_path for section in document.ordered_sections
+        ]
+        return found[0]
+
+    cover = section_at("cover.xhtml")
+    title = section_at("title.xhtml")
+    dedication = section_at("dedication.xhtml")
+    chapter = section_at("chapter1.xhtml")
+    assert document.is_cover_section(cover) and document.is_front_matter(cover)
+    assert document.is_front_matter(title) and not document.is_cover_section(title)
+    assert document.is_front_matter(dedication) and not document.is_cover_section(dedication)
+    assert not document.is_front_matter(chapter)
+    paragraph = next(
+        block for block in chapter.ordered_blocks if block.type is BlockType.PARAGRAPH
+    )
+    run = run_export(
+        epub_path,
+        tmp_path=tmp_path / "full",
+        book_id="book-cover",
+        block_results={
+            paragraph.id: BlockProcessingResult(
+                block_id=paragraph.id,
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Сказка начинается на этой странице.",
+            )
+        },
+    )
+
+    _expect_front_matter_file(run.path, "cover.xhtml", listed=True)
+    _expect_front_matter_file(run.path, "title.xhtml", listed=False)
+    _expect_front_matter_file(run.path, "dedication.xhtml", listed=False)
+    _expect_front_matter_file(run.path, "chapter1.xhtml", listed=True)
 
 
 def test_fragment_assistance_follows_the_complete_split_original(tmp_path: Path) -> None:

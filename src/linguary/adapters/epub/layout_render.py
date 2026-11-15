@@ -265,8 +265,13 @@ def _append_notes(
             pronunciation.tail = (
                 f" ({note.variant.upper()})" if note.variant else " "
             )
+        previous: etree._Element | None = None
         for piece in body:
-            _append_text(_sub(item, "p"), piece)
+            paragraph = _sub(item, "p")
+            _append_text(paragraph, piece)
+            if previous is not None:
+                previous.tail = " — "
+            previous = paragraph
 
 
 def _slashed(ipa: str) -> str:

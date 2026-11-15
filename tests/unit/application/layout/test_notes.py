@@ -547,3 +547,85 @@ def test_identical_anchor_difficulties_merge_labels() -> None:
         ),
     )
     assert all("," not in label for note in notes for label in note.labels)
+
+
+def test_editorial_self_check_and_redundant_agreement_hint_note_stripped() -> None:
+    """Self-check tails drop off. A hint note that only restates agreement is discarded."""
+    text = "Yes the phrase holds here"
+    block = _block(text)
+    agreement = GlossaryHint(
+        "Yes",
+        "да",
+        "разговорное подтверждение чужих слов кивком",
+    )
+    refers = GlossaryHint(
+        "holds",
+        "держит",
+        "говорящий соглашается и ссылается на реплику собеседника",
+    )
+    kept = GlossaryHint(
+        "phrase",
+        "фраза",
+        "устойчивый оборот; вариант стоит проверить",
+    )
+    note = LanguageNote(
+        "n-here",
+        block.id,
+        "here",
+        "Середина. Вариант стоит проверить. Конец; вариант стоит проверить",
+    )
+    difficulty = _difficulty(block.id, (_anchor(block, "the"),), "grammar")
+    assistance = _assistance(difficulty, "Артикль не переводится. Вариант стоит проверить.")
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(agreement, refers, kept),
+        notes=(note,),
+        assistances=(assistance,),
+    )
+
+    notes = block_notes(block, result, _plan(difficulty), ())
+
+    assert notes == (
+        LayoutNote((), "Yes", None, None, ("да",), _end(text, "Yes"), "glossary_hint", ()),
+        LayoutNote(
+            ("Грамматика.",),
+            None,
+            None,
+            None,
+            ("Артикль не переводится",),
+            _end(text, "the"),
+            "assistance",
+            ("grammar",),
+        ),
+        LayoutNote(
+            (),
+            "phrase",
+            None,
+            None,
+            ("фраза", "устойчивый оборот"),
+            _end(text, "phrase"),
+            "glossary_hint",
+            (),
+        ),
+        LayoutNote(
+            (),
+            "holds",
+            None,
+            None,
+            ("держит",),
+            _end(text, "holds"),
+            "glossary_hint",
+            (),
+        ),
+        LayoutNote(
+            (),
+            None,
+            None,
+            None,
+            ("Середина. Вариант стоит проверить. Конец",),
+            _end(text, "here"),
+            "language_note",
+            (),
+        ),
+    )

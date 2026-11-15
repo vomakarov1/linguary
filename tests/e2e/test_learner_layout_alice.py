@@ -699,7 +699,10 @@ def test_alice_export_matches_layout_structure(alice_book: AliceRun):
     assert BlockTreatment.TRANSLATE in item.segment_treatments
     assert len(mixed.segments) >= 2
     assert len({span.sentence_index for span in mixed.segments}) >= 2
-    for section in alice_book.document.ordered_sections:
+    document = alice_book.document
+    for section in document.ordered_sections:
+        if not (not document.is_front_matter(section) or document.is_cover_section(section)):
+            continue
         divs = _unit_divs(_chapter_root(documents, section))
         expected = _reading_units(section, layout)
         assert len(divs) == len(expected), (section.title, len(divs), len(expected))
@@ -767,7 +770,10 @@ def test_alice_false_friend_and_character_speech_labels(alice_book: AliceRun):
     documents = exported_documents(alice_book.export_path)
     labels: list[str] = []
     speakers: list[str] = []
-    for section in alice_book.document.ordered_sections:
+    document = alice_book.document
+    for section in document.ordered_sections:
+        if not (not document.is_front_matter(section) or document.is_cover_section(section)):
+            continue
         root = _chapter_root(documents, section)
         labels.extend(_labeled(root, "lg-kind"))
         speakers.extend(_labeled(root, "lg-speaker"))
