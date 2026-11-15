@@ -2309,7 +2309,9 @@ def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
         return True
     ranges = _remark_ranges(quotes, len(text))
     remark = " ".join(text[start:end] for start, end in ranges)
-    structural = long_reply or bool(set(expression_words(remark)) & _NONBASIC_REPORTING)
+    structural = long_reply or bool(
+        set(expression_words(remark)) & (_NONBASIC_REPORTING - _BASIC_REPORTING)
+    )
     if structural and any(
         difficulty.kind in _REMARK_DIFFICULTY_KINDS
         and difficulty.owner_block_id in owners
@@ -2367,15 +2369,20 @@ def _demote_elementary_reply(original, updated, block, difficulties):
 
     Returns the item and the block owners when vocabulary hints must become
     lexical hints. Owners stay None when the mode is unchanged or there is
-    nothing to retarget.
+    nothing to retarget. Segment modes drop with the block.
     """
-    if original.treatment is not BlockTreatment.TRANSLATE or original.segments:
+    if original.treatment is not BlockTreatment.TRANSLATE and not any(
+        segment.treatment is BlockTreatment.TRANSLATE for segment in original.segments
+    ):
         return updated, None
     owners = frozenset(part for part in (original.source_block_id, block.id) if part)
     mode = _elementary_reply_mode(block.text, difficulties, owners)
-    if mode is None or updated.treatment is mode:
+    if mode is None:
         return updated, None
-    demoted = replace(updated, treatment=mode)
+    segments = tuple(SegmentTreatmentResponse(segment.index, mode) for segment in updated.segments)
+    if updated.treatment is mode and segments == tuple(updated.segments):
+        return updated, None
+    demoted = replace(updated, treatment=mode, segments=segments) if segments else replace(updated, treatment=mode)
     if mode is not BlockTreatment.GLOSSARY_ONLY:
         return demoted, None
     return demoted, owners

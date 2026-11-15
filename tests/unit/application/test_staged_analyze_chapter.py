@@ -1916,3 +1916,104 @@ def test_normalize_a2_dialogue_response_clears_before_you_read():
     assert chapter_kept.before_you_read == (entry,)
 
 
+def test_cried_and_shouted_stay_glossary_only_like_other_basic_speech_verbs():
+    """cried and shouted are basic: a light mode is not raised, and TRANSLATE drops.
+
+    ‘Are you up yet?’ she demanded. still promotes. A reply longer than eight
+    words still becomes TRANSLATE, and a model TRANSLATE on that reply stays.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse, QuotedDifficultyResponse, QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    cried = '‘Yes,’ he cried.'
+    shouted = '‘Yes,’ he shouted.'
+    demanded = '‘Are you up yet?’ she demanded.'
+    long_reply = '‘Please bring the small red box from the hall,’ she said.'
+    blocks = (
+        _block(0, cried),
+        _block(1, shouted),
+        _block(2, cried),
+        _block(3, cried),
+        _block(4, demanded),
+        _block(5, long_reply),
+        _block(6, long_reply),
+    )
+    point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
+    difficulty = QuotedDifficultyResponse(
+        'd-cried', (QuotedSourceAnchorResponse('b4', 'Yes'),), 'b4',
+        'vocabulary', 'useful', 'explanation', point,
+    )
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b2', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b3', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b4', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b5', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b6', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b7', BlockTreatment.TRANSLATE),
+        ),
+        difficulties=(difficulty,),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert normalized.difficulties[0].help_kind == 'lexical_hint'
+
+
+def test_segmented_elementary_translate_reply_demotes_with_its_segments():
+    """Per-sentence TRANSLATE on a short elementary reply drops with the block."""
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse, QuotedDifficultyResponse, QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse, TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    text = '‘No,’ she said sharply. ‘Why?’'
+    second = text.rindex('‘')
+    block = _block(0, text, segments=(
+        BlockSegment(0, second, 0),
+        BlockSegment(second, len(text), 1),
+    ))
+    point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE, (
+                SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                SegmentTreatmentResponse(2, BlockTreatment.TRANSLATE),
+            )),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                'd-sharply', (QuotedSourceAnchorResponse('b1', 'sharply'),), 'b1',
+                'vocabulary', 'useful', 'explanation', point,
+            ),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, (block,), {'b1': block.id}, reader_level='a2', english_help=False,
+    )
+    item = normalized.treatment_plan[0]
+    assert item.treatment is BlockTreatment.GLOSSARY_ONLY
+    assert [segment.treatment for segment in item.segments] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+    assert normalized.difficulties[0].help_kind == 'lexical_hint'
+
+
