@@ -42,6 +42,21 @@ _UNIT_SPEAKER_CERTAINTY = frozenset({"inferred"})
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 _OPEN_QUOTES = {"“": "”", "‘": "’", "«": "»", '"': '"'}
 _ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "st", "prof"})
+_REMARK_VERBS = frozenset({
+    "say", "says", "said",
+    "ask", "asks", "asked",
+    "reply", "replies", "replied",
+    "answer", "answers", "answered",
+    "tell", "tells", "told",
+    "demand", "demands", "demanded",
+    "murmur", "murmurs", "murmured",
+    "whisper", "whispers", "whispered",
+    "snap", "snaps", "snapped",
+    "mutter", "mutters", "muttered",
+    "shout", "shouts", "shouted",
+    "cry", "cries", "cried",
+})
+_REMARK_WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*", re.IGNORECASE)
 _TITLE_TRANSLATIONS = {
     "mr": "мистер",
     "mrs": "миссис",
@@ -541,15 +556,31 @@ def _matching_close(text: str, open_index: int, limit: int) -> int | None:
 
 
 def _remark_end(text: str, close_index: int, limit: int) -> int:
-    """End of the reporting clause after a closing quote, before the next sentence."""
+    """End of the reporting clause after a closing quote, before the next sentence.
+
+    A capital right after the quote is still that remark when the same sentence
+    has a speech verb (`Harry said`, `I said`). It starts the next sentence
+    only when no such verb follows (`Harry left`).
+    """
     index = close_index + 1
     while index < limit and text[index].isspace():
         index += 1
     if index >= limit:
         return limit
-    if text[index].isupper() or text[index] in _OPEN_QUOTES:
+    if text[index] in _OPEN_QUOTES:
         return close_index + 1
-    return _sentence_end(text, close_index + 1, limit)
+    sentence_end = _sentence_end(text, close_index + 1, limit)
+    if text[index].isupper() and not _speech_verb_in(text, index, sentence_end):
+        return close_index + 1
+    return sentence_end
+
+
+def _speech_verb_in(text: str, start: int, end: int) -> bool:
+    """Whether the sentence slice contains a finite speech verb."""
+    return any(
+        match.group(0).casefold() in _REMARK_VERBS
+        for match in _REMARK_WORD.finditer(text, start, end)
+    )
 
 
 def _sentence_end(text: str, start: int, limit: int) -> int:

@@ -929,6 +929,59 @@ def test_mid_paragraph_quote_does_not_attach_speaker_to_narrative_unit() -> None
     ]
 
 
+def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
+    """A capital after the quote stays in the remark when a speech verb follows.
+
+    The anchor is the name, not the reply. “Hello,” Harry said. and
+    “Hello,” I said. keep the label. “Hello,” Harry left. starts the next
+    sentence, and so does a name after that remark has already ended.
+    """
+    said_first = _block("one", 0, "“Hello,” said Harry.")
+    name_first = _block("one", 1, "“Hello,” Harry said.")
+    pronoun = _block("one", 2, "“Hello,” I said.")
+    asked = _block("one", 3, "“Hello,” Harry asked.")
+    titled = _block("one", 4, "“Hello,” Mr. Dursley said.")
+    left = _block("one", 5, "“Hello,” Harry left.")
+    later = _block("one", 6, "“Hello,” Harry said. Harry left.")
+    facts = (
+        _fact("f-said-first", said_first, "Harry", "Harry", "inferred"),
+        _fact("f-name-first", name_first, "Harry", "Harry", "inferred"),
+        _fact("f-pronoun", pronoun, "I", "Alice", "inferred"),
+        _fact("f-asked", asked, "Harry", "Harry", "inferred"),
+        _fact("f-titled", titled, "Dursley", "Dursley", "inferred"),
+        _fact("f-left", left, "Harry", "Harry", "inferred"),
+        _fact("f-later", later, "Harry left", "Harry", "inferred"),
+    )
+    section = _section(
+        "one",
+        0,
+        "Chapter 1",
+        (said_first, name_first, pronoun, asked, titled, left, later),
+    )
+    layout = build_book_layout(_inputs(
+        _document((section,)),
+        analyses=(_analysis(
+            "a-one",
+            section.id,
+            candidates=(
+                _candidate("a-one", "cand-harry", "Harry", "Гарри"),
+                _candidate("a-one", "cand-alice", "Alice", "Алиса"),
+                _candidate("a-one", "cand-dursley", "Dursley", "Дёрсли"),
+            ),
+            plan=_plan(facts=facts),
+        ),),
+    ))
+    units = layout.chapters[section.id].units
+
+    assert units[said_first.id][0].speaker == "Гарри"
+    assert units[name_first.id][0].speaker == "Гарри"
+    assert units[pronoun.id][0].speaker == "Алиса"
+    assert units[asked.id][0].speaker == "Гарри"
+    assert units[titled.id][0].speaker == "Дёрсли"
+    assert units[left.id][0].speaker is None
+    assert units[later.id][0].speaker is None
+
+
 def test_collapsed_whole_block_translation_hides_mid_paragraph_speaker() -> None:
     """One shown translation of a narrative paragraph does not keep a later quote's speaker.
 

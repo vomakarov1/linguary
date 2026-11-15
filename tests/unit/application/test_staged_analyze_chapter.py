@@ -1532,3 +1532,116 @@ async def test_a2_elementary_short_dialogues_and_non_dialogue_lines_keep_mode(st
     assert english.analysis.treatment_plan.treatment_for(english_block.id) is BlockTreatment.READ_AS_IS
 
 
+def test_a2_split_sentence_segments_share_the_promoted_mode():
+    """One promoted piece of a split sentence lifts every piece of that sentence.
+
+    A later sentence keeps the mode the model assigned. A lexical hint on the
+    promoted tail becomes an explanation. Assembly must accept the plan.
+    """
+    from linguary.application.analysis_merge import FragmentAnalysis, normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse, PedagogicalAnalysisResponse, QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse, SegmentTreatmentResponse, TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    tail = 'He waited by the lane '
+    quote = '‘Stay here if you can.’'
+    other = ' ‘Yes.’'
+    text = tail + quote + other
+    quote_at = len(tail)
+    other_at = quote_at + len(quote)
+    assert text[quote_at:other_at] == quote
+    assert 'lane' in tail and 'lane' not in quote and 'lane' not in other
+    block = _block(0, text, segments=(
+        BlockSegment(0, quote_at, 0),
+        BlockSegment(quote_at, other_at, 0),
+        BlockSegment(other_at, len(text), 1),
+    ))
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(TreatmentPlanItemResponse('b1', BlockTreatment.GLOSSARY_ONLY, (
+            SegmentTreatmentResponse(1, BlockTreatment.GLOSSARY_ONLY),
+            SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+            SegmentTreatmentResponse(3, BlockTreatment.READ_AS_IS),
+        )),),
+        difficulties=(QuotedDifficultyResponse(
+            'd-lane',
+            (QuotedSourceAnchorResponse('b1', 'lane'),),
+            'b1',
+            'vocabulary',
+            'useful',
+            'lexical_hint',
+            (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),),
+        ),),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, (block,), {'b1': block.id}, reader_level='a2', english_help=False,
+    )
+    assert [segment.treatment for segment in normalized.treatment_plan[0].segments] == [
+        BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS,
+    ]
+    assert normalized.difficulties[0].help_kind == 'explanation'
+    combined = ChapterAnalysisResponse(
+        translation_instructions='Keep the voice.',
+        chapter_summary='A speaker waits by the lane.',
+        treatment_plan=normalized.treatment_plan,
+    )
+    fragment = FragmentAnalysis.of_response(
+        combined, order=0, block_ids_by_alias={'b1': block.id}, blocks=(block,),
+    )
+    assert fragment.treatments[0].treatment is BlockTreatment.TRANSLATE
+    assert fragment.treatments[0].segment_treatments == (
+        BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS,
+    )
+
+
+def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
+    """A ’ inside a word does not end ‘...’. The conjunction stays in the reply.
+
+    ‘Don’t go if I call.’ is translated. ‘I’m here.’ is still a short exception.
+    ‘Don’t touch the ledger.’ keeps ledger inside the reply. The same word after
+    a real closer is a remark and does translate.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse, QuotedDifficultyResponse, QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    conditional = '‘Don’t go if I call.’'
+    short = '‘I’m here.’'
+    interior = '‘Don’t touch the ledger.’'
+    remark = '‘Don’t,’ he said about the ledger.'
+    blocks = (_block(0, conditional), _block(1, short), _block(2, interior), _block(3, remark))
+    point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
+
+    def vocab(difficulty_id, alias):
+        return QuotedDifficultyResponse(
+            difficulty_id, (QuotedSourceAnchorResponse(alias, 'ledger'),), alias,
+            'vocabulary', 'useful', 'lexical_hint', point,
+        )
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b2', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b3', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b4', BlockTreatment.GLOSSARY_ONLY),
+        ),
+        difficulties=(vocab('d-inside', 'b3'), vocab('d-remark', 'b4')),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks,
+        {'b1': blocks[0].id, 'b2': blocks[1].id, 'b3': blocks[2].id, 'b4': blocks[3].id},
+        reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert [item.help_kind for item in normalized.difficulties] == ['lexical_hint', 'explanation']
+
+

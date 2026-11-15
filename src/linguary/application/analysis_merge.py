@@ -2019,7 +2019,10 @@ def validate_fact_glossary(
             )
 
 
-_DIALOGUE_QUOTES = re.compile(r"‘[^‘’]*’|“[^“”]*”|\"[^\"“”‘’]*\"")
+# ’ between word characters is an apostrophe (Don’t, I’m, car’s), not a closer.
+_DIALOGUE_QUOTES = re.compile(
+    r"‘(?:[^‘’]|(?<=\w)’(?=\w))*’|“[^“”]*”|\"[^\"“”‘’]*\""
+)
 _SUBORDINATORS = frozenset({"if", "when", "because", "although", "though", "unless", "whether"})
 _REMARK_DIFFICULTY_KINDS = frozenset({"vocabulary", "false_friend"})
 _LIGHT_DIALOGUE_TREATMENTS = frozenset({BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS})
@@ -2140,30 +2143,50 @@ def _block_for_plan_item(source_block_id, blocks_by_id, block_ids_by_alias):
     return blocks_by_id.get(block_id)
 
 
+def _sentence_segments_to_promote(segments, spans, difficulties, owners, block_text) -> set[int]:
+    """Indexes to lift, including every light span of a sentence that needs it.
+
+    A long sentence is stored as several spans with one `sentence_index`.
+    Promoting only the span that holds the quote would split that sentence's modes.
+    """
+    promote: set[int] = set()
+    for segment in segments:
+        if segment.index < 1 or segment.index > len(spans):
+            continue
+        if segment.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
+            continue
+        span = spans[segment.index - 1]
+        text = block_text[span.start:span.end]
+        if not _dialogue_needs_translation(text, difficulties, owners, span.start):
+            continue
+        sentence_index = span.sentence_index
+        for other in segments:
+            if other.index < 1 or other.index > len(spans):
+                continue
+            if other.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
+                continue
+            if spans[other.index - 1].sentence_index == sentence_index:
+                promote.add(other.index)
+    return promote
+
+
 def _promote_dialogue_item(item, block, difficulties):
     owners = frozenset(part for part in (item.source_block_id, block.id) if part)
     if item.segments:
         spans = block.segment_spans
+        promote = _sentence_segments_to_promote(item.segments, spans, difficulties, owners, block.text)
+        if not promote:
+            return item, ()
         updated = []
         regions = []
-        changed = False
         for segment in item.segments:
-            if segment.index < 1 or segment.index > len(spans):
+            if segment.index not in promote:
                 updated.append(segment)
                 continue
             span = spans[segment.index - 1]
-            text = block.text[span.start:span.end]
-            if segment.treatment in _LIGHT_DIALOGUE_TREATMENTS and _dialogue_needs_translation(
-                text, difficulties, owners, span.start,
-            ):
-                if segment.treatment is BlockTreatment.GLOSSARY_ONLY:
-                    regions.append((owners, span.start, span.end, block.text))
-                updated.append(SegmentTreatmentResponse(segment.index, BlockTreatment.TRANSLATE))
-                changed = True
-            else:
-                updated.append(segment)
-        if not changed:
-            return item, ()
+            if segment.treatment is BlockTreatment.GLOSSARY_ONLY:
+                regions.append((owners, span.start, span.end, block.text))
+            updated.append(SegmentTreatmentResponse(segment.index, BlockTreatment.TRANSLATE))
         modes = tuple(segment.treatment for segment in updated)
         return replace(item, treatment=strongest_treatment(modes), segments=tuple(updated)), regions
     if item.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
