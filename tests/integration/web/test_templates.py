@@ -11,6 +11,7 @@ from lxml import html
 from web_scenario import (
     WebScenario,
     glossary_candidate,
+    glossary_candidate,
     hinted_result,
     start_run,
     store_book,
@@ -937,7 +938,7 @@ def test_result_page_versions_updated_script(client, application):
 
 def _units_book(application: Application) -> WebScenario:
     """Two-part paragraph with a marked note and a speaker, plus a poem note without a marker."""
-    paragraph = "Alice heard a tale. Then she left."
+    paragraph = "Alice heard a tale. “Then,” she left."
     poem = "How doth\nImprove,\n\nAnd pour"
     scenario = store_book(
         application,
@@ -946,7 +947,7 @@ def _units_book(application: Application) -> WebScenario:
         chapters=((paragraph, poem),),
     )
     paragraph_id, poem_id = scenario.block_ids()
-    cut = paragraph.index(" Then")
+    cut = paragraph.index(" “")
     tale_end = paragraph.index("tale") + len("tale")
     then_at = paragraph.index("Then")
     tale = LanguageNote("note-tale", paragraph_id, "tale", "Сказка здесь — история.")
@@ -984,7 +985,7 @@ def _units_book(application: Application) -> WebScenario:
         difficulties,
         evidence,
         context_facts=(
-            ContextFact("speaker-alice", "speaker", (speaker,), speaker, "Alice", "explicit"),
+            ContextFact("speaker-alice", "speaker", (speaker,), speaker, "Alice", "inferred"),
         ),
     )
     with application.unit_of_work.transaction() as tx:
@@ -1000,7 +1001,21 @@ def _units_book(application: Application) -> WebScenario:
             replace(second, type=BlockType.POEM),
         )
         tx.documents.save(replace(document, sections=(replace(section, blocks=blocks),)))
-        tx.analyses.save(scenario.book_id, replace(analysis, content_plan=plan))
+        tx.analyses.save(
+            scenario.book_id,
+            replace(
+                analysis,
+                content_plan=plan,
+                glossary_candidates=(
+                    glossary_candidate(
+                        book_id=scenario.book_id,
+                        candidate_id="candidate-alice",
+                        source_text="Alice",
+                        suggested_translation="Алиса",
+                    ),
+                ),
+            ),
+        )
     poem_note = LanguageNote("note-poem", poem_id, "absent-excerpt", "Без маркера.")
     start_run(
         application,
@@ -1085,7 +1100,7 @@ def test_result_page_renders_units_like_book(client: TestClient, application: Ap
     assert [kind.text for kind in kinds] == ["Грамматика.", "Идиома."]
     assert all("," not in (kind.text or "") for kind in kinds)
     speaker = translated.xpath('./p[@class="lg-tr"]/span[@class="lg-speaker"]')[0]
-    assert speaker.text == "Alice"
+    assert speaker.text == "Алиса"
     assert "Потом она ушла." not in speaker.text_content()
     assert (speaker.tail or "").lstrip() == "Потом она ушла."
     poem_source = poem.xpath('.//p[@class="lg-src"]')[0]

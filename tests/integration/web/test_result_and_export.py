@@ -14,6 +14,7 @@ from web_scenario import (
     SOURCE_TEXT,
     TRANSLATED_TEXT,
     failed_task,
+    glossary_candidate,
     hinted_result,
     repetition_warning,
     start_run,
@@ -685,18 +686,29 @@ def test_result_api_returns_units_per_block(client: TestClient, application: App
     )
     from linguary.web.schemas import ResultChapterResponse
 
-    text = "Alice said hello."
+    text = "“hello,” said Alice."
     poem = "Twinkle."
     scenario = store_book(
         application,
         status=BookStatus.COMPLETED,
         chapters=((text, poem),),
+        glossary_candidates={
+            0: (
+                glossary_candidate(
+                    candidate_id="candidate-alice",
+                    source_text="Alice",
+                    suggested_translation="Алиса",
+                ),
+            ),
+        },
     )
     paragraph, verse = scenario.section().ordered_blocks
     verse = replace(verse, type=BlockType.POEM)
     section = scenario.section()
     document = replace(scenario.document, sections=(replace(section, blocks=(paragraph, verse)),))
     hello = text.index("hello")
+    alice_at = text.index("Alice")
+    spoken = "“hello,”"
     note = LanguageNote(
         id="ln-hello",
         block_id=paragraph.id,
@@ -723,20 +735,21 @@ def test_result_api_returns_units_per_block(client: TestClient, application: App
     )
     idiom = Difficulty(
         "d-idiom",
-        (SourceAnchor(paragraph.id, 0, len("Alice"), "Alice"),),
+        (SourceAnchor(paragraph.id, alice_at, alice_at + len("Alice"), "Alice"),),
         paragraph.id,
         "idiom",
         "useful",
         "explanation",
         (RequiredPoint("p-idiom", "Explain the phrase"),),
     )
+    speaker_anchor = SourceAnchor(paragraph.id, text.index(spoken), text.index(spoken) + len(spoken), spoken)
     speaker = ContextFact(
         "speaker-alice",
         "speaker",
-        (SourceAnchor(paragraph.id, 0, len("Alice"), "Alice"),),
-        SourceAnchor(paragraph.id, 0, len("Alice"), "Alice"),
+        (speaker_anchor,),
+        speaker_anchor,
         "Alice",
-        "explicit",
+        "inferred",
     )
     plan = ContentPlan(
         version=3,
@@ -776,7 +789,7 @@ def test_result_api_returns_units_per_block(client: TestClient, application: App
         "end": len(text),
         "original": text,
         "translation": TRANSLATED_TEXT,
-        "speaker": "Alice",
+        "speaker": "Алиса",
         "notes": [{
             "number": 1,
             "labels": ["Грамматика.", "Идиома."],

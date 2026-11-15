@@ -383,6 +383,27 @@ def _analysis_payload(request, blocks: dict[str, DocumentBlock], targets: Target
         elif request.name_translation_policy_version is not None:
             raise AssertionError(request.name_translation_policy_version)
         glossary.append(candidate)
+    if targets.mixed_id in present:
+        speaker_candidate = {
+            "source_text": SPEAKER,
+            "type": "person",
+            "suggested_translation": SPEAKER,
+            "confidence": 0.9,
+            "model_flagged_review": False,
+            "note": "Имя говорящего.",
+            "description": "Зверёк с часами.",
+        }
+        if request.name_translation_policy_version == 1:
+            speaker_candidate["name_translation_assessment"] = {
+                "applied_method": "sound",
+                "eligible_without_review": True,
+                "review_reasons": [],
+                "rationale": "Имя передано по звучанию.",
+                "opaque_name": True,
+            }
+        elif request.name_translation_policy_version is not None:
+            raise AssertionError(request.name_translation_policy_version)
+        glossary.append(speaker_candidate)
     return {
         "translation_instructions": INSTRUCTIONS,
         "chapter_summary": SUMMARY,

@@ -87,12 +87,16 @@ def _section(
     )
 
 
-def _document(sections: Sequence[DocumentSection]) -> CanonicalDocument:
+def _document(
+    sections: Sequence[DocumentSection],
+    *,
+    target_language: str = "ru",
+) -> CanonicalDocument:
     return CanonicalDocument(
         id=DOCUMENT_ID,
         metadata=BookMetadata(title="Wonderland", authors=("Carroll",)),
         source_language="en",
-        target_language="ru",
+        target_language=target_language,
         sections=tuple(sections),
     )
 
@@ -305,6 +309,67 @@ def test_chapter_lists_only_first_mentioned_people_and_places() -> None:
     assert chapter_who_is_who(document, analyses, (), section_id=second.id) == (
         WhoEntry("Paris", "Париж", ConceptType.PLACE, "Город", None, 2),
     )
+
+
+def test_english_description_dropped_for_russian_target() -> None:
+    """A Russian book keeps a description only when it contains Cyrillic.
+
+    Latin text, punctuation, and whitespace-only descriptions become empty
+    after surrounding spaces are removed. The same Latin text is kept, stripped,
+    when the target language is not Russian.
+    """
+    chapter = _content("ch-1", 0)
+    candidates = (
+        _candidate("a1", "alice", "Alice", ConceptType.PERSON, "Элис", description="A girl nearby."),
+        _candidate("a1", "bob", "Bob", ConceptType.PERSON, "Боб", description="   "),
+        _candidate("a1", "carol", "Carol", ConceptType.PERSON, "Кэрол", description="  ...  "),
+        _candidate("a1", "dave", "Dave", ConceptType.PERSON, "Дейв", description="  nearby, её дом  "),
+    )
+    analyses = (_analysis("a1", chapter.id, candidates),)
+    document = _document((chapter,))
+
+    assert chapter_who_is_who(document, analyses, (), section_id=chapter.id) == (
+        WhoEntry("Alice", "Элис", ConceptType.PERSON, "", None, 1),
+        WhoEntry("Bob", "Боб", ConceptType.PERSON, "", None, 1),
+        WhoEntry("Carol", "Кэрол", ConceptType.PERSON, "", None, 1),
+        WhoEntry("Dave", "Дейв", ConceptType.PERSON, "nearby, её дом", None, 1),
+    )
+    assert book_who_is_who(document, analyses, ())[0].description == ""
+
+    other = _document((chapter,), target_language="de")
+    kept = chapter_who_is_who(other, analyses, (), section_id=chapter.id)
+    assert kept[0].description == "A girl nearby."
+    assert kept[2].description == "..."
+
+
+def test_russian_description_preserved_in_who_is_who() -> None:
+    """Cyrillic descriptions stay on the chapter and book lists, including ё.
+
+    Surrounding whitespace is removed. A later chapter does not replace them.
+    """
+    first = _content("ch-1", 0)
+    second = _content("ch-2", 1)
+    document = _document((first, second))
+    analyses = (
+        _analysis("a1", first.id, (
+            _candidate(
+                "a1", "alice", "Alice", ConceptType.PERSON, "Элис",
+                description="  Девочка в начале.  ",
+            ),
+            _candidate("a1", "yolka", "Yolka", ConceptType.PLACE, "Ёлка", description="  Ёлка у дома.  "),
+        )),
+        _analysis("a2", second.id, (
+            _candidate("a2", "alice-later", "Alice", ConceptType.PERSON, "Алиса", description="A queen later."),
+        )),
+    )
+
+    chapter = chapter_who_is_who(document, analyses, (), section_id=first.id)
+    book = book_who_is_who(document, analyses, ())
+    assert chapter == (
+        WhoEntry("Alice", "Элис", ConceptType.PERSON, "Девочка в начале.", None, 1),
+        WhoEntry("Yolka", "Ёлка", ConceptType.PLACE, "Ёлка у дома.", None, 1),
+    )
+    assert book[:2] == chapter
 
 
 def test_description_never_from_later_chapter() -> None:

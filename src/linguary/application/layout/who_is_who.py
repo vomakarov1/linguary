@@ -7,6 +7,7 @@ nor notes-only. Numbering of those chapters starts at 1.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -30,6 +31,7 @@ NAME_METHOD_LABELS: dict[str, str] = {
 
 _SHOWN_METHODS = frozenset({NameTranslationMethod.MIXED, NameTranslationMethod.CREATIVE})
 _LISTED_TYPES = (ConceptType.PERSON, ConceptType.PLACE)
+_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +130,7 @@ def _entries(
             source=candidate.source_text,
             translation=_translation(candidate, concepts, language),
             type=candidate.type,
-            description=candidate.description,
+            description=_target_description(candidate.description, language),
             name_method=_name_method(candidate),
             first_chapter=chapter,
         )
@@ -137,6 +139,14 @@ def _entries(
     persons = tuple(entry for entry in entries if entry.type == ConceptType.PERSON)
     places = tuple(entry for entry in entries if entry.type == ConceptType.PLACE)
     return persons + places
+
+
+def _target_description(description: str, language: str) -> str:
+    """Strip surrounding space. A Russian book keeps the text only with Cyrillic."""
+    cleaned = description.strip()
+    if language.strip().lower() == "ru" and _CYRILLIC.search(cleaned) is None:
+        return ""
+    return cleaned
 
 
 def _translation(

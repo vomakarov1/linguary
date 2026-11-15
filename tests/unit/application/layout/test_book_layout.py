@@ -23,6 +23,7 @@ from linguary.application.layout.book import (
 )
 from linguary.application.layout.ipa_reference import ipa_key
 from linguary.application.layout.legend import LayoutFeatures, legend_lines
+from linguary.application.layout.parts import PART_MAX_CHARS
 from linguary.domain import (
     BlockProcessingResult,
     BlockSegment,
@@ -99,12 +100,16 @@ def _section(
     )
 
 
-def _document(sections: Sequence[DocumentSection]) -> CanonicalDocument:
+def _document(
+    sections: Sequence[DocumentSection],
+    *,
+    target_language: str = "ru",
+) -> CanonicalDocument:
     return CanonicalDocument(
         id=DOCUMENT_ID,
         metadata=BookMetadata(title="Wonderland", authors=("Carroll",)),
         source_language="en",
-        target_language="ru",
+        target_language=target_language,
         sections=tuple(sections),
     )
 
@@ -494,12 +499,13 @@ def test_repeated_speech_style_same_speaker_dropped() -> None:
     Reading order still keeps the earlier explicit occurrence, label and body.
     The stored plans are the same objects and still contain both difficulties.
     """
-    first = _block("one", 0, "Alice drawled softly.")
-    second = _block("two", 0, "Alice drawled softly.")
+    spoken = "“Softly,” Alice drawled softly."
+    first = _block("one", 0, spoken)
+    second = _block("two", 0, spoken)
     early = _difficulty(first, "drawled", "speech_style", "z-drawl")
     late = _difficulty(second, "drawled", "speech_style", "a-drawl")
-    early_fact = _fact("f-explicit", first, "Alice drawled softly.", "Alice", "explicit")
-    late_fact = _fact("f-inferred", second, "Alice drawled softly.", "Alice", "inferred")
+    early_fact = _fact("f-explicit", first, spoken, "Alice", "explicit")
+    late_fact = _fact("f-inferred", second, spoken, "Alice", "inferred")
     first_plan = _plan(early, facts=(early_fact,))
     second_plan = _plan(late, facts=(late_fact,))
     first_section = _section("one", 0, "Chapter 1", (first,))
@@ -524,6 +530,7 @@ def test_repeated_speech_style_same_speaker_dropped() -> None:
         _document((first_section, second_section)),
         results,
         analyses,
+        concepts=(_concept("c-alice", "Alice", "Алиса", TermStatus.APPROVED),),
     ))
 
     assert analyses[0].content_plan is first_plan
@@ -538,9 +545,9 @@ def test_repeated_speech_style_same_speaker_dropped() -> None:
     assert kept[0].difficulty_kinds == ("speech_style",)
     assert kept[0].body == ("первое появление",)
     assert dropped == []
-    assert tuple(note.body for note in _notes(layout, second.id)) == (("Говорит Alice",),)
-    assert layout.chapters[first_section.id].units[first.id][0].speaker == "Alice"
-    assert layout.chapters[second_section.id].units[second.id][0].speaker == "Alice"
+    assert tuple(note.body for note in _notes(layout, second.id)) == (("Говорит Алиса",),)
+    assert layout.chapters[first_section.id].units[first.id][0].speaker is None
+    assert layout.chapters[second_section.id].units[second.id][0].speaker == "Алиса"
 
 
 def test_repeated_speech_style_id_scoped_to_its_chapter() -> None:
@@ -617,10 +624,10 @@ def test_speech_style_without_speaker_not_dropped() -> None:
     """Speech styles that overlap no speaker fact both stay, in either order."""
     rough = _block("one", 0, "The sailor spoke roughly today.")
     again = _block("one", 1, "The sailor spoke roughly again.")
-    named = _block("one", 2, "Alice nodded once.")
+    named = _block("one", 2, "“Yes,” Alice nodded once.")
     first = _difficulty(rough, "roughly", "speech_style", "z-rough")
     second = _difficulty(again, "roughly", "speech_style", "a-rough")
-    fact = _fact("f-alice", named, "Alice", "Alice", "explicit")
+    fact = _fact("f-alice", named, "“Yes,”", "Alice", "inferred")
     plan = _plan(first, second, facts=(fact,))
     section = _section("one", 0, "Chapter 1", (rough, again, named))
     results = {
@@ -639,28 +646,58 @@ def test_speech_style_without_speaker_not_dropped() -> None:
     layout = build_book_layout(_inputs(
         _document((section,)),
         results,
-        (_analysis("a-one", section.id, plan=plan),),
+        (_analysis(
+            "a-one",
+            section.id,
+            candidates=(_candidate("a-one", "cand-alice", "Alice", "Алиса"),),
+            plan=plan,
+        ),),
     ))
 
     assert _labels(layout, rough.id) == ("Речь персонажа.",)
     assert _labels(layout, again.id) == ("Речь персонажа.",)
-    assert layout.chapters[section.id].units[named.id][0].speaker == "Alice"
+    assert layout.chapters[section.id].units[named.id][0].speaker == "Алиса"
     assert layout.chapters[section.id].units[rough.id][0].speaker is None
     assert plan.difficulties[0].id == "a-rough"
 
 
-def test_unmatched_speaker_not_shown() -> None:
-    """Unknown, gender, and a fact anchored elsewhere are not speakers.
+def test_explicit_speaker_not_shown_on_unit() -> None:
+    """A unit label is only an inferred speaker. An explicit fact on the same line is not.
 
-    A user decision replaces the source name. A suggested variant does not:
-    the source value is shown instead.
+    Both lines open with a quote and the name is an approved glossary decision.
     """
-    alice = _block("one", 0, "Alice waited here.")
-    hatter = _block("one", 1, "Hatter waited here.")
-    unknown = _block("one", 2, "Someone waited.")
-    alice_fact = _fact("f-alice", alice, "Alice", "Alice", "explicit")
-    hatter_fact = _fact("f-hatter", hatter, "Hatter", "Hatter", "inferred")
-    unknown_anchor = _anchor(unknown, "Someone waited.")
+    line = "“Wait,” she said."
+    explicit = _block("one", 0, line)
+    inferred = _block("one", 1, line)
+    explicit_fact = _fact("f-explicit", explicit, line, "Alice", "explicit")
+    inferred_fact = _fact("f-inferred", inferred, line, "Alice", "inferred")
+    plan = _plan(facts=(explicit_fact, inferred_fact))
+    section = _section("one", 0, "Chapter 1", (explicit, inferred))
+    layout = build_book_layout(_inputs(
+        _document((section,)),
+        analyses=(_analysis("a-one", section.id, plan=plan),),
+        concepts=(_concept("c-alice", "Alice", "Алиса", TermStatus.APPROVED),),
+    ))
+    units = layout.chapters[section.id].units
+
+    assert units[explicit.id][0].speaker is None
+    assert units[explicit.id][0].notes == ()
+    assert units[inferred.id][0].speaker == "Алиса"
+    assert units[inferred.id][0].notes[0].note.body == ("Говорит Алиса",)
+
+
+def test_unmatched_speaker_not_shown() -> None:
+    """Unknown, gender, and an unresolved English name are not speakers.
+
+    An approved decision replaces the source name. A suggested variant does not,
+    and the English source is not shown in its place.
+    """
+    alice = _block("one", 0, "“Wait,” said Alice.")
+    hatter = _block("one", 1, "“Wait,” said Hatter.")
+    unknown = _block("one", 2, "“Wait,” said someone.")
+    alice_fact = _fact("f-alice", alice, "“Wait,” said Alice.", "Alice", "inferred")
+    hatter_fact = _fact("f-hatter", hatter, "“Wait,” said Hatter.", "Hatter", "inferred")
+    unknown_anchor = _anchor(unknown, "“Wait,” said someone.")
     unknown_fact = ContextFact(
         "f-unknown",
         "speaker",
@@ -669,7 +706,7 @@ def test_unmatched_speaker_not_shown() -> None:
         value=None,
         certainty="unknown",
     )
-    gender = _fact("f-gender", unknown, "Someone waited.", "female", "explicit", kind="gender")
+    gender = _fact("f-gender", unknown, "“Wait,” said someone.", "female", "explicit", kind="gender")
     plan = _plan(facts=(alice_fact, hatter_fact, unknown_fact, gender))
     section = _section("one", 0, "Chapter 1", (alice, hatter, unknown))
     concepts = (
@@ -684,7 +721,7 @@ def test_unmatched_speaker_not_shown() -> None:
     units = layout.chapters[section.id].units
 
     assert units[alice.id][0].speaker == "Алиса"
-    assert units[hatter.id][0].speaker == "Hatter"
+    assert units[hatter.id][0].speaker is None
     assert units[unknown.id][0].speaker is None
     assert units[unknown.id][0].notes == ()
     assert units[hatter.id][0].speaker != "Шляпник"
@@ -697,6 +734,244 @@ def test_unmatched_speaker_not_shown() -> None:
     assert "Маленькая цифра после слова" not in "\n".join(layout.legend)
 
 
+def test_speaker_name_resolved_from_candidate_and_title_prefix_and_parentheses() -> None:
+    """A Russian label comes from a decision, a person candidate, or a title plus the rest.
+
+    The whole value, the text before parentheses, and the text inside them are all keys.
+    A front-matter candidate and a Latin suggestion are not used. Another target language
+    does not invent a Russian title.
+    """
+    line = "“Hello,” said the person."
+    names = (
+        "Alice",
+        "Bob",
+        "Mr. Kent",
+        "Mrs. Kent",
+        "Miss Kent",
+        "Ms. Kent",
+        "Uncle Kent",
+        "Aunt Kent",
+        "Professor Kent",
+        "Dr. Kent",
+        "Sir Kent",
+        "Madam Kent",
+        "Lord Kent",
+        "Mr. Smith",
+        "Petunia Dursley (Mrs Dursley)",
+        "Vernon Dursley (Uncle Vernon)",
+        "Nobody",
+        "Carl",
+        "Ghost",
+    )
+    blocks = tuple(_block("one", index, line) for index in range(len(names)))
+    facts = tuple(
+        _fact(f"f-{index}", block, "“Hello,”", name, "inferred")
+        for index, (block, name) in enumerate(zip(blocks, names, strict=True))
+    )
+    section = _section("one", 1, "Chapter 1", blocks)
+    front_block = _block("front", 0, "Table of contents.")
+    front = _section("front", 0, "Contents", (front_block,))
+    candidates = (
+        _candidate("a-one", "cand-alice", "Alice", "Элис"),
+        _candidate("a-one", "cand-bob", "Bob", "Бобби"),
+        _candidate("a-one", "cand-kent", "Kent", "Кент"),
+        _candidate("a-one", "cand-petunia", "Petunia Dursley", "Петуния Дерсли"),
+        _candidate("a-one", "cand-vernon", "Vernon", "Вернон"),
+        _candidate("a-one", "cand-carl", "Carl", "Carl"),
+    )
+    analyses = (
+        _analysis(
+            "a-front",
+            front.id,
+            candidates=(_candidate("a-front", "cand-ghost", "Ghost", "Призрак"),),
+        ),
+        _analysis("a-one", section.id, candidates=candidates, plan=_plan(facts=facts)),
+    )
+    concepts = (
+        _concept("c-bob", "Bob", "Роберт", TermStatus.APPROVED),
+        _concept("c-smith", "Mr. Smith", "господин Смит", TermStatus.LOCKED),
+    )
+    layout = build_book_layout(_inputs(
+        _document((front, section)),
+        analyses=analyses,
+        concepts=concepts,
+    ))
+    shown = {
+        name: layout.chapters[section.id].units[block.id][0].speaker
+        for name, block in zip(names, blocks, strict=True)
+    }
+
+    assert shown["Alice"] == "Элис"
+    assert shown["Bob"] == "Роберт"
+    assert shown["Mr. Kent"] == "мистер Кент"
+    assert shown["Mrs. Kent"] == "миссис Кент"
+    assert shown["Miss Kent"] == "мисс Кент"
+    assert shown["Ms. Kent"] == "мис Кент"
+    assert shown["Uncle Kent"] == "дядя Кент"
+    assert shown["Aunt Kent"] == "тётя Кент"
+    assert shown["Professor Kent"] == "профессор Кент"
+    assert shown["Dr. Kent"] == "доктор Кент"
+    assert shown["Sir Kent"] == "сэр Кент"
+    assert shown["Madam Kent"] == "мадам Кент"
+    assert shown["Lord Kent"] == "лорд Кент"
+    assert shown["Mr. Smith"] == "господин Смит"
+    assert shown["Petunia Dursley (Mrs Dursley)"] == "Петуния Дерсли"
+    assert shown["Vernon Dursley (Uncle Vernon)"] == "дядя Вернон"
+    assert shown["Nobody"] is None
+    assert shown["Carl"] is None
+    assert shown["Ghost"] is None
+
+    titled = _block("de", 0, line)
+    plain = _block("de", 1, line)
+    german_section = _section("de", 0, "Chapter 1", (titled, plain))
+    german_layout = build_book_layout(_inputs(
+        _document((german_section,), target_language="de"),
+        analyses=(_analysis(
+            "a-de",
+            german_section.id,
+            candidates=(
+                _candidate("a-de", "cand-kent", "Kent", "Кент"),
+                _candidate("a-de", "cand-alice", "Alice", "Alicia"),
+            ),
+            plan=_plan(facts=(
+                _fact("f-title", titled, "“Hello,”", "Mr. Kent", "inferred"),
+                _fact("f-plain", plain, "“Hello,”", "Alice", "inferred"),
+            )),
+        ),),
+    ))
+    german_units = german_layout.chapters[german_section.id].units
+    assert german_units[titled.id][0].speaker is None
+    assert german_units[plain.id][0].speaker == "Alicia"
+
+
+def test_secondary_anchor_does_not_attach_speaker_to_other_block() -> None:
+    """Only the subject anchor labels its block. A secondary anchor does not."""
+    spoken = _block("one", 0, "“Hello,” she said.")
+    other = _block("one", 1, "“Hello,” he said.")
+    subject = _anchor(spoken, "“Hello,” she said.")
+    secondary = _anchor(other, "“Hello,” he said.")
+    fact = ContextFact(
+        "f-alice",
+        "speaker",
+        (subject, secondary),
+        subject,
+        value="Alice",
+        certainty="inferred",
+    )
+    section = _section("one", 0, "Chapter 1", (spoken, other))
+    layout = build_book_layout(_inputs(
+        _document((section,)),
+        analyses=(_analysis(
+            "a-one",
+            section.id,
+            candidates=(_candidate("a-one", "cand-alice", "Alice", "Алиса"),),
+            plan=_plan(facts=(fact,)),
+        ),),
+    ))
+    units = layout.chapters[section.id].units
+
+    assert units[spoken.id][0].speaker == "Алиса"
+    assert units[other.id][0].speaker is None
+
+
+def test_mid_paragraph_quote_does_not_attach_speaker_to_narrative_unit() -> None:
+    """A quote inside a narrative part is not a label. An opening line and a continued quote are.
+
+    A dash opens a line the same way a quote does. A dash later in the paragraph does not.
+    """
+    narrative = _block("one", 0, "The boy looked around. “Hello,” he said.")
+    opening = _block("one", 1, "“Hello,” he said.")
+    dashed = _block("one", 2, "— Hello, she said.")
+    buried = _block("one", 3, "She paused — Hello, she said.")
+    continued_text = "He shouted, “Hello there, friend."
+    cut = continued_text.index("there")
+    continued = _block(
+        "one",
+        4,
+        continued_text,
+        segments=(BlockSegment(0, cut, 0), BlockSegment(cut, len(continued_text), 1)),
+    )
+    facts = (
+        _fact("f-narrative", narrative, "“Hello,”", "Alice", "inferred"),
+        _fact("f-opening", opening, "“Hello,”", "Alice", "inferred"),
+        _fact("f-dashed", dashed, "— Hello, she said.", "Alice", "inferred"),
+        _fact("f-buried", buried, "Hello", "Alice", "inferred"),
+        _fact("f-continued", continued, "Hello", "Alice", "inferred"),
+    )
+    section = _section("one", 0, "Chapter 1", (narrative, opening, dashed, buried, continued))
+    continued_result = BlockProcessingResult(
+        continued.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="там.",
+        segment_treatments=(BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+        segment_translations=(None, "там."),
+    )
+    layout = build_book_layout(_inputs(
+        _document((section,)),
+        {continued.id: continued_result},
+        analyses=(_analysis(
+            "a-one",
+            section.id,
+            candidates=(_candidate("a-one", "cand-alice", "Alice", "Алиса"),),
+            plan=_plan(facts=facts),
+        ),),
+    ))
+    units = layout.chapters[section.id].units
+    continued_units = units[continued.id]
+
+    assert units[narrative.id][0].speaker is None
+    assert units[opening.id][0].speaker == "Алиса"
+    assert units[dashed.id][0].speaker == "Алиса"
+    assert units[buried.id][0].speaker is None
+    assert [(unit.start, unit.speaker) for unit in continued_units] == [
+        (0, None),
+        (cut, "Алиса"),
+    ]
+
+
+def test_collapsed_whole_block_translation_hides_mid_paragraph_speaker() -> None:
+    """One shown translation of a narrative paragraph does not keep a later quote's speaker.
+
+    Segment cuts would open a later part on the quote, but the block is shown as one
+    unit from the narrative start.
+    """
+    narrative = "The boy looked around. "
+    quote = "“Hello,” he said."
+    filler = "word " * ((PART_MAX_CHARS // 5) + 2)
+    text = narrative + filler + quote
+    cut = len(narrative + filler)
+    assert text[cut:].startswith("“")
+    assert len(text) > PART_MAX_CHARS
+    block = _block(
+        "one",
+        0,
+        text,
+        segments=(BlockSegment(0, cut, 0), BlockSegment(cut, len(text), 1)),
+    )
+    fact = _fact("f-alice", block, "“Hello,”", "Alice", "inferred")
+    section = _section("one", 0, "Chapter 1", (block,))
+    result = BlockProcessingResult(
+        block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Один перевод абзаца.",
+    )
+    layout = build_book_layout(_inputs(
+        _document((section,)),
+        {block.id: result},
+        analyses=(_analysis(
+            "a-one",
+            section.id,
+            candidates=(_candidate("a-one", "cand-alice", "Alice", "Алиса"),),
+            plan=_plan(facts=(fact,)),
+        ),),
+    ))
+    units = layout.chapters[section.id].units[block.id]
+
+    assert [(unit.start, unit.end, unit.speaker) for unit in units] == [
+        (0, len(text), None),
+    ]
+
+
 def test_features_collected_for_legend() -> None:
     """Flags, labels, IPA, and section keys come from the finished projection.
 
@@ -707,14 +982,14 @@ def test_features_collected_for_legend() -> None:
     grammar_block = _block("one", 1, "She had a curious dream.")
     wordplay_block = _block("one", 2, "The mouse's tale was long.")
     pronounced = _block("one", 3, "The cat sat.")
-    speaker_block = _block("one", 4, "Alice said hello.")
+    speaker_block = _block("one", 4, "“Hello,” said Alice.")
     hinted = _block("one", 5, "Past prose.")
     current = _block("two", 0, "She saw a lantern.")
     grammar = _difficulty(grammar_block, "curious", "grammar", "d-grammar")
     wordplay = _difficulty(
         wordplay_block, "tale", "wordplay", "d-wordplay", help_kind="lexical_hint"
     )
-    speaker = _fact("f-alice", speaker_block, "Alice said hello.", "Alice", "inferred")
+    speaker = _fact("f-alice", speaker_block, "“Hello,” said Alice.", "Alice", "inferred")
     plan = _plan(grammar, wordplay, facts=(speaker,))
     first = _section(
         "one",

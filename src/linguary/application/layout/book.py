@@ -7,6 +7,7 @@ error. Export readiness is not required.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -14,8 +15,9 @@ from linguary.application.errors import ApplicationError
 from linguary.application.layout.ipa_reference import IpaSymbol, ipa_key
 from linguary.application.layout.legend import LayoutFeatures, legend_lines
 from linguary.application.layout.notes import block_notes
+from linguary.application.layout.parts import LayoutPart, compose_parts
 from linguary.application.layout.review import ReviewEntry, chapter_review
-from linguary.application.layout.units import LayoutUnit, block_units
+from linguary.application.layout.units import LayoutUnit, _whole_block_translation, block_units
 from linguary.application.layout.who_is_who import (
     WhoEntry,
     _content_chapter_numbers,
@@ -28,6 +30,7 @@ from linguary.domain import (
     BlockTreatment,
     CanonicalDocument,
     ChapterAnalysis,
+    ConceptType,
     DocumentBlock,
     TermConcept,
     glossary_key,
@@ -35,6 +38,23 @@ from linguary.domain import (
 from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, SourceAnchor
 
 _SHOWN_CERTAINTY = frozenset({"explicit", "inferred"})
+_UNIT_SPEAKER_CERTAINTY = frozenset({"inferred"})
+_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+_OPEN_QUOTES = {"“": "”", "‘": "’", "«": "»", '"': '"'}
+_ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "st", "prof"})
+_TITLE_TRANSLATIONS = {
+    "mr": "мистер",
+    "mrs": "миссис",
+    "miss": "мисс",
+    "ms": "мис",
+    "uncle": "дядя",
+    "aunt": "тётя",
+    "professor": "профессор",
+    "dr": "доктор",
+    "sir": "сэр",
+    "madam": "мадам",
+    "lord": "лорд",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +126,8 @@ def build_layout_inputs(unit_of_work, book_id: str) -> LayoutInputs:
 def build_book_layout(inputs: LayoutInputs) -> BookLayout:
     """Project `inputs` into chapters, legend lines, and the book-level lists.
 
-    Speakers are explicit or inferred speaker facts. A repeated speech-style
+    Unit labels use inferred speaker facts only. Repeated speech styles still
+    count explicit and inferred facts. A repeated speech-style
     difficulty for the same speaker is removed from the plan copy and from the
     assistance on the result copy passed to `block_notes`, so the later note
     is absent. The id is dropped only in the section that owns that later
@@ -140,7 +161,16 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                 result,
                 _treatments(block, result),
                 notes,
-                _speakers_for_block(block, facts, inputs.concepts, document.target_language),
+                _speakers_for_block(
+                    block,
+                    facts,
+                    inputs.concepts,
+                    inputs.analyses,
+                    document.target_language,
+                    _treatments(block, result),
+                    result,
+                    document=document,
+                ),
             )
         chapters[section.id] = ChapterLayout(
             section_id=section.id,
@@ -219,38 +249,349 @@ def _speaker_facts(analyses: Sequence[ChapterAnalysis]) -> tuple[ContextFact, ..
     return tuple(found)
 
 
-def _speaker_name(value: str, concepts: Sequence[TermConcept], language: str) -> str:
-    """User-decision variant for this source value, otherwise the value itself."""
-    key = glossary_key(value)
-    for concept in concepts:
-        if glossary_key(concept.canonical_source_text) != key:
-            continue
-        variant = concept.variant_for(language)
-        if variant is not None and variant.status.is_user_decision:
-            return variant.text
-    return value
+def _speaker_name(
+    value: str,
+    concepts: Sequence[TermConcept],
+    analyses: Sequence[ChapterAnalysis],
+    language: str,
+    *,
+    document: CanonicalDocument | None = None,
+) -> str | None:
+    """Russian (or other target) name for `value`, or none when it stays unresolved.
+
+    Keys are the whole value, the text before `(`, and the text inside `(...)`.
+    A user decision wins, then a person candidate from a content section, then
+    for Russian a title or kinship prefix plus the same lookup on the remainder.
+    The English source is never returned on its own.
+    """
+    variants = _name_variants(value)
+    for variant in variants:
+        found = _user_translation(variant, concepts, language)
+        if found is not None:
+            return found
+    for variant in variants:
+        found = _candidate_translation(variant, analyses, language, document)
+        if found is not None:
+            return found
+    if _normalized_language(language) == "ru":
+        for variant in variants:
+            found = _titled_name(variant, concepts, analyses, language, document)
+            if found is not None:
+                return found
+    return None
 
 
 def _speakers_for_block(
     block: DocumentBlock,
     facts: Sequence[ContextFact],
     concepts: Sequence[TermConcept],
+    analyses: Sequence[ChapterAnalysis],
     language: str,
+    treatments: Sequence[BlockTreatment | None],
+    result: BlockProcessingResult | None = None,
+    *,
+    document: CanonicalDocument | None = None,
 ) -> dict[tuple[int, int], str]:
-    """Anchors of shown speaker facts that fall in this block.
+    """Inferred subject anchors whose shown part opens the line or continues its quote.
 
-    A fact with no anchor here is absent. The first name keeps a repeated span.
+    Parts follow `compose_parts`, including the single unit used when a whole-block
+    translation replaces those parts. Secondary anchors are ignored. A part that
+    starts as narrative, with a quote only later, is absent. The first resolved
+    name keeps a repeated part.
     """
     speakers: dict[tuple[int, int], str] = {}
+    parts = _shown_parts(block, treatments, result)
     for fact in facts:
-        if not isinstance(fact.value, str):
+        if fact.certainty not in _UNIT_SPEAKER_CERTAINTY or not isinstance(fact.value, str):
             continue
-        name = _speaker_name(fact.value, concepts, language)
-        for anchor in fact.anchors:
-            if anchor.block_id != block.id:
-                continue
-            speakers.setdefault((anchor.start, anchor.end), name)
+        anchor = fact.subject_anchor
+        if anchor.block_id != block.id:
+            continue
+        name = _speaker_name(
+            fact.value, concepts, analyses, language, document=document,
+        )
+        if name is None:
+            continue
+        for part in parts:
+            if _part_shows_speaker(block.text, part, anchor.start):
+                speakers.setdefault((part.start, part.end), name)
     return speakers
+
+
+def _name_variants(value: str) -> tuple[str, ...]:
+    """Whole name, the part before parentheses, and the part inside them."""
+    text = value.strip()
+    if not text:
+        return ()
+    found = [text]
+    if "(" in text and ")" in text:
+        before, _, rest = text.partition("(")
+        inside, _, _ = rest.partition(")")
+        if before.strip():
+            found.append(before.strip())
+        if inside.strip():
+            found.append(inside.strip())
+    variants: list[str] = []
+    seen: set[str] = set()
+    for variant in found:
+        key = glossary_key(variant)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        variants.append(variant)
+    return tuple(variants)
+
+
+def _user_translation(
+    variant: str,
+    concepts: Sequence[TermConcept],
+    language: str,
+) -> str | None:
+    """Approved or locked variant for this key. A suggestion does not count."""
+    key = glossary_key(variant)
+    if not key:
+        return None
+    normalized = _normalized_language(language)
+    for concept in concepts:
+        if glossary_key(concept.canonical_source_text) != key:
+            continue
+        chosen = concept.variant_for(normalized)
+        if chosen is not None and chosen.status.is_user_decision and chosen.text.strip():
+            return chosen.text.strip()
+    return None
+
+
+def _candidate_translation(
+    variant: str,
+    analyses: Sequence[ChapterAnalysis],
+    language: str,
+    document: CanonicalDocument | None,
+) -> str | None:
+    """Person suggestion from a content section. Russian text must use Cyrillic."""
+    key = glossary_key(variant)
+    if not key:
+        return None
+    russian = _normalized_language(language) == "ru"
+    allowed = _content_section_ids(document)
+    for analysis in _analyses_in_reading_order(analyses, document, allowed):
+        for candidate in analysis.glossary_candidates:
+            if candidate.type is not ConceptType.PERSON:
+                continue
+            if glossary_key(candidate.source_text) != key:
+                continue
+            translation = candidate.suggested_translation.strip()
+            if not translation:
+                continue
+            if russian and _CYRILLIC.search(translation) is None:
+                continue
+            return translation
+    return None
+
+
+def _titled_name(
+    variant: str,
+    concepts: Sequence[TermConcept],
+    analyses: Sequence[ChapterAnalysis],
+    language: str,
+    document: CanonicalDocument | None,
+) -> str | None:
+    """Russian title or kinship word plus a resolved remainder. No English fallback."""
+    if _normalized_language(language) != "ru":
+        return None
+    token, separator, rest = glossary_key(variant).partition(" ")
+    if not separator or token not in _TITLE_TRANSLATIONS or not rest.strip():
+        return None
+    translated = _user_translation(rest, concepts, language)
+    if translated is None:
+        translated = _candidate_translation(rest, analyses, language, document)
+    if translated is None:
+        return None
+    return f"{_TITLE_TRANSLATIONS[token]} {translated}"
+
+
+def _normalized_language(language: str) -> str:
+    return language.strip().lower()
+
+
+def _content_section_ids(document: CanonicalDocument | None) -> frozenset[str] | None:
+    """Content section ids, or none when the document was not passed in."""
+    if document is None:
+        return None
+    return frozenset(
+        section.id
+        for section in document.ordered_sections
+        if not document.is_front_matter(section) and not section.is_notes_only
+    )
+
+
+def _analyses_in_reading_order(
+    analyses: Sequence[ChapterAnalysis],
+    document: CanonicalDocument | None,
+    allowed: frozenset[str] | None,
+) -> tuple[ChapterAnalysis, ...]:
+    """Content analyses in section order. Without a document, keep the given order."""
+    if document is None:
+        return tuple(analyses)
+    grouped: dict[str, list[ChapterAnalysis]] = {}
+    for analysis in analyses:
+        if allowed is not None and analysis.section_id not in allowed:
+            continue
+        grouped.setdefault(analysis.section_id, []).append(analysis)
+    ordered: list[ChapterAnalysis] = []
+    for section in document.ordered_sections:
+        ordered.extend(grouped.get(section.id, ()))
+    return tuple(ordered)
+
+
+def _shown_parts(
+    block: DocumentBlock,
+    treatments: Sequence[BlockTreatment | None],
+    result: BlockProcessingResult | None,
+) -> tuple[LayoutPart, ...]:
+    """Parts `block_units` will build, so a collapsed translation is one part."""
+    chosen = tuple(treatments)
+    parts = compose_parts(block, chosen)
+    if _whole_block_translation(result, chosen) is None:
+        return parts
+    spans = block.segment_spans
+    return (
+        LayoutPart(
+            start=spans[0].start,
+            end=spans[-1].end,
+            treatment=BlockTreatment.TRANSLATE,
+            segments=tuple(range(len(spans))),
+        ),
+    )
+
+
+def _part_shows_speaker(text: str, part: LayoutPart, anchor_start: int) -> bool:
+    """Whether `anchor_start` belongs to the dialogue that opens this part."""
+    opening_end = _opening_speech_end(text, part.start, part.end)
+    if opening_end is not None and part.start <= anchor_start < opening_end:
+        return True
+    continued = _continued_speech_bounds(text, part.start)
+    if continued is None:
+        return False
+    start, end = continued
+    return start <= anchor_start < end
+
+
+def _opening_speech_end(text: str, part_start: int, part_end: int) -> int | None:
+    """End of the opening replica and its remark, when the part starts with one."""
+    open_at = _first_nonspace(text, part_start, part_end)
+    if open_at is None or not _is_dialogue_opener(text, open_at, part_end):
+        return None
+    if text[open_at] not in _OPEN_QUOTES:
+        return _sentence_end(text, open_at, part_end)
+    close = _matching_close(text, open_at, part_end)
+    if close is None:
+        return part_end
+    return min(part_end, _remark_end(text, close, part_end))
+
+
+def _continued_speech_bounds(text: str, part_start: int) -> tuple[int, int] | None:
+    """Quote opened before this part and still open there, through its remark."""
+    if part_start <= 0:
+        return None
+    open_at = _outer_unclosed_open(text[:part_start])
+    if open_at is None:
+        return None
+    close = _matching_close(text, open_at, len(text))
+    if close is None:
+        return (open_at, len(text))
+    if close < part_start:
+        return None
+    return (open_at, _remark_end(text, close, len(text)))
+
+
+def _outer_unclosed_open(text: str) -> int | None:
+    """Index of the outermost quote that `text` does not close."""
+    stack: list[tuple[int, str]] = []
+    for index, char in enumerate(text):
+        if char in _OPEN_QUOTES:
+            if char == '"' and stack and stack[-1][1] == '"':
+                stack.pop()
+            else:
+                stack.append((index, _OPEN_QUOTES[char]))
+        elif stack and char == stack[-1][1]:
+            stack.pop()
+    if not stack:
+        return None
+    return stack[0][0]
+
+
+def _matching_close(text: str, open_index: int, limit: int) -> int | None:
+    """Index of the quote that closes the opener at `open_index`, inside `limit`."""
+    opener = text[open_index]
+    if opener not in _OPEN_QUOTES:
+        return None
+    stack = [_OPEN_QUOTES[opener]]
+    for index in range(open_index + 1, limit):
+        char = text[index]
+        if char in _OPEN_QUOTES:
+            if char == '"' and stack and stack[-1] == '"':
+                stack.pop()
+            else:
+                stack.append(_OPEN_QUOTES[char])
+        elif stack and char == stack[-1]:
+            stack.pop()
+        if not stack:
+            return index
+    return None
+
+
+def _remark_end(text: str, close_index: int, limit: int) -> int:
+    """End of the reporting clause after a closing quote, before the next sentence."""
+    index = close_index + 1
+    while index < limit and text[index].isspace():
+        index += 1
+    if index >= limit:
+        return limit
+    if text[index].isupper() or text[index] in _OPEN_QUOTES:
+        return close_index + 1
+    return _sentence_end(text, close_index + 1, limit)
+
+
+def _sentence_end(text: str, start: int, limit: int) -> int:
+    """Exclusive end of the sentence containing `start`, capped at `limit`."""
+    index = start
+    while index < limit:
+        if text[index] in ".!?" and _ends_sentence(text, index, limit):
+            return index + 1
+        index += 1
+    return limit
+
+
+def _ends_sentence(text: str, index: int, limit: int) -> bool:
+    """A terminator that is not an abbreviation dot and is followed by a break."""
+    if text[index] == "." and _abbreviation_dot(text, index):
+        return False
+    next_index = index + 1
+    return next_index >= limit or text[next_index].isspace()
+
+
+def _abbreviation_dot(text: str, index: int) -> bool:
+    word_start = index
+    while word_start > 0 and text[word_start - 1].isalpha():
+        word_start -= 1
+    return text[word_start:index].casefold() in _ABBREVIATIONS
+
+
+def _first_nonspace(text: str, start: int, end: int) -> int | None:
+    index = start
+    while index < end and text[index].isspace():
+        index += 1
+    if index >= end:
+        return None
+    return index
+
+
+def _is_dialogue_opener(text: str, index: int, end: int) -> bool:
+    """Opening quote or a dialogue dash, not a hyphen glued to a word."""
+    char = text[index]
+    if char in _OPEN_QUOTES or char in "—–":
+        return True
+    return char == "-" and index + 1 < end and text[index + 1] in " —–"
 
 
 def _repeated_speech_style_ids(
