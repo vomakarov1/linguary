@@ -25,7 +25,7 @@ SPLIT_MIN_PART_CHARS: int = 250
 SPLIT_MAX_PART_CHARS: int = 350
 
 #: Text shorter than this is one segment. Longer text is split into sentences.
-SEGMENT_MIN_BLOCK_CHARS: int = 600
+SEGMENT_MIN_BLOCK_CHARS: int = 450
 #: A sentence longer than this is split at the first clause level that fits.
 SEGMENT_MAX_CHARS: int = 350
 

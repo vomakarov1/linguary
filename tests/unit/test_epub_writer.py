@@ -9,6 +9,7 @@ from linguary.domain.document import (
     DocumentBlock,
     DocumentSection,
     SourceReference,
+    is_cover_section,
     is_front_matter,
 )
 
@@ -95,6 +96,164 @@ def test_front_matter_classification_in_domain() -> None:
 
     assert is_front_matter(ch2_section, doc) is False
     assert doc.is_front_matter(ch2_section) is False
+
+
+def test_is_cover_section_distinguishes_cover_from_other_front_matter() -> None:
+    """A cover is recognized by filename, title, heading, or a textless image, not by front matter alone."""
+
+    def _section(
+        section_id: str,
+        order: int,
+        title: str,
+        path: str,
+        blocks: tuple[DocumentBlock, ...],
+    ) -> DocumentSection:
+        return DocumentSection(
+            id=section_id,
+            document_id="book-1",
+            title=title,
+            order=order,
+            source_resource_path=path,
+            blocks=blocks,
+        )
+
+    def _paragraph(section_id: str, block_id: str, text: str, order: int = 0) -> DocumentBlock:
+        return _block(section_id, block_id, text, order=order)
+
+    cover_xhtml = _section(
+        "sec-cover-xhtml",
+        0,
+        "Front",
+        "OEBPS/cover.xhtml",
+        (_paragraph("sec-cover-xhtml", "cover-xhtml-p", "The book opens on this page."),),
+    )
+    cover_html = _section(
+        "sec-cover-html",
+        1,
+        "Front",
+        "OEBPS/Cover.html",
+        (_paragraph("sec-cover-html", "cover-html-p", "The book opens on this page."),),
+    )
+    cover_page = _section(
+        "sec-cover-page",
+        2,
+        "Front",
+        "text/cover-page.xhtml",
+        (_paragraph("sec-cover-page", "cover-page-p", "The book opens on this page."),),
+    )
+    cover_page_underscore = _section(
+        "sec-cover-underscore",
+        3,
+        "Front",
+        "text/cover_page.xhtml",
+        (_paragraph("sec-cover-underscore", "cover-underscore-p", "The book opens on this page."),),
+    )
+    titled_cover = _section(
+        "sec-titled-cover",
+        4,
+        "«Cover»",
+        "frontispiece.xhtml",
+        (_paragraph("sec-titled-cover", "titled-cover-p", "A line under the cover title."),),
+    )
+    heading_cover = _section(
+        "sec-heading-cover",
+        5,
+        "Opening",
+        "opening.xhtml",
+        (
+            _block("sec-heading-cover", "heading-cover-h", "Cover", BlockType.HEADING, 0),
+            _paragraph("sec-heading-cover", "heading-cover-p", "A line under the heading.", 1),
+        ),
+    )
+    image_cover = _section(
+        "sec-image-cover",
+        6,
+        "Plate",
+        "plate.xhtml",
+        (_block("sec-image-cover", "image-cover-i", "A purple cloak.", BlockType.IMAGE, 0),),
+    )
+    title_page = _section(
+        "sec-title",
+        7,
+        "Title Page",
+        "title.xhtml",
+        (_block("sec-title", "title-h", "The Great Novel", BlockType.HEADING, 0),),
+    )
+    promo_texts = (
+        "Readers can find extra notes on Pottermore.",
+        "The site lists maps and character sketches.",
+        "Visit Pottermore after you finish the chapter.",
+    )
+    promo = _section(
+        "sec-promo",
+        8,
+        "Pottermore",
+        "pottermore.xhtml",
+        tuple(
+            _paragraph("sec-promo", f"promo-{index}", text, index)
+            for index, text in enumerate(promo_texts)
+        ),
+    )
+    chapter = _section(
+        "sec-ch1",
+        9,
+        "Chapter 1",
+        "chapter-1.xhtml",
+        (
+            _block("sec-ch1", "ch1-i", "A street at evening.", BlockType.IMAGE, 0),
+            _block("sec-ch1", "ch1-h", "Chapter 1", BlockType.HEADING, 1),
+            _paragraph("sec-ch1", "ch1-p", "The tale starts on this page.", 2),
+        ),
+    )
+    notes = _section(
+        "sec-notes",
+        10,
+        "Cover",
+        "notes/cover.xhtml",
+        (
+            _block("sec-notes", "notes-h", "Cover", BlockType.HEADING, 0),
+            _block("sec-notes", "notes-f", "A note about the cloak.", BlockType.FOOTNOTE, 1),
+        ),
+    )
+    doc = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="A Magical Story"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            cover_xhtml,
+            cover_html,
+            cover_page,
+            cover_page_underscore,
+            titled_cover,
+            heading_cover,
+            image_cover,
+            title_page,
+            promo,
+            chapter,
+            notes,
+        ),
+    )
+
+    def _expect_cover(section: DocumentSection, expected: bool) -> None:
+        assert is_cover_section(section) is expected
+        assert doc.is_cover_section(section) is expected
+
+    assert is_front_matter(cover_xhtml, doc) is True
+    for section in (cover_xhtml, cover_html, cover_page, cover_page_underscore):
+        _expect_cover(section, True)
+    _expect_cover(titled_cover, True)
+    _expect_cover(heading_cover, True)
+    _expect_cover(image_cover, True)
+
+    assert is_front_matter(title_page, doc) is True
+    _expect_cover(title_page, False)
+    assert is_front_matter(promo, doc) is True
+    _expect_cover(promo, False)
+    assert is_front_matter(chapter, doc) is False
+    _expect_cover(chapter, False)
+    assert notes.is_notes_only is True
+    _expect_cover(notes, False)
 
 
 def test_short_headingless_promo_section_before_first_story_chapter_is_front_matter() -> None:

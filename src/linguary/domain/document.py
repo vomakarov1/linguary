@@ -256,6 +256,16 @@ _NOTES_PAGE_EXTRAS = frozenset({BlockType.HEADING, BlockType.PAGE_BREAK})
 #: Blocks that carry content even without text.
 _CONTENT_WITHOUT_TEXT = frozenset({BlockType.IMAGE, BlockType.TABLE})
 
+#: Prose blocks. Only a non-empty block of one of these types counts as text.
+_TEXT_BLOCK_TYPES = frozenset(
+    {
+        BlockType.PARAGRAPH,
+        BlockType.POEM,
+        BlockType.QUOTE,
+        BlockType.LIST_ITEM,
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DocumentSection:
@@ -424,6 +434,10 @@ class CanonicalDocument:
         """Whether the section is classified as front matter."""
         return is_front_matter(section, self)
 
+    def is_cover_section(self, section: DocumentSection) -> bool:
+        """Whether the section is the book cover."""
+        return is_cover_section(section)
+
 
 _FRONT_MATTER_FILENAMES = frozenset(
     {
@@ -581,6 +595,39 @@ def is_front_matter(
                 return True
 
     return False
+
+
+def is_cover_section(section: DocumentSection) -> bool:
+    """Whether the section is a cover page rather than other front matter.
+
+    A notes page is never a cover. Any other section is a cover when its filename
+    stem is or starts with `cover`, its title or a heading is `cover`, or it
+    holds an image and no text blocks.
+    """
+    if section.is_notes_only:
+        return False
+
+    filename = section.source_resource_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    stem = filename.rsplit(".", 1)[0].casefold()
+    if stem == "cover" or stem.startswith("cover"):
+        return True
+
+    title_norm = section.title.strip().casefold().strip("\"'«»")
+    if title_norm == "cover":
+        return True
+    for block in section.blocks:
+        if block.type is not BlockType.HEADING or not block.text.strip():
+            continue
+        if block.text.strip().casefold().strip("\"'«»") == "cover":
+            return True
+
+    has_image = False
+    for block in section.blocks:
+        if block.type in _TEXT_BLOCK_TYPES and block.text.strip():
+            return False
+        if block.type is BlockType.IMAGE:
+            has_image = True
+    return has_image
 
 
 class ImportWarningKind(StrEnum):

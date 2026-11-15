@@ -11,7 +11,14 @@ from linguary.adapters.epub.splitting import (
     split_paragraph,
     split_sentences,
 )
-from linguary.domain import BlockSegment
+from linguary.application.layout.parts import compose_parts
+from linguary.domain import (
+    BlockSegment,
+    BlockTreatment,
+    BlockType,
+    DocumentBlock,
+    SourceReference,
+)
 
 
 def test_split_sentences_skips_short_paragraphs() -> None:
@@ -403,7 +410,7 @@ def _assert_protected_intact(
 
 def test_short_text_single_segment() -> None:
     """Text below the block threshold is one span, even when it exceeds the segment cap."""
-    assert SEGMENT_MIN_BLOCK_CHARS == 600
+    assert SEGMENT_MIN_BLOCK_CHARS == 450
     assert SEGMENT_MAX_CHARS == 350
 
     short = "First sentence stays. Second sentence stays too."
@@ -414,9 +421,55 @@ def test_short_text_single_segment() -> None:
     assert len(below) == SEGMENT_MIN_BLOCK_CHARS - 1
     assert segment_text(below) == (BlockSegment(0, len(below), 0),)
 
-    bulky = _repeat("quartz", 500) + "."
+    bulky = _repeat("quartz", 400) + "."
     assert SEGMENT_MAX_CHARS < len(bulky) < SEGMENT_MIN_BLOCK_CHARS
     assert segment_text(bulky) == (BlockSegment(0, len(bulky), 0),)
+
+
+def test_medium_paragraph_around_500_chars_segments_into_two_reading_parts() -> None:
+    """A two-sentence paragraph of about 513 characters becomes two translated reading parts.
+
+    Each sentence is shorter than the segment cap. The paragraph is long enough to
+    segment, and the translate run is too long to stay one display part.
+    """
+    first = (
+        "A tiny old man in a purple cloak stood outside the bakery and watched the evening crowd "
+        "hurry past the bright window, keeping a folded paper parcel close against his chest "
+        "while the street lamps came on and never once turned his head toward the voices behind him. "
+    )
+    second = (
+        "He spoke to nobody at all, and the faded cloak moved only when the wind crossed the lane "
+        "and lifted its hem above the worn shoes he had polished that morning before he left "
+        "the quiet street and the bakery lights behind him without once looking back."
+    )
+    paragraph = first + second
+    assert len(paragraph) == 513
+    assert len(first) < SEGMENT_MAX_CHARS
+    assert len(second) < SEGMENT_MAX_CHARS
+
+    segments = segment_text(paragraph)
+    assert segments == (
+        BlockSegment(0, len(first), 0),
+        BlockSegment(len(first), len(paragraph), 1),
+    )
+
+    block = DocumentBlock(
+        id="b-purple-cloak",
+        section_id="sec-story",
+        type=BlockType.PARAGRAPH,
+        order=0,
+        text=paragraph,
+        source_reference=SourceReference(resource_path="chapter.xhtml", structural_path="/p[1]"),
+        segments=segments,
+    )
+    parts = compose_parts(block, (BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE))
+    assert len(parts) == 2
+    assert tuple(part.treatment for part in parts) == (
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    )
+    assert (parts[0].start, parts[0].end) == (0, len(first))
+    assert (parts[1].start, parts[1].end) == (len(first), len(paragraph))
 
 
 def test_sentences_become_segments() -> None:
