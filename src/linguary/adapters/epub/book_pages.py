@@ -215,14 +215,8 @@ def _append_who_entry(
     if entry.description.strip():
         tail += f" {entry.description.strip()}"
     head.tail = tail
-    anchor: etree._Element = head
-    if entry.name_method:
-        head.tail += " "
-        method = _sub(item, "span", {"class": "lg-method"})
-        method.text = entry.name_method
-        anchor = method
     if show_first_chapter:
-        anchor.tail = (anchor.tail or "") + " "
+        head.tail += " "
         reference = _sub(item, "span", {"class": "lg-src-ref"})
         reference.text = f"Впервые в гл. {_roman(entry.first_chapter)}."
 

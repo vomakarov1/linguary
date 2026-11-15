@@ -137,16 +137,8 @@ def test_chapter_front_order(tmp_path: Path) -> None:
     who_text = "".join(who.itertext())
     assert who_text.index("the Mouse") < who_text.index("Cheshire")
     assert "Зверёк в воде." in who_text
-    assert "вольный перевод" in "".join(
-        "".join(node.itertext())
-        for node in elements(who, "li")
-        if "Cheshire" in "".join(node.itertext())
-    )
-    assert all(
-        "вольный перевод" not in "".join(node.itertext())
-        for node in elements(who, "li")
-        if "the Mouse" in "".join(node.itertext())
-    )
+    assert all(node.get("class") != "lg-method" for node in elements(who, "span"))
+    assert "вольный перевод" not in who_text
     assert "Alice" not in who_text and "Pat" not in who_text and "Впервые" not in who_text
     review_text = "".join(review.itertext())
     assert "Повторим" in review_text
@@ -197,8 +189,8 @@ def test_book_who_is_who_at_end(tmp_path: Path) -> None:
     assert "Впервые в гл. II." in text
     assert "Впервые в гл. III." in text
     assert "Девочка." in text
-    cheshire = next(node for node in elements(page, "li") if "Cheshire" in "".join(node.itertext()))
-    assert "".join(elements(cheshire, "span")[-2].itertext()) == "вольный перевод"
+    assert all(node.get("class") != "lg-method" for node in elements(page, "span"))
+    assert "вольный перевод" not in text
     mouse = next(node for node in elements(page, "li") if "the Mouse" in "".join(node.itertext()))
     assert "вольный перевод" not in "".join(mouse.itertext())
 

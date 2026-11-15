@@ -22,7 +22,6 @@ from linguary.application.layout.who_is_who import (
     WhoEntry,
     _content_chapter_numbers,
     book_who_is_who,
-    chapter_who_is_who,
 )
 from linguary.application.pronunciation_projection import project_pronunciations
 from linguary.domain import (
@@ -275,12 +274,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             section_id=section.id,
             number=numbers.get(section.id),
             units=units,
-            who_is_who=chapter_who_is_who(
-                document,
-                inputs.analyses,
-                inputs.concepts,
-                section_id=section.id,
-            ),
+            who_is_who=(),
             review=chapter_review(
                 document,
                 inputs.results,
@@ -288,7 +282,12 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                 reader_level=inputs.reader_level,
             ),
         )
-    features = _features(chapters, inputs.analyses)
+    features = _features(
+        chapters,
+        inputs.analyses,
+        reader_level=inputs.reader_level,
+        english_help=inputs.english_help,
+    )
     return BookLayout(
         chapters=chapters,
         legend=legend_lines(features),
@@ -969,14 +968,19 @@ def _result_without(
 def _features(
     chapters: Mapping[str, ChapterLayout],
     analyses: Sequence[ChapterAnalysis],
+    *,
+    reader_level: str | None,
+    english_help: bool,
 ) -> LayoutFeatures:
     """Layers and section keys that the finished chapters actually contain.
 
-    `previously` is not set: that list is not projected. Before You Read is a
-    section key when a content chapter's analysis has entries. Labels are the
-    strings written on notes, not kind ids that lost their label. `has_notes`
-    is true only when some note has a number. An unnumbered «Говорит …» note
-    sets `has_speakers` and does not turn on the numbered-notes line.
+    `previously` is not set: that list is not projected. Chapter who-is-who
+    lists are empty, so that section key is not set. Before You Read is a
+    section key when a content chapter's analysis has entries, except on A2
+    without English help. Labels are the strings written on notes, not kind
+    ids that lost their label. `has_notes` is true only when some note has a
+    number. An unnumbered «Говорит …» note sets `has_speakers` and does not
+    turn on the numbered-notes line.
     """
     units = [
         unit
@@ -993,7 +997,7 @@ def _features(
         sections.add("who_is_who")
     if any(chapter.review for chapter in chapters.values()):
         sections.add("review")
-    if any(
+    if (reader_level != "a2" or english_help) and any(
         analysis.before_you_read and analysis.section_id in content_ids for analysis in analyses
     ):
         sections.add("before_you_read")

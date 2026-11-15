@@ -940,7 +940,10 @@ def test_pottermore_is_front_matter_and_chapter_one_is_numbered_first_with_harry
 
 
 def test_who_is_who_cards_contain_no_english_descriptions(harry_regression: _Case) -> None:
-    """A card description is Russian, or absent when the first one was English."""
+    """A card description is Russian, or absent when the first one was English.
+
+    Bare `Dursley` is a family surname, not a character card.
+    """
     cards = _who_cards(_who_page(harry_regression.pages))
     page_text = _text(_who_page(harry_regression.pages))
     for description in _ENGLISH_DESCRIPTIONS:
@@ -948,7 +951,7 @@ def test_who_is_who_cards_contain_no_english_descriptions(harry_regression: _Cas
     assert _DUDLEY_LATER_DESCRIPTION not in page_text
     assert _HARRY_LATER_DESCRIPTION not in page_text
     assert cards["Dudley"][0] == "\u2014 Дадли."
-    assert cards["Dursley"][0] == "\u2014 Дёрсли."
+    assert "Dursley" not in cards
     assert cards["Mrs Dursley"][0] == f"\u2014 миссис Дёрсли. {_MRS_DURSLEY_DESCRIPTION}"
     assert cards["Vernon"][0] == f"\u2014 Вернон. {_VERNON_DESCRIPTION}"
     assert cards["Piers"][0] == f"\u2014 Пирз. {_PIERS_DESCRIPTION}"

@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from lxml import etree
+
+from linguary.adapters.epub.book_pages import who_is_who_document
 from linguary.application.layout.review import (
     REVIEW_DISTANCES,
     REVIEW_LIMITS,
@@ -704,7 +707,7 @@ def test_name_method_labels_match_enum() -> None:
 
 
 def test_name_method_shown_only_for_mixed_and_creative() -> None:
-    """Sound, meaning, and uncertain stay out of the row. Mixed and creative are labelled."""
+    """No method is written on the row, including mixed and creative."""
     section = _content("ch-1", 0)
     document = _document((section,))
     methods = (
@@ -729,19 +732,19 @@ def test_name_method_shown_only_for_mixed_and_creative() -> None:
     assert listed == {
         "Sound": None,
         "Meaning": None,
-        "Mixed": "звучание и смысл",
-        "Creative": "вольный перевод",
+        "Mixed": None,
+        "Creative": None,
         "Uncertain": None,
         "Plain": None,
     }
 
 
 def test_name_method_follows_highest_confidence_observation() -> None:
-    """The label is the highest-confidence fragment, not the first assessment.
+    """The row keeps the candidate translation and does not label the method.
 
-    A later creative observation outranks an earlier sound one, so the row
-    shows the creative translation with its label. Equal confidence keeps the
-    first of those maxima.
+    A later creative observation outranks an earlier sound one, but the entry
+    still shows the candidate's suggested translation and no method label.
+    Equal confidence keeps the first of those maxima, also without a label.
     """
     section = _content("ch-1", 0)
     document = _document((section,))
@@ -799,6 +802,174 @@ def test_name_method_follows_highest_confidence_observation() -> None:
     }
 
     assert listed == {
-        "Hatter": ("Шляпник", "вольный перевод"),
-        "Hare": ("Заяц", "вольный перевод"),
+        "Hatter": ("Шляпник", None),
+        "Hare": ("Заяц", None),
     }
+
+
+def test_name_method_not_shown_on_who_is_who_entries() -> None:
+    """Book and chapter rows omit the method, and the page does not print it.
+
+    A hand-built entry that still carries a method label must not render
+    `<span class="lg-method">`.
+    """
+    section = _content("ch-1", 0)
+    document = _document((section,))
+    methods = (
+        ("sound-name", "Sound", NameTranslationMethod.SOUND),
+        ("meaning-name", "Meaning", NameTranslationMethod.MEANING),
+        ("mixed-name", "Mixed", NameTranslationMethod.MIXED),
+        ("creative-name", "Creative", NameTranslationMethod.CREATIVE),
+        ("uncertain-name", "Uncertain", NameTranslationMethod.UNCERTAIN),
+    )
+    analysis = _analysis("a1", section.id, tuple(
+        _candidate("a1", candidate_id, source, ConceptType.PERSON, source, method=method)
+        for candidate_id, source, method in methods
+    ))
+
+    chapter = chapter_who_is_who(document, (analysis,), (), section_id=section.id)
+    book = book_who_is_who(document, (analysis,), ())
+    assert [entry.name_method for entry in chapter] == [None, None, None, None, None]
+    assert [entry.name_method for entry in book] == [None, None, None, None, None]
+
+    labelled = WhoEntry("Hatter", "Шляпник", ConceptType.PERSON, "", "вольный перевод", 1)
+    root = who_is_who_document(
+        (labelled,),
+        language="ru",
+        source_language="en",
+        stylesheet="style.css",
+    )
+    xml = etree.tostring(root, encoding=str)
+    assert "lg-method" not in xml
+    assert "вольный перевод" not in xml
+
+
+def test_who_is_who_deduplicates_petunia_mrs_dursley_and_lily_mrs_potter() -> None:
+    """One card per person. A later chapter does not replace an earlier description.
+
+    `Petunia Dursley (Mrs Dursley)`, `Petunia`, `Aunt Petunia`, and `Mrs Dursley`
+    are one person. `Vernon Dursley (Uncle Vernon)` and `Uncle Vernon` are another.
+    `Lily Potter`, `Lily`, and `Mrs Potter` are a third. `Dudley Dursley` and
+    `Mr Dursley` stay separate: the same surname is not enough.
+    """
+    first = _content("ch-1", 0)
+    second = _content("ch-2", 1)
+    document = _document((first, second))
+    analyses = (
+        _analysis("a1", first.id, (
+            _candidate(
+                "a1", "petunia-full", "Petunia Dursley (Mrs Dursley)", ConceptType.PERSON,
+                "Петуния Дёрсли", description="жена мистера Дёрсли",
+            ),
+            _candidate(
+                "a1", "vernon-full", "Vernon Dursley (Uncle Vernon)", ConceptType.PERSON,
+                "Вернон Дёрсли", description="",
+            ),
+            _candidate(
+                "a1", "lily-full", "Lily Potter", ConceptType.PERSON,
+                "Лили Поттер", description="мать Гарри",
+            ),
+            _candidate(
+                "a1", "lily-same", "Lily", ConceptType.PERSON,
+                "Лили", description="та же глава",
+            ),
+            _candidate(
+                "a1", "dudley", "Dudley Dursley", ConceptType.PERSON,
+                "Дадли Дёрсли", description="сын",
+            ),
+            _candidate(
+                "a1", "mr", "Mr Dursley", ConceptType.PERSON,
+                "мистер Дёрсли", description="",
+            ),
+        )),
+        _analysis("a2", second.id, (
+            _candidate(
+                "a2", "petunia", "Petunia", ConceptType.PERSON,
+                "Петуния", description="сестра Лили",
+            ),
+            _candidate(
+                "a2", "aunt", "Aunt Petunia", ConceptType.PERSON,
+                "тётя Петуния", description="позже про Петунию",
+            ),
+            _candidate(
+                "a2", "uncle", "Uncle Vernon", ConceptType.PERSON,
+                "дядя Вернон", description="позже про Вернона",
+            ),
+            _candidate(
+                "a2", "mrs-dursley", "Mrs Dursley", ConceptType.PERSON,
+                "миссис Дёрсли", description="",
+            ),
+            _candidate(
+                "a2", "mrs-potter", "Mrs Potter", ConceptType.PERSON,
+                "миссис Поттер", description="спойлер о матери",
+            ),
+        )),
+    )
+
+    assert book_who_is_who(document, analyses, ()) == (
+        WhoEntry(
+            "Petunia Dursley (Mrs Dursley)", "Петуния Дёрсли", ConceptType.PERSON,
+            "жена мистера Дёрсли", None, 1,
+        ),
+        WhoEntry(
+            "Vernon Dursley (Uncle Vernon)", "Вернон Дёрсли", ConceptType.PERSON,
+            "позже про Вернона", None, 1,
+        ),
+        WhoEntry("Lily Potter", "Лили Поттер", ConceptType.PERSON, "мать Гарри", None, 1),
+        WhoEntry("Dudley Dursley", "Дадли Дёрсли", ConceptType.PERSON, "сын", None, 1),
+        WhoEntry("Mr Dursley", "мистер Дёрсли", ConceptType.PERSON, "", None, 1),
+    )
+
+
+def test_who_is_who_filters_plural_family_names_and_mistaken_non_characters() -> None:
+    """Plural families and mistaken names are not people. A place is kept.
+
+    `the Potters`, `Potters`, `the Dursleys`, and `Dursleys` are families.
+    So are translations «семья …» and «супруги …». Bare `Dursley` with a family
+    surname description is dropped because `Mrs Dursley` and `Dudley` are already
+    candidates. Bare `Potter` with the same kind of description stays when nobody
+    else carries that surname. `Howard` and the other non-character descriptions
+    are dropped. `Piers` is a person whose name merely ends in s.
+    """
+    first = _content("ch-1", 0)
+    document = _document((first,))
+    rows = (
+        ("the-potters", "the Potters", ConceptType.PERSON, "Поттеры", ""),
+        ("mrs", "Mrs Dursley", ConceptType.PERSON, "миссис Дёрсли", "жена мистера Дёрсли"),
+        ("potters", "Potters", ConceptType.PERSON, "Поттеры", ""),
+        ("dudley", "Dudley", ConceptType.PERSON, "Дадли", "сын мистера Дёрсли"),
+        ("the-dursleys", "the Dursleys", ConceptType.PERSON, "Дёрсли", ""),
+        ("dursleys", "Dursleys", ConceptType.PERSON, "Дёрсли", ""),
+        ("dursley", "Dursley", ConceptType.PERSON, "Дурсли", "фамилия семьи"),
+        ("potter", "Potter", ConceptType.PERSON, "Поттер", "фамилия семьи"),
+        ("number-four", "Number Four", ConceptType.PERSON, "семья Дёрсли", ""),
+        ("couple", "the couple", ConceptType.PERSON, "супруги Поттер", ""),
+        (
+            "howard",
+            "Howard",
+            ConceptType.PERSON,
+            "Говард",
+            "Распространённое мужское имя; так мистер Дёрсли неуверенно называет сына Поттеров.",
+        ),
+        ("harvey", "Harvey", ConceptType.PERSON, "Харви", "Он пытается вспомнить имя."),
+        ("harold", "Harold", ConceptType.PERSON, "Гарольд", "Он ошибочно называет другого."),
+        ("ted", "Ted", ConceptType.PERSON, "Тед", "ведущий новостей"),
+        ("jim", "Jim", ConceptType.PERSON, "Джим", "телеведущий"),
+        ("announcer", "Announcer", ConceptType.PERSON, "Диктор", "диктор"),
+        ("sunny", "Sunny", ConceptType.PERSON, "Санни", "синоптик"),
+        ("tibbles", "Tibbles", ConceptType.PERSON, "Тибблз", "кличка кошки"),
+        ("piers", "Piers", ConceptType.PERSON, "Пирз", "приятель"),
+        ("london", "London", ConceptType.PLACE, "Лондон", "телеведущий"),
+    )
+    analysis = _analysis("a1", first.id, tuple(
+        _candidate("a1", candidate_id, source, concept_type, translation, description=description)
+        for candidate_id, source, concept_type, translation, description in rows
+    ))
+
+    assert book_who_is_who(document, (analysis,), ()) == (
+        WhoEntry("Mrs Dursley", "миссис Дёрсли", ConceptType.PERSON, "жена мистера Дёрсли", None, 1),
+        WhoEntry("Dudley", "Дадли", ConceptType.PERSON, "сын мистера Дёрсли", None, 1),
+        WhoEntry("Potter", "Поттер", ConceptType.PERSON, "фамилия семьи", None, 1),
+        WhoEntry("Piers", "Пирз", ConceptType.PERSON, "приятель", None, 1),
+        WhoEntry("London", "Лондон", ConceptType.PLACE, "телеведущий", None, 1),
+    )

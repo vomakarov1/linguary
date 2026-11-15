@@ -1247,7 +1247,7 @@ def test_features_collected_for_legend() -> None:
         has_ipa=True,
         has_poems=True,
         has_speakers=True,
-        sections=frozenset({"who_is_who", "review", "before_you_read"}),
+        sections=frozenset({"review", "before_you_read"}),
     )
     assert "previously" not in layout.features.sections
     assert layout.legend[0] == "Абзац оригинала всегда идёт первым."
@@ -1257,6 +1257,7 @@ def test_features_collected_for_legend() -> None:
     assert layout.who_is_who == (
         WhoEntry("Alice", "Алиса", ConceptType.PERSON, "девочка", None, 1),
     )
+    assert layout.chapters[first.id].who_is_who == ()
     assert layout.chapters[second.id].review == (ReviewEntry("lantern", "фонарь", 1),)
     assert layout.chapters[second.id].who_is_who == ()
 
@@ -1310,9 +1311,7 @@ def test_front_matter_has_no_extras() -> None:
     assert layout.chapters[notes.id].who_is_who == ()
     assert layout.chapters[front.id].review == ()
     assert layout.chapters[notes.id].review == ()
-    assert layout.chapters[first.id].who_is_who == (
-        WhoEntry("Alice", "Элис", ConceptType.PERSON, "девочка", None, 1),
-    )
+    assert layout.chapters[first.id].who_is_who == ()
     assert layout.chapters[second.id].review == (ReviewEntry("lantern", "фонарь", 1),)
     assert layout.who_is_who == (
         WhoEntry("Alice", "Элис", ConceptType.PERSON, "девочка", None, 1),
@@ -1322,7 +1321,44 @@ def test_front_matter_has_no_extras() -> None:
     assert (front_unit.start, front_unit.end, front_unit.notes) == (0, len(front_block.text), ())
     assert (note_unit.start, note_unit.end, note_unit.notes) == (0, len(note.text), ())
     assert "previously" not in layout.features.sections
-    assert layout.features.sections == frozenset({"who_is_who", "review"})
+    assert "who_is_who" not in layout.features.sections
+    assert layout.features.sections == frozenset({"review"})
+
+
+def test_chapter_layout_omits_who_is_who_while_book_layout_keeps_it() -> None:
+    """Who-is-who stays on the book. Chapters and the legend section key lose it.
+
+    A2 without English help also omits `before_you_read`. A2 with English help,
+    another level, and an unset level keep that key.
+    """
+    block = _block("one", 0, "Past prose.")
+    section = _section("one", 0, "Chapter 1", (block,))
+    analysis = _analysis(
+        "a-one",
+        section.id,
+        candidates=(_candidate("a-one", "cand-alice", "Alice", "Элис", description="девочка"),),
+        before=(BeforeYouReadEntry("lantern", "Снова встретится."),),
+    )
+    document = _document((section,))
+
+    def sections(level: str | None, *, english_help: bool) -> frozenset[str]:
+        layout = build_book_layout(_inputs(
+            document,
+            analyses=(analysis,),
+            reader_level=level,
+            english_help=english_help,
+        ))
+        assert layout.chapters[section.id].who_is_who == ()
+        assert layout.who_is_who == (
+            WhoEntry("Alice", "Элис", ConceptType.PERSON, "девочка", None, 1),
+        )
+        assert "who_is_who" not in layout.features.sections
+        return layout.features.sections
+
+    assert sections("a2", english_help=False) == frozenset()
+    assert sections("a2", english_help=True) == frozenset({"before_you_read"})
+    assert sections("b1", english_help=False) == frozenset({"before_you_read"})
+    assert sections(None, english_help=False) == frozenset({"before_you_read"})
 
 
 def test_build_layout_inputs_unifies_data_loading() -> None:
