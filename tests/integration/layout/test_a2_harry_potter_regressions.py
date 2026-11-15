@@ -17,17 +17,22 @@ import pytest
 from lxml import etree
 
 from linguary.adapters.epub import EpubExportWriter
+from linguary.adapters.epub.splitting import segment_text
 from linguary.application.analysis_merge import normalize_a2_dialogue_response
 from linguary.application.layout.book import BookLayout, LayoutInputs, build_book_layout
 from linguary.application.llm_dto import (
+    BeforeYouReadEntryResponse,
     PedagogicalAnalysisResponse,
     QuotedDifficultyResponse,
     QuotedSourceAnchorResponse,
+    SegmentTreatmentResponse,
     TreatmentPlanItemResponse,
 )
 from linguary.application.ports.epub import EpubWriteRequest
 from linguary.domain import (
+    BeforeYouReadEntry,
     BlockProcessingResult,
+    BlockSegment,
     BlockTreatment,
     BlockType,
     BookMetadata,
@@ -38,6 +43,7 @@ from linguary.domain import (
     DocumentSection,
     GlossaryCandidate,
     GlossaryHint,
+    LearningMaterial,
     SourceReference,
     TreatmentPlan,
 )
@@ -963,3 +969,415 @@ def test_who_is_who_cards_contain_no_english_descriptions(harry_regression: _Cas
     assert harry.first_chapter == 1
     assert harry.description == _HARRY_DESCRIPTION
     assert dudley.description == ""
+
+
+_CLOAK_FIRST = (
+    "Nothing like this man had ever been seen on Privet Drive: he was tall, thin and very old, "
+    "judging by the silver of his hair and beard, which were both long enough to tuck into his belt, "
+    "and his lined face was half hidden by the dusk that hung over the quiet street tonight."
+)
+_CLOAK_SECOND = (
+    "He was wearing long robes, a purple cloak that swept the ground, and high-heeled buckled boots, "
+    "and the old man in the violet cloak walked past the neat gardens of Privet Drive without a word "
+    "to anyone waiting there under the street lamps."
+)
+_CLOAK = f"{_CLOAK_FIRST} {_CLOAK_SECOND}"
+_AGREEMENT_QUOTE = "that's right, that's what I heard"
+_AGREEMENT_LINE = f"He muttered {_AGREEMENT_QUOTE} about the violet cloak on the step."
+_CLOAK_RU_FIRST = "На Тисовой улице такого человека ещё не видели."
+_CLOAK_RU_SECOND = "Старик в фиолетовом плаще прошёл мимо садов."
+_HOWARD_DESCRIPTION = (
+    "Распространённое мужское имя; так мистер Дёрсли неуверенно называет сына Поттеров."
+)
+_PETUNIA_WIFE = "Тётя Гарри, сестра Лили и жена мистера Дёрсли."
+_MRS_POTTER_MOTHER = "Мать Гарри, жена Джеймса."
+_LILY_MOTHER = "Мать Гарри, волшебница."
+_EDITORIAL_BODY = "Плащ старого волшебника"
+_AGREEMENT_NOTE = "Разговорное подтверждение чужих слов, без нового смысла."
+
+
+def _archive_names(path: Path) -> set[str]:
+    with ZipFile(path) as archive:
+        return set(archive.namelist())
+
+
+def _spine_hrefs(path: Path) -> tuple[str, ...]:
+    with ZipFile(path) as archive:
+        package = etree.fromstring(archive.read("OEBPS/content.opf"))
+    href_by_id = {
+        item.get("id"): item.get("href")
+        for item in package.iter()
+        if _local(item) == "item" and item.get("id") and item.get("href")
+    }
+    return tuple(
+        href_by_id[item.get("idref")]
+        for item in package.iter()
+        if _local(item) == "itemref"
+    )
+
+
+def _nav_hrefs(path: Path) -> tuple[str, ...]:
+    with ZipFile(path) as archive:
+        navigation = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
+    return tuple(
+        item.get("href")
+        for item in navigation.iter()
+        if _local(item) == "a" and item.get("href")
+    )
+
+
+def _stylesheet(path: Path) -> str:
+    with ZipFile(path) as archive:
+        return archive.read("OEBPS/linguary.css").decode()
+
+
+def _page_with(pages: Sequence[etree._Element], snippet: str) -> etree._Element:
+    found = [page for page in pages if snippet in _text(page)]
+    assert len(found) == 1, snippet
+    return found[0]
+
+
+def _note_terms(unit: etree._Element) -> list[str]:
+    terms: list[str] = []
+    for notes in unit.iter():
+        if _local(notes) != "ol" or not _has_class(notes, "lg-notes"):
+            continue
+        for item in notes:
+            if _local(item) != "li":
+                continue
+            term = _child(item, "lg-term")
+            terms.append("" if term is None or term.text is None else term.text)
+    return terms
+
+
+def _feedback_block(
+    section_id: str,
+    resource: str,
+    order: int,
+    index: int,
+    text: str,
+    *,
+    segments: tuple[BlockSegment, ...] = (),
+) -> DocumentBlock:
+    return DocumentBlock.create(
+        document_id=_BOOK_ID,
+        section_id=section_id,
+        type=BlockType.PARAGRAPH,
+        order=order,
+        text=text,
+        source_reference=SourceReference(resource, f"/body/p[{index}]"),
+        segments=segments,
+    )
+
+
+def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
+    """One learner export covers the sixteen Harry Potter reader remarks.
+
+    The shared fixture stays untouched: Shoo and the sharply line there already
+    start as glossary-only, and that book has no cover, cloak paragraph, or
+    Howard. This book feeds those replies in as model TRANSLATE.
+    """
+    from linguary.application.context_builder import snapshot_prompt_templates
+
+    assert len(_CLOAK) == 513
+    cloak_segments = segment_text(_CLOAK)
+    assert len(cloak_segments) == 2
+    assert all(segment.end - segment.start <= 350 for segment in cloak_segments)
+
+    cover_id, title_id, promo_id, chapter_id = "sec-cover", "sec-title", "sec-promo", "sec-cloak"
+    cover_blocks = (
+        _feedback_block(cover_id, "cover.xhtml", 0, 1, "Harry Potter and the Philosopher's Stone"),
+    )
+    title_blocks = (_feedback_block(title_id, "title.xhtml", 0, 1, "Harry Potter"),)
+    promo_blocks = tuple(
+        _feedback_block(promo_id, "hp01_experience_en-gb.html", index, index + 1, text)
+        for index, text in enumerate((_PROMO_CREDIT, _PROMO_BLURB, _PROMO_VISIT))
+    )
+    cloak = _feedback_block(
+        chapter_id, "hp01_ch001_en-gb.html", 1, 1, _CLOAK, segments=cloak_segments
+    )
+    shoo = _feedback_block(chapter_id, "hp01_ch001_en-gb.html", 2, 2, _SHOO)
+    sharply = _feedback_block(chapter_id, "hp01_ch001_en-gb.html", 3, 3, _NO_WHY)
+    agreement = _feedback_block(chapter_id, "hp01_ch001_en-gb.html", 4, 4, _AGREEMENT_LINE)
+    heading = _heading(chapter_id, "hp01_ch001_en-gb.html", "— CHAPTER ONE —")
+    sections = (
+        DocumentSection(
+            id=cover_id,
+            document_id=_BOOK_ID,
+            title="Cover",
+            order=0,
+            source_resource_path="cover.xhtml",
+            blocks=cover_blocks,
+        ),
+        DocumentSection(
+            id=title_id,
+            document_id=_BOOK_ID,
+            title="Title Page",
+            order=1,
+            source_resource_path="title.xhtml",
+            blocks=title_blocks,
+        ),
+        DocumentSection(
+            id=promo_id,
+            document_id=_BOOK_ID,
+            title="Pottermore.com",
+            order=2,
+            source_resource_path="hp01_experience_en-gb.html",
+            blocks=promo_blocks,
+        ),
+        DocumentSection(
+            id=chapter_id,
+            document_id=_BOOK_ID,
+            title="Chapter 1 - The Boy Who Lived",
+            order=3,
+            source_resource_path="hp01_ch001_en-gb.html",
+            blocks=(heading, cloak, shoo, sharply, agreement),
+        ),
+    )
+    document = CanonicalDocument(
+        id=_BOOK_ID,
+        metadata=BookMetadata(title="Harry Potter and the Philosopher's Stone"),
+        source_language="en",
+        target_language="ru",
+        sections=sections,
+    )
+    assert document.is_cover_section(sections[0]) is True
+    assert document.is_front_matter(sections[1]) is True
+    assert document.is_cover_section(sections[1]) is False
+    assert document.is_front_matter(sections[2]) is True
+    assert document.is_cover_section(sections[2]) is False
+    assert document.is_front_matter(sections[3]) is False
+
+    point = (RequiredPoint("hint", "Короткая словарная подсказка."),)
+    normalized = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=(
+                TreatmentPlanItemResponse(shoo.id, BlockTreatment.TRANSLATE),
+                TreatmentPlanItemResponse(
+                    sharply.id,
+                    BlockTreatment.TRANSLATE,
+                    (
+                        SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                        SegmentTreatmentResponse(2, BlockTreatment.TRANSLATE),
+                    ),
+                ),
+            ),
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d-shoo",
+                    (QuotedSourceAnchorResponse(shoo.id, "Shoo!"),),
+                    shoo.id,
+                    "vocabulary",
+                    "useful",
+                    "explanation",
+                    point,
+                ),
+                QuotedDifficultyResponse(
+                    "d-sharply",
+                    (QuotedSourceAnchorResponse(sharply.id, "sharply"),),
+                    sharply.id,
+                    "vocabulary",
+                    "useful",
+                    "explanation",
+                    point,
+                ),
+            ),
+            before_you_read=(BeforeYouReadEntryResponse("Bonfire Night", "Ночь костров, 5 ноября."),),
+        ),
+        (shoo, sharply),
+        {shoo.id: shoo.id, sharply.id: sharply.id},
+        reader_level="a2",
+        english_help=False,
+    )
+    assert normalized.before_you_read == ()
+    modes = {item.source_block_id: item for item in normalized.treatment_plan}
+    assert modes[shoo.id].treatment is BlockTreatment.GLOSSARY_ONLY
+    assert modes[sharply.id].treatment is BlockTreatment.GLOSSARY_ONLY
+    assert [segment.treatment for segment in modes[sharply.id].segments] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+    hints_by_owner: dict[str, list[QuotedDifficultyResponse]] = {}
+    for difficulty in normalized.difficulties:
+        hints_by_owner.setdefault(difficulty.owner_block_id, []).append(difficulty)
+    assert [item.help_kind for item in hints_by_owner[shoo.id]] == ["lexical_hint"]
+    assert [item.help_kind for item in hints_by_owner[sharply.id]] == ["lexical_hint"]
+    assert hints_by_owner[shoo.id][0].anchors[0].quote == "Shoo!"
+    assert hints_by_owner[sharply.id][0].anchors[0].quote == "sharply"
+
+    cloak_translation = f"{_CLOAK_RU_FIRST} {_CLOAK_RU_SECOND}"
+    results = {
+        cloak.id: BlockProcessingResult(
+            block_id=cloak.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text=cloak_translation,
+            segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE),
+            segment_translations=(_CLOAK_RU_FIRST, _CLOAK_RU_SECOND),
+        ),
+        shoo.id: BlockProcessingResult(
+            block_id=shoo.id,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint("Shoo!", "Брысь!", "Возглас, которым прогоняют кошку."),),
+        ),
+        sharply.id: BlockProcessingResult(
+            block_id=sharply.id,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(
+                GlossaryHint("sharply", "резко", "sharply — резко, отрывисто."),
+            ),
+        ),
+        agreement.id: BlockProcessingResult(
+            block_id=agreement.id,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(
+                GlossaryHint(
+                    _AGREEMENT_QUOTE,
+                    "именно так, я это и слышал",
+                    _AGREEMENT_NOTE,
+                ),
+                GlossaryHint(
+                    "violet cloak",
+                    "фиолетовый плащ",
+                    f"{_EDITORIAL_BODY}; вариант стоит проверить",
+                ),
+            ),
+        ),
+    }
+    analysis_id = "analysis-sixteen"
+    people = (
+        ("Mrs Dursley", "миссис Дёрсли", "Тётя Гарри, жена мистера Дёрсли; в финале главы она обнаружит Гарри."),
+        ("Petunia", "Петуния", _PETUNIA_WIFE),
+        ("Lily Potter", "Лили Поттер", _LILY_MOTHER),
+        ("Mrs Potter", "миссис Поттер", _MRS_POTTER_MOTHER),
+        ("the Potters", "Поттеры", "Семья родителей Гарри."),
+        ("Dursley", "Дёрсли", _DURSLEY_DESCRIPTION),
+        ("Howard", "Говард", _HOWARD_DESCRIPTION),
+    )
+    byr = (BeforeYouReadEntry("Bonfire Night", "Ночь костров, 5 ноября."),)
+    story_blocks = (cloak, shoo, sharply, agreement)
+    analysis = ChapterAnalysis.create(
+        id=analysis_id,
+        section_id=chapter_id,
+        treatment_plan=TreatmentPlan.of_treatments(
+            chapter_id,
+            (
+                (cloak.id, BlockTreatment.TRANSLATE),
+                (shoo.id, BlockTreatment.GLOSSARY_ONLY),
+                (sharply.id, BlockTreatment.GLOSSARY_ONLY),
+                (agreement.id, BlockTreatment.GLOSSARY_ONLY),
+            ),
+        ),
+        translation_instructions="Keep the glossary names.",
+        chapter_summary="An old man in a violet cloak leaves Harry on the step.",
+        expected_block_ids=tuple(block.id for block in story_blocks),
+        glossary_candidates=tuple(
+            _candidate(analysis_id, source, translation, description)
+            for source, translation, description in people
+        ),
+        before_you_read=byr,
+    )
+    layout = build_book_layout(
+        LayoutInputs(
+            document=document,
+            results=results,
+            analyses=(analysis,),
+            concepts=(),
+            reader_level="a2",
+            english_help=False,
+        )
+    )
+    assert layout.chapters[chapter_id].who_is_who == ()
+    assert "before_you_read" not in layout.features.sections
+    assert "who_is_who" not in layout.features.sections
+    who_sources = [entry.source for entry in layout.who_is_who]
+    assert who_sources.count("Mrs Dursley") + who_sources.count("Petunia") == 1
+    assert who_sources.count("Lily Potter") + who_sources.count("Mrs Potter") == 1
+    assert "the Potters" not in who_sources
+    assert "Dursley" not in who_sources
+    assert "Howard" not in who_sources
+    assert all(entry.name_method is None for entry in layout.who_is_who)
+
+    target = tmp_path / "sixteen-remarks.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=document,
+            target_path=str(target),
+            block_results=results,
+            learning_materials={
+                chapter_id: LearningMaterial.for_chapter(
+                    section_id=chapter_id,
+                    before_you_read=byr,
+                    chapter_summary=analysis.chapter_summary,
+                    language_notes=(),
+                )
+            },
+            layout=layout,
+        )
+    )
+    names = _archive_names(target)
+    assert "OEBPS/cover.xhtml" in names
+    assert "OEBPS/title.xhtml" not in names
+    assert "OEBPS/hp01_experience_en-gb.html" not in names
+    spine = _spine_hrefs(target)
+    navigation = _nav_hrefs(target)
+    assert "cover.xhtml" in spine
+    assert "cover.xhtml" in navigation
+    for dropped in ("title.xhtml", "hp01_experience_en-gb.html"):
+        assert dropped not in spine
+        assert dropped not in navigation
+
+    pages = _read_pages(target)
+    assert not any(
+        _has_class(element, "lg-who") or _has_class(element, "lg-method")
+        for page in pages
+        for element in page.iter()
+    )
+    chapter_page = _page_with(pages, "quiet street tonight")
+    assert not any(_has_class(element, "linguary-before-you-read") for element in chapter_page.iter())
+    who_text = _text(_who_page(pages))
+    assert "звучание и смысл" not in who_text
+    assert "вольный перевод" not in who_text
+    assert "Распространённое мужское имя" not in who_text
+    assert "неуверенно называет" not in who_text
+    cards = _who_cards(_who_page(pages))
+    assert ("Mrs Dursley" in cards) + ("Petunia" in cards) == 1
+    assert ("Lily Potter" in cards) + ("Mrs Potter" in cards) == 1
+    for absent in ("the Potters", "Dursley", "Howard"):
+        assert absent not in cards
+
+    assert _unit(pages, "quiet street tonight") is not _unit(pages, "under the street lamps")
+    shoo_unit = _unit(pages, _SHOO)
+    sharply_unit = _unit(pages, _NO_WHY)
+    assert _translation(shoo_unit) is None
+    assert _translation(sharply_unit) is None
+    assert _note_terms(shoo_unit) == ["Shoo!"]
+    assert _note_terms(sharply_unit) == ["sharply"]
+
+    notes_page = _page_with(pages, _AGREEMENT_QUOTE)
+    notes_text = _text(notes_page)
+    assert "вариант стоит проверить" not in notes_text
+    assert "Разговорное подтверждение чужих слов" not in notes_text
+    assert _EDITORIAL_BODY in notes_text
+    assert "именно так, я это и слышал" in notes_text
+    assert ".lg-notes p {\n  display: inline;\n  margin: 0;\n}" in _stylesheet(target)
+
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    prompts = "\n".join(value for value in templates.values() if isinstance(value, str))
+    for phrase in (
+        "Bonfire Night",
+        "Ночь костров",
+        "cultural_reference",
+        "хотя зато",
+        "не одобрял воображения",
+        "пострел",
+        "окказиональный",
+    ):
+        assert phrase in prompts
+    assert "(3–5 предложений)" in templates["narrative_analysis"]
+    assert "3–5" in templates["analysis"]
+    assert "3–5" in templates["fragment"]
