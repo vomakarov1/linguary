@@ -97,6 +97,74 @@ def test_front_matter_classification_in_domain() -> None:
     assert doc.is_front_matter(ch2_section) is False
 
 
+def test_short_headingless_promo_section_before_first_story_chapter_is_front_matter() -> None:
+    """A headingless insert of at most five text blocks and 600 characters before the first story chapter is front matter."""
+    promo_texts = (
+        "Readers can find extra notes on the companion site.",
+        "The site lists maps and character sketches.",
+        "Visit the companion site after you finish.",
+    )
+    assert 2 < len(promo_texts) <= 5
+    assert sum(len(text) for text in promo_texts) <= 600
+    promo_section = DocumentSection(
+        id="sec-promo",
+        document_id="book-1",
+        title="Companion site",
+        order=0,
+        source_resource_path="companion.xhtml",
+        blocks=tuple(
+            _block("sec-promo", f"promo-{index}", text, order=index)
+            for index, text in enumerate(promo_texts)
+        ),
+    )
+    boundary_texts = ("n" * 120,) * 5
+    assert len(boundary_texts) == 5
+    assert sum(len(text) for text in boundary_texts) == 600
+    boundary_section = DocumentSection(
+        id="sec-boundary",
+        document_id="book-1",
+        title="Opening note",
+        order=0,
+        source_resource_path="opening-note.xhtml",
+        blocks=tuple(
+            _block("sec-boundary", f"bound-{index}", text, order=index)
+            for index, text in enumerate(boundary_texts)
+        ),
+    )
+    chapter_section = DocumentSection(
+        id="sec-ch1",
+        document_id="book-1",
+        title="Chapter 1",
+        order=1,
+        source_resource_path="ch1.xhtml",
+        blocks=(
+            _block("sec-ch1", "ch1-h", "Chapter 1", BlockType.HEADING, 0),
+            _block("sec-ch1", "ch1-p", "The tale starts on this page.", order=1),
+        ),
+    )
+
+    promo_doc = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="Synthetic Reader"),
+        source_language="en",
+        target_language="ru",
+        sections=(promo_section, chapter_section),
+    )
+    boundary_doc = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="Synthetic Reader"),
+        source_language="en",
+        target_language="ru",
+        sections=(boundary_section, chapter_section),
+    )
+
+    assert is_front_matter(promo_section, promo_doc) is True
+    assert promo_doc.is_front_matter(promo_section) is True
+    assert is_front_matter(chapter_section, promo_doc) is False
+    assert is_front_matter(boundary_section, boundary_doc) is True
+    assert boundary_doc.is_front_matter(boundary_section) is True
+
+
 def test_custom_named_story_chapter_before_pattern_chapter_is_not_front_matter() -> None:
     """A chapter with a custom name and more than 2 paragraphs before Chapter 2 is not front matter."""
     ch1_section = DocumentSection(
@@ -134,6 +202,69 @@ def test_custom_named_story_chapter_before_pattern_chapter_is_not_front_matter()
     assert doc.is_front_matter(ch1_section) is False
     assert is_front_matter(ch2_section, doc) is False
     assert doc.is_front_matter(ch2_section) is False
+
+
+def test_long_headingless_prologue_before_first_story_chapter_is_not_front_matter() -> None:
+    """Headingless text before the first numbered chapter stays content when it exceeds five blocks or 600 characters.
+
+    The section title must not match a story-chapter pattern: a titled prologue would be excluded earlier, and this test would not pin the length bound.
+    """
+    over_length_texts = ("x" * 121,) + ("x" * 120,) * 4
+    assert len(over_length_texts) == 5
+    assert sum(len(text) for text in over_length_texts) == 601
+    over_length_section = DocumentSection(
+        id="sec-long",
+        document_id="book-1",
+        title="Opening lines",
+        order=0,
+        source_resource_path="opening-lines.xhtml",
+        blocks=tuple(
+            _block("sec-long", f"long-{index}", text, order=index)
+            for index, text in enumerate(over_length_texts)
+        ),
+    )
+    over_count_texts = ("Short line.",) * 6
+    assert len(over_count_texts) == 6
+    assert sum(len(text) for text in over_count_texts) <= 600
+    over_count_section = DocumentSection(
+        id="sec-many",
+        document_id="book-1",
+        title="Opening lines",
+        order=0,
+        source_resource_path="opening-lines.xhtml",
+        blocks=tuple(
+            _block("sec-many", f"many-{index}", text, order=index)
+            for index, text in enumerate(over_count_texts)
+        ),
+    )
+    chapter_section = DocumentSection(
+        id="sec-ch1",
+        document_id="book-1",
+        title="Chapter 1",
+        order=1,
+        source_resource_path="ch1.xhtml",
+        blocks=(
+            _block("sec-ch1", "ch1-h", "Chapter 1", BlockType.HEADING, 0),
+            _block("sec-ch1", "ch1-p", "The tale starts on this page.", order=1),
+        ),
+    )
+
+    def _document(intro: DocumentSection) -> CanonicalDocument:
+        return CanonicalDocument(
+            id="book-1",
+            metadata=BookMetadata(title="Synthetic Reader"),
+            source_language="en",
+            target_language="ru",
+            sections=(intro, chapter_section),
+        )
+
+    over_length_doc = _document(over_length_section)
+    over_count_doc = _document(over_count_section)
+    assert is_front_matter(over_length_section, over_length_doc) is False
+    assert over_length_doc.is_front_matter(over_length_section) is False
+    assert is_front_matter(over_count_section, over_count_doc) is False
+    assert over_count_doc.is_front_matter(over_count_section) is False
+    assert is_front_matter(chapter_section, over_length_doc) is False
 
 
 def test_first_story_chapter_does_not_recap_front_matter() -> None:

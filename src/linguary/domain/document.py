@@ -570,8 +570,19 @@ def is_front_matter(
             (s.order for s in document.ordered_sections if _is_story_chapter(s)),
             default=None,
         )
-        if first_story_order is not None and section.order < first_story_order and len(text_blocks) <= 2:
-            return True
+        if (
+            first_story_order is not None
+            and section.order < first_story_order
+            and not _is_story_chapter(section)
+        ):
+            if len(text_blocks) <= 2:
+                return True
+            if (
+                not headings
+                and len(text_blocks) <= 5
+                and sum(len(block.text) for block in text_blocks) <= 600
+            ):
+                return True
 
     return False
 
