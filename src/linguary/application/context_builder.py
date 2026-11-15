@@ -129,6 +129,7 @@ English Help, помощь и произношение, если они вклю
 целевые b1..bN в исходном порядке, ровно по одному результату на цель (блоки с пометкой
 «(только для контекста, в blocks не возвращать)» в массив blocks не включай). Соседи не цели:
 не переводи их отдельно, не возвращай для них помощь, произношение или новые ID.
+Запрещены кальки и несочетаемые союзы («хотя зато», «больше того», «не одобрял воображения», «пострел» вместо «сорванец / негодник»), пропуск конечного обстоятельства tonight, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», пометы «вариант стоит проверить» и «в переводе передано как...», шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
 """
 
 
@@ -150,6 +151,8 @@ explanation требует объясняющего BYR, языковой зам
 Перевод, цитата и пересказ не заменяют объяснение. Не повышай квоты.
 Если BYR уже покрывает аспект, не требуй лишней заметки.
 Не выдумывай связи с невидимыми частями. Пустой план допустим.
+Если уровень читателя A2 и режим не english help, верни before_you_read: [] и before_you_read_evidence: []. Трудные места объясняй в language_notes под абзацем.
+cultural_reference — приоритетная трудность с help_kind="explanation", в том числе внутри блоков TRANSLATE. Пример: Bonfire Night — «Ночь костров», 5 ноября, костры и фейерверки.
 """
 
 _NARRATIVE_ANALYSIS_INSTRUCTIONS = """\
@@ -160,6 +163,7 @@ chapter_summary — фактическая сводка событий на яз
 для фрагмента продолжи сводку с начала главы по предыдущим находкам; ключевые предметы и понятия из glossary_candidates называй их каноническим source_text.
 glossary_candidates: source_text, type, suggested_translation, confidence,
 model_flagged_review, note, description. Соблюдай обязательные решения глоссария.
+Не клади в glossary_candidates (person) угаданные имена Howard, Harvey, Harold, ведущих Jim McGuffin и Ted, клички Tibbles, Snowy, Mr Paws, Tufty и семьи the Potters, the Dursleys. Требуй одну каноническую запись на персонажа: не плоди отдельно Petunia и Mrs Dursley, Lily Potter и Mrs Potter.
 description для person и place пишется на языке перевода ({target_language}), строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
 context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
@@ -194,6 +198,7 @@ parody — в required_points назвать исходный текст.
 Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
 lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR.
 Для TRANSLATE и READ_AS_IS используй explanation. Перевод и цитата не заменяют объяснение.
+cultural_reference — приоритетная трудность с help_kind="explanation", в том числе внутри блоков TRANSLATE. Пример: Bonfire Night — «Ночь костров», 5 ноября, костры и фейерверки.
 BYR: expression, explanation; объяснение на языке перевода, без указаний переводчику.
 Свидетельство BYR: difficulty_id, point_id, artifact_kind=before_you_read.explanation,
 source_block_id, artifact_index (с нуля), body_excerpt — точная часть explanation.
@@ -207,6 +212,7 @@ _CONTENT_PLAN_PROCESSING = """
 объясни смысл, сохраняя согласованный перевод. Не повторяй уже покрытый BYR аспект.
 Перевод и пересказ не считаются объяснением. Соседние anchors служат
 контекстом, не требуют результата.
+Запрещены кальки и несочетаемые союзы («хотя зато», «больше того», «не одобрял воображения», «пострел» вместо «сорванец / негодник»), пропуск конечного обстоятельства tonight, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», пометы «вариант стоит проверить» и «в переводе передано как...», шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
 """
 
 
@@ -441,6 +447,7 @@ class _LazyTranslationInput:
     pronunciation_version: int | None = None
     regeneration: bool = False
     segment_lines: bool = True
+    explained_block: str | None = None
 
     def __call__(self) -> str:
         return self.builder._translation_input(
@@ -456,6 +463,7 @@ class _LazyTranslationInput:
             pronunciation_version=self.pronunciation_version,
             regeneration=self.regeneration,
             segment_lines=self.segment_lines,
+            explained_block=self.explained_block,
         )
 
     def _fields_tuple(self) -> tuple[object, ...]:
@@ -472,6 +480,7 @@ class _LazyTranslationInput:
             self.pronunciation_version,
             self.regeneration,
             self.segment_lines,
+            self.explained_block,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -1197,6 +1206,8 @@ class ContextBuilder:
                 )
             )
         )
+        a2_inline_notes = self._reader_level == "a2" and not self._english_help
+        explained_block = "" if a2_inline_notes else _explained_expressions(analysis, section)
         input_args = dict(
             document=document,
             section=section,
@@ -1209,6 +1220,7 @@ class ContextBuilder:
             pronunciation_version=pronunciation_version,
             regeneration=regeneration,
             segment_lines=segment_lines,
+            explained_block=explained_block,
         )
         input_text = self._translation_input(**input_args, neighbours=neighbours)
         mandatory_input = (
@@ -1225,6 +1237,7 @@ class ContextBuilder:
                 pronunciation_version=pronunciation_version,
                 regeneration=regeneration,
                 segment_lines=segment_lines,
+                explained_block=explained_block,
             )
             if neighbours and policy_version != LEGACY_TRANSLATION_POLICY
             else None
@@ -1259,8 +1272,8 @@ class ContextBuilder:
                     for alias, item in zip(aliases, unit.items, strict=True)
                 ),
             ),
-            explained_expressions=_before_you_read_expressions(analysis, section),
-            explained_entries=_before_you_read_entries(analysis, section),
+            explained_expressions=() if a2_inline_notes else _before_you_read_expressions(analysis, section),
+            explained_entries=() if a2_inline_notes else _before_you_read_entries(analysis, section),
             content_plan=analysis.content_plan,
             before_you_read=() if section.is_notes_only else analysis.before_you_read,
             input_without_optional_neighbours=mandatory_input,
@@ -1283,6 +1296,7 @@ class ContextBuilder:
         pronunciation_version: int | None = None,
         regeneration: bool = False,
         segment_lines: bool = True,
+        explained_block: str | None = None,
     ) -> str:
         """Processing request prompt text: header, chapter digest, glossary, and blocks.
 
@@ -1344,7 +1358,7 @@ class ContextBuilder:
             _chapter_header(document=document, section=section),
             _chapter_digest(analysis, glossary, candidates),
             _scene_context(analysis, section, unit),
-            _explained_expressions(analysis, section),
+            _explained_expressions(analysis, section) if explained_block is None else explained_block,
             notes_budget_line,
             _mandatory_decisions(
                 _with_agreed_notes(filtered_mandatory, glossary, candidates),
@@ -1820,6 +1834,7 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 формулируй утвердительно. Например, «not saying the spell isn’t brilliant» означает \
 «не отрицаю, что заклинание блестящее», а объяснение звучит так: «Говорящий признаёт, \
 что заклинание блестящее».
+Для A2 без english help верни before_you_read: [] и before_you_read_evidence: []. Трудные места объясняй в language_notes под абзацем.
 
 Длина блока не определяет режим. Если сомневаешься между режимами, выбирай более сильную помощь (TRANSLATE). \
 Перед ответом в этом же запросе проверь план: ориентир TRANSLATE — 65–80% блоков; GLOSSARY_ONLY — до 25% блоков.\
@@ -1966,18 +1981,21 @@ _FRAGMENT_SUMMARY = """\
 _WHOLE_CHAPTER_SUMMARY_A2 = """\
 5. chapter_summary — что произошло в этой главе.
 
-Пиши на языке оригинала книги ({source_language}) три-шесть коротких предложений. Только \
-события самой этой главы: что случилось, с кем, что изменилось. Предыдущие главы не \
-пересказывай, о будущих не рассуждай, текст не оценивай. Верни ровно два абзаца: сначала \
-пересказ на языке оригинала книги ({source_language}), затем полный русский перевод тех же \
+Пиши на языке оригинала книги ({source_language}). Ограничь chapter_summary и \
+reader_chapter_summary 3–5 короткими предложениями на всю главу. Только события самой \
+этой главы: что случилось, с кем, что изменилось. Предыдущие главы не пересказывай, \
+о будущих не рассуждай, текст не оценивай. Верни ровно два абзаца: сначала пересказ \
+на языке оригинала книги ({source_language}), затем полный русский перевод тех же \
 предложений. Не добавляй подписи и не смешивай языки внутри абзаца."""
 
 _FRAGMENT_SUMMARY_A2 = """\
 5. chapter_summary — что произошло в главе от начала до конца этого фрагмента.
 
-Пиши на языке оригинала книги ({source_language}) три-шесть коротких предложений. Верни \
-сводку всей главы от начала до конца своего фрагмента, включая уже найденное в предыдущих \
-частях. Не рассуждай о том, что будет после, и не оценивай текст. Верни ровно два абзаца: \
+Пиши на языке оригинала книги ({source_language}). Единый пересказ chapter_summary и \
+reader_chapter_summary с начала главы до текущего фрагмента сжимается в 3–5 короткими \
+предложениями, а не дописывается абзацем к каждому фрагменту. Верни сводку всей главы \
+от начала до конца своего фрагмента, включая уже найденное в предыдущих частях. \
+Не рассуждай о том, что будет после, и не оценивай текст. Верни ровно два абзаца: \
 сначала пересказ на языке оригинала книги ({source_language}), затем полный русский перевод \
 тех же предложений. Не добавляй подписи и не смешивай языки внутри абзаца. Указания \
 переводчику и выражения before_you_read возвращай только новые, не повторяя предыдущие части."""
@@ -2027,6 +2045,10 @@ _ANALYSIS_INSTRUCTIONS = """\
 
 Очевидные альтернативные имена одной сущности объединяй только тогда, когда это \
 бесспорно; неоднозначные случаи оставляй отдельными кандидатами.
+Не клади в glossary_candidates (person) угаданные имена Howard, Harvey, Harold, \
+ведущих Jim McGuffin и Ted, клички Tibbles, Snowy, Mr Paws, Tufty и семьи the Potters, \
+the Dursleys. Требуй одну каноническую запись на персонажа: не плоди отдельно Petunia \
+и Mrs Dursley, Lily Potter и Mrs Potter.
 
 - type — person, place, organization, fictional_concept или term; person — только \
 тот, кто действует в сюжете. Народы, племена, сословия и исторические имена из справок \
@@ -3043,7 +3065,7 @@ def _pedagogical_instructions(source_language: str, target_language: str, reader
         instructions += '\n' + _reader_level_treatment_guidance(reader_level)
     if reader_level == 'a2':
         instructions += '\n' + _A2_GRAMMAR_SUPPORT_GUIDANCE.strip()
-        instructions += '\nВерни reader_chapter_summary: простой пересказ на языке оригинала и перевод на русский, ровно два абзаца через пустую строку. Для фрагмента продолжи пересказ с начала главы.'
+        instructions += '\nВерни reader_chapter_summary: простой пересказ на языке оригинала и перевод на русский, ровно два абзаца через пустую строку. Ограничь chapter_summary и reader_chapter_summary 3–5 короткими предложениями на всю главу. Для фрагмента единый пересказ с начала главы до текущего фрагмента сжимается в 3–5 короткими предложениями, а не дописывается абзацем к каждому фрагменту.'
     else:
         instructions += '\nНе возвращай пересказ: принятая фактическая сводка уже сохранена.'
     return instructions

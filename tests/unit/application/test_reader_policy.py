@@ -108,6 +108,33 @@ def test_translation_preserves_exact_source_quote_with_service_like_text():
     assert ReaderTextPolicy().prepare('translation', translation, source_quote_fragments((original,))) == translation
 
 
+def _parallel_summary(sentence_count: int) -> str:
+    english = " ".join(
+        f"Sentence number {index} continues the chapter." for index in range(1, sentence_count + 1)
+    )
+    russian = " ".join(
+        f"Предложение номер {index} продолжает эту главу." for index in range(1, sentence_count + 1)
+    )
+    return f"{english}\n\n{russian}"
+
+
+def test_validate_a2_summary_rejects_overlong_multi_sentence_recap():
+    """A paragraph of six sentences is accepted; a paragraph of seven is rejected."""
+    validate_a2_summary(
+        _parallel_summary(6),
+        source_texts=("The story continues.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+    )
+    with pytest.raises(ReaderTextError):
+        validate_a2_summary(
+            _parallel_summary(7),
+            source_texts=("The story continues.",),
+            source_language="en",
+            language_detector=LANGUAGE_DETECTOR,
+        )
+
+
 def test_reader_text_error_includes_kind_and_block_id():
     from linguary.domain import BlockProcessingResult, BlockTreatment, LanguageNote
 

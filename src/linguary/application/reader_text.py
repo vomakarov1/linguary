@@ -13,6 +13,7 @@ _EXPLANATION_LABEL = re.compile(r'\[b\d+\]\s*(?:[:—–-]\s*)?', re.IGNORECASE)
 _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 'language_note.note'})
 # Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
+A2_SUMMARY_MAX_SENTENCES = 6
 
 
 class ReaderTextError(ResultValidationError):
@@ -144,6 +145,16 @@ def validate_a2_summary(
                 r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
             ),
         )
+    for index, paragraph in enumerate(paragraphs, start=1):
+        sentence_count = len([part for part in re.split(r'[.!?]+', paragraph) if part.strip()])
+        if sentence_count > A2_SUMMARY_MAX_SENTENCES:
+            raise ReaderTextError(
+                'a2_summary_too_many_sentences',
+                detail=(
+                    f'абзац {index}: {sentence_count} предложений, '
+                    f'не больше {A2_SUMMARY_MAX_SENTENCES}'
+                ),
+            )
 
 
 class ReaderTextPolicy:
@@ -232,6 +243,7 @@ glossary_hint.translation, glossary_hint.note и language_note.note, а такж
 Не выводи служебные метки блоков, идентификаторы и технические поля в учебных телах.
 Цитаты, expression, original и original_excerpt сохраняй дословно.
 Смысловая точность остаётся непроверенной; длина фраз не гарантирует уровень CEFR.
+Запрещены кальки и несочетаемые союзы («хотя зато», «больше того», «не одобрял воображения», «пострел» вместо «сорванец / негодник»), пропуск конечного обстоятельства tonight, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», пометы «вариант стоит проверить» и «в переводе передано как...», шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
 '''
     if reader_level.strip().lower() == 'a2':
         return common + '''
@@ -250,6 +262,7 @@ snapped и went out, если они встречаются; не считай �
 заклинание блестящее»; не превращай это в «заклинание не блестящее».
 BYR, подсказки и заметки объясняют трудность понятным русским языком, без неподтверждённых деталей.
 Длина предложений и редкая лексика — повод для редакторской проверки, не сертификат CEFR.
+Для A2 без english help верни before_you_read: [] и before_you_read_evidence: []. Трудные места объясняй в language_notes под абзацем.
 '''
     if reader_level.strip().lower() == 'c1':
         return common + '\nДля C1 сохраняй естественный ритм и давай помощь только к действительно редким, архаичным или неочевидным местам.\n'

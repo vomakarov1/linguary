@@ -979,7 +979,7 @@ def test_translation_input_and_lazy_input_append_pronunciation_note_preserving_b
     )
     assert (
         payload_digest(baseline_templates)
-        == "0a1ec545a2c264d12e0e02c5ff9be85cd7c3305b4fc900603f0f57b01da1c5b8"
+        == "3bcf968fbeb3eea72bc191df4360d50ec62f005d45a670b54dbd738ef2fb069a"
     )
 
     sec = make_analysis_section(
@@ -1538,4 +1538,238 @@ def test_instructions_request_offset_only_for_repeated_quote() -> None:
         assert "приложение вычислит координаты" not in text
     assert "CHAPTER_ANALYSIS v5" in _CONTENT_PLAN_ANALYSIS_V5
     assert "CHAPTER_ANALYSIS v5" in english
+
+
+_A2_EMPTY_BEFORE_YOU_READ = (
+    "before_you_read: []",
+    "before_you_read_evidence: []",
+    "language_notes",
+    "под абзацем",
+)
+_A2_SUMMARY_LENGTH = "3–5 короткими предложениями"
+_BYR_EXPLANATION = "уникальное объяснение костров 515151"
+
+
+def _translation_request_text(*, reader_level: str | None, english_help: bool = False) -> str:
+    """Translation prompt text for one unit that already has a Before You Read entry."""
+    from linguary.domain import BeforeYouReadEntry
+
+    section = make_analysis_section(
+        section_id="sec-byr",
+        texts=(
+            "Neighbour paragraph before the ship.",
+            "The ship heaved and groaned tonight.",
+            "Neighbour paragraph after the ship.",
+        ),
+    )
+    document = make_analysis_document((section,))
+    unit_block = section.blocks[1]
+    plan = TreatmentPlan.of_treatments(
+        section.id, ((unit_block.id, BlockTreatment.TRANSLATE),)
+    )
+    unit = TranslationUnit.of_blocks(id="unit-byr", blocks=(unit_block,), plan=plan)
+    analysis = ChapterAnalysis.create(
+        id="analysis-byr",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="Сохраняй смысл.",
+        chapter_summary="The ship groaned.",
+        expected_block_ids=(unit_block.id,),
+        before_you_read=(
+            BeforeYouReadEntry("heaved and groaned", _BYR_EXPLANATION),
+        ),
+    )
+    builder = ContextBuilder(reader_level="b2")
+    builder._reader_level = reader_level
+    if english_help:
+        from types import MappingProxyType
+
+        builder._english_help = True
+        builder._prompt_templates = MappingProxyType({
+            "english_help": "enabled",
+            "english_help_processing": "Помощь рядом с оригиналом.",
+        })
+    context = builder.for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=GlossarySnapshot(),
+        policy_version=CURRENT_TRANSLATION_POLICY,
+    )
+    return context.request.input_text
+
+
+def test_a2_context_disables_before_you_read_and_keeps_inline_notes() -> None:
+    """A2 without english help explains hard spots under the paragraph and drops Before You Read."""
+    from linguary.application.reader_text import learner_instructions
+
+    whole = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    fragment = chapter_fragment_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    learner = learner_instructions("a2")
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    for instructions in (
+        whole,
+        fragment,
+        learner,
+        templates["analysis"],
+        templates["fragment"],
+        templates["content_analysis"],
+        templates["pedagogical_analysis"],
+    ):
+        for phrase in _A2_EMPTY_BEFORE_YOU_READ:
+            assert phrase in instructions
+    assert _A2_SUMMARY_LENGTH in whole
+    assert "на всю главу" in whole
+    assert "chapter_summary" in whole
+    assert "reader_chapter_summary" in whole
+    assert _A2_SUMMARY_LENGTH in fragment
+    assert "с начала главы до текущего фрагмента" in fragment
+    assert "абзацем к каждому фрагменту" in fragment
+
+    b2 = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="b2",
+    )
+    none_templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level=None,
+    )
+    b2_templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+    )
+    for instructions in (b2, none_templates["analysis"], b2_templates["analysis"]):
+        assert "before_you_read: []" not in instructions
+        assert "advance organizer" in instructions
+    for level in ("b1", "b2"):
+        assert "before_you_read: []" not in learner_instructions(level)
+        assert "advance organizer" in learner_instructions(level) or "before_you_read" in learner_instructions(level)
+
+    assert _BYR_EXPLANATION in _translation_request_text(reader_level="b2")
+    assert _BYR_EXPLANATION in _translation_request_text(reader_level=None)
+    assert _BYR_EXPLANATION in _translation_request_text(reader_level="a2", english_help=True)
+    assert _BYR_EXPLANATION not in _translation_request_text(reader_level="a2")
+
+
+def test_pedagogical_instructions_prioritize_cultural_reference_bonfire_night() -> None:
+    """Cultural references are priority explanations, and guessed person names stay out of the glossary."""
+    from linguary.application.context_builder import (
+        _ANALYSIS_INSTRUCTIONS,
+        _CONTENT_PLAN_ANALYSIS,
+        _NARRATIVE_ANALYSIS_INSTRUCTIONS,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+    )
+
+    cultural = (
+        "cultural_reference",
+        'help_kind="explanation"',
+        "Bonfire Night",
+        "Ночь костров",
+        "5 ноября",
+        "костры и фейерверки",
+        "TRANSLATE",
+    )
+    names = (
+        "glossary_candidates",
+        "person",
+        "Howard",
+        "Harvey",
+        "Harold",
+        "Jim McGuffin",
+        "Ted",
+        "Tibbles",
+        "Snowy",
+        "Mr Paws",
+        "Tufty",
+        "the Potters",
+        "the Dursleys",
+        "Petunia",
+        "Mrs Dursley",
+        "Lily Potter",
+        "Mrs Potter",
+        "каноническ",
+    )
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b1",
+        profile="content-plan-v3",
+    )
+    pedagogical = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="B1",
+    )
+    for instructions in (
+        pedagogical,
+        templates["pedagogical_analysis"],
+        _CONTENT_PLAN_ANALYSIS,
+        templates["content_analysis"],
+    ):
+        for phrase in cultural:
+            assert phrase in instructions
+    narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru",
+    )
+    for instructions in (
+        narrative,
+        templates["narrative_analysis"],
+        _ANALYSIS_INSTRUCTIONS,
+        templates["analysis"],
+    ):
+        for phrase in names:
+            assert phrase in instructions
+
+
+_CALQUE_AND_JARGON_PHRASES = (
+    "хотя зато",
+    "больше того",
+    "не одобрял воображения",
+    "пострел",
+    "сорванец / негодник",
+    "tonight",
+    "окказиональный",
+    "окказиональное прилагательное/сложение",
+    "дериват",
+    "инверсия",
+    "эллипсис",
+    "вариант стоит проверить",
+    "в переводе передано как...",
+    "не X, а Y",
+    "false_friend",
+    "glossary_hints.note",
+)
+
+
+def test_translation_and_note_instructions_forbid_calques_and_academic_jargon() -> None:
+    """Translation and note prompts forbid calques, academic jargon, and empty glossary notes."""
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_PROCESSING,
+        _TRANSLATION_CONTEXT_V2,
+    )
+    from linguary.application.reader_text import learner_instructions
+
+    for instructions in (
+        _TRANSLATION_CONTEXT_V2,
+        _CONTENT_PLAN_PROCESSING,
+        learner_instructions("a2"),
+    ):
+        for phrase in _CALQUE_AND_JARGON_PHRASES:
+            assert phrase in instructions
+
 
