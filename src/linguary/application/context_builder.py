@@ -159,8 +159,8 @@ _NARRATIVE_ANALYSIS_INSTRUCTIONS = """\
 Проход narrative-v1. Анализируй только исходные блоки этой главы или фрагмента.
 Язык оригинала: {source_language}; язык перевода: {target_language}.
 Верни glossary_candidates, translation_instructions, chapter_summary, context_facts и scenes.
-chapter_summary — фактическая сводка событий на языке оригинала (3–6 предложений);
-для фрагмента продолжи сводку с начала главы по предыдущим находкам; ключевые предметы и понятия из glossary_candidates называй их каноническим source_text.
+chapter_summary — фактическая сводка событий на языке оригинала (3–5 предложений) за всю главу, прочитанную до сих пор;
+для фрагмента сожми единый пересказ с начала главы до текущего фрагмента в те же 3–5 предложений, а не дописывай абзац к каждому фрагменту; ключевые предметы и понятия из glossary_candidates называй их каноническим source_text.
 glossary_candidates: source_text, type, suggested_translation, confidence,
 model_flagged_review, note, description. Соблюдай обязательные решения глоссария.
 Не клади в glossary_candidates (person) угаданные имена Howard, Harvey, Harold, ведущих Jim McGuffin и Ted, клички Tibbles, Snowy, Mr Paws, Tufty и семьи the Potters, the Dursleys. Требуй одну каноническую запись на персонажа: не плоди отдельно Petunia и Mrs Dursley, Lily Potter и Mrs Potter.
@@ -1936,17 +1936,20 @@ def _instructions(
         if english_help
         else _reader_level_treatment_guidance(reader_level)
     )
-    if validators_version == 4 and reader_level.strip().lower() == "a2":
+    level = reader_level.strip().lower()
+    if validators_version == 4 and level == "a2":
         treatment_guidance += _A2_GRAMMAR_SUPPORT_GUIDANCE
+    if english_help:
+        before_you_read_guidance = _ENGLISH_HELP_BEFORE_YOU_READ
+    elif level == "a2":
+        before_you_read_guidance = _A2_BEFORE_YOU_READ_GUIDANCE
+    else:
+        before_you_read_guidance = _BEFORE_YOU_READ_GUIDANCE.format(**languages)
     return _ANALYSIS_INSTRUCTIONS.format(
         scope=scope.format(**languages),
         summary=summary.format(**languages),
         treatment_guidance=treatment_guidance,
-        before_you_read_guidance=(
-            _ENGLISH_HELP_BEFORE_YOU_READ
-            if english_help
-            else _BEFORE_YOU_READ_GUIDANCE.format(**languages)
-        ),
+        before_you_read_guidance=before_you_read_guidance,
         **languages,
     )
 
@@ -1997,8 +2000,14 @@ reader_chapter_summary с начала главы до текущего фраг
 от начала до конца своего фрагмента, включая уже найденное в предыдущих частях. \
 Не рассуждай о том, что будет после, и не оценивай текст. Верни ровно два абзаца: \
 сначала пересказ на языке оригинала книги ({source_language}), затем полный русский перевод \
-тех же предложений. Не добавляй подписи и не смешивай языки внутри абзаца. Указания \
-переводчику и выражения before_you_read возвращай только новые, не повторяя предыдущие части."""
+тех же предложений. Не добавляй подписи и не смешивай языки внутри абзаца. Новые \
+выражения before_you_read не возвращай: список остаётся пустым."""
+
+
+_A2_BEFORE_YOU_READ_GUIDANCE = """\
+4. before_you_read — верни before_you_read: [] и before_you_read_evidence: [].
+Трудные места объясняй в language_notes под абзацем. Отдельный список выражений до чтения не составляй.
+"""
 
 
 #: Chapter analysis instructions. A single request covers treatment plan, glossary candidates,

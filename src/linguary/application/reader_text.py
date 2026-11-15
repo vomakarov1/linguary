@@ -14,6 +14,8 @@ _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 
 # Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
 A2_SUMMARY_MAX_SENTENCES = 6
+_TITLE_PERIOD = re.compile(r'\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St)\.', re.IGNORECASE)
+_INITIAL_PERIOD = re.compile(r'\b[A-Z]\.')
 
 
 class ReaderTextError(ResultValidationError):
@@ -87,6 +89,13 @@ def _dominant_script(text: str) -> str | None:
     return max(counts, key=counts.get)
 
 
+def _sentence_count(paragraph: str) -> int:
+    """Count sentences without treating titles or initials as boundaries."""
+    protected = _TITLE_PERIOD.sub(lambda match: match.group(0).replace('.', '\0'), paragraph)
+    protected = _INITIAL_PERIOD.sub(lambda match: match.group(0).replace('.', '\0'), protected)
+    return len([part for part in re.split(r'[.!?]+', protected) if part.strip()])
+
+
 def validate_a2_summary(
     body: str,
     *,
@@ -146,7 +155,7 @@ def validate_a2_summary(
             ),
         )
     for index, paragraph in enumerate(paragraphs, start=1):
-        sentence_count = len([part for part in re.split(r'[.!?]+', paragraph) if part.strip()])
+        sentence_count = _sentence_count(paragraph)
         if sentence_count > A2_SUMMARY_MAX_SENTENCES:
             raise ReaderTextError(
                 'a2_summary_too_many_sentences',

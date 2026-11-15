@@ -1639,6 +1639,25 @@ def test_a2_context_disables_before_you_read_and_keeps_inline_notes() -> None:
     assert _A2_SUMMARY_LENGTH in fragment
     assert "с начала главы до текущего фрагмента" in fragment
     assert "абзацем к каждому фрагменту" in fragment
+    for instructions in (whole, fragment, templates["analysis"], templates["fragment"]):
+        assert "пять-десять ключевых понятий" not in instructions
+    assert "выражения before_you_read возвращай только новые" not in fragment
+    assert "выражения before_you_read возвращай только новые" not in templates["fragment"]
+
+    narrative = templates["narrative_analysis"]
+    narrative_section = make_analysis_section(texts=("Mr. and Mrs. Dursley woke up.",))
+    live_narrative = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+    ).for_chapter_narrative_analysis(
+        make_analysis_document((narrative_section,)),
+        narrative_section,
+    )
+    for instructions in (narrative, live_narrative.request.instructions):
+        assert "3–5 предложений" in instructions
+        assert "до текущего фрагмента" in instructions
+        assert "3–6" not in instructions
+        assert "продолжи сводку" not in instructions
 
     b2 = chapter_analysis_instructions(
         source_language=SOURCE_LANGUAGE,

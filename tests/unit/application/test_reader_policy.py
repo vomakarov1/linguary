@@ -118,10 +118,30 @@ def _parallel_summary(sentence_count: int) -> str:
     return f"{english}\n\n{russian}"
 
 
+def _summary_with_titles(sentence_count: int) -> str:
+    sentences = [
+        f"Sentence number {index} continues the chapter."
+        for index in range(1, sentence_count)
+    ]
+    sentences.append("Mr. and Mrs. Dursley woke up at number four, where J. K. left a note.")
+    english = " ".join(sentences)
+    russian = " ".join(
+        f"Предложение номер {index} продолжает эту главу."
+        for index in range(1, sentence_count + 1)
+    )
+    return f"{english}\n\n{russian}"
+
+
 def test_validate_a2_summary_rejects_overlong_multi_sentence_recap():
-    """A paragraph of six sentences is accepted; a paragraph of seven is rejected."""
+    """Six sentences are accepted, including titles and initials; seven are rejected."""
     validate_a2_summary(
         _parallel_summary(6),
+        source_texts=("The story continues.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+    )
+    validate_a2_summary(
+        _summary_with_titles(6),
         source_texts=("The story continues.",),
         source_language="en",
         language_detector=LANGUAGE_DETECTOR,
@@ -129,6 +149,13 @@ def test_validate_a2_summary_rejects_overlong_multi_sentence_recap():
     with pytest.raises(ReaderTextError):
         validate_a2_summary(
             _parallel_summary(7),
+            source_texts=("The story continues.",),
+            source_language="en",
+            language_detector=LANGUAGE_DETECTOR,
+        )
+    with pytest.raises(ReaderTextError):
+        validate_a2_summary(
+            _summary_with_titles(7),
             source_texts=("The story continues.",),
             source_language="en",
             language_detector=LANGUAGE_DETECTOR,
