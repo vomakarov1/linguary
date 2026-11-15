@@ -933,16 +933,48 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
     """A capital after the quote stays in the remark when a speech verb follows.
 
     The anchor is the name, not the reply. “Hello,” Harry said. and
-    “Hello,” I said. keep the label. “Hello,” Harry left. starts the next
+    “Hello,” I said. keep the label. “Hello!” Harry left. starts the next
     sentence, and so does a name after that remark has already ended.
+    A period before the closing quote ends the sentence, so a speech verb in
+    the following sentence does not attach to the first quote.
     """
     said_first = _block("one", 0, "“Hello,” said Harry.")
     name_first = _block("one", 1, "“Hello,” Harry said.")
     pronoun = _block("one", 2, "“Hello,” I said.")
-    asked = _block("one", 3, "“Hello,” Harry asked.")
+    asked = _block("one", 3, "“Hello?” Harry asked.")
     titled = _block("one", 4, "“Hello,” Mr. Dursley said.")
-    left = _block("one", 5, "“Hello,” Harry left.")
+    left = _block("one", 5, "“Hello!” Harry left.")
     later = _block("one", 6, "“Hello,” Harry said. Harry left.")
+    mumbled = _block("one", 7, "‘Funny stuff on the news,’ Mr Dursley mumbled.")
+    yelled = _block("one", 8, "‘Mine!’ Dudley yelled.")
+    gasped = _block("one", 9, "‘Oh!’ I gasped.")
+    roared = _block("one", 10, "‘Out!’ Uncle Vernon roared.")
+    period_next = _block(
+        "one",
+        11,
+        "‘Wait here.’ Harry walked to the door and asked, ‘Who is it?’",
+    )
+    dumbledore = _block(
+        "one",
+        12,
+        "‘It’s lucky it’s dark. I haven’t blushed so much since Madam Pomfrey "
+        "told me she liked my new earmuffs.’",
+    )
+    possessive = _block(
+        "one",
+        13,
+        "‘Check the boys’ room and get ’em now.’ Look at them.",
+    )
+    split_quote = "‘Wait for me in the hall,’ "
+    split_remark = "she demanded from the stairs."
+    split_text = split_quote + split_remark
+    split_cut = len(split_quote)
+    split_block = _block(
+        "one",
+        14,
+        split_text,
+        segments=(BlockSegment(0, split_cut, 0), BlockSegment(split_cut, len(split_text), 0)),
+    )
     facts = (
         _fact("f-said-first", said_first, "Harry", "Harry", "inferred"),
         _fact("f-name-first", name_first, "Harry", "Harry", "inferred"),
@@ -951,15 +983,47 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
         _fact("f-titled", titled, "Dursley", "Dursley", "inferred"),
         _fact("f-left", left, "Harry", "Harry", "inferred"),
         _fact("f-later", later, "Harry left", "Harry", "inferred"),
+        _fact("f-mumbled", mumbled, "Mr Dursley mumbled", "Mr. Dursley", "inferred"),
+        _fact("f-yelled", yelled, "Dudley yelled", "Dudley", "inferred"),
+        _fact("f-gasped", gasped, "I gasped", "Alice", "inferred"),
+        _fact("f-roared", roared, "Uncle Vernon roared", "Uncle Vernon", "inferred"),
+        _fact("f-period-next", period_next, "Harry walked to the door and asked", "Harry", "inferred"),
+        _fact("f-dumbledore", dumbledore, "I haven’t blushed so much", "Dumbledore", "inferred"),
+        _fact("f-possessive", possessive, "get ’em now", "Harry", "inferred"),
+        _fact("f-split", split_block, "she demanded", "Alice", "inferred"),
     )
     section = _section(
         "one",
         0,
         "Chapter 1",
-        (said_first, name_first, pronoun, asked, titled, left, later),
+        (
+            said_first,
+            name_first,
+            pronoun,
+            asked,
+            titled,
+            left,
+            later,
+            mumbled,
+            yelled,
+            gasped,
+            roared,
+            period_next,
+            dumbledore,
+            possessive,
+            split_block,
+        ),
+    )
+    split_result = BlockProcessingResult(
+        split_block.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="— Подожди меня в холле,",
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+        segment_translations=("— Подожди меня в холле,", None),
     )
     layout = build_book_layout(_inputs(
         _document((section,)),
+        {split_block.id: split_result},
         analyses=(_analysis(
             "a-one",
             section.id,
@@ -967,6 +1031,9 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
                 _candidate("a-one", "cand-harry", "Harry", "Гарри"),
                 _candidate("a-one", "cand-alice", "Alice", "Алиса"),
                 _candidate("a-one", "cand-dursley", "Dursley", "Дёрсли"),
+                _candidate("a-one", "cand-dudley", "Dudley", "Дадли"),
+                _candidate("a-one", "cand-vernon", "Vernon", "Вернон"),
+                _candidate("a-one", "cand-dumbledore", "Dumbledore", "Дамблдор"),
             ),
             plan=_plan(facts=facts),
         ),),
@@ -980,6 +1047,14 @@ def test_name_before_speech_verb_stays_inside_the_opening_remark() -> None:
     assert units[titled.id][0].speaker == "Дёрсли"
     assert units[left.id][0].speaker is None
     assert units[later.id][0].speaker is None
+    assert units[mumbled.id][0].speaker == "мистер Дёрсли"
+    assert units[yelled.id][0].speaker == "Дадли"
+    assert units[gasped.id][0].speaker == "Алиса"
+    assert units[roared.id][0].speaker == "дядя Вернон"
+    assert units[period_next.id][0].speaker is None
+    assert units[dumbledore.id][0].speaker == "Дамблдор"
+    assert units[possessive.id][0].speaker == "Гарри"
+    assert units[split_block.id][0].speaker == "Алиса"
 
 
 def test_collapsed_whole_block_translation_hides_mid_paragraph_speaker() -> None:

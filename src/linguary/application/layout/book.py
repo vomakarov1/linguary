@@ -43,20 +43,81 @@ _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 _OPEN_QUOTES = {"“": "”", "‘": "’", "«": "»", '"': '"'}
 _ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "st", "prof"})
 _REMARK_VERBS = frozenset({
-    "say", "says", "said",
-    "ask", "asks", "asked",
-    "reply", "replies", "replied",
-    "answer", "answers", "answered",
-    "tell", "tells", "told",
-    "demand", "demands", "demanded",
-    "murmur", "murmurs", "murmured",
-    "whisper", "whispers", "whispered",
-    "snap", "snaps", "snapped",
-    "mutter", "mutters", "muttered",
-    "shout", "shouts", "shouted",
-    "cry", "cries", "cried",
+    "say", "says", "said", "saying",
+    "ask", "asks", "asked", "asking",
+    "reply", "replies", "replied", "replying",
+    "answer", "answers", "answered", "answering",
+    "tell", "tells", "told", "telling",
+    "add", "adds", "added", "adding",
+    "continue", "continues", "continued", "continuing",
+    "repeat", "repeats", "repeated", "repeating",
+    "explain", "explains", "explained", "explaining",
+    "insist", "insists", "insisted", "insisting",
+    "suggest", "suggests", "suggested", "suggesting",
+    "agree", "agrees", "agreed", "agreeing",
+    "order", "orders", "ordered", "ordering",
+    "command", "commands", "commanded", "commanding",
+    "beg", "begs", "begged", "begging",
+    "urge", "urges", "urged", "urging",
+    "remind", "reminds", "reminded", "reminding",
+    "demand", "demands", "demanded", "demanding",
+    "murmur", "murmurs", "murmured", "murmuring",
+    "whisper", "whispers", "whispered", "whispering",
+    "snap", "snaps", "snapped", "snapping",
+    "mutter", "mutters", "muttered", "muttering",
+    "shout", "shouts", "shouted", "shouting",
+    "cry", "cries", "cried", "crying",
+    "stammer", "stammers", "stammered", "stammering",
+    "gasp", "gasps", "gasped", "gasping",
+    "bellow", "bellows", "bellowed", "bellowing",
+    "hiss", "hisses", "hissed", "hissing",
+    "growl", "growls", "growled", "growling",
+    "exclaim", "exclaims", "exclaimed", "exclaiming",
+    "sob", "sobs", "sobbed", "sobbing",
+    "plead", "pleads", "pleaded", "pleading",
+    "retort", "retorts", "retorted", "retorting",
+    "bark", "barks", "barked", "barking",
+    "croak", "croaks", "croaked", "croaking",
+    "splutter", "splutters", "spluttered", "spluttering",
+    "drawl", "drawls", "drawled", "drawling",
+    "sneer", "sneers", "sneered", "sneering",
+    "sigh", "sighs", "sighed", "sighing",
+    "groan", "groans", "groaned", "groaning",
+    "yell", "yells", "yelled", "yelling",
+    "shriek", "shrieks", "shrieked", "shrieking",
+    "whimper", "whimpers", "whimpered", "whimpering",
+    "thunder", "thunders", "thundered", "thundering",
+    "roar", "roars", "roared", "roaring",
+    "inquire", "inquires", "inquired", "inquiring",
+    "enquire", "enquires", "enquired", "enquiring",
+    "protest", "protests", "protested", "protesting",
+    "confess", "confesses", "confessed", "confessing",
+    "admit", "admits", "admitted", "admitting",
+    "announce", "announces", "announced", "announcing",
+    "declare", "declares", "declared", "declaring",
+    "remark", "remarks", "remarked", "remarking",
+    "interrupt", "interrupts", "interrupted", "interrupting",
+    "warn", "warns", "warned", "warning",
+    "mumble", "mumbles", "mumbled", "mumbling",
+    "snarl", "snarls", "snarled", "snarling",
+    "wail", "wailed", "wailing", "wails",
+    "scream", "screams", "screamed", "screaming",
+    "squeak", "squeaks", "squeaked", "squeaking",
+    "rasp", "rasps", "rasped", "rasping",
+    "blurt", "blurts", "blurted", "blurting",
+    "scoff", "scoffs", "scoffed", "scoffing",
+    "falter", "falters", "faltered", "faltering",
+    "grunt", "grunts", "grunted", "grunting",
+    "snort", "snorts", "snorted", "snorting",
+    "whine", "whines", "whined", "whining",
+    "boom", "booms", "boomed", "booming",
+    "spit", "spits", "spat", "spitting",
+    "moan", "moans", "moaned", "moaning",
 })
 _REMARK_WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*", re.IGNORECASE)
+_WORD_FINAL_APOSTROPHE = re.compile(
+    r"’(?=(?:\s+\w|[,;:])(?:[^‘’]|(?<=\w)’(?=\w)|’(?=\w))*’)"
+)
 _TITLE_TRANSLATIONS = {
     "mr": "мистер",
     "mrs": "миссис",
@@ -152,6 +213,17 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
     document = inputs.document
     numbers = _content_chapter_numbers(document)
     facts = _speaker_facts(inputs.analyses)
+    inferred_by_block = _inferred_facts_by_block(facts)
+    speaker_index = (
+        _speaker_index(
+            inputs.concepts,
+            inputs.analyses,
+            document.target_language,
+            document,
+        )
+        if inferred_by_block
+        else None
+    )
     dropped_by_section = _repeated_speech_style_ids(document, inputs.analyses, facts)
     plans = _plans_by_section(inputs.analyses)
     pronunciations = project_pronunciations(tuple(document.blocks()), inputs.results)
@@ -162,6 +234,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
         units: dict[str, tuple[LayoutUnit, ...]] = {}
         for block in section.ordered_blocks:
             result = inputs.results.get(block.id)
+            treatments = _treatments(block, result)
             notes = ()
             if result is not None:
                 notes = block_notes(
@@ -171,21 +244,28 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                     pronunciations,
                     english_help=inputs.english_help,
                 )
-            units[block.id] = block_units(
-                block,
-                result,
-                _treatments(block, result),
-                notes,
+            block_facts = inferred_by_block.get(block.id, ())
+            speakers = (
                 _speakers_for_block(
                     block,
-                    facts,
+                    block_facts,
                     inputs.concepts,
                     inputs.analyses,
                     document.target_language,
-                    _treatments(block, result),
+                    treatments,
                     result,
                     document=document,
-                ),
+                    _index=speaker_index,
+                )
+                if block_facts
+                else {}
+            )
+            units[block.id] = block_units(
+                block,
+                result,
+                treatments,
+                notes,
+                speakers,
             )
         chapters[section.id] = ChapterLayout(
             section_id=section.id,
@@ -264,6 +344,59 @@ def _speaker_facts(analyses: Sequence[ChapterAnalysis]) -> tuple[ContextFact, ..
     return tuple(found)
 
 
+@dataclass(frozen=True, slots=True)
+class _SpeakerIndex:
+    """Pre-indexed user decisions and person candidates for speaker resolution."""
+
+    language: str
+    user_by_key: Mapping[str, str]
+    candidate_by_key: Mapping[str, str]
+
+
+def _inferred_facts_by_block(
+    facts: Sequence[ContextFact],
+) -> dict[str, tuple[ContextFact, ...]]:
+    grouped: dict[str, list[ContextFact]] = {}
+    for fact in facts:
+        if fact.certainty in _UNIT_SPEAKER_CERTAINTY and isinstance(fact.value, str):
+            grouped.setdefault(fact.subject_anchor.block_id, []).append(fact)
+    return {block_id: tuple(items) for block_id, items in grouped.items()}
+
+
+def _speaker_index(
+    concepts: Sequence[TermConcept],
+    analyses: Sequence[ChapterAnalysis],
+    language: str,
+    document: CanonicalDocument | None,
+) -> _SpeakerIndex:
+    normalized = _normalized_language(language)
+    user_by_key: dict[str, str] = {}
+    for concept in concepts:
+        key = glossary_key(concept.canonical_source_text)
+        if not key or key in user_by_key:
+            continue
+        chosen = concept.variant_for(normalized)
+        if chosen is not None and chosen.status.is_user_decision and chosen.text.strip():
+            user_by_key[key] = chosen.text.strip()
+    russian = normalized == "ru"
+    allowed = _content_section_ids(document)
+    candidate_by_key: dict[str, str] = {}
+    for analysis in _analyses_in_reading_order(analyses, document, allowed):
+        for candidate in analysis.glossary_candidates:
+            if candidate.type is not ConceptType.PERSON:
+                continue
+            key = glossary_key(candidate.source_text)
+            if not key or key in candidate_by_key:
+                continue
+            translation = candidate.suggested_translation.strip()
+            if not translation:
+                continue
+            if russian and _CYRILLIC.search(translation) is None:
+                continue
+            candidate_by_key[key] = translation
+    return _SpeakerIndex(normalized, user_by_key, candidate_by_key)
+
+
 def _speaker_name(
     value: str,
     concepts: Sequence[TermConcept],
@@ -271,6 +404,7 @@ def _speaker_name(
     language: str,
     *,
     document: CanonicalDocument | None = None,
+    _index: _SpeakerIndex | None = None,
 ) -> str | None:
     """Russian (or other target) name for `value`, or none when it stays unresolved.
 
@@ -280,17 +414,20 @@ def _speaker_name(
     The English source is never returned on its own.
     """
     variants = _name_variants(value)
+    if not variants:
+        return None
+    index = _index or _speaker_index(concepts, analyses, language, document)
     for variant in variants:
-        found = _user_translation(variant, concepts, language)
+        found = index.user_by_key.get(glossary_key(variant))
         if found is not None:
             return found
     for variant in variants:
-        found = _candidate_translation(variant, analyses, language, document)
+        found = index.candidate_by_key.get(glossary_key(variant))
         if found is not None:
             return found
-    if _normalized_language(language) == "ru":
+    if index.language == "ru":
         for variant in variants:
-            found = _titled_name(variant, concepts, analyses, language, document)
+            found = _titled_name_from_index(variant, index)
             if found is not None:
                 return found
     return None
@@ -306,6 +443,7 @@ def _speakers_for_block(
     result: BlockProcessingResult | None = None,
     *,
     document: CanonicalDocument | None = None,
+    _index: _SpeakerIndex | None = None,
 ) -> dict[tuple[int, int], str]:
     """Inferred subject anchors whose shown part opens the line or continues its quote.
 
@@ -314,19 +452,30 @@ def _speakers_for_block(
     starts as narrative, with a quote only later, is absent. The first resolved
     name keeps a repeated part.
     """
-    speakers: dict[tuple[int, int], str] = {}
+    block_facts = [
+        fact
+        for fact in facts
+        if fact.certainty in _UNIT_SPEAKER_CERTAINTY
+        and isinstance(fact.value, str)
+        and fact.subject_anchor.block_id == block.id
+    ]
+    if not block_facts:
+        return {}
+    index = _index or _speaker_index(concepts, analyses, language, document)
     parts = _shown_parts(block, treatments, result)
-    for fact in facts:
-        if fact.certainty not in _UNIT_SPEAKER_CERTAINTY or not isinstance(fact.value, str):
-            continue
-        anchor = fact.subject_anchor
-        if anchor.block_id != block.id:
-            continue
+    speakers: dict[tuple[int, int], str] = {}
+    for fact in block_facts:
         name = _speaker_name(
-            fact.value, concepts, analyses, language, document=document,
+            fact.value,
+            concepts,
+            analyses,
+            language,
+            document=document,
+            _index=index,
         )
         if name is None:
             continue
+        anchor = fact.subject_anchor
         for part in parts:
             if _part_shows_speaker(block.text, part, anchor.start):
                 speakers.setdefault((part.start, part.end), name)
@@ -403,6 +552,20 @@ def _candidate_translation(
     return None
 
 
+def _titled_name_from_index(variant: str, index: _SpeakerIndex) -> str | None:
+    """Russian title or kinship word plus a resolved remainder. No English fallback."""
+    if index.language != "ru":
+        return None
+    token, separator, rest = glossary_key(variant).partition(" ")
+    if not separator or token not in _TITLE_TRANSLATIONS or not rest.strip():
+        return None
+    key = glossary_key(rest)
+    translated = index.user_by_key.get(key) or index.candidate_by_key.get(key)
+    if translated is None:
+        return None
+    return f"{_TITLE_TRANSLATIONS[token]} {translated}"
+
+
 def _titled_name(
     variant: str,
     concepts: Sequence[TermConcept],
@@ -411,17 +574,10 @@ def _titled_name(
     document: CanonicalDocument | None,
 ) -> str | None:
     """Russian title or kinship word plus a resolved remainder. No English fallback."""
-    if _normalized_language(language) != "ru":
-        return None
-    token, separator, rest = glossary_key(variant).partition(" ")
-    if not separator or token not in _TITLE_TRANSLATIONS or not rest.strip():
-        return None
-    translated = _user_translation(rest, concepts, language)
-    if translated is None:
-        translated = _candidate_translation(rest, analyses, language, document)
-    if translated is None:
-        return None
-    return f"{_TITLE_TRANSLATIONS[token]} {translated}"
+    return _titled_name_from_index(
+        variant,
+        _speaker_index(concepts, analyses, language, document),
+    )
 
 
 def _normalized_language(language: str) -> str:
@@ -496,19 +652,20 @@ def _opening_speech_end(text: str, part_start: int, part_end: int) -> int | None
     open_at = _first_nonspace(text, part_start, part_end)
     if open_at is None or not _is_dialogue_opener(text, open_at, part_end):
         return None
+    limit = len(text)
     if text[open_at] not in _OPEN_QUOTES:
-        return _sentence_end(text, open_at, part_end)
-    close = _matching_close(text, open_at, part_end)
+        return _sentence_end(text, open_at, limit)
+    close = _matching_close(text, open_at, limit)
     if close is None:
-        return part_end
-    return min(part_end, _remark_end(text, close, part_end))
+        return limit
+    return _remark_end(text, close, limit)
 
 
 def _continued_speech_bounds(text: str, part_start: int) -> tuple[int, int] | None:
     """Quote opened before this part and still open there, through its remark."""
     if part_start <= 0:
         return None
-    open_at = _outer_unclosed_open(text[:part_start])
+    open_at = _outer_unclosed_open(text, part_start)
     if open_at is None:
         return None
     close = _matching_close(text, open_at, len(text))
@@ -519,16 +676,31 @@ def _continued_speech_bounds(text: str, part_start: int) -> tuple[int, int] | No
     return (open_at, _remark_end(text, close, len(text)))
 
 
-def _outer_unclosed_open(text: str) -> int | None:
-    """Index of the outermost quote that `text` does not close."""
+def _is_apostrophe(text: str, index: int) -> bool:
+    """Whether `’` at `index` is an apostrophe inside a replica rather than its closer."""
+    if text[index] != "’":
+        return False
+    if index + 1 < len(text) and text[index + 1].isalnum():
+        return True
+    if index > 0 and text[index - 1].isalnum():
+        return _WORD_FINAL_APOSTROPHE.match(text, index) is not None
+    return False
+
+
+def _outer_unclosed_open(text: str, limit: int | None = None) -> int | None:
+    """Index of the outermost quote that `text[:limit]` does not close."""
+    end = len(text) if limit is None else min(limit, len(text))
     stack: list[tuple[int, str]] = []
-    for index, char in enumerate(text):
+    for index in range(end):
+        char = text[index]
         if char in _OPEN_QUOTES:
             if char == '"' and stack and stack[-1][1] == '"':
                 stack.pop()
             else:
                 stack.append((index, _OPEN_QUOTES[char]))
         elif stack and char == stack[-1][1]:
+            if char == "’" and _is_apostrophe(text, index):
+                continue
             stack.pop()
     if not stack:
         return None
@@ -549,6 +721,8 @@ def _matching_close(text: str, open_index: int, limit: int) -> int | None:
             else:
                 stack.append(_OPEN_QUOTES[char])
         elif stack and char == stack[-1]:
+            if char == "’" and _is_apostrophe(text, index):
+                continue
             stack.pop()
         if not stack:
             return index
@@ -558,10 +732,17 @@ def _matching_close(text: str, open_index: int, limit: int) -> int | None:
 def _remark_end(text: str, close_index: int, limit: int) -> int:
     """End of the reporting clause after a closing quote, before the next sentence.
 
-    A capital right after the quote is still that remark when the same sentence
-    has a speech verb (`Harry said`, `I said`). It starts the next sentence
-    only when no such verb follows (`Harry left`).
+    A period before the closing quote ends the sentence. A comma before the
+    closing quote always continues into the reporting clause. After `?!…—`, a
+    capital right after the quote stays in the remark when the clause before the
+    next quote has a speech verb (`Harry said`, `I gasped`, `Dudley yelled`).
     """
+    if (
+        close_index > 0
+        and text[close_index - 1] == "."
+        and not text[:close_index].endswith("...")
+    ):
+        return close_index + 1
     index = close_index + 1
     while index < limit and text[index].isspace():
         index += 1
@@ -570,9 +751,19 @@ def _remark_end(text: str, close_index: int, limit: int) -> int:
     if text[index] in _OPEN_QUOTES:
         return close_index + 1
     sentence_end = _sentence_end(text, close_index + 1, limit)
-    if text[index].isupper() and not _speech_verb_in(text, index, sentence_end):
+    clause_end = _next_open_quote(text, index, sentence_end)
+    if close_index > 0 and text[close_index - 1] == ",":
+        return clause_end
+    if text[index].isupper() and not _speech_verb_in(text, index, clause_end):
         return close_index + 1
-    return sentence_end
+    return clause_end
+
+
+def _next_open_quote(text: str, start: int, end: int) -> int:
+    for index in range(start, end):
+        if text[index] in _OPEN_QUOTES:
+            return index
+    return end
 
 
 def _speech_verb_in(text: str, start: int, end: int) -> bool:

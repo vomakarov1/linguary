@@ -19,7 +19,12 @@ from lxml import etree
 from linguary.adapters.epub import EpubExportWriter
 from linguary.application.analysis_merge import normalize_a2_dialogue_response
 from linguary.application.layout.book import BookLayout, LayoutInputs, build_book_layout
-from linguary.application.llm_dto import PedagogicalAnalysisResponse, TreatmentPlanItemResponse
+from linguary.application.llm_dto import (
+    PedagogicalAnalysisResponse,
+    QuotedDifficultyResponse,
+    QuotedSourceAnchorResponse,
+    TreatmentPlanItemResponse,
+)
 from linguary.application.ports.epub import EpubWriteRequest
 from linguary.domain import (
     BlockProcessingResult,
@@ -36,7 +41,7 @@ from linguary.domain import (
     SourceReference,
     TreatmentPlan,
 )
-from linguary.domain.content_plan import ContentPlan, ContextFact, SourceAnchor
+from linguary.domain.content_plan import ContentPlan, ContextFact, RequiredPoint, SourceAnchor
 
 _BOOK_ID = "hp-a2-regression"
 _OPEN = "\u2018"
@@ -76,6 +81,9 @@ _HAGRID_DESCRIPTION = "Огромный волшебник с густой бо�
 _DUMBLEDORE_DESCRIPTION = "Пожилой волшебник; появляется на Прайвет-драйв ночью."
 _VERNON_DESCRIPTION = (
     "Муж Петунии, дядя Гарри; крупный, вспыльчивый, работает в фирме по производству дрелей."
+)
+_PETUNIA_DESCRIPTION = (
+    "Тётя Гарри, сестра Лили и жена Вернона Дёрсли; худая женщина с длинной шеей."
 )
 _PIERS_DESCRIPTION = "Один из приятелей Дадли, крупный и глуповатый мальчик из его компании."
 _ENGLISH_DESCRIPTIONS = (
@@ -130,11 +138,12 @@ _REGRESSED = ("nasty", "hagrid-line", "good-luck", "demanded", "snapped", "car")
 _EXCEPTIONS = ("shoo", "up", "winked", "boa", "a-what", "no-why", "nearly")
 _SHOWN_SPEAKERS = {
     "nasty": "миссис Дёрсли",
-    "car": "дядя Вернон",
     "oh-yes": "мистер Дёрсли",
     "giant": "Хагрид",
+    "demanded": "тётя Петуния",
+    "car": "дядя Вернон",
 }
-_HIDDEN_SPEAKERS = ("good-luck", "hagrid-line", "motorbikes", *_EXCEPTIONS)
+_HIDDEN_SPEAKERS = ("good-luck", "hagrid-line", "snapped", "motorbikes", *_EXCEPTIONS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,6 +391,7 @@ def _facts(blocks: Mapping[str, DocumentBlock]) -> dict[str, tuple[ContextFact, 
     good_luck = _anchor(blocks["good-luck"], blocks["good-luck"].text)
     giant_subject = _anchor(blocks["giant"], "said the giant")
     hagrid_other = _anchor(blocks["hagrid-line"], f"{_OPEN}Hagrid,{_CLOSE}")
+    demanded = _anchor(blocks["demanded"], "she demanded")
     car = _anchor(blocks["car"], blocks["car"].text)
     turned = _anchor(blocks["motorbikes"], "He turned right around in his seat")
     return {
@@ -398,6 +408,13 @@ def _facts(blocks: Mapping[str, DocumentBlock]) -> dict[str, tuple[ContextFact, 
             ),
         ),
         "ch2": (
+            _fact(
+                "speaker-aunt-petunia",
+                "Aunt Petunia",
+                "inferred",
+                demanded,
+                (demanded,),
+            ),
             _fact(
                 "speaker-vernon",
                 "Vernon Dursley (Uncle Vernon)",
@@ -436,6 +453,7 @@ def _analyses(
         "ch2": (
             ("Dudley", "Дадли", _DUDLEY_LATER_DESCRIPTION),
             ("Harry Potter", "Гарри Поттер", _HARRY_LATER_DESCRIPTION),
+            ("Petunia", "Петуния", _PETUNIA_DESCRIPTION),
             ("Vernon", "Вернон", _VERNON_DESCRIPTION),
         ),
         "ch3": (("Piers", "Пирз", _PIERS_DESCRIPTION),),
@@ -507,11 +525,32 @@ def _read_pages(path: Path) -> tuple[etree._Element, ...]:
 def _assemble(tmp_path: Path) -> _Case:
     document, blocks, section_ids = _document()
     ordered = tuple(blocks[line.key] for line in _LINES)
+    point = (RequiredPoint("p1", "Объяснить значение глагола речи."),)
     normalized = normalize_a2_dialogue_response(
         PedagogicalAnalysisResponse(
             treatment_plan=tuple(
                 TreatmentPlanItemResponse(block.id, _BY_KEY[key].original)
                 for key, block in blocks.items()
+            ),
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d-demanded",
+                    (QuotedSourceAnchorResponse(blocks["demanded"].id, "demanded"),),
+                    blocks["demanded"].id,
+                    "vocabulary",
+                    "useful",
+                    "lexical_hint",
+                    point,
+                ),
+                QuotedDifficultyResponse(
+                    "d-snapped",
+                    (QuotedSourceAnchorResponse(blocks["snapped"].id, "snapped"),),
+                    blocks["snapped"].id,
+                    "vocabulary",
+                    "useful",
+                    "lexical_hint",
+                    point,
+                ),
             ),
         ),
         ordered,
@@ -670,6 +709,13 @@ def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouch
         assert _mode(harry_regression, key) is BlockTreatment.TRANSLATE
         unit = _unit(harry_regression.pages, _BY_KEY[key].text)
         assert _translation(unit) == _BY_KEY[key].russian
+    assert {
+        difficulty.id: difficulty.help_kind
+        for difficulty in harry_regression.normalized.difficulties
+    } == {
+        "d-demanded": "explanation",
+        "d-snapped": "explanation",
+    }
     for key in _EXCEPTIONS:
         assert _mode(harry_regression, key) is _BY_KEY[key].original
         assert _mode(harry_regression, key) is not BlockTreatment.TRANSLATE
@@ -692,6 +738,7 @@ def test_harry_potter_epub_has_russian_inferred_speakers_only_on_opening_dialogu
         "миссис Дёрсли",
         "мистер Дёрсли",
         "Хагрид",
+        "тётя Петуния",
         "дядя Вернон",
     ]
     for key, name in _SHOWN_SPEAKERS.items():

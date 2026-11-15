@@ -1536,12 +1536,24 @@ def test_a2_split_sentence_segments_share_the_promoted_mode():
     """One promoted piece of a split sentence lifts every piece of that sentence.
 
     A later sentence keeps the mode the model assigned. A lexical hint on the
-    promoted tail becomes an explanation. Assembly must accept the plan.
+    promoted tail or on another segment of a block that becomes TRANSLATE
+    becomes an explanation. A quote split across two segments of one sentence is
+    evaluated across the full sentence span. Assembly and validation must accept
+    the plan.
     """
-    from linguary.application.analysis_merge import FragmentAnalysis, normalize_a2_dialogue_response
+    from linguary.application.analysis_merge import (
+        FragmentAnalysis,
+        normalize_a2_dialogue_response,
+        validate_content_plan,
+    )
     from linguary.application.llm_dto import (
-        ChapterAnalysisResponse, PedagogicalAnalysisResponse, QuotedDifficultyResponse,
-        QuotedSourceAnchorResponse, SegmentTreatmentResponse, TreatmentPlanItemResponse,
+        ChapterAnalysisResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse,
+        TreatmentPlanItemResponse,
     )
     from linguary.domain.content_plan import RequiredPoint
 
@@ -1558,49 +1570,101 @@ def test_a2_split_sentence_segments_share_the_promoted_mode():
         BlockSegment(quote_at, other_at, 0),
         BlockSegment(other_at, len(text), 1),
     ))
+    split_open = '‘Stay here '
+    split_close = 'if you can,’ she demanded.'
+    split_tail = ' The cat slept.'
+    split_text = split_open + split_close + split_tail
+    first_cut = len(split_open)
+    second_cut = first_cut + len(split_close)
+    split_block = _block(1, split_text, segments=(
+        BlockSegment(0, first_cut, 0),
+        BlockSegment(first_cut, second_cut, 0),
+        BlockSegment(second_cut, len(split_text), 1),
+    ))
+    point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
     payload = PedagogicalAnalysisResponse(
-        treatment_plan=(TreatmentPlanItemResponse('b1', BlockTreatment.GLOSSARY_ONLY, (
-            SegmentTreatmentResponse(1, BlockTreatment.GLOSSARY_ONLY),
-            SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
-            SegmentTreatmentResponse(3, BlockTreatment.READ_AS_IS),
-        )),),
-        difficulties=(QuotedDifficultyResponse(
-            'd-lane',
-            (QuotedSourceAnchorResponse('b1', 'lane'),),
-            'b1',
-            'vocabulary',
-            'useful',
-            'lexical_hint',
-            (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),),
-        ),),
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.GLOSSARY_ONLY, (
+                SegmentTreatmentResponse(1, BlockTreatment.GLOSSARY_ONLY),
+                SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                SegmentTreatmentResponse(3, BlockTreatment.READ_AS_IS),
+            )),
+            TreatmentPlanItemResponse('b2', BlockTreatment.GLOSSARY_ONLY, (
+                SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),
+                SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+                SegmentTreatmentResponse(3, BlockTreatment.GLOSSARY_ONLY),
+            )),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                'd-lane',
+                (QuotedSourceAnchorResponse('b1', 'lane'),),
+                'b1',
+                'vocabulary',
+                'useful',
+                'lexical_hint',
+                point,
+            ),
+            QuotedDifficultyResponse(
+                'd-slept',
+                (QuotedSourceAnchorResponse('b2', 'slept'),),
+                'b2',
+                'vocabulary',
+                'useful',
+                'lexical_hint',
+                point,
+            ),
+        ),
     )
+    aliases = {'b1': block.id, 'b2': split_block.id}
     normalized = normalize_a2_dialogue_response(
-        payload, (block,), {'b1': block.id}, reader_level='a2', english_help=False,
+        payload, (block, split_block), aliases, reader_level='a2', english_help=False,
     )
     assert [segment.treatment for segment in normalized.treatment_plan[0].segments] == [
         BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS,
     ]
-    assert normalized.difficulties[0].help_kind == 'explanation'
+    assert [segment.treatment for segment in normalized.treatment_plan[1].segments] == [
+        BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY,
+    ]
+    assert [item.help_kind for item in normalized.difficulties] == ['explanation', 'explanation']
     combined = ChapterAnalysisResponse(
         translation_instructions='Keep the voice.',
         chapter_summary='A speaker waits by the lane.',
         treatment_plan=normalized.treatment_plan,
+        content_plan=QuotedContentPlanResponse(difficulties=normalized.difficulties),
     )
+    texts = {block.id: block.text, split_block.id: split_block.text}
+    visible = {'b1': block.text, 'b2': split_block.text}
+    validated = validate_content_plan(
+        combined, aliases, texts, visible_texts_by_alias=visible, blocks=(block, split_block),
+    )
+    assert validated is not None
+    assert [item.help_kind for item in validated.difficulties] == ['explanation', 'explanation']
     fragment = FragmentAnalysis.of_response(
-        combined, order=0, block_ids_by_alias={'b1': block.id}, blocks=(block,),
+        combined,
+        order=0,
+        block_ids_by_alias=aliases,
+        texts=texts,
+        visible_texts_by_alias=visible,
+        blocks=(block, split_block),
     )
     assert fragment.treatments[0].treatment is BlockTreatment.TRANSLATE
     assert fragment.treatments[0].segment_treatments == (
         BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS,
     )
+    assert fragment.treatments[1].treatment is BlockTreatment.TRANSLATE
+    assert fragment.treatments[1].segment_treatments == (
+        BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY,
+    )
 
 
 def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
-    """A ’ inside a word does not end ‘...’. The conjunction stays in the reply.
+    """An apostrophe inside, before, or after a word does not end ‘...’.
 
-    ‘Don’t go if I call.’ is translated. ‘I’m here.’ is still a short exception.
-    ‘Don’t touch the ledger.’ keeps ledger inside the reply. The same word after
-    a real closer is a remark and does translate.
+    ‘Don’t go if I call.’, ‘Get ’em if you can.’, and ‘Check the boys’ room if you can.’
+    are translated. ‘I’m here.’ and ‘No,’ she said sharply. ‘Why?’ stay short exceptions.
+    ‘Don’t touch the ledger.’ and ‘Check the boys’ ledger.’ keep ledger inside the reply.
+    The same word or a typographically normalized quote in a remark translates.
     """
     from linguary.application.analysis_merge import normalize_a2_dialogue_response
     from linguary.application.llm_dto import (
@@ -1613,35 +1677,69 @@ def test_a2_apostrophe_inside_single_quotes_is_not_the_closer():
     short = '‘I’m here.’'
     interior = '‘Don’t touch the ledger.’'
     remark = '‘Don’t,’ he said about the ledger.'
-    blocks = (_block(0, conditional), _block(1, short), _block(2, interior), _block(3, remark))
+    elision = '‘Get ’em if you can.’'
+    possessive = '‘Check the boys’ room if you can.’'
+    possessive_interior = '‘Check the boys’ ledger.’'
+    two_quotes = '‘No,’ she said sharply. ‘Why?’'
+    typographic_remark = '‘No,’ he didn’t answer.'
+    blocks = (
+        _block(0, conditional),
+        _block(1, short),
+        _block(2, interior),
+        _block(3, remark),
+        _block(4, elision),
+        _block(5, possessive),
+        _block(6, possessive_interior),
+        _block(7, two_quotes),
+        _block(8, typographic_remark),
+    )
     point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
 
-    def vocab(difficulty_id, alias):
+    def vocab(difficulty_id, alias, quote='ledger'):
         return QuotedDifficultyResponse(
-            difficulty_id, (QuotedSourceAnchorResponse(alias, 'ledger'),), alias,
+            difficulty_id, (QuotedSourceAnchorResponse(alias, quote),), alias,
             'vocabulary', 'useful', 'lexical_hint', point,
         )
 
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
     payload = PedagogicalAnalysisResponse(
         treatment_plan=(
             TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),
             TreatmentPlanItemResponse('b2', BlockTreatment.READ_AS_IS),
             TreatmentPlanItemResponse('b3', BlockTreatment.GLOSSARY_ONLY),
             TreatmentPlanItemResponse('b4', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b5', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b6', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b7', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b8', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b9', BlockTreatment.GLOSSARY_ONLY),
         ),
-        difficulties=(vocab('d-inside', 'b3'), vocab('d-remark', 'b4')),
+        difficulties=(
+            vocab('d-inside', 'b3'),
+            vocab('d-remark', 'b4'),
+            vocab('d-possessive-inside', 'b7'),
+            vocab('d-typo-remark', 'b9', quote="didn't"),
+        ),
     )
     normalized = normalize_a2_dialogue_response(
-        payload, blocks,
-        {'b1': blocks[0].id, 'b2': blocks[1].id, 'b3': blocks[2].id, 'b4': blocks[3].id},
-        reader_level='a2', english_help=False,
+        payload, blocks, aliases, reader_level='a2', english_help=False,
     )
     assert [item.treatment for item in normalized.treatment_plan] == [
         BlockTreatment.TRANSLATE,
         BlockTreatment.READ_AS_IS,
         BlockTreatment.GLOSSARY_ONLY,
         BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
     ]
-    assert [item.help_kind for item in normalized.difficulties] == ['lexical_hint', 'explanation']
+    assert [item.help_kind for item in normalized.difficulties] == [
+        'lexical_hint',
+        'explanation',
+        'lexical_hint',
+        'explanation',
+    ]
 
 

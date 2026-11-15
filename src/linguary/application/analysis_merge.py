@@ -2019,9 +2019,16 @@ def validate_fact_glossary(
             )
 
 
-# ’ between word characters is an apostrophe (Don’t, I’m, car’s), not a closer.
+# ’ inside a word (Don’t, car’s), before a word (’em), or after a word when a
+# closing ’ still follows inside the same replica (boys’ room, Dursleys’,) is
+# an apostrophe, not the quote closer.
+_SINGLE_QUOTE_APOSTROPHE = (
+    r"(?<=\w)’(?=\w)"
+    r"|’(?=\w)"
+    r"|(?<=\w)’(?=(?:\s+\w|[,;:])(?:[^‘’]|(?<=\w)’(?=\w)|’(?=\w))*’)"
+)
 _DIALOGUE_QUOTES = re.compile(
-    r"‘(?:[^‘’]|(?<=\w)’(?=\w))*’|“[^“”]*”|\"[^\"“”‘’]*\""
+    rf"‘(?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})*’|“[^“”]*”|\"[^\"“”‘’]*\""
 )
 _SUBORDINATORS = frozenset({"if", "when", "because", "although", "though", "unless", "whether"})
 _REMARK_DIFFICULTY_KINDS = frozenset({"vocabulary", "false_friend"})
@@ -2095,14 +2102,16 @@ def normalize_a2_dialogue_response(
 
     A paragraph or quote stays as the model left it when the reader is not A2,
     English help is on, or the line is a short elementary reply. Promoting a
-    block or segment out of GLOSSARY_ONLY retargets its lexical hints to explanation.
+    block or segment to TRANSLATE retargets unbacked lexical hints on that
+    block to explanation.
     """
     if reader_level != "a2" or english_help:
         return payload
     blocks_by_id = {block.id: block for block in blocks}
     difficulties = _response_difficulties(payload)
+    covered_points = _covered_byr_points(payload)
     items: list[TreatmentPlanItemResponse] = []
-    regions: list[tuple[frozenset[str], int, int, str]] = []
+    promoted_blocks: list[tuple[frozenset[str], bool]] = []
     changed = False
     for item in payload.treatment_plan:
         block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
@@ -2113,10 +2122,14 @@ def normalize_a2_dialogue_response(
         if updated is not item:
             changed = True
         items.append(updated)
-        regions.extend(promoted)
+        if promoted is not None:
+            promoted_blocks.append(promoted)
     if not changed:
         return payload
-    switched = tuple(_switch_promoted_hint(difficulty, regions) for difficulty in difficulties)
+    switched = tuple(
+        _switch_promoted_hint(difficulty, promoted_blocks, covered_points)
+        for difficulty in difficulties
+    )
     plan = tuple(items)
     if isinstance(payload, PedagogicalAnalysisResponse):
         return replace(payload, treatment_plan=plan, difficulties=switched)
@@ -2134,6 +2147,21 @@ def _response_difficulties(payload: ChapterAnalysisResponse | PedagogicalAnalysi
     return payload.content_plan.difficulties
 
 
+def _covered_byr_points(
+    payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse,
+) -> dict[str, set[str]]:
+    if isinstance(payload, PedagogicalAnalysisResponse):
+        evidence = payload.before_you_read_evidence
+    elif payload.content_plan is not None:
+        evidence = payload.content_plan.before_you_read_evidence
+    else:
+        evidence = ()
+    covered: dict[str, set[str]] = {}
+    for item in evidence:
+        covered.setdefault(item.difficulty_id, set()).add(item.point_id)
+    return covered
+
+
 def _block_for_plan_item(source_block_id, blocks_by_id, block_ids_by_alias):
     block_id = block_ids_by_alias.get(source_block_id)
     if block_id is None and source_block_id in blocks_by_id:
@@ -2147,27 +2175,43 @@ def _sentence_segments_to_promote(segments, spans, difficulties, owners, block_t
     """Indexes to lift, including every light span of a sentence that needs it.
 
     A long sentence is stored as several spans with one `sentence_index`.
-    Promoting only the span that holds the quote would split that sentence's modes.
+    Evaluating the full sentence slice and promoting every span of that
+    sentence keeps split quotes intact and preserves uniform sentence modes.
     """
-    promote: set[int] = set()
+    sentence_bounds: dict[int, tuple[int, int]] = {}
+    for span in spans:
+        bounds = sentence_bounds.get(span.sentence_index)
+        if bounds is None:
+            sentence_bounds[span.sentence_index] = (span.start, span.end)
+        else:
+            sentence_bounds[span.sentence_index] = (
+                min(bounds[0], span.start),
+                max(bounds[1], span.end),
+            )
+    promoted_sentences: set[int] = set()
+    checked_sentences: set[int] = set()
     for segment in segments:
         if segment.index < 1 or segment.index > len(spans):
             continue
         if segment.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
             continue
-        span = spans[segment.index - 1]
-        text = block_text[span.start:span.end]
-        if not _dialogue_needs_translation(text, difficulties, owners, span.start):
+        sentence_index = spans[segment.index - 1].sentence_index
+        if sentence_index in checked_sentences:
             continue
-        sentence_index = span.sentence_index
-        for other in segments:
-            if other.index < 1 or other.index > len(spans):
-                continue
-            if other.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
-                continue
-            if spans[other.index - 1].sentence_index == sentence_index:
-                promote.add(other.index)
-    return promote
+        checked_sentences.add(sentence_index)
+        sentence_start, sentence_end = sentence_bounds[sentence_index]
+        text = block_text[sentence_start:sentence_end]
+        if _dialogue_needs_translation(text, difficulties, owners, sentence_start):
+            promoted_sentences.add(sentence_index)
+    if not promoted_sentences:
+        return set()
+    return {
+        segment.index
+        for segment in segments
+        if 1 <= segment.index <= len(spans)
+        and segment.treatment in _LIGHT_DIALOGUE_TREATMENTS
+        and spans[segment.index - 1].sentence_index in promoted_sentences
+    }
 
 
 def _promote_dialogue_item(item, block, difficulties):
@@ -2176,27 +2220,26 @@ def _promote_dialogue_item(item, block, difficulties):
         spans = block.segment_spans
         promote = _sentence_segments_to_promote(item.segments, spans, difficulties, owners, block.text)
         if not promote:
-            return item, ()
-        updated = []
-        regions = []
-        for segment in item.segments:
-            if segment.index not in promote:
-                updated.append(segment)
-                continue
-            span = spans[segment.index - 1]
-            if segment.treatment is BlockTreatment.GLOSSARY_ONLY:
-                regions.append((owners, span.start, span.end, block.text))
-            updated.append(SegmentTreatmentResponse(segment.index, BlockTreatment.TRANSLATE))
+            return item, None
+        had_glossary = item.treatment is BlockTreatment.GLOSSARY_ONLY or any(
+            segment.treatment is BlockTreatment.GLOSSARY_ONLY for segment in item.segments
+        )
+        updated = [
+            SegmentTreatmentResponse(segment.index, BlockTreatment.TRANSLATE)
+            if segment.index in promote
+            else segment
+            for segment in item.segments
+        ]
         modes = tuple(segment.treatment for segment in updated)
-        return replace(item, treatment=strongest_treatment(modes), segments=tuple(updated)), regions
+        strongest = strongest_treatment(modes)
+        promoted = (owners, had_glossary) if strongest is BlockTreatment.TRANSLATE else None
+        return replace(item, treatment=strongest, segments=tuple(updated)), promoted
     if item.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
-        return item, ()
+        return item, None
     if not _dialogue_needs_translation(block.text, difficulties, owners, 0):
-        return item, ()
-    regions = []
-    if item.treatment is BlockTreatment.GLOSSARY_ONLY:
-        regions.append((owners, 0, len(block.text), block.text))
-    return replace(item, treatment=BlockTreatment.TRANSLATE), regions
+        return item, None
+    had_glossary = item.treatment is BlockTreatment.GLOSSARY_ONLY
+    return replace(item, treatment=BlockTreatment.TRANSLATE), (owners, had_glossary)
 
 
 def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
@@ -2245,36 +2288,40 @@ def _anchor_hits_ranges(anchor, text, span_start, ranges) -> bool:
     quote = getattr(anchor, "quote", "")
     if not quote:
         return False
-    found = 0
-    while True:
-        found = text.find(quote, found)
-        if found < 0:
-            return False
-        found_end = found + len(quote)
-        if any(found < stop and found_end > begin for begin, stop in ranges):
-            return True
-        found += 1
+    spans = _quote_spans(text, quote)
+    cleaned = without_footnote_markers(quote).strip()
+    if not spans and cleaned and cleaned != quote:
+        spans = _quote_spans(text, cleaned)
+    if spans:
+        return any(
+            found_start < stop and found_end > begin
+            for found_start, found_end, _ in spans
+            for begin, stop in ranges
+        )
+    target = cleaned or quote
+    return any(
+        bool(_quote_spans(without_footnote_markers(text[begin:stop]), target))
+        for begin, stop in ranges
+    )
 
 
-def _switch_promoted_hint(difficulty, regions):
+def _switch_promoted_hint(
+    difficulty,
+    promoted_blocks: Sequence[tuple[frozenset[str], bool]],
+    covered_points: Mapping[str, set[str]],
+):
     if difficulty.help_kind != "lexical_hint":
         return difficulty
-    for owners, start, end, block_text in regions:
-        if difficulty.owner_block_id not in owners:
+    required = {point.id for point in difficulty.required_points}
+    byr_covered = bool(required) and required <= covered_points.get(difficulty.id, set())
+    for owners, had_glossary in promoted_blocks:
+        if difficulty.owner_block_id not in owners and not any(
+            getattr(anchor, "block_id", None) in owners for anchor in difficulty.anchors
+        ):
             continue
-        window = block_text[start:end]
-        for anchor in difficulty.anchors:
-            if getattr(anchor, "block_id", None) not in owners:
-                continue
-            anchor_start = getattr(anchor, "start", None)
-            anchor_end = getattr(anchor, "end", None)
-            if type(anchor_start) is int and type(anchor_end) is int:
-                if anchor_start < end and anchor_end > start:
-                    return replace(difficulty, help_kind="explanation")
-                continue
-            quote = getattr(anchor, "quote", "")
-            if quote and quote in window:
-                return replace(difficulty, help_kind="explanation")
+        if byr_covered and not had_glossary:
+            continue
+        return replace(difficulty, help_kind="explanation")
     return difficulty
 
 
