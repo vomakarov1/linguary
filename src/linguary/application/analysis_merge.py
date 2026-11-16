@@ -2110,6 +2110,24 @@ _NONBASIC_REPORTING = frozenset({
     "boomed", "booming",
     "spat",
 })
+_SHORT_B1_WORD_LIMIT = 10
+_SHORT_B1_WORDS = frozenset({
+    "winked", "groaned", "chuckled", "peered", "sniggered", "moaned", "sweetums",
+})
+_SHORT_B1_PHRASES = (
+    ("fancy", "seeing", "you"),
+    ("how", "very", "wrong"),
+    ("suppose", "so"),
+)
+_CHAPTER_NUMBER_WORDS = frozenset({
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+    "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty",
+    "seventy", "eighty", "ninety", "hundred",
+})
+_ROMAN_NUMERAL = re.compile(
+    r"(?=[ivxlcdm]+$)m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})"
+)
 
 
 def normalize_a2_dialogue_response(
@@ -2128,7 +2146,11 @@ def normalize_a2_dialogue_response(
     at most two phrases, drops to GLOSSARY_ONLY when it has a vocabulary
     difficulty and to READ_AS_IS otherwise. A2 without English help clears
     before_you_read when nothing cites it. Promoting a block to TRANSLATE
-    retargets unbacked lexical hints on that block to explanation.
+    retargets unbacked lexical hints on that block to explanation. A meaningful
+    chapter heading becomes TRANSLATE and loses an unevidenced grammar note.
+    A short READ_AS_IS line with a listed B1+ word or phrase becomes
+    GLOSSARY_ONLY when it owns vocabulary, and TRANSLATE otherwise. TRANSLATE
+    drops an unevidenced grammar quote of sounding relieved.
     """
     if reader_level != "a2" or english_help:
         return payload
@@ -2139,23 +2161,44 @@ def normalize_a2_dialogue_response(
     items: list[TreatmentPlanItemResponse] = []
     promoted_blocks: list[tuple[frozenset[str], bool]] = []
     demoted_blocks: list[frozenset[str]] = []
+    meaningful_heading_ids: set[str] = set()
+    translate_ids: set[str] = set()
     changed = False
     for item in payload.treatment_plan:
         block = _block_for_plan_item(item.source_block_id, blocks_by_id, block_ids_by_alias)
-        if block is None or block.type not in _DIALOGUE_BLOCK_TYPES:
+        if block is None:
             items.append(item)
             continue
-        updated, promoted = _promote_dialogue_item(item, block, difficulties)
-        updated, demoted = _demote_elementary_reply(item, updated, block, difficulties)
+        updated = item
+        promoted = None
+        demoted = None
+        if block.type in _DIALOGUE_BLOCK_TYPES:
+            updated, promoted = _promote_dialogue_item(item, block, difficulties)
+            updated, demoted = _demote_elementary_reply(item, updated, block, difficulties)
+        owners = frozenset(part for part in (item.source_block_id, block.id) if part)
+        if block.type is BlockType.HEADING and _is_meaningful_chapter_title(block.text):
+            updated = _force_block_treatment(updated, BlockTreatment.TRANSLATE)
+            meaningful_heading_ids.update(owners)
+            promoted = None
+            demoted = None
+        elif _is_short_b1_read_as_is(block, updated):
+            mode = (
+                BlockTreatment.GLOSSARY_ONLY
+                if _owns_vocabulary(difficulties, owners)
+                else BlockTreatment.TRANSLATE
+            )
+            updated = _force_block_treatment(updated, mode)
+            promoted = None
+            demoted = owners if mode is BlockTreatment.GLOSSARY_ONLY else None
         if updated is not item:
             changed = True
         items.append(updated)
+        if updated.treatment is BlockTreatment.TRANSLATE:
+            translate_ids.update(owners)
         if promoted is not None and demoted is None:
             promoted_blocks.append(promoted)
         if demoted is not None:
             demoted_blocks.append(demoted)
-    if not changed:
-        return payload
     switched = tuple(
         _switch_demoted_hint(
             _switch_promoted_hint(difficulty, promoted_blocks, covered_points),
@@ -2163,6 +2206,15 @@ def normalize_a2_dialogue_response(
         )
         for difficulty in difficulties
     )
+    kept = tuple(
+        difficulty for difficulty in switched
+        if not _is_unevidenced_trivial_grammar(
+            difficulty, meaningful_heading_ids, translate_ids, covered_points,
+        )
+    )
+    if not changed and kept == tuple(difficulties):
+        return payload
+    switched = kept
     plan = tuple(items)
     if isinstance(payload, PedagogicalAnalysisResponse):
         return replace(payload, treatment_plan=plan, difficulties=switched)
@@ -2447,6 +2499,69 @@ def _switch_promoted_hint(
             continue
         return replace(difficulty, help_kind="explanation")
     return difficulty
+
+
+def _is_meaningful_chapter_title(text: str) -> bool:
+    words = expression_words(text)
+    if not words:
+        return False
+    if len(words) == 1 and _ROMAN_NUMERAL.fullmatch(words[0]):
+        return False
+    if len(words) >= 2 and words[0] == "chapter" and all(
+        word.isdigit() or word in _CHAPTER_NUMBER_WORDS or _ROMAN_NUMERAL.fullmatch(word)
+        for word in words[1:]
+    ):
+        return False
+    return True
+
+
+def _is_short_b1_read_as_is(block: DocumentBlock, item) -> bool:
+    """A short READ_AS_IS line whose words are on the closed B1+ list."""
+    if block.type not in _DIALOGUE_BLOCK_TYPES or item.treatment is not BlockTreatment.READ_AS_IS:
+        return False
+    if any(segment.treatment is not BlockTreatment.READ_AS_IS for segment in item.segments):
+        return False
+    words = expression_words(block.text)
+    if not words or len(words) > _SHORT_B1_WORD_LIMIT:
+        return False
+    if any(word in _SHORT_B1_WORDS for word in words):
+        return True
+    return any(_contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES)
+
+
+def _contains_phrase(words: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
+    size = len(phrase)
+    return any(words[index:index + size] == phrase for index in range(len(words) - size + 1))
+
+
+def _owns_vocabulary(difficulties, owners: frozenset[str]) -> bool:
+    return any(
+        difficulty.kind == "vocabulary" and difficulty.owner_block_id in owners
+        for difficulty in difficulties
+    )
+
+
+def _force_block_treatment(item, mode):
+    segments = tuple(
+        segment if segment.treatment is mode else SegmentTreatmentResponse(segment.index, mode)
+        for segment in item.segments
+    )
+    if item.treatment is mode and segments == item.segments:
+        return item
+    if segments:
+        return replace(item, treatment=mode, segments=segments)
+    return replace(item, treatment=mode)
+
+
+def _is_unevidenced_trivial_grammar(difficulty, heading_ids, translate_ids, covered_points) -> bool:
+    if difficulty.kind != "grammar" or difficulty.id in covered_points:
+        return False
+    owner = difficulty.owner_block_id
+    if owner in heading_ids:
+        return True
+    return owner in translate_ids and any(
+        expression_words(anchor.quote) == ("sounding", "relieved") for anchor in difficulty.anchors
+    )
 
 
 def glossary_context_constraints(concepts):

@@ -2081,4 +2081,270 @@ def test_secondary_anchor_on_demoted_reply_does_not_retarget_foreign_owner():
     assert plan is not None
 
 
+def test_a2_chapter_title_heading_promotes_to_translate_and_drops_from_no_one_grammar_note():
+    """A meaningful chapter title is translated and loses an unevidenced grammar note.
+
+    — CHAPTER THREE — and a bare roman numeral stay READ_AS_IS. The Letters from
+    No One becomes TRANSLATE. Grammar quote from no one is dropped only when
+    nothing cites it. The same note with evidence, a vocabulary note, and the
+    same title in a paragraph stay.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        HelpEvidenceResponse, PedagogicalAnalysisResponse, QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse, TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    numbered = '— CHAPTER THREE —'
+    roman = 'II'
+    title = 'The Letters from No One'
+    blocks = (
+        _block(0, numbered, type=BlockType.HEADING),
+        _block(1, roman, type=BlockType.HEADING),
+        _block(2, title, type=BlockType.HEADING),
+        _block(3, title),
+    )
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    point = (RequiredPoint('p1', 'Объяснить конструкцию в заголовке.'),)
+
+    def grammar(difficulty_id, alias, quote='from no one'):
+        return QuotedDifficultyResponse(
+            difficulty_id, (QuotedSourceAnchorResponse(alias, quote),), alias,
+            'grammar', 'useful', 'explanation', point,
+        )
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(alias, BlockTreatment.READ_AS_IS) for alias in aliases
+        ),
+        difficulties=(
+            grammar('d-from', 'b3'),
+            grammar('d-from-evidenced', 'b3'),
+            QuotedDifficultyResponse(
+                'd-letters', (QuotedSourceAnchorResponse('b3', 'Letters'),), 'b3',
+                'vocabulary', 'useful', 'lexical_hint', point,
+            ),
+            grammar('d-paragraph', 'b4'),
+        ),
+        before_you_read_evidence=(
+            HelpEvidenceResponse(
+                'd-from-evidenced', 'p1', 'before_you_read.explanation', 'b3', 0,
+                'Предлог from в заголовке.',
+            ),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+    ]
+    assert {item.id: item.help_kind for item in normalized.difficulties} == {
+        'd-from-evidenced': 'explanation',
+        'd-letters': 'lexical_hint',
+        'd-paragraph': 'explanation',
+    }
+
+    untouched = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='b1', english_help=False,
+    )
+    assert [item.treatment for item in untouched.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+    ]
+    assert [item.id for item in untouched.difficulties] == [
+        'd-from', 'd-from-evidenced', 'd-letters', 'd-paragraph',
+    ]
+
+
+def test_a2_short_lines_with_winked_groaned_chuckled_or_fancy_seeing_you_do_not_stay_read_as_is():
+    """Short READ_AS_IS lines with the listed B1+ words or phrases leave that mode.
+
+    No vocabulary difficulty means TRANSLATE. A vocabulary difficulty means
+    GLOSSARY_ONLY and lexical_hint. Elementary replies, a line over ten words,
+    and a line that is already GLOSSARY_ONLY stay as they are.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse, QuotedDifficultyResponse, QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse, TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    translate_lines = (
+        'It winked.',
+        'Harry groaned.',
+        'Uncle Vernon chuckled.',
+        '‘Fancy seeing you here, Professor McGonagall.’',
+        '‘Thirty-nine, sweetums,’ said Aunt Petunia.',
+        'How very wrong he was.',
+        'He peered.',
+        'They sniggered.',
+        'She moaned.',
+        '‘I suppose so.’',
+    )
+    stay_lines = (
+        '‘Up! Get up! Now!’',
+        '‘A what?’',
+        '‘Nearly,’ said Harry.',
+        '‘Shoo!’ said Mr Dursley loudly.',
+        '‘No,’ she said sharply. ‘Why?’',
+        'It blinked.',
+        'Fancy that.',
+        'How are you?',
+        'I suppose he left.',
+        'It winked at the boy who stood alone by the door.',
+    )
+    glossary_line = 'It winked.'
+    already_glossary = 'He peered.'
+    winked = 'It winked.'
+    cut = len('It ')
+    blocks = tuple(_block(index, text) for index, text in enumerate(translate_lines))
+    glossary_block = _block(len(blocks), glossary_line)
+    stay_blocks = tuple(
+        _block(len(blocks) + 1 + index, text) for index, text in enumerate(stay_lines)
+    )
+    kept_glossary = _block(len(blocks) + 1 + len(stay_blocks), already_glossary)
+    split = _block(
+        len(blocks) + 2 + len(stay_blocks), winked, segments=(
+            BlockSegment(0, cut, 0),
+            BlockSegment(cut, len(winked), 0),
+        ),
+    )
+    ordered = blocks + (glossary_block,) + stay_blocks + (kept_glossary, split)
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(ordered)}
+    glossary_alias = f'b{len(blocks) + 1}'
+    split_alias = f'b{len(ordered)}'
+    point = (RequiredPoint('p1', 'Объяснить значение слова в этой реплике.'),)
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(f'b{index + 1}', BlockTreatment.READ_AS_IS)
+            for index in range(len(ordered) - 2)
+        ) + (
+            TreatmentPlanItemResponse(f'b{len(ordered) - 1}', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse(split_alias, BlockTreatment.READ_AS_IS, (
+                SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),
+                SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+            )),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                'd-winked', (QuotedSourceAnchorResponse(glossary_alias, 'winked'),),
+                glossary_alias, 'vocabulary', 'useful', 'explanation', point,
+            ),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, ordered, aliases, reader_level='a2', english_help=False,
+    )
+    expected = (
+        [BlockTreatment.TRANSLATE] * len(translate_lines)
+        + [BlockTreatment.GLOSSARY_ONLY]
+        + [BlockTreatment.READ_AS_IS] * len(stay_lines)
+        + [BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE]
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == expected
+    assert [segment.treatment for segment in normalized.treatment_plan[-1].segments] == [
+        BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE,
+    ]
+    assert normalized.difficulties[0].help_kind == 'lexical_hint'
+
+
+def test_a2_translate_block_drops_trivial_sounding_relieved_grammar_difficulty():
+    """A block that ends as TRANSLATE loses unevidenced grammar quote sounding relieved.
+
+    Evidence keeps the note. A block that stays READ_AS_IS keeps it. Another
+    grammar quote on a translated block stays. The same drop applies when the
+    difficulty is stored on a chapter content plan.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse, HelpEvidenceResponse, PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse, QuotedDifficultyResponse, QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    short = '‘Hagrid,’ said Dumbledore, sounding relieved.'
+    promoted = (
+        '‘Hagrid,’ said Dumbledore, sounding relieved. '
+        '‘At last. And where did you get that motorbike?’'
+    )
+    wrong = 'How very wrong he was, sounding relieved.'
+    blocks = (
+        _block(0, short),
+        _block(1, short),
+        _block(2, short),
+        _block(3, promoted),
+        _block(4, wrong),
+    )
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    point = (RequiredPoint('p1', 'Объяснить конструкцию в этой реплике.'),)
+
+    def grammar(difficulty_id, alias, quote):
+        return QuotedDifficultyResponse(
+            difficulty_id, (QuotedSourceAnchorResponse(alias, quote),), alias,
+            'grammar', 'useful', 'explanation', point,
+        )
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b2', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b3', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b4', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b5', BlockTreatment.READ_AS_IS),
+        ),
+        difficulties=(
+            grammar('d-relieved', 'b1', 'sounding relieved'),
+            grammar('d-relieved-evidenced', 'b2', 'sounding relieved'),
+            grammar('d-said', 'b2', 'said'),
+            grammar('d-stay', 'b3', 'sounding relieved'),
+            grammar('d-promoted', 'b4', 'sounding relieved'),
+            grammar('d-wrong', 'b5', 'sounding relieved'),
+        ),
+        before_you_read_evidence=(
+            HelpEvidenceResponse(
+                'd-relieved-evidenced', 'p1', 'before_you_read.explanation', 'b2', 0,
+                'Говорящий успокаивается.',
+            ),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+    ]
+    assert {item.id: item.anchors[0].quote for item in normalized.difficulties} == {
+        'd-relieved-evidenced': 'sounding relieved',
+        'd-said': 'said',
+        'd-stay': 'sounding relieved',
+    }
+
+    chapter_block = _block(0, short)
+    relieved = grammar('d-relieved', 'b1', 'sounding relieved')
+    chapter = normalize_a2_dialogue_response(
+        ChapterAnalysisResponse(
+            translation_instructions='Keep the voice.',
+            chapter_summary='Dumbledore speaks.',
+            treatment_plan=(TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),),
+            content_plan=QuotedContentPlanResponse(difficulties=(relieved,)),
+        ),
+        (chapter_block,), {'b1': chapter_block.id}, reader_level='a2', english_help=False,
+    )
+    assert chapter.treatment_plan[0].treatment is BlockTreatment.TRANSLATE
+    assert chapter.content_plan.difficulties == ()
+
+
 
