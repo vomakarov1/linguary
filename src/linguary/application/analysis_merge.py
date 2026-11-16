@@ -2416,7 +2416,7 @@ def _elementary_reply_mode(text, difficulties, owners):
     )
     if any(difficulty.kind != "vocabulary" for difficulty in related):
         return None
-    if related:
+    if any(difficulty.owner_block_id in owners for difficulty in related):
         return BlockTreatment.GLOSSARY_ONLY
     return BlockTreatment.READ_AS_IS
 
@@ -2424,12 +2424,7 @@ def _elementary_reply_mode(text, difficulties, owners):
 def _switch_demoted_hint(difficulty, demoted_blocks: Sequence[frozenset[str]]):
     if not demoted_blocks or difficulty.kind != "vocabulary" or difficulty.help_kind == "lexical_hint":
         return difficulty
-    if any(
-        difficulty.owner_block_id in owners or any(
-            getattr(anchor, "block_id", None) in owners for anchor in difficulty.anchors
-        )
-        for owners in demoted_blocks
-    ):
+    if any(difficulty.owner_block_id in owners for owners in demoted_blocks):
         return replace(difficulty, help_kind="lexical_hint")
     return difficulty
 

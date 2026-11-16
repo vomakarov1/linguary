@@ -565,10 +565,11 @@ def _resource_payloads(
     A declared copy missing from disk is a different matter: the store is corrupted,
     and assembling a book with a missing required resource is forbidden.
     """
+    exported = {item.id for item in _exported_sections(request)}
     skipped_sections = {
         _contained_name(section.source_resource_path)
         for section in request.document.ordered_sections
-        if section.id not in {item.id for item in _exported_sections(request)}
+        if section.id not in exported
     }
     for resource in request.document.resources:
         if resource.support_status not in _EXPORTED_STATUSES:

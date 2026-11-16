@@ -32,7 +32,7 @@ NAME_METHOD_LABELS: dict[str, str] = {
 _SHOWN_METHODS: frozenset[NameTranslationMethod] = frozenset()
 _LISTED_TYPES = (ConceptType.PERSON, ConceptType.PLACE)
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
-_THE_FAMILY = re.compile(r"^(?:[Tt]he) [A-Z][A-Za-z]+s$")
+_THE_FAMILY = re.compile(r"^(?:[Tt]he) ([A-Z][A-Za-z]+)s$")
 _BARE_PLURAL = re.compile(r"^([A-Z][A-Za-z]+)s$")
 _FAMILY_SURNAME = re.compile(r"surname of the .+ family", re.IGNORECASE)
 _FAMILY_TRANSLATIONS = frozenset({"поттеры", "дерсли"})
@@ -49,10 +49,25 @@ _TITLE_GENDER = {
     "lord": "m",
     "madam": "f",
 }
+_FEMALE_ROLES = frozenset({
+    "жена", "супруга", "сестра", "мать", "мама", "тетя", "тётя",
+    "дочь", "племянница", "вдова", "женщина", "девушка", "девочка",
+    "хозяйка", "соседка", "волшебница", "колдунья", "ведьма", "дама",
+    "миссис", "мисс", "госпожа", "леди", "королева", "принцесса", "герцогиня",
+})
+_MALE_ROLES = frozenset({
+    "муж", "супруг", "брат", "отец", "папа", "дядя",
+    "сын", "племянник", "мужчина", "юноша", "парень", "мальчик",
+    "хозяин", "сосед", "волшебник", "колдун", "маг", "директор",
+    "мистер", "господин", "лорд", "сэр", "король", "принц", "герцог",
+})
 _ROLE_MARKERS = (
     ("жена мистера дёрсли", "f", "wife:dursley"),
+    ("жена вернона", "f", "wife:dursley"),
     ("сестра лили", "f", "sister:lily"),
     ("мать гарри", "f", "mother:harry"),
+    ("жена джеймса", "f", "mother:harry"),
+    ("жена мистера поттера", "f", "mother:harry"),
 )
 _NON_CHARACTER = (
     "неуверенно называет",
@@ -234,12 +249,36 @@ def _excluded_person(
     if _family_translation(candidate.suggested_translation) or _family_translation(shown):
         return True
     source = candidate.source_text.strip()
-    if _THE_FAMILY.fullmatch(source):
-        return True
-    bare = _BARE_PLURAL.fullmatch(source)
-    if bare is not None and _stem_is_family_surname(bare.group(1), candidate, people):
+    if _plural_family_source(source, shown, candidate, people):
         return True
     return _bare_family_surname(candidate, people)
+
+
+def _plural_family_source(
+    source: str,
+    shown: str,
+    candidate: GlossaryCandidate,
+    people: Sequence[GlossaryCandidate],
+) -> bool:
+    the_match = _THE_FAMILY.fullmatch(source)
+    if the_match is not None:
+        stem = the_match.group(1)
+        if stem.casefold().endswith(("s", "u", "i", "o")):
+            return False
+        description_key = glossary_key(candidate.description)
+        return (
+            _stem_is_family_surname(stem, candidate, people)
+            or glossary_key(shown).endswith(("ы", "и"))
+            or "семья" in description_key
+            or "супруги" in description_key
+        )
+    bare = _BARE_PLURAL.fullmatch(source)
+    if bare is not None:
+        stem = bare.group(1)
+        if stem.casefold().endswith(("s", "u", "i", "o")):
+            return False
+        return _stem_is_family_surname(stem, candidate, people)
+    return False
 
 
 def _family_translation(translation: str) -> bool:
@@ -328,6 +367,8 @@ def _dedupe_persons(refs: list[_PersonRef]) -> tuple[WhoEntry, ...]:
     parent = list(range(len(refs)))
     # A bare given name may join one surnamed component. It must not bridge two.
     surnames = [_ref_surnames(ref) for ref in refs]
+    givens = [_given_names(ref) for ref in refs]
+    genders = [{ref.gender} if ref.gender else set() for ref in refs]
 
     def find(index: int) -> int:
         while parent[index] != index:
@@ -344,15 +385,25 @@ def _dedupe_persons(refs: list[_PersonRef]) -> tuple[WhoEntry, ...]:
         right_surnames = surnames[right_root]
         if left_surnames and right_surnames and left_surnames.isdisjoint(right_surnames):
             return
+        left_givens = givens[left_root]
+        right_givens = givens[right_root]
+        if left_givens and right_givens and left_givens.isdisjoint(right_givens):
+            return
+        left_genders = genders[left_root]
+        right_genders = genders[right_root]
+        if left_genders and right_genders and left_genders.isdisjoint(right_genders):
+            return
         parent[right_root] = left_root
         left_surnames |= right_surnames
+        left_givens |= right_givens
+        left_genders |= right_genders
 
     for left in range(len(refs)):
         for right in range(left + 1, len(refs)):
             if _same_person(refs[left], refs[right]):
                 union(left, right)
-    _union_unique_titles(refs, union)
     _union_roles(refs, union)
+    _union_unique_titles(refs, find, givens, surnames, genders, union)
     groups: dict[int, list[_PersonRef]] = {}
     order: list[int] = []
     for index, ref in enumerate(refs):
@@ -375,27 +426,46 @@ def _same_person(left: _PersonRef, right: _PersonRef) -> bool:
     return not left_surnames or not right_surnames or not left_surnames.isdisjoint(right_surnames)
 
 
-def _union_unique_titles(refs: list[_PersonRef], union) -> None:
+def _union_unique_titles(
+    refs: list[_PersonRef],
+    find,
+    givens: list[set[str]],
+    surnames: list[set[str]],
+    genders: list[set[str]],
+    union,
+) -> None:
     """`Mrs Potter` joins the only woman with that surname, not every Potter."""
+    titled_male_roots = {
+        find(index)
+        for index, item in enumerate(refs)
+        if _parse_called(item.outside)[3] == "m" or _parse_called(item.inside)[3] == "m"
+    }
     for index, ref in enumerate(refs):
+        root = find(index)
         for gender, surname in ref.title_surnames:
             known: list[int] = []
             matches: list[int] = []
-            for other_index, other in enumerate(refs):
-                if other_index == index or not other.given or not other.surname:
+            seen_roots: set[int] = {root}
+            for other_index in range(len(refs)):
+                other_root = find(other_index)
+                if other_root in seen_roots:
                     continue
-                if glossary_key(other.surname) != surname:
+                if not givens[other_root] or surname not in surnames[other_root]:
                     continue
-                if other.gender == gender:
-                    known.append(other_index)
-                    matches.append(other_index)
-                elif not other.gender:
-                    matches.append(other_index)
+                seen_roots.add(other_root)
+                other_genders = genders[other_root]
+                if other_genders == {gender} and (
+                    gender == "f" or other_root in titled_male_roots
+                ):
+                    known.append(other_root)
+                    matches.append(other_root)
+                elif not other_genders or other_genders == {gender}:
+                    matches.append(other_root)
             # `James Potter` has no gender and must not veto the only woman.
             # A male title still needs every namesake to be that one man, so
             # `Dudley` keeps `Mr Dursley` from joining `Vernon`.
             if len(known) == 1 and (gender == "f" or len(matches) == 1):
-                union(index, known[0])
+                union(root, known[0])
 
 
 def _union_roles(refs: list[_PersonRef], union) -> None:
@@ -491,10 +561,10 @@ def _parse_called(text: str) -> tuple[str, str, str, str]:
     gender = _TITLE_GENDER.get(first, "")
     if first in _TITLE_GENDER and len(tokens) >= 2:
         rest = tokens[1:]
-        if first in _GIVEN_TITLES or (first not in _SURNAME_TITLES and len(rest) == 1):
-            return first, " ".join(rest), "", gender
-        if first in _SURNAME_TITLES:
-            return first, "", " ".join(rest), gender
+        if len(rest) == 1:
+            if first in _SURNAME_TITLES:
+                return first, "", rest[0], gender
+            return first, rest[0], "", gender
         return first, rest[0], " ".join(rest[1:]), gender
     if len(tokens) == 1:
         return "", tokens[0], "", ""
@@ -508,15 +578,50 @@ def _title_surnames(text: str) -> tuple[tuple[str, str], ...]:
     return ((gender, glossary_key(surname)),)
 
 
+_ALLOWED_ROLE_TAILS = frozenset({"", "дерсли", "дурсль", "поттер", "поттера"})
+
+
 def _roles(description: str) -> tuple[frozenset[str], str]:
-    text = glossary_key(description)
+    head = glossary_key(
+        description.split(";", 1)[0].split(".", 1)[0].split("—", 1)[0]
+    )
+    phrases = [
+        part.strip()
+        for chunk in head.split(",")
+        for part in chunk.split(" и ")
+        if part.strip()
+    ]
+    if not phrases:
+        return frozenset(), ""
+    gender = _clause_gender(phrases[0])
+    if not gender:
+        for phrase in phrases[1:]:
+            gender = _clause_gender(phrase)
+            if gender:
+                break
     roles: list[str] = []
-    gender = ""
-    for marker, marker_gender, role in _ROLE_MARKERS:
-        if glossary_key(marker) in text:
+    for phrase in phrases:
+        for marker, marker_gender, role in _ROLE_MARKERS:
+            if gender and gender != marker_gender:
+                continue
+            marker_key = glossary_key(marker)
+            if not phrase.startswith(marker_key):
+                continue
+            tail = phrase[len(marker_key) :].strip()
+            if tail not in _ALLOWED_ROLE_TAILS:
+                continue
             roles.append(role)
             gender = gender or marker_gender
     return frozenset(roles), gender
+
+
+def _clause_gender(phrase: str) -> str:
+    for token in re.split(r"[\s\-]+", phrase):
+        if token in _FEMALE_ROLES:
+            return "f"
+        if token in _MALE_ROLES:
+            return "m"
+    return ""
 
 
 def _target_description(description: str, language: str) -> str:

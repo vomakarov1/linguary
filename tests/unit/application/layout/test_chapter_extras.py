@@ -1044,6 +1044,8 @@ def test_who_is_who_filters_plural_family_names_and_mistaken_non_characters() ->
         ("sunny", "Sunny", ConceptType.PERSON, "Санни", "синоптик"),
         ("tibbles", "Tibbles", ConceptType.PERSON, "Тибблз", "кличка кошки"),
         ("piers", "Piers", ConceptType.PERSON, "Пирз", "приятель"),
+        ("duchess", "The Duchess", ConceptType.PERSON, "Герцогиня", "знатная дама"),
+        ("walrus", "The Walrus", ConceptType.PERSON, "Морж", "персонаж баллады"),
         ("london", "London", ConceptType.PLACE, "Лондон", "телеведущий"),
     )
     analysis = _analysis("a1", first.id, tuple(
@@ -1056,5 +1058,62 @@ def test_who_is_who_filters_plural_family_names_and_mistaken_non_characters() ->
         WhoEntry("Dudley", "Дадли", ConceptType.PERSON, "сын мистера Дёрсли", None, 1),
         WhoEntry("Potter", "Поттер", ConceptType.PERSON, "фамилия семьи", None, 1),
         WhoEntry("Piers", "Пирз", ConceptType.PERSON, "приятель", None, 1),
+        WhoEntry("The Duchess", "Герцогиня", ConceptType.PERSON, "знатная дама", None, 1),
+        WhoEntry("The Walrus", "Морж", ConceptType.PERSON, "персонаж баллады", None, 1),
         WhoEntry("London", "Лондон", ConceptType.PLACE, "телеведущий", None, 1),
+    )
+
+
+def test_who_is_who_prevents_false_role_merges_and_merges_titled_full_names() -> None:
+    """Indirect role mentions in descriptions do not merge distinct characters."""
+    section = _content("ch-1", 0)
+    document = _document((section,))
+    analysis = _analysis("a1", section.id, (
+        _candidate(
+            "a1", "harry", "Harry Potter", ConceptType.PERSON,
+            "Гарри Поттер", description="Мальчик-сирота; мать Гарри погибла.",
+        ),
+        _candidate(
+            "a1", "voldemort", "Voldemort", ConceptType.PERSON,
+            "Волдеморт", description="Тёмный волшебник, от руки которого погибла мать Гарри.",
+        ),
+        _candidate(
+            "a1", "lily", "Lily Potter", ConceptType.PERSON,
+            "Лили Поттер", description="Жена Джеймса Поттера, сестра Петунии.",
+        ),
+        _candidate(
+            "a1", "mrs-potter", "Mrs Potter", ConceptType.PERSON,
+            "миссис Поттер", description="Жена мистера Поттера.",
+        ),
+        _candidate(
+            "a1", "mrs-petunia", "Mrs Petunia Dursley", ConceptType.PERSON,
+            "миссис Петуния Дёрсли", description="Тётя Гарри, жена Вернона Дёрсли.",
+        ),
+        _candidate(
+            "a1", "aunt-petunia", "Aunt Petunia", ConceptType.PERSON,
+            "тётя Петуния", description="Тётя Гарри.",
+        ),
+        _candidate(
+            "a1", "mrs-dursley", "Mrs Dursley", ConceptType.PERSON,
+            "миссис Дёрсли", description="Хозяйка дома.",
+        ),
+    ))
+
+    assert book_who_is_who(document, (analysis,), ()) == (
+        WhoEntry(
+            "Harry Potter", "Гарри Поттер", ConceptType.PERSON,
+            "Мальчик-сирота; мать Гарри погибла.", None, 1,
+        ),
+        WhoEntry(
+            "Voldemort", "Волдеморт", ConceptType.PERSON,
+            "Тёмный волшебник, от руки которого погибла мать Гарри.", None, 1,
+        ),
+        WhoEntry(
+            "Lily Potter", "Лили Поттер", ConceptType.PERSON,
+            "Жена Джеймса Поттера, сестра Петунии.", None, 1,
+        ),
+        WhoEntry(
+            "Mrs Petunia Dursley", "миссис Петуния Дёрсли", ConceptType.PERSON,
+            "Тётя Гарри, жена Вернона Дёрсли.", None, 1,
+        ),
     )

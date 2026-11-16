@@ -2017,3 +2017,68 @@ def test_segmented_elementary_translate_reply_demotes_with_its_segments():
     assert normalized.difficulties[0].help_kind == 'lexical_hint'
 
 
+def test_secondary_anchor_on_demoted_reply_does_not_retarget_foreign_owner():
+    """A vocabulary difficulty owned by a TRANSLATE block keeps `explanation`."""
+    from linguary.application.analysis_merge import (
+        normalize_a2_dialogue_response,
+        validate_content_plan,
+    )
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    b1 = _block(0, 'He walked past the house, looking sharply at the cat on the wall.')
+    b2 = _block(1, '‘No,’ she said sharply. ‘Why?’')
+    point = (RequiredPoint('p1', 'Объяснить значение наречия sharply.'),)
+    payload = ChapterAnalysisResponse(
+        chapter_summary='Summary.',
+        translation_instructions='Keep tone.',
+        before_you_read=(),
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b2', BlockTreatment.TRANSLATE),
+        ),
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile='content-plan-v3',
+            difficulties=(
+                QuotedDifficultyResponse(
+                    'd-sharply',
+                    (
+                        QuotedSourceAnchorResponse('b1', 'sharply'),
+                        QuotedSourceAnchorResponse('b2', 'sharply'),
+                    ),
+                    'b1',
+                    'vocabulary',
+                    'useful',
+                    'explanation',
+                    point,
+                ),
+            ),
+        ),
+    )
+    aliases = {'b1': b1.id, 'b2': b2.id}
+    normalized = normalize_a2_dialogue_response(
+        payload, (b1, b2), aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+    ]
+    assert normalized.content_plan.difficulties[0].help_kind == 'explanation'
+    plan = validate_content_plan(
+        normalized,
+        aliases,
+        {b1.id: b1.text, b2.id: b2.text},
+        visible_texts_by_alias={'b1': b1.text, 'b2': b2.text},
+        blocks=(b1, b2),
+    )
+    assert plan is not None
+
+
+

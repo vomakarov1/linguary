@@ -128,17 +128,30 @@ def test_chapter_front_order(tmp_path: Path) -> None:
     assert [child.get("class") for child in front] == [
         "linguary-previously",
         "lg-review",
+        "linguary-before-you-read",
     ]
-    previously, review = list(front)
+    previously, review, before = list(front)
     assert _heading(elements(previously, "h2")[0]) == "Previously in Chapter One"
     assert "".join(elements(previously, "p")[0].itertext()) == _SUMMARY
     chapter_text = "".join(chapter.itertext())
     assert "Кто есть кто" not in chapter_text
     assert "the Mouse" not in chapter_text
-    assert "Before You Read" not in chapter_text
     review_text = "".join(review.itertext())
     assert "Повторим" in review_text
     assert "tired" in review_text and "устала" in review_text and "(гл. I)" in review_text
+    before_text = "".join(before.itertext())
+    assert "Before You Read" in before_text
+    assert _BYR_EXPRESSION in before_text
+    assert _BYR_EXPLANATION in before_text
+
+    a2_path = _export(tmp_path, "front-a2", feature_sections=frozenset())
+    a2_chapter = _chapter_section(_document(a2_path, "chapter2.xhtml"))
+    a2_front = a2_chapter[0]
+    assert [child.get("class") for child in a2_front] == [
+        "linguary-previously",
+        "lg-review",
+    ]
+    assert "Before You Read" not in "".join(a2_chapter.itertext())
 
     third_root = _document(path, "chapter3.xhtml")
     assert not _fronts(third_root)
@@ -218,6 +231,7 @@ def _export(
     legend: tuple[str, ...] | None = None,
     ipa_key: tuple[IpaSymbol, ...] | None = None,
     who: tuple[WhoEntry, ...] | None = None,
+    feature_sections: frozenset[str] = frozenset({"before_you_read"}),
 ) -> Path:
     """Import a small book and export it with an explicit layout."""
     source = build_epub(
@@ -350,7 +364,7 @@ def _export(
         legend=_LEGEND if legend is None else legend,
         ipa_key=_IPA if ipa_key is None else ipa_key,
         who_is_who=book_who if who is None else who,
-        features=LayoutFeatures(False, False, frozenset(), False, False, False, frozenset()),
+        features=LayoutFeatures(False, False, frozenset(), False, False, False, feature_sections),
     )
     target = tmp_path / f"{name}.epub"
     EpubExportWriter().write(
