@@ -40,6 +40,24 @@ def test_a2_policy_in_all_channels():
     assert ReaderTextPolicy().warnings('summary', 'One ' * 40 + '.', reader_level='a2')
 
 
+def test_a2_learner_instructions_require_infinitives_and_forbid_note_jargon():
+    instructions = learner_instructions('a2')
+    for phrase in (
+        'помета к глаголу речи',
+        '«реалия»',
+        'страдательный оборот',
+        'превосходная степень',
+        'причастие прошедшего времени',
+        'to snigger — хихикать',
+        'to nod — кивать',
+        'note пустым',
+        'длиннее 5 слов',
+        'целое предложение',
+    ):
+        assert phrase in instructions
+    assert 'помета к глаголу речи' not in learner_instructions('b1')
+
+
 def test_a2_double_negative_instructions_keep_translation_and_byr_affirmative():
     instructions = ' '.join(learner_instructions('a2').split())
 

@@ -54,7 +54,7 @@ from linguary.application.chapter_instructions import (
     note_respecting_glossary,
 )
 from linguary.application.errors import ApplicationError
-from linguary.application.reader_text import learner_instructions
+from linguary.application.reader_text import _A2_NOTE_DISCIPLINE, learner_instructions
 from linguary.application.llm_dto import (
     BlockResultResponse,
     ChapterAnalysisResponse,
@@ -109,6 +109,10 @@ DEFAULT_REGENERATION_CONTEXT_BLOCKS = 2
 #: An image is fully supported, but offers an image to the reader rather than text.
 _NON_TEXTUAL_BLOCK_TYPES = frozenset({BlockType.IMAGE, BlockType.PAGE_BREAK})
 
+_NOT_A_PERSON_GUIDANCE = """
+Не помечай бытовые предметы, игрушки и игры типом person (cine-camera, crutches, racing bike, remote-control aeroplane, cupboard, Harry-hunting). В description не пиши служебные отписки («в этой главе упоминается впервые», «до этого упоминания сведений нет»).
+"""
+
 
 _TRANSLATION_CONTEXT_V2 = """
 Политика translation-context-v2. Соблюдай назначенные режимы каждого целевого блока,
@@ -130,7 +134,7 @@ English Help, помощь и произношение, если они вклю
 «(только для контекста, в blocks не возвращать)» в массив blocks не включай). Соседи не цели:
 не переводи их отдельно, не возвращай для них помощь, произношение или новые ID.
 Запрещены кальки и несочетаемые союзы («хотя зато», «больше того», «не одобрял воображения», «пострел» вместо «сорванец / негодник»), пропуск конечного обстоятельства tonight, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», пометы «вариант стоит проверить» и «в переводе передано как...», шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
-"""
+""" + _A2_NOTE_DISCIPLINE
 
 
 CONTENT_PLAN_PROMPT_VERSION = "content-plan-v2.1"
@@ -179,7 +183,7 @@ visual_facts содержат anchor {{block_id, quote}}, subject, detail: то�
 У первой сцены нового фрагмента укажи continues_previous_scene=true, если она
 продолжает последнюю сцену предыдущего фрагмента.
 Не возвращай учебный план, трудности, BYR или адаптированный пересказ.
-"""
+""" + _NOT_A_PERSON_GUIDANCE
 
 _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS = """\
 Проход pedagogical-v1. Язык оригинала: {source_language}; язык перевода: {target_language}.
@@ -204,7 +208,7 @@ BYR: expression, explanation; объяснение на языке перево�
 source_block_id, artifact_index (с нуля), body_excerpt — точная часть explanation.
 Соблюдай квоты запроса, пределы заметок по блокам и группам. Не повышай бюджеты.
 Не возвращай glossary_candidates, translation_instructions, context_facts или scenes.
-"""
+""" + _A2_NOTE_DISCIPLINE
 _CONTENT_PLAN_PROCESSING = """
 Профиль content-plan-v2, инструкция content-plan-v2.1.
 Выполни все required_points назначенных владельцам трудностей минимальной помощью
@@ -223,7 +227,7 @@ subject_anchor, value, certainty (explicit, inferred, unknown).
 Не исправляй цитату и смещения; subject_anchor проверяется отдельно от anchors.
 Не распространяй факт за видимый фрагмент. При certainty=unknown значение не задано (value=null).
 Различай подтверждённый текстом факт и предположение; противоречащие атрибуции не выбирай молча.
-"""
+""" + _A2_NOTE_DISCIPLINE
 _CONTENT_PLAN_ANALYSIS_V5 = (
     _CONTENT_PLAN_ANALYSIS_V3
     .replace(
@@ -251,7 +255,7 @@ _CONTENT_PLAN_PROCESSING_V3 = _CONTENT_PLAN_PROCESSING.replace('content-plan-v2.
 Служебные context_facts применяй только к назначенным субъектам и их точным исходным привязкам.
 Не выдавай inferred/unknown за подтверждённый факт; решения глоссария имеют приоритет.
 Не превращай эти служебные сведения в обязательную заметку читателю.
-"""
+""" + _A2_NOTE_DISCIPLINE
 
 _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS = """\
 Профиль content-plan-v3 для режима чтения на английском с помощью к трудным местам.
@@ -1812,17 +1816,24 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 - GLOSSARY_ONLY — выбирай только для коротких абзацев с прозрачной базовой грамматикой, \
 подсказывай любые слова выше уровня A2.
 - READ_AS_IS — выбирай только для самых элементарных реплик и базовых коротких фраз \
-(приветствия, простые утверждения в 2–3 слова без незнакомой лексики вроде «It winked.»; \
-не переводи такие фразы в GLOSSARY_ONLY только ради пояснения рода местоимения it).
+(приветствия, простые утверждения в 2–3 слова без незнакомой лексики вроде «Nearly.»; \
+не переводи такие фразы в GLOSSARY_ONLY только ради пояснения рода местоимения it). \
+Короткую фразу с глаголом мимики, речи или взгляда выше A1–A2 нельзя оставлять в READ_AS_IS: \
+«It winked.», а также winked, groaned, chuckled, peered, nodded, sniggered, moaned. \
+Наравне с ними нельзя оставлять в READ_AS_IS разговорные формулы «Fancy seeing you here», \
+«I suppose so», обращения «sweetums» и восклицательную инверсию «How very wrong he was»: \
+для них обязателен GLOSSARY_ONLY или TRANSLATE.
 
 Короткая прозрачная реплика диалога длиной 4–8 слов уровня A1–A2 не требует полного \
 перевода только из-за того, что это реплика: выбирай READ_AS_IS или GLOSSARY_ONLY \
 по незнакомой лексике и понятности смысла.
 Окно 4–8 слов для READ_AS_IS или GLOSSARY_ONLY относится только к одной элементарной \
 реплике уровня A1–A2 без придаточных оборотов (if, when, because, that), причастных \
-оборотов (sounding relieved), авторских предложений действия и небазовых глаголов речи \
+оборотов, авторских предложений действия и небазовых глаголов речи \
 (demanded, murmured, snapped). Реплики длиннее 8 слов либо сочетающие прямую речь с \
 авторским действием или сложной ремаркой получают TRANSLATE.
+Содержательный заголовок главы («The Boy Who Lived», «The Vanishing Glass», \
+«The Letters from No One») выбирай режимом TRANSLATE без грамматических сносок.
 Не оставляй без достаточной помощи грамматически скрытые конструкции уровня выше A2: \
 модальный перфект (например, «might have been»), придаточное с «what» в значении \
 «то, что» и отрыв предлога в конце придаточного или вопроса. Для каждой такой \
@@ -1945,13 +1956,16 @@ def _instructions(
         before_you_read_guidance = _A2_BEFORE_YOU_READ_GUIDANCE
     else:
         before_you_read_guidance = _BEFORE_YOU_READ_GUIDANCE.format(**languages)
-    return _ANALYSIS_INSTRUCTIONS.format(
+    instructions = _ANALYSIS_INSTRUCTIONS.format(
         scope=scope.format(**languages),
         summary=summary.format(**languages),
         treatment_guidance=treatment_guidance,
         before_you_read_guidance=before_you_read_guidance,
         **languages,
     )
+    if level == "a2":
+        instructions += _NOT_A_PERSON_GUIDANCE
+    return instructions
 
 
 #: What the model sees in the request: the whole chapter or a sequential fragment.
@@ -2782,6 +2796,8 @@ def _with_name_policy(instructions: str, policy: NameTranslationPolicy | None, *
                 'не переводи смысловые части имени, не подменяй произношение побуквенной транслитерацией, '
                 'не копируй непроизносимые удвоенные согласные английской орфографии («маглы», а не «магглы»), '
                 'передавай гласный /ɔː/ (aw/au) через «о», а не «оу» («Поз», а не «Поуз»), '
+                'шотландские и ирландские фамилии на Mc- и Mac- передавай с приставкой «Мак-» '
+                '(«McGonagall» → «Макгонагал», а не «Магонагал»); '
                 'не усекай конечные гласные и слоги ради склоняемости (например, -ley/-ly со звучанием /li/ передавай как -ли, а не -ль) '
                 'и не заменяй корневую гласную под русское созвучие; '
                 'не бери готовые имена из известных переводов книги, если они искажают звучание '

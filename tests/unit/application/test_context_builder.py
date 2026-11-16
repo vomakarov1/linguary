@@ -1417,7 +1417,7 @@ def test_a2_pedagogical_instructions_include_grammar_support_and_strict_dialogue
     window = (
         "Окно 4–8 слов для READ_AS_IS или GLOSSARY_ONLY относится только к одной "
         "элементарной реплике уровня A1–A2 без придаточных оборотов "
-        "(if, when, because, that), причастных оборотов (sounding relieved), "
+        "(if, when, because, that), причастных оборотов, "
         "авторских предложений действия и небазовых глаголов речи "
         "(demanded, murmured, snapped)"
     )
@@ -1779,6 +1779,7 @@ def test_translation_and_note_instructions_forbid_calques_and_academic_jargon() 
     """Translation and note prompts forbid calques, academic jargon, and empty glossary notes."""
     from linguary.application.context_builder import (
         _CONTENT_PLAN_PROCESSING,
+        _CONTENT_PLAN_PROCESSING_V3,
         _TRANSLATION_CONTEXT_V2,
     )
     from linguary.application.reader_text import learner_instructions
@@ -1790,5 +1791,147 @@ def test_translation_and_note_instructions_forbid_calques_and_academic_jargon() 
     ):
         for phrase in _CALQUE_AND_JARGON_PHRASES:
             assert phrase in instructions
+    for instructions in (
+        _TRANSLATION_CONTEXT_V2,
+        _CONTENT_PLAN_PROCESSING_V3,
+        learner_instructions("a2"),
+    ):
+        assert "помета к глаголу речи" in instructions
+        assert "страдательный оборот" in instructions
+        assert "to snigger" in instructions
+
+
+_A2_SHORT_LINE_HELP = (
+    "winked",
+    "groaned",
+    "chuckled",
+    "peered",
+    "nodded",
+    "sniggered",
+    "moaned",
+    "Fancy seeing you here",
+    "I suppose so",
+    "sweetums",
+    "How very wrong he was",
+    "нельзя оставлять в READ_AS_IS",
+    "GLOSSARY_ONLY или TRANSLATE",
+    "The Boy Who Lived",
+    "The Vanishing Glass",
+    "The Letters from No One",
+    "без грамматических сносок",
+)
+_A2_TRIVIAL_NOTE_BAN = (
+    "капитанские сноски",
+    "she и her относятся",
+    "he относится",
+    "from no one",
+    "прозрачных ремарках",
+    "разные концы абзаца",
+    "длиннее 5 слов",
+    "original_excerpt",
+    "had + V3",
+    "must/could have + V3",
+    "to snigger — хихикать",
+    "to nod — кивать",
+    "note пустым",
+    "помета к глаголу речи",
+    "«реалия»",
+    "страдательный оборот",
+    "превосходная степень",
+    "причастие прошедшего времени",
+    "целое предложение",
+)
+_NOT_A_PERSON = (
+    "типом person",
+    "cine-camera",
+    "crutches",
+    "racing bike",
+    "remote-control aeroplane",
+    "cupboard",
+    "Harry-hunting",
+    "в этой главе упоминается впервые",
+    "до этого упоминания сведений нет",
+)
+
+
+def test_a2_instructions_require_help_for_winked_and_forbid_trivial_translate_notes() -> None:
+    """A2 helps short B1+ lines and rejects trivial notes, object-persons, and boilerplate."""
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_ANALYSIS_V5,
+        _CONTENT_PLAN_PROCESSING_V3,
+        _NARRATIVE_ANALYSIS_INSTRUCTIONS,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _TRANSLATION_CONTEXT_V2,
+        _reader_level_treatment_guidance,
+    )
+    from linguary.application.reader_text import learner_instructions
+
+    guidance = _reader_level_treatment_guidance("a2")
+    b1_guidance = _reader_level_treatment_guidance("b1")
+    assert "вроде «Nearly.»" in guidance
+    assert "вроде «It winked.»" not in guidance
+    assert "«It winked.»" in guidance
+    for phrase in _A2_SHORT_LINE_HELP:
+        assert phrase in guidance
+        assert phrase not in b1_guidance
+
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    note_sources = (
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _CONTENT_PLAN_ANALYSIS_V5,
+        _CONTENT_PLAN_PROCESSING_V3,
+        _TRANSLATION_CONTEXT_V2,
+        learner_instructions("a2"),
+        templates["pedagogical_analysis"],
+        templates["content_analysis"],
+        templates["content_processing"],
+        templates["learner_quality"],
+    )
+    for instructions in note_sources:
+        for phrase in _A2_TRIVIAL_NOTE_BAN:
+            assert phrase in instructions
+    for phrase in _A2_SHORT_LINE_HELP:
+        assert phrase in templates["pedagogical_analysis"]
+    assert "помета к глаголу речи" not in learner_instructions("b1")
+
+    narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru",
+    )
+    a2_analysis = chapter_analysis_instructions(
+        source_language=SOURCE_LANGUAGE,
+        target_language=TARGET_LANGUAGE,
+        reader_level="a2",
+    )
+    for instructions in (narrative, templates["narrative_analysis"], a2_analysis):
+        for phrase in _NOT_A_PERSON:
+            assert phrase in instructions
+
+
+def test_sound_policy_preserves_mc_prefix_in_mcgonagall() -> None:
+    """SOUND keeps Mc-/Mac- as the prefix Мак- (McGonagall, not Магонагал)."""
+    sound = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        profile="content-plan-v3",
+        name_translation_policy=_policy("sound"),
+    )
+    meaning = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        profile="content-plan-v3",
+        name_translation_policy=_policy("meaning"),
+    )
+    required = ("Mc-", "Mac-", "McGonagall", "Макгонагал", "а не «Магонагал»")
+    for key in ("analysis", "fragment", "translation", "regeneration", "narrative_analysis"):
+        for phrase in required:
+            assert phrase in sound[key]
+        assert "Макгонагал" not in meaning[key]
 
 
