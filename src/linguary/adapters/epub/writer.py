@@ -175,8 +175,19 @@ a.lg-ref {
   color: inherit;
 }
 
-a.lg-ref sup {
+a.lg-ref sup,
+.lg-num {
   font-size: 0.7em;
+  vertical-align: super;
+  line-height: 0;
+}
+
+.lg-term {
+  font-weight: bold;
+}
+
+.lg-kind {
+  font-style: italic;
 }
 
 p {
@@ -756,7 +767,11 @@ class _ChapterRenderer:
         front = _element("section", {"class": "lg-front"})
         self._append_previously(front, previous)
         chapter = self._request.layout.chapters.get(section.id)
-        if chapter is not None:
+        show_review = (
+            self._request.layout is None
+            or "review" in self._request.layout.features.sections
+        )
+        if chapter is not None and show_review:
             append_review(front, chapter.review, source_language=self._document.source_language)
         if "before_you_read" in self._request.layout.features.sections:
             self._append_before_you_read(front, section)

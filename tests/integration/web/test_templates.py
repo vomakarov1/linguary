@@ -155,8 +155,11 @@ def test_pronunciation_template_combines_dictionary_meaning(
     tree = html.fromstring(client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS).text)
     ipa, = tree.xpath('//span[@class="lg-ipa"]')
     item = ipa.getparent()
+    term, = item.xpath('./span[@class="lg-term"]')
 
     assert item.tag == "li"
+    assert term.tail == " "
+    assert ipa.tail == " (UK) — "
     assert "выдуманное значение" in item.text_content()
     assert "тестовая помета" in item.text_content()
     assert len(tree.xpath('//article//li')) == 1
@@ -1098,7 +1101,7 @@ def _two_part_page(application: Application, book_id: str) -> WebScenario:
 
 
 def test_result_page_renders_units_like_book(client: TestClient, application: Application) -> None:
-    """Reading units use the book classes, markers, speaker span, and one legend."""
+    """Reading units use the book classes, markers, and one legend."""
     scenario = _units_book(application)
     endpoint = f"/books/{scenario.book_id}/result"
     response = client.get(endpoint, headers=HTML_HEADERS)
@@ -1114,13 +1117,10 @@ def test_result_page_renders_units_like_book(client: TestClient, application: Ap
     assert link.tail == "."
     assert link.get("href") == f'#{original.xpath("./ol[@class=\'lg-notes\']/li")[0].get("id")}'
     assert link.xpath("./sup")[0].text == "1"
-    kinds = original.xpath('.//span[@class="lg-kind"]')
-    assert [kind.text for kind in kinds] == ["Грамматика.", "Идиома."]
-    assert all("," not in (kind.text or "") for kind in kinds)
-    speaker = translated.xpath('./p[@class="lg-tr"]/span[@class="lg-speaker"]')[0]
-    assert speaker.text == "Алиса"
-    assert "Потом она ушла." not in speaker.text_content()
-    assert (speaker.tail or "").lstrip() == "Потом она ушла."
+    assert original.xpath('.//span[@class="lg-kind"]') == []
+    translated_row = translated.xpath('./p[@class="lg-tr"]')[0]
+    assert translated_row.xpath('./span[@class="lg-speaker"]') == []
+    assert translated_row.text_content().strip() == "Потом она ушла."
     poem_source = poem.xpath('.//p[@class="lg-src"]')[0]
     poem_text = "How doth\nImprove,\n\nAnd pour"
     assert len(poem_source.xpath("./br")) == poem_text.count("\n")

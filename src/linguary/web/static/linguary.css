@@ -542,8 +542,19 @@ a.lg-ref {
   color: inherit;
 }
 
-a.lg-ref sup {
+a.lg-ref sup,
+.lg-num {
   font-size: 0.7em;
+  vertical-align: super;
+  line-height: 0;
+}
+
+.lg-term {
+  font-weight: bold;
+}
+
+.lg-kind {
+  font-style: italic;
 }
 
 .lg-sec {

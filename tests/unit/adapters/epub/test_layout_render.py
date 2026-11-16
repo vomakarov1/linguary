@@ -369,10 +369,11 @@ def test_each_marker_links_to_note_of_its_unit() -> None:
     assert text[tale_end:cut].strip()
     translation = next(node for node in _elements(units[0], "p") if "lg-tr" in _classes(node))
     assert translation.get("lang") == "ru"
-    speaker = next(node for node in _elements(translation, "span") if "lg-speaker" in _classes(node))
-    assert speaker.text == "Алиса"
+    assert not any("lg-speaker" in _classes(node) for node in _elements(translation, "span"))
     assert "Алиса услышала историю" in _plain(translation)
-    assert speaker.text not in (translation.text or "")
+    tale = next(node for node in _elements(first_notes[0], "span") if "lg-term" in _classes(node))
+    assert tale.text == "tale"
+    assert tale.tail == " — "
 
     second_list = _elements(units[1], "ol")[0]
     assert second_list.get("lang") == "ru"
@@ -389,8 +390,10 @@ def test_each_marker_links_to_note_of_its_unit() -> None:
     ]
     term = next(node for node in _elements(numbered, "span") if "lg-term" in _classes(node))
     assert term.get("lang") == "en"
+    assert term.tail == " "
     ipa = next(node for node in _elements(numbered, "span") if "lg-ipa" in _classes(node))
     assert ipa.text == "/teɪl/"
+    assert ipa.tail == " (UK) — "
     assert "UK" in "".join(numbered.itertext())
     assert _elements(unnumbered, "span") == [] or all(
         "lg-num" not in _classes(node) for node in _elements(unnumbered, "span")
@@ -574,13 +577,26 @@ def test_stylesheet_no_generated_text_or_colors() -> None:
 
 def test_stylesheet_typography_limits_and_page_breaks() -> None:
     """Type stays at least 0.85em, except the marker, and both break properties are set."""
-    for selector, body in re.findall(r"([^{}]+)\{([^}]+)\}", _STYLESHEET):
-        for size in re.findall(r"font-size\s*:\s*([0-9.]+)em", body):
-            value = float(size)
-            if "sup" in selector:
-                assert value == 0.7
-            else:
-                assert value >= 0.85
+    web = (
+        Path(__file__).resolve().parents[4] / "src" / "linguary" / "web" / "static" / "linguary.css"
+    ).read_text(encoding="utf-8")
+    for sheet in (_STYLESHEET, web):
+        marked = False
+        for selector, body in re.findall(r"([^{}]+)\{([^}]+)\}", sheet):
+            compact = re.sub(r"\s+", " ", body)
+            for size in re.findall(r"font-size\s*:\s*([0-9.]+)em", body):
+                value = float(size)
+                if "sup" in selector or ".lg-num" in selector:
+                    assert value == 0.7
+                else:
+                    assert value >= 0.85
+            if ("sup" in selector or ".lg-num" in selector) and "font-size: 0.7em" in compact:
+                assert "vertical-align: super" in compact
+                assert re.search(r"line-height:\s*0(?:;|\s)", compact)
+                marked = True
+        assert marked
+        assert re.search(r"\.lg-term\s*\{[^}]*font-weight\s*:\s*bold\s*;", sheet)
+        assert re.search(r"\.lg-kind\s*\{[^}]*font-style\s*:\s*italic\s*;", sheet)
     assert "page-break-inside" in _STYLESHEET and "break-inside" in _STYLESHEET
     assert "page-break-before" in _STYLESHEET and "break-before" in _STYLESHEET
     assert "border-left" in _STYLESHEET

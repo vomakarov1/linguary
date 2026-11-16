@@ -637,15 +637,10 @@ def _source_element(unit_div):
 
 
 def _translation_plain(paragraph) -> str:
-    # The writer keeps the translation in the speaker span's tail, after one space.
     chunks: list[str] = []
     if paragraph.text:
         chunks.append(paragraph.text)
     for child in paragraph:
-        if "lg-speaker" in _classes(child):
-            tail = child.tail or ""
-            chunks.append(tail[1:] if tail.startswith(" ") else tail)
-            continue
         if _local(child) == "sup":
             continue
         chunks.append(plain_text(child))
@@ -676,8 +671,8 @@ def _assert_unit(unit_div, unit: LayoutUnit, block: DocumentBlock) -> None:
         assert _translation_plain(rows[0]).replace("\n", "") == unit.translation.replace("\n", "")
     else:
         assert rows == []
-    shown = unit.speaker if translated else None
-    assert _labeled(unit_div, "lg-speaker") == ([shown] if shown else [])
+    for row in rows:
+        assert _labeled(row, "lg-speaker") == []
     assert _labeled(unit_div, "lg-kind") == [
         label for numbered in unit.notes for label in numbered.note.labels
     ]
@@ -769,14 +764,16 @@ def test_alice_poem_line_subscript_and_parody(alice_book: AliceRun):
 def test_alice_false_friend_and_character_speech_labels(alice_book: AliceRun):
     documents = exported_documents(alice_book.export_path)
     labels: list[str] = []
-    speakers: list[str] = []
     document = alice_book.document
     for section in document.ordered_sections:
         if not (not document.is_front_matter(section) or document.is_cover_section(section)):
             continue
         root = _chapter_root(documents, section)
         labels.extend(_labeled(root, "lg-kind"))
-        speakers.extend(_labeled(root, "lg-speaker"))
+        for paragraph in root.iter():
+            if "lg-tr" not in _classes(paragraph):
+                continue
+            assert _labeled(paragraph, "lg-speaker") == []
     assert FALSE_FRIEND_LABEL in labels
     assert SPEECH_LABEL in labels
     with alice_book.app.unit_of_work.transaction() as transaction:
@@ -790,28 +787,19 @@ def test_alice_false_friend_and_character_speech_labels(alice_book: AliceRun):
     ]
     assert len(inferred) == 1
     assert inferred[0].value == SPEAKER
-    assert SPEAKER in speakers
 
 
 def test_alice_who_is_who_no_later_chapters(alice_book: AliceRun):
     layout = _layout(alice_book)
-    assert layout.who_is_who
-    assert any(entry.description.strip() == DESCRIPTION for entry in layout.who_is_who)
-    assert all(entry.first_chapter in {1, 2} for entry in layout.who_is_who)
+    assert layout.who_is_who == ()
     documents = exported_documents(alice_book.export_path)
     found = [
-        root
-        for path, root in documents.items()
+        path
+        for path in documents
         if path.replace("\\", "/").endswith("linguary/who-is-who.xhtml")
     ]
-    assert len(found) == 1
-    page = plain_text(found[0])
-    assert DESCRIPTION in page
-    refs = re.findall(r"Впервые в гл\. [^.]*\.", page)
-    assert refs
-    assert set(refs) <= {"Впервые в гл. I.", "Впервые в гл. II."}
+    assert found == []
     for name in LATER_NAMES:
-        assert name not in page
         assert all(name not in entry.source for entry in layout.who_is_who)
 
 

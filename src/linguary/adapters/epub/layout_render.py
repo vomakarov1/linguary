@@ -216,14 +216,10 @@ def _append_translation(
     state: _SectionState,
     target_language: str,
 ) -> None:
-    """Translation paragraph. The speaker name is its own span."""
+    """Translation paragraph. The speaker name is not written into it."""
     paragraph = _sub(
         reading, "p", {"class": "lg-tr", "lang": target_language}
     )
-    if unit.speaker:
-        speaker = _sub(paragraph, "span", {"class": "lg-speaker"})
-        speaker.text = unit.speaker
-        speaker.tail = " "
     assert unit.translation is not None
     for segment in translation_segments(unit.translation, block):
         if isinstance(segment, str):
@@ -258,13 +254,18 @@ def _append_notes(
         if note.term:
             term = _sub(item, "span", {"class": "lg-term", "lang": source_language})
             term.text = note.term
-            term.tail = " "
+            term.tail = " " if note.ipa or not body else " — "
         if note.ipa:
             pronunciation = _sub(item, "span", {"class": "lg-ipa"})
             pronunciation.text = _slashed(note.ipa)
-            pronunciation.tail = (
-                f" ({note.variant.upper()})" if note.variant else " "
-            )
+            if note.term and body:
+                pronunciation.tail = (
+                    f" ({note.variant.upper()}) — " if note.variant else " — "
+                )
+            else:
+                pronunciation.tail = (
+                    f" ({note.variant.upper()})" if note.variant else " "
+                )
         previous: etree._Element | None = None
         for piece in body:
             paragraph = _sub(item, "p")

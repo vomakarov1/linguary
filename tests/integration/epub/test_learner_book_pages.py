@@ -121,7 +121,11 @@ def test_ipa_key_omitted_when_no_ipa(tmp_path: Path) -> None:
 
 def test_chapter_front_order(tmp_path: Path) -> None:
     """One front section, in order, and only on a content chapter that has something to say."""
-    path = _export(tmp_path, "front")
+    path = _export(
+        tmp_path,
+        "front",
+        feature_sections=frozenset({"before_you_read", "review"}),
+    )
     chapter = _chapter_section(_document(path, "chapter2.xhtml"))
     assert chapter[0].get("class") == "lg-front"
     front = chapter[0]
@@ -144,7 +148,7 @@ def test_chapter_front_order(tmp_path: Path) -> None:
     assert _BYR_EXPRESSION in before_text
     assert _BYR_EXPLANATION in before_text
 
-    a2_path = _export(tmp_path, "front-a2", feature_sections=frozenset())
+    a2_path = _export(tmp_path, "front-a2", feature_sections=frozenset({"review"}))
     a2_chapter = _chapter_section(_document(a2_path, "chapter2.xhtml"))
     a2_front = a2_chapter[0]
     assert [child.get("class") for child in a2_front] == [
@@ -152,6 +156,18 @@ def test_chapter_front_order(tmp_path: Path) -> None:
         "lg-review",
     ]
     assert "Before You Read" not in "".join(a2_chapter.itertext())
+
+    hidden = _export(
+        tmp_path,
+        "front-no-review",
+        feature_sections=frozenset({"before_you_read"}),
+    )
+    hidden_front = _chapter_section(_document(hidden, "chapter2.xhtml"))[0]
+    assert [child.get("class") for child in hidden_front] == [
+        "linguary-previously",
+        "linguary-before-you-read",
+    ]
+    assert "Повторим" not in "".join(hidden_front.itertext())
 
     third_root = _document(path, "chapter3.xhtml")
     assert not _fronts(third_root)
