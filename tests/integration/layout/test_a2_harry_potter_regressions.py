@@ -20,6 +20,8 @@ from linguary.adapters.epub import EpubExportWriter
 from linguary.adapters.epub.splitting import segment_text
 from linguary.application.analysis_merge import normalize_a2_dialogue_response
 from linguary.application.layout.book import BookLayout, LayoutInputs, build_book_layout
+from linguary.application.layout.units import LayoutUnit
+from linguary.application.layout.who_is_who import WhoEntry, book_who_is_who
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
     PedagogicalAnalysisResponse,
@@ -171,7 +173,7 @@ _REGRESSED = (
     "yvonne",
     "car",
 )
-_EXCEPTIONS = ("shoo", "up", "winked", "boa", "a-what", "no-why", "nearly")
+_EXCEPTIONS = ("shoo", "up", "boa", "a-what", "no-why", "nearly")
 _SHOWN_SPEAKERS = {
     "nasty": "миссис Дёрсли",
     "oh-yes": "мистер Дёрсли",
@@ -179,6 +181,7 @@ _SHOWN_SPEAKERS = {
     "demanded": "тётя Петуния",
     "car": "дядя Вернон",
 }
+_UNTRANSLATED_SPEAKERS = {"shoo": "мистер Дёрсли"}
 _HIDDEN_SPEAKERS = (
     "good-luck",
     "hagrid-line",
@@ -188,7 +191,12 @@ _HIDDEN_SPEAKERS = (
     "snapped",
     "yvonne",
     "motorbikes",
-    *_EXCEPTIONS,
+    "winked",
+    "up",
+    "boa",
+    "a-what",
+    "no-why",
+    "nearly",
 )
 
 
@@ -331,7 +339,13 @@ _LINES: tuple[_Line, ...] = (
         "на своём сиденье и заорал на Гарри, и его лицо было похоже на огромную "
         "свёклу с усами: \u00abМОТОЦИКЛЫ НЕ ЛЕТАЮТ!\u00bb",
     ),
-    _Line("winked", "ch2", _WINKED, BlockTreatment.READ_AS_IS),
+    _Line(
+        "winked",
+        "ch2",
+        _WINKED,
+        BlockTreatment.GLOSSARY_ONLY,
+        hint=("winked", "подмигнула", None),
+    ),
     _Line("boa", "ch2", _BOA, BlockTreatment.READ_AS_IS),
     _Line("piers", "ch3", _PIERS, BlockTreatment.READ_AS_IS),
 )
@@ -353,6 +367,8 @@ class _Case:
     normalized: PedagogicalAnalysisResponse
     layout: BookLayout
     pages: tuple[etree._Element, ...]
+    analyses: tuple[ChapterAnalysis, ...]
+    epub_path: Path
 
 
 def _paragraph(
@@ -466,9 +482,11 @@ def _facts(blocks: Mapping[str, DocumentBlock]) -> dict[str, tuple[ContextFact, 
 
     ``Oh, yes`` was explicit in the run. It is inferred here so ``Mr. Dursley``
     has to be shown on a translated opening line; the stored inferred ``Mr Dursley``
-    lines were left untranslated.
+    lines were left untranslated. ``Shoo!`` stays glossary-only, so its inferred
+    name is a «Говорит …» note rather than a speaker span.
     """
     nasty = _anchor(blocks["nasty"], blocks["nasty"].text)
+    shoo = _anchor(blocks["shoo"], blocks["shoo"].text)
     oh_yes = _anchor(blocks["oh-yes"], blocks["oh-yes"].text)
     good_luck = _anchor(blocks["good-luck"], blocks["good-luck"].text)
     good_luck_remark = _anchor(blocks["good-luck"], "he murmured")
@@ -480,6 +498,7 @@ def _facts(blocks: Mapping[str, DocumentBlock]) -> dict[str, tuple[ContextFact, 
     return {
         "ch1": (
             _fact("speaker-petunia", "миссис Дёрсли", "inferred", nasty, (nasty,)),
+            _fact("speaker-shoo", "мистер Дёрсли", "inferred", shoo, (shoo,)),
             _fact("speaker-mr-dursley", "мистер Дёрсли", "inferred", oh_yes, (oh_yes,)),
             _fact("speaker-dumbledore", "Дамблдор", "explicit", good_luck, (good_luck,)),
             _fact("speaker-dumbledore-dup", "Дамблдор", "inferred", good_luck_remark, (good_luck_remark,)),
@@ -676,7 +695,16 @@ def _assemble(tmp_path: Path) -> _Case:
             layout=layout,
         )
     )
-    return _Case(document, blocks, section_ids, normalized, layout, _read_pages(target))
+    return _Case(
+        document,
+        blocks,
+        section_ids,
+        normalized,
+        layout,
+        _read_pages(target),
+        analyses,
+        target,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -752,16 +780,6 @@ def _translation(unit: etree._Element) -> str | None:
     return "".join(parts).strip()
 
 
-def _speaker(unit: etree._Element) -> str | None:
-    paragraph = _child(unit, "lg-tr")
-    if paragraph is None:
-        return None
-    speaker = _child(paragraph, "lg-speaker")
-    if speaker is None or not speaker.text:
-        return None
-    return speaker.text.strip()
-
-
 def _mode(case: _Case, key: str) -> BlockTreatment:
     block_id = case.blocks[key].id
     for item in case.normalized.treatment_plan:
@@ -770,34 +788,64 @@ def _mode(case: _Case, key: str) -> BlockTreatment:
     raise AssertionError(key)
 
 
-def _who_page(pages: Sequence[etree._Element]) -> etree._Element:
+def _layout_units(case: _Case, key: str) -> tuple[LayoutUnit, ...]:
+    block = case.blocks[key]
+    return case.layout.chapters[block.section_id].units[block.id]
+
+
+def _speaker_notes(units: Sequence[LayoutUnit]) -> tuple[str, ...]:
+    """Bodies of unnumbered «Говорит …» notes. Translated units have none."""
+    return tuple(
+        item.note.body[0]
+        for unit in units
+        for item in unit.notes
+        if item.note.origin == "speaker"
+    )
+
+
+def _entry_tail(entry: WhoEntry) -> str:
+    """The card tail the who-is-who page used to print after the source name."""
+    tail = f"\u2014 {entry.translation}."
+    if entry.description.strip():
+        tail += f" {entry.description.strip()}"
+    return tail
+
+
+def _who_entries(
+    document: CanonicalDocument,
+    analyses: Sequence[ChapterAnalysis],
+) -> dict[str, WhoEntry]:
+    entries = book_who_is_who(document, analyses, ())
+    return {entry.source: entry for entry in entries}
+
+
+def _assert_who_page_absent(path: Path, pages: Sequence[etree._Element]) -> None:
+    assert not any(name.endswith("who-is-who.xhtml") for name in _archive_names(path))
+    assert not any(
+        _local(element) == "section" and element.get("id") == "who-is-who"
+        for page in pages
+        for element in page.iter()
+    )
+
+
+def _assert_no_speaker_span(pages: Sequence[etree._Element]) -> None:
     for page in pages:
         for element in page.iter():
-            if _local(element) == "section" and element.get("id") == "who-is-who":
-                return element
-    raise AssertionError("book who-is-who page is missing")
-
-
-def _who_cards(page: etree._Element) -> dict[str, tuple[str, str]]:
-    cards: dict[str, tuple[str, str]] = {}
-    for element in page.iter():
-        if _local(element) != "li":
-            continue
-        head = _child(element, "lg-head")
-        if head is None or not head.text:
-            continue
-        reference = ""
-        for child in element:
-            if _has_class(child, "lg-src-ref") and child.text:
-                reference = child.text.strip()
-        cards[head.text.strip()] = ((head.tail or "").strip(), reference)
-    return cards
+            if _local(element) != "p" or not _has_class(element, "lg-tr"):
+                continue
+            assert not any(
+                _local(child) == "span" and _has_class(child, "lg-speaker")
+                for child in element.iter()
+            )
 
 
 def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouched(
     harry_regression: _Case,
 ) -> None:
-    """Ten light main blocks become TRANSLATE; seven staged exceptions do not."""
+    """Ten light main blocks become TRANSLATE; six staged exceptions do not.
+
+    ``It winked.`` keeps the glossary hint and is not an unaided READ_AS_IS line.
+    """
     for key in _REGRESSED:
         assert _mode(harry_regression, key) is BlockTreatment.TRANSLATE
         unit = _unit(harry_regression.pages, _BY_KEY[key].text)
@@ -815,6 +863,12 @@ def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouch
         assert _mode(harry_regression, key) is not BlockTreatment.TRANSLATE
         unit = _unit(harry_regression.pages, _BY_KEY[key].text)
         assert _translation(unit) is None
+    assert "winked" not in _EXCEPTIONS
+    assert _mode(harry_regression, "winked") is BlockTreatment.GLOSSARY_ONLY
+    assert _mode(harry_regression, "winked") is not BlockTreatment.READ_AS_IS
+    winked = _unit(harry_regression.pages, _WINKED)
+    assert _translation(winked) is None
+    assert _note_terms(winked) == ["to wink"]
 
 
 def test_a2_review_fixes_prompt_and_speaker_rules(harry_regression: _Case) -> None:
@@ -908,25 +962,50 @@ def test_a2_review_fixes_prompt_and_speaker_rules(harry_regression: _Case) -> No
 def test_harry_potter_epub_has_russian_inferred_speakers_only_on_opening_dialogues(
     harry_regression: _Case,
 ) -> None:
-    """Inferred opening lines carry a Russian name; other anchors do not."""
-    seen: list[str] = []
-    for page in harry_regression.pages:
-        for element in page.iter():
-            if _local(element) == "span" and _has_class(element, "lg-speaker"):
-                assert element.text is not None
-                assert _LATIN.search(element.text) is None
-                seen.append(element.text.strip())
-    assert seen == [
-        "миссис Дёрсли",
-        "мистер Дёрсли",
-        "Хагрид",
-        "тётя Петуния",
-        "дядя Вернон",
+    """Inferred opening lines keep a Russian name on the reading unit.
+
+    The translation paragraph has no speaker span. An untranslated line keeps
+    «Говорит …» in its notes; a translated line does not repeat the name there.
+    """
+    _assert_no_speaker_span(harry_regression.pages)
+    found = [
+        (line.key, unit.speaker)
+        for line in _LINES
+        for unit in _layout_units(harry_regression, line.key)
+        if unit.speaker is not None
+    ]
+    assert found == [
+        ("nasty", "миссис Дёрсли"),
+        ("shoo", "мистер Дёрсли"),
+        ("oh-yes", "мистер Дёрсли"),
+        ("giant", "Хагрид"),
+        ("demanded", "тётя Петуния"),
+        ("car", "дядя Вернон"),
     ]
     for key, name in _SHOWN_SPEAKERS.items():
-        assert _speaker(_unit(harry_regression.pages, _BY_KEY[key].text)) == name
+        units = _layout_units(harry_regression, key)
+        assert [unit.speaker for unit in units] == [name]
+        assert all(unit.translation for unit in units)
+        assert _speaker_notes(units) == ()
+        paragraph = _child(_unit(harry_regression.pages, _BY_KEY[key].text), "lg-tr")
+        assert paragraph is not None
+        assert _child(paragraph, "lg-speaker") is None
+        assert _LATIN.search(name) is None
+    for key, name in _UNTRANSLATED_SPEAKERS.items():
+        units = _layout_units(harry_regression, key)
+        assert [unit.speaker for unit in units] == [name]
+        assert all(unit.translation is None for unit in units)
+        assert _speaker_notes(units) == (f"Говорит {name}",)
+        rendered = _unit(harry_regression.pages, _BY_KEY[key].text)
+        assert _child(rendered, "lg-tr") is None
+        notes = _child(rendered, "lg-notes")
+        assert notes is not None
+        assert f"Говорит {name}" in _text(notes)
+        assert _LATIN.search(name) is None
     for key in _HIDDEN_SPEAKERS:
-        assert _speaker(_unit(harry_regression.pages, _BY_KEY[key].text)) is None
+        units = _layout_units(harry_regression, key)
+        assert all(unit.speaker is None for unit in units)
+        assert _speaker_notes(units) == ()
 
 
 def test_pottermore_is_front_matter_and_chapter_one_is_numbered_first_with_harry_entry(
@@ -944,38 +1023,41 @@ def test_pottermore_is_front_matter_and_chapter_one_is_numbered_first_with_harry
         for key, section_id in harry_regression.section_ids.items()
     }
     assert numbers == {"promo": None, "ch1": 1, "ch2": 2, "ch3": 3}
-    cards = _who_cards(_who_page(harry_regression.pages))
-    tail, reference = cards["Harry Potter"]
-    assert tail == f"\u2014 Гарри Поттер. {_HARRY_DESCRIPTION}"
-    assert reference == "Впервые в гл. I."
-    assert cards["Piers"][1] == "Впервые в гл. III."
-    assert _PROMO_HARRY_DESCRIPTION not in _text(_who_page(harry_regression.pages))
+    assert harry_regression.layout.who_is_who == ()
+    _assert_who_page_absent(harry_regression.epub_path, harry_regression.pages)
+    cards = _who_entries(document, harry_regression.analyses)
+    harry = cards["Harry Potter"]
+    assert _entry_tail(harry) == f"\u2014 Гарри Поттер. {_HARRY_DESCRIPTION}"
+    assert harry.first_chapter == 1
+    assert cards["Piers"].first_chapter == 3
+    assert all(_PROMO_HARRY_DESCRIPTION not in entry.description for entry in cards.values())
 
 
 def test_who_is_who_cards_contain_no_english_descriptions(harry_regression: _Case) -> None:
     """A card description is Russian, or absent when the first one was English.
 
-    Bare `Dursley` is a family surname, not a character card.
+    Bare `Dursley` is a family surname, not a character card. The book layout
+    leaves the list empty and does not write `who-is-who.xhtml`.
     """
-    cards = _who_cards(_who_page(harry_regression.pages))
-    page_text = _text(_who_page(harry_regression.pages))
+    assert harry_regression.layout.who_is_who == ()
+    _assert_who_page_absent(harry_regression.epub_path, harry_regression.pages)
+    cards = _who_entries(harry_regression.document, harry_regression.analyses)
+    descriptions = "\n".join(entry.description for entry in cards.values())
     for description in _ENGLISH_DESCRIPTIONS:
-        assert description not in page_text
-    assert _DUDLEY_LATER_DESCRIPTION not in page_text
-    assert _HARRY_LATER_DESCRIPTION not in page_text
-    assert cards["Dudley"][0] == "\u2014 Дадли."
+        assert description not in descriptions
+    assert _DUDLEY_LATER_DESCRIPTION not in descriptions
+    assert _HARRY_LATER_DESCRIPTION not in descriptions
+    assert _entry_tail(cards["Dudley"]) == "\u2014 Дадли."
     assert "Dursley" not in cards
-    assert cards["Mrs Dursley"][0] == f"\u2014 миссис Дёрсли. {_MRS_DURSLEY_DESCRIPTION}"
-    assert cards["Vernon"][0] == f"\u2014 Вернон. {_VERNON_DESCRIPTION}"
-    assert cards["Piers"][0] == f"\u2014 Пирз. {_PIERS_DESCRIPTION}"
-    for tail, _reference in cards.values():
-        description = tail.split(". ", 1)[1] if ". " in tail else ""
-        assert description == "" or _LATIN.search(description) is None
-    harry = next(entry for entry in harry_regression.layout.who_is_who if entry.source == "Harry Potter")
-    dudley = next(entry for entry in harry_regression.layout.who_is_who if entry.source == "Dudley")
-    assert harry.first_chapter == 1
-    assert harry.description == _HARRY_DESCRIPTION
-    assert dudley.description == ""
+    assert _entry_tail(cards["Mrs Dursley"]) == f"\u2014 миссис Дёрсли. {_MRS_DURSLEY_DESCRIPTION}"
+    assert _entry_tail(cards["Vernon"]) == f"\u2014 Вернон. {_VERNON_DESCRIPTION}"
+    assert _entry_tail(cards["Piers"]) == f"\u2014 Пирз. {_PIERS_DESCRIPTION}"
+    for entry in cards.values():
+        assert entry.description == "" or _LATIN.search(entry.description) is None
+        assert entry.name_method is None
+    assert cards["Harry Potter"].first_chapter == 1
+    assert cards["Harry Potter"].description == _HARRY_DESCRIPTION
+    assert cards["Dudley"].description == ""
 
 
 _CLOAK_FIRST = (
@@ -1329,9 +1411,13 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
         )
     )
     assert layout.chapters[chapter_id].who_is_who == ()
+    assert layout.who_is_who == ()
+    assert all(chapter.review == () for chapter in layout.chapters.values())
     assert "before_you_read" not in layout.features.sections
     assert "who_is_who" not in layout.features.sections
-    who_sources = [entry.source for entry in layout.who_is_who]
+    assert "review" not in layout.features.sections
+    entries = book_who_is_who(document, (analysis,), ())
+    who_sources = [entry.source for entry in entries]
     assert who_sources.count("Mrs Dursley") == 1
     assert "Petunia" not in who_sources
     assert who_sources.count("Lily Potter") == 1
@@ -1339,7 +1425,7 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
     assert "the Potters" not in who_sources
     assert "Dursley" not in who_sources
     assert "Howard" not in who_sources
-    assert all(entry.name_method is None for entry in layout.who_is_who)
+    assert all(entry.name_method is None for entry in entries)
 
     target = tmp_path / "sixteen-remarks.epub"
     EpubExportWriter().write(
@@ -1371,19 +1457,24 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
         assert dropped not in navigation
 
     pages = _read_pages(target)
+    _assert_who_page_absent(target, pages)
     assert not any(
-        _has_class(element, "lg-who") or _has_class(element, "lg-method")
+        _has_class(element, "lg-who")
+        or _has_class(element, "lg-method")
+        or _has_class(element, "lg-review")
         for page in pages
         for element in page.iter()
     )
+    rendered = "\n".join(_text(page) for page in pages)
+    assert "Повторим" not in rendered
+    assert "Кто есть кто" not in rendered
+    assert "звучание и смысл" not in rendered
+    assert "вольный перевод" not in rendered
+    assert "Распространённое мужское имя" not in rendered
+    assert "неуверенно называет" not in rendered
     chapter_page = _page_with(pages, "quiet street tonight")
     assert not any(_has_class(element, "linguary-before-you-read") for element in chapter_page.iter())
-    who_text = _text(_who_page(pages))
-    assert "звучание и смысл" not in who_text
-    assert "вольный перевод" not in who_text
-    assert "Распространённое мужское имя" not in who_text
-    assert "неуверенно называет" not in who_text
-    cards = _who_cards(_who_page(pages))
+    cards = set(who_sources)
     assert "Mrs Dursley" in cards
     assert "Petunia" not in cards
     assert "Lily Potter" in cards
@@ -1427,3 +1518,491 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
     assert "(3–5 предложений)" in templates["narrative_analysis"]
     assert "3–5" in templates["analysis"]
     assert "3–5" in templates["fragment"]
+
+
+_LETTERS = "The Letters from No One"
+_LETTERS_RU = "Письма ниоткуда"
+_FANCY = f"{_OPEN}Fancy seeing you here, Professor McGonagall.{_CLOSE}"
+_FANCY_RU = "\u2014 Вот так встреча, профессор Макгонагал."
+_GROANED = "Harry groaned."
+_GROANED_RU = "Гарри охнул."
+_CHUCKLED = "Uncle Vernon chuckled."
+_CHUCKLED_RU = "Дядя Вернон усмехнулся."
+_WINKED_RU = "Она подмигнула."
+_RUMBLING = "A low rumbling sound had broken the silence around them."
+_NOT_KNOWING = (
+    "not knowing he was special, not knowing he was famous, not knowing he would be "
+    "woken in a few hours by Mrs Dursley's scream as she opened the front door to put "
+    "out the milk bottles"
+)
+_THANKS = "thank you very much"
+_FIVE_WORDS = "silence around them at night"
+_SIX_WORDS = "silence around them at the night"
+_NOTE_PARAGRAPH = " ".join((_RUMBLING, _NOT_KNOWING, _THANKS, _FIVE_WORDS, _SIX_WORDS))
+_VERBS = "They sniggered then nodded vigorously and spoke stiffly."
+_CHAPTER_NUMBER = "\u2014 CHAPTER THREE \u2014"
+_DROPPED_LABELS = ("Грамматика.", "Идиома.", "Реалия.", "Смысл.")
+_SUPERSCRIPTS = (
+    "a.lg-ref sup,\n"
+    ".lg-num {\n"
+    "  font-size: 0.7em;\n"
+    "  vertical-align: super;\n"
+    "  line-height: 0;\n"
+    "}"
+)
+_TERM_WEIGHT = ".lg-term {\n  font-weight: bold;\n}"
+
+
+def _rendered_heading(pages: Sequence[etree._Element], snippet: str) -> etree._Element:
+    """A heading unit. Headings are not marked ``lg-src``."""
+    matches: list[etree._Element] = []
+    for page in pages:
+        for element in page.iter():
+            if _local(element) != "div" or not _has_class(element, "lg-unit"):
+                continue
+            for child in element:
+                if _local(child) in {"h1", "h2", "h3", "h4"} and snippet in _source_text(child):
+                    matches.append(element)
+                    break
+    assert len(matches) == 1, snippet
+    return matches[0]
+
+
+def _term_tails(unit: etree._Element) -> list[tuple[str, str | None]]:
+    """``lg-term`` text and the tail that separates it from the note paragraph."""
+    found: list[tuple[str, str | None]] = []
+    for notes in unit.iter():
+        if _local(notes) != "ol" or not _has_class(notes, "lg-notes"):
+            continue
+        for item in notes:
+            if _local(item) != "li":
+                continue
+            term = _child(item, "lg-term")
+            if term is None or not any(_local(child) == "p" for child in item):
+                continue
+            found.append((term.text or "", term.tail))
+    return found
+
+
+def test_fifteen_ux_polish_and_a2_reader_fixes_end_to_end(tmp_path: Path) -> None:
+    """One export covers the fifteen UX remarks and the A2 reader findings.
+
+    No model call. Elementary lines stay READ_AS_IS. Short B1+ lines, including
+    ``It winked.``, leave that mode. The book list is empty; card filtering is
+    the direct ``book_who_is_who`` result.
+    """
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.explained_expressions import _same_word
+    from linguary.domain.content_plan import (
+        ContentEvidence,
+        ContentPlan,
+        Difficulty,
+        HelpEvidence,
+        artifact_key,
+    )
+    from linguary.domain.name_translation import NameTranslationPolicy
+
+    assert _same_word("shoo", "shook") is False
+
+    chapter_id = "sec-fifteen"
+    resource = "hp01_ch003_en-gb.html"
+    numbered = _heading(chapter_id, resource, _CHAPTER_NUMBER)
+    title = DocumentBlock.create(
+        document_id=_BOOK_ID,
+        section_id=chapter_id,
+        type=BlockType.HEADING,
+        order=1,
+        text=_LETTERS,
+        source_reference=SourceReference(resource, "/body/h1[2]"),
+    )
+    paragraph_texts = (
+        _WINKED,
+        _FANCY,
+        _GROANED,
+        _CHUCKLED,
+        _UP,
+        _A_WHAT,
+        _NEARLY,
+        _SHOO,
+        _NO_WHY,
+        _HAGRID_LINE,
+        _NOTE_PARAGRAPH,
+        _VERBS,
+    )
+    paragraphs = tuple(
+        _feedback_block(chapter_id, resource, index + 2, index + 1, text)
+        for index, text in enumerate(paragraph_texts)
+    )
+    (
+        winked,
+        fancy,
+        groaned,
+        chuckled,
+        up,
+        a_what,
+        nearly,
+        shoo,
+        no_why,
+        hagrid,
+        notes_block,
+        verbs,
+    ) = paragraphs
+    story = (
+        numbered,
+        title,
+        winked,
+        fancy,
+        groaned,
+        chuckled,
+        up,
+        a_what,
+        nearly,
+        shoo,
+        no_why,
+        hagrid,
+        notes_block,
+        verbs,
+    )
+    initial = {
+        hagrid.id: BlockTreatment.TRANSLATE,
+        notes_block.id: BlockTreatment.TRANSLATE,
+        verbs.id: BlockTreatment.GLOSSARY_ONLY,
+    }
+    point = (RequiredPoint("p-fifteen", "Объяснить эту конструкцию."),)
+    normalized = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=tuple(
+                TreatmentPlanItemResponse(
+                    block.id,
+                    initial.get(block.id, BlockTreatment.READ_AS_IS),
+                )
+                for block in story
+            ),
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d-from",
+                    (QuotedSourceAnchorResponse(title.id, "from no one"),),
+                    title.id,
+                    "grammar",
+                    "useful",
+                    "explanation",
+                    point,
+                ),
+                QuotedDifficultyResponse(
+                    "d-relieved",
+                    (QuotedSourceAnchorResponse(hagrid.id, "sounding relieved"),),
+                    hagrid.id,
+                    "grammar",
+                    "useful",
+                    "explanation",
+                    point,
+                ),
+            ),
+        ),
+        story,
+        {block.id: block.id for block in story},
+        reader_level="a2",
+        english_help=False,
+    )
+    modes = {item.source_block_id: item.treatment for item in normalized.treatment_plan}
+    assert modes == {
+        numbered.id: BlockTreatment.READ_AS_IS,
+        title.id: BlockTreatment.TRANSLATE,
+        winked.id: BlockTreatment.TRANSLATE,
+        fancy.id: BlockTreatment.TRANSLATE,
+        groaned.id: BlockTreatment.TRANSLATE,
+        chuckled.id: BlockTreatment.TRANSLATE,
+        up.id: BlockTreatment.READ_AS_IS,
+        a_what.id: BlockTreatment.READ_AS_IS,
+        nearly.id: BlockTreatment.READ_AS_IS,
+        shoo.id: BlockTreatment.READ_AS_IS,
+        no_why.id: BlockTreatment.READ_AS_IS,
+        hagrid.id: BlockTreatment.TRANSLATE,
+        notes_block.id: BlockTreatment.TRANSLATE,
+        verbs.id: BlockTreatment.GLOSSARY_ONLY,
+    }
+    assert normalized.difficulties == ()
+
+    sniggered = GlossaryHint(
+        "sniggered",
+        "хихикнули, засмеялись с ехидством",
+        "Snigger — хихикать, смеяться с ехидством",
+    )
+    nodded = GlossaryHint("nodded", "кивнула", "Nod — кивнуть")
+    vigorously = GlossaryHint("vigorously", "энергично", "Vigorously — энергично, сильно")
+    stiffly = GlossaryHint("stiffly", "сухо", "Помета к глаголу речи: сказала сдержанно")
+    stiffly_start = verbs.text.index("stiffly")
+    stiffly_anchor = SourceAnchor(
+        verbs.id, stiffly_start, stiffly_start + len("stiffly"), "stiffly"
+    )
+    label_kinds = (
+        ("d-grammar", "grammar"),
+        ("d-idiom", "idiom"),
+        ("d-realia", "cultural_reference"),
+        ("d-sense", "semantic_relation"),
+        ("d-wordplay", "wordplay"),
+    )
+    difficulties = tuple(
+        Difficulty(
+            difficulty_id,
+            (stiffly_anchor,),
+            verbs.id,
+            kind,
+            "useful",
+            "explanation",
+            (RequiredPoint(f"p-{difficulty_id}", "Подсказка к слову stiffly."),),
+        )
+        for difficulty_id, kind in label_kinds
+    )
+    plan = ContentPlan(difficulties=difficulties)
+    hint_content = {
+        "original": stiffly.original,
+        "translation": stiffly.translation,
+        "note": stiffly.note,
+    }
+    hint_key = artifact_key("glossary_hint.note", verbs.id, hint_content)
+    evidence = tuple(
+        HelpEvidence(
+            difficulty.id,
+            difficulty.required_points[0].id,
+            "glossary_hint.note",
+            verbs.id,
+            hint_key,
+            stiffly.note or "",
+        )
+        for difficulty in difficulties
+    )
+    rumbling_hint = GlossaryHint(
+        _RUMBLING, "Низкий рокот нарушил тишину.", "Звук шёл из-за двери."
+    )
+    passage_hint = GlossaryHint(
+        _NOT_KNOWING, "не зная, что он особенный", "Гарри ещё не знает о себе."
+    )
+    thanks_hint = GlossaryHint(
+        _THANKS,
+        "уж поверьте",
+        "Ироничная присказка со значением \u00abУж Поверьте\u00bb, а не благодарность.",
+    )
+    five_hint = GlossaryHint(_FIVE_WORDS, "коротко", "Пояснение к короткой фразе.")
+    six_hint = GlossaryHint(_SIX_WORDS, "чуть длиннее", "Пояснение к фразе из шести слов.")
+    russians = {
+        title.id: _LETTERS_RU,
+        winked.id: _WINKED_RU,
+        fancy.id: _FANCY_RU,
+        groaned.id: _GROANED_RU,
+        chuckled.id: _CHUCKLED_RU,
+        hagrid.id: _BY_KEY["hagrid-line"].russian,
+        notes_block.id: "Полный перевод абзаца.",
+    }
+    results = {
+        block.id: BlockProcessingResult(block.id, BlockTreatment.READ_AS_IS)
+        for block in (numbered, up, a_what, nearly, shoo, no_why)
+    }
+    results[verbs.id] = BlockProcessingResult(
+        verbs.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(sniggered, nodded, vigorously, stiffly),
+        content_evidence=ContentEvidence(plan.sha256, evidence),
+    )
+    for block_id, russian in russians.items():
+        hints = ()
+        if block_id == notes_block.id:
+            hints = (rumbling_hint, passage_hint, thanks_hint, five_hint, six_hint)
+        assert russian is not None
+        results[block_id] = BlockProcessingResult(
+            block_id,
+            BlockTreatment.TRANSLATE,
+            translated_text=russian,
+            glossary_hints=hints,
+        )
+    analysis_id = "analysis-fifteen"
+    people = (
+        ("cine-camera", "кинокамера", "камера для съёмки"),
+        ("crutches", "костыли", "опоры"),
+        ("cupboard", "шкаф", "шкаф под лестницей"),
+        ("racing bike", "гоночный велосипед", "велосипед, на котором ездит Гарри"),
+        ("Sirius Black", "Сириус Блэк", "Крёстный Гарри; в этой главе упоминается впервые"),
+    )
+    analysis = ChapterAnalysis.create(
+        id=analysis_id,
+        section_id=chapter_id,
+        treatment_plan=TreatmentPlan.of_treatments(
+            chapter_id,
+            tuple((block.id, modes[block.id]) for block in story),
+        ),
+        translation_instructions="Keep the glossary names.",
+        chapter_summary="Short lines, a chapter title, and footnotes.",
+        expected_block_ids=tuple(block.id for block in story),
+        glossary_candidates=tuple(
+            _candidate(analysis_id, source, translation, description)
+            for source, translation, description in people
+        ),
+        content_plan=plan,
+    )
+    document = CanonicalDocument(
+        id=_BOOK_ID,
+        metadata=BookMetadata(title="Harry Potter and the Philosopher's Stone"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            DocumentSection(
+                id=chapter_id,
+                document_id=_BOOK_ID,
+                title="Chapter 3 - The Letters from No One",
+                order=0,
+                source_resource_path=resource,
+                blocks=story,
+            ),
+        ),
+    )
+    kept = book_who_is_who(document, (analysis,), ())
+    assert [entry.source for entry in kept] == ["Sirius Black"]
+    assert kept[0].translation == "Сириус Блэк"
+    assert kept[0].description == "Крёстный Гарри"
+    assert kept[0].first_chapter == 1
+    assert "в этой главе упоминается впервые" not in kept[0].description
+    for source, _translation_text, _description in people[:4]:
+        assert source not in {entry.source for entry in kept}
+
+    layout = build_book_layout(
+        LayoutInputs(
+            document=document,
+            results=results,
+            analyses=(analysis,),
+            concepts=(),
+            reader_level="a2",
+            english_help=False,
+        )
+    )
+    assert layout.who_is_who == ()
+    assert layout.chapters[chapter_id].who_is_who == ()
+    assert layout.chapters[chapter_id].review == ()
+    assert "who_is_who" not in layout.features.sections
+    assert "review" not in layout.features.sections
+
+    def one(block_id: str) -> LayoutUnit:
+        units = layout.chapters[chapter_id].units[block_id]
+        assert len(units) == 1
+        return units[0]
+
+    footnote = [item.note for item in one(notes_block.id).notes]
+    assert [note.term for note in footnote] == [
+        None,
+        None,
+        _THANKS,
+        _FIVE_WORDS,
+        None,
+    ]
+    assert footnote[0].body == ("Звук шёл из-за двери.",)
+    assert "Низкий рокот" not in "".join(footnote[0].body)
+    assert footnote[1].body == ("Гарри ещё не знает о себе.",)
+    assert "не зная, что он особенный" not in "".join(footnote[1].body)
+    assert footnote[2].body == (
+        "Ироничная присказка со значением \u00abУж Поверьте\u00bb, а не благодарность.",
+    )
+    assert "".join(footnote[2].body).casefold().count("уж поверьте") == 1
+    assert footnote[3].body == ("коротко", "Пояснение к короткой фразе.")
+    assert footnote[4].body == ("Пояснение к фразе из шести слов.",)
+    assert "чуть длиннее" not in "".join(footnote[4].body)
+    assert _RUMBLING not in "".join(footnote[0].body)
+    assert _NOT_KNOWING not in "".join(footnote[1].body)
+
+    verb_notes = [item.note for item in one(verbs.id).notes]
+    assert [note.term for note in verb_notes] == ["to snigger", "to nod", "vigorously", "stiffly"]
+    assert verb_notes[0].body == ("хихикать, засмеяться с ехидством",)
+    assert "Snigger" not in "".join(verb_notes[0].body)
+    assert verb_notes[1].body == ("кивнуть",)
+    assert verb_notes[2].body == ("энергично",)
+    assert "Vigorously" not in "".join(verb_notes[2].body)
+    assert verb_notes[3].labels == ("Игра слов.",)
+    assert verb_notes[3].difficulty_kinds == (
+        "grammar",
+        "idiom",
+        "cultural_reference",
+        "semantic_relation",
+        "wordplay",
+    )
+    assert verb_notes[3].body == ("сухо", "сказала сдержанно")
+    assert "Помета" not in "".join(verb_notes[3].body)
+    assert one(title.id).translation == _LETTERS_RU
+    assert one(title.id).notes == ()
+    assert one(hagrid.id).notes == ()
+    for block in (up, a_what, nearly, shoo, no_why, numbered):
+        assert one(block.id).translation is None
+
+    target = tmp_path / "fifteen-remarks.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=document,
+            target_path=str(target),
+            block_results=results,
+            layout=layout,
+        )
+    )
+    pages = _read_pages(target)
+    _assert_who_page_absent(target, pages)
+    _assert_no_speaker_span(pages)
+    stylesheet = _stylesheet(target)
+    assert _SUPERSCRIPTS in stylesheet
+    assert _TERM_WEIGHT in stylesheet
+    rendered = "\n".join(_text(page) for page in pages)
+    assert "Повторим" not in rendered
+    assert "Кто есть кто" not in rendered
+    for label in _DROPPED_LABELS:
+        assert label not in rendered
+    assert "Помета к глаголу речи:" not in rendered
+    assert "Игра слов." in rendered
+    assert "сказала сдержанно" in rendered
+
+    gaps = [
+        item
+        for page in pages
+        for element in page.iter()
+        if _local(element) == "div" and _has_class(element, "lg-unit")
+        for item in _term_tails(element)
+    ]
+    assert gaps
+    assert all(tail == " \u2014 " for _term, tail in gaps)
+    assert ("to snigger", " \u2014 ") in gaps
+    assert ("to nod", " \u2014 ") in gaps
+    assert ("vigorously", " \u2014 ") in gaps
+    assert (_THANKS, " \u2014 ") in gaps
+
+    notes_unit = _unit(pages, _RUMBLING)
+    notes_text = _text(_child(notes_unit, "lg-notes"))
+    assert _RUMBLING not in notes_text
+    assert _NOT_KNOWING not in notes_text
+    assert "Низкий рокот" not in notes_text
+    assert "не зная, что он особенный" not in notes_text
+    assert notes_text.casefold().count("уж поверьте") == 1
+    assert _note_terms(notes_unit) == ["", "", _THANKS, _FIVE_WORDS, ""]
+    verb_unit = _unit(pages, "sniggered")
+    assert _note_terms(verb_unit) == ["to snigger", "to nod", "vigorously", "stiffly"]
+    assert "Snigger" not in _text(_child(verb_unit, "lg-notes"))
+    assert "Vigorously" not in _text(_child(verb_unit, "lg-notes"))
+
+    letters = _rendered_heading(pages, _LETTERS)
+    assert _translation(letters) == _LETTERS_RU
+    assert _child(letters, "lg-notes") is None
+    chapter_heading = _rendered_heading(pages, "CHAPTER THREE")
+    assert _translation(chapter_heading) is None
+    hagrid_unit = _unit(pages, "sounding relieved")
+    assert _translation(hagrid_unit) == _BY_KEY["hagrid-line"].russian
+    assert _child(hagrid_unit, "lg-notes") is None
+    assert _translation(_unit(pages, _WINKED)) == _WINKED_RU
+    assert _translation(_unit(pages, _FANCY)) == _FANCY_RU
+    assert _translation(_unit(pages, _GROANED)) == _GROANED_RU
+    assert _translation(_unit(pages, _CHUCKLED)) == _CHUCKLED_RU
+    for text in (_UP, _A_WHAT, _NEARLY, _SHOO, _NO_WHY):
+        assert _translation(_unit(pages, text)) is None
+
+    section = document.section(chapter_id)
+    sound = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=NameTranslationPolicy(
+            version=1,
+            strategy=NameTranslationStrategy.SOUND,
+        ),
+    ).for_chapter_narrative_analysis(document, section)
+    assert "«McGonagall» → «Макгонагал»" in sound.request.instructions
