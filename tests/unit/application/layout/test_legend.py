@@ -24,14 +24,10 @@ _IPA = (
     "Транскрипция дана в косых чертах. "
     "UK и US — британское и американское произношение. Ключ к знакам — на следующей странице."
 )
-_SPEAKERS = "Имя перед переводом реплики — кто говорит. Если перевода нет, в примечании стоит «Говорит …»."
+_SPEAKERS = "В примечании «Говорит …» — кто произносит реплику, если она дана без перевода."
 _POEM = "Перевод стихов в книге — подстрочный, без рифмы: он передаёт смысл каждой строки."
 _LABELS = (
     "Игра слов.",
-    "Грамматика.",
-    "Идиома.",
-    "Реалия.",
-    "Смысл.",
     "Ложный друг.",
     "Речь персонажа.",
     "Пародия.",
@@ -163,11 +159,18 @@ def test_legend_lists_only_present_labels() -> None:
         _label_line("Игра слов.", "Пародия."),
     )
     by_kind = legend_lines(_features(
-        labels=frozenset({"false_friend", "grammar", "wordplay"}),
+        labels=frozenset({
+            "false_friend",
+            "grammar",
+            "idiom",
+            "cultural_reference",
+            "semantic_relation",
+            "wordplay",
+        }),
     ))
     assert by_kind == (
         _ORIGINAL,
-        _label_line("Игра слов.", "Грамматика.", "Ложный друг."),
+        _label_line("Игра слов.", "Ложный друг."),
     )
     assert _TRANSLATION not in lines
     assert _IPA not in lines

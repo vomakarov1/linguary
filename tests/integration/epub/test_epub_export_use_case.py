@@ -63,6 +63,7 @@ from linguary.domain import (
     TermVariant,
     TreatmentPlan,
 )
+from linguary.domain.content_plan import ContentEvidence, ContentPlan, ContextFact, SourceAnchor
 
 BOOK_ID = "book-1"
 
@@ -529,6 +530,41 @@ def test_export_ensure_ready_and_downloadable_task_use_read_transaction(
     assert fallback_calls == 2
 
 
+@dataclass(frozen=True, slots=True)
+class _OpeningLine:
+    """Untranslated block whose text opens with a replica."""
+
+    section: DocumentSection
+    id: str
+    start: int
+    end: int
+    quote: str
+
+
+def _untranslated_opening_line(document: CanonicalDocument, translated_id: str) -> _OpeningLine:
+    """First untranslated content block that opens with a quoted replica."""
+    closers = {"“": "”", "‘": "’", "«": "»", '"': '"'}
+    for section in document.ordered_sections:
+        if document.is_front_matter(section) or section.is_notes_only:
+            continue
+        for block in textual_blocks(section):
+            if block.id == translated_id:
+                continue
+            start = 0
+            while start < len(block.text) and block.text[start].isspace():
+                start += 1
+            if start >= len(block.text):
+                continue
+            closer = closers.get(block.text[start])
+            if closer is None:
+                continue
+            end = block.text.find(closer, start + 1)
+            if end < 0:
+                continue
+            return _OpeningLine(section, block.id, start, end + 1, block.text[start : end + 1])
+    raise AssertionError("в фикстуре нет непереведённого блока с открывающей репликой")
+
+
 def _content_block(document: CanonicalDocument) -> tuple[DocumentSection, DocumentBlock]:
     """First textual block of a content chapter in the imported fixture."""
     for section in document.ordered_sections:
@@ -627,6 +663,50 @@ def _store_reading_sources(
                 ),
             )
         )
+        spoken = _untranslated_opening_line(document, block.id)
+        anchor = SourceAnchor(spoken.id, spoken.start, spoken.end, spoken.quote)
+        plan = ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            context_facts=(
+                ContextFact(
+                    "fact-wren",
+                    "speaker",
+                    (anchor,),
+                    anchor,
+                    value="Wren Calder",
+                    certainty="inferred",
+                ),
+            ),
+        )
+        evidence = ContentEvidence(plan.sha256, version=3)
+        spoken_blocks = textual_blocks(spoken.section)
+        transaction.results.replace_results(
+            "run-1",
+            [
+                BlockProcessingResult(
+                    item.id,
+                    BlockTreatment.READ_AS_IS,
+                    content_evidence=evidence,
+                )
+                for item in spoken_blocks
+            ],
+        )
+        transaction.analyses.save(
+            BOOK_ID,
+            ChapterAnalysis(
+                id="analysis-speaker",
+                section_id=spoken.section.id,
+                coverage_status=CoverageStatus.INCOMPLETE,
+                treatment_plan=TreatmentPlan.of_treatments(
+                    spoken.section.id,
+                    ((item.id, BlockTreatment.READ_AS_IS) for item in spoken_blocks),
+                ),
+                translation_instructions="Держи имена.",
+                chapter_summary="Кратко.",
+                content_plan=plan,
+            ),
+        )
     return section.id, block.id
 
 
@@ -672,7 +752,16 @@ def test_export_passes_book_layout(
     units = request.layout.chapters[section_id].units[block_id]
     assert any(unit.translation for unit in units)
     assert any(unit.notes for unit in units)
-    assert request.layout.who_is_who[0].translation == "Рен Колдер"
+    assert request.layout.who_is_who == ()
+    spoken = [
+        unit
+        for unit in _units(request.layout)
+        if any(item.note.origin == "speaker" for item in unit.notes)
+    ]
+    assert len(spoken) == 1
+    assert spoken[0].translation is None
+    assert spoken[0].speaker == "Рен Колдер"
+    assert spoken[0].notes[-1].note.body == ("Говорит Рен Колдер",)
     assert "before_you_read" in request.layout.features.sections
     assert status_of(unit_of_work)[0] is BookStatus.COMPLETED
 
@@ -710,13 +799,21 @@ def test_structure_only_layout_without_help(
             unit, = chapter.units[block.id]
             assert (unit.start, unit.end) == (0, len(block.text))
             assert unit.translation is None
-            assert unit.notes == ()
+            if unit.notes:
+                assert unit.speaker == "Рен Колдер"
+                assert [item.note.origin for item in unit.notes] == ["speaker"]
+                assert unit.notes[0].note.body == ("Говорит Рен Колдер",)
+            else:
+                assert unit.notes == ()
     helped = without_results.chapters[section_id].units[block_id]
     assert helped[0].translation is None and helped[0].notes == ()
     assert any(unit.translation for unit in build_book_layout(inputs).chapters[section_id].units[block_id])
-    assert request.layout.who_is_who[0].translation == "Рен Колдер"
-    assert request.layout.who_is_who[0].description == "Путник."
+    assert request.layout.who_is_who == ()
+    assert [
+        item.note.body
+        for unit in _units(request.layout)
+        for item in unit.notes
+    ] == [("Говорит Рен Колдер",)]
     assert "before_you_read" in request.layout.features.sections
-    assert not any(unit.notes for unit in _units(request.layout))
     assert status_of(unit_of_work) == (BookStatus.IMPORTED, None)
 

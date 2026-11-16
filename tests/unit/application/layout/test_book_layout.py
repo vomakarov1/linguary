@@ -58,8 +58,6 @@ from linguary.domain.content_plan import (
 )
 from linguary.domain.learning import BeforeYouReadEntry, FragmentAssistance
 from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
-from linguary.application.layout.review import ReviewEntry
-from linguary.application.layout.who_is_who import WhoEntry
 
 DOCUMENT_ID = "book-1"
 
@@ -613,11 +611,16 @@ def test_repeated_speech_style_id_scoped_to_its_chapter() -> None:
     grammar_notes = [note for note in _notes(layout, grammar_block.id) if note.origin != "speaker"]
     assert kept[0].labels == ("Речь персонажа.",)
     assert kept[0].body == ("первое появление",)
-    assert grammar_notes[0].labels == ("Грамматика.",)
+    assert grammar_notes[0].labels == ()
     assert grammar_notes[0].difficulty_kinds == ("grammar",)
     assert grammar_notes[0].body == ("странное время",)
     assert [note for note in _notes(layout, repeated.id) if note.origin != "speaker"] == []
     assert [note for note in _notes(layout, again.id) if note.origin != "speaker"] == []
+    assert layout.who_is_who == ()
+    assert layout.chapters[first_section.id].review == ()
+    assert layout.chapters[second_section.id].review == ()
+    assert "review" not in layout.features.sections
+    assert layout.features.has_speakers is False
 
 
 def test_speech_style_without_speaker_not_dropped() -> None:
@@ -1234,31 +1237,36 @@ def test_features_collected_for_legend() -> None:
         english_help=True,
     ))
 
+    speaker_unit = layout.chapters[first.id].units[speaker_block.id][0]
     assert layout.chapters[first.id].units[poem.id][0].lines is True
     assert layout.chapters[first.id].units[poem.id][0].translation == translated
-    assert layout.chapters[first.id].units[speaker_block.id][0].speaker == "Алиса"
-    assert _labels(layout, grammar_block.id) == ("Грамматика.",)
+    assert speaker_unit.speaker == "Алиса"
+    assert all(item.note.origin != "speaker" for item in speaker_unit.notes)
+    grammar_notes = [note for note in _notes(layout, grammar_block.id) if note.origin != "speaker"]
+    assert grammar_notes[0].labels == ()
+    assert grammar_notes[0].difficulty_kinds == ("grammar",)
+    assert grammar_notes[0].body == ("странное время",)
     assert _labels(layout, wordplay_block.id) == ()
     assert any(note.ipa == "kæt" for note in _notes(layout, pronounced.id))
     assert layout.features == LayoutFeatures(
         has_translation=True,
         has_notes=True,
-        labels=frozenset({"Грамматика."}),
+        labels=frozenset(),
         has_ipa=True,
         has_poems=True,
-        has_speakers=True,
-        sections=frozenset({"review", "before_you_read"}),
+        has_speakers=False,
+        sections=frozenset({"before_you_read"}),
     )
     assert "previously" not in layout.features.sections
+    assert "review" not in layout.features.sections
     assert layout.legend[0] == "Абзац оригинала всегда идёт первым."
     assert "что было раньше" not in "\n".join(layout.legend)
+    assert "Говорит" not in "\n".join(layout.legend)
     assert layout.ipa_key == ipa_key(("kæt",))
     assert layout.legend == legend_lines(layout.features)
-    assert layout.who_is_who == (
-        WhoEntry("Alice", "Алиса", ConceptType.PERSON, "девочка", None, 1),
-    )
+    assert layout.who_is_who == ()
     assert layout.chapters[first.id].who_is_who == ()
-    assert layout.chapters[second.id].review == (ReviewEntry("lantern", "фонарь", 1),)
+    assert layout.chapters[second.id].review == ()
     assert layout.chapters[second.id].who_is_who == ()
 
 
@@ -1312,24 +1320,26 @@ def test_front_matter_has_no_extras() -> None:
     assert layout.chapters[front.id].review == ()
     assert layout.chapters[notes.id].review == ()
     assert layout.chapters[first.id].who_is_who == ()
-    assert layout.chapters[second.id].review == (ReviewEntry("lantern", "фонарь", 1),)
-    assert layout.who_is_who == (
-        WhoEntry("Alice", "Элис", ConceptType.PERSON, "девочка", None, 1),
-    )
+    assert layout.chapters[first.id].review == ()
+    assert layout.chapters[second.id].review == ()
+    assert layout.who_is_who == ()
     front_unit = layout.chapters[front.id].units[front_block.id][0]
     note_unit = layout.chapters[notes.id].units[note.id][0]
     assert (front_unit.start, front_unit.end, front_unit.notes) == (0, len(front_block.text), ())
     assert (note_unit.start, note_unit.end, note_unit.notes) == (0, len(note.text), ())
     assert "previously" not in layout.features.sections
     assert "who_is_who" not in layout.features.sections
-    assert layout.features.sections == frozenset({"review"})
+    assert "review" not in layout.features.sections
+    assert layout.features.sections == frozenset()
 
 
-def test_chapter_layout_omits_who_is_who_while_book_layout_keeps_it() -> None:
-    """Who-is-who stays on the book. Chapters and the legend section key lose it.
+def test_book_layout_omits_who_is_who_and_review() -> None:
+    """Book assembly drops who-is-who and «Повторим». Speakers are untranslated notes.
 
     A2 without English help also omits `before_you_read`. A2 with English help,
-    another level, and an unset level keep that key.
+    another level, and an unset level keep that key. A translated replica keeps
+    the name on the unit and does not set `has_speakers`. An untranslated
+    replica adds «Говорит …» and does.
     """
     block = _block("one", 0, "Past prose.")
     section = _section("one", 0, "Chapter 1", (block,))
@@ -1349,16 +1359,67 @@ def test_chapter_layout_omits_who_is_who_while_book_layout_keeps_it() -> None:
             english_help=english_help,
         ))
         assert layout.chapters[section.id].who_is_who == ()
-        assert layout.who_is_who == (
-            WhoEntry("Alice", "Элис", ConceptType.PERSON, "девочка", None, 1),
-        )
+        assert layout.chapters[section.id].review == ()
+        assert layout.who_is_who == ()
         assert "who_is_who" not in layout.features.sections
+        assert "review" not in layout.features.sections
+        assert layout.features.has_speakers is False
         return layout.features.sections
 
     assert sections("a2", english_help=False) == frozenset()
     assert sections("a2", english_help=True) == frozenset({"before_you_read"})
     assert sections("b1", english_help=False) == frozenset({"before_you_read"})
     assert sections(None, english_help=False) == frozenset({"before_you_read"})
+
+    spoken = "“Hello,” said Alice."
+    translated = _block("talk", 0, spoken)
+    plain = _block("talk", 1, spoken)
+    fact_translated = _fact("f-tr", translated, spoken, "Alice", "inferred")
+    fact_plain = _fact("f-plain", plain, spoken, "Alice", "inferred")
+    talk = _section("talk", 0, "Chapter 1", (translated, plain))
+    hello = "Алиса сказала привет."
+    translated_result = BlockProcessingResult(
+        translated.id,
+        BlockTreatment.TRANSLATE,
+        translated_text=hello,
+        segment_treatments=(BlockTreatment.TRANSLATE,),
+        segment_translations=(hello,),
+    )
+    both = build_book_layout(_inputs(
+        _document((talk,)),
+        {translated.id: translated_result},
+        analyses=(_analysis(
+            "a-talk",
+            talk.id,
+            candidates=(_candidate("a-talk", "cand-alice", "Alice", "Элис"),),
+            plan=_plan(facts=(fact_translated, fact_plain)),
+        ),),
+        concepts=(_concept("c-alice", "Alice", "Алиса", TermStatus.APPROVED),),
+    ))
+    translated_unit = both.chapters[talk.id].units[translated.id][0]
+    plain_unit = both.chapters[talk.id].units[plain.id][0]
+    assert translated_unit.speaker == "Алиса"
+    assert translated_unit.notes == ()
+    assert plain_unit.speaker == "Алиса"
+    assert plain_unit.notes[0].note.origin == "speaker"
+    assert plain_unit.notes[0].note.body == ("Говорит Алиса",)
+    assert both.features.has_speakers is True
+    assert both.who_is_who == ()
+    assert both.chapters[talk.id].review == ()
+    assert "review" not in both.features.sections
+
+    only_translated = build_book_layout(_inputs(
+        _document((_section("talk", 0, "Chapter 1", (translated,)),)),
+        {translated.id: translated_result},
+        analyses=(_analysis(
+            "a-talk",
+            talk.id,
+            plan=_plan(facts=(fact_translated,)),
+        ),),
+        concepts=(_concept("c-alice", "Alice", "Алиса", TermStatus.APPROVED),),
+    ))
+    assert only_translated.chapters[talk.id].units[translated.id][0].speaker == "Алиса"
+    assert only_translated.features.has_speakers is False
 
 
 def test_build_layout_inputs_unifies_data_loading() -> None:

@@ -16,13 +16,9 @@ from linguary.application.layout.ipa_reference import IpaSymbol, ipa_key
 from linguary.application.layout.legend import LayoutFeatures, legend_lines
 from linguary.application.layout.notes import block_notes
 from linguary.application.layout.parts import LayoutPart, compose_parts
-from linguary.application.layout.review import ReviewEntry, chapter_review
+from linguary.application.layout.review import ReviewEntry
 from linguary.application.layout.units import LayoutUnit, _whole_block_translation, block_units
-from linguary.application.layout.who_is_who import (
-    WhoEntry,
-    _content_chapter_numbers,
-    book_who_is_who,
-)
+from linguary.application.layout.who_is_who import WhoEntry, _content_chapter_numbers
 from linguary.application.pronunciation_projection import project_pronunciations
 from linguary.domain import (
     BlockProcessingResult,
@@ -211,7 +207,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
     assistance on the result copy passed to `block_notes`, so the later note
     is absent. The id is dropped only in the section that owns that later
     style. The stored plan and the stored result are not changed. There is
-    no Previously list.
+    no Previously list. Chapter review and the book who-is-who list stay empty.
     """
     document = inputs.document
     numbers = _content_chapter_numbers(document)
@@ -275,12 +271,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             number=numbers.get(section.id),
             units=units,
             who_is_who=(),
-            review=chapter_review(
-                document,
-                inputs.results,
-                section_id=section.id,
-                reader_level=inputs.reader_level,
-            ),
+            review=(),
         )
     features = _features(
         chapters,
@@ -292,7 +283,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
         chapters=chapters,
         legend=legend_lines(features),
         ipa_key=ipa_key(_ipa_strings(chapters)),
-        who_is_who=book_who_is_who(document, inputs.analyses, inputs.concepts),
+        who_is_who=(),
         features=features,
     )
 
@@ -1007,7 +998,9 @@ def _features(
         labels=frozenset(label for note in notes for label in note.labels),
         has_ipa=any(note.ipa for note in notes),
         has_poems=any(unit.lines for unit in units),
-        has_speakers=any(unit.speaker for unit in units),
+        has_speakers=any(
+            item.note.origin == "speaker" for unit in units for item in unit.notes
+        ),
         sections=frozenset(sections),
     )
 

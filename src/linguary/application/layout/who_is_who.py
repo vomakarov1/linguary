@@ -79,6 +79,20 @@ _NON_CHARACTER = (
     "диктор",
     "синоптик",
     "кличка кошки",
+    "предмет, который",
+    "приспособление, на котором",
+    "игра или травля",
+    "велосипед, на котором",
+    "игрушечный самолёт",
+    "крупная змея",
+    "место, из которого",
+)
+_DESCRIPTION_BOILERPLATE = (
+    "Персонаж, впервые упоминаемый в этой главе; до этого упоминания сведений о нём нет.",
+    "; в этой главе упоминается впервые",
+    "; до этого упоминания сведений о нём нет",
+    "; сведений до первого упоминания в главе нет",
+    "; до этой главы в тексте не появлялся",
 )
 
 
@@ -244,6 +258,8 @@ def _excluded_person(
 ) -> bool:
     """Plural families, a bare family surname, and descriptions that are not characters."""
     if _marked_non_character(candidate.description):
+        return True
+    if candidate.source_text.strip()[:1].islower():
         return True
     shown = _translation(candidate, concepts, language)
     if _family_translation(candidate.suggested_translation) or _family_translation(shown):
@@ -625,8 +641,14 @@ def _clause_gender(phrase: str) -> str:
 
 
 def _target_description(description: str, language: str) -> str:
-    """Strip surrounding space. A Russian book keeps the text only with Cyrillic."""
+    """Strip surrounding space and first-mention boilerplate.
+
+    A Russian book keeps the text only with Cyrillic.
+    """
     cleaned = description.strip()
+    for phrase in _DESCRIPTION_BOILERPLATE:
+        cleaned = cleaned.replace(phrase, "")
+    cleaned = cleaned.strip()
     if language.strip().lower() == "ru" and _CYRILLIC.search(cleaned) is None:
         return ""
     return cleaned

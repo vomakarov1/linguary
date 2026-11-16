@@ -1117,3 +1117,119 @@ def test_who_is_who_prevents_false_role_merges_and_merges_titled_full_names() ->
             "Тётя Гарри, жена Вернона Дёрсли.", None, 1,
         ),
     )
+
+
+def test_who_is_who_excludes_lowercase_objects_and_strips_first_mention_boilerplate() -> None:
+    """Objects and non-characters stay out. First-mention tails are not descriptions.
+
+    A lowercase source is not a person. A description that names a thing, a game,
+    an animal, or a place is not a person either. `Shoo!` from chapter 1 is not
+    repeated when chapter 2 only has `shook`.
+    """
+    past = _block("ch-1", "ch-1.xhtml", 0, "Shoo!")
+    current = _block("ch-2", "ch-2.xhtml", 0, "He shook his head.")
+    first = _content("ch-1", 0, (past,))
+    second = _content("ch-2", 1, (current,))
+    document = _document((first, second))
+    rows = (
+        ("cine-camera", "cine-camera", ConceptType.PERSON, "кинокамера", "камера для съёмки"),
+        ("crutches", "crutches", ConceptType.PERSON, "костыли", "опоры"),
+        ("cupboard", "cupboard", ConceptType.PERSON, "шкаф", "шкаф под лестницей"),
+        (
+            "racing-bike",
+            "racing bike",
+            ConceptType.PERSON,
+            "гоночный велосипед",
+            "велосипед, на котором ездит Гарри",
+        ),
+        (
+            "aeroplane",
+            "remote-control aeroplane",
+            ConceptType.PERSON,
+            "самолётик",
+            "игрушечный самолёт",
+        ),
+        ("harry-hunting", "Harry-hunting", ConceptType.PERSON, "охота на Гарри", "игра или травля"),
+        ("boa", "Brazilian boa constrictor", ConceptType.PERSON, "удав", "крупная змея"),
+        (
+            "omnioculars",
+            "Omnioculars",
+            ConceptType.PERSON,
+            "омнинокль",
+            "предмет, который показывает повтор",
+        ),
+        (
+            "broom",
+            "Broomstick",
+            ConceptType.PERSON,
+            "метла",
+            "приспособление, на котором летают",
+        ),
+        ("firebolt", "Firebolt", ConceptType.PERSON, "файрболт", "велосипед, на котором летает Гарри"),
+        ("toy-plane", "Aeroplane", ConceptType.PERSON, "самолёт", "игрушечный самолёт Гарри"),
+        ("zoo", "Zoo", ConceptType.PERSON, "зоопарк", "место, из которого сбежала змея"),
+        (
+            "sirius",
+            "Sirius Black",
+            ConceptType.PERSON,
+            "Сириус Блэк",
+            "Крёстный Гарри; в этой главе упоминается впервые",
+        ),
+        (
+            "james",
+            "James Potter",
+            ConceptType.PERSON,
+            "Джеймс Поттер",
+            "Отец Гарри; до этого упоминания сведений о нём нет",
+        ),
+        (
+            "remus",
+            "Remus Lupin",
+            ConceptType.PERSON,
+            "Римус Люпин",
+            "Друг отца; сведений до первого упоминания в главе нет",
+        ),
+        (
+            "peter",
+            "Peter Pettigrew",
+            ConceptType.PERSON,
+            "Питер Петтигрю",
+            "Предатель; до этой главы в тексте не появлялся",
+        ),
+        (
+            "regulus",
+            "Regulus Black",
+            ConceptType.PERSON,
+            "Регулус Блэк",
+            "Младший брат. Персонаж, впервые упоминаемый в этой главе; до этого упоминания сведений о нём нет.",
+        ),
+        (
+            "reptile-house",
+            "reptile house",
+            ConceptType.PLACE,
+            "павильон рептилий",
+            "Павильон змей; в этой главе упоминается впервые",
+        ),
+    )
+    analysis = _analysis("a1", first.id, tuple(
+        _candidate("a1", candidate_id, source, concept_type, translation, description=description)
+        for candidate_id, source, concept_type, translation, description in rows
+    ))
+    results = {past.id: _result(past, (("Shoo!", "брысь"),))}
+
+    assert book_who_is_who(document, (analysis,), ()) == (
+        WhoEntry("Sirius Black", "Сириус Блэк", ConceptType.PERSON, "Крёстный Гарри", None, 1),
+        WhoEntry("James Potter", "Джеймс Поттер", ConceptType.PERSON, "Отец Гарри", None, 1),
+        WhoEntry("Remus Lupin", "Римус Люпин", ConceptType.PERSON, "Друг отца", None, 1),
+        WhoEntry("Peter Pettigrew", "Питер Петтигрю", ConceptType.PERSON, "Предатель", None, 1),
+        WhoEntry("Regulus Black", "Регулус Блэк", ConceptType.PERSON, "Младший брат.", None, 1),
+        WhoEntry(
+            "reptile house",
+            "павильон рептилий",
+            ConceptType.PLACE,
+            "Павильон змей",
+            None,
+            1,
+        ),
+    )
+    assert chapter_review(document, results, section_id=second.id, reader_level="a2") == ()
