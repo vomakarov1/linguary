@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -48,6 +48,13 @@ from linguary.domain import (
     TreatmentPlan,
 )
 from linguary.domain.content_plan import ContentPlan, ContextFact, RequiredPoint, SourceAnchor
+from linguary.domain.name_translation import (
+    NameTranslationAssessment,
+    NameTranslationEvidence,
+    NameTranslationMethod,
+    NameTranslationObservation,
+    NameTranslationStrategy,
+)
 
 _BOOK_ID = "hp-a2-regression"
 _OPEN = "\u2018"
@@ -1050,6 +1057,33 @@ def _note_terms(unit: etree._Element) -> list[str]:
     return terms
 
 
+def _method_evidence(method: NameTranslationMethod) -> NameTranslationEvidence:
+    """Provenance that would show a method label if any method were shown.
+
+    `_name_method` returns none when evidence is missing, before it looks at
+    `_SHOWN_METHODS`. A candidate without evidence cannot lock that set.
+    """
+    return NameTranslationEvidence(
+        version=1,
+        conditions_id="hp-a2-regression",
+        policy_version=1,
+        strategy=NameTranslationStrategy.SOUND,
+        observations=(
+            NameTranslationObservation(
+                suggested_translation="проверка способа",
+                confidence=0.9,
+                model_flagged_review=False,
+                assessment=NameTranslationAssessment(
+                    applied_method=method,
+                    eligible_without_review=True,
+                    review_reasons=(),
+                    rationale="The label stays hidden while shown methods are empty.",
+                ),
+            ),
+        ),
+    )
+
+
 def _feedback_block(
     section_id: str,
     resource: str,
@@ -1255,6 +1289,17 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
     )
     byr = (BeforeYouReadEntry("Bonfire Night", "Ночь костров, 5 ноября."),)
     story_blocks = (cloak, shoo, sharply, agreement)
+    evidenced = {
+        "Mrs Dursley": NameTranslationMethod.CREATIVE,
+        "Lily Potter": NameTranslationMethod.MIXED,
+    }
+    candidates = []
+    for source, translation, description in people:
+        candidate = _candidate(analysis_id, source, translation, description)
+        method = evidenced.get(source)
+        if method is not None:
+            candidate = replace(candidate, name_translation_evidence=_method_evidence(method))
+        candidates.append(candidate)
     analysis = ChapterAnalysis.create(
         id=analysis_id,
         section_id=chapter_id,
@@ -1270,10 +1315,7 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
         translation_instructions="Keep the glossary names.",
         chapter_summary="An old man in a violet cloak leaves Harry on the step.",
         expected_block_ids=tuple(block.id for block in story_blocks),
-        glossary_candidates=tuple(
-            _candidate(analysis_id, source, translation, description)
-            for source, translation, description in people
-        ),
+        glossary_candidates=tuple(candidates),
         before_you_read=byr,
     )
     layout = build_book_layout(
@@ -1290,8 +1332,10 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
     assert "before_you_read" not in layout.features.sections
     assert "who_is_who" not in layout.features.sections
     who_sources = [entry.source for entry in layout.who_is_who]
-    assert who_sources.count("Mrs Dursley") + who_sources.count("Petunia") == 1
-    assert who_sources.count("Lily Potter") + who_sources.count("Mrs Potter") == 1
+    assert who_sources.count("Mrs Dursley") == 1
+    assert "Petunia" not in who_sources
+    assert who_sources.count("Lily Potter") == 1
+    assert "Mrs Potter" not in who_sources
     assert "the Potters" not in who_sources
     assert "Dursley" not in who_sources
     assert "Howard" not in who_sources
@@ -1340,8 +1384,10 @@ def test_sixteen_epub_feedback_fixes_end_to_end(tmp_path: Path) -> None:
     assert "Распространённое мужское имя" not in who_text
     assert "неуверенно называет" not in who_text
     cards = _who_cards(_who_page(pages))
-    assert ("Mrs Dursley" in cards) + ("Petunia" in cards) == 1
-    assert ("Lily Potter" in cards) + ("Mrs Potter" in cards) == 1
+    assert "Mrs Dursley" in cards
+    assert "Petunia" not in cards
+    assert "Lily Potter" in cards
+    assert "Mrs Potter" not in cards
     for absent in ("the Potters", "Dursley", "Howard"):
         assert absent not in cards
 
