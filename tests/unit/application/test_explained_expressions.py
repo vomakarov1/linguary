@@ -57,6 +57,15 @@ def test_unrelated_text_is_not_treated_as_repeat(explained: str, text: str) -> N
     assert not ExplainedExpressions([explained]).covers(text)
 
 
+def test_shoo_does_not_match_shook_or_shoot() -> None:
+    """`shook` and `shoot` are not inflected forms of `shoo`."""
+    explained = ExplainedExpressions(["Shoo!"])
+    assert not explained.covers("Hagrid's shoulders shook.")
+    assert not explained.covers("He wanted to shoot.")
+    assert not explained.covers("shook")
+    assert not explained.covers("shoot")
+
+
 def test_repeats_are_removed_from_hints_and_notes() -> None:
     """Repeated hints and notes are discarded, leaving the rest unchanged."""
     explained = ExplainedExpressions(["heaved and groaned"], explanations=[("heaved and groaned", "Пояснение.")])

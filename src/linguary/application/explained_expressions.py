@@ -36,6 +36,13 @@ _WORD = re.compile(r"\w+(?:'\w+)*")
 _MIN_STEM = 4
 _MAX_ENDING = 3
 
+#: English inflectional suffixes. A shared prefix is not enough (`shoo`/`shook`).
+_INFLECTION_SUFFIXES = frozenset(
+    {"", "s", "es", "d", "ed", "ing", "er", "est", "ly", "'s", "ies", "ied"}
+)
+_DOUBLING_SUFFIXES = frozenset({"ed", "ing", "er", "est"})
+_Y_ALTERNATIONS = frozenset({("ied", "y"), ("ies", "y")})
+
 
 def expression_words(text: str) -> tuple[str, ...]:
     """Expression words in normalized form: lowercase, stripped of punctuation and excess whitespace."""
@@ -222,7 +229,13 @@ def _same_words(first: Sequence[str], second: Sequence[str]) -> bool:
 
 
 def _same_word(first: str, second: str) -> bool:
-    """Whether this is the same word: exact match or inflections sharing a common stem."""
+    """Whether this is the same word: exact match or inflections sharing a common stem.
+
+    After the stem-length check, both tails must be inflectional suffixes.
+    A doubled consonant before `-ed`/`-ing`/`-er`/`-est` and `y`/`ies`/`ied`
+    still count. `made`/`make` is the one irregular pair the repeat filter
+    already requires.
+    """
     first = {"made": "make"}.get(first, first)
     second = {"made": "make"}.get(second, second)
     if first == second:
@@ -235,7 +248,32 @@ def _same_word(first: str, second: str) -> bool:
         ),
         min(len(first), len(second)),
     )
-    return stem >= _MIN_STEM and max(len(first), len(second)) - stem <= _MAX_ENDING
+    if stem < _MIN_STEM or max(len(first), len(second)) - stem > _MAX_ENDING:
+        return False
+    return _inflection_pair(first, second, stem)
+
+
+def _inflection_pair(first: str, second: str, stem: int) -> bool:
+    """Whether both tails after `stem` are allowed English inflectional suffixes."""
+    left, right = first[stem:], second[stem:]
+    pair = (left, right) if left <= right else (right, left)
+    if pair in _Y_ALTERNATIONS:
+        return True
+    prefix = first[:stem]
+    return _inflection_suffix(prefix, left) and _inflection_suffix(prefix, right)
+
+
+def _inflection_suffix(stem: str, ending: str) -> bool:
+    """Whether `ending` is a suffix, including one doubled final consonant."""
+    if ending in _INFLECTION_SUFFIXES:
+        return True
+    return bool(
+        len(ending) > 2
+        and stem
+        and ending[0] == stem[-1]
+        and ending[0] not in "aeiou"
+        and ending[1:] in _DOUBLING_SUFFIXES
+    )
 
 
 __all__ = ["ExplainedExpressions", "expression_words"]

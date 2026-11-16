@@ -671,7 +671,7 @@ def test_result_block_shows_footnote_marker_as_the_original_label() -> None:
 
 
 def test_result_api_returns_units_per_block(client: TestClient, application: Application) -> None:
-    """Each block carries the chapter layout's units, including separate note labels."""
+    """Each block carries the chapter layout's units. Grammar and idiom add no note label."""
     from linguary.application.book_overview import ResultChapterSummary
     from linguary.application.layout.book import ChapterLayout
     from linguary.domain.content_plan import (
@@ -792,7 +792,7 @@ def test_result_api_returns_units_per_block(client: TestClient, application: App
         "speaker": "Алиса",
         "notes": [{
             "number": 1,
-            "labels": ["Грамматика.", "Идиома."],
+            "labels": [],
             "term": None,
             "ipa": None,
             "variant": None,

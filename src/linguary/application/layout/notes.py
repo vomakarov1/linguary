@@ -7,11 +7,19 @@ without one keep their original order after the notes that have one.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from linguary.application.explained_expressions import expression_words
 from linguary.application.pronunciation_projection import PronunciationOccurrence
-from linguary.domain import BlockProcessingResult, DocumentBlock, GlossaryHint, LanguageNote
+from linguary.domain import (
+    BlockProcessingResult,
+    BlockTreatment,
+    DocumentBlock,
+    GlossaryHint,
+    LanguageNote,
+)
 from linguary.domain.content_plan import (
     ContentEvidence,
     ContentPlan,
@@ -24,10 +32,10 @@ from linguary.domain.learning import FragmentAssistance
 
 KIND_LABELS: Mapping[str, str | None] = {
     "wordplay": "Игра слов.",
-    "grammar": "Грамматика.",
-    "idiom": "Идиома.",
-    "cultural_reference": "Реалия.",
-    "semantic_relation": "Смысл.",
+    "grammar": None,
+    "idiom": None,
+    "cultural_reference": None,
+    "semantic_relation": None,
     "false_friend": "Ложный друг.",
     "speech_style": "Речь персонажа.",
     "parody": "Пародия.",
@@ -44,14 +52,91 @@ _AGREEMENT_NOTE_PREFIXES = (
     "разговорное подтверждение чужих слов",
     "говорящий соглашается и ссылается",
 )
+_SPEECH_VERB_NOTE = "помета к глаголу речи"
+_SIGNAL_KINDS = frozenset(
+    {"wordplay", "false_friend", "speech_style", "parody", "cultural_reference"}
+)
+_PARTICLES = frozenset(
+    {
+        "about",
+        "across",
+        "along",
+        "around",
+        "aside",
+        "away",
+        "back",
+        "by",
+        "down",
+        "in",
+        "off",
+        "on",
+        "out",
+        "over",
+        "through",
+        "up",
+    }
+)
+_DOUBLED_CONSONANTS = frozenset("bdgmnprt")
+_LE_CONSONANTS = frozenset("bcdfgkpstz")
+_DASHES = ("—", "–", "-")
+_RU_WORD = re.compile(r"[А-Яа-яЁё]+")
+_RU_IRREGULAR = {
+    "хихикнул": "хихикать",
+    "хихикнула": "хихикать",
+    "хихикнуло": "хихикать",
+    "хихикнули": "хихикать",
+    "поплелся": "поплестись",
+    "поплелась": "поплестись",
+    "поплелось": "поплестись",
+    "поплелись": "поплестись",
+    "пошел": "пойти",
+    "пошла": "пойти",
+    "пошло": "пойти",
+    "пошли": "пойти",
+}
+_RU_PAST = (
+    ("нулись", "нуться"),
+    ("нулась", "нуться"),
+    ("нулось", "нуться"),
+    ("нулся", "нуться"),
+    ("лись", "ться"),
+    ("лась", "ться"),
+    ("лось", "ться"),
+    ("лся", "ться"),
+    ("нули", "нуть"),
+    ("нула", "нуть"),
+    ("нуло", "нуть"),
+    ("нул", "нуть"),
+    ("или", "ить"),
+    ("ила", "ить"),
+    ("ило", "ить"),
+    ("ил", "ить"),
+    ("ели", "еть"),
+    ("ела", "еть"),
+    ("ело", "еть"),
+    ("ел", "еть"),
+    ("али", "ать"),
+    ("ала", "ать"),
+    ("ало", "ать"),
+    ("ал", "ать"),
+    ("яли", "ять"),
+    ("яла", "ять"),
+    ("яло", "ять"),
+    ("ял", "ять"),
+    ("ыли", "ыть"),
+    ("ыла", "ыть"),
+    ("ыло", "ыть"),
+    ("ыл", "ыть"),
+)
 
 
 @dataclass(frozen=True, slots=True)
 class LayoutNote:
     """One block note before display numbering is assigned.
 
-    `labels` are separate kind names. `vocabulary` is omitted there and kept
-    in `difficulty_kinds`. `marker_end` is an offset into the block text.
+    `labels` are separate kind names. Only wordplay, false friend, speech style,
+    and parody are shown; other kinds stay in `difficulty_kinds`. `marker_end`
+    is an offset into the block text.
     """
 
     labels: tuple[str, ...]
@@ -103,7 +188,15 @@ def block_notes(
     drafts: list[_Draft] = []
     for hint, pronunciation in zip(result.glossary_hints, assigned, strict=True):
         drafts.append(
-            _hint_draft(hint, pronunciation, block.text, result.block_id, evidences, known)
+            _hint_draft(
+                hint,
+                pronunciation,
+                block.text,
+                result.block_id,
+                evidences,
+                known,
+                result.treatment,
+            )
         )
     for note in result.language_notes:
         drafts.append(_note_draft(note, block.text, evidences, known))
@@ -163,25 +256,55 @@ def _hint_draft(
     block_id: str,
     evidences: Sequence[HelpEvidence],
     known: Mapping[str, Difficulty],
+    treatment: BlockTreatment,
 ) -> _Draft:
-    """A glossary hint. The marker is the end of the first exact `original`."""
+    """A glossary hint. The marker is the end of the first exact `original`.
+
+    Evidence keys and the marker use the stored hint fields. `term` and `body`
+    may then drop a repeated sentence, a quoted translation, or a headword
+    gloss, and show a past-tense verb as an infinitive.
+    """
     content = {"original": hint.original, "translation": hint.translation, "note": hint.note}
     keys = {
         artifact_key("glossary_hint.note", block_id, content),
         artifact_key("glossary_hint.translation", block_id, content),
     }
     ids = _ids_for(evidences, keys)
-    parts = [hint.translation]
-    if hint.note and hint.note.strip() and not _agreement_restatement(hint.note):
-        parts.append(hint.note)
+    marker_end = _find_end(text, hint.original)
+    cleaned_note = _cleaned_hint_note(hint.note)
+    lexical = _plain_lexical(hint.original, ids, known)
+    kept_note = ""
+    if cleaned_note and not (lexical and _headword_gloss(cleaned_note, hint.original)):
+        kept_note = cleaned_note
+    term: str | None = hint.original
+    translation = hint.translation
+    if lexical:
+        infinitive = _to_infinitive_term(hint.original)
+        if infinitive is not None:
+            term = infinitive
+            translation = _russian_past_to_infinitive(hint.translation)
+    long = (
+        treatment is BlockTreatment.TRANSLATE
+        and bool(cleaned_note)
+        and len(expression_words(hint.original)) > 5
+    )
+    if long:
+        term = None
+        parts = [cleaned_note]
+    elif _note_quotes_translation(kept_note, hint.translation):
+        parts = [kept_note]
+    else:
+        parts = [translation]
+        if kept_note:
+            parts.append(kept_note)
     return _Draft(
         label_ids=ids,
         kind_ids=ids,
-        term=hint.original,
+        term=term,
         ipa=None if pronunciation is None else pronunciation.ipa,
         variant=None if pronunciation is None else pronunciation.variant,
         body=_body(*parts),
-        marker_end=_find_end(text, hint.original),
+        marker_end=marker_end,
         origin="glossary_hint",
         anchors=_shared_anchors(ids, known),
     )
@@ -297,7 +420,7 @@ def _last_anchor_end(block_id: str, anchors: Sequence[SourceAnchor]) -> int | No
 
 
 def _body(*parts: str) -> tuple[str, ...]:
-    """Drop the language-reference phrase and editorial tails.
+    """Drop the language-reference phrase, speech-verb boilerplate, and editorial tails.
 
     A piece that becomes empty is omitted. The colon form of the reference
     phrase is removed first so a following colon is not left behind.
@@ -305,10 +428,24 @@ def _body(*parts: str) -> tuple[str, ...]:
     cleaned = []
     for part in parts:
         text = part.replace(_REFERENCE_COLON, "").replace(_REFERENCE, "")
+        text = _strip_speech_verb_note(text)
         text = _strip_editorial_tail(text)
         if text:
             cleaned.append(text)
     return tuple(cleaned)
+
+
+def _strip_speech_verb_note(text: str) -> str:
+    """Remove a leading «помета к глаголу речи», with or without a colon."""
+    current = text.strip()
+    while current.casefold().startswith(_SPEECH_VERB_NOTE):
+        rest = current[len(_SPEECH_VERB_NOTE) :].lstrip()
+        if rest.startswith(":"):
+            rest = rest[1:].lstrip()
+        if rest == current:
+            break
+        current = rest
+    return current
 
 
 def _strip_editorial_tail(text: str) -> str:
@@ -331,6 +468,162 @@ def _agreement_restatement(note: str) -> bool:
         note.replace(_REFERENCE_COLON, "").replace(_REFERENCE, "")
     ).casefold()
     return any(text.startswith(prefix) for prefix in _AGREEMENT_NOTE_PREFIXES)
+
+
+def _cleaned_hint_note(note: str | None) -> str:
+    """Hint note after boilerplate removal, or empty when it only restates agreement."""
+    if not note or not note.strip() or _agreement_restatement(note):
+        return ""
+    pieces = _body(note)
+    return pieces[0] if pieces else ""
+
+
+def _plain_lexical(
+    original: str,
+    ids: Sequence[str],
+    known: Mapping[str, Difficulty],
+) -> bool:
+    """A single word or a short `-ed` phrasal verb without a signal difficulty."""
+    if any(item_id in known and known[item_id].kind in _SIGNAL_KINDS for item_id in ids):
+        return False
+    words = expression_words(original)
+    if len(words) == 1:
+        return True
+    return (
+        len(words) == 2
+        and words[1] in _PARTICLES
+        and _regular_ed_stem(words[0]) is not None
+    )
+
+
+def _to_infinitive_term(original: str) -> str | None:
+    """`to` + infinitive for a regular `-ed` verb or verb plus particle."""
+    words = expression_words(original)
+    if len(words) == 1:
+        stem = _regular_ed_stem(words[0])
+        return None if stem is None else f"to {stem}"
+    if len(words) == 2 and words[1] in _PARTICLES:
+        stem = _regular_ed_stem(words[0])
+        return None if stem is None else f"to {stem} {words[1]}"
+    return None
+
+
+def _regular_ed_stem(word: str) -> str | None:
+    """Dictionary stem of a regular English past form, without `to`."""
+    if len(word) <= 3 or not word.endswith("ed"):
+        return None
+    if word.endswith("ied") and len(word) > 4:
+        return word[:-3] + "y"
+    if word[-3] in "aeiou":
+        return None
+    if len(word) > 4 and word[-3] == "l" and word[-4] in _LE_CONSONANTS:
+        return word[:-1]
+    stem = word[:-2]
+    if not any(char in "aeiou" for char in stem):
+        return None
+    if (
+        len(stem) >= 4
+        and stem[-1] == stem[-2]
+        and stem[-1] in _DOUBLED_CONSONANTS
+        and _is_vowel(stem, -3)
+        and not _is_vowel(stem, -4)
+    ):
+        return stem[:-1]
+    if _magic_e(stem):
+        return stem + "e"
+    return stem
+
+
+def _is_vowel(stem: str, index: int) -> bool:
+    """Whether `stem[index]` is a vowel. `u` after `q` is not."""
+    if index < 0:
+        index += len(stem)
+    if index < 0 or index >= len(stem):
+        return False
+    char = stem[index]
+    if char not in "aeiou":
+        return False
+    return not (char == "u" and index > 0 and stem[index - 1] == "q")
+
+
+def _magic_e(stem: str) -> bool:
+    """One-syllable CVC stem whose `-ed` spelling hides a silent `e` (`hope`, `like`)."""
+    if len(stem) < 3 or stem[-1] in "aeiouwxy":
+        return False
+    vowels = [index for index in range(len(stem)) if _is_vowel(stem, index)]
+    return len(vowels) == 1 and vowels[0] == len(stem) - 2
+
+
+def _headword_gloss(note: str, original: str) -> bool:
+    """Whether `note` starts by repeating the English word or its stem and a dash."""
+    folded = note.strip().casefold()
+    for head in _headwords(original):
+        if not folded.startswith(head):
+            continue
+        if folded[len(head) :].lstrip().startswith(_DASHES):
+            return True
+    return False
+
+
+def _headwords(original: str) -> tuple[str, ...]:
+    """Spellings that count as repeating `original` at the start of a gloss."""
+    words = expression_words(original)
+    heads: list[str] = []
+    if words:
+        heads.append(" ".join(words))
+    bare = original.strip().casefold()
+    if bare:
+        heads.append(bare)
+    stem = None
+    if len(words) == 1:
+        stem = _regular_ed_stem(words[0])
+    elif len(words) == 2 and words[1] in _PARTICLES:
+        stem = _regular_ed_stem(words[0])
+        if stem:
+            heads.append(f"{stem} {words[1]}")
+    if stem:
+        heads.append(stem)
+    unique = list(dict.fromkeys(head for head in heads if head))
+    unique.sort(key=len, reverse=True)
+    return tuple(unique)
+
+
+def _note_quotes_translation(note: str, translation: str) -> bool:
+    """Whether `note` already contains the translation inside « »."""
+    quoted = translation.strip()
+    if not quoted or not note.strip():
+        return False
+    return f"«{quoted}»".casefold() in note.casefold()
+
+
+def _russian_past_to_infinitive(text: str) -> str:
+    """Past-tense Russian verbs in a gloss become infinitives. Other words stay."""
+    return _RU_WORD.sub(lambda match: _russian_token(match.group(0)), text)
+
+
+def _russian_token(word: str) -> str:
+    key = word.casefold().replace("ё", "е")
+    converted = _RU_IRREGULAR.get(key)
+    if converted is None:
+        converted = _regular_ru_past(key)
+    if converted is None:
+        return word
+    if word[:1].isupper():
+        return converted[:1].upper() + converted[1:]
+    return converted
+
+
+def _regular_ru_past(word: str) -> str | None:
+    """Infinitive of a regular past form, or None when `word` is not one."""
+    for ending, suffix in _RU_PAST:
+        if not word.endswith(ending) or len(word) == len(ending):
+            continue
+        stem = word[: -len(ending)]
+        minimum = 2 if suffix.startswith("ну") else 3
+        if len(stem) < minimum:
+            continue
+        return stem + suffix
+    return None
 
 
 def _collapse(drafts: Sequence[_Draft], plan: ContentPlan | None) -> list[LayoutNote]:

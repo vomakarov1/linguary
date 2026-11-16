@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from linguary.application.explained_expressions import expression_words
 from linguary.application.layout.notes import KIND_LABELS, LayoutNote, block_notes
 from linguary.application.pronunciation_projection import PronunciationOccurrence
 from linguary.domain import (
@@ -233,7 +234,7 @@ def test_unresolved_assistance_omitted() -> None:
 
     assert notes == (
         LayoutNote(
-            ("Грамматика.",),
+            (),
             None,
             None,
             None,
@@ -315,10 +316,10 @@ def test_kind_label_from_help_evidence() -> None:
     )
     assert dict(KIND_LABELS) == {
         "wordplay": "Игра слов.",
-        "grammar": "Грамматика.",
-        "idiom": "Идиома.",
-        "cultural_reference": "Реалия.",
-        "semantic_relation": "Смысл.",
+        "grammar": None,
+        "idiom": None,
+        "cultural_reference": None,
+        "semantic_relation": None,
         "false_friend": "Ложный друг.",
         "speech_style": "Речь персонажа.",
         "parody": "Пародия.",
@@ -420,7 +421,7 @@ def test_kind_label_from_help_evidence() -> None:
             (),
         ),
         LayoutNote(
-            ("Смысл.",),
+            (),
             None,
             None,
             None,
@@ -469,7 +470,7 @@ def test_english_help_lexical_hint_has_no_label() -> None:
             ("false_friend",),
         ),
         LayoutNote(
-            ("Грамматика.",),
+            (),
             None,
             None,
             None,
@@ -480,7 +481,7 @@ def test_english_help_lexical_hint_has_no_label() -> None:
         ),
     )
     assert shown[0].labels == ("Ложный друг.",)
-    assert shown[1].labels == ("Грамматика.",)
+    assert shown[1].labels == ()
 
 
 def test_pronunciation_merged_into_matching_hint() -> None:
@@ -526,7 +527,7 @@ def test_identical_anchor_difficulties_merge_labels() -> None:
 
     assert notes == (
         LayoutNote(
-            ("Грамматика.", "Игра слов."),
+            ("Игра слов.",),
             None,
             None,
             None,
@@ -536,7 +537,7 @@ def test_identical_anchor_difficulties_merge_labels() -> None:
             ("grammar", "vocabulary", "wordplay"),
         ),
         LayoutNote(
-            ("Идиома.",),
+            (),
             None,
             None,
             None,
@@ -589,7 +590,7 @@ def test_editorial_self_check_and_redundant_agreement_hint_note_stripped() -> No
     assert notes == (
         LayoutNote((), "Yes", None, None, ("да",), _end(text, "Yes"), "glossary_hint", ()),
         LayoutNote(
-            ("Грамматика.",),
+            (),
             None,
             None,
             None,
@@ -629,3 +630,186 @@ def test_editorial_self_check_and_redundant_agreement_hint_note_stripped() -> No
             (),
         ),
     )
+
+
+def test_translate_block_drops_redundant_sentence_term_and_translation_in_note() -> None:
+    """A translated block hides a long sentence and a translation already quoted in the note."""
+    rumbling = "A low rumbling sound had broken the silence around them."
+    passage = (
+        "not knowing he was special, not knowing he was famous, not knowing he would be "
+        "woken in a few hours by Mrs Dursley's scream as she opened the front door to put "
+        "out the milk bottles"
+    )
+    thanks = "thank you very much"
+    five = "silence around them at night"
+    six = "silence around them at the night"
+    assert len(expression_words(rumbling)) == 10
+    assert len(expression_words(passage)) > 5
+    assert len(expression_words(thanks)) == 4
+    assert len(expression_words(five)) == 5
+    assert len(expression_words(six)) == 6
+    text = " ".join((rumbling, passage, thanks, five, six))
+    block = _block(text)
+    rumbling_hint = GlossaryHint(rumbling, "Низкий рокот нарушил тишину.", "Звук шёл из-за двери.")
+    passage_hint = GlossaryHint(passage, "не зная, что он особенный", "Гарри ещё не знает о себе.")
+    thanks_hint = GlossaryHint(
+        thanks,
+        "уж поверьте",
+        "Ироничная присказка со значением «Уж Поверьте», а не благодарность.",
+    )
+    five_hint = GlossaryHint(five, "коротко", "Пояснение к короткой фразе.")
+    six_hint = GlossaryHint(six, "чуть длиннее", "Пояснение к фразе из шести слов.")
+    result = _result(
+        block,
+        treatment=BlockTreatment.TRANSLATE,
+        translation="Полный перевод абзаца.",
+        hints=(rumbling_hint, passage_hint, thanks_hint, five_hint, six_hint),
+    )
+
+    notes = block_notes(block, result, None, ())
+
+    assert [note.term for note in notes] == [None, None, thanks, five, None]
+    assert notes[0].body == ("Звук шёл из-за двери.",)
+    assert "Низкий рокот" not in "".join(notes[0].body)
+    assert notes[0].marker_end == _end(text, rumbling)
+    assert notes[1].body == ("Гарри ещё не знает о себе.",)
+    assert notes[1].marker_end == _end(text, passage)
+    assert notes[2].body == (
+        "Ироничная присказка со значением «Уж Поверьте», а не благодарность.",
+    )
+    assert "".join(notes[2].body).casefold().count("уж поверьте") == 1
+    assert notes[3].body == ("коротко", "Пояснение к короткой фразе.")
+    assert notes[4].body == ("Пояснение к фразе из шести слов.",)
+    assert "чуть длиннее" not in "".join(notes[4].body)
+    glossary_block = _block(rumbling)
+    glossary = _result(
+        glossary_block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(rumbling_hint,),
+    )
+    kept = block_notes(glossary_block, glossary, None, ())
+    assert kept[0].term == rumbling
+    assert kept[0].body == ("Низкий рокот нарушил тишину.", "Звук шёл из-за двери.")
+
+
+def test_verb_glossary_hint_normalized_to_infinitive_and_redundant_definition_dropped() -> None:
+    """Past-tense verbs become `to` infinitives; a repeated headword gloss and speech label go."""
+    text = "They sniggered then nodded vigorously and spoke stiffly."
+    block = _block(text)
+    sniggered = GlossaryHint(
+        "sniggered",
+        "хихикнули, засмеялись с ехидством",
+        "Snigger — хихикать, смеяться с ехидством",
+    )
+    nodded = GlossaryHint("nodded", "кивнула", "Nod — кивнуть")
+    vigorously = GlossaryHint("vigorously", "энергично", "Vigorously — энергично, сильно")
+    stiffly = GlossaryHint("stiffly", "сухо", "Помета к глаголу речи: сказала сдержанно")
+    vocabulary = _difficulty(
+        block.id, (_anchor(block, "sniggered"),), "vocabulary", difficulty_id="d-snigger"
+    )
+    plan = _plan(vocabulary)
+    evidence = ContentEvidence(
+        plan.sha256,
+        (
+            HelpEvidence(
+                vocabulary.id,
+                vocabulary.required_points[0].id,
+                "glossary_hint.translation",
+                block.id,
+                _hint_key("glossary_hint.translation", sniggered, block.id),
+                sniggered.translation,
+            ),
+        ),
+    )
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(sniggered, nodded, vigorously, stiffly),
+        evidence=evidence,
+    )
+    pronunciation = _pron(block, "sniggered", "/ˈsnɪɡəd/", "uk")
+
+    notes = block_notes(block, result, plan, (pronunciation,))
+
+    assert [note.term for note in notes] == ["to snigger", "to nod", "vigorously", "stiffly"]
+    assert notes[0].body == ("хихикать, засмеяться с ехидством",)
+    assert "Snigger" not in "".join(notes[0].body)
+    assert notes[0].marker_end == _end(text, "sniggered")
+    assert notes[0].ipa == "/ˈsnɪɡəd/"
+    assert notes[0].difficulty_kinds == ("vocabulary",)
+    assert notes[0].labels == ()
+    assert notes[1].body == ("кивнуть",)
+    assert notes[1].marker_end == _end(text, "nodded")
+    assert notes[2].body == ("энергично",)
+    assert "Vigorously" not in "".join(notes[2].body)
+    assert notes[3].body == ("сухо", "сказала сдержанно")
+    assert "Помета" not in "".join(notes[3].body)
+    samples = (
+        ("gasped", "ахнула", "to gasp", "ахнуть"),
+        ("moaned", "простонал", "to moan", "простонать"),
+        ("sniffed", "шмыгнула", "to sniff", "шмыгнуть"),
+        ("peered", "всмотрелась", "to peer", "всмотреться"),
+        ("winked", "подмигнула", "to wink", "подмигнуть"),
+        ("groaned", "охнул", "to groan", "охнуть"),
+        ("chuckled", "хихикнул", "to chuckle", "хихикать"),
+        ("shuffled away", "поплёлся прочь", "to shuffle away", "поплестись прочь"),
+        ("walked off", "пошёл прочь", "to walk off", "пойти прочь"),
+        ("walked off", "пошел прочь", "to walk off", "пойти прочь"),
+        ("shuffled away", "поплелся", "to shuffle away", "поплестись"),
+    )
+    for original, translation, term, infinitive in samples:
+        sample_text = f"Then {original} here."
+        sample_block = _block(sample_text)
+        sample = block_notes(
+            sample_block,
+            _result(
+                sample_block,
+                treatment=BlockTreatment.GLOSSARY_ONLY,
+                hints=(GlossaryHint(original, translation),),
+            ),
+            None,
+            (),
+        )
+        assert sample[0].term == term
+        assert sample[0].body == (infinitive,)
+        assert sample[0].marker_end == _end(sample_text, original)
+    played = "They sniggered."
+    played_block = _block(played)
+    played_hint = GlossaryHint("sniggered", "хихикнули", "Snigger — толкование")
+    wordplay = _difficulty(
+        played_block.id,
+        (_anchor(played_block, "sniggered"),),
+        "wordplay",
+        difficulty_id="d-play",
+    )
+    played_plan = _plan(wordplay)
+    played_result = _result(
+        played_block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(played_hint,),
+        evidence=ContentEvidence(
+            played_plan.sha256,
+            (
+                HelpEvidence(
+                    wordplay.id,
+                    wordplay.required_points[0].id,
+                    "glossary_hint.note",
+                    played_block.id,
+                    _hint_key("glossary_hint.note", played_hint, played_block.id),
+                    played_hint.note or "",
+                ),
+                HelpEvidence(
+                    wordplay.id,
+                    wordplay.required_points[0].id,
+                    "glossary_hint.translation",
+                    played_block.id,
+                    _hint_key("glossary_hint.translation", played_hint, played_block.id),
+                    played_hint.translation,
+                ),
+            ),
+        ),
+    )
+    preserved = block_notes(played_block, played_result, played_plan, ())
+    assert preserved[0].term == "sniggered"
+    assert preserved[0].body == ("хихикнули", "Snigger — толкование")
+    assert preserved[0].labels == ("Игра слов.",)
