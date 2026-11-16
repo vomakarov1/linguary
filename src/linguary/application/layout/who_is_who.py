@@ -391,7 +391,10 @@ def _union_unique_titles(refs: list[_PersonRef], union) -> None:
                     matches.append(other_index)
                 elif not other.gender:
                     matches.append(other_index)
-            if len(known) == 1 and len(matches) == 1:
+            # `James Potter` has no gender and must not veto the only woman.
+            # A male title still needs every namesake to be that one man, so
+            # `Dudley` keeps `Mr Dursley` from joining `Vernon`.
+            if len(known) == 1 and (gender == "f" or len(matches) == 1):
                 union(index, known[0])
 
 
@@ -403,9 +406,20 @@ def _union_roles(refs: list[_PersonRef], union) -> None:
 
 
 def _role_names_title(left: _PersonRef, right: _PersonRef) -> bool:
-    return "wife:dursley" in left.roles and "mrs dursley" in _source_keys(right) or (
-        "wife:dursley" in right.roles and "mrs dursley" in _source_keys(left)
-    )
+    """A role on one card names the other card's title."""
+    return _role_on_title(left, right) or _role_on_title(right, left)
+
+
+def _role_on_title(speaker: _PersonRef, titled: _PersonRef) -> bool:
+    """`sister:lily` or `wife:dursley` names Mrs Dursley. `mother:harry` names Mrs Potter."""
+    if speaker.roles & {"wife:dursley", "sister:lily"} and _mrs_titled(titled, "dursley"):
+        return True
+    return "mother:harry" in speaker.roles and _mrs_titled(titled, "potter")
+
+
+def _mrs_titled(ref: _PersonRef, surname: str) -> bool:
+    """Female surname title, or a source key that is already `Mrs <surname>`."""
+    return f"mrs {surname}" in _source_keys(ref) or ("f", surname) in ref.title_surnames
 
 
 def _merge_person(group: list[_PersonRef]) -> WhoEntry:

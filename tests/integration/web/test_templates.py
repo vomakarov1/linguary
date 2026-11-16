@@ -163,6 +163,24 @@ def test_pronunciation_template_combines_dictionary_meaning(
     assert tree.text_content().count("выдуманное значение") == 1
 
 
+def test_pronunciation_template_separates_pieces_of_one_note(
+    client: TestClient, application: Application
+) -> None:
+    """Two pieces of one note do not run together. EPUB already inserts this dash."""
+    scenario = _pronunciation_book(application, texts=("A zorp.",), meaning=True)
+    response = client.get(f"/books/{scenario.book_id}/result", headers=HTML_HEADERS)
+    tree = html.fromstring(response.text)
+    ipa, = tree.xpath('//span[@class="lg-ipa"]')
+    paragraphs = ipa.getparent().xpath("./p")
+
+    assert [paragraph.text for paragraph in paragraphs] == [
+        "выдуманное значение",
+        "тестовая помета",
+    ]
+    assert paragraphs[0].tail == " — "
+    assert "</p> — <p>" in response.text
+
+
 def test_pronunciation_template_folds_a_repeated_quote_into_one_note(
     client: TestClient, application: Application
 ) -> None:

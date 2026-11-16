@@ -921,6 +921,62 @@ def test_who_is_who_deduplicates_petunia_mrs_dursley_and_lily_mrs_potter() -> No
     )
 
 
+def test_who_is_who_merges_mrs_potter_past_james_and_petunia_by_sister_lily() -> None:
+    """A unique female title ignores an ungendered namesake. One role names the title.
+
+    `James Potter` has no gender, so he must not stop `Mrs Potter` joining the only
+    woman named Potter. `Petunia` has no surname. «Сестра Лили» names `Mrs Dursley`;
+    «жена Вернона Дёрсли» is not the marker «жена мистера Дёрсли». `Mr Dursley` and
+    `Dudley Dursley` stay apart.
+    """
+    section = _content("ch-1", 0)
+    document = _document((section,))
+    analysis = _analysis("a1", section.id, (
+        _candidate(
+            "a1", "lily", "Lily Potter", ConceptType.PERSON,
+            "Лили Поттер", description="Мать Гарри, волшебница.",
+        ),
+        _candidate(
+            "a1", "james", "James Potter", ConceptType.PERSON,
+            "Джеймс Поттер", description="Отец Гарри.",
+        ),
+        _candidate(
+            "a1", "mrs-potter", "Mrs Potter", ConceptType.PERSON,
+            "миссис Поттер", description="Жена Джеймса.",
+        ),
+        _candidate(
+            "a1", "petunia", "Petunia", ConceptType.PERSON,
+            "Петуния", description="Тётя Гарри, сестра Лили и жена Вернона Дёрсли.",
+        ),
+        _candidate(
+            "a1", "mrs-dursley", "Mrs Dursley", ConceptType.PERSON,
+            "миссис Дёрсли", description="Тётя Гарри, жена мистера Дёрсли.",
+        ),
+        _candidate(
+            "a1", "mr", "Mr Dursley", ConceptType.PERSON,
+            "мистер Дёрсли", description="",
+        ),
+        _candidate(
+            "a1", "dudley", "Dudley Dursley", ConceptType.PERSON,
+            "Дадли Дёрсли", description="сын",
+        ),
+    ))
+
+    assert book_who_is_who(document, (analysis,), ()) == (
+        WhoEntry(
+            "Lily Potter", "Лили Поттер", ConceptType.PERSON,
+            "Мать Гарри, волшебница.", None, 1,
+        ),
+        WhoEntry("James Potter", "Джеймс Поттер", ConceptType.PERSON, "Отец Гарри.", None, 1),
+        WhoEntry(
+            "Mrs Dursley", "миссис Дёрсли", ConceptType.PERSON,
+            "Тётя Гарри, сестра Лили и жена Вернона Дёрсли.", None, 1,
+        ),
+        WhoEntry("Mr Dursley", "мистер Дёрсли", ConceptType.PERSON, "", None, 1),
+        WhoEntry("Dudley Dursley", "Дадли Дёрсли", ConceptType.PERSON, "сын", None, 1),
+    )
+
+
 def test_who_is_who_does_not_bridge_harry_potter_and_harry_osborn() -> None:
     """A bare given name may join one surnamed person and must not join both.
 
