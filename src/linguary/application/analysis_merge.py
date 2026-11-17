@@ -2177,9 +2177,16 @@ def normalize_a2_dialogue_response(
             updated, demoted = _demote_elementary_reply(item, updated, block, difficulties)
         owners = frozenset(part for part in (item.source_block_id, block.id) if part)
         if block.type is BlockType.HEADING and _is_meaningful_chapter_title(block.text):
+            had_glossary = item.treatment is BlockTreatment.GLOSSARY_ONLY or any(
+                segment.treatment is BlockTreatment.GLOSSARY_ONLY for segment in item.segments
+            )
             updated = _force_block_treatment(updated, BlockTreatment.TRANSLATE)
             meaningful_heading_ids.update(owners)
-            promoted = None
+            promoted = (
+                (owners, had_glossary)
+                if item.treatment is not BlockTreatment.TRANSLATE
+                else None
+            )
             demoted = None
         elif _is_short_b1_read_as_is(block, updated):
             mode = (
@@ -2188,7 +2195,7 @@ def normalize_a2_dialogue_response(
                 else BlockTreatment.TRANSLATE
             )
             updated = _force_block_treatment(updated, mode)
-            promoted = None
+            promoted = (owners, False) if mode is BlockTreatment.TRANSLATE else None
             demoted = owners if mode is BlockTreatment.GLOSSARY_ONLY else None
         if updated is not item:
             changed = True

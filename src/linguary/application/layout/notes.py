@@ -78,8 +78,144 @@ _PARTICLES = frozenset(
 )
 _DOUBLED_CONSONANTS = frozenset("bdgmnprt")
 _LE_CONSONANTS = frozenset("bcdfgkpstz")
+_SILENT_E_TAILS = (
+    "v",
+    "c",
+    "dg",
+    "cg",
+    "u",
+    "chang",
+    "rang",
+    "plung",
+    "lung",
+    "spong",
+    "hing",
+    "fring",
+    "cring",
+    "sing",
+    "ting",
+    "eng",
+    "rg",
+)
+_SILENT_E_SYLLABLES = (
+    "at",
+    "ut",
+    "ad",
+    "id",
+    "od",
+    "ud",
+    "cap",
+    "shap",
+    "scrap",
+    "drap",
+    "elop",
+    "scop",
+    "ok",
+    "uk",
+    "um",
+    "ir",
+    "or",
+    "in",
+    "it",
+)
+_NO_SILENT_E_WORDS = frozenset(
+    {
+        "visit",
+        "limit",
+        "credit",
+        "edit",
+        "vomit",
+        "orbit",
+        "habit",
+        "merit",
+        "profit",
+        "spirit",
+        "exhibit",
+        "prohibit",
+        "inherit",
+        "deposit",
+        "murmur",
+        "augur",
+        "favor",
+        "favour",
+        "honor",
+        "honour",
+        "labor",
+        "labour",
+        "color",
+        "colour",
+        "humor",
+        "humour",
+        "rumor",
+        "rumour",
+        "vapor",
+        "vapour",
+        "harbor",
+        "harbour",
+        "neighbor",
+        "neighbour",
+        "mirror",
+        "terror",
+        "horror",
+        "error",
+        "motor",
+        "doctor",
+        "factor",
+        "actor",
+        "author",
+        "tutor",
+        "tailor",
+        "sailor",
+        "anchor",
+    }
+)
 _DASHES = ("—", "–", "-")
-_RU_WORD = re.compile(r"[А-Яа-яЁё]+")
+_RU_TOKEN = re.compile(r"[А-Яа-яЁё]+|[,;]")
+_RU_INFINITIVE_ENDINGS = ("ть", "ться", "ти", "тись", "чь", "чься")
+_RU_CONJUNCTIONS = frozenset({"и", "или", "да", "а", "но", "либо"})
+_RU_PREPOSITIONS = frozenset(
+    {
+        "в",
+        "во",
+        "на",
+        "за",
+        "из",
+        "изо",
+        "к",
+        "ко",
+        "от",
+        "ото",
+        "по",
+        "под",
+        "подо",
+        "над",
+        "надо",
+        "перед",
+        "передо",
+        "через",
+        "с",
+        "со",
+        "у",
+        "о",
+        "об",
+        "обо",
+        "про",
+        "для",
+        "без",
+        "безо",
+        "до",
+        "при",
+        "сквозь",
+        "между",
+        "среди",
+        "около",
+        "вокруг",
+        "после",
+        "кроме",
+        "вместо",
+        "сверх",
+    }
+)
 _RU_IRREGULAR = {
     "хихикнул": "хихикать",
     "хихикнула": "хихикать",
@@ -109,23 +245,18 @@ _RU_PAST = (
     ("нул", "нуть"),
     ("или", "ить"),
     ("ила", "ить"),
-    ("ило", "ить"),
     ("ил", "ить"),
     ("ели", "еть"),
     ("ела", "еть"),
-    ("ело", "еть"),
     ("ел", "еть"),
     ("али", "ать"),
     ("ала", "ать"),
-    ("ало", "ать"),
     ("ал", "ать"),
     ("яли", "ять"),
     ("яла", "ять"),
-    ("яло", "ять"),
     ("ял", "ять"),
     ("ыли", "ыть"),
     ("ыла", "ыть"),
-    ("ыло", "ыть"),
     ("ыл", "ыть"),
 )
 
@@ -281,8 +412,10 @@ def _hint_draft(
     if lexical:
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
-            term = infinitive
-            translation = _russian_past_to_infinitive(hint.translation)
+            converted = _russian_past_to_infinitive(hint.translation)
+            if converted != hint.translation or _has_russian_infinitive(hint.translation):
+                term = infinitive
+                translation = converted
     long = (
         treatment is BlockTreatment.TRANSLATE
         and bool(cleaned_note)
@@ -547,11 +680,28 @@ def _is_vowel(stem: str, index: int) -> bool:
 
 
 def _magic_e(stem: str) -> bool:
-    """One-syllable CVC stem whose `-ed` spelling hides a silent `e` (`hope`, `like`)."""
-    if len(stem) < 3 or stem[-1] in "aeiouwxy":
+    """Whether `stem` dropped a silent `e` before `-ed`."""
+    if stem == "us":
+        return True
+    if len(stem) < 3 or stem in _NO_SILENT_E_WORDS or stem[-1] in "aeiouwxy":
         return False
+    if stem.endswith(_SILENT_E_TAILS):
+        return True
+    if stem.endswith("g") and not stem.endswith(("ng", "gg")) and _is_vowel(stem, -2):
+        return True
+    if stem.endswith("z") and not stem.endswith("zz"):
+        return True
+    if stem.endswith("s") and not stem.endswith("ss") and stem not in {"focus", "bias", "bus", "gas"}:
+        return True
     vowels = [index for index in range(len(stem)) if _is_vowel(stem, index)]
-    return len(vowels) == 1 and vowels[0] == len(stem) - 2
+    if len(vowels) == 1 and vowels[0] == len(stem) - 2:
+        return True
+    return (
+        len(vowels) >= 2
+        and _is_vowel(stem, -2)
+        and not _is_vowel(stem, -3)
+        and stem.endswith(_SILENT_E_SYLLABLES)
+    )
 
 
 def _headword_gloss(note: str, original: str) -> bool:
@@ -596,9 +746,49 @@ def _note_quotes_translation(note: str, translation: str) -> bool:
     return f"«{quoted}»".casefold() in note.casefold()
 
 
+def _has_russian_infinitive(text: str) -> bool:
+    """Whether `text` already contains a Russian verb infinitive."""
+    return any(
+        match.group(0).casefold().endswith(_RU_INFINITIVE_ENDINGS)
+        for match in _RU_TOKEN.finditer(text)
+    )
+
+
 def _russian_past_to_infinitive(text: str) -> str:
     """Past-tense Russian verbs in a gloss become infinitives. Other words stay."""
-    return _RU_WORD.sub(lambda match: _russian_token(match.group(0)), text)
+    converted_in_clause = False
+    after_preposition = False
+    pieces: list[str] = []
+    cursor = 0
+    for match in _RU_TOKEN.finditer(text):
+        pieces.append(text[cursor : match.start()])
+        token = match.group(0)
+        cursor = match.end()
+        if token in {",", ";"}:
+            converted_in_clause = False
+            after_preposition = False
+            pieces.append(token)
+            continue
+        folded = token.casefold().replace("ё", "е")
+        if folded in _RU_CONJUNCTIONS:
+            converted_in_clause = False
+            after_preposition = False
+            pieces.append(token)
+            continue
+        if folded in _RU_PREPOSITIONS:
+            after_preposition = True
+            pieces.append(token)
+            continue
+        if converted_in_clause or after_preposition:
+            after_preposition = False
+            pieces.append(token)
+            continue
+        replaced = _russian_token(token)
+        if replaced != token:
+            converted_in_clause = True
+        pieces.append(replaced)
+    pieces.append(text[cursor:])
+    return "".join(pieces)
 
 
 def _russian_token(word: str) -> str:

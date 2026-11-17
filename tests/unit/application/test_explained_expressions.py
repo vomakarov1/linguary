@@ -58,12 +58,17 @@ def test_unrelated_text_is_not_treated_as_repeat(explained: str, text: str) -> N
 
 
 def test_shoo_does_not_match_shook_or_shoot() -> None:
-    """`shook` and `shoot` are not inflected forms of `shoo`."""
+    """`shook` and `shoot` are not inflected forms of `shoo`, while real inflections match."""
     explained = ExplainedExpressions(["Shoo!"])
     assert not explained.covers("Hagrid's shoulders shook.")
     assert not explained.covers("He wanted to shoot.")
     assert not explained.covers("shook")
     assert not explained.covers("shoot")
+    assert ExplainedExpressions(["stop"]).covers("stopping")
+    assert ExplainedExpressions(["snap"]).covers("snapping")
+    assert ExplainedExpressions(["thin"]).covers("thinnest")
+    assert ExplainedExpressions(["heave"]).covers("heaving")
+    assert ExplainedExpressions(["shuffle"]).covers("shuffling")
 
 
 def test_repeats_are_removed_from_hints_and_notes() -> None:

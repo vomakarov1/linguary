@@ -34,14 +34,14 @@ _WORD = re.compile(r"\w+(?:'\w+)*")
 
 #: Minimum shared stem between two inflected forms of one word and maximum suffix delta beyond it.
 _MIN_STEM = 4
-_MAX_ENDING = 3
+_MAX_ENDING = 4
 
 #: English inflectional suffixes. A shared prefix is not enough (`shoo`/`shook`).
 _INFLECTION_SUFFIXES = frozenset(
     {"", "s", "es", "d", "ed", "ing", "er", "est", "ly", "'s", "ies", "ied"}
 )
 _DOUBLING_SUFFIXES = frozenset({"ed", "ing", "er", "est"})
-_Y_ALTERNATIONS = frozenset({("ied", "y"), ("ies", "y")})
+_ALTERNATIONS = frozenset({("e", "ing"), ("ied", "y"), ("ies", "y")})
 
 
 def expression_words(text: str) -> tuple[str, ...]:
@@ -257,7 +257,7 @@ def _inflection_pair(first: str, second: str, stem: int) -> bool:
     """Whether both tails after `stem` are allowed English inflectional suffixes."""
     left, right = first[stem:], second[stem:]
     pair = (left, right) if left <= right else (right, left)
-    if pair in _Y_ALTERNATIONS:
+    if pair in _ALTERNATIONS:
         return True
     prefix = first[:stem]
     return _inflection_suffix(prefix, left) and _inflection_suffix(prefix, right)

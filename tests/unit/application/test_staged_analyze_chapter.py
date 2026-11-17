@@ -2145,7 +2145,7 @@ def test_a2_chapter_title_heading_promotes_to_translate_and_drops_from_no_one_gr
     ]
     assert {item.id: item.help_kind for item in normalized.difficulties} == {
         'd-from-evidenced': 'explanation',
-        'd-letters': 'lexical_hint',
+        'd-letters': 'explanation',
         'd-paragraph': 'explanation',
     }
 
@@ -2238,6 +2238,10 @@ def test_a2_short_lines_with_winked_groaned_chuckled_or_fancy_seeing_you_do_not_
                 'd-winked', (QuotedSourceAnchorResponse(glossary_alias, 'winked'),),
                 glossary_alias, 'vocabulary', 'useful', 'explanation', point,
             ),
+            QuotedDifficultyResponse(
+                'd-fancy', (QuotedSourceAnchorResponse('b4', 'Fancy seeing you here'),),
+                'b4', 'idiom', 'useful', 'lexical_hint', point,
+            ),
         ),
     )
     normalized = normalize_a2_dialogue_response(
@@ -2254,6 +2258,7 @@ def test_a2_short_lines_with_winked_groaned_chuckled_or_fancy_seeing_you_do_not_
         BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE,
     ]
     assert normalized.difficulties[0].help_kind == 'lexical_hint'
+    assert normalized.difficulties[1].help_kind == 'explanation'
 
 
 def test_a2_translate_block_drops_trivial_sounding_relieved_grammar_difficulty():

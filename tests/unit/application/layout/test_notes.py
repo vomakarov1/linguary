@@ -756,6 +756,18 @@ def test_verb_glossary_hint_normalized_to_infinitive_and_redundant_definition_dr
         ("walked off", "пошёл прочь", "to walk off", "пойти прочь"),
         ("walked off", "пошел прочь", "to walk off", "пойти прочь"),
         ("shuffled away", "поплелся", "to shuffle away", "поплестись"),
+        ("heaved", "тяжело вздохнул", "to heave", "тяжело вздохнуть"),
+        ("glanced", "заглянул в зеркало", "to glance", "заглянуть в зеркало"),
+        ("nudged", "толкнул локтем", "to nudge", "толкнуть локтем"),
+        ("squeezed", "спустился в подвал", "to squeeze", "спуститься в подвал"),
+        ("paused", "подал сигнал", "to pause", "подать сигнал"),
+        ("escaped", "услышал выстрел", "to escape", "услышать выстрел"),
+        ("hesitated", "замешкался", "to hesitate", "замешкаться"),
+        ("bewildered", "озадаченный, растерянный", "bewildered", "озадаченный, растерянный"),
+        ("frightened", "испуганный", "frightened", "испуганный"),
+        ("wicked", "злой, коварный", "wicked", "злой, коварный"),
+        ("pointed", "остроконечный", "pointed", "остроконечный"),
+        ("hundred", "сотня", "hundred", "сотня"),
     )
     for original, translation, term, infinitive in samples:
         sample_text = f"Then {original} here."
