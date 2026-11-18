@@ -467,8 +467,13 @@ def _hint_draft(
     cleaned_note = _cleaned_hint_note(hint.note)
     lexical = _plain_lexical(hint.original, ids, known)
     verbal = _verbal_infinitive_words(hint.original) is not None
+    signaled = any(item_id in known and known[item_id].kind in _SIGNAL_KINDS for item_id in ids)
     kept_note = ""
-    if cleaned_note and not ((lexical or verbal) and _headword_gloss(cleaned_note, hint.original)):
+    if cleaned_note and not (
+        (lexical or verbal)
+        and not signaled
+        and _headword_gloss(cleaned_note, hint.original)
+    ):
         kept_note = cleaned_note
     kept_note = _strip_leading_translation(kept_note, hint.translation)
     term: str | None = hint.original

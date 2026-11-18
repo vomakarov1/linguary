@@ -843,6 +843,53 @@ def test_verb_glossary_hint_normalized_to_infinitive_and_redundant_definition_dr
     assert preserved[0].labels == ("Игра слов.",)
 
 
+def test_infinitive_wordplay_hint_keeps_gloss_and_label() -> None:
+    """A linked wordplay difficulty keeps a bare-headword gloss on `to` + verb."""
+    text = "None of them noticed a large tawny owl flutter past the window."
+    block = _block(text)
+    hint = GlossaryHint("to flutter", "пролететь", "flutter — толкование")
+    wordplay = _difficulty(
+        block.id,
+        (_anchor(block, "flutter"),),
+        "wordplay",
+        difficulty_id="d-flutter",
+    )
+    plan = _plan(wordplay)
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(hint,),
+        evidence=ContentEvidence(
+            plan.sha256,
+            (
+                HelpEvidence(
+                    wordplay.id,
+                    wordplay.required_points[0].id,
+                    "glossary_hint.note",
+                    block.id,
+                    _hint_key("glossary_hint.note", hint, block.id),
+                    hint.note or "",
+                ),
+                HelpEvidence(
+                    wordplay.id,
+                    wordplay.required_points[0].id,
+                    "glossary_hint.translation",
+                    block.id,
+                    _hint_key("glossary_hint.translation", hint, block.id),
+                    hint.translation,
+                ),
+            ),
+        ),
+    )
+
+    notes = block_notes(block, result, plan, ())
+
+    assert notes[0].term == "to flutter"
+    assert notes[0].body == ("пролететь", "flutter — толкование")
+    assert notes[0].labels == ("Игра слов.",)
+    assert notes[0].marker_end == _span_end(text, "flutter")
+
+
 def test_infinitive_and_case_insensitive_glossary_hints_find_marker_end_in_text() -> None:
     """`to` + verb marks the inflected phrase. A different case still needs a word boundary."""
     flutter = "None of them noticed a large tawny owl flutter past the window."
