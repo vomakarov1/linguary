@@ -149,6 +149,22 @@ def _hint_key(kind: str, hint: GlossaryHint, block_id: str) -> str:
     return artifact_key(kind, block_id, content)
 
 
+def _hint_notes(text: str, *hints: GlossaryHint) -> tuple[LayoutNote, ...]:
+    """Glossary notes for `text`, with no plan and no pronunciation."""
+    block = _block(text)
+    return block_notes(
+        block,
+        _result(block, treatment=BlockTreatment.GLOSSARY_ONLY, hints=hints),
+        None,
+        (),
+    )
+
+
+def _span_end(text: str, surface: str) -> int:
+    """Exclusive end of the first `surface` fragment."""
+    return text.index(surface) + len(surface)
+
+
 def _note_key(note: LanguageNote) -> str:
     content = {
         "original_excerpt": note.original_excerpt,
@@ -825,3 +841,227 @@ def test_verb_glossary_hint_normalized_to_infinitive_and_redundant_definition_dr
     assert preserved[0].term == "sniggered"
     assert preserved[0].body == ("хихикнули", "Snigger — толкование")
     assert preserved[0].labels == ("Игра слов.",)
+
+
+def test_infinitive_and_case_insensitive_glossary_hints_find_marker_end_in_text() -> None:
+    """`to` + verb marks the inflected phrase. A different case still needs a word boundary."""
+    flutter = "None of them noticed a large tawny owl flutter past the window."
+    flutter_block = _block(flutter)
+    flutter_hint = GlossaryHint("to flutter", "пролететь", "flutter — промелькнуть")
+    flutter_notes = block_notes(
+        flutter_block,
+        _result(
+            flutter_block,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            hints=(flutter_hint,),
+        ),
+        None,
+        (_pron(flutter_block, "to flutter", "/ˈflʌtə/", "uk", start=0),),
+    )
+    assert flutter_notes == (
+        LayoutNote(
+            (),
+            "to flutter",
+            "/ˈflʌtə/",
+            "uk",
+            ("пролететь",),
+            _span_end(flutter, "flutter"),
+            "glossary_hint",
+            (),
+        ),
+    )
+
+    hugged = "And the old man hugged Mr Dursley around the middle and walked off."
+    assert [
+        (note.term, note.marker_end) for note in _hint_notes(
+            hugged,
+            GlossaryHint("to hug", "обнять"),
+            GlossaryHint("to walk off", "уйти"),
+        )
+    ] == [
+        ("to hug", _span_end(hugged, "hugged")),
+        ("to walk off", _span_end(hugged, "walked off")),
+    ]
+
+    bowed = "Dumbledore bowed his head. Professor McGonagall gasped."
+    assert [
+        (note.term, note.marker_end) for note in _hint_notes(
+            bowed,
+            GlossaryHint("to bow one's head", "склонить голову"),
+            GlossaryHint("to gasp", "ахнуть"),
+        )
+    ] == [
+        ("to bow one's head", _span_end(bowed, "bowed his head")),
+        ("to gasp", _span_end(bowed, "gasped")),
+    ]
+
+    grab = "Harry made a grab for the letter but Uncle Vernon knocked his hand out of the way."
+    assert [
+        (note.term, note.marker_end) for note in _hint_notes(
+            grab,
+            GlossaryHint("to make a grab for", "схватить"),
+            GlossaryHint("to knock out of the way", "отвести в сторону"),
+        )
+    ] == [
+        ("to make a grab for", _span_end(grab, "made a grab for")),
+        ("to knock out of the way", _span_end(grab, "knocked his hand out of the way")),
+    ]
+
+    upright = "The whole shack shivered and Harry sat bolt upright, staring at the door."
+    upright_notes = _hint_notes(upright, GlossaryHint("to sit bolt upright", "сесть прямо"))
+    assert upright_notes[0].term == "to sit bolt upright"
+    assert upright_notes[0].marker_end == _span_end(upright, "sat bolt upright")
+    assert upright[upright_notes[0].marker_end] == ","
+
+    thrown_to = "Hagrid threw it to Harry."
+    thrown_to_notes = _hint_notes(thrown_to, GlossaryHint("to throw to", "бросить"))
+    assert thrown_to_notes[0].term == "to throw to"
+    assert thrown_to_notes[0].marker_end == _span_end(thrown_to, "threw it to")
+    assert thrown_to[thrown_to_notes[0].marker_end] == " "
+
+    write_down = "Could you write it down?"
+    write_down_notes = _hint_notes(write_down, GlossaryHint("to write down", "записать"))
+    assert write_down_notes[0].term == "to write down"
+    assert write_down_notes[0].marker_end == _span_end(write_down, "write it down")
+    assert write_down[write_down_notes[0].marker_end] == "?"
+
+    surprise = "To his surprise, Hagrid chuckled."
+    surprise_notes = _hint_notes(surprise, GlossaryHint("to his surprise", "к его удивлению"))
+    assert surprise_notes[0].term == "to his surprise"
+    assert surprise_notes[0].marker_end == _span_end(surprise, "To his surprise")
+    assert surprise[surprise_notes[0].marker_end] == ","
+
+    buried = "He walked INTO his surprise party."
+    assert _hint_notes(buried, GlossaryHint("to his surprise", "к его удивлению"))[0].marker_end is None
+
+    look = "Harry threw Uncle Vernon a dirty look."
+    look_notes = _hint_notes(look, GlossaryHint("to throw a dirty look at", "сердитый взгляд"))
+    assert look_notes[0].term == "to throw a dirty look at"
+    assert look_notes[0].marker_end == _span_end(look, "threw Uncle Vernon a dirty look")
+
+    samples = (
+        ("The owl flutters past.", "to flutter", "flutters"),
+        ("Hagrid held the door.", "to hold", "held"),
+        ("Harry took the letter.", "to take", "took"),
+        ("The stone was thrown aside.", "to throw", "thrown"),
+        ("It was written there.", "to write", "written"),
+        ("The light was fading fast.", "to fade", "fading"),
+        ("Harry nodded once.", "to nod", "nodded"),
+        ("Dudley snivelled loudly.", "to snivel", "snivelled"),
+        ("They expelled the boy.", "to expel", "expelled"),
+    )
+    for text, original, surface in samples:
+        sample = _hint_notes(text, GlossaryHint(original, "форма"))
+        assert sample[0].term == original
+        assert sample[0].marker_end == _span_end(text, surface)
+
+
+def test_hint_note_strips_unquoted_leading_translation_duplicate() -> None:
+    """A note that repeats the translation before punctuation does not show it twice."""
+    text = "Dumbledore mentioned the London Underground."
+    block = _block(text)
+    hint = GlossaryHint(
+        "the London Underground",
+        "Лондонское метро",
+        "Лондонское метро. Дамблдор шутит, что шрам у него на колене похож на схему линий метро.",
+    )
+    difficulty = _difficulty(
+        block.id,
+        (_anchor(block, "the London Underground"),),
+        "cultural_reference",
+        difficulty_id="d-tube",
+    )
+    plan = _plan(difficulty)
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(hint,),
+        evidence=ContentEvidence(
+            plan.sha256,
+            (
+                HelpEvidence(
+                    difficulty.id,
+                    difficulty.required_points[0].id,
+                    "glossary_hint.note",
+                    block.id,
+                    _hint_key("glossary_hint.note", hint, block.id),
+                    hint.note or "",
+                ),
+            ),
+        ),
+    )
+
+    notes = block_notes(block, result, plan, ())
+
+    assert notes[0].body == (
+        "Лондонское метро",
+        "Дамблдор шутит, что шрам у него на колене похож на схему линий метро.",
+    )
+    assert "Лондонское метро — Лондонское метро" not in " — ".join(notes[0].body)
+    assert notes[0].difficulty_kinds == ("cultural_reference",)
+    assert notes[0].marker_end == _span_end(text, "the London Underground")
+
+    same = _hint_notes("line", GlossaryHint("line", "Лондонское метро", "Лондонское метро"))
+    assert same[0].body == ("Лондонское метро",)
+    shouted = _hint_notes(
+        "tube",
+        GlossaryHint("tube", "Лондонское метро", "лондонское метро! Схема линий."),
+    )
+    assert shouted[0].body == ("Лондонское метро", "Схема линий.")
+    dashed = _hint_notes(
+        "map",
+        GlossaryHint("map", "Лондонское метро", "Лондонское метро — схема линий."),
+    )
+    assert dashed[0].body == ("Лондонское метро", "схема линий.")
+    for mark in (".", "!", "?", "—", "–", "-", ":", ";"):
+        marked = _hint_notes(
+            "stop",
+            GlossaryHint("stop", "Лондонское метро", f"Лондонское метро{mark} дальше"),
+        )
+        assert marked[0].body == ("Лондонское метро", "дальше")
+    prefix = _hint_notes("station", GlossaryHint("station", "метро", "метрополитен в Лондоне."))
+    assert prefix[0].body == ("метро", "метрополитен в Лондоне.")
+
+
+def test_body_strips_unconfirmed_wordplay_disclaimer_and_fixes_are_there_ellipsis() -> None:
+    """An unconfirmed wordplay disclaimer drops out. The wrong tag label becomes Are there."""
+    text = "Diagon Alley filled with showers of owls."
+    block = _block(text)
+    diagon = GlossaryHint(
+        "Diagon Alley",
+        "Косой переулок",
+        "Название похоже на diagonally. "
+        "Это можно заметить как возможную игру слов, но текст книги не подтверждает её прямо. "
+        "Читается как diagonally, но текст книги не подтверждает её прямо.",
+    )
+    owls = GlossaryHint(
+        "showers of owls",
+        "потоки сов",
+        "Вопрос построен без is it: Going to be any more showers of owls tonight, Harry?",
+    )
+    ellipsis = LanguageNote(
+        "n-owls",
+        block.id,
+        "owls",
+        "Вопрос построен без is it, поэтому перевод добавляет «разве».",
+    )
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(diagon, owls),
+        notes=(ellipsis,),
+    )
+
+    notes = block_notes(block, result, None, ())
+
+    assert [note.body for note in notes] == [
+        ("Косой переулок", "Название похоже на diagonally. Читается как diagonally."),
+        (
+            "потоки сов",
+            "Вопрос построен без Are there: Going to be any more showers of owls tonight, Harry?",
+        ),
+        ("Вопрос построен без Are there, поэтому перевод добавляет «разве».",),
+    ]
+    flat = " ".join(" ".join(note.body) for note in notes)
+    assert "не подтверждает её прямо" not in flat
+    assert "без is it" not in flat

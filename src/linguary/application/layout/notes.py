@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from linguary.application.explained_expressions import expression_words
+from linguary.application.explained_expressions import _same_word, expression_words
 from linguary.application.pronunciation_projection import PronunciationOccurrence
 from linguary.domain import (
     BlockProcessingResult,
@@ -48,6 +48,12 @@ _EDITORIAL_TAILS = (
     "; вариант стоит проверить",
     ". Вариант стоит проверить.",
 )
+_UNCONFIRMED_WORDPLAY = (
+    "Это можно заметить как возможную игру слов, но текст книги не подтверждает её прямо."
+)
+_UNCONFIRMED_WORDPLAY_TAIL = ", но текст книги не подтверждает её прямо"
+_TAG_QUESTION_LABEL = "Вопрос построен без is it"
+_TAG_QUESTION_REPLACEMENT = "Вопрос построен без Are there"
 _AGREEMENT_NOTE_PREFIXES = (
     "разговорное подтверждение чужих слов",
     "говорящий соглашается и ссылается",
@@ -76,6 +82,61 @@ _PARTICLES = frozenset(
         "up",
     }
 )
+# `to his surprise` is a prepositional phrase, not `to` + verb.
+_NOT_A_VERB_AFTER_TO = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "this",
+        "that",
+        "these",
+        "those",
+        "his",
+        "her",
+        "my",
+        "their",
+        "our",
+        "your",
+        "its",
+        "him",
+        "them",
+        "me",
+        "us",
+        "you",
+        "it",
+        "himself",
+        "herself",
+        "myself",
+        "themselves",
+        "ourselves",
+        "yourself",
+        "yourselves",
+    }
+)
+# Particles and the prepositions that introduce an object after the verb.
+_PHRASE_PREPOSITIONS = _PARTICLES | frozenset(
+    {"at", "for", "from", "into", "of", "onto", "to", "with", "without", "upon", "against"}
+)
+# Irregular or alternating forms only. Regular -ed/-ing stays on `_same_word` / `_regular_ed_stem`.
+_IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
+    "hold": frozenset({"held"}),
+    "make": frozenset({"made"}),
+    "sit": frozenset({"sat"}),
+    "take": frozenset({"took"}),
+    "throw": frozenset({"threw", "thrown"}),
+    "cast": frozenset({"cast"}),
+    "write": frozenset({"wrote", "written"}),
+    "expel": frozenset({"expelled"}),
+    "hug": frozenset({"hugged"}),
+    "nod": frozenset({"nodded"}),
+    "snivel": frozenset({"snivelled"}),
+    "fade": frozenset({"faded", "fading"}),
+}
+_LEADING_TRANSLATION_BREAKS = frozenset(".!?—–-:;")
+_APOSTROPHE_CHARS = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
+_SURFACE_WORD = re.compile(r"\w+(?:'\w+)*")
+_ONE_SLOT = "one's"
 _DOUBLED_CONSONANTS = frozenset("bdgmnprt")
 _LE_CONSONANTS = frozenset("bcdfgkpstz")
 _SILENT_E_TAILS = (
@@ -389,11 +450,12 @@ def _hint_draft(
     known: Mapping[str, Difficulty],
     treatment: BlockTreatment,
 ) -> _Draft:
-    """A glossary hint. The marker is the end of the first exact `original`.
+    """A glossary hint. The marker is the end of the first match of `original`.
 
-    Evidence keys and the marker use the stored hint fields. `term` and `body`
-    may then drop a repeated sentence, a quoted translation, or a headword
-    gloss, and show a past-tense verb as an infinitive.
+    Evidence keys use the stored hint fields, before the marker search and
+    before a leading translation is cut out of the note. `term` and `body`
+    may then drop a repeated sentence, a quoted or leading translation, or a
+    headword gloss, and show a past-tense verb as an infinitive.
     """
     content = {"original": hint.original, "translation": hint.translation, "note": hint.note}
     keys = {
@@ -404,12 +466,18 @@ def _hint_draft(
     marker_end = _find_end(text, hint.original)
     cleaned_note = _cleaned_hint_note(hint.note)
     lexical = _plain_lexical(hint.original, ids, known)
+    verbal = _verbal_infinitive_words(hint.original) is not None
     kept_note = ""
-    if cleaned_note and not (lexical and _headword_gloss(cleaned_note, hint.original)):
+    if cleaned_note and not ((lexical or verbal) and _headword_gloss(cleaned_note, hint.original)):
         kept_note = cleaned_note
+    kept_note = _strip_leading_translation(kept_note, hint.translation)
     term: str | None = hint.original
     translation = hint.translation
-    if lexical:
+    if verbal:
+        infinitive = _to_infinitive_term(hint.original)
+        if infinitive is not None:
+            term = infinitive
+    elif lexical:
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
             converted = _russian_past_to_infinitive(hint.translation)
@@ -537,11 +605,151 @@ def _shared_anchors(
 
 
 def _find_end(text: str, quote: str) -> int | None:
-    """End of the first exact `str.find` match, or None when it is absent."""
+    """End of the first match of `quote`, or None when nothing matches.
+
+    Exact `str.find` wins. Otherwise the same spelling on word boundaries,
+    ignoring case. `to` plus a verb may match an inflected phrase with no `to`.
+    """
     start = text.find(quote)
-    if start < 0:
+    if start >= 0:
+        return start + len(quote)
+    if not quote:
         return None
-    return start + len(quote)
+    folded = _case_insensitive_end(text, quote)
+    if folded is not None:
+        return folded
+    return _infinitive_end(text, quote)
+
+
+def _case_insensitive_end(text: str, quote: str) -> int | None:
+    """End of the first case-insensitive `quote` that starts and ends on a word boundary."""
+    pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)", re.IGNORECASE)
+    match = pattern.search(text)
+    if match is None:
+        return None
+    return match.end()
+
+
+def _verbal_infinitive_words(original: str) -> tuple[str, ...] | None:
+    """Words after `to` when `original` is a verb infinitive, not `to his surprise`."""
+    stripped = original.strip()
+    if not stripped.casefold().startswith("to "):
+        return None
+    words = expression_words(stripped)
+    if len(words) < 2 or words[0] != "to" or words[1] in _NOT_A_VERB_AFTER_TO:
+        return None
+    return words[1:]
+
+
+def _infinitive_end(text: str, quote: str) -> int | None:
+    """End of `to` + verb matched to an inflected phrase in `text`."""
+    pattern = _verbal_infinitive_words(quote)
+    if not pattern:
+        return None
+    verb, rest = pattern[0], pattern[1:]
+    tokens = _surface_tokens(text)
+    for index, (word, end) in enumerate(tokens):
+        if not _same_verb(word, verb):
+            continue
+        if not rest:
+            return end
+        found = _match_phrase(tokens, index + 1, rest)
+        if found is not None:
+            return found
+    return None
+
+
+def _surface_tokens(text: str) -> list[tuple[str, int]]:
+    """Casefolded words and the exclusive end of each word in `text`."""
+    normalized = text.translate(_APOSTROPHE_CHARS)
+    return [
+        (match.group(0).casefold(), match.end())
+        for match in _SURFACE_WORD.finditer(normalized)
+    ]
+
+
+def _same_verb(surface: str, verb: str) -> bool:
+    """Whether `surface` is `verb` or one of its inflected forms."""
+    if surface == verb or surface in _IRREGULAR_VERB_FORMS.get(verb, ()):
+        return True
+    if _same_word(surface, verb):
+        return True
+    return _regular_ed_stem(surface) == verb
+
+
+def _match_phrase(
+    tokens: Sequence[tuple[str, int]],
+    index: int,
+    pattern: tuple[str, ...],
+) -> int | None:
+    """End of `pattern` in `tokens` from `index`, allowing an object gap."""
+    if pattern and pattern[0] in _PHRASE_PREPOSITIONS:
+        for skip in range(3):
+            found = _match_fixed(tokens, index + skip, pattern)
+            if found is not None:
+                return found
+        return None
+    found = _match_fixed(tokens, index, pattern)
+    if found is not None:
+        return found
+    return _match_shifted_object(tokens, index, pattern)
+
+
+def _match_fixed(
+    tokens: Sequence[tuple[str, int]],
+    index: int,
+    pattern: tuple[str, ...],
+) -> int | None:
+    """End of a contiguous `pattern`. `one's` may be zero to two words."""
+    if not pattern:
+        if index <= 0 or index - 1 >= len(tokens):
+            return None
+        return tokens[index - 1][1]
+    if pattern[0] == _ONE_SLOT:
+        for skip in range(3):
+            found = _match_fixed(tokens, index + skip, pattern[1:])
+            if found is not None:
+                return found
+        return None
+    if index >= len(tokens) or tokens[index][0] != pattern[0]:
+        return None
+    return _match_fixed(tokens, index + 1, pattern[1:])
+
+
+def _match_shifted_object(
+    tokens: Sequence[tuple[str, int]],
+    index: int,
+    pattern: tuple[str, ...],
+) -> int | None:
+    """`throw a dirty look at` also matches `threw Uncle Vernon a dirty look`."""
+    if len(pattern) < 2 or pattern[-1] not in _PHRASE_PREPOSITIONS:
+        return None
+    middle = pattern[:-1]
+    for skip in range(3):
+        found = _match_fixed(tokens, index + skip, middle)
+        if found is not None:
+            return found
+    return None
+
+
+def _strip_leading_translation(note: str, translation: str) -> str:
+    """Drop a leading unquoted copy of `translation` and the punctuation after it.
+
+    The copy must be the whole note or be followed by `.`, `!`, `?`, `—`, `–`,
+    `-`, `:`, or `;`. A longer word that merely starts with the translation stays.
+    """
+    text = note.strip()
+    quoted = translation.strip()
+    if not text or not quoted or len(text) < len(quoted):
+        return text
+    if text[: len(quoted)].casefold() != quoted.casefold():
+        return text
+    rest = text[len(quoted) :].lstrip()
+    if not rest:
+        return ""
+    if rest[0] not in _LEADING_TRANSLATION_BREAKS:
+        return text
+    return rest[1:].lstrip()
 
 
 def _last_anchor_end(block_id: str, anchors: Sequence[SourceAnchor]) -> int | None:
@@ -553,7 +761,7 @@ def _last_anchor_end(block_id: str, anchors: Sequence[SourceAnchor]) -> int | No
 
 
 def _body(*parts: str) -> tuple[str, ...]:
-    """Drop the language-reference phrase, speech-verb boilerplate, and editorial tails.
+    """Drop reference phrases, speech-verb boilerplate, editorial tails, and AI disclaimers.
 
     A piece that becomes empty is omitted. The colon form of the reference
     phrase is removed first so a following colon is not left behind.
@@ -563,9 +771,30 @@ def _body(*parts: str) -> tuple[str, ...]:
         text = part.replace(_REFERENCE_COLON, "").replace(_REFERENCE, "")
         text = _strip_speech_verb_note(text)
         text = _strip_editorial_tail(text)
+        text = _strip_ai_disclaimer(text)
         if text:
             cleaned.append(text)
     return tuple(cleaned)
+
+
+def _strip_ai_disclaimer(text: str) -> str:
+    """Remove the unconfirmed-wordplay disclaimer and fix the Are there label.
+
+    One neighboring space is removed with the sentence so a gap does not stay doubled.
+    Spaces left by other cuts are kept.
+    """
+    current = _cut_piece(text, _UNCONFIRMED_WORDPLAY)
+    current = _cut_piece(current, _UNCONFIRMED_WORDPLAY_TAIL)
+    current = current.replace(_TAG_QUESTION_LABEL, _TAG_QUESTION_REPLACEMENT)
+    return current.strip()
+
+
+def _cut_piece(text: str, piece: str) -> str:
+    """Remove `piece`, and one adjacent space when the piece sits between words."""
+    spaced = f" {piece}"
+    if spaced in text:
+        text = text.replace(spaced, "")
+    return text.replace(piece, "")
 
 
 def _strip_speech_verb_note(text: str) -> str:
@@ -630,7 +859,14 @@ def _plain_lexical(
 
 
 def _to_infinitive_term(original: str) -> str | None:
-    """`to` + infinitive for a regular `-ed` verb or verb plus particle."""
+    """`to` + infinitive for a regular `-ed` verb or verb plus particle.
+
+    An original that is already `to` plus a verb keeps that spelling.
+    `to his surprise` is not an infinitive.
+    """
+    stripped = original.strip()
+    if _verbal_infinitive_words(stripped) is not None:
+        return stripped
     words = expression_words(original)
     if len(words) == 1:
         stem = _regular_ed_stem(words[0])
@@ -724,6 +960,9 @@ def _headwords(original: str) -> tuple[str, ...]:
     bare = original.strip().casefold()
     if bare:
         heads.append(bare)
+    infinitive = _verbal_infinitive_words(original)
+    if infinitive:
+        heads.append(" ".join(infinitive))
     stem = None
     if len(words) == 1:
         stem = _regular_ed_stem(words[0])
