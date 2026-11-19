@@ -1747,3 +1747,34 @@ def test_repeated_visual_quote_without_offset_keeps_the_plan() -> None:
     assert {item.anchors[0].quote for item in shifted.difficulties} == {"dark"}
     assert [fact.anchor.quote for fact in shifted.scenes[0].visual_facts] == ["dark"]
 
+
+def test_russian_gender_adjective_matches_glossary_code() -> None:
+    from types import SimpleNamespace
+
+    from linguary.application.analysis_merge import _extract_gender, validate_fact_glossary
+
+    assert _extract_gender("женский") == "female"
+    assert _extract_gender("мужской") == "male"
+    assert _extract_gender("средний") == "neuter"
+    assert _extract_gender("Женский род; та же героиня") == "female"
+    assert _extract_gender("женский пол") == "female"
+    assert _extract_gender("мужского рода") == "male"
+    assert _extract_gender("женский (она)") == "female"
+    assert _extract_gender("город без пометы") is None
+    assert _extract_gender("человек среднего роста") is None
+    assert _extract_gender("средний возраст") is None
+    assert _extract_gender("средняя школа") is None
+    assert _extract_gender("мужской монастырь") is None
+
+    def plan(value: str):
+        anchor = SimpleNamespace(quote="Mrs Dursley", block_id="b1")
+        fact = SimpleNamespace(
+            kind="gender", value=value, certainty="explicit", subject_anchor=anchor
+        )
+        return SimpleNamespace(version=3, context_facts=(fact,))
+
+    validate_fact_glossary(plan("женский"), {"Mrs Dursley": {"gender": "female"}})
+    with pytest.raises(AnalysisMergeError) as conflict:
+        validate_fact_glossary(plan("мужской"), {"Mrs Dursley": {"gender": "female"}})
+    assert conflict.value.violation.rule_code == "glossary_fact_conflict"
+

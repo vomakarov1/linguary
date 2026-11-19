@@ -1968,7 +1968,13 @@ def _quotation_key(text: str) -> str:
 
 
 _GENDER_NOTE_PATTERN = re.compile(
-    r"\b(мужск\w*\s+род\w*|женск\w*\s+род\w*|средн\w*\s+род\w*|male|female|neuter)\b",
+    r"\b("
+    r"мужск\w*\s+(?:род\w*|пол\w*)"
+    r"|женск\w*\s+(?:род\w*|пол\w*)"
+    r"|средн\w*\s+род\w*"
+    r"|male|female|neuter"
+    r"|(?:мужск(?:ой|ого)|женск(?:ий|ого)|средн(?:ий|его))(?=$|[\s,;:.(\[])(?!(?:\s+\w))"
+    r")\b",
     re.IGNORECASE,
 )
 
