@@ -2352,4 +2352,410 @@ def test_a2_translate_block_drops_trivial_sounding_relieved_grammar_difficulty()
     assert chapter.content_plan.difficulties == ()
 
 
+def test_a2_short_replies_with_cannon_budge_lump_or_eagerly_keep_translate():
+    """B1+ words and non-basic remark adverbs keep a short reply in TRANSLATE.
+
+    ‘Where’s the cannon?’ he said stupidly., ‘Budge up, yeh great lump,’ said
+    the stranger., and ‘Kept what from me?’ said Harry eagerly. are not demoted.
+    Up, A what, Nearly, Shoo, and No/Why are not promoted. A model TRANSLATE on
+    Nearly, Shoo, or No/Why still drops to READ_AS_IS. B1 leaves those lines alone.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import PedagogicalAnalysisResponse, TreatmentPlanItemResponse
+
+    translate_lines = (
+        '‘Where’s the cannon?’ he said stupidly.',
+        '‘Budge up, yeh great lump,’ said the stranger.',
+        '‘Kept what from me?’ said Harry eagerly.',
+        '‘Kept what from me?’ said Harry.',
+        '‘Yes,’ he said stupidly.',
+        '‘Yes,’ he said eagerly.',
+        '‘Yes,’ he said gingerly.',
+        '‘Yes,’ he said furiously.',
+        '‘Yes,’ he said nervously.',
+        '‘Yes,’ he said casually.',
+        '‘Yes,’ he said sternly.',
+        '‘Yes,’ he said firmly.',
+        '‘Yes,’ he said anxiously.',
+        '‘Yes,’ he said bitterly.',
+        '‘Yes,’ he said wearily.',
+        '‘Yes,’ he said sleepily.',
+        '‘Yes,’ he said coldly.',
+        '‘Cannon,’ he said.',
+        '‘Budge,’ he said.',
+        '‘Lump,’ he said.',
+        '‘Shack,’ he said.',
+        '‘Shivered,’ he said.',
+        '‘Yeh,’ he said.',
+        '‘Yer,’ he said.',
+        '‘Ter,’ he said.',
+        '‘Summat,’ he said.',
+        '‘Fer,’ he said.',
+        '‘Meself,’ he said.',
+        '‘Mighta,’ he said.',
+        '‘Dunno,’ he said.',
+        '‘Shan’t,’ he said.',
+        '‘Blimey,’ he said.',
+        '‘Codswallop,’ he said.',
+    )
+    stay_read_as_is = (
+        '‘Up! Get up! Now!’',
+        '‘A what?’',
+        '‘Nearly,’ said Harry.',
+        '‘Shoo!’ said Mr Dursley loudly.',
+        '‘No,’ she said sharply. ‘Why?’',
+    )
+    demote_to_read_as_is = (
+        '‘Nearly,’ said Harry.',
+        '‘Shoo!’ said Mr Dursley loudly.',
+        '‘No,’ she said sharply. ‘Why?’',
+    )
+    lines = translate_lines + stay_read_as_is + demote_to_read_as_is
+    blocks = tuple(_block(index, text) for index, text in enumerate(lines))
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    translate_until = len(translate_lines)
+    stay_until = translate_until + len(stay_read_as_is)
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(
+                f'b{index + 1}',
+                BlockTreatment.READ_AS_IS if translate_until <= index < stay_until else BlockTreatment.TRANSLATE,
+            )
+            for index in range(len(blocks))
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == (
+        [BlockTreatment.TRANSLATE] * translate_until
+        + [BlockTreatment.READ_AS_IS] * len(stay_read_as_is)
+        + [BlockTreatment.READ_AS_IS] * len(demote_to_read_as_is)
+    )
+
+    untouched = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='b1', english_help=False,
+    )
+    assert [item.treatment for item in untouched.treatment_plan] == [
+        item.treatment for item in payload.treatment_plan
+    ]
+
+
+def test_a2_numbered_chapter_heading_forced_to_read_as_is():
+    """A numbered heading the model marked TRANSLATE is forced to READ_AS_IS.
+
+    — CHAPTER THREE — and a bare roman numeral lose an unevidenced grammar note.
+    Evidence keeps its note. A meaningful title is still translated. The same
+    title in a paragraph is left alone. B1 does not rewrite the plan.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        HelpEvidenceResponse, PedagogicalAnalysisResponse, QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse, TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    numbered = '— CHAPTER THREE —'
+    roman = 'IV'
+    title = 'The Letters from No One'
+    blocks = (
+        _block(0, numbered, type=BlockType.HEADING),
+        _block(1, roman, type=BlockType.HEADING),
+        _block(2, title, type=BlockType.HEADING),
+        _block(3, title),
+    )
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    point = (RequiredPoint('p1', 'Объяснить номер главы.'),)
+
+    def grammar(difficulty_id, alias, quote):
+        return QuotedDifficultyResponse(
+            difficulty_id, (QuotedSourceAnchorResponse(alias, quote),), alias,
+            'grammar', 'useful', 'explanation', point,
+        )
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b2', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b3', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b4', BlockTreatment.READ_AS_IS),
+        ),
+        difficulties=(
+            grammar('d-numbered', 'b1', 'THREE'),
+            grammar('d-numbered-evidenced', 'b1', 'CHAPTER'),
+            grammar('d-roman', 'b2', 'IV'),
+        ),
+        before_you_read_evidence=(
+            HelpEvidenceResponse(
+                'd-numbered-evidenced', 'p1', 'before_you_read.explanation', 'b1', 0,
+                'Номер главы уже объяснён.',
+            ),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+    ]
+    assert [item.id for item in normalized.difficulties] == ['d-numbered-evidenced']
+
+    untouched = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='b1', english_help=False,
+    )
+    assert [item.treatment for item in untouched.treatment_plan] == [
+        item.treatment for item in payload.treatment_plan
+    ]
+    assert [item.id for item in untouched.difficulties] == [
+        'd-numbered', 'd-numbered-evidenced', 'd-roman',
+    ]
+
+
+def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_prune_forward_speech_style_spoiler():
+    """TRANSLATE drops unevidenced Ch5 grammar and vocabulary notes on the closed list.
+
+    could tell stays, including when the same note also anchors cupboard.
+    Evidence and a READ_AS_IS block keep the note. A lexical
+    hint is not an explanation. speech_style loses a later-block quote and
+    dialect lemmas that first appear later, and keeps at least one point.
+    """
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        HelpEvidenceResponse, PedagogicalAnalysisResponse, QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse, TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    blocks = (
+        _block(0, 'The hut stood by the sea.'),
+        _block(1, '‘Budge up, yeh great lump, and sit down here,’ said the stranger to the boy.'),
+        _block(2, '‘I mighta sat on it,’ he said. Got summat fer meself las\' night.'),
+        _block(3, 'Harry kept his eyes shut tight in the cupboard under the stairs.'),
+        _block(4, 'The small cupboard was dark.'),
+        _block(5, 'He waited until morning.'),
+    )
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    point = (RequiredPoint('p1', 'Объяснить конструкцию в этом блоке.'),)
+
+    def note(difficulty_id, alias, quote, kind, help_kind='explanation'):
+        return QuotedDifficultyResponse(
+            difficulty_id, (QuotedSourceAnchorResponse(alias, quote),), alias,
+            kind, 'useful', help_kind, point,
+        )
+
+    def speech(difficulty_id, points):
+        return QuotedDifficultyResponse(
+            difficulty_id, (QuotedSourceAnchorResponse('b2', 'yeh'),), 'b2',
+            'speech_style', 'useful', 'explanation', points,
+        )
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b2', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b3', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b4', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b5', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b6', BlockTreatment.TRANSLATE),
+        ),
+        difficulties=(
+            note('d-cupboard', 'b4', 'cupboard', 'vocabulary'),
+            note('d-in-cupboard', 'b4', 'in my cupboard', 'grammar'),
+            note('d-eyes', 'b4', 'kept his eyes shut tight', 'grammar'),
+            note('d-giant', 'b4', 'a giant called Hagrid', 'vocabulary'),
+            note('d-called', 'b4', 'called Hagrid', 'grammar'),
+            note('d-school', 'b4', 'was going to a school', 'vocabulary'),
+            note('d-wizards', 'b4', 'I was going to a school for wizards', 'grammar'),
+            note('d-open', 'b4', 'when I open my eyes', 'grammar'),
+            note('d-could', 'b4', 'could tell', 'vocabulary'),
+            note('d-could-grammar', 'b4', 'could tell', 'grammar'),
+            QuotedDifficultyResponse(
+                'd-mixed',
+                (
+                    QuotedSourceAnchorResponse('b4', 'could tell'),
+                    QuotedSourceAnchorResponse('b4', 'cupboard'),
+                ),
+                'b4', 'vocabulary', 'useful', 'explanation', point,
+            ),
+            note('d-lexical', 'b4', 'cupboard', 'vocabulary', 'lexical_hint'),
+            note('d-read', 'b5', 'in my cupboard', 'grammar'),
+            note('d-evidenced', 'b6', 'cupboard', 'vocabulary'),
+            speech('d-style', (
+                RequiredPoint('p-yeh', 'В этой реплике yeh значит you.'),
+                RequiredPoint('p-quote', 'Позже он скажет "I mighta sat on it" про торт.'),
+                RequiredPoint('p-guillemet', 'Он говорит «I mighta sat on it» про торт.'),
+                RequiredPoint(
+                    'p-lemmas',
+                    "summat = something, fer = for, las' = last, meself = myself",
+                ),
+                RequiredPoint('p-yeh-lemma', 'yeh = you'),
+                RequiredPoint('p-mixed', 'yeh = you, summat = something'),
+                RequiredPoint('p-codswallop', 'codswallop = nonsense'),
+                RequiredPoint('p-current-quote', 'Реплика "yeh great lump" звучит грубо.'),
+                RequiredPoint('p-unknown-quote', 'Цитата "flying motorbike cake" нигде не стоит.'),
+            )),
+            speech('d-style-min', (
+                RequiredPoint('p-only-quote', 'Спойлер "I mighta sat on it" про торт.'),
+                RequiredPoint('p-only-lemma', 'summat = something, fer = for'),
+            )),
+            speech('d-style-one', (
+                RequiredPoint('p-single', 'Единственный спойлер "I mighta sat on it".'),
+            )),
+        ),
+        before_you_read_evidence=(
+            HelpEvidenceResponse(
+                'd-evidenced', 'p1', 'before_you_read.explanation', 'b6', 0,
+                'Шкаф уже объяснён.',
+            ),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+    ]
+    kept = {item.id: item for item in normalized.difficulties}
+    assert set(kept) == {
+        'd-could',
+        'd-could-grammar',
+        'd-mixed',
+        'd-lexical',
+        'd-read',
+        'd-evidenced',
+        'd-style',
+        'd-style-min',
+        'd-style-one',
+    }
+    assert [point.id for point in kept['d-style'].required_points] == [
+        'p-yeh',
+        'p-yeh-lemma',
+        'p-mixed',
+        'p-codswallop',
+        'p-current-quote',
+        'p-unknown-quote',
+    ]
+    assert [point.id for point in kept['d-style-min'].required_points] == ['p-only-quote']
+    assert [point.id for point in kept['d-style-one'].required_points] == ['p-single']
+    assert kept['d-lexical'].help_kind == 'lexical_hint'
+
+
+def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_character():
+    """‘Why?’ said Harry. turns an inferred speaker into explicit.
+
+    Harry and Harry Potter both match that remark. The same name only inside
+    the quote, a remark that names nobody, and Harry on a later line stay
+    inferred. Without blocks the fact is unchanged. content_plan_from_response
+    applies the same rule from the block text.
+    """
+    from linguary.application.analysis_merge import (
+        combine_staged_analysis_responses,
+        content_plan_from_response,
+    )
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse, NarrativeAnalysisResponse, PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse, QuotedContextFactResponse, QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+
+    harry = _block(0, '‘Why?’ said Harry.')
+    named = _block(1, 'Harry said, ‘Why?’')
+    potter = _block(2, '‘Why?’ said Harry.')
+    stranger = _block(3, '‘Why?’ said the stranger.')
+    inside = _block(4, '‘Harry?’ she said.')
+    later = _block(5, '‘No,’ she said sharply. ‘Why?’ said Harry.')
+    blocks = (harry, named, potter, stranger, inside, later)
+
+    def speaker(block, fact_id, value, quote, *, kind='speaker', certainty='inferred'):
+        anchor = QuotedSourceAnchorResponse(block.id, quote)
+        return QuotedContextFactResponse(fact_id, kind, (anchor,), anchor, value, certainty)
+
+    facts = (
+        speaker(harry, 'f-harry', 'Harry', 'Why?'),
+        speaker(named, 'f-named', 'Harry', 'Why?'),
+        speaker(potter, 'f-potter', 'Harry Potter', 'Why?'),
+        speaker(stranger, 'f-stranger', 'Harry', 'Why?'),
+        speaker(inside, 'f-inside', 'Harry', 'Harry?'),
+        speaker(later, 'f-later', 'Harry', 'Why?'),
+        speaker(harry, 'f-gender', 'male', 'said', kind='gender'),
+        speaker(harry, 'f-explicit', 'Harry', 'Why?', certainty='explicit'),
+    )
+    narrative = NarrativeAnalysisResponse(
+        'Keep the voice.', 'Harry asks why.', context_facts=facts,
+    )
+    pedagogical = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(block.id, BlockTreatment.READ_AS_IS) for block in blocks
+        ),
+    )
+    combined = combine_staged_analysis_responses(
+        narrative, pedagogical, resolved_blocks=blocks,
+    )
+    assert [(fact.id, fact.certainty) for fact in combined.content_plan.context_facts] == [
+        ('f-harry', 'explicit'),
+        ('f-named', 'explicit'),
+        ('f-potter', 'explicit'),
+        ('f-stranger', 'inferred'),
+        ('f-inside', 'inferred'),
+        ('f-later', 'inferred'),
+        ('f-gender', 'inferred'),
+        ('f-explicit', 'explicit'),
+    ]
+    unchanged = combine_staged_analysis_responses(narrative, pedagogical)
+    assert [fact.certainty for fact in unchanged.content_plan.context_facts] == [
+        'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'explicit',
+    ]
+
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+
+    def quoted_speaker(alias, fact_id, value, quote, *, kind='speaker', certainty='inferred'):
+        anchor = QuotedSourceAnchorResponse(alias, quote)
+        return QuotedContextFactResponse(fact_id, kind, (anchor,), anchor, value, certainty)
+
+    plan = content_plan_from_response(
+        ChapterAnalysisResponse(
+            translation_instructions='Keep the voice.',
+            chapter_summary='Harry asks why.',
+            treatment_plan=tuple(
+                TreatmentPlanItemResponse(alias, BlockTreatment.READ_AS_IS) for alias in aliases
+            ),
+            content_plan=QuotedContentPlanResponse(context_facts=(
+                quoted_speaker('b1', 'f-harry', 'Harry', 'Why?'),
+                quoted_speaker('b2', 'f-named', 'Harry', 'Why?'),
+                quoted_speaker('b3', 'f-potter', 'Harry Potter', 'Why?'),
+                quoted_speaker('b4', 'f-stranger', 'Harry', 'Why?'),
+                quoted_speaker('b5', 'f-inside', 'Harry', 'Harry?'),
+                quoted_speaker('b6', 'f-later', 'Harry', 'Why?'),
+                quoted_speaker('b1', 'f-gender', 'male', 'said', kind='gender'),
+            )),
+        ),
+        aliases,
+        {block.id: block.text for block in blocks},
+        visible_texts_by_alias={alias: block.text for alias, block in zip(aliases, blocks, strict=True)},
+        blocks=blocks,
+    )
+    assert plan is not None
+    grouped = {}
+    for fact in plan.context_facts:
+        grouped.setdefault(fact.subject_anchor.block_id, set()).add(
+            (fact.kind, fact.value, fact.certainty),
+        )
+    assert grouped == {
+        harry.id: {('speaker', 'Harry', 'explicit'), ('gender', 'male', 'inferred')},
+        named.id: {('speaker', 'Harry', 'explicit')},
+        potter.id: {('speaker', 'Harry Potter', 'explicit')},
+        stranger.id: {('speaker', 'Harry', 'inferred')},
+        inside.id: {('speaker', 'Harry', 'inferred')},
+        later.id: {('speaker', 'Harry', 'inferred')},
+    }
+
+
 

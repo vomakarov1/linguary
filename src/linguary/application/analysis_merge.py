@@ -1254,14 +1254,20 @@ def combine_staged_analysis_responses(
     pedagogical: PedagogicalAnalysisResponse,
     *,
     resolved_scenes: Sequence[Scene] = (),
+    resolved_blocks: Sequence[DocumentBlock] = (),
 ) -> ChapterAnalysisResponse:
     """Assemble both pass contracts without changing pedagogical reference aliases."""
+    facts = narrative.context_facts
+    if resolved_blocks:
+        facts = tuple(
+            _explicit_speaker_if_remark_names(fact, None, resolved_blocks) for fact in facts
+        )
     return ChapterAnalysisResponse(narrative.translation_instructions,
         pedagogical.reader_chapter_summary or narrative.chapter_summary,
         narrative.glossary_candidates, pedagogical.treatment_plan, pedagogical.before_you_read,
         QuotedContentPlanResponse(difficulties=pedagogical.difficulties,
             before_you_read_evidence=pedagogical.before_you_read_evidence,
-            context_facts=narrative.context_facts,
+            context_facts=facts,
             scenes=tuple(_quoted_scene(s) for s in resolved_scenes) if resolved_scenes else narrative.scenes))
 
 
@@ -1453,6 +1459,7 @@ def content_plan_from_response(
                     subject_anchor=replace(fact.subject_anchor, block_id=aliases[fact.subject_anchor.block_id]))
             except KeyError:
                 raise AnalysisMergeError('контекстная атрибуция ссылается на невидимый блок') from None
+        mapped = _explicit_speaker_if_remark_names(mapped, texts, blocks)
         mapped.validate(texts)
         facts.append(replace(mapped, id=mapped.canonical_id))
     return ContentPlan(version=payload.content_plan.version, profile=payload.content_plan.profile,
@@ -2109,16 +2116,37 @@ _NONBASIC_REPORTING = frozenset({
     "whined", "whining",
     "boomed", "booming",
     "spat",
+    "stupidly", "eagerly", "gingerly", "furiously", "nervously", "casually",
+    "sternly", "firmly", "anxiously", "bitterly", "wearily", "sleepily", "coldly",
 })
 _SHORT_B1_WORD_LIMIT = 10
 _SHORT_B1_WORDS = frozenset({
     "winked", "groaned", "chuckled", "peered", "sniggered", "moaned", "sweetums",
+    "cannon", "budge", "lump", "shack", "shivered", "yeh", "yer", "ter", "summat",
+    "fer", "meself", "mighta", "dunno", "shan't", "blimey", "codswallop",
 })
 _SHORT_B1_PHRASES = (
     ("fancy", "seeing", "you"),
     ("how", "very", "wrong"),
     ("suppose", "so"),
+    ("kept", "what", "from"),
 )
+_TRIVIAL_A2_ANCHORS = frozenset({
+    ("sounding", "relieved"),
+    ("cupboard",),
+    ("in", "my", "cupboard"),
+    ("kept", "his", "eyes", "shut", "tight"),
+    ("a", "giant", "called", "hagrid"),
+    ("called", "hagrid"),
+    ("was", "going", "to", "a", "school"),
+    ("i", "was", "going", "to", "a", "school", "for", "wizards"),
+    ("when", "i", "open", "my", "eyes"),
+})
+_SPEECH_POINT_QUOTES = re.compile(r'"([^"]+)"|«([^»]+)»')
+_LEMMA_GLOSS = re.compile(r"([A-Za-z][\w']*)\s*=\s*[^,;\n]+")
+_SPEAKER_NAME_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "and", "mr", "mrs", "miss", "ms", "dr",
+})
 _CHAPTER_NUMBER_WORDS = frozenset({
     "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
     "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
@@ -2150,7 +2178,11 @@ def normalize_a2_dialogue_response(
     chapter heading becomes TRANSLATE and loses an unevidenced grammar note.
     A short READ_AS_IS line with a listed B1+ word or phrase becomes
     GLOSSARY_ONLY when it owns vocabulary, and TRANSLATE otherwise. TRANSLATE
-    drops an unevidenced grammar quote of sounding relieved.
+    drops an unevidenced grammar quote of sounding relieved, and the same
+    closed A1–A2 anchors when the note is a grammar or vocabulary explanation.
+    A numbered chapter heading is forced to READ_AS_IS and loses an unevidenced
+    grammar note. A speech_style point that quotes a later block, or that only
+    glosses dialect lemmas first seen later, is removed, leaving at least one point.
     """
     if reader_level != "a2" or english_help:
         return payload
@@ -2188,6 +2220,11 @@ def normalize_a2_dialogue_response(
                 else None
             )
             demoted = None
+        elif block.type is BlockType.HEADING:
+            updated = _force_block_treatment(updated, BlockTreatment.READ_AS_IS)
+            meaningful_heading_ids.update(owners)
+            promoted = None
+            demoted = None
         elif _is_short_b1_read_as_is(block, updated):
             mode = (
                 BlockTreatment.GLOSSARY_ONLY
@@ -2207,9 +2244,13 @@ def normalize_a2_dialogue_response(
         if demoted is not None:
             demoted_blocks.append(demoted)
     switched = tuple(
-        _switch_demoted_hint(
-            _switch_promoted_hint(difficulty, promoted_blocks, covered_points),
-            demoted_blocks,
+        _prune_forward_speech_style_points(
+            _switch_demoted_hint(
+                _switch_promoted_hint(difficulty, promoted_blocks, covered_points),
+                demoted_blocks,
+            ),
+            blocks,
+            block_ids_by_alias,
         )
         for difficulty in difficulties
     )
@@ -2448,7 +2489,12 @@ def _demote_elementary_reply(original, updated, block, difficulties):
 
 
 def _elementary_reply_mode(text, difficulties, owners):
-    if len(expression_words(text)) > 8:
+    words = expression_words(text)
+    if any(word in _SHORT_B1_WORDS for word in words) or any(
+        _contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES
+    ):
+        return None
+    if len(words) > 8:
         return None
     quotes = list(_DIALOGUE_QUOTES.finditer(text))
     if not quotes or len(quotes) > 2:
@@ -2561,14 +2607,161 @@ def _force_block_treatment(item, mode):
 
 
 def _is_unevidenced_trivial_grammar(difficulty, heading_ids, translate_ids, covered_points) -> bool:
-    if difficulty.kind != "grammar" or difficulty.id in covered_points:
+    if difficulty.id in covered_points:
         return False
     owner = difficulty.owner_block_id
-    if owner in heading_ids:
+    if difficulty.kind == "grammar" and owner in heading_ids:
         return True
-    return owner in translate_ids and any(
-        expression_words(anchor.quote) == ("sounding", "relieved") for anchor in difficulty.anchors
+    if owner not in translate_ids:
+        return False
+    anchors = tuple(expression_words(getattr(anchor, "quote", "")) for anchor in difficulty.anchors)
+    if difficulty.kind == "grammar" and any(words == ("sounding", "relieved") for words in anchors):
+        return True
+    return (
+        difficulty.kind in {"grammar", "vocabulary"}
+        and getattr(difficulty, "help_kind", None) == "explanation"
+        and bool(anchors)
+        and all(words in _TRIVIAL_A2_ANCHORS for words in anchors)
     )
+
+
+def _prune_forward_speech_style_points(difficulty, blocks, block_ids_by_alias):
+    """Drop speech_style points that cite a later block, keeping at least one."""
+    points = difficulty.required_points
+    if difficulty.kind != "speech_style" or len(points) < 2:
+        return difficulty
+    owner_index = _block_order_index(difficulty.owner_block_id, blocks, block_ids_by_alias)
+    if owner_index is None:
+        return difficulty
+    block_words = tuple(expression_words(block.text) for block in blocks)
+    kept = tuple(
+        point for point in points
+        if not _is_forward_speech_point(point.description, block_words, owner_index)
+    )
+    if len(kept) == len(points):
+        return difficulty
+    if not kept:
+        kept = (points[0],)
+    return replace(difficulty, required_points=kept)
+
+
+def _block_order_index(owner_id, blocks, block_ids_by_alias) -> int | None:
+    indexes = {block.id: index for index, block in enumerate(blocks)}
+    if owner_id in indexes:
+        return indexes[owner_id]
+    block_id = block_ids_by_alias.get(owner_id)
+    if block_id in indexes:
+        return indexes[block_id]
+    return None
+
+
+def _is_forward_speech_point(description, block_words, owner_index) -> bool:
+    if _quotes_later_block(description, block_words, owner_index):
+        return True
+    tokens = _only_lemma_tokens(description)
+    return tokens is not None and _future_only_tokens(tokens, block_words, owner_index)
+
+
+def _quotes_later_block(description, block_words, owner_index) -> bool:
+    earlier = block_words[:owner_index + 1]
+    later = block_words[owner_index + 1:]
+    for match in _SPEECH_POINT_QUOTES.finditer(description):
+        phrase = expression_words(match.group(1) or match.group(2) or "")
+        # One or two words are not a citation of a later block.
+        if len(phrase) < 3:
+            continue
+        if any(_contains_phrase(words, phrase) for words in earlier):
+            continue
+        if any(_contains_phrase(words, phrase) for words in later):
+            return True
+    return False
+
+
+def _only_lemma_tokens(description: str) -> tuple[str, ...] | None:
+    """Dialect glosses `<token> =` when the point has no other words."""
+    matches = list(_LEMMA_GLOSS.finditer(description))
+    if not matches:
+        return None
+    if expression_words(_LEMMA_GLOSS.sub(" ", description)):
+        return None
+    tokens = []
+    for match in matches:
+        words = expression_words(match.group(1))
+        if not words:
+            return None
+        tokens.append(words[0])
+    return tuple(tokens) or None
+
+
+def _future_only_tokens(tokens, block_words, owner_index) -> bool:
+    earlier = block_words[:owner_index + 1]
+    later = block_words[owner_index + 1:]
+    for token in tokens:
+        if any(token in words for words in earlier):
+            return False
+        if not any(token in words for words in later):
+            return False
+    return True
+
+
+def _explicit_speaker_if_remark_names(fact, texts, blocks):
+    """inferred → explicit when the opening remark already names the speaker."""
+    if fact.kind != "speaker" or fact.certainty != "inferred" or not isinstance(fact.value, str):
+        return fact
+    text = _fact_block_text(fact.subject_anchor.block_id, texts, blocks)
+    if text and _opening_remark_names_speaker(text, fact.value):
+        return replace(fact, certainty="explicit")
+    return fact
+
+
+def _fact_block_text(block_id, texts, blocks) -> str | None:
+    if texts is not None and block_id in texts:
+        return texts[block_id]
+    if not blocks:
+        return None
+    for block in blocks:
+        if block.id == block_id:
+            return block.text
+    return None
+
+
+def _opening_remark_names_speaker(text: str, value: str) -> bool:
+    remark_words = expression_words(_opening_remark(text))
+    if not remark_words:
+        return False
+    value_words = expression_words(value)
+    if value_words and _contains_phrase(remark_words, value_words):
+        return True
+    return any(name in remark_words for name in _speaker_name_words(value))
+
+
+def _speaker_name_words(value: str) -> tuple[str, ...]:
+    tokens = re.findall(r"[A-Za-z]+(?:['’][A-Za-z]+)*", value)
+    proper = [
+        token for token in tokens
+        if token[:1].isupper() and token.casefold() not in _SPEAKER_NAME_STOPWORDS
+    ]
+    chosen = proper or [
+        token for token in tokens if token.casefold() not in _SPEAKER_NAME_STOPWORDS
+    ]
+    return expression_words(" ".join(chosen))
+
+
+def _opening_remark(text: str) -> str:
+    quotes = list(_DIALOGUE_QUOTES.finditer(text))
+    if not quotes:
+        return ""
+    first = quotes[0]
+    previous = max(text.rfind(mark, 0, first.start()) for mark in ".!?…")
+    prefix_start = previous + 1 if previous >= 0 else 0
+    after = text[first.end():]
+    next_quote = quotes[1].start() - first.end() if len(quotes) > 1 else len(after)
+    sentence_end = len(after)
+    for mark in ".!?…":
+        found = after.find(mark)
+        if found != -1:
+            sentence_end = min(sentence_end, found)
+    return text[prefix_start:first.start()] + after[:min(next_quote, sentence_end)]
 
 
 def glossary_context_constraints(concepts):
