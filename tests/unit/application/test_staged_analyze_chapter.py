@@ -2654,10 +2654,12 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
 def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_character():
     """‘Why?’ said Harry. turns an inferred speaker into explicit.
 
-    Harry and Harry Potter both match that remark. The same name only inside
-    the quote, a remark that names nobody, and Harry on a later line stay
-    inferred. Without blocks the fact is unchanged. content_plan_from_response
-    applies the same rule from the block text.
+    Harry and Harry Potter both match that remark. Mr. Dursley and Mrs. Weasley
+    match it too: the title period is not the end of the remark. A name before
+    Dr. in the opening remark matches as well. The same name only inside the
+    quote, a remark that names nobody, and Harry on a later line stay inferred.
+    Without blocks the fact is unchanged. content_plan_from_response applies
+    the same rule from the block text.
     """
     from linguary.application.analysis_merge import (
         combine_staged_analysis_responses,
@@ -2675,7 +2677,10 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
     stranger = _block(3, '‘Why?’ said the stranger.')
     inside = _block(4, '‘Harry?’ she said.')
     later = _block(5, '‘No,’ she said sharply. ‘Why?’ said Harry.')
-    blocks = (harry, named, potter, stranger, inside, later)
+    dursley = _block(6, '‘Why?’ said Mr. Dursley.')
+    weasley = _block(7, '‘Why?’ said Mrs. Weasley.')
+    titled = _block(8, 'Harry saw Dr. and said, ‘Why?’')
+    blocks = (harry, named, potter, stranger, inside, later, dursley, weasley, titled)
 
     def speaker(block, fact_id, value, quote, *, kind='speaker', certainty='inferred'):
         anchor = QuotedSourceAnchorResponse(block.id, quote)
@@ -2685,6 +2690,9 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
         speaker(harry, 'f-harry', 'Harry', 'Why?'),
         speaker(named, 'f-named', 'Harry', 'Why?'),
         speaker(potter, 'f-potter', 'Harry Potter', 'Why?'),
+        speaker(dursley, 'f-dursley', 'Mr. Dursley', 'Why?'),
+        speaker(weasley, 'f-weasley', 'Mrs. Weasley', 'Why?'),
+        speaker(titled, 'f-titled', 'Harry', 'Why?'),
         speaker(stranger, 'f-stranger', 'Harry', 'Why?'),
         speaker(inside, 'f-inside', 'Harry', 'Harry?'),
         speaker(later, 'f-later', 'Harry', 'Why?'),
@@ -2706,6 +2714,9 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
         ('f-harry', 'explicit'),
         ('f-named', 'explicit'),
         ('f-potter', 'explicit'),
+        ('f-dursley', 'explicit'),
+        ('f-weasley', 'explicit'),
+        ('f-titled', 'explicit'),
         ('f-stranger', 'inferred'),
         ('f-inside', 'inferred'),
         ('f-later', 'inferred'),
@@ -2714,7 +2725,8 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
     ]
     unchanged = combine_staged_analysis_responses(narrative, pedagogical)
     assert [fact.certainty for fact in unchanged.content_plan.context_facts] == [
-        'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'explicit',
+        'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'inferred',
+        'inferred', 'inferred', 'inferred', 'inferred', 'explicit',
     ]
 
     aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
@@ -2734,6 +2746,9 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
                 quoted_speaker('b1', 'f-harry', 'Harry', 'Why?'),
                 quoted_speaker('b2', 'f-named', 'Harry', 'Why?'),
                 quoted_speaker('b3', 'f-potter', 'Harry Potter', 'Why?'),
+                quoted_speaker('b7', 'f-dursley', 'Mr. Dursley', 'Why?'),
+                quoted_speaker('b8', 'f-weasley', 'Mrs. Weasley', 'Why?'),
+                quoted_speaker('b9', 'f-titled', 'Harry', 'Why?'),
                 quoted_speaker('b4', 'f-stranger', 'Harry', 'Why?'),
                 quoted_speaker('b5', 'f-inside', 'Harry', 'Harry?'),
                 quoted_speaker('b6', 'f-later', 'Harry', 'Why?'),
@@ -2755,10 +2770,106 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
         harry.id: {('speaker', 'Harry', 'explicit'), ('gender', 'male', 'inferred')},
         named.id: {('speaker', 'Harry', 'explicit')},
         potter.id: {('speaker', 'Harry Potter', 'explicit')},
+        dursley.id: {('speaker', 'Mr. Dursley', 'explicit')},
+        weasley.id: {('speaker', 'Mrs. Weasley', 'explicit')},
+        titled.id: {('speaker', 'Harry', 'explicit')},
         stranger.id: {('speaker', 'Harry', 'inferred')},
         inside.id: {('speaker', 'Harry', 'inferred')},
         later.id: {('speaker', 'Harry', 'inferred')},
     }
+
+
+def test_pruned_speech_point_drops_its_evidence_and_the_plan_still_builds():
+    """A forward speech point cited by BYR evidence is removed with that evidence.
+
+    The difficulty stays. Evidence for the kept point stays. A pedagogical
+    payload and a chapter content plan both still build a content plan.
+    """
+    from linguary.application.analysis_merge import (
+        combine_staged_analysis_responses,
+        normalize_a2_dialogue_response,
+        validate_content_plan,
+    )
+    from linguary.application.llm_dto import (
+        BeforeYouReadEntryResponse, ChapterAnalysisResponse, HelpEvidenceResponse,
+        NarrativeAnalysisResponse, PedagogicalAnalysisResponse, QuotedContentPlanResponse,
+        QuotedDifficultyResponse, QuotedSourceAnchorResponse, TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    blocks = (
+        _block(0, '‘Budge up, yeh great lump,’ said the stranger.'),
+        _block(1, '‘I mighta sat on it,’ he said.'),
+    )
+    aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
+    speech = QuotedDifficultyResponse(
+        'd-style', (QuotedSourceAnchorResponse('b1', 'yeh'),), 'b1',
+        'speech_style', 'useful', 'explanation', (
+            RequiredPoint('p-kept', 'В этой реплике yeh значит you.'),
+            RequiredPoint('p-spoiler', 'Позже он скажет "I mighta sat on it".'),
+        ),
+    )
+    explanation = 'Диалект этой реплики уже объяснён.'
+    entry = BeforeYouReadEntryResponse('yeh', explanation)
+    evidence = (
+        HelpEvidenceResponse(
+            'd-style', 'p-kept', 'before_you_read.explanation', 'b1', 0, explanation,
+        ),
+        HelpEvidenceResponse(
+            'd-style', 'p-spoiler', 'before_you_read.explanation', 'b1', 0, explanation,
+        ),
+    )
+    treatment = (
+        TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),
+        TreatmentPlanItemResponse('b2', BlockTreatment.TRANSLATE),
+    )
+
+    def assert_plan(payload):
+        plan = validate_content_plan(
+            payload,
+            aliases,
+            {block.id: block.text for block in blocks},
+            visible_texts_by_alias={
+                alias: block.text for alias, block in zip(aliases, blocks, strict=True)
+            },
+            blocks=blocks,
+        )
+        assert plan is not None
+        assert [point.id for point in plan.difficulties[0].required_points] == ['p-kept']
+        assert [item.point_id for item in plan.before_you_read_evidence] == ['p-kept']
+
+    normalized = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=treatment,
+            before_you_read=(entry,),
+            difficulties=(speech,),
+            before_you_read_evidence=evidence,
+        ),
+        blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [point.id for point in normalized.difficulties[0].required_points] == ['p-kept']
+    assert [item.point_id for item in normalized.before_you_read_evidence] == ['p-kept']
+    assert_plan(combine_staged_analysis_responses(
+        NarrativeAnalysisResponse('Keep the voice.', 'A stranger speaks.'),
+        normalized,
+    ))
+
+    chapter = normalize_a2_dialogue_response(
+        ChapterAnalysisResponse(
+            translation_instructions='Keep the voice.',
+            chapter_summary='A stranger speaks.',
+            treatment_plan=treatment,
+            before_you_read=(entry,),
+            content_plan=QuotedContentPlanResponse(
+                difficulties=(speech,),
+                before_you_read_evidence=evidence,
+            ),
+        ),
+        blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [point.id for point in chapter.content_plan.difficulties[0].required_points] == ['p-kept']
+    assert [item.point_id for item in chapter.content_plan.before_you_read_evidence] == ['p-kept']
+    assert_plan(chapter)
 
 
 

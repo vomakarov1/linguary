@@ -2147,6 +2147,7 @@ _LEMMA_GLOSS = re.compile(r"([A-Za-z][\w']*)\s*=\s*[^,;\n]+")
 _SPEAKER_NAME_STOPWORDS = frozenset({
     "the", "a", "an", "of", "and", "mr", "mrs", "miss", "ms", "dr",
 })
+_REMARK_ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "st"})
 _CHAPTER_NUMBER_WORDS = frozenset({
     "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
     "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
@@ -2183,6 +2184,7 @@ def normalize_a2_dialogue_response(
     A numbered chapter heading is forced to READ_AS_IS and loses an unevidenced
     grammar note. A speech_style point that quotes a later block, or that only
     glosses dialect lemmas first seen later, is removed, leaving at least one point.
+    Evidence that cites a removed point is dropped with it.
     """
     if reader_level != "a2" or english_help:
         return payload
@@ -2264,12 +2266,30 @@ def normalize_a2_dialogue_response(
         return payload
     switched = kept
     plan = tuple(items)
+    removed_points = _removed_point_ids(difficulties, switched)
     if isinstance(payload, PedagogicalAnalysisResponse):
-        return replace(payload, treatment_plan=plan, difficulties=switched)
+        return replace(
+            payload,
+            treatment_plan=plan,
+            difficulties=switched,
+            before_you_read_evidence=_evidence_without_removed_points(
+                payload.before_you_read_evidence, removed_points,
+            ),
+        )
     content_plan = payload.content_plan
     if content_plan is None:
         return replace(payload, treatment_plan=plan)
-    return replace(payload, treatment_plan=plan, content_plan=replace(content_plan, difficulties=switched))
+    return replace(
+        payload,
+        treatment_plan=plan,
+        content_plan=replace(
+            content_plan,
+            difficulties=switched,
+            before_you_read_evidence=_evidence_without_removed_points(
+                content_plan.before_you_read_evidence, removed_points,
+            ),
+        ),
+    )
 
 
 def _response_difficulties(payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse):
@@ -2278,6 +2298,32 @@ def _response_difficulties(payload: ChapterAnalysisResponse | PedagogicalAnalysi
     if payload.content_plan is None:
         return ()
     return payload.content_plan.difficulties
+
+
+def _removed_point_ids(before, after) -> set[tuple[str, str]]:
+    """Points dropped from a difficulty that itself stays."""
+    kept_ids = {
+        difficulty.id: {point.id for point in difficulty.required_points}
+        for difficulty in after
+    }
+    removed = set()
+    for difficulty in before:
+        surviving = kept_ids.get(difficulty.id)
+        if surviving is None:
+            continue
+        for point in difficulty.required_points:
+            if point.id not in surviving:
+                removed.add((difficulty.id, point.id))
+    return removed
+
+
+def _evidence_without_removed_points(evidence, removed: set[tuple[str, str]]):
+    if not removed:
+        return evidence
+    return tuple(
+        item for item in evidence
+        if (item.difficulty_id, item.point_id) not in removed
+    )
 
 
 def _before_you_read_evidence(payload: ChapterAnalysisResponse | PedagogicalAnalysisResponse):
@@ -2747,20 +2793,40 @@ def _speaker_name_words(value: str) -> tuple[str, ...]:
 
 
 def _opening_remark(text: str) -> str:
+    """Remark around the first quote. Mr./Mrs./Ms./Dr./St. are not sentence ends."""
     quotes = list(_DIALOGUE_QUOTES.finditer(text))
     if not quotes:
         return ""
     first = quotes[0]
-    previous = max(text.rfind(mark, 0, first.start()) for mark in ".!?…")
+    previous = _sentence_end_before(text, first.start())
     prefix_start = previous + 1 if previous >= 0 else 0
     after = text[first.end():]
     next_quote = quotes[1].start() - first.end() if len(quotes) > 1 else len(after)
-    sentence_end = len(after)
-    for mark in ".!?…":
-        found = after.find(mark)
-        if found != -1:
-            sentence_end = min(sentence_end, found)
+    sentence_end = _sentence_end_at(after)
     return text[prefix_start:first.start()] + after[:min(next_quote, sentence_end)]
+
+
+def _abbreviation_period(text: str, index: int) -> bool:
+    if index <= 0 or text[index] != ".":
+        return False
+    start = index - 1
+    while start >= 0 and text[start].isalpha():
+        start -= 1
+    return text[start + 1:index].casefold() in _REMARK_ABBREVIATIONS
+
+
+def _sentence_end_before(text: str, limit: int) -> int:
+    for index in range(limit - 1, -1, -1):
+        if text[index] in ".!?…" and not _abbreviation_period(text, index):
+            return index
+    return -1
+
+
+def _sentence_end_at(text: str) -> int:
+    for index, mark in enumerate(text):
+        if mark in ".!?…" and not _abbreviation_period(text, index):
+            return index
+    return len(text)
 
 
 def glossary_context_constraints(concepts):
