@@ -418,27 +418,49 @@ def _assign_pronunciations(
 ) -> tuple[list[PronunciationOccurrence | None], tuple[PronunciationOccurrence, ...]]:
     """Pair each hint with the first pronunciation of the same quote.
 
-    A quote that equals some hint `original` does not become its own note,
-    even when a later copy is left over. Other blocks are ignored.
+    A quote that matches some hint `original` (including case-insensitive or
+    infinitive `to` + verb forms) does not become its own note, even when a
+    later copy is left over. Other blocks are ignored.
     """
     local = [item for item in pronunciations if item.block_id == block_id]
-    originals = {hint.original for hint in hints}
     used: set[int] = set()
     assigned: list[PronunciationOccurrence | None] = []
     for hint in hints:
         match = None
         for index, item in enumerate(local):
-            if index in used or item.quote != hint.original:
+            if index in used or not _hint_matches_pronunciation(hint.original, item.quote):
                 continue
             match = item
             used.add(index)
             break
         assigned.append(match)
     for index, item in enumerate(local):
-        if item.quote in originals:
+        if any(_hint_matches_pronunciation(hint.original, item.quote) for hint in hints):
             used.add(index)
     unmatched = tuple(item for index, item in enumerate(local) if index not in used)
     return assigned, unmatched
+
+
+def _hint_matches_pronunciation(original: str, quote: str) -> bool:
+    """Whether a pronunciation `quote` belongs to a glossary hint `original`."""
+    if quote == original:
+        return True
+    stripped_original = original.strip()
+    stripped_quote = quote.strip()
+    if not stripped_original or not stripped_quote:
+        return False
+    if stripped_quote.casefold() == stripped_original.casefold():
+        return True
+    pattern = _verbal_infinitive_words(stripped_original)
+    if not pattern:
+        return False
+    tokens = _surface_tokens(stripped_quote)
+    if not tokens or not _same_verb(tokens[0][0], pattern[0]):
+        return False
+    rest = pattern[1:]
+    if not rest:
+        return len(tokens) == 1
+    return _match_phrase(tokens, 1, rest) == tokens[-1][1]
 
 
 def _hint_draft(
@@ -730,7 +752,7 @@ def _match_shifted_object(
     if len(pattern) < 2 or pattern[-1] not in _PHRASE_PREPOSITIONS:
         return None
     middle = pattern[:-1]
-    for skip in range(3):
+    for skip in range(1, 3):
         found = _match_fixed(tokens, index + skip, middle)
         if found is not None:
             return found

@@ -2513,6 +2513,46 @@ def test_a2_numbered_chapter_heading_forced_to_read_as_is():
         'd-numbered', 'd-numbered-evidenced', 'd-roman',
     ]
 
+    from linguary.application.analysis_merge import (
+        combine_staged_analysis_responses,
+        validate_content_plan,
+    )
+    from linguary.application.llm_dto import NarrativeAnalysisResponse
+
+    vocab_on_heading = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.GLOSSARY_ONLY),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                'd-ch-vocab',
+                (QuotedSourceAnchorResponse('b1', 'CHAPTER'),),
+                'b1',
+                'vocabulary',
+                'useful',
+                'lexical_hint',
+                point,
+            ),
+        ),
+    )
+    heading_blocks = (blocks[0],)
+    heading_aliases = {'b1': blocks[0].id}
+    normalized_vocab = normalize_a2_dialogue_response(
+        vocab_on_heading, heading_blocks, heading_aliases, reader_level='a2', english_help=False,
+    )
+    assert normalized_vocab.treatment_plan[0].treatment is BlockTreatment.READ_AS_IS
+    assert normalized_vocab.difficulties == ()
+    assert validate_content_plan(
+        combine_staged_analysis_responses(
+            NarrativeAnalysisResponse('Keep the voice.', 'Chapter heading.'),
+            normalized_vocab,
+        ),
+        heading_aliases,
+        {blocks[0].id: blocks[0].text},
+        visible_texts_by_alias={'b1': blocks[0].text},
+        blocks=heading_blocks,
+    ) is not None
+
 
 def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_prune_forward_speech_style_spoiler():
     """TRANSLATE drops unevidenced Ch5 grammar and vocabulary notes on the closed list.
@@ -2586,6 +2626,7 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
             note('d-evidenced', 'b6', 'cupboard', 'vocabulary'),
             speech('d-style', (
                 RequiredPoint('p-yeh', 'В этой реплике yeh значит you.'),
+                RequiredPoint('p-quoted-you', 'В этой реплике «yeh» значит «you».'),
                 RequiredPoint('p-quote', 'Позже он скажет "I mighta sat on it" про торт.'),
                 RequiredPoint('p-two-words', 'Короткая цитата "mighta sat" из будущего блока.'),
                 RequiredPoint('p-one-word', 'Одно слово «mighta» из будущего блока.'),
@@ -2593,6 +2634,10 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
                 RequiredPoint(
                     'p-lemmas',
                     "summat = something, fer = for, las' = last, meself = myself",
+                ),
+                RequiredPoint(
+                    'p-curly-lemmas',
+                    'summat = something, fer = for, las’ = last, meself = myself',
                 ),
                 RequiredPoint('p-yeh-lemma', 'yeh = you'),
                 RequiredPoint('p-mixed', 'yeh = you, summat = something'),
@@ -2640,6 +2685,7 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
     }
     assert [point.id for point in kept['d-style'].required_points] == [
         'p-yeh',
+        'p-quoted-you',
         'p-yeh-lemma',
         'p-mixed',
         'p-codswallop',
@@ -2680,7 +2726,13 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
     dursley = _block(6, '‘Why?’ said Mr. Dursley.')
     weasley = _block(7, '‘Why?’ said Mrs. Weasley.')
     titled = _block(8, 'Harry saw Dr. and said, ‘Why?’')
-    blocks = (harry, named, potter, stranger, inside, later, dursley, weasley, titled)
+    addressee = _block(9, '‘Look at that,’ she said to Mr. Dursley.')
+    dodged = _block(10, '‘Get out!’ Harry dodged past Uncle Vernon.')
+    backed = _block(11, '‘Leave me alone.’ Harry backed away.')
+    blocks = (
+        harry, named, potter, stranger, inside, later,
+        dursley, weasley, titled, addressee, dodged, backed,
+    )
 
     def speaker(block, fact_id, value, quote, *, kind='speaker', certainty='inferred'):
         anchor = QuotedSourceAnchorResponse(block.id, quote)
@@ -2696,6 +2748,9 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
         speaker(stranger, 'f-stranger', 'Harry', 'Why?'),
         speaker(inside, 'f-inside', 'Harry', 'Harry?'),
         speaker(later, 'f-later', 'Harry', 'Why?'),
+        speaker(addressee, 'f-addressee', 'Mrs. Dursley', 'Look at that,'),
+        speaker(dodged, 'f-dodged', 'Uncle Vernon', 'Get out!'),
+        speaker(backed, 'f-backed', 'Harry', 'Leave me alone.'),
         speaker(harry, 'f-gender', 'male', 'said', kind='gender'),
         speaker(harry, 'f-explicit', 'Harry', 'Why?', certainty='explicit'),
     )
@@ -2720,13 +2775,17 @@ def test_combine_staged_analysis_marks_speaker_explicit_when_remark_names_charac
         ('f-stranger', 'inferred'),
         ('f-inside', 'inferred'),
         ('f-later', 'inferred'),
+        ('f-addressee', 'inferred'),
+        ('f-dodged', 'inferred'),
+        ('f-backed', 'inferred'),
         ('f-gender', 'inferred'),
         ('f-explicit', 'explicit'),
     ]
     unchanged = combine_staged_analysis_responses(narrative, pedagogical)
     assert [fact.certainty for fact in unchanged.content_plan.context_facts] == [
         'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'inferred',
-        'inferred', 'inferred', 'inferred', 'inferred', 'explicit',
+        'inferred', 'inferred', 'inferred', 'inferred', 'inferred', 'inferred',
+        'inferred', 'explicit',
     ]
 
     aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}

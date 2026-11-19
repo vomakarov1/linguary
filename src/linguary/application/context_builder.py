@@ -2993,6 +2993,7 @@ def _owned_content_plan(
 ) -> str:
     if analysis.content_plan is None:
         return ""
+    candidate_list = tuple(chapter_candidates)
     aliases = {item.block.id: _alias(i) for i, item in enumerate(unit.items, 1)}
     difficulties = []
     related = {}
@@ -3014,7 +3015,7 @@ def _owned_content_plan(
             point["description"] = replace_rejected_glossary_variants(
                 point["description"],
                 decisions=decisions,
-                chapter_candidates=chapter_candidates,
+                chapter_candidates=candidate_list,
             )
         difficulties.append(value)
     facts = []

@@ -176,9 +176,9 @@ def replace_rejected_glossary_variants(
         word = match.group(0)
         folded = word.casefold().replace("’", "'")
         for rejected, approved in pairs:
-            if not _same_word(folded, rejected.casefold()):
+            if not _same_word(folded, rejected):
                 continue
-            formed = _corresponding_form(folded, rejected.casefold(), approved.casefold())
+            formed = _corresponding_form(folded, rejected, approved)
             if formed is None:
                 continue
             return _copy_capitalization(word, formed)
@@ -352,36 +352,188 @@ def _genders(text: str) -> frozenset[str]:
     return frozenset(match.group(1).casefold() for match in _GENDER.finditer(text))
 
 
+# Case slots recognized on rejected name stems and transferred to the approved paradigm.
+# Masculine "-а" is treated as genitive (Даскмира → Даскмеры), not animate accusative.
 # Dative and prepositional -ье of a -ья name correspond to -ии of an -ия name.
-_YA_ENDING_TO_IYA = {
-    "ья": "ия",
-    "ьи": "ии",
-    "ье": "ии",
-    "ью": "ию",
-    "ьей": "ией",
-    "ьею": "иею",
+_PARADIGM_ENDINGS_TO_CASE: dict[str, dict[str, str]] = {
+    "iya": {
+        "ия": "nom",
+        "ии": "gen_dat_prep",
+        "ию": "acc",
+        "ией": "ins",
+        "иею": "ins_alt",
+        "иям": "dat_pl",
+        "иями": "ins_pl",
+        "иях": "prep_pl",
+    },
+    "ья": {
+        "ья": "nom",
+        "ьи": "gen",
+        "ье": "dat_prep",
+        "ью": "acc",
+        "ьей": "ins",
+        "ьею": "ins_alt",
+        "ьям": "dat_pl",
+        "ьями": "ins_pl",
+        "ьях": "prep_pl",
+    },
+    "ya": {
+        "я": "nom",
+        "и": "gen",
+        "е": "dat_prep",
+        "ю": "acc",
+        "ей": "ins",
+        "ею": "ins_alt",
+        "ям": "dat_pl",
+        "ями": "ins_pl",
+        "ях": "prep_pl",
+    },
+    "a": {
+        "а": "nom",
+        "ы": "gen",
+        "и": "gen",
+        "е": "dat_prep",
+        "у": "acc",
+        "ой": "ins",
+        "ою": "ins_alt",
+        "ей": "ins",
+        "ею": "ins_alt",
+        "ам": "dat_pl",
+        "ами": "ins_pl",
+        "ах": "prep_pl",
+    },
+    "ь": {
+        "ь": "nom",
+        "я": "gen",
+        "ю": "dat",
+        "е": "prep",
+        "ем": "ins",
+        "ём": "ins",
+        "и": "nom_pl",
+        "ей": "gen_pl",
+        "ям": "dat_pl",
+        "ями": "ins_pl",
+        "ях": "prep_pl",
+    },
+    "consonant": {
+        "": "nom",
+        "а": "gen",
+        "у": "dat",
+        "е": "prep",
+        "ом": "ins",
+        "ем": "ins",
+        "ём": "ins",
+        "ы": "nom_pl",
+        "ов": "gen_pl",
+        "ам": "dat_pl",
+        "ами": "ins_pl",
+        "ах": "prep_pl",
+    },
 }
 
-# Consonant-stem singular endings mapped onto the approved declension class.
-# Masculine "-а" is genitive (Даскмира → Даскмеры), not animate accusative.
-# "-ья" keeps the soft sign; plain "-я" and "-ия" do not.
-_CONSONANT_CASE = {
-    "a": {"а": "ы", "у": "е", "е": "е", "ом": "ой", "ем": "ей"},
-    "ya": {"а": "и", "у": "е", "е": "е", "ом": "ей", "ем": "ей"},
-    "iya": {"а": "ии", "у": "ии", "е": "ии", "ом": "ией", "ем": "ией"},
-    "ья": {"а": "ьи", "у": "ье", "е": "ье", "ом": "ьей", "ем": "ьей"},
+_CASE_TO_PARADIGM_ENDING: dict[str, dict[str, str]] = {
+    "iya": {
+        "nom": "ия",
+        "gen": "ии",
+        "dat": "ии",
+        "prep": "ии",
+        "dat_prep": "ии",
+        "gen_dat_prep": "ии",
+        "acc": "ию",
+        "ins": "ией",
+        "ins_alt": "иею",
+        "dat_pl": "иям",
+        "ins_pl": "иями",
+        "prep_pl": "иях",
+    },
+    "ья": {
+        "nom": "ья",
+        "gen": "ьи",
+        "gen_dat_prep": "ьи",
+        "dat": "ье",
+        "prep": "ье",
+        "dat_prep": "ье",
+        "acc": "ью",
+        "ins": "ьей",
+        "ins_alt": "ьею",
+        "dat_pl": "ьям",
+        "ins_pl": "ьями",
+        "prep_pl": "ьях",
+    },
+    "ya": {
+        "nom": "я",
+        "gen": "и",
+        "gen_dat_prep": "и",
+        "dat": "е",
+        "prep": "е",
+        "dat_prep": "е",
+        "acc": "ю",
+        "ins": "ей",
+        "ins_alt": "ею",
+        "dat_pl": "ям",
+        "ins_pl": "ями",
+        "prep_pl": "ях",
+    },
+    "a": {
+        "nom": "а",
+        "gen": "ы",
+        "gen_dat_prep": "ы",
+        "dat": "е",
+        "prep": "е",
+        "dat_prep": "е",
+        "acc": "у",
+        "ins": "ой",
+        "ins_alt": "ою",
+        "dat_pl": "ам",
+        "ins_pl": "ами",
+        "prep_pl": "ах",
+    },
+    "ь": {
+        "nom": "ь",
+        "gen": "я",
+        "gen_dat_prep": "я",
+        "dat": "ю",
+        "prep": "е",
+        "dat_prep": "е",
+        "acc": "я",
+        "ins": "ем",
+        "ins_alt": "ем",
+        "nom_pl": "и",
+        "gen_pl": "ей",
+        "dat_pl": "ям",
+        "ins_pl": "ями",
+        "prep_pl": "ях",
+    },
+    "consonant": {
+        "nom": "",
+        "gen": "а",
+        "gen_dat_prep": "а",
+        "dat": "у",
+        "prep": "е",
+        "dat_prep": "е",
+        "acc": "",
+        "ins": "ом",
+        "ins_alt": "ом",
+        "nom_pl": "ы",
+        "gen_pl": "ов",
+        "dat_pl": "ам",
+        "ins_pl": "ами",
+        "prep_pl": "ах",
+    },
 }
 
-# Genitive -ы is spelled -и after these; instrumental -ой is -ей after hushers and ц.
+# Genitive -ы is spelled -и after these; instrumental -ой/-ом is -ей/-ем after hushers and ц.
 _GENITIVE_I = frozenset("кгхжчшщй")
 _INSTRUMENTAL_EY = frozenset("жчшщц")
+_INDECLINABLE_VOWELS = ("и", "е", "о", "у", "ю", "э")
+_RUSSIAN_CONSONANTS = frozenset("бвгджзйклмнпрстфхцчшщ")
 
 
 def _rejected_variant_pairs(
     decisions: Sequence[GlossarySnapshotEntry],
     chapter_candidates: Iterable[GlossaryCandidate],
 ) -> tuple[tuple[str, str], ...]:
-    """Rejected candidate words paired with the approved word they replace."""
+    """Rejected candidate words paired with the approved word they replace (casefolded)."""
     suggested: dict[str, set[str]] = {}
     for candidate in chapter_candidates:
         suggested.setdefault(glossary_key(candidate.source_text), set()).add(
@@ -402,7 +554,7 @@ def _rejected_variant_pairs(
                 if marker in seen or marker[0] == marker[1]:
                     continue
                 seen.add(marker)
-                pairs.append((rejected, approved))
+                pairs.append(marker)
     pairs.sort(key=lambda item: len(item[0]), reverse=True)
     return tuple(pairs)
 
@@ -457,12 +609,11 @@ def _corresponding_form(surface: str, rejected: str, approved: str) -> str | Non
         return None
     suffix = surface[len(rejected):]
     approved_paradigm = _name_paradigm(approved)
-    if _name_paradigm(rejected) is None and approved_paradigm is not None:
+    if approved_paradigm is not None:
         stem, kind = approved_paradigm
-        ending = _consonant_case_ending(kind, approved, suffix)
-        if ending is not None:
-            return _spell_approved_ending(stem, ending)
-        return stem + suffix
+        if kind == "indeclinable":
+            return stem
+        return _spell_approved_ending(stem, suffix)
     return approved + suffix
 
 
@@ -477,24 +628,19 @@ def _inflect_like(surface: str, rejected: str, approved: str) -> str | None:
     if not surface.startswith(rejected_stem):
         return None
     ending = surface[len(rejected_stem):]
-    if rejected_kind == approved_kind:
-        return approved_stem + ending
-    if rejected_kind == "ya" and approved_kind == "iya":
-        mapped = _YA_ENDING_TO_IYA.get(ending)
-        if mapped is None:
-            return None
-        return approved_stem + mapped
-    return None
-
-
-def _consonant_case_ending(kind: str, approved: str, suffix: str) -> str | None:
-    """Approved-class ending for a consonant-stem suffix, if that case is known."""
-    if kind == "ya" and approved.endswith("ья"):
-        kind = "ья"
-    table = _CONSONANT_CASE.get(kind)
-    if table is None:
+    if approved_kind == "indeclinable":
+        if ending in _PARADIGM_ENDINGS_TO_CASE.get(rejected_kind, {}):
+            return approved_stem
         return None
-    return table.get(suffix)
+    if rejected_kind == approved_kind:
+        return _spell_approved_ending(approved_stem, ending)
+    case = _PARADIGM_ENDINGS_TO_CASE.get(rejected_kind, {}).get(ending)
+    if case is None:
+        return None
+    mapped = _CASE_TO_PARADIGM_ENDING.get(approved_kind, {}).get(case)
+    if mapped is None:
+        return None
+    return _spell_approved_ending(approved_stem, mapped)
 
 
 def _spell_approved_ending(stem: str, ending: str) -> str:
@@ -504,6 +650,8 @@ def _spell_approved_ending(stem: str, ending: str) -> str:
         ending = "и"
     elif ending == "ой" and last in _INSTRUMENTAL_EY:
         ending = "ей"
+    elif ending == "ом" and last in _INSTRUMENTAL_EY:
+        ending = "ем"
     return stem + ending
 
 
@@ -512,11 +660,17 @@ def _name_paradigm(lemma: str) -> tuple[str, str] | None:
     if len(lemma) > 2 and lemma.endswith("ия"):
         return lemma[:-2], "iya"
     if len(lemma) > 2 and lemma.endswith("ья"):
-        return lemma[:-2], "ya"
+        return lemma[:-2], "ья"
     if len(lemma) > 1 and lemma.endswith("я"):
         return lemma[:-1], "ya"
     if len(lemma) > 1 and lemma.endswith("а"):
         return lemma[:-1], "a"
+    if len(lemma) > 2 and lemma.endswith("ь"):
+        return lemma[:-1], "ь"
+    if len(lemma) > 2 and lemma.endswith(_INDECLINABLE_VOWELS):
+        return lemma, "indeclinable"
+    if len(lemma) > 2 and lemma[-1] in _RUSSIAN_CONSONANTS:
+        return lemma, "consonant"
     return None
 
 

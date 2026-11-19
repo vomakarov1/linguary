@@ -110,6 +110,19 @@ def _quote_matches_anchor(quote: str, anchor_quote: str, difficulty_kind: str) -
     return match_anchor(quote, anchor_quote, difficulty_kind)
 
 
+def _hint_quote_matches_anchor(quote: str, anchor_quote: str, difficulty_kind: str) -> bool:
+    if _quote_matches_anchor(quote, anchor_quote, difficulty_kind):
+        return True
+    from linguary.application.layout.notes import _infinitive_end, _verbal_infinitive_words
+
+    words = _verbal_infinitive_words(quote)
+    if not words:
+        return False
+    if difficulty_kind == 'grammar' and len(anchor_quote.split()) > 1 and len(words) < 2:
+        return False
+    return _infinitive_end(anchor_quote, quote) is not None
+
+
 def _matches_full_anchor(quote: str, anchor_quotes: tuple[str, ...]) -> bool:
     from linguary.application.analysis_merge import find_quote_span
 
@@ -126,18 +139,29 @@ def _matches_full_anchor(quote: str, anchor_quotes: tuple[str, ...]) -> bool:
 
 def _validate_artifact_source(artifact, difficulty, source_texts=None):
     from linguary.application.analysis_merge import find_quote_span
+    from linguary.application.layout.notes import _infinitive_end
 
     quote = without_footnote_markers(artifact.quotes[0]).strip()
+    is_hint = artifact.kind.startswith('glossary_hint.')
+    match_quote = _hint_quote_matches_anchor if is_hint else _quote_matches_anchor
     anchors = tuple(anchor for anchor in difficulty.anchors
         if artifact.kind == 'before_you_read.explanation' or anchor.block_id == artifact.block_id)
     anchor_quotes = tuple(without_footnote_markers(anchor.quote).strip() for anchor in anchors)
-    if not quote or not any(_quote_matches_anchor(quote, anchor, difficulty.kind) for anchor in anchor_quotes):
+    if not quote or not any(match_quote(quote, anchor, difficulty.kind) for anchor in anchor_quotes):
         raise _validation_error(
             f'помощь не относится к исходной цитате трудности ({difficulty.id}, {artifact.block_id})',
             block_ids=(artifact.block_id,),
         )
     if source_texts is not None and not any(
         find_quote_span(without_footnote_markers(source_texts.get(anchor.block_id, '')), quote) is not None
+        or (
+            is_hint
+            and _infinitive_end(
+                without_footnote_markers(source_texts.get(anchor.block_id, '')),
+                quote,
+            )
+            is not None
+        )
         for anchor in anchors
     ):
         raise _validation_error(
@@ -449,7 +473,7 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
                     for hint in r.glossary_hints:
                         hint_quote = without_footnote_markers(hint.original).strip()
                         quote_ok = (
-                            _quote_matches_anchor(hint_quote, anchor_quote, difficulty.kind)
+                            _hint_quote_matches_anchor(hint_quote, anchor_quote, difficulty.kind)
                             if plan.version == 3
                             else (
                                 anchor_quote in hint_quote
@@ -457,6 +481,7 @@ def resolve_response_evidence(plan, payload, results, before_you_read, *, owner_
                                 or _same_word(anchor_quote, hint_quote)
                                 or find_quote_span(hint_quote, anchor_quote) is not None
                                 or find_quote_span(anchor_quote, hint_quote) is not None
+                                or _hint_quote_matches_anchor(hint_quote, anchor_quote, difficulty.kind)
                             )
                         )
                         if quote_ok:

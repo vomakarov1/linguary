@@ -372,3 +372,39 @@ def test_replace_rejected_glossary_variants_updates_petunya_in_required_points()
         )
         == "Путь в Даскмеры короче. К Даскмере ближе. О Даскмере речь. С Даскмерой рядом. Нет Даскмеры."
     )
+    petunya_approved = GlossarySnapshotEntry(
+        source_text="Petunia",
+        translation="Петунья",
+        type=ConceptType.PERSON,
+        status=TermStatus.APPROVED,
+    )
+    assert (
+        replace(
+            "Дом Петунии рядом. С Петунией говорили. Видели Петунию. Петуния молчит.",
+            decisions=(petunya_approved,),
+            chapter_candidates=(chapter_candidate("Petunia", "Петуния"),),
+        )
+        == "Дом Петуньи рядом. С Петуньей говорили. Видели Петунью. Петунья молчит."
+    )
+    assert (
+        replace(
+            "У Даскмеры. К Даскмере. За Даскмерой. Вижу Даскмеру.",
+            decisions=(DUSKMERE,),
+            chapter_candidates=(chapter_candidate("Duskmere", "Даскмера"),),
+        )
+        == "У Даскмера. К Даскмере. За Даскмером. Вижу Даскмер."
+    )
+    dursley_approved = GlossarySnapshotEntry(
+        source_text="Dursley",
+        translation="Дурсли",
+        type=ConceptType.PERSON,
+        status=TermStatus.APPROVED,
+    )
+    assert (
+        replace(
+            "Дом Дурсля. К Дурслю пришли. С Дурслем спорили. О Дурсле говорили.",
+            decisions=(dursley_approved,),
+            chapter_candidates=(chapter_candidate("Dursley", "Дурсль"),),
+        )
+        == "Дом Дурсли. К Дурсли пришли. С Дурсли спорили. О Дурсли говорили."
+    )

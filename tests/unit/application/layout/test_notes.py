@@ -889,6 +889,42 @@ def test_infinitive_wordplay_hint_keeps_gloss_and_label() -> None:
     assert notes[0].labels == ("Игра слов.",)
     assert notes[0].marker_end == _span_end(text, "flutter")
 
+    from linguary.application.llm_dto import HelpEvidenceResponse, TranslationResultResponse
+    from linguary.application.validators.content_plan import (
+        resolve_content_coverage,
+        resolve_response_evidence,
+    )
+
+    resolved_evidence = resolve_response_evidence(
+        plan,
+        TranslationResultResponse(
+            content_evidence=(
+                HelpEvidenceResponse(
+                    wordplay.id,
+                    wordplay.required_points[0].id,
+                    "glossary_hint.note",
+                    block.id,
+                    0,
+                    "flutter — толкование",
+                ),
+            ),
+        ),
+        (result,),
+        (),
+        owner_block_ids=(block.id,),
+    )
+    checked, unresolved = resolve_content_coverage(
+        plan,
+        (result,),
+        (),
+        resolved_evidence,
+        owner_block_ids=(block.id,),
+        source_texts={block.id: text},
+        validators_version=4,
+    )
+    assert len(checked) == 1
+    assert unresolved[block.id] == ()
+
 
 def test_infinitive_and_case_insensitive_glossary_hints_find_marker_end_in_text() -> None:
     """`to` + verb marks the inflected phrase. A different case still needs a word boundary."""
@@ -1001,6 +1037,41 @@ def test_infinitive_and_case_insensitive_glossary_hints_find_marker_end_in_text(
         sample = _hint_notes(text, GlossaryHint(original, "форма"))
         assert sample[0].term == original
         assert sample[0].marker_end == _span_end(text, surface)
+
+    # Surface pronunciation quote ("flutter", "To his surprise") pairs with infinitive/folded hint.
+    surface_flutter_notes = block_notes(
+        flutter_block,
+        _result(
+            flutter_block,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            hints=(flutter_hint,),
+        ),
+        None,
+        (_pron(flutter_block, "flutter", "/ˈflʌtə/", "uk"),),
+    )
+    assert len(surface_flutter_notes) == 1
+    assert surface_flutter_notes[0].term == "to flutter"
+    assert surface_flutter_notes[0].ipa == "/ˈflʌtə/"
+
+    surprise_block = _block(surprise)
+    surprise_paired = block_notes(
+        surprise_block,
+        _result(
+            surprise_block,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            hints=(GlossaryHint("to his surprise", "к его удивлению"),),
+        ),
+        None,
+        (_pron(surprise_block, "To his surprise", "/səˈpraɪz/", "uk"),),
+    )
+    assert len(surprise_paired) == 1
+    assert surprise_paired[0].term == "to his surprise"
+    assert surprise_paired[0].ipa == "/səˈpraɪz/"
+
+    # Shifted-object matching requires an actual indirect object before the phrase middle.
+    grab_twice = "Harry made a grab, then he made a grab for the letter."
+    grab_twice_notes = _hint_notes(grab_twice, GlossaryHint("to make a grab for", "схватить"))
+    assert grab_twice_notes[0].marker_end == _span_end(grab_twice, "made a grab for")
 
 
 def test_hint_note_strips_unquoted_leading_translation_duplicate() -> None:

@@ -1259,8 +1259,9 @@ def combine_staged_analysis_responses(
     """Assemble both pass contracts without changing pedagogical reference aliases."""
     facts = narrative.context_facts
     if resolved_blocks:
+        texts_by_id = {block.id: block.text for block in resolved_blocks}
         facts = tuple(
-            _explicit_speaker_if_remark_names(fact, None, resolved_blocks) for fact in facts
+            _explicit_speaker_if_remark_names(fact, texts_by_id, resolved_blocks) for fact in facts
         )
     return ChapterAnalysisResponse(narrative.translation_instructions,
         pedagogical.reader_chapter_summary or narrative.chapter_summary,
@@ -2143,7 +2144,14 @@ _TRIVIAL_A2_ANCHORS = frozenset({
     ("when", "i", "open", "my", "eyes"),
 })
 _SPEECH_POINT_QUOTES = re.compile(r'"([^"]+)"|«([^»]+)»')
-_LEMMA_GLOSS = re.compile(r"([A-Za-z][\w']*)\s*=\s*[^,;\n]+")
+_LEMMA_GLOSS = re.compile(r"(?<![\w'’])([A-Za-z][\w'’]*)\s*=\s*[^,;\n]+")
+_STANDARD_SPEECH_GLOSS_WORDS = frozenset({
+    "you", "your", "yours", "to", "for", "of", "from", "my", "myself",
+    "something", "nothing", "anything", "everything", "last", "want",
+    "were", "was", "have", "had", "will", "shall", "not",
+})
+_SPEAKER_TITLES = frozenset({"mr", "mrs", "miss", "ms", "dr"})
+_ADDRESSEE_PREPOSITIONS = frozenset({"to", "at"})
 _SPEAKER_NAME_STOPWORDS = frozenset({
     "the", "a", "an", "of", "and", "mr", "mrs", "miss", "ms", "dr",
 })
@@ -2196,6 +2204,7 @@ def normalize_a2_dialogue_response(
     promoted_blocks: list[tuple[frozenset[str], bool]] = []
     demoted_blocks: list[frozenset[str]] = []
     meaningful_heading_ids: set[str] = set()
+    numbered_heading_ids: set[str] = set()
     translate_ids: set[str] = set()
     changed = False
     for item in payload.treatment_plan:
@@ -2225,6 +2234,7 @@ def normalize_a2_dialogue_response(
         elif block.type is BlockType.HEADING:
             updated = _force_block_treatment(updated, BlockTreatment.READ_AS_IS)
             meaningful_heading_ids.update(owners)
+            numbered_heading_ids.update(owners)
             promoted = None
             demoted = None
         elif _is_short_b1_read_as_is(block, updated):
@@ -2259,7 +2269,11 @@ def normalize_a2_dialogue_response(
     kept = tuple(
         difficulty for difficulty in switched
         if not _is_unevidenced_trivial_grammar(
-            difficulty, meaningful_heading_ids, translate_ids, covered_points,
+            difficulty,
+            meaningful_heading_ids,
+            translate_ids,
+            covered_points,
+            numbered_heading_ids,
         )
     )
     if not changed and kept == tuple(difficulties):
@@ -2652,10 +2666,21 @@ def _force_block_treatment(item, mode):
     return replace(item, treatment=mode)
 
 
-def _is_unevidenced_trivial_grammar(difficulty, heading_ids, translate_ids, covered_points) -> bool:
+def _is_unevidenced_trivial_grammar(
+    difficulty,
+    heading_ids,
+    translate_ids,
+    covered_points,
+    numbered_heading_ids: set[str] | frozenset[str] = frozenset(),
+) -> bool:
     if difficulty.id in covered_points:
         return False
     owner = difficulty.owner_block_id
+    if owner in numbered_heading_ids and (
+        difficulty.kind in {"grammar", "vocabulary"}
+        or getattr(difficulty, "help_kind", None) == "lexical_hint"
+    ):
+        return True
     if difficulty.kind == "grammar" and owner in heading_ids:
         return True
     if owner not in translate_ids:
@@ -2714,6 +2739,8 @@ def _quotes_later_block(description, block_words, owner_index) -> bool:
     for match in _SPEECH_POINT_QUOTES.finditer(description):
         phrase = expression_words(match.group(1) or match.group(2) or "")
         if not phrase:
+            continue
+        if len(phrase) == 1 and phrase[0] in _STANDARD_SPEECH_GLOSS_WORDS:
             continue
         if any(_contains_phrase(words, phrase) for words in earlier):
             continue
@@ -2775,9 +2802,34 @@ def _opening_remark_names_speaker(text: str, value: str) -> bool:
     if not remark_words:
         return False
     value_words = expression_words(value)
-    if value_words and _contains_phrase(remark_words, value_words):
+    if value_words and _contains_speaker_phrase(remark_words, value_words):
         return True
-    return any(name in remark_words for name in _speaker_name_words(value))
+    value_titles = set(value_words) & _SPEAKER_TITLES
+    conflicting_titles = _SPEAKER_TITLES - value_titles
+    for name in _speaker_name_words(value):
+        for index, word in enumerate(remark_words):
+            if word != name:
+                continue
+            prev = remark_words[index - 1] if index > 0 else None
+            if prev in _ADDRESSEE_PREPOSITIONS or prev in conflicting_titles:
+                continue
+            if (
+                prev in _SPEAKER_TITLES
+                and index >= 2
+                and remark_words[index - 2] in _ADDRESSEE_PREPOSITIONS
+            ):
+                continue
+            return True
+    return False
+
+
+def _contains_speaker_phrase(words: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
+    size = len(phrase)
+    return any(
+        words[index:index + size] == phrase
+        and (index == 0 or words[index - 1] not in _ADDRESSEE_PREPOSITIONS)
+        for index in range(len(words) - size + 1)
+    )
 
 
 def _speaker_name_words(value: str) -> tuple[str, ...]:
@@ -2800,10 +2852,27 @@ def _opening_remark(text: str) -> str:
     first = quotes[0]
     previous = _sentence_end_before(text, first.start())
     prefix_start = previous + 1 if previous >= 0 else 0
-    after = text[first.end():]
-    next_quote = quotes[1].start() - first.end() if len(quotes) > 1 else len(after)
-    sentence_end = _sentence_end_at(after)
-    return text[prefix_start:first.start()] + after[:min(next_quote, sentence_end)]
+    next_quote = quotes[1].start() if len(quotes) > 1 else len(text)
+    return text[prefix_start:first.start()] + _trailing_remark(text, first.end(), next_quote)
+
+
+def _trailing_remark(text: str, first_end: int, next_quote_start: int) -> str:
+    if (
+        first_end >= 2
+        and text[first_end - 2] == "."
+        and not text[:first_end - 1].endswith("...")
+    ):
+        return ""
+    after = text[first_end:next_quote_start]
+    clause = after[:_sentence_end_at(after)]
+    stripped = clause.lstrip()
+    if not stripped:
+        return ""
+    if first_end >= 2 and text[first_end - 2] != "," and stripped[0].isupper():
+        words = expression_words(clause)
+        if not any(word in _BASIC_REPORTING or word in _NONBASIC_REPORTING for word in words):
+            return ""
+    return clause
 
 
 def _abbreviation_period(text: str, index: int) -> bool:
