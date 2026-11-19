@@ -2519,8 +2519,9 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
 
     could tell stays, including when the same note also anchors cupboard.
     Evidence and a READ_AS_IS block keep the note. A lexical
-    hint is not an explanation. speech_style loses a later-block quote and
-    dialect lemmas that first appear later, and keeps at least one point.
+    hint is not an explanation. speech_style loses a later-block quote of any
+    length, including "mighta sat" and «mighta», and dialect lemmas that first
+    appear later, and keeps at least one point.
     """
     from linguary.application.analysis_merge import normalize_a2_dialogue_response
     from linguary.application.llm_dto import (
@@ -2586,6 +2587,8 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
             speech('d-style', (
                 RequiredPoint('p-yeh', 'В этой реплике yeh значит you.'),
                 RequiredPoint('p-quote', 'Позже он скажет "I mighta sat on it" про торт.'),
+                RequiredPoint('p-two-words', 'Короткая цитата "mighta sat" из будущего блока.'),
+                RequiredPoint('p-one-word', 'Одно слово «mighta» из будущего блока.'),
                 RequiredPoint('p-guillemet', 'Он говорит «I mighta sat on it» про торт.'),
                 RequiredPoint(
                     'p-lemmas',

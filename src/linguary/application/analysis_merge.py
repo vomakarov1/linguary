@@ -2667,8 +2667,7 @@ def _quotes_later_block(description, block_words, owner_index) -> bool:
     later = block_words[owner_index + 1:]
     for match in _SPEECH_POINT_QUOTES.finditer(description):
         phrase = expression_words(match.group(1) or match.group(2) or "")
-        # One or two words are not a citation of a later block.
-        if len(phrase) < 3:
+        if not phrase:
             continue
         if any(_contains_phrase(words, phrase) for words in earlier):
             continue
