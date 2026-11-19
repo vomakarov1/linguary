@@ -20,7 +20,7 @@ from linguary.adapters.epub import EpubExportWriter
 from linguary.adapters.epub.splitting import segment_text
 from linguary.application.analysis_merge import normalize_a2_dialogue_response
 from linguary.application.layout.book import BookLayout, LayoutInputs, build_book_layout
-from linguary.application.layout.units import LayoutUnit
+from linguary.application.layout.units import LayoutUnit, NumberedNote
 from linguary.application.layout.who_is_who import WhoEntry, book_who_is_who
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse,
@@ -2006,3 +2006,587 @@ def test_fifteen_ux_polish_and_a2_reader_fixes_end_to_end(tmp_path: Path) -> Non
         ),
     ).for_chapter_narrative_analysis(document, section)
     assert "«McGonagall» → «Макгонагал»" in sound.request.instructions
+
+
+def _span_end(text: str, surface: str) -> int:
+    """End offset of `surface` in `text`."""
+    return text.index(surface) + len(surface)
+
+
+def _ref_superscripts(unit: etree._Element) -> list[str]:
+    """Digits of ``a.lg-ref`` markers in this unit, in source order."""
+    found: list[str] = []
+    for element in unit.iter():
+        if _local(element) != "a" or not _has_class(element, "lg-ref"):
+            continue
+        digits = [child.text for child in element if _local(child) == "sup" and child.text]
+        assert digits
+        found.extend(digits)
+    return found
+
+
+def _glossary_notes(layout: BookLayout, section_id: str, block_id: str) -> tuple[NumberedNote, ...]:
+    units = layout.chapters[section_id].units[block_id]
+    return tuple(
+        item
+        for unit in units
+        for item in unit.notes
+        if item.note.origin == "glossary_hint"
+    )
+
+
+def test_a2_student_linguist_and_teacher_review_fixes_end_to_end(tmp_path: Path) -> None:
+    """One Harry Potter pass covers the student, linguist, and teacher fixes.
+
+    No model call. Infinitive hints and ``To his surprise`` get a marker and a
+    superscript. The tube note drops its unquoted duplicate, Diagon Alley drops
+    the disclaimer, and the owl note says Are there. Short B1+ replies stay
+    TRANSLATE. ``— CHAPTER THREE —`` does not. Chapter 5 drops the captain
+    notes and keeps ``could tell``. Chapter 4 block 12 loses the later
+    speech-style spoiler. ``said Harry`` is explicit. ``Петунья`` becomes
+    ``Петуния``. Dialogue dashes join. The A2 prompt snapshot keeps the new rules.
+    """
+    from linguary.application.analysis_merge import (
+        combine_staged_analysis_responses,
+        content_plan_from_response,
+    )
+    from linguary.application.context_builder import _owned_content_plan, snapshot_prompt_templates
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        NarrativeAnalysisResponse,
+        QuotedContentPlanResponse,
+        QuotedContextFactResponse,
+    )
+    from linguary.application.reader_text import ReaderTextPolicy
+    from linguary.domain import GlossarySnapshotEntry, TermStatus, TranslationUnit
+    from linguary.domain.content_plan import Difficulty
+
+    flutter = "None of them noticed a large tawny owl flutter past the window."
+    hugged = "And the old man hugged Mr Dursley around the middle and walked off."
+    bowed = "Dumbledore bowed his head. Professor McGonagall gasped."
+    grab = "Harry made a grab for the letter but Uncle Vernon knocked his hand out of the way."
+    upright = "The whole shack shivered and Harry sat bolt upright, staring at the door."
+    thrown_to = "Hagrid threw it to Harry."
+    write_down = "Could you write it down?"
+    surprise = "To his surprise, Hagrid chuckled."
+    tube = "Dumbledore mentioned the London Underground."
+    alley = "Diagon Alley filled with showers of owls."
+    cannon_text = f"{_OPEN}Where{_CLOSE}s the cannon?{_CLOSE} he said stupidly."
+    budge_text = f"{_OPEN}Budge up, yeh great lump,{_CLOSE} said the stranger."
+    kept_text = f"{_OPEN}Kept what from me?{_CLOSE} said Harry eagerly."
+    cannon_ru = "\u2014 Где пушка? \u2014 глупо сказал он."
+    budge_ru = "\u2014 Подвинься, здоровяк, \u2014 сказал незнакомец."
+    kept_ru = "\u2014 Что от меня скрыли? \u2014 с жадностью спросил Гарри."
+    marked = (
+        (flutter, ("to flutter",), ("flutter",), "owl flutter"),
+        (hugged, ("to hug", "to walk off"), ("hugged", "walked off"), "hugged"),
+        (bowed, ("to bow one's head",), ("bowed his head",), "bowed his head"),
+        (
+            grab,
+            ("to make a grab for", "to knock out of the way"),
+            ("made a grab for", "knocked his hand out of the way"),
+            "made a grab",
+        ),
+        (upright, ("to sit bolt upright",), ("sat bolt upright",), "bolt upright"),
+        (thrown_to, ("to throw to",), ("threw it to",), "threw it to"),
+        (write_down, ("to write down",), ("write it down",), "write it down"),
+        (surprise, ("to his surprise",), ("To his surprise",), "To his surprise"),
+    )
+    hint_rows = {
+        flutter: (GlossaryHint("to flutter", "пролететь", "flutter — промелькнуть"),),
+        hugged: (GlossaryHint("to hug", "обнять"), GlossaryHint("to walk off", "уйти")),
+        bowed: (GlossaryHint("to bow one's head", "склонить голову"),),
+        grab: (
+            GlossaryHint("to make a grab for", "схватить"),
+            GlossaryHint("to knock out of the way", "отвести в сторону"),
+        ),
+        upright: (GlossaryHint("to sit bolt upright", "сесть прямо"),),
+        thrown_to: (GlossaryHint("to throw to", "бросить"),),
+        write_down: (GlossaryHint("to write down", "записать"),),
+        surprise: (GlossaryHint("to his surprise", "к его удивлению"),),
+        tube: (
+            GlossaryHint(
+                "the London Underground",
+                "Лондонское метро",
+                "Лондонское метро. Дамблдор шутит, что шрам у него на колене "
+                "похож на схему линий метро.",
+            ),
+        ),
+        alley: (
+            GlossaryHint(
+                "Diagon Alley",
+                "Косой переулок",
+                "Название похоже на diagonally. "
+                "Это можно заметить как возможную игру слов, но текст книги не подтверждает её прямо. "
+                "Читается как diagonally, но текст книги не подтверждает её прямо.",
+            ),
+            GlossaryHint(
+                "showers of owls",
+                "потоки сов",
+                "Вопрос построен без is it: Going to be any more showers of owls tonight, Harry?",
+            ),
+        ),
+    }
+
+    chapter_id = "sec-review"
+    resource = "hp01_review_en-gb.html"
+    numbered = _heading(chapter_id, resource, _CHAPTER_NUMBER)
+    reply_rows = (
+        (cannon_text, cannon_ru),
+        (budge_text, budge_ru),
+        (kept_text, kept_ru),
+    )
+    reply_blocks = tuple(
+        _feedback_block(chapter_id, resource, index + 1, index + 1, text)
+        for index, (text, _russian) in enumerate(reply_rows)
+    )
+    cannon, budge, kept = reply_blocks
+    hint_texts = tuple(hint_rows)
+    hint_blocks = tuple(
+        _feedback_block(chapter_id, resource, index + 4, index + 4, text)
+        for index, text in enumerate(hint_texts)
+    )
+    hints_by_text = dict(zip(hint_texts, hint_blocks, strict=True))
+    story = (numbered, *reply_blocks, *hint_blocks)
+    chapter_five_text = (
+        "Harry kept his eyes shut tight. "
+        f"{_OPEN}I was going to a school for wizards,{_CLOSE} he thought, in my cupboard. "
+        "A giant called Hagrid. When I open my eyes I could tell."
+    )
+    chapter_five = _feedback_block(
+        "sec-ch5", "hp01_ch005_en-gb.html", 0, 1, chapter_five_text,
+    )
+    read_as_is = _feedback_block(
+        "sec-ch5", "hp01_ch005_en-gb.html", 1, 2, "The small cupboard was dark.",
+    )
+    mode_blocks = (numbered, cannon, budge, kept, chapter_five, read_as_is)
+    point = (RequiredPoint("p-review", "Объяснить эту конструкцию."),)
+
+    def grammar(difficulty_id: str, block: DocumentBlock, quote: str, kind: str) -> QuotedDifficultyResponse:
+        return QuotedDifficultyResponse(
+            difficulty_id,
+            (QuotedSourceAnchorResponse(block.id, quote),),
+            block.id,
+            kind,
+            "useful",
+            "explanation",
+            point,
+        )
+
+    mode_payload = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(
+                block.id,
+                BlockTreatment.READ_AS_IS if block is read_as_is else BlockTreatment.TRANSLATE,
+            )
+            for block in mode_blocks
+        ),
+        difficulties=(
+            grammar("d-in-cupboard", chapter_five, "in my cupboard", "grammar"),
+            grammar("d-eyes", chapter_five, "kept his eyes shut tight", "grammar"),
+            grammar("d-giant", chapter_five, "a giant called Hagrid", "vocabulary"),
+            grammar("d-wizards", chapter_five, "I was going to a school for wizards", "grammar"),
+            grammar("d-open", chapter_five, "when I open my eyes", "grammar"),
+            grammar("d-could", chapter_five, "could tell", "vocabulary"),
+            grammar("d-read", read_as_is, "in my cupboard", "grammar"),
+        ),
+    )
+    assert mode_payload.treatment_plan[0].treatment is BlockTreatment.TRANSLATE
+    assert numbered.text == "\u2014 CHAPTER THREE \u2014"
+    normalized = normalize_a2_dialogue_response(
+        mode_payload,
+        mode_blocks,
+        {block.id: block.id for block in mode_blocks},
+        reader_level="a2",
+        english_help=False,
+    )
+    modes = {item.source_block_id: item.treatment for item in normalized.treatment_plan}
+    assert modes[numbered.id] is BlockTreatment.READ_AS_IS
+    assert modes[cannon.id] is BlockTreatment.TRANSLATE
+    assert modes[budge.id] is BlockTreatment.TRANSLATE
+    assert modes[kept.id] is BlockTreatment.TRANSLATE
+    assert modes[chapter_five.id] is BlockTreatment.TRANSLATE
+    assert modes[read_as_is.id] is BlockTreatment.READ_AS_IS
+    assert {item.id for item in normalized.difficulties} == {"d-could", "d-read"}
+
+    ch4_id = "sec-ch4"
+    ch4_resource = "hp01_ch004_en-gb.html"
+    ch4_speech = (
+        f"{_OPEN}Budge up, yeh great lump, and sit down here,{_CLOSE} "
+        "said the stranger to the boy."
+    )
+    ch4_spoiler = (
+        f"{_OPEN}I mighta sat on it,{_CLOSE} he said. Got summat fer meself las' night."
+    )
+    ch4 = tuple(
+        _feedback_block(
+            ch4_id,
+            ch4_resource,
+            index,
+            index + 1,
+            ch4_speech if index == 11 else ch4_spoiler if index == 22 else "The hut stood by the sea.",
+        )
+        for index in range(23)
+    )
+    assert len(ch4) == 23
+    assert ch4[11].text == ch4_speech
+    assert "I mighta sat on it" in ch4[22].text
+    speech = QuotedDifficultyResponse(
+        "d-style",
+        (QuotedSourceAnchorResponse(ch4[11].id, "yeh"),),
+        ch4[11].id,
+        "speech_style",
+        "useful",
+        "explanation",
+        (
+            RequiredPoint("p-yeh", "В этой реплике yeh значит you."),
+            RequiredPoint("p-quote", 'Позже он скажет "I mighta sat on it" про торт.'),
+            RequiredPoint(
+                "p-lemmas",
+                "summat = something, fer = for, las' = last, meself = myself",
+            ),
+        ),
+    )
+    speech_normalized = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=tuple(
+                TreatmentPlanItemResponse(block.id, BlockTreatment.TRANSLATE) for block in ch4
+            ),
+            difficulties=(speech,),
+        ),
+        ch4,
+        {block.id: block.id for block in ch4},
+        reader_level="a2",
+        english_help=False,
+    )
+    kept_style = next(item for item in speech_normalized.difficulties if item.id == "d-style")
+    assert kept_style.owner_block_id == ch4[11].id
+    assert [item.id for item in kept_style.required_points] == ["p-yeh"]
+    assert all("I mighta sat on it" not in item.description for item in kept_style.required_points)
+    assert all("summat = something" not in item.description for item in kept_style.required_points)
+
+    harry_text = f"{_OPEN}Why?{_CLOSE} said Harry."
+    stranger_text = f"{_OPEN}Why?{_CLOSE} said the stranger."
+    speaker_resource = "hp01_ch005_speakers.html"
+    harry = _feedback_block("sec-speakers", speaker_resource, 0, 1, harry_text)
+    potter = _feedback_block("sec-speakers", speaker_resource, 1, 2, harry_text)
+    stranger = _feedback_block("sec-speakers", speaker_resource, 2, 3, stranger_text)
+    speaker_blocks = (harry, potter, stranger)
+
+    def speaker_fact(block: DocumentBlock, fact_id: str, value: str) -> QuotedContextFactResponse:
+        anchor = QuotedSourceAnchorResponse(block.id, "Why?")
+        return QuotedContextFactResponse(
+            id=fact_id,
+            kind="speaker",
+            anchors=(anchor,),
+            subject_anchor=anchor,
+            value=value,
+            certainty="inferred",
+        )
+
+    combined = combine_staged_analysis_responses(
+        NarrativeAnalysisResponse(
+            "Keep the voice.",
+            "Harry asks why.",
+            context_facts=(
+                speaker_fact(harry, "f-harry", "Harry"),
+                speaker_fact(potter, "f-potter", "Harry Potter"),
+                speaker_fact(stranger, "f-stranger", "Harry"),
+            ),
+        ),
+        PedagogicalAnalysisResponse(
+            treatment_plan=tuple(
+                TreatmentPlanItemResponse(block.id, BlockTreatment.READ_AS_IS)
+                for block in speaker_blocks
+            ),
+        ),
+        resolved_blocks=speaker_blocks,
+    )
+    assert [(fact.id, fact.certainty) for fact in combined.content_plan.context_facts] == [
+        ("f-harry", "explicit"),
+        ("f-potter", "explicit"),
+        ("f-stranger", "inferred"),
+    ]
+    speaker_aliases = {
+        f"b{index + 1}": block.id for index, block in enumerate(speaker_blocks)
+    }
+
+    def quoted_speaker(alias: str, fact_id: str, value: str) -> QuotedContextFactResponse:
+        anchor = QuotedSourceAnchorResponse(alias, "Why?")
+        return QuotedContextFactResponse(
+            id=fact_id,
+            kind="speaker",
+            anchors=(anchor,),
+            subject_anchor=anchor,
+            value=value,
+            certainty="inferred",
+        )
+
+    speaker_plan = content_plan_from_response(
+        ChapterAnalysisResponse(
+            translation_instructions="Keep the voice.",
+            chapter_summary="Harry asks why.",
+            treatment_plan=tuple(
+                TreatmentPlanItemResponse(alias, BlockTreatment.READ_AS_IS)
+                for alias in speaker_aliases
+            ),
+            content_plan=QuotedContentPlanResponse(
+                context_facts=(
+                    quoted_speaker("b1", "f-harry", "Harry"),
+                    quoted_speaker("b2", "f-potter", "Harry Potter"),
+                    quoted_speaker("b3", "f-stranger", "Harry"),
+                ),
+            ),
+        ),
+        speaker_aliases,
+        {block.id: block.text for block in speaker_blocks},
+        visible_texts_by_alias={
+            alias: block.text
+            for alias, block in zip(speaker_aliases, speaker_blocks, strict=True)
+        },
+        blocks=speaker_blocks,
+    )
+    assert speaker_plan is not None
+    grouped: dict[str, set[tuple[str, str | None, str]]] = {}
+    for fact in speaker_plan.context_facts:
+        grouped.setdefault(fact.subject_anchor.block_id, set()).add(
+            (fact.kind, fact.value, fact.certainty),
+        )
+    assert grouped == {
+        harry.id: {("speaker", "Harry", "explicit")},
+        potter.id: {("speaker", "Harry Potter", "explicit")},
+        stranger.id: {("speaker", "Harry", "inferred")},
+    }
+
+    results = {
+        numbered.id: BlockProcessingResult(numbered.id, BlockTreatment.READ_AS_IS),
+    }
+    for block, russian in zip(reply_blocks, (cannon_ru, budge_ru, kept_ru), strict=True):
+        results[block.id] = BlockProcessingResult(
+            block.id,
+            BlockTreatment.TRANSLATE,
+            translated_text=russian,
+        )
+    for block in hint_blocks:
+        results[block.id] = BlockProcessingResult(
+            block.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=hint_rows[block.text],
+        )
+    document = CanonicalDocument(
+        id=_BOOK_ID,
+        metadata=BookMetadata(title="Harry Potter and the Philosopher's Stone"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            DocumentSection(
+                id=chapter_id,
+                document_id=_BOOK_ID,
+                title="Chapter 4 - The Keeper of the Keys",
+                order=0,
+                source_resource_path=resource,
+                blocks=story,
+            ),
+        ),
+    )
+    layout = build_book_layout(
+        LayoutInputs(
+            document=document,
+            results=results,
+            analyses=(),
+            concepts=(),
+            reader_level="a2",
+            english_help=False,
+        )
+    )
+    for text, terms, surfaces, _snippet in marked:
+        block = hints_by_text[text]
+        notes = _glossary_notes(layout, chapter_id, block.id)
+        assert [item.note.term for item in notes] == list(terms)
+        assert len(layout.chapters[chapter_id].units[block.id]) == 1
+        for item, surface in zip(notes, surfaces, strict=True):
+            assert item.note.marker_end is not None
+            assert item.note.marker_end > 0
+            assert item.note.marker_end == _span_end(text, surface)
+            assert item.number is not None
+    tube_notes = _glossary_notes(layout, chapter_id, hints_by_text[tube].id)
+    assert tube_notes[0].note.marker_end == _span_end(tube, "the London Underground")
+    assert tube_notes[0].note.body == (
+        "Лондонское метро",
+        "Дамблдор шутит, что шрам у него на колене похож на схему линий метро.",
+    )
+    assert "Лондонское метро — Лондонское метро" not in " — ".join(tube_notes[0].note.body)
+    alley_notes = _glossary_notes(layout, chapter_id, hints_by_text[alley].id)
+    assert [item.note.term for item in alley_notes] == ["Diagon Alley", "showers of owls"]
+    assert alley_notes[0].note.marker_end == _span_end(alley, "Diagon Alley")
+    assert alley_notes[1].note.marker_end == _span_end(alley, "showers of owls")
+    assert [item.note.body for item in alley_notes] == [
+        ("Косой переулок", "Название похоже на diagonally. Читается как diagonally."),
+        (
+            "потоки сов",
+            "Вопрос построен без Are there: Going to be any more showers of owls tonight, Harry?",
+        ),
+    ]
+
+    target = tmp_path / "review-fixes.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=document,
+            target_path=str(target),
+            block_results=results,
+            layout=layout,
+        )
+    )
+    pages = _read_pages(target)
+    raw_pages = []
+    with ZipFile(target) as archive:
+        for name in archive.namelist():
+            if name.endswith((".xhtml", ".html")):
+                raw_pages.append(archive.read(name).decode())
+    exported = "\n".join(raw_pages)
+    for text, _terms, surfaces, snippet in marked:
+        block = hints_by_text[text]
+        notes = _glossary_notes(layout, chapter_id, block.id)
+        unit = _unit(pages, snippet)
+        assert _ref_superscripts(unit) == [str(item.number) for item in notes]
+        for item, surface in zip(notes, surfaces, strict=True):
+            assert f"<sup>{item.number}</sup>" in exported
+            assert surface in _source_text(_child(unit, "lg-src"))
+    tube_text = _text(_child(_unit(pages, "London Underground"), "lg-notes"))
+    assert tube_text.count("Лондонское метро") == 1
+    assert "Лондонское метро — Лондонское метро" not in tube_text
+    assert "Дамблдор шутит, что шрам у него на колене похож на схему линий метро." in tube_text
+    alley_text = _text(_child(_unit(pages, "Diagon Alley"), "lg-notes"))
+    assert "не подтверждает её прямо" not in alley_text
+    assert "без is it" not in alley_text
+    assert "Вопрос построен без Are there" in alley_text
+    assert "Название похоже на diagonally." in alley_text
+    assert _translation(_unit(pages, "the cannon")) == cannon_ru
+    assert _translation(_unit(pages, "Budge up")) == budge_ru
+    assert _translation(_unit(pages, "Kept what")) == kept_ru
+    assert _translation(_rendered_heading(pages, "CHAPTER THREE")) is None
+
+    petunia_id = "analysis-petunia"
+    petunia = _feedback_block(
+        "sec-petunia", "hp01_ch002_en-gb.html", 0, 1, "Aunt Petunia looked up.",
+    )
+    petunia_quote = "Aunt Petunia"
+    petunia_plan = TreatmentPlan.of_treatments(
+        petunia.section_id, ((petunia.id, BlockTreatment.TRANSLATE),),
+    )
+    petunia_description = "Петунья отказала. У Петуньи нет ключа. Петунье сказали нет."
+    petunia_candidate = _candidate(
+        petunia_id, "Aunt Petunia", "тётя Петунья", "Тётя Гарри, сестра Лили.",
+    )
+    petunia_analysis = ChapterAnalysis.create(
+        id=petunia_id,
+        section_id=petunia.section_id,
+        treatment_plan=petunia_plan,
+        translation_instructions="Keep the glossary names.",
+        chapter_summary="Aunt Petunia is named.",
+        expected_block_ids=(petunia.id,),
+        glossary_candidates=(petunia_candidate,),
+        content_plan=ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(
+                Difficulty(
+                    "diff-petunia",
+                    (SourceAnchor(petunia.id, 0, len(petunia_quote), petunia_quote),),
+                    petunia.id,
+                    "vocabulary",
+                    "useful",
+                    "explanation",
+                    (RequiredPoint("p-petunia", petunia_description),),
+                ),
+            ),
+        ),
+    )
+    owned = _owned_content_plan(
+        petunia_analysis,
+        TranslationUnit.of_blocks(id="unit-petunia", blocks=(petunia,), plan=petunia_plan),
+        decisions=(
+            GlossarySnapshotEntry(
+                source_text="Aunt Petunia",
+                translation="тётя Петуния",
+                type=ConceptType.PERSON,
+                status=TermStatus.APPROVED,
+            ),
+        ),
+        chapter_candidates=(petunia_candidate,),
+    )
+    assert "Петуния отказала. У Петунии нет ключа. Петунии сказали нет." in owned
+    assert "Петунья" not in owned
+    assert "Петуньи" not in owned
+    assert "Петунье" not in owned
+
+    policy = ReaderTextPolicy()
+    assert policy.prepare("translation", "\u2013 Где пушка?", ()) == "\u2014 Где пушка?"
+    assert (
+        policy.prepare("translation", "К его удивлению.\n\u2014 Хагрид усмехнулся.", ())
+        == "К его удивлению. \u2014 Хагрид усмехнулся."
+    )
+
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    narrative_rules = (
+        "Privet Drive — ж. р., улица",
+        "tabby cat — ж. р., кошка",
+        "boa constrictor — м. р., обращение на «ты»",
+        "несклоняемость фамилий",
+        "said Harry",
+        "certainty=explicit",
+        "said the stranger",
+        "said the giant",
+        "Hagrid",
+    )
+    pedagogical_rules = (
+        "speech_style — диалект, акцент, особенности речи; только первое появление особенности персонажа.",
+        "«Речь персонажа.»",
+        "we was",
+        "you was",
+        "don' need",
+        "them as",
+        "b(K+1)..bN",
+        "не больше N",
+        "reader_chapter_summary",
+        "Previously in Chapter",
+        "Present Simple",
+        "стандартные английские кавычки",
+        "«ёлочек»",
+    )
+    calques = (
+        "длинным тире «— »",
+        "You told me",
+        "Ты сказала",
+        "coat — пальто",
+        "«оно»",
+        "marmalade",
+        "апельсиновый джем",
+        "a great Muggle",
+        "отпетый/здоровенный магл",
+        "rather fond of",
+        "весьма люблю",
+        "any of the lights",
+        "нигде не включая свет",
+        "large chocolate ice-creams",
+        "большие порции шоколадного мороженого",
+        "go boil yer heads",
+        "катитесь оба к лешему",
+        "проблевался",
+        "her lot",
+        "компания, братия",
+        "Going to be any more showers",
+        "Are there",
+    )
+    for phrase in narrative_rules:
+        assert phrase in templates["narrative_analysis"]
+    for phrase in pedagogical_rules:
+        assert phrase in templates["pedagogical_analysis"]
+    for key in ("content_processing", "learner_quality"):
+        for phrase in calques:
+            assert phrase in templates[key]
