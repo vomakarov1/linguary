@@ -109,7 +109,7 @@ async def test_second_pass_failure_preserves_first_pass_and_new_use_case_skips_i
 async def test_reader_settings_recompute_only_pedagogy(stored_book, level, help, notes):
     _, uow, _ = stored_book
     await scenario(uow, FakeLLMClient([narrative(), pedagogical()]))(COMMAND)
-    summary = 'Holmes opens the door.\n\nХолмс открывает дверь.' if level == 'a2' else None
+    summary = 'Holmes opens the door.' if level == 'a2' else None
     client = FakeLLMClient([pedagogical(summary=summary)])
     result = await scenario(uow, client, context=builder(level, help=help, notes=notes))(COMMAND)
     assert [r.stage for r in client.requests] == [PEDAGOGICAL]
@@ -230,8 +230,12 @@ async def test_pedagogical_invalid_quotes_and_channels_preserve_narrative(stored
 
 async def test_a2_retries_reader_summary_without_repeating_narrative(stored_book):
     _, uow, _ = stored_book
-    summary = 'Holmes opens the door.\n\nХолмс открывает дверь.'
-    client = FakeLLMClient([narrative(), pedagogical(summary='English only.'), pedagogical(summary=summary)])
+    summary = 'Holmes opens the door.'
+    client = FakeLLMClient([
+        narrative(),
+        pedagogical(summary='Holmes opens the door.\n\nХолмс открывает дверь.'),
+        pedagogical(summary=summary),
+    ])
     result = await scenario(uow, client, context=builder('a2'), attempts=2)(COMMAND)
     assert [r.stage for r in client.requests] == [NARRATIVE, PEDAGOGICAL, PEDAGOGICAL]
     assert result.analysis.chapter_summary == summary
@@ -394,7 +398,7 @@ async def test_real_reanalyze_with_own_glossary_suggestion_reuses_narrative(tmp_
                 variants=(TermVariant('own-suggestion', 'ru', 'Холмс'),)))
         fresh = choose(BOOK_ID, action='reanalyze', expected_revision=1,
                        settings_revision=0, confirmed=True, reader_level=level, english_help=help)
-        summary = 'Holmes opens the door.\n\nХолмс открывает дверь.' if level == 'a2' else None
+        summary = 'Holmes opens the door.' if level == 'a2' else None
         client = FakeLLMClient([pedagogical(summary=summary)])
         result = await scenario(app.unit_of_work, client, context=pinned_context(fresh))(COMMAND)
         assert [r.stage for r in client.requests] == [PEDAGOGICAL]
@@ -421,8 +425,8 @@ async def test_service_markers_are_rejected_before_pass_is_saved(stored_book, pa
         bad['chapter_summary'] = 'Holmes opens [b1].'
         replies = [FakeReply.of_payload(bad), narrative(), pedagogical()]
     else:
-        replies = [narrative(), pedagogical(summary='Holmes opens [b1].\n\nХолмс открывает дверь.'),
-                   pedagogical(summary='Holmes opens the door.\n\nХолмс открывает дверь.')]
+        replies = [narrative(), pedagogical(summary='Holmes opens [b1].'),
+                   pedagogical(summary='Holmes opens the door.')]
     client = FakeLLMClient(replies)
     await scenario(uow, client, context=builder('a2') if pass_kind == PEDAGOGICAL else builder(),
                    attempts=2)(COMMAND)
@@ -1118,11 +1122,8 @@ async def test_pedagogical_pass_receives_current_chapter_narrative_glossary_and_
     raw_2 = json.loads(narrative(('b1',)).content)
     raw_2['chapter_summary'] = 'Holmes waits on Baker Street and Watson arrives.'
 
-    summary_1 = 'Holmes waits on Baker Street.\n\nХолмс ждёт на Бейкер-стрит.'
-    summary_2 = (
-        'Holmes waits on Baker Street and Watson arrives.\n\n'
-        'Холмс ждёт на Бейкер-стрит, и приезжает Уотсон.'
-    )
+    summary_1 = 'Holmes waits on Baker Street.'
+    summary_2 = 'Holmes waits on Baker Street and Watson arrives.'
     client = FakeLLMClient([
         FakeReply.of_payload(raw_1),
         FakeReply.of_payload(raw_2),
@@ -1295,7 +1296,7 @@ async def test_description_kept_for_person_and_place_only(stored_book):
     }
 
 
-A2_SUMMARY = 'A speaker asks for a small box.\n\nГоворящий просит небольшую коробку.'
+A2_SUMMARY = 'A speaker asks for a small box.'
 _LONG_QUOTE = '“Please bring the small red box from the hall before noon.”'
 _LONG_CRATE = '“Please carry the small red crate from the hall before noon.”'
 

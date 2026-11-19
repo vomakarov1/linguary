@@ -120,18 +120,150 @@ _PHRASE_PREPOSITIONS = _PARTICLES | frozenset(
 )
 # Irregular or alternating forms only. Regular -ed/-ing stays on `_same_word` / `_regular_ed_stem`.
 _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
-    "hold": frozenset({"held"}),
-    "make": frozenset({"made"}),
-    "sit": frozenset({"sat"}),
-    "take": frozenset({"took"}),
-    "throw": frozenset({"threw", "thrown"}),
+    "be": frozenset({"am", "is", "are", "was", "were", "been", "being"}),
+    "bear": frozenset({"bore", "borne", "born"}),
+    "beat": frozenset({"beat", "beaten"}),
+    "become": frozenset({"became"}),
+    "begin": frozenset({"began", "begun", "beginning"}),
+    "bend": frozenset({"bent"}),
+    "bet": frozenset({"bet", "betting"}),
+    "bind": frozenset({"bound"}),
+    "bite": frozenset({"bit", "bitten", "biting"}),
+    "bleed": frozenset({"bled"}),
+    "blow": frozenset({"blew", "blown"}),
+    "break": frozenset({"broke", "broken"}),
+    "bring": frozenset({"brought"}),
+    "build": frozenset({"built"}),
+    "burn": frozenset({"burnt", "burned"}),
+    "burst": frozenset({"burst"}),
+    "buy": frozenset({"bought"}),
     "cast": frozenset({"cast"}),
-    "write": frozenset({"wrote", "written"}),
-    "expel": frozenset({"expelled"}),
-    "hug": frozenset({"hugged"}),
-    "nod": frozenset({"nodded"}),
-    "snivel": frozenset({"snivelled"}),
+    "catch": frozenset({"caught"}),
+    "choose": frozenset({"chose", "chosen", "choosing"}),
+    "cling": frozenset({"clung"}),
+    "come": frozenset({"came", "coming"}),
+    "cost": frozenset({"cost"}),
+    "creep": frozenset({"crept"}),
+    "cut": frozenset({"cut", "cutting"}),
+    "deal": frozenset({"dealt"}),
+    "dig": frozenset({"dug", "digging"}),
+    "do": frozenset({"does", "did", "done", "doing"}),
+    "draw": frozenset({"drew", "drawn"}),
+    "dream": frozenset({"dreamt", "dreamed"}),
+    "drink": frozenset({"drank", "drunk"}),
+    "drive": frozenset({"drove", "driven", "driving"}),
+    "eat": frozenset({"ate", "eaten"}),
+    "expel": frozenset({"expelled", "expelling"}),
     "fade": frozenset({"faded", "fading"}),
+    "fall": frozenset({"fell", "fallen"}),
+    "feed": frozenset({"fed"}),
+    "feel": frozenset({"felt"}),
+    "fight": frozenset({"fought"}),
+    "find": frozenset({"found"}),
+    "flee": frozenset({"fled"}),
+    "fling": frozenset({"flung"}),
+    "fly": frozenset({"flew", "flown"}),
+    "forbid": frozenset({"forbade", "forbidden"}),
+    "forget": frozenset({"forgot", "forgotten", "forgetting"}),
+    "forgive": frozenset({"forgave", "forgiven", "forgiving"}),
+    "freeze": frozenset({"froze", "frozen", "freezing"}),
+    "get": frozenset({"got", "gotten", "getting"}),
+    "give": frozenset({"gave", "given", "giving"}),
+    "go": frozenset({"goes", "went", "gone", "going"}),
+    "grind": frozenset({"ground"}),
+    "grow": frozenset({"grew", "grown"}),
+    "hang": frozenset({"hung", "hanged"}),
+    "have": frozenset({"has", "had", "having"}),
+    "hear": frozenset({"heard"}),
+    "hide": frozenset({"hid", "hidden", "hiding"}),
+    "hit": frozenset({"hit", "hitting"}),
+    "hold": frozenset({"held"}),
+    "hug": frozenset({"hugged", "hugging"}),
+    "hurt": frozenset({"hurt"}),
+    "keep": frozenset({"kept"}),
+    "kneel": frozenset({"knelt", "kneeled"}),
+    "know": frozenset({"knew", "known"}),
+    "lay": frozenset({"laid"}),
+    "lead": frozenset({"led"}),
+    "lean": frozenset({"leant", "leaned"}),
+    "leap": frozenset({"leapt", "leaped"}),
+    "learn": frozenset({"learnt", "learned"}),
+    "leave": frozenset({"left", "leaving"}),
+    "lend": frozenset({"lent"}),
+    "let": frozenset({"let", "letting"}),
+    "lie": frozenset({"lay", "lain", "lying"}),
+    "light": frozenset({"lit", "lighted"}),
+    "lose": frozenset({"lost", "losing"}),
+    "make": frozenset({"made", "making"}),
+    "mean": frozenset({"meant"}),
+    "meet": frozenset({"met"}),
+    "nod": frozenset({"nodded", "nodding"}),
+    "pay": frozenset({"paid"}),
+    "put": frozenset({"put", "putting"}),
+    "read": frozenset({"read"}),
+    "ride": frozenset({"rode", "ridden", "riding"}),
+    "ring": frozenset({"rang", "rung"}),
+    "rise": frozenset({"rose", "risen", "rising"}),
+    "run": frozenset({"ran", "running"}),
+    "say": frozenset({"said"}),
+    "see": frozenset({"saw", "seen"}),
+    "seek": frozenset({"sought"}),
+    "sell": frozenset({"sold"}),
+    "send": frozenset({"sent"}),
+    "set": frozenset({"set", "setting"}),
+    "shake": frozenset({"shook", "shaken", "shaking"}),
+    "shine": frozenset({"shone", "shining"}),
+    "shoot": frozenset({"shot"}),
+    "show": frozenset({"showed", "shown"}),
+    "shrink": frozenset({"shrank", "shrunk"}),
+    "shut": frozenset({"shut", "shutting"}),
+    "sing": frozenset({"sang", "sung"}),
+    "sink": frozenset({"sank", "sunk"}),
+    "sit": frozenset({"sat", "sitting"}),
+    "sleep": frozenset({"slept"}),
+    "slide": frozenset({"slid", "sliding"}),
+    "sling": frozenset({"slung"}),
+    "slit": frozenset({"slit", "slitting"}),
+    "smell": frozenset({"smelt", "smelled"}),
+    "snivel": frozenset({"snivelled", "snivelling"}),
+    "speak": frozenset({"spoke", "spoken"}),
+    "speed": frozenset({"sped", "speeded"}),
+    "spell": frozenset({"spelt", "spelled"}),
+    "spend": frozenset({"spent"}),
+    "spill": frozenset({"spilt", "spilled"}),
+    "spin": frozenset({"spun", "spinning"}),
+    "spit": frozenset({"spat", "spitting"}),
+    "split": frozenset({"split", "splitting"}),
+    "spoil": frozenset({"spoilt", "spoiled"}),
+    "spread": frozenset({"spread"}),
+    "spring": frozenset({"sprang", "sprung"}),
+    "stand": frozenset({"stood"}),
+    "steal": frozenset({"stole", "stolen"}),
+    "stick": frozenset({"stuck"}),
+    "sting": frozenset({"stung"}),
+    "stink": frozenset({"stank", "stunk"}),
+    "stride": frozenset({"strode", "striding"}),
+    "strike": frozenset({"struck", "striking"}),
+    "swear": frozenset({"swore", "sworn"}),
+    "sweep": frozenset({"swept"}),
+    "swell": frozenset({"swelled", "swollen"}),
+    "swim": frozenset({"swam", "swum", "swimming"}),
+    "swing": frozenset({"swung"}),
+    "take": frozenset({"took", "taken", "taking"}),
+    "teach": frozenset({"taught"}),
+    "tear": frozenset({"tore", "torn"}),
+    "tell": frozenset({"told"}),
+    "think": frozenset({"thought"}),
+    "throw": frozenset({"threw", "thrown"}),
+    "tread": frozenset({"trod", "trodden"}),
+    "understand": frozenset({"understood"}),
+    "wake": frozenset({"woke", "woken", "waking"}),
+    "wear": frozenset({"wore", "worn"}),
+    "weep": frozenset({"wept"}),
+    "win": frozenset({"won", "winning"}),
+    "wind": frozenset({"wound"}),
+    "wring": frozenset({"wrung"}),
+    "write": frozenset({"wrote", "written", "writing"}),
 }
 _LEADING_TRANSLATION_BREAKS = frozenset(".!?—–-:;")
 _APOSTROPHE_CHARS = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
@@ -499,7 +631,7 @@ def _hint_draft(
         kept_note = cleaned_note
     kept_note = _strip_leading_translation(kept_note, hint.translation)
     term: str | None = hint.original
-    translation = hint.translation
+    translation = _strip_leading_headword(hint.translation, hint.original)
     if verbal:
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
@@ -507,10 +639,12 @@ def _hint_draft(
     elif lexical:
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
-            converted = _russian_past_to_infinitive(hint.translation)
-            if converted != hint.translation or _has_russian_infinitive(hint.translation):
+            converted = _russian_past_to_infinitive(translation)
+            if converted != translation or _has_russian_infinitive(translation):
                 term = infinitive
                 translation = converted
+    if term is not None:
+        translation = _strip_leading_headword(translation, term)
     long = (
         treatment is BlockTreatment.TRANSLATE
         and bool(cleaned_note)
@@ -519,7 +653,7 @@ def _hint_draft(
     if long:
         term = None
         parts = [cleaned_note]
-    elif _note_quotes_translation(kept_note, hint.translation):
+    elif _note_quotes_translation(kept_note, translation):
         parts = [kept_note]
     else:
         parts = [translation]
@@ -634,23 +768,63 @@ def _shared_anchors(
 def _find_end(text: str, quote: str) -> int | None:
     """End of the first match of `quote`, or None when nothing matches.
 
-    Exact `str.find` wins. Otherwise the same spelling on word boundaries,
-    ignoring case. `to` plus a verb may match an inflected phrase with no `to`.
+    Exact `str.find` wins (with apostrophe variants normalized 1-to-1).
+    Otherwise the same spelling on word boundaries ignoring case, a gapped
+    phrase with `…`/`...`, or `to` plus a verb matched to an inflected phrase.
     """
     start = text.find(quote)
     if start >= 0:
         return start + len(quote)
     if not quote:
         return None
-    folded = _case_insensitive_end(text, quote)
+    norm_text = text.translate(_APOSTROPHE_CHARS)
+    norm_quote = quote.translate(_APOSTROPHE_CHARS)
+    start = norm_text.find(norm_quote)
+    if start >= 0:
+        return start + len(norm_quote)
+    folded = _case_insensitive_end(norm_text, norm_quote)
     if folded is not None:
         return folded
+    gapped = _gapped_end(norm_text, norm_quote)
+    if gapped is not None:
+        return gapped
     return _infinitive_end(text, quote)
 
 
 def _case_insensitive_end(text: str, quote: str) -> int | None:
     """End of the first case-insensitive `quote` that starts and ends on a word boundary."""
-    pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)", re.IGNORECASE)
+    stripped = quote.strip()
+    if not stripped:
+        return None
+    left_boundary = r"(?<!\w)" if stripped[0].isalnum() else ""
+    right_boundary = r"(?!\w)" if stripped[-1].isalnum() else ""
+    pattern = re.compile(rf"{left_boundary}{re.escape(stripped)}{right_boundary}", re.IGNORECASE)
+    match = pattern.search(text)
+    if match is None:
+        return None
+    return match.end()
+
+
+_ELLIPSIS_GAP = re.compile(r"\s*(?:…|\.{3})\s*")
+
+
+def _gapped_end(text: str, quote: str) -> int | None:
+    """End of a gapped phrase like `what does … do` in `text`."""
+    if "…" not in quote and "..." not in quote:
+        return None
+    parts = [part.strip() for part in _ELLIPSIS_GAP.split(quote.strip()) if part.strip()]
+    if len(parts) < 2:
+        return None
+    pieces: list[str] = []
+    for index, part in enumerate(parts):
+        left_b = r"(?<!\w)" if part[0].isalnum() else ""
+        right_b = r"(?!\w)" if part[-1].isalnum() else ""
+        escaped = re.sub(r"\\ ", r"\\s+", re.escape(part))
+        if index == 0:
+            pieces.append(f"{left_b}{escaped}")
+        else:
+            pieces.append(f"{escaped}{right_b}")
+    pattern = re.compile(r"(?:\s+\S+){0,8}\s+".join(pieces), re.IGNORECASE)
     match = pattern.search(text)
     if match is None:
         return None
@@ -701,7 +875,27 @@ def _same_verb(surface: str, verb: str) -> bool:
         return True
     if _same_word(surface, verb):
         return True
-    return _regular_ed_stem(surface) == verb
+    if _regular_ed_stem(surface) == verb:
+        return True
+    if surface in {f"{verb}s", f"{verb}es", f"{verb}ed", f"{verb}ing", f"{verb}d"}:
+        return True
+    if len(verb) >= 3 and verb[-1] not in "aeiouwxy" and surface in {
+        f"{verb}{verb[-1]}ed",
+        f"{verb}{verb[-1]}ing",
+    }:
+        return True
+    if verb.endswith("e") and len(verb) >= 3 and surface == f"{verb[:-1]}ing":
+        return True
+    if (
+        verb.endswith("y")
+        and len(verb) >= 3
+        and verb[-2] not in "aeiou"
+        and surface in {f"{verb[:-1]}ies", f"{verb[:-1]}ied"}
+    ):
+        return True
+    if verb.endswith("ie") and surface == f"{verb[:-2]}ying":
+        return True
+    return False
 
 
 def _match_phrase(
@@ -787,6 +981,51 @@ def _last_anchor_end(block_id: str, anchors: Sequence[SourceAnchor]) -> int | No
     return max(ends)
 
 
+_DECLENSION_TAIL = re.compile(
+    r"\s*;\s*не\s+склонять\.?$",
+    re.IGNORECASE,
+)
+_DECLENSION_STANDALONE = re.compile(
+    r"^(?:(?:имя|фамилия|название)\s+не\s+склоня(?:ет(?:ся)?|ть)|"
+    r"при\s+слове\s+[«\"][^»\"]+[»\"]\s+(?:имя|фамилия|название)\s+\S+\s+не\s+склоня(?:ет(?:ся)?|ть))\.?$",
+    re.IGNORECASE,
+)
+
+
+def _strip_leading_headword(text: str, headword: str) -> str:
+    """Drop a redundant `headword — ` prefix inside `hint.translation`."""
+    stripped = text.strip()
+    if not stripped or not headword.strip():
+        return stripped
+    folded = stripped.translate(_APOSTROPHE_CHARS).casefold()
+    for head in _headwords(headword):
+        norm_head = head.translate(_APOSTROPHE_CHARS).casefold()
+        if not folded.startswith(norm_head):
+            continue
+        rest = stripped[len(norm_head) :].lstrip()
+        if rest and rest[0] in _DASHES:
+            candidate = rest[1:].lstrip()
+            if candidate:
+                return candidate
+    return stripped
+
+
+def _strip_declension_directive(text: str) -> str:
+    """Remove translator-only Russian declension directives leaked into notes."""
+    current = text.strip()
+    if not current:
+        return ""
+    if _DECLENSION_STANDALONE.fullmatch(current):
+        return ""
+    had_period = current.endswith(".")
+    trimmed = _DECLENSION_TAIL.sub("", current).rstrip()
+    if trimmed != current:
+        if had_period and trimmed and trimmed[-1] not in ".!?":
+            return f"{trimmed}."
+        return trimmed
+    return current
+
+
 def _body(*parts: str) -> tuple[str, ...]:
     """Drop reference phrases, speech-verb boilerplate, editorial tails, and AI disclaimers.
 
@@ -795,9 +1034,11 @@ def _body(*parts: str) -> tuple[str, ...]:
     """
     cleaned = []
     for part in parts:
-        text = part.replace(_REFERENCE_COLON, "").replace(_REFERENCE, "")
+        text = part.replace("\u00ad", "")
+        text = text.replace(_REFERENCE_COLON, "").replace(_REFERENCE, "")
         text = _strip_speech_verb_note(text)
         text = _strip_editorial_tail(text)
+        text = _strip_declension_directive(text)
         text = _strip_ai_disclaimer(text)
         if text:
             cleaned.append(text)

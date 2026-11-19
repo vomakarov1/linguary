@@ -11,7 +11,9 @@ from linguary.domain.llm_log import Violation
 _SERVICE_TOKEN = re.compile(r'\b(?:b\d+|source_block_id|difficulty_id|artifact_index)\b', re.IGNORECASE)
 _EXPLANATION_LABEL = re.compile(r'\[b\d+\]\s*(?:[:—–-]\s*)?', re.IGNORECASE)
 _LEADING_EN_DASH = re.compile(r'^– ', re.MULTILINE)
+_INLINE_EN_DASH = re.compile(r' – ')
 _INLINE_DIALOGUE_BREAK = re.compile(r'([.:,!?…])\n— ')
+_GERMAN_QUOTES = re.compile(r'„([^“”]+)“')
 _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 'language_note.note'})
 # Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
@@ -105,67 +107,51 @@ def validate_a2_summary(
     source_language: str,
     language_detector: LanguageDetector,
 ) -> None:
-    """Require an original-language paragraph followed by a Russian translation."""
+    """Require a single source-language A2 paragraph without Russian translation."""
     paragraphs = [part.strip() for part in re.split(r'\r?\n[ \t]*\r?\n+', body.strip())]
-    if len(paragraphs) != 2 or not all(paragraphs):
-        bad_idx = (
-            1
-            if not paragraphs or not paragraphs[0]
-            else (2 if len(paragraphs) < 2 or not paragraphs[1] else 3)
-        )
-        non_empty = len([part for part in paragraphs if part])
+    non_empty = [part for part in paragraphs if part]
+    if len(non_empty) != 1:
         raise ReaderTextError(
-            'a2_summary_requires_parallel_russian',
+            'a2_summary_requires_single_source_paragraph',
             detail=(
-                f'абзац {bad_idx}: получено абзацев — {non_empty}, '
-                r'требуется двухабзацный формат EN\nRU через пустую строку '
-                '(абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+                f'получено абзацев — {len(non_empty)}, '
+                'требуется ровно один абзац на языке оригинала без перевода на русский'
             ),
         )
+    paragraph = non_empty[0]
     source_script = _dominant_script(' '.join(source_texts))
-    summary_script = _dominant_script(paragraphs[0])
+    summary_script = _dominant_script(paragraph)
     if source_script is not None and summary_script != source_script:
         raise ReaderTextError(
-            'a2_summary_requires_parallel_russian',
+            'a2_summary_requires_single_source_paragraph',
             detail=(
-                'абзац 1: алфавит не совпадает с языком оригинала; '
-                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+                'алфавит не совпадает с языком оригинала; '
+                'требуется ровно один абзац на языке оригинала без перевода на русский'
             ),
         )
     source_language_probability = language_detector.probability_for_language(
-        paragraphs[0], source_language
+        paragraph, source_language
     )
     if (
         source_language_probability is not None
         and source_language_probability < _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY
     ):
         raise ReaderTextError(
-            'a2_summary_requires_parallel_russian',
+            'a2_summary_requires_single_source_paragraph',
             detail=(
-                f'абзац 1: текст не распознан как язык оригинала ({source_language}); '
-                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+                f'текст не распознан как язык оригинала ({source_language}); '
+                'требуется ровно один абзац на языке оригинала без перевода на русский'
             ),
         )
-    letters = [char for char in paragraphs[1] if char.isalpha()]
-    cyrillic = [char for char in letters if unicodedata.name(char, '').startswith('CYRILLIC ')]
-    if not letters or len(cyrillic) / len(letters) < 0.5:
+    sentence_count = _sentence_count(paragraph)
+    if sentence_count > A2_SUMMARY_MAX_SENTENCES:
         raise ReaderTextError(
-            'a2_summary_requires_parallel_russian',
+            'a2_summary_too_many_sentences',
             detail=(
-                'абзац 2: ожидается перевод на русский язык; '
-                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+                f'абзац 1: {sentence_count} предложений, '
+                f'не больше {A2_SUMMARY_MAX_SENTENCES}'
             ),
         )
-    for index, paragraph in enumerate(paragraphs, start=1):
-        sentence_count = _sentence_count(paragraph)
-        if sentence_count > A2_SUMMARY_MAX_SENTENCES:
-            raise ReaderTextError(
-                'a2_summary_too_many_sentences',
-                detail=(
-                    f'абзац {index}: {sentence_count} предложений, '
-                    f'не больше {A2_SUMMARY_MAX_SENTENCES}'
-                ),
-            )
 
 
 class ReaderTextPolicy:
@@ -175,8 +161,10 @@ class ReaderTextPolicy:
         if body is None:
             return None
         original = body
+        body = _replace_outside_quotes(body, re.compile('\u00ad'), '', protected_quotes)
         if kind == 'translation':
             body = _normalize_dialogue_dashes(body, protected_quotes)
+            body = _normalize_russian_typography(body, protected_quotes)
         if kind in _EXPLANATIONS:
             spans = _protected_spans(body, protected_quotes)
             matches = [match for match in _EXPLANATION_LABEL.finditer(body)
@@ -251,6 +239,12 @@ def _normalize_dialogue_dashes(body, protected_quotes):
     )
 
 
+def _normalize_russian_typography(body, protected_quotes):
+    """Replace stray en-dashes and German quotes outside protected source quotes."""
+    body = _replace_outside_quotes(body, _INLINE_EN_DASH, ' — ', protected_quotes)
+    return _replace_outside_quotes(body, _GERMAN_QUOTES, r'«\1»', protected_quotes)
+
+
 def _replace_outside_quotes(body, pattern, replacement, protected_quotes):
     spans = _protected_spans(body, protected_quotes)
 
@@ -270,16 +264,17 @@ def _rebuilt_translation(slots):
 
 
 _A2_NOTE_DISCIPLINE = """
-В блоках TRANSLATE запрещены капитанские сноски об очевидных местоимениях («she и her относятся к...», «he относится к...»), базовых предлогах («from no one») и прозрачных ремарках («sounding relieved»). Не склеивай разные концы абзаца в одну сноску. Не копируй в original или original_excerpt фразы длиннее 5 слов. Не повторяй объяснение конструкции, уже разобранной в главе (had + V3, must/could have + V3, snapped).
-В glossary_hints приводи глаголы к инфинитиву с to («to snigger — хихикать», «to nod — кивать») и оставляй note пустым для обычных слов без игры слов и идиоматики.
-Запрещены «помета к глаголу речи», «реалия», «страдательный оборот», «превосходная степень» и «причастие прошедшего времени». Не дублируй в сноске целое предложение и его перевод.
+В блоках TRANSLATE ставь не больше 1–2 заметок на абзац; запрещены очевидные сноски о прозрачных местоимениях, базовых предлогах и словах уровня A1 или прозрачных интернационализмах. Не склеивай разные концы абзаца в одну сноску. Не копируй в original или original_excerpt фразы длиннее 5 слов. Не повторяй объяснение конструкции или слова, уже разобранных ранее в главе.
+В glossary_hints приводи глаголы к инфинитиву с to («to snigger — хихикать», «to nod — кивать»), не повторяй английское слово в начале поля translation и оставляй note пустым для обычных слов без игры слов и идиоматики. Никогда не переноси в заметки читателю внутренние переводческие пометы («не склонять», род существительных).
+Запрещены «помета к глаголу речи», «реалия», «страдательный оборот», «превосходная степень», «причастие прошедшего времени» и кодовые обозначения вроде V2/V3 (пиши по-русски: «третья форма глагола»). Цитируй слова из оригинала точно в той форме, как они стоят в тексте (например, did become, а не did became). Не дублируй в сноске целое предложение и его перевод.
 """
 
 _A2_DIALOGUE_AND_CALQUE_RULES = """
-Русские реплики оформляй длинным тире «— » в начале реплики, а не средним тире «– » и не кавычками вместо реплики.
-Сверяй род адресата во 2-м лице: You told me... тёте Петунии передавай как «Ты сказала».
-Сверяй местоимения 3-го лица с родом перевода: coat — пальто требует «оно».
-Не калькируй: marmalade передавай как апельсиновый джем; a great Muggle — отпетый/здоровенный магл; rather fond of — весьма люблю; any of the lights — нигде не включая свет; large chocolate ice-creams — большие порции шоколадного мороженого; go boil yer heads — катитесь оба к лешему, без вульгаризма «проблевался»; lot в her lot понимай как «компания, братия»; в Going to be any more showers...? не пропускай опущенное Are there.
+Русские реплики оформляй длинным тире «— » в начале реплики и кавычками-ёлочками «…», а не средним тире «– » и не немецкими кавычками „…“.
+Сверяй род адресата во 2-м лице и местоимений 3-го лица с родом русского перевода (включая животных и неодушевлённые существительные).
+Соблюдай единый регистр обращения «ты/вы» по ролям в сцене: ребёнок к незнакомому взрослому или учителю, а также вежливые обращения с титулом (Mr/Mrs/Professor) требуют «вы», если в сцене не установлен переход на «ты».
+Если у персонажа в оригинале ярко выраженная разговорная или просторечная речь (диалект, усечения), сохраняй живую разговорность в русском переводе на протяжении всей сцены и избегай книжных оборотов.
+Передавай идиомы, британские реалии и разговорные обороты естественным русским эквивалентом по контексту, без буквальных калек и вульгаризмов.
 """
 
 
@@ -293,14 +288,12 @@ glossary_hint.translation, glossary_hint.note и language_note.note, а такж
 Не выводи служебные метки блоков, идентификаторы и технические поля в учебных телах.
 Цитаты, expression, original и original_excerpt сохраняй дословно.
 Смысловая точность остаётся непроверенной; длина фраз не гарантирует уровень CEFR.
-Запрещены кальки и несочетаемые союзы («хотя зато», «больше того», «не одобрял воображения», «пострел» вместо «сорванец / негодник»), пропуск конечного обстоятельства tonight, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», пометы «вариант стоит проверить» и «в переводе передано как...», шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
+Запрещены буквальные кальки и несочетаемые союзы («хотя зато», «больше того»), пропуск обстоятельств времени и места, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», «V2/V3», пометы «вариант стоит проверить» и «в переводе передано как...», переводческие инструкции («не склонять») в заметках читателю, шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
 '''
     if reader_level.strip().lower() == 'a2':
         return common + '''
-Для A2 обеспечь необходимую лексическую опору: объясни по контексту Shoo,
-snapped и went out, если они встречаются; не считай короткую реплику автоматически простой.
-Пересказ A2 верни ровно два абзаца: сначала оригинальный текст доступными словами и с ясными
-связями причин и событий, затем отдельный абзац с его полным переводом на русский язык.
+Для A2 обеспечь необходимую лексическую опору: не считай короткую реплику автоматически простой — если в ней есть редкое междометие, выразительный глагол речи или фразовый глагол выше A2, дай подсказку или перевод. В блоках без перевода проверяй каждое знаменательное слово выше A2, включая редкие значения знакомых слов и официальные титулы.
+Пересказ A2 верни ровно одним абзацем на языке оригинала (без перевода на русский): простая лексика A2, ясные связи причин и событий, строго по фактам главы без выдуманных деталей.
 Если встречаются модальный перфект вроде might have been, придаточное с what в значении
 «то, что» или отрыв предлога в конце придаточного или вопроса, не ограничивай помощь
 словарной подсказкой: переведи конструкцию полностью либо прямо объясни её форму и смысл

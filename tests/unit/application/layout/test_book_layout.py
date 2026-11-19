@@ -484,7 +484,8 @@ def test_structure_only_layout_whole_blocks_no_notes() -> None:
     assert layout.legend == (
         "Абзац оригинала всегда идёт первым.",
         "Строка с линией слева — перевод этой части абзаца. "
-        "Переведены не все абзацы: остальные вы читаете сами, с подсказками или без них.",
+        "Переведены не все абзацы: остальные вы читаете сами, с подсказками или без них. "
+        "Старайтесь сначала прочитать абзац оригинала целиком и только потом сверяться с переводом.",
     )
     assert layout.ipa_key == ()
     assert layout.who_is_who == ()
@@ -1496,3 +1497,120 @@ def test_build_layout_inputs_unifies_data_loading() -> None:
     assert build_layout_inputs(writing, DOCUMENT_ID).document is document
     assert writing.calls[0] == "transaction"
     assert not hasattr(_UnitOfWork, "read_transaction") or "read_transaction" not in writing.calls
+
+
+def test_repeated_speech_style_drops_language_notes_and_hints_backed_by_evidence() -> None:
+    """Repeated speech_style removes Russian language_notes and glossary_hints, not only assistances."""
+    from linguary.domain import LanguageNote
+    from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
+
+    first = _block("one", 0, "‘We was late,’ Hagrid said.")
+    second = _block("two", 0, "‘Yeh’ll see,’ Hagrid said.")
+    early = _difficulty(first, "We was", "speech_style", "d-early")
+    late = _difficulty(second, "Yeh’ll", "speech_style", "d-late")
+    kept_grammar = _difficulty(second, "see", "grammar", "d-gram")
+    first_fact = _fact("f1", first, first.text, "Hagrid", "explicit")
+    second_fact = _fact("f2", second, second.text, "Hagrid", "explicit")
+    first_plan = _plan(early, facts=(first_fact,))
+    second_plan = _plan(late, kept_grammar, facts=(second_fact,))
+    first_section = _section("one", 0, "Chapter 1", (first,))
+    second_section = _section("two", 1, "Chapter 2", (second,))
+
+    early_note = LanguageNote("n1", first.id, "We was", "Просторечное согласование.")
+    late_note = LanguageNote("n2", second.id, "Yeh’ll", "Повтор про yeh = you.")
+    kept_note = LanguageNote("n3", second.id, "see", "Будущее время.")
+    late_hint = GlossaryHint("Yeh’ll", "ты будешь", "Повтор про диалект.")
+
+    def _note_key(note: LanguageNote) -> str:
+        return artifact_key(
+            "language_note.note",
+            note.block_id,
+            {
+                "original_excerpt": note.original_excerpt,
+                "note": note.note,
+                "translated_excerpt": note.translated_excerpt,
+            },
+        )
+
+    def _hint_key(block_id: str, hint: GlossaryHint) -> str:
+        return artifact_key(
+            "glossary_hint.note",
+            block_id,
+            {"original": hint.original, "translation": hint.translation, "note": hint.note},
+        )
+
+    results = {
+        first.id: BlockProcessingResult(
+            first.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="— Мы опоздали, — сказал Хагрид.",
+            language_notes=(early_note,),
+            content_evidence=ContentEvidence(
+                first_plan.sha256,
+                (
+                    HelpEvidence(
+                        early.id,
+                        early.required_points[0].id,
+                        "language_note.note",
+                        first.id,
+                        _note_key(early_note),
+                        early_note.note,
+                    ),
+                ),
+            ),
+        ),
+        second.id: BlockProcessingResult(
+            second.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="— Сам увидишь, — сказал Хагрид.",
+            glossary_hints=(late_hint,),
+            language_notes=(late_note, kept_note),
+            content_evidence=ContentEvidence(
+                second_plan.sha256,
+                (
+                    HelpEvidence(
+                        late.id,
+                        late.required_points[0].id,
+                        "language_note.note",
+                        second.id,
+                        _note_key(late_note),
+                        late_note.note,
+                    ),
+                    HelpEvidence(
+                        late.id,
+                        late.required_points[0].id,
+                        "glossary_hint.note",
+                        second.id,
+                        _hint_key(second.id, late_hint),
+                        late_hint.note or "",
+                    ),
+                    HelpEvidence(
+                        kept_grammar.id,
+                        kept_grammar.required_points[0].id,
+                        "language_note.note",
+                        second.id,
+                        _note_key(kept_note),
+                        kept_note.note,
+                    ),
+                ),
+            ),
+        ),
+    }
+
+    layout = build_book_layout(
+        _inputs(
+            _document((first_section, second_section)),
+            results,
+            (
+                _analysis("a1", first_section.id, plan=first_plan),
+                _analysis("a2", second_section.id, plan=second_plan),
+            ),
+        )
+    )
+
+    first_notes = _notes(layout, first.id)
+    second_notes = _notes(layout, second.id)
+    assert len(first_notes) == 1
+    assert first_notes[0].labels == ("Речь персонажа.",)
+    assert [note.body for note in second_notes] == [("Будущее время.",)]
+    assert [note.labels for note in second_notes] == [()]

@@ -170,7 +170,7 @@ _CLOSING_PUNCTUATION = "\"'\u201d\u2019\u00bb\u203a"
 
 _CANDIDATE_PATTERN = re.compile(
     r"""
-    (?P<term>\.\.\.+|…|(?:\.\s+){2,}\.|[.!?])
+    (?P<term>\.\.\.+|…|(?:\.\s+){2,}\.|[.!?]|[—–](?=["'\u201d\u2019\u00bb\u203a]))
     (?P<close>(?:["'\u201d\u2019\u00bb\u203a)\]*†‡0-9]|\[[0-9a-zA-Z]+\])*)
     (?P<space>\s+)
     """,
@@ -192,7 +192,8 @@ _CLAUSE_CONJUNCTION_PATTERN = re.compile(
     r",\s+(?:although|because|though|while|where|which|when|and|but|nor|yet|who|so|or|if)\b",
     re.IGNORECASE,
 )
-_CLAUSE_LEVELS: tuple[str, ...] = (";", ":", "dash", "conjunction")
+_CLAUSE_ELLIPSIS_PATTERN = re.compile(r"(?:…|\.\.\.+)\s+")
+_CLAUSE_LEVELS: tuple[str, ...] = (";", ":", "dash", "ellipsis", "conjunction")
 _DASH_MARKS: tuple[str, ...] = ("—", "–", " - ")
 
 
@@ -588,12 +589,56 @@ def _conjunction_points(text: str, start: int, end: int) -> list[int]:
     return points
 
 
+def _ellipsis_points(text: str, start: int, end: int) -> list[int]:
+    points: list[int] = []
+    for match in _CLAUSE_ELLIPSIS_PATTERN.finditer(text, start, end):
+        point = match.end()
+        if start < point < end:
+            points.append(point)
+    return points
+
+
+def _comma_points(text: str, start: int, end: int) -> list[int]:
+    return _marked_points(text, start, end, ",")
+
+
 def _clause_points(text: str, start: int, end: int, level: str) -> list[int]:
     if level in {";", ":"}:
         return _marked_points(text, start, end, level)
     if level == "dash":
         return _dash_points(text, start, end)
+    if level == "ellipsis":
+        return _ellipsis_points(text, start, end)
     return _conjunction_points(text, start, end)
+
+
+def _fit_clause_boundaries(
+    start: int,
+    end: int,
+    points: Sequence[int],
+    protected: Sequence[tuple[int, int]],
+    max_segment_chars: int,
+) -> list[tuple[int, int]] | None:
+    """Greedily pick the fewest clause cuts so every span fits within `max_segment_chars`."""
+    candidates = _boundaries_respecting_protected(start, end, sorted(set(points)), protected)
+    if len(candidates) < 3:
+        return None
+    chosen = [start]
+    cursor = start
+    idx = 1
+    while end - cursor > max_segment_chars:
+        best: int | None = None
+        while idx < len(candidates) - 1 and candidates[idx] - cursor <= max_segment_chars:
+            best = candidates[idx]
+            idx += 1
+        if best is None:
+            return None
+        chosen.append(best)
+        cursor = best
+    chosen.append(end)
+    if any(b - a > max_segment_chars for a, b in zip(chosen, chosen[1:])):
+        return None
+    return list(zip(chosen, chosen[1:]))
 
 
 def _word_split_target(max_segment_chars: int) -> int:
@@ -694,6 +739,23 @@ def _split_sentence(
                 BlockSegment(span_start, span_end, sentence_index)
                 for span_start, span_end in spans
             ]
+
+    combined_points: list[int] = []
+    for level in _CLAUSE_LEVELS:
+        combined_points.extend(_clause_points(text, start, end, level))
+    fitted_clauses = _fit_clause_boundaries(
+        start, end, combined_points, protected, max_segment_chars
+    )
+    if fitted_clauses is None:
+        combined_points.extend(_comma_points(text, start, end))
+        fitted_clauses = _fit_clause_boundaries(
+            start, end, combined_points, protected, max_segment_chars
+        )
+    if fitted_clauses is not None:
+        return [
+            BlockSegment(span_start, span_end, sentence_index)
+            for span_start, span_end in fitted_clauses
+        ]
 
     word_spans = _split_span_by_words(
         text,

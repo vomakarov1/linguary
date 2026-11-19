@@ -30,7 +30,15 @@ from linguary.domain import (
     TermConcept,
     glossary_key,
 )
-from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, SourceAnchor
+from linguary.domain.content_plan import (
+    ContentEvidence,
+    ContentPlan,
+    ContextFact,
+    Difficulty,
+    HelpEvidence,
+    SourceAnchor,
+    artifact_key,
+)
 
 _SHOWN_CERTAINTY = frozenset({"explicit", "inferred"})
 _UNIT_SPEAKER_CERTAINTY = frozenset({"inferred"})
@@ -943,17 +951,94 @@ def _result_without(
     result: BlockProcessingResult,
     dropped: frozenset[str],
 ) -> BlockProcessingResult:
-    """Copy without assistance for a dropped speech style. The stored result stays.
+    """Copy without help backed exclusively by a dropped speech style.
 
-    `block_notes` still emits that assistance after the difficulty leaves the
-    plan. Omitting it drops the note, label and body. Other help stays.
+    `block_notes` still emits assistance, language notes, or hints after the
+    difficulty leaves the plan. Omitting items whose evidence points only to
+    `dropped` removes the note, label, and body while preserving stored data
+    and any help that also backs a kept difficulty.
     """
     if not dropped:
         return result
-    kept = tuple(item for item in result.fragment_assistances if item.difficulty_id not in dropped)
-    if len(kept) == len(result.fragment_assistances):
+    kept_assistances = tuple(
+        item for item in result.fragment_assistances if item.difficulty_id not in dropped
+    )
+    evidences = _help_evidences(result)
+    kept_notes = tuple(
+        note
+        for note in result.language_notes
+        if not _only_dropped_evidence(
+            evidences,
+            {
+                artifact_key(
+                    "language_note.note",
+                    note.block_id,
+                    {
+                        "original_excerpt": note.original_excerpt,
+                        "note": note.note,
+                        "translated_excerpt": note.translated_excerpt,
+                    },
+                )
+            },
+            dropped,
+        )
+    )
+    kept_hints = tuple(
+        hint
+        for hint in result.glossary_hints
+        if not _only_dropped_evidence(
+            evidences,
+            {
+                artifact_key(
+                    "glossary_hint.note",
+                    result.block_id,
+                    {
+                        "original": hint.original,
+                        "translation": hint.translation,
+                        "note": hint.note,
+                    },
+                ),
+                artifact_key(
+                    "glossary_hint.translation",
+                    result.block_id,
+                    {
+                        "original": hint.original,
+                        "translation": hint.translation,
+                        "note": hint.note,
+                    },
+                ),
+            },
+            dropped,
+        )
+    )
+    if (
+        kept_assistances == result.fragment_assistances
+        and kept_notes == result.language_notes
+        and kept_hints == result.glossary_hints
+    ):
         return result
-    return replace(result, fragment_assistances=kept)
+    return replace(
+        result,
+        fragment_assistances=kept_assistances,
+        language_notes=kept_notes,
+        glossary_hints=kept_hints,
+    )
+
+
+def _help_evidences(result: BlockProcessingResult) -> tuple[HelpEvidence, ...]:
+    evidence = result.content_evidence
+    if not isinstance(evidence, ContentEvidence):
+        return ()
+    return tuple(item for item in evidence.evidence if isinstance(item, HelpEvidence))
+
+
+def _only_dropped_evidence(
+    evidences: Sequence[HelpEvidence],
+    keys: set[str],
+    dropped: frozenset[str],
+) -> bool:
+    linked = {item.difficulty_id for item in evidences if item.artifact_key in keys}
+    return bool(linked) and linked <= dropped
 
 
 def _features(

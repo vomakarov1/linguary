@@ -19,7 +19,7 @@ from linguary.web.labels import treatment_label
 def lexical_analysis():
     return dict(
         translation_instructions='Preserve the original text.',
-        chapter_summary='The cat sits quietly and hears a sound that comes back.\n\nКошка тихо сидит и слышит возвращающийся звук.',
+        chapter_summary='The cat sits quietly and hears a sound that comes back.',
         treatment_plan=[dict(source_block_id='b1', treatment='READ_AS_IS')],
         glossary_candidates=[], before_you_read=[],
         content_plan=dict(version=3, profile='content-plan-v3', context_facts=[],
@@ -112,7 +112,7 @@ def test_english_help_with_no_difficulties_can_be_exported(tmp_path):
                                        english_help=True, reader_level='a2')
         client.replies = (FakeReply.of_payload(dict(
             translation_instructions='Preserve the original text.',
-            chapter_summary='A cat sleeps quietly.\n\nКошка тихо спит.',
+            chapter_summary='A cat sleeps quietly.',
             treatment_plan=[dict(source_block_id='b1', treatment='READ_AS_IS')],
             glossary_candidates=[], before_you_read=[],
             content_plan=dict(version=3, profile='content-plan-v3', context_facts=[],

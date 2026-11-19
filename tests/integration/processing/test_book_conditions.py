@@ -684,7 +684,7 @@ async def test_staged_runtime_uses_pinned_models_and_reuses_narrative_on_reanaly
             if sum(b['response_format']['json_schema']['name'] == kind for b in bodies) == 1:
                 payload['treatment_plan'] = []  # Valid schema, rejected coverage, then retry.
             if 'reader_chapter_summary' in body['response_format']['json_schema']['schema']['properties']:
-                payload['reader_chapter_summary'] = 'The cat sat.\n\nКот сидел.'
+                payload['reader_chapter_summary'] = 'The cat sat on the mat.'
         else:
             raise AssertionError(f'Unexpected request kind: {kind}')
         usage = dict(prompt_tokens=100, completion_tokens=25)
@@ -733,7 +733,7 @@ async def test_staged_runtime_uses_pinned_models_and_reuses_narrative_on_reanaly
             with app.unit_of_work.transaction() as tx:
                 assert tx.analyses.get_pass('book-1', document.sections[0].id, AnalysisPassKind.NARRATIVE) == first
                 analysis = tx.analyses.list_for_book('book-1')[0]
-                assert analysis.chapter_summary == ('The cat sat.\n\nКот сидел.' if level == 'a2' else 'The cat sat.')
+                assert analysis.chapter_summary == ('The cat sat on the mat.' if level == 'a2' else 'The cat sat.')
         overview = book_overview(app.unit_of_work, 'book-1')
         stats = overview.ordinary_cost['analysis']
         assert stats['calls'] == 5

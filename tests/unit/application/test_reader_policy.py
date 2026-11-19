@@ -32,10 +32,11 @@ def test_cleanup_cannot_erase_required_help():
 
 def test_a2_policy_in_all_channels():
     instructions = learner_instructions('a2')
-    for expected in ('summary', 'before_you_read', 'glossary_hint', 'language_note', 'Shoo', 'snapped', 'went out',
+    for expected in ('summary', 'before_you_read', 'glossary_hint', 'language_note',
+                     'не считай короткую реплику автоматически простой',
                      'might have been', 'what', 'отрыв предлога', 'языковой заметке',
-                     'not saying ... isn’t ...', 'утвердительный смысл', 'переводом на русский язык',
-                     'два абзаца'):
+                     'not saying ... isn’t ...', 'утвердительный смысл',
+                     'ровно одним абзацем на языке оригинала', 'без перевода на русский'):
         assert expected in instructions
     assert ReaderTextPolicy().warnings('summary', 'One ' * 40 + '.', reader_level='a2')
 
@@ -70,17 +71,16 @@ def test_a2_double_negative_instructions_keep_translation_and_byr_affirmative():
 @pytest.mark.parametrize(
     'summary',
     [
-        'The story continues.',
+        '',
+        'The story continues.\n\nИстория продолжается.',
         'The story continues.\n\nThe story continues.',
-        'The story continues.\n\nИстория продолжается.\n\nГерои уходят.',
-        'История продолжается.\n\nГерои уходят.',
-        'La historia continúa.\n\nИстория продолжается.',
-        'La noche.\n\nНочь.',
-        'The story continues.\n\nИстория العربية العربية العربية.',
+        'История продолжается.',
+        'La historia continúa.',
+        'La noche.',
     ],
 )
-def test_a2_summary_requires_two_paragraphs_with_russian_translation(summary):
-    with pytest.raises(ReaderTextError, match='a2_summary_requires_parallel_russian'):
+def test_a2_summary_requires_single_source_language_paragraph(summary):
+    with pytest.raises(ReaderTextError, match='a2_summary_requires_single_source_paragraph'):
         validate_a2_summary(
             summary,
             source_texts=('The story continues.',),
@@ -89,9 +89,9 @@ def test_a2_summary_requires_two_paragraphs_with_russian_translation(summary):
         )
 
 
-def test_a2_summary_accepts_original_and_russian_translation_paragraphs():
+def test_a2_summary_accepts_single_source_language_paragraph():
     validate_a2_summary(
-        'The story continues.\n\nИстория продолжается.',
+        'The story continues.',
         source_texts=('The story continues.',),
         source_language='en',
         language_detector=LANGUAGE_DETECTOR,
@@ -100,7 +100,7 @@ def test_a2_summary_accepts_original_and_russian_translation_paragraphs():
 
 def test_a2_summary_accepts_short_english_paragraph_with_low_classifier_confidence():
     validate_a2_summary(
-        'Independent synthetic scene.\n\nНезависимая вымышленная сцена.',
+        'Independent synthetic scene.',
         source_texts=('The story continues.',),
         source_language='en',
         language_detector=LANGUAGE_DETECTOR,
@@ -127,13 +127,9 @@ def test_translation_preserves_exact_source_quote_with_service_like_text():
 
 
 def _parallel_summary(sentence_count: int) -> str:
-    english = " ".join(
+    return " ".join(
         f"Sentence number {index} continues the chapter." for index in range(1, sentence_count + 1)
     )
-    russian = " ".join(
-        f"Предложение номер {index} продолжает эту главу." for index in range(1, sentence_count + 1)
-    )
-    return f"{english}\n\n{russian}"
 
 
 def _summary_with_titles(sentence_count: int) -> str:
@@ -142,12 +138,7 @@ def _summary_with_titles(sentence_count: int) -> str:
         for index in range(1, sentence_count)
     ]
     sentences.append("Mr. and Mrs. Dursley woke up at number four, where J. K. left a note.")
-    english = " ".join(sentences)
-    russian = " ".join(
-        f"Предложение номер {index} продолжает эту главу."
-        for index in range(1, sentence_count + 1)
-    )
-    return f"{english}\n\n{russian}"
+    return " ".join(sentences)
 
 
 def test_validate_a2_summary_rejects_overlong_multi_sentence_recap():
@@ -236,4 +227,18 @@ def test_reader_text_error_includes_kind_and_block_id():
     assert err.violation.scope == 'local'
     assert err.violation.block_ids == ('block-10',)
     assert err.violation.artifact_kinds == ('language_note.note',)
+
+
+def test_reader_policy_strips_soft_hyphen_and_normalizes_german_quotes_and_inline_en_dash():
+    policy = ReaderTextPolicy()
+    assert policy.prepare("language_note.note", "Может требовать\u00adся помощь.", ()) == (
+        "Может требоваться помощь."
+    )
+    assert policy.prepare("translation", "Он сказал: „Привет“ – и ушёл.", ()) == (
+        "Он сказал: «Привет» — и ушёл."
+    )
+    # Protected source quotes remain untouched.
+    assert policy.prepare("translation", "Цитата „keep – me“ – дальше.", ("„keep – me“",)) == (
+        "Цитата „keep – me“ — дальше."
+    )
 

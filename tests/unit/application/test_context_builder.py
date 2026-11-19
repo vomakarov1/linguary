@@ -481,11 +481,11 @@ def test_a2_summary_is_two_parallel_paragraphs_for_whole_chapter_and_fragment() 
     )
 
     for instructions in (whole, fragment):
-        assert "ровно два абзаца" in instructions
-        assert "сначала пересказ на языке оригинала книги" in instructions
-        assert "затем полный русский перевод тех же предложений" in instructions
+        assert "ровно один абзац на языке оригинала" in instructions
+        assert "без перевода на русский" in instructions
+        assert "ровно два абзаца" not in instructions
 
-    assert "ровно два абзаца" not in chapter_analysis_instructions(
+    assert "ровно один абзац на языке оригинала" not in chapter_analysis_instructions(
         source_language=SOURCE_LANGUAGE,
         target_language=TARGET_LANGUAGE,
         reader_level="b2",
@@ -940,8 +940,8 @@ def test_a2_chapter_context_deduplicates_learner_quality_and_pronunciation_omits
     instructions = context.request.instructions
     assert instructions.count("might have been") == 1
     assert instructions.count("not saying ... isn’t ...") == 1
-    assert instructions.count("ровно два абзаца") == 1
-    assert "Пересказ A2 верни ровно два абзаца" not in instructions
+    assert instructions.count("ровно один абзац на языке оригинала") == 1
+    assert "Пересказ A2 верни ровно одним абзацем" not in instructions
 
     templates = snapshot_prompt_templates(
         source_language="en",
@@ -1636,7 +1636,7 @@ def test_a2_context_disables_before_you_read_and_keeps_inline_notes() -> None:
     assert "на всю главу" in whole
     assert "chapter_summary" in whole
     assert "reader_chapter_summary" in whole
-    assert _A2_SUMMARY_LENGTH in fragment
+    assert "3–5 коротких предложений" in fragment
     assert "с начала главы до текущего фрагмента" in fragment
     assert "абзацем к каждому фрагменту" in fragment
     for instructions in (whole, fragment, templates["analysis"], templates["fragment"]):
@@ -1708,21 +1708,9 @@ def test_pedagogical_instructions_prioritize_cultural_reference_bonfire_night() 
     names = (
         "glossary_candidates",
         "person",
-        "Howard",
-        "Harvey",
-        "Harold",
-        "Jim McGuffin",
-        "Ted",
-        "Tibbles",
-        "Snowy",
-        "Mr Paws",
-        "Tufty",
-        "the Potters",
-        "the Dursleys",
-        "Petunia",
-        "Mrs Dursley",
-        "Lily Potter",
-        "Mrs Potter",
+        "случайно упомянутых",
+        "клички животных",
+        "собирательные названия семей",
         "каноническ",
     )
     templates = snapshot_prompt_templates(
@@ -1748,8 +1736,6 @@ def test_pedagogical_instructions_prioritize_cultural_reference_bonfire_night() 
     for instructions in (
         narrative,
         templates["narrative_analysis"],
-        _ANALYSIS_INSTRUCTIONS,
-        templates["analysis"],
     ):
         for phrase in names:
             assert phrase in instructions
@@ -1758,10 +1744,6 @@ def test_pedagogical_instructions_prioritize_cultural_reference_bonfire_night() 
 _CALQUE_AND_JARGON_PHRASES = (
     "хотя зато",
     "больше того",
-    "не одобрял воображения",
-    "пострел",
-    "сорванец / негодник",
-    "tonight",
     "окказиональный",
     "окказиональное прилагательное/сложение",
     "дериват",
@@ -1787,6 +1769,7 @@ def test_translation_and_note_instructions_forbid_calques_and_academic_jargon() 
     for instructions in (
         _TRANSLATION_CONTEXT_V2,
         _CONTENT_PLAN_PROCESSING,
+        _CONTENT_PLAN_PROCESSING_V3,
         learner_instructions("a2"),
     ):
         for phrase in _CALQUE_AND_JARGON_PHRASES:
@@ -1799,6 +1782,8 @@ def test_translation_and_note_instructions_forbid_calques_and_academic_jargon() 
         assert "помета к глаголу речи" in instructions
         assert "страдательный оборот" in instructions
         assert "to snigger" in instructions
+        assert "V2/V3" in instructions
+        assert "не склонять" in instructions
 
 
 _A2_SHORT_LINE_HELP = (
@@ -1821,16 +1806,13 @@ _A2_SHORT_LINE_HELP = (
     "без грамматических сносок",
 )
 _A2_TRIVIAL_NOTE_BAN = (
-    "капитанские сноски",
-    "she и her относятся",
-    "he относится",
-    "from no one",
-    "прозрачных ремарках",
+    "не больше 1–2 заметок на абзац",
+    "прозрачных местоимениях",
+    "базовых предлогах",
     "разные концы абзаца",
     "длиннее 5 слов",
     "original_excerpt",
-    "had + V3",
-    "must/could have + V3",
+    "третья форма глагола",
     "to snigger — хихикать",
     "to nod — кивать",
     "note пустым",
@@ -1843,12 +1825,7 @@ _A2_TRIVIAL_NOTE_BAN = (
 )
 _NOT_A_PERSON = (
     "типом person",
-    "cine-camera",
-    "crutches",
-    "racing bike",
-    "remote-control aeroplane",
-    "cupboard",
-    "Harry-hunting",
+    "бытовые предметы",
     "в этой главе упоминается впервые",
     "до этого упоминания сведений нет",
 )
@@ -2069,15 +2046,13 @@ def test_a2_prompts_enforce_gender_dialogue_dash_a2_summary_and_forbid_calques()
     )
 
     narrative_rules = (
-        "Privet Drive — ж. р., улица",
-        "tabby cat — ж. р., кошка",
-        "boa constrictor — м. р., обращение на «ты»",
-        "несклоняемость фамилий",
+        "грамматический род топонимов и животных",
+        "действительно несклоняемых",
+        "мужские фамилии на согласный в русском склоняются всегда",
+        "не копируй в заметки читателю",
         "said Harry",
         "certainty=explicit",
-        "said the stranger",
-        "said the giant",
-        "Hagrid",
+        "анонимных обозначений",
     )
     pedagogical_rules = (
         _SPEECH_STYLE_KIND,
@@ -2088,35 +2063,22 @@ def test_a2_prompts_enforce_gender_dialogue_dash_a2_summary_and_forbid_calques()
         "them as",
         "b(K+1)..bN",
         "не больше N",
+        "не больше 1–2 заметок на абзац",
         "reader_chapter_summary",
         "Previously in Chapter",
         "Present Simple",
         "стандартные английские кавычки",
         "«ёлочек»",
+        "без перевода на русский",
     )
     calques = (
         "длинным тире «— »",
-        "You told me",
-        "Ты сказала",
-        "coat — пальто",
-        "«оно»",
-        "marmalade",
-        "апельсиновый джем",
-        "a great Muggle",
-        "отпетый/здоровенный магл",
-        "rather fond of",
-        "весьма люблю",
-        "any of the lights",
-        "нигде не включая свет",
-        "large chocolate ice-creams",
-        "большие порции шоколадного мороженого",
-        "go boil yer heads",
-        "катитесь оба к лешему",
-        "проблевался",
-        "her lot",
-        "компания, братия",
-        "Going to be any more showers",
-        "Are there",
+        "кавычками-ёлочками",
+        "род адресата во 2-м лице",
+        "местоимений 3-го лица",
+        "регистр обращения «ты/вы»",
+        "разговорность в русском переводе",
+        "без буквальных калек",
     )
     narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="en", target_language="ru")
     pedagogical = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
@@ -2170,5 +2132,57 @@ def test_sound_policy_preserves_mc_prefix_in_mcgonagall() -> None:
         for phrase in required:
             assert phrase in sound[key]
         assert "Макгонагал" not in meaning[key]
+
+
+def test_short_chapter_caps_notes_budget_to_body_blocks() -> None:
+    """A 2-paragraph excerpt chapter does not receive the full 8-note chapter budget."""
+    from linguary.application.context_builder import _scene_notes_budget
+    from linguary.domain import ChapterAnalysis, CoverageStatus, TranslationUnit, TreatmentPlan
+    from linguary.domain.content_plan import ContentPlan, Scene
+
+    short_section = make_analysis_section(
+        section_id="sec-short",
+        title="Chapter 6",
+        blocks=(
+            make_analysis_block(
+                section_id="sec-short", order=0, text="— CHAPTER SIX —", type=BlockType.HEADING
+            ),
+            make_analysis_block(
+                section_id="sec-short", order=1, text="The Journey", type=BlockType.HEADING
+            ),
+            make_analysis_block(
+                section_id="sec-short", order=2, text="First paragraph. " * 30, type=BlockType.PARAGRAPH
+            ),
+            make_analysis_block(
+                section_id="sec-short", order=3, text="Second paragraph. " * 30, type=BlockType.PARAGRAPH
+            ),
+        ),
+    )
+    doc = make_analysis_document((short_section,))
+    builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        language_notes_per_chapter=8,
+    )
+    context = builder.for_chapter_analysis(document=doc, section=short_section)
+    assert context.language_notes_per_chapter == 2
+    assert max(context.note_limits_by_block.values()) <= 2
+
+    plan = TreatmentPlan.of_treatments(
+        short_section.id,
+        ((b.id, BlockTreatment.TRANSLATE) for b in short_section.blocks),
+    )
+    unit = TranslationUnit.of_blocks(id="u1", blocks=short_section.blocks, plan=plan)
+    analysis = ChapterAnalysis(
+        id="a1",
+        section_id=short_section.id,
+        coverage_status=CoverageStatus.COMPLETE,
+        treatment_plan=plan,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        content_plan=ContentPlan(version=3, profile="content-plan-v3"),
+        scenes=(Scene("s1", 0, short_section.blocks[0].id, short_section.blocks[-1].id, "Scene"),),
+    )
+    assert _scene_notes_budget(analysis, short_section, unit, per_chapter=8) == 2
 
 

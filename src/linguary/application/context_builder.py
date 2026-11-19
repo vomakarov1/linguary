@@ -115,7 +115,7 @@ DEFAULT_REGENERATION_CONTEXT_BLOCKS = 2
 _NON_TEXTUAL_BLOCK_TYPES = frozenset({BlockType.IMAGE, BlockType.PAGE_BREAK})
 
 _NOT_A_PERSON_GUIDANCE = """
-Не помечай бытовые предметы, игрушки и игры типом person (cine-camera, crutches, racing bike, remote-control aeroplane, cupboard, Harry-hunting). В description не пиши служебные отписки («в этой главе упоминается впервые», «до этого упоминания сведений нет»).
+Не помечай бытовые предметы, игрушки, игры и места типом person. В description не пиши служебные отписки («в этой главе упоминается впервые», «до этого упоминания сведений нет»).
 """
 
 
@@ -138,7 +138,7 @@ English Help, помощь и произношение, если они вклю
 целевые b1..bN в исходном порядке, ровно по одному результату на цель (блоки с пометкой
 «(только для контекста, в blocks не возвращать)» в массив blocks не включай). Соседи не цели:
 не переводи их отдельно, не возвращай для них помощь, произношение или новые ID.
-Запрещены кальки и несочетаемые союзы («хотя зато», «больше того», «не одобрял воображения», «пострел» вместо «сорванец / негодник»), пропуск конечного обстоятельства tonight, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», пометы «вариант стоит проверить» и «в переводе передано как...», шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
+Запрещены буквальные кальки и несочетаемые союзы («хотя зато», «больше того»), пропуск обстоятельств времени и места, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», «V2/V3», пометы «вариант стоит проверить» и «в переводе передано как...», переводческие инструкции («не склонять») в заметках читателю, шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
 """ + _A2_NOTE_DISCIPLINE + _A2_DIALOGUE_AND_CALQUE_RULES
 
 
@@ -172,12 +172,12 @@ chapter_summary — фактическая сводка событий на яз
 для фрагмента сожми единый пересказ с начала главы до текущего фрагмента в те же 3–5 предложений, а не дописывай абзац к каждому фрагменту; ключевые предметы и понятия из glossary_candidates называй их каноническим source_text.
 glossary_candidates: source_text, type, suggested_translation, confidence,
 model_flagged_review, note, description. Соблюдай обязательные решения глоссария.
-Не клади в glossary_candidates (person) угаданные имена Howard, Harvey, Harold, ведущих Jim McGuffin и Ted, клички Tibbles, Snowy, Mr Paws, Tufty и семьи the Potters, the Dursleys. Требуй одну каноническую запись на персонажа: не плоди отдельно Petunia и Mrs Dursley, Lily Potter и Mrs Potter.
+Не клади в glossary_candidates (person) случайно упомянутых или вымышленных в диалоге людей, фоновых ведущих и дикторов, клички животных и собирательные названия семей во множественном числе. Требуй одну каноническую запись на персонажа: не плоди отдельно имя и форму с титулом или фамилией.
 description для person и place пишется на языке перевода ({target_language}), строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
 context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
-Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора (said Harry). Не спойлерь каноническое имя (Hagrid) у said the stranger и said the giant до первого называния персонажа по имени в тексте.
-В glossary_candidates.note указывай грамматический род топонимов (Privet Drive — ж. р., улица) и животных (tabby cat — ж. р., кошка; boa constrictor — м. р., обращение на «ты»), а также несклоняемость фамилий.
+Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора (said Harry). Не спойлерь каноническое имя у анонимных обозначений (the stranger, the giant и т. п.) до первого называния персонажа по имени в тексте.
+В glossary_candidates.note указывай только внутренние переводческие пометы: грамматический род топонимов и животных, если он неочевиден в переводе, обращение на «ты» или «вы», а также несклоняемость действительно несклоняемых заимствованных имён и фамилий (мужские фамилии на согласный в русском склоняются всегда). Эти внутренние пометы не копируй в заметки читателю.
 Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
 scenes: start_block_id, end_block_id, summary, location, participants,
 visual_facts, visual_assumptions, continues_previous_scene.
@@ -206,8 +206,9 @@ false_friend — слово похоже на русское, значит др�
 speech_style — диалект, акцент, особенности речи; только первое появление особенности персонажа.
 Отмечай speech_style («Речь персонажа.») также при первом появлении ненормативных грамматических форм (we was, you was, don' need, them as).
 В required_points трудности блока bK запрещено цитировать и разбирать фразы из более поздних блоков b(K+1)..bN.
-Бюджет заметок — верхний предел («не больше N»), а не норма, которую нужно заполнить.
-Для reader_chapter_summary (Previously in Chapter...) используй простую лексику A2 в Present Simple и стандартные английские кавычки вместо «ёлочек».
+Бюджет заметок — верхний предел («не больше N»), а не норма, которую нужно заполнить. В блоках TRANSLATE планируй не больше 1–2 заметок на абзац.
+В блоках без перевода (GLOSSARY_ONLY, READ_AS_IS) проверяй каждое знаменательное слово выше уровня читателя (включая редкие значения знакомых слов и официальные титулы), но не добавляй подсказки на базовые слова A1 и прозрачные интернационализмы.
+Для reader_chapter_summary (Previously in Chapter...) используй простую лексику A2 в Present Simple, стандартные английские кавычки вместо «ёлочек», строго по фактам главы без выдуманных деталей, одним абзацем без перевода на русский.
 parody — в required_points назвать исходный текст.
 Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
 lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR.
@@ -261,7 +262,14 @@ _CONTENT_PLAN_ANALYSIS_V5 = (
     )
     + '\nВнешний контракт анализа — CHAPTER_ANALYSIS v5.\n'
 )
-_CONTENT_PLAN_PROCESSING_V3 = _CONTENT_PLAN_PROCESSING.replace('content-plan-v2.1', 'learner-quality-v3.1').replace('content-plan-v2', 'content-plan-v3') + """
+_CONTENT_PLAN_PROCESSING_V3 = """
+Профиль content-plan-v3, инструкция learner-quality-v3.1.
+Выполни все required_points назначенных владельцам трудностей минимальной помощью
+в пределах прежних режимов и бюджета. Решения глоссария выше формулировок помощи;
+объясни смысл, сохраняя согласованный перевод. Не повторяй уже покрытый BYR аспект.
+Перевод и пересказ не считаются объяснением. Соседние anchors служат
+контекстом, не требуют результата.
+Запрещены буквальные кальки и несочетаемые союзы («хотя зато», «больше того»), пропуск обстоятельств времени и места, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», «V2/V3», пометы «вариант стоит проверить» и «в переводе передано как...», переводческие инструкции («не склонять») в заметках читателю, шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
 Служебные context_facts применяй только к назначенным субъектам и их точным исходным привязкам.
 Не выдавай inferred/unknown за подтверждённый факт; решения глоссария имеют приоритет.
 Не превращай эти служебные сведения в обязательную заметку читателю.
@@ -391,6 +399,18 @@ def notes_budget(*, unit_chars: int, chapter_chars: int, per_chapter: int) -> in
             "длина главы для расчёта заметок должна быть положительной"
         )
     return max(1, round(per_chapter * unit_chars / chapter_chars))
+
+
+def _chapter_note_limit(section: DocumentSection, per_chapter: int) -> int:
+    """Cap chapter note allowance on short chapters so 2-paragraph excerpts do not get 8 notes."""
+    if per_chapter <= 0:
+        return 0
+    blocks = textual_blocks(section)
+    if not blocks:
+        return 0
+    body_blocks = sum(1 for block in blocks if block.type is not BlockType.HEADING)
+    effective_blocks = body_blocks if body_blocks > 0 else len(blocks)
+    return min(per_chapter, max(1, effective_blocks))
 
 
 class AliasedBlocksContext:
@@ -1512,7 +1532,8 @@ class ContextBuilder:
         }
         candidate = self._content_plan_profile in {"content-plan-v2", "content-plan-v3"}
         version = 3 if self._content_plan_profile == "content-plan-v3" else (2 if candidate else 1)
-        note_limit = self._language_notes_per_chapter if language_notes_limit is None else language_notes_limit
+        effective_per_chapter = _chapter_note_limit(section, self._language_notes_per_chapter)
+        note_limit = effective_per_chapter if language_notes_limit is None else min(language_notes_limit, effective_per_chapter)
         note_groups = self._analysis_note_groups(section, blocks) if candidate else ()
         if self._english_help:
             before_you_read_limit = 0
@@ -1547,7 +1568,7 @@ class ContextBuilder:
             before_you_read_limit=before_you_read_limit,
             note_group_limits=note_groups,
             language_notes_per_chapter=note_limit,
-            note_limits_by_block={b.id: 0 if self._english_help else (notes_budget(unit_chars=len(b.text), chapter_chars=sum(len(t.text) for t in textual_blocks(section)), per_chapter=self._language_notes_per_chapter) if self._language_notes_per_chapter else 0) for b in blocks},
+            note_limits_by_block={b.id: 0 if self._english_help else (min(2, notes_budget(unit_chars=len(b.text), chapter_chars=sum(len(t.text) for t in textual_blocks(section)), per_chapter=effective_per_chapter)) if effective_per_chapter else 0) for b in blocks},
             section_id=section.id,
             request=LLMRequest.for_chapter_analysis(
                 contract_version=self._analysis_contract_version if version == 3 else version,
@@ -1593,12 +1614,13 @@ class ContextBuilder:
         )
         visible = {b.id for b in blocks}
         chapter_chars = sum(len(b.text) for b in chapter)
+        effective_per_chapter = _chapter_note_limit(section, self._language_notes_per_chapter)
         result = []
         for unit in units:
             size = sum(len(item.block.text) for item in unit.items)
             capacity = notes_budget(unit_chars=size, chapter_chars=chapter_chars,
-                                    per_chapter=self._language_notes_per_chapter)
-            if self._language_notes_per_chapter == 0:
+                                    per_chapter=effective_per_chapter)
+            if effective_per_chapter == 0:
                 capacity = 0
             cursor = 0
             share = 0
@@ -2014,23 +2036,23 @@ _WHOLE_CHAPTER_SUMMARY_A2 = """\
 5. chapter_summary — что произошло в этой главе.
 
 Пиши на языке оригинала книги ({source_language}). Ограничь chapter_summary и \
-reader_chapter_summary 3–5 короткими предложениями на всю главу. Только события самой \
-этой главы: что случилось, с кем, что изменилось. Предыдущие главы не пересказывай, \
-о будущих не рассуждай, текст не оценивай. Верни ровно два абзаца: сначала пересказ \
-на языке оригинала книги ({source_language}), затем полный русский перевод тех же \
-предложений. Не добавляй подписи и не смешивай языки внутри абзаца."""
+reader_chapter_summary 3–5 короткими предложениями на всю главу. Только подтверждённые \
+текстом события самой этой главы: что случилось, с кем, что изменилось — не домысливай \
+деталей, которых нет в тексте. Предыдущие главы не пересказывай, о будущих не рассуждай, \
+текст не оценивай. Верни ровно один абзац на языке оригинала книги ({source_language}), \
+без перевода на русский, без подписей и без смешения языков."""
 
 _FRAGMENT_SUMMARY_A2 = """\
 5. chapter_summary — что произошло в главе от начала до конца этого фрагмента.
 
 Пиши на языке оригинала книги ({source_language}). Единый пересказ chapter_summary и \
-reader_chapter_summary с начала главы до текущего фрагмента сжимается в 3–5 короткими \
-предложениями, а не дописывается абзацем к каждому фрагменту. Верни сводку всей главы \
-от начала до конца своего фрагмента, включая уже найденное в предыдущих частях. \
-Не рассуждай о том, что будет после, и не оценивай текст. Верни ровно два абзаца: \
-сначала пересказ на языке оригинала книги ({source_language}), затем полный русский перевод \
-тех же предложений. Не добавляй подписи и не смешивай языки внутри абзаца. Новые \
-выражения before_you_read не возвращай: список остаётся пустым."""
+reader_chapter_summary с начала главы до текущего фрагмента сжимается в 3–5 коротких \
+предложений, а не дописывается абзацем к каждому фрагменту. Верни сводку всей главы \
+от начала до конца своего фрагмента, включая уже найденное в предыдущих частях, строго \
+по фактам текста без выдуманных деталей. Не рассуждай о том, что будет после, и не \
+оценивай текст. Верни ровно один абзац на языке оригинала книги ({source_language}), \
+без перевода на русский, без подписей и без смешения языков. Новые выражения \
+before_you_read не возвращай: список остаётся пустым."""
 
 
 _A2_BEFORE_YOU_READ_GUIDANCE = """\
@@ -2281,8 +2303,9 @@ def _scene_notes_budget(
                 break
             if block.id in extra_owners:
                 owners.add(block.id)
+    effective_per_chapter = max(len(owners), _chapter_note_limit(section, per_chapter))
     chapter_chars = sum(len(block.text) for block in blocks)
-    remaining = per_chapter - len(owners)
+    remaining = max(0, effective_per_chapter - len(owners))
     targets = set(unit.block_ids)
     budget = 0
     cursor = 0
@@ -2931,8 +2954,8 @@ __all__ = [
 
 
 _DUPLICATE_A2_ANALYSIS_LINES = (
-    "Пересказ A2 верни ровно два абзаца:",
-    "связями причин и событий, затем отдельный абзац",
+    "Пересказ A2 верни ровно одним абзацем",
+    "простая лексика A2, ясные связи причин",
     "Если встречаются модальный перфект вроде might have been",
     "«то, что» или отрыв предлога в конце придаточного",
     "словарной подсказкой: переведи конструкцию полностью",
@@ -3118,7 +3141,7 @@ def _pedagogical_instructions(source_language: str, target_language: str, reader
         instructions += '\n' + _reader_level_treatment_guidance(reader_level)
     if reader_level == 'a2':
         instructions += '\n' + _A2_GRAMMAR_SUPPORT_GUIDANCE.strip()
-        instructions += '\nВерни reader_chapter_summary: простой пересказ на языке оригинала и перевод на русский, ровно два абзаца через пустую строку. Ограничь chapter_summary и reader_chapter_summary 3–5 короткими предложениями на всю главу. Для фрагмента единый пересказ с начала главы до текущего фрагмента сжимается в 3–5 короткими предложениями, а не дописывается абзацем к каждому фрагменту.'
+        instructions += '\nВерни reader_chapter_summary: простой пересказ на языке оригинала, ровно один абзац без перевода на русский, строго по фактам главы без выдуманных деталей. Ограничь chapter_summary и reader_chapter_summary 3–5 короткими предложениями на всю главу. Для фрагмента единый пересказ с начала главы до текущего фрагмента сжимается в 3–5 коротких предложений, а не дописывается абзацем к каждому фрагменту.'
     else:
         instructions += '\nНе возвращай пересказ: принятая фактическая сводка уже сохранена.'
     return instructions

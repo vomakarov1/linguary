@@ -1183,3 +1183,56 @@ def test_body_strips_unconfirmed_wordplay_disclaimer_and_fixes_are_there_ellipsi
     flat = " ".join(" ".join(note.body) for note in notes)
     assert "не подтверждает её прямо" not in flat
     assert "без is it" not in flat
+
+
+def test_hint_markers_match_apostrophes_irregular_verbs_short_doubling_and_gaps() -> None:
+    """Straight apostrophes, irregular verbs, 3-letter doubled verbs, and gapped quotes all get markers."""
+    cases = (
+        ("‘The Potters, that’s right, that’s what I heard –’", "that's right", "верно", "that’s right"),
+        ("‘The Potters, that’s right, that’s what I heard –’", "that's what I heard", "вот что я услышал", "that’s what I heard"),
+        ("‘What’s up?’ said Hagrid.", "What's up?", "Что случилось?", "What’s up?"),
+        ("‘Years an’ years ago.’", "Years an' years ago", "Много-много лет назад", "Years an’ years ago"),
+        ("He was back in the room.", "to be back", "вернуться", "was back"),
+        ("The giant shook his head.", "to shake", "трясти", "shook"),
+        ("Uncle Vernon found his voice.", "to find one's voice", "обрести дар речи", "found his voice"),
+        ("Aunt Petunia gave a gasp.", "to give a gasp", "ахнуть", "gave a gasp"),
+        ("He heard a tapping at the window.", "to tap", "стучать", "tapping"),
+        ("‘But what does a Ministry of Magic do?’", "what does … do", "чем занимается …", "what does a Ministry of Magic do"),
+    )
+    for text, original, translation, matched_span in cases:
+        block = _block(text)
+        result = _result(
+            block,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            hints=(GlossaryHint(original, translation),),
+        )
+        notes = block_notes(block, result, None, ())
+        assert notes[0].marker_end == _end(text, matched_span), (original, text)
+
+
+def test_hint_strips_duplicate_headword_declension_directives_and_soft_hyphen() -> None:
+    """Duplicate headwords in translation, leaked declension directives, and soft hyphens are cleaned."""
+    text = "He singled out Little Whinging, Marge, and Mr Potter."
+    block = _block(text)
+    hints = (
+        GlossaryHint("to single out", "to single out — выделить, отделить"),
+        GlossaryHint("Little Whinging", "Литл-Уинджинг", "Название города; не склонять."),
+        GlossaryHint("Marge", "Мардж", "Имя не склоняется."),
+        GlossaryHint("Mr Potter", "мистер Поттер", "При слове «мистер» фамилия Поттер не склоняется."),
+    )
+    soft_hyphen_note = LanguageNote("n-soft", block.id, "singled out", "Может требовать\u00adся пояснение.")
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=hints,
+        notes=(soft_hyphen_note,),
+    )
+
+    notes = block_notes(block, result, None, ())
+    by_term = {note.term: note.body for note in notes if note.term}
+    assert by_term["to single out"] == ("выделить, отделить",)
+    assert by_term["Little Whinging"] == ("Литл-Уинджинг", "Название города.")
+    assert by_term["Marge"] == ("Мардж",)
+    assert by_term["Mr Potter"] == ("мистер Поттер",)
+    note_bodies = [note.body for note in notes if note.origin == "language_note"]
+    assert note_bodies == [("Может требоваться пояснение.",)]

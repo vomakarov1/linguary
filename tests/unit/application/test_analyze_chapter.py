@@ -545,8 +545,8 @@ async def test_a2_analysis_retries_when_summary_does_not_match_source_and_transl
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (
-            analysis_reply(chapter_summary="История продолжается.\n\nГерои уходят."),
             analysis_reply(chapter_summary="The story continues.\n\nИстория продолжается."),
+            analysis_reply(chapter_summary="The story continues."),
         )
     )
     scenario, _ = make_analyze_chapter(unit_of_work, client, reader_level="a2")
@@ -555,15 +555,15 @@ async def test_a2_analysis_retries_when_summary_does_not_match_source_and_transl
 
     assert result.attempts == 2
     assert client.call_count == 2
-    assert result.analysis.chapter_summary == "The story continues.\n\nИстория продолжается."
+    assert result.analysis.chapter_summary == "The story continues."
 
 
 async def test_a2_analysis_retries_when_first_summary_paragraph_is_in_another_latin_language() -> None:
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (
-            analysis_reply(chapter_summary="La historia continúa.\n\nИстория продолжается."),
-            analysis_reply(chapter_summary="The story continues.\n\nИстория продолжается."),
+            analysis_reply(chapter_summary="La historia continúa."),
+            analysis_reply(chapter_summary="The story continues."),
         )
     )
     scenario, _ = make_analyze_chapter(unit_of_work, client, reader_level="a2")
@@ -572,7 +572,7 @@ async def test_a2_analysis_retries_when_first_summary_paragraph_is_in_another_la
 
     assert result.attempts == 2
     assert client.call_count == 2
-    assert result.analysis.chapter_summary == "The story continues.\n\nИстория продолжается."
+    assert result.analysis.chapter_summary == "The story continues."
 
 
 async def test_unknown_block_in_plan_is_rejected() -> None:

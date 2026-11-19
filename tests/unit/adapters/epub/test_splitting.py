@@ -737,3 +737,37 @@ def test_parts_of_sentence_share_sentence_index() -> None:
     assert segments[0].sentence_index == segments[1].sentence_index
     assert segments[2].sentence_index == segments[0].sentence_index + 1
 
+
+def test_ellipsis_clause_and_dash_terminated_quote_boundaries() -> None:
+    """Ellipsis-joined clauses do not fall back to mid-phrase cuts, and dash-closed quotes end sentences."""
+    ellipsis_text = (
+        "Harry looked into the fire. Now he came to think about it … "
+        "every odd thing that had ever made his aunt and uncle furious with him "
+        "had happened when he, Harry, had been upset or angry … "
+        "chased by Dudley’s gang, he had somehow found himself out of their reach … "
+        "dreading going to school with that ridiculous haircut, he’d managed to make it grow back … "
+        "and the very last time Dudley had hit him, hadn’t he got his revenge, "
+        "without even realising he was doing it? Hadn’t he set a boa constrictor on him?"
+    )
+    ellipsis_segments = segment_text(ellipsis_text)
+    _assert_exact_cover(ellipsis_text, ellipsis_segments)
+    pieces = [ellipsis_text[seg.start : seg.end] for seg in ellipsis_segments]
+    assert any("out of their reach" in piece for piece in pieces)
+    assert all(len(piece) <= SEGMENT_MAX_CHARS for piece in pieces)
+
+    quote_text = (
+        "A low, soft hooting came from a dark shop with a sign saying Eeylops Owl Emporium – "
+        "Tawny, Screech, Barn, Brown and Snowy. Several boys of about Harry’s age had their noses "
+        "pressed against a window with broomsticks in it. ‘Look,’ Harry heard one of them say, "
+        "‘the new Nimbus Two Thousand – fastest ever –’ There were shops selling robes, "
+        "shops selling telescopes and strange silver instruments Harry had never seen before, "
+        "windows stacked with barrels of bat spleens and eels’ eyes, tottering piles of spell books."
+    )
+    quote_segments = segment_text(quote_text)
+    _assert_exact_cover(quote_text, quote_segments)
+    quote_pieces = [quote_text[seg.start : seg.end] for seg in quote_segments]
+    assert any(
+        "‘Look,’ Harry heard one of them say, ‘the new Nimbus Two Thousand – fastest ever –’" in piece
+        for piece in quote_pieces
+    )
+

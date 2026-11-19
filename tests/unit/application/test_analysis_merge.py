@@ -1369,17 +1369,16 @@ def test_validate_content_plan_attaches_local_canonical_violation_and_parses_com
     detector = Py3LangidDetector()
     with pytest.raises(ReaderTextError) as a2_exc:
         validate_a2_summary(
-            "Mr Wonka smiled politely.\n\nStill in English instead of Russian.",
+            "Mr Wonka smiled politely.\n\nМистер Вонка вежливо улыбнулся.",
             source_texts=("Mr Wonka smiled politely.",),
             source_language="en",
             language_detector=detector,
         )
     a2_err = a2_exc.value
-    assert a2_err.reason_code == "a2_summary_requires_parallel_russian"
+    assert a2_err.reason_code == "a2_summary_requires_single_source_paragraph"
     assert a2_err.violation is not None
-    assert a2_err.violation.rule_code == "a2_summary_requires_parallel_russian"
-    assert "абзац 2" in str(a2_err)
-    assert "EN\\nRU" in str(a2_err)
+    assert a2_err.violation.rule_code == "a2_summary_requires_single_source_paragraph"
+    assert "получено абзацев — 2" in str(a2_err)
 
 
 def test_find_quote_span_prefers_exact_case_and_falls_back_to_case_insensitive_typography() -> None:
