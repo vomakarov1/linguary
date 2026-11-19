@@ -242,6 +242,25 @@ async def test_a2_retries_reader_summary_without_repeating_narrative(stored_book
     assert result.analysis.content_plan.version == 3
 
 
+async def test_a2_staged_accepts_legacy_two_paragraph_summary_with_frozen_template(stored_book):
+    _, uow, _ = stored_book
+    legacy_summary = 'Holmes opens the door.\n\nХолмс открывает дверь.'
+    templates = dict(snapshot_prompt_templates(
+        source_language='en', target_language='ru', reader_level='a2', profile='content-plan-v3',
+    ))
+    templates['pedagogical_analysis'] += '\nВерни ровно два абзаца через пустую строку.'
+    ctx_builder = ContextBuilder(
+        content_plan_profile='content-plan-v3',
+        reader_level='a2',
+        language_notes_per_chapter=8,
+        prompt_templates=templates,
+    )
+    client = FakeLLMClient([narrative(), pedagogical(summary=legacy_summary)])
+    result = await scenario(uow, client, context=ctx_builder, attempts=1)(COMMAND)
+    assert [r.stage for r in client.requests] == [NARRATIVE, PEDAGOGICAL]
+    assert result.analysis.chapter_summary == legacy_summary
+
+
 async def test_notes_only_sections_require_empty_scenes(stored_book):
     _, uow, _ = stored_book
     section = make_analysis_section(texts=('Holmes opens the door.',))

@@ -153,8 +153,6 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "drink": frozenset({"drank", "drunk"}),
     "drive": frozenset({"drove", "driven", "driving"}),
     "eat": frozenset({"ate", "eaten"}),
-    "expel": frozenset({"expelled", "expelling"}),
-    "fade": frozenset({"faded", "fading"}),
     "fall": frozenset({"fell", "fallen"}),
     "feed": frozenset({"fed"}),
     "feel": frozenset({"felt"}),
@@ -178,7 +176,6 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "hide": frozenset({"hid", "hidden", "hiding"}),
     "hit": frozenset({"hit", "hitting"}),
     "hold": frozenset({"held"}),
-    "hug": frozenset({"hugged", "hugging"}),
     "hurt": frozenset({"hurt"}),
     "keep": frozenset({"kept"}),
     "kneel": frozenset({"knelt", "kneeled"}),
@@ -191,13 +188,12 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "leave": frozenset({"left", "leaving"}),
     "lend": frozenset({"lent"}),
     "let": frozenset({"let", "letting"}),
-    "lie": frozenset({"lay", "lain", "lying"}),
+    "lie": frozenset({"lay", "lain", "lied", "lying"}),
     "light": frozenset({"lit", "lighted"}),
     "lose": frozenset({"lost", "losing"}),
     "make": frozenset({"made", "making"}),
     "mean": frozenset({"meant"}),
     "meet": frozenset({"met"}),
-    "nod": frozenset({"nodded", "nodding"}),
     "pay": frozenset({"paid"}),
     "put": frozenset({"put", "putting"}),
     "read": frozenset({"read"}),
@@ -212,7 +208,7 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "send": frozenset({"sent"}),
     "set": frozenset({"set", "setting"}),
     "shake": frozenset({"shook", "shaken", "shaking"}),
-    "shine": frozenset({"shone", "shining"}),
+    "shine": frozenset({"shone", "shined", "shining"}),
     "shoot": frozenset({"shot"}),
     "show": frozenset({"showed", "shown"}),
     "shrink": frozenset({"shrank", "shrunk"}),
@@ -225,7 +221,6 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "sling": frozenset({"slung"}),
     "slit": frozenset({"slit", "slitting"}),
     "smell": frozenset({"smelt", "smelled"}),
-    "snivel": frozenset({"snivelled", "snivelling"}),
     "speak": frozenset({"spoke", "spoken"}),
     "speed": frozenset({"sped", "speeded"}),
     "spell": frozenset({"spelt", "spelled"}),
@@ -242,7 +237,7 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "stick": frozenset({"stuck"}),
     "sting": frozenset({"stung"}),
     "stink": frozenset({"stank", "stunk"}),
-    "stride": frozenset({"strode", "striding"}),
+    "stride": frozenset({"strode", "stridden", "striding"}),
     "strike": frozenset({"struck", "striking"}),
     "swear": frozenset({"swore", "sworn"}),
     "sweep": frozenset({"swept"}),
@@ -257,7 +252,7 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "throw": frozenset({"threw", "thrown"}),
     "tread": frozenset({"trod", "trodden"}),
     "understand": frozenset({"understood"}),
-    "wake": frozenset({"woke", "woken", "waking"}),
+    "wake": frozenset({"woke", "woken", "waked", "waking"}),
     "wear": frozenset({"wore", "worn"}),
     "weep": frozenset({"wept"}),
     "win": frozenset({"won", "winning"}),
@@ -685,22 +680,26 @@ def _hint_draft(
     ):
         kept_note = cleaned_note
     base_translation = _strip_leading_headword(hint.translation, hint.original)
-    kept_note = _strip_leading_translation(kept_note, base_translation)
     term: str | None = hint.original
     translation = base_translation
     if verbal:
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
             term = infinitive
+            translation = _strip_leading_headword(translation, term)
     elif lexical:
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
-            converted = _russian_past_to_infinitive(translation)
-            if converted != translation or _has_russian_infinitive(translation):
+            stripped_tr = _strip_leading_headword(translation, infinitive)
+            converted = _russian_past_to_infinitive(stripped_tr)
+            if converted != stripped_tr or _has_russian_infinitive(stripped_tr):
                 term = infinitive
                 translation = converted
-    if term is not None:
-        translation = _strip_leading_headword(translation, term)
+            else:
+                translation = stripped_tr
+    kept_note = _strip_leading_translation(kept_note, translation)
+    if base_translation != translation:
+        kept_note = _strip_leading_translation(kept_note, base_translation)
     long = (
         treatment is BlockTreatment.TRANSLATE
         and bool(cleaned_note)
@@ -824,10 +823,9 @@ def _shared_anchors(
 def _find_end(text: str, quote: str) -> int | None:
     """End of the first match of `quote`, or None when nothing matches.
 
-    Exact `str.find` wins first when it lands on word boundaries (or when
-    `quote` has non-word edges), then apostrophe-normalized exact/casefolded
-    word-bounded match, a single-sentence gapped phrase with `…`/`...`, or
-    `to` plus a verb matched to an inflected phrase.
+    Exact word-bounded match wins first, then apostrophe-normalized exact and
+    casefolded word-bounded matches, a single-sentence gapped phrase with
+    `…`/`...`, or `to` plus a verb matched to an inflected phrase.
     """
     if not quote:
         return None
@@ -845,13 +843,7 @@ def _find_end(text: str, quote: str) -> int | None:
     gapped = _gapped_end(norm_text, norm_quote)
     if gapped is not None:
         return gapped
-    infinitive = _infinitive_end(text, quote)
-    if infinitive is not None:
-        return infinitive
-    start = text.find(quote)
-    if start >= 0 and (not quote[0].isalnum() or not quote[-1].isalnum()):
-        return start + len(quote)
-    return None
+    return _infinitive_end(text, quote)
 
 
 def _word_bounded_end(text: str, quote: str, *, ignore_case: bool) -> int | None:

@@ -1251,6 +1251,9 @@ def test_same_verb_and_find_end_reject_false_positives_and_cross_sentence_gaps()
         ("He walked into the ward.", "to war"),
         ("The bard sang softly.", "to bar"),
         ("She’d already left the room.", "he'd"),
+        ("He didn’t shout!", "out!"),
+        ("She’s right?", "he’s?"),
+        ("‘hello’", "‘he"),
     )
     for text, original in false_pairs:
         block = _block(text)
@@ -1260,6 +1263,31 @@ def test_same_verb_and_find_end_reject_false_positives_and_cross_sentence_gaps()
             hints=(GlossaryHint(original, "перевод"),),
         )
         assert block_notes(block, result, None, ())[0].marker_end is None, (original, text)
+
+    # Regular/dual-paradigm verb forms (including US/UK spelling) still bind markers cleanly.
+    verb_pairs = (
+        ("He sniveled quietly.", "to snivel", "sniveled"),
+        ("He snivelled quietly.", "to snivel", "snivelled"),
+        ("He lied to Harry.", "to lie", "lied"),
+        ("He shined his boots.", "to shine", "shined"),
+        ("She waked at dawn.", "to wake", "waked"),
+        ("He had stridden across.", "to stride", "stridden"),
+        ("They expelled him.", "to expel", "expelled"),
+        ("She hugged him.", "to hug", "hugged"),
+        ("He nodded twice.", "to nod", "nodded"),
+        ("The light faded fast.", "to fade", "faded"),
+    )
+    for text, original, matched in verb_pairs:
+        block = _block(text)
+        result = _result(
+            block,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            hints=(GlossaryHint(original, "перевод"),),
+        )
+        assert block_notes(block, result, None, ())[0].marker_end == _end(text, matched), (
+            original,
+            text,
+        )
 
     # Gapped quote must NOT jump across a sentence period, but DOES handle inline punctuation/quotes.
     two_sentences = "He did not. Later he went to the shop."
@@ -1290,6 +1318,7 @@ def test_headword_stripping_preserves_hyphenated_compounds_and_empty_notes_drop_
     hints = (
         GlossaryHint("mini", "mini-юбка"),
         GlossaryHint("to single out", "to single out — выделить", "Выделить. Особо отметить."),
+        GlossaryHint("singled out", "to single out — выделил", "Выделить. Второе замечание."),
         GlossaryHint("Potter", "Поттер", "Уменьшительная форма. Фамилия Поттер не склоняется."),
     )
     empty_note = LanguageNote("n-empty", block.id, "Potter", "Имя не склоняется.")
@@ -1302,9 +1331,13 @@ def test_headword_stripping_preserves_hyphenated_compounds_and_empty_notes_drop_
     )
 
     notes = block_notes(block, result, None, ())
+    single_out_notes = [note.body for note in notes if note.term == "to single out"]
+    assert single_out_notes == [
+        ("выделить", "Особо отметить."),
+        ("выделить", "Второе замечание."),
+    ]
     by_term = {note.term: note.body for note in notes if note.term}
     assert by_term["mini"] == ("mini-юбка",)
-    assert by_term["to single out"] == ("выделить", "Особо отметить.")
     assert by_term["Potter"] == ("Поттер", "Уменьшительная форма.")
     # Empty LanguageNote is dropped before numbering, leaving only real_note.
     lang_notes = [note for note in notes if note.origin == "language_note"]

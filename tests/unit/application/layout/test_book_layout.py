@@ -1745,14 +1745,20 @@ def test_display_translation_typography_applies_only_to_russian_target_language(
     """German quotes and spaced en-dashes are normalized for Russian display, preserved for German."""
     block = _block("one", 0, "He said hello.")
     section = _section("one", 0, "Chapter 1", (block,))
-    raw_text = "Сказал: „Привет“ и „Ещё” – потом „обрыв и „Точка“ и требовать\u00adся."
+    raw_text = (
+        "Сказал: „Привет“ и „Ещё” – потом «Он назвал его „волшебником“» "
+        "и „обрыв и „Точка“ и требовать\u00adся."
+    )
     result = BlockProcessingResult(block.id, BlockTreatment.TRANSLATE, translated_text=raw_text)
 
     ru_layout = build_book_layout(
         _inputs(_document((section,), target_language="ru"), {block.id: result})
     )
     ru_translation = ru_layout.chapters[section.id].units[block.id][0].translation
-    assert ru_translation == "Сказал: «Привет» и «Ещё» — потом „обрыв и «Точка» и требоваться."
+    assert ru_translation == (
+        "Сказал: «Привет» и «Ещё» — потом «Он назвал его „волшебником“» "
+        "и „обрыв и «Точка» и требоваться."
+    )
 
     de_text = "Er sagte: „Hallo“ – und „Welt” – und tren\u00adnen."
     de_result = BlockProcessingResult(block.id, BlockTreatment.TRANSLATE, translated_text=de_text)

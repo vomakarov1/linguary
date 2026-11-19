@@ -350,28 +350,33 @@ def test_notes_budget_at_least_one() -> None:
 
 
 def test_translation_input_states_notes_budget() -> None:
-    from linguary.application.context_builder import chapter_note_limit
-
-    blocks = make_blocks(2)
+    blocks = make_blocks(8)
     section = make_section(blocks)
-    unit = make_unit(blocks[:1], treatments=(BlockTreatment.TRANSLATE,))
+    unit = make_unit(blocks[:2], treatments=(BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE))
     builder = ContextBuilder(language_notes_per_chapter=8)
     context = builder.for_translation_unit(
         document=make_document(section), section=section, unit=unit,
         analysis=make_analysis(unit), glossary=make_snapshot(),
     )
     expected = notes_budget(
+        unit_chars=sum(len(block.text) for block in blocks[:2]),
+        chapter_chars=sum(len(block.text) for block in blocks),
+        per_chapter=8,
+    )
+    assert expected == 2
+    assert f"В этом запросе — не больше {expected} языковых заметок" in context.request.input_text
+    single_unit = make_unit(blocks[:1], treatments=(BlockTreatment.TRANSLATE,))
+    single_expected = notes_budget(
         unit_chars=len(blocks[0].text),
         chapter_chars=sum(len(block.text) for block in blocks),
-        per_chapter=chapter_note_limit(section, 8),
+        per_chapter=8,
     )
-    assert f"В этом запросе — не больше {expected} языковых заметок" in context.request.input_text
     regenerated = builder.for_block_regeneration(
-        document=make_document(section), section=section, unit=unit,
-        analysis=make_analysis(unit), glossary=make_snapshot(),
+        document=make_document(section), section=section, unit=single_unit,
+        analysis=make_analysis(single_unit), glossary=make_snapshot(),
     )
     assert (
-        f"В этом запросе — не больше {expected} языковых заметок"
+        f"В этом запросе — не больше {single_expected} языковых заметок"
         in regenerated.request.input_text
     )
 

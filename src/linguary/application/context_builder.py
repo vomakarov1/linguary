@@ -1066,6 +1066,7 @@ class ContextBuilder:
                 f"фрагмент {fragment.order} не входит в главу {section.id} "
                 f"из {fragment_count} фрагментов"
             )
+        effective_notes = chapter_note_limit(section, self._language_notes_per_chapter)
         return self._chapter_context(
             document=document,
             section=section,
@@ -1080,12 +1081,8 @@ class ContextBuilder:
             nonbinding_suggestions=nonbinding_suggestions,
             before_you_read_limit=10 // fragment_count + (fragment.order < 10 % fragment_count),
             language_notes_limit=(
-                chapter_note_limit(section, self._language_notes_per_chapter) // fragment_count
-                + (
-                    fragment.order
-                    < chapter_note_limit(section, self._language_notes_per_chapter)
-                    % fragment_count
-                )
+                effective_notes // fragment_count
+                + (fragment.order < effective_notes % fragment_count)
             ),
             fragment_label=_fragment_label(fragment.order, fragment_count),
             findings=findings if fragment.order > 0 else None,

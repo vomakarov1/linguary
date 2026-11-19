@@ -203,11 +203,13 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
 
     Unit labels use inferred speaker facts only. Repeated speech styles still
     count explicit and inferred facts. A repeated speech-style
-    difficulty for the same speaker is removed from the plan copy and from the
-    assistance on the result copy passed to `block_notes`, so the later note
-    is absent. The id is dropped only in the section that owns that later
-    style. The stored plan and the stored result are not changed. There is
-    no Previously list. Chapter review and the book who-is-who list stay empty.
+    difficulty for the same speaker is removed from the plan copy and passed
+    to `block_notes` as `dropped_difficulty_ids`, which omits repeated
+    assistance, language notes, and hints backed exclusively by it (keeping
+    the word translation without the dialect note on `GLOSSARY_ONLY`). The id
+    is dropped only in the section that owns that later style. The stored plan
+    and the stored result are not changed. There is no Previously list. Chapter
+    review and the book who-is-who list stay empty.
     """
     document = inputs.document
     numbers = _content_chapter_numbers(document)

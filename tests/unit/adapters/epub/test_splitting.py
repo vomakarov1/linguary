@@ -804,3 +804,16 @@ def test_combined_clause_fallback_comma_safety_and_spaced_ellipsis() -> None:
     attr_segments = segment_text(attributed)
     assert attributed[attr_segments[0].start : attr_segments[0].end] == "‘Look –’ Harry said. "
 
+    # Combined multi-level DP (`;` + `—`) fits within 350 chars without falling back to plain commas.
+    seg_a = _repeat("first", 190) + ", extra"
+    seg_b = _repeat("second", 190) + ", extra"
+    seg_c = _repeat("third", 190) + "."
+    multi = f"{seg_a}; {seg_b} — {seg_c}"
+    assert len(multi) >= SEGMENT_MIN_BLOCK_CHARS
+    # Neither `;` alone nor `—` alone keeps both halves <= 350.
+    assert len(multi) - (multi.index(";") + 2) > SEGMENT_MAX_CHARS
+    assert multi.index(" — ") + 3 > SEGMENT_MAX_CHARS
+    multi_segments = segment_text(multi)
+    multi_pieces = [multi[seg.start : seg.end] for seg in multi_segments]
+    assert multi_pieces == [f"{seg_a}; ", f"{seg_b} — ", seg_c]
+

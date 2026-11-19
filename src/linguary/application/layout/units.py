@@ -249,12 +249,47 @@ def _speakers_by_part(
 
 
 def _normalize_display_translation(text: str, target_language: str | None) -> str:
-    """Clean invisible soft hyphens and stray Russian typography at display projection."""
+    """Clean invisible soft hyphens and stray outer Russian typography at display projection."""
     cleaned = _SOFT_HYPHEN.sub("", text)
     if (target_language or "").strip().lower() == "ru":
         cleaned = _INLINE_EN_DASH.sub(" — ", cleaned)
-        cleaned = _GERMAN_QUOTES.sub(r"«\1»", cleaned)
+        cleaned = _normalize_outer_german_quotes(cleaned)
     return cleaned
+
+
+def _normalize_outer_german_quotes(text: str) -> str:
+    """Replace `„…“` / `„…”` with `«…»` only outside open Russian guillemets `«…»`.
+
+    Nested `«… „…“ …»` is standard Russian typography and stays intact.
+    """
+    if "„" not in text:
+        return text
+    out: list[str] = []
+    depth = 0
+    cursor = 0
+    length = len(text)
+    while cursor < length:
+        char = text[cursor]
+        if char == "«":
+            depth += 1
+            out.append(char)
+            cursor += 1
+        elif char == "»":
+            depth = max(0, depth - 1)
+            out.append(char)
+            cursor += 1
+        elif char == "„" and depth == 0:
+            match = _GERMAN_QUOTES.match(text, cursor)
+            if match is not None and "«" not in match.group(1) and "»" not in match.group(1):
+                out.append(f"«{match.group(1)}»")
+                cursor = match.end()
+            else:
+                out.append(char)
+                cursor += 1
+        else:
+            out.append(char)
+            cursor += 1
+    return "".join(out)
 
 
 def _speaker_note(name: str) -> NumberedNote:
