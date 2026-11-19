@@ -349,3 +349,17 @@ def test_replace_rejected_glossary_variants_updates_petunya_in_required_points()
         )
         == "Путь в Даскмера короче."
     )
+    vowel_final = GlossarySnapshotEntry(
+        source_text="Duskmere",
+        translation="Даскмера",
+        type=ConceptType.PLACE,
+        status=TermStatus.APPROVED,
+    )
+    assert (
+        replace(
+            "Путь в Даскмира короче. К Даскмиру ближе.",
+            decisions=(vowel_final,),
+            chapter_candidates=(chapter_candidate("Duskmere", "Даскмир"),),
+        )
+        == "Путь в Даскмера короче. К Даскмеру ближе."
+    )

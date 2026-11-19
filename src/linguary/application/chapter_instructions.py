@@ -437,9 +437,14 @@ def _corresponding_form(surface: str, rejected: str, approved: str) -> str | Non
     if mapped is not None:
         return mapped
     extra = len(surface) - len(rejected)
-    if surface.startswith(rejected) and 0 < extra <= _MAX_ENDING:
-        return approved + surface[len(rejected):]
-    return None
+    if not surface.startswith(rejected) or not 0 < extra <= _MAX_ENDING:
+        return None
+    suffix = surface[len(rejected):]
+    paradigm = _name_paradigm(approved)
+    if paradigm is None:
+        return approved + suffix
+    stem, _kind = paradigm
+    return stem + suffix
 
 
 def _inflect_like(surface: str, rejected: str, approved: str) -> str | None:

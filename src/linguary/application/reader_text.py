@@ -242,12 +242,10 @@ class ReaderTextPolicy:
 def _normalize_dialogue_dashes(body, protected_quotes):
     """Use an em dash for a reply and join one newline after punctuation.
 
-    A protected quote that itself contains a newline blocks the join: the quote
-    must stay byte-for-byte, including a break the model copied from it.
+    A match overlapping a protected quote stays as written. Both replacements
+    keep the same length, so the quote text is unchanged.
     """
     body = _replace_outside_quotes(body, _LEADING_EN_DASH, '— ', protected_quotes)
-    if any('\n' in quote for quote in protected_quotes if quote):
-        return body
     return _replace_outside_quotes(
         body, _INLINE_DIALOGUE_BREAK, r'\1 — ', protected_quotes,
     )

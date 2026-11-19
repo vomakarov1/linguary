@@ -207,10 +207,12 @@ def test_reader_policy_normalizes_en_dash_and_inline_newline_before_dialogue_das
         == "— Он сказал «– нет»."
     )
     protected = "Конец.\n— «.\n— внутри»."
-    assert policy.prepare("translation", protected, (".\n— внутри",)) == protected
+    assert policy.prepare("translation", protected, (".\n— внутри",)) == (
+        "Конец. — «.\n— внутри»."
+    )
     outside = "– Снаружи.\nТекст.\n— Дальше «.\n— внутри»."
     assert policy.prepare("translation", outside, (".\n— внутри",)) == (
-        "— Снаружи.\nТекст.\n— Дальше «.\n— внутри»."
+        "— Снаружи.\nТекст. — Дальше «.\n— внутри»."
     )
 
 
