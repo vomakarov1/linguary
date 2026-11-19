@@ -622,6 +622,9 @@ def _ensure_recovery_complete(transaction, book_id, run_id):
     if not correction_coverage_complete(transaction, book_id):
         raise ExportBookError('обязательное исправление глав не завершено или устарело')
     for root in transaction.work.list_roots(book_id, run_id=run_id):
+        # A superseded root is the previous operation. Its successor is checked separately.
+        if getattr(root, 'superseded_by', None) is not None:
+            continue
         try:
             complete = transaction.work.root_coverage_complete(root.id, update_state=False)
         except TypeError:
