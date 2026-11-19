@@ -7,12 +7,17 @@ to that part. Nothing is persisted.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from linguary.application.layout.notes import LayoutNote
 from linguary.application.layout.parts import LayoutPart, compose_parts
 from linguary.domain import BlockProcessingResult, BlockTreatment, BlockType, DocumentBlock
+
+_SOFT_HYPHEN = re.compile("\u00ad")
+_INLINE_EN_DASH = re.compile(" – ")
+_GERMAN_QUOTES = re.compile(r"„([^„“”]+)[“”]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +53,8 @@ def block_units(
     treatments: Sequence[BlockTreatment | None],
     notes: Sequence[LayoutNote],
     speakers: Mapping[tuple[int, int], str],
+    *,
+    target_language: str | None = None,
 ) -> tuple[LayoutUnit, ...]:
     """Project `block` into reading units.
 
@@ -101,6 +108,8 @@ def block_units(
     units: list[LayoutUnit] = []
     for index, part in enumerate(parts):
         translation = whole if whole is not None else _part_translation(part, result, chosen)
+        if translation is not None:
+            translation = _normalize_display_translation(translation, target_language)
         speaker = speaker_names[index]
         part_notes = list(note_buckets[index])
         if speaker is not None and translation is None:
@@ -237,6 +246,15 @@ def _speakers_by_part(
                     chosen[index] = name
                 break
     return chosen
+
+
+def _normalize_display_translation(text: str, target_language: str | None) -> str:
+    """Clean invisible soft hyphens and stray Russian typography at display projection."""
+    cleaned = _SOFT_HYPHEN.sub("", text)
+    if (target_language or "").strip().lower() == "ru":
+        cleaned = _INLINE_EN_DASH.sub(" — ", cleaned)
+        cleaned = _GERMAN_QUOTES.sub(r"«\1»", cleaned)
+    return cleaned
 
 
 def _speaker_note(name: str) -> NumberedNote:

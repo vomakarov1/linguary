@@ -1236,3 +1236,76 @@ def test_hint_strips_duplicate_headword_declension_directives_and_soft_hyphen() 
     assert by_term["Mr Potter"] == ("мистер Поттер",)
     note_bodies = [note.body for note in notes if note.origin == "language_note"]
     assert note_bodies == [("Может требоваться пояснение.",)]
+
+
+def test_same_verb_and_find_end_reject_false_positives_and_cross_sentence_gaps() -> None:
+    """Irregular/short verbs do not match unrelated nouns; gapped quotes stay in one sentence."""
+    # False-positive verb matches must NOT bind markers.
+    false_pairs = (
+        ("He lay in bed in the dark.", "to be"),
+        ("Wild bees buzzed loudly.", "to be"),
+        ("Thank God for that.", "to go"),
+        ("The cold wind blew hard.", "to win"),
+        ("A tiny seed fell down.", "to see"),
+        ("A brass band played nearby.", "to ban"),
+        ("He walked into the ward.", "to war"),
+        ("The bard sang softly.", "to bar"),
+        ("She’d already left the room.", "he'd"),
+    )
+    for text, original in false_pairs:
+        block = _block(text)
+        result = _result(
+            block,
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            hints=(GlossaryHint(original, "перевод"),),
+        )
+        assert block_notes(block, result, None, ())[0].marker_end is None, (original, text)
+
+    # Gapped quote must NOT jump across a sentence period, but DOES handle inline punctuation/quotes.
+    two_sentences = "He did not. Later he went to the shop."
+    gap_block = _block(two_sentences)
+    gap_res = _result(
+        gap_block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(GlossaryHint("not … to", "не … чтобы"),),
+    )
+    assert block_notes(gap_block, gap_res, None, ())[0].marker_end is None
+
+    quoted_gap = "‘But what does ‘Ministry of Magic’ do?’"
+    q_block = _block(quoted_gap)
+    q_res = _result(
+        q_block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(GlossaryHint("what does … do", "чем занимается"),),
+    )
+    assert block_notes(q_block, q_res, None, ())[0].marker_end == _end(
+        quoted_gap, "what does ‘Ministry of Magic’ do"
+    )
+
+
+def test_headword_stripping_preserves_hyphenated_compounds_and_empty_notes_drop_before_numbering() -> None:
+    """Hyphenated compounds stay intact; leading translation strips cleanly; empty notes vanish."""
+    text = "She wore a mini skirt and singled out Potter."
+    block = _block(text)
+    hints = (
+        GlossaryHint("mini", "mini-юбка"),
+        GlossaryHint("to single out", "to single out — выделить", "Выделить. Особо отметить."),
+        GlossaryHint("Potter", "Поттер", "Уменьшительная форма. Фамилия Поттер не склоняется."),
+    )
+    empty_note = LanguageNote("n-empty", block.id, "Potter", "Имя не склоняется.")
+    real_note = LanguageNote("n-real", block.id, "singled out", "Фразовый глагол.")
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=hints,
+        notes=(empty_note, real_note),
+    )
+
+    notes = block_notes(block, result, None, ())
+    by_term = {note.term: note.body for note in notes if note.term}
+    assert by_term["mini"] == ("mini-юбка",)
+    assert by_term["to single out"] == ("выделить", "Особо отметить.")
+    assert by_term["Potter"] == ("Поттер", "Уменьшительная форма.")
+    # Empty LanguageNote is dropped before numbering, leaving only real_note.
+    lang_notes = [note for note in notes if note.origin == "language_note"]
+    assert [note.body for note in lang_notes] == [("Фразовый глагол.",)]

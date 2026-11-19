@@ -1614,3 +1614,150 @@ def test_repeated_speech_style_drops_language_notes_and_hints_backed_by_evidence
     assert first_notes[0].labels == ("Речь персонажа.",)
     assert [note.body for note in second_notes] == [("Будущее время.",)]
     assert [note.labels for note in second_notes] == [()]
+
+
+def test_repeated_speech_style_on_glossary_only_keeps_translation_and_shared_evidence() -> None:
+    """GLOSSARY_ONLY does not crash with BlockResultError; shared evidence and unbacked notes stay."""
+    from linguary.domain import LanguageNote
+    from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
+
+    first = _block("one", 0, "‘We was late,’ Hagrid said.")
+    second = _block("two", 0, "‘Yeh’ll see,’ Hagrid said.")
+    third = _block("two", 1, "‘An’ don’t forget,’ Hagrid said.")
+    early = _difficulty(first, "We was", "speech_style", "d-early")
+    late_glossary = _difficulty(second, "Yeh’ll", "speech_style", "d-late-g", help_kind="lexical_hint")
+    late_shared_style = _difficulty(third, "An’", "speech_style", "d-late-s")
+    kept_idiom = _difficulty(third, "don’t forget", "idiom", "d-keep-idiom")
+    first_plan = _plan(early, facts=(_fact("f1", first, first.text, "Hagrid", "explicit"),))
+    second_plan = _plan(
+        late_glossary,
+        late_shared_style,
+        kept_idiom,
+        facts=(
+            _fact("f2", second, second.text, "Hagrid", "explicit"),
+            _fact("f3", third, third.text, "Hagrid", "explicit"),
+        ),
+    )
+    first_section = _section("one", 0, "Chapter 1", (first,))
+    second_section = _section("two", 1, "Chapter 2", (second, third))
+
+    yeh_hint = GlossaryHint("Yeh’ll", "ты будешь", "Повтор про диалект Хагрида.")
+    shared_note = LanguageNote("n-shared", third.id, "don’t forget", "Устойчивое напоминание.")
+    unbacked_note = LanguageNote("n-unbacked", third.id, "An’", "Заметка без evidence.")
+
+    def _hint_tr_key(block_id: str, hint: GlossaryHint) -> str:
+        return artifact_key(
+            "glossary_hint.translation",
+            block_id,
+            {"original": hint.original, "translation": hint.translation, "note": hint.note},
+        )
+
+    def _note_key(note: LanguageNote) -> str:
+        return artifact_key(
+            "language_note.note",
+            note.block_id,
+            {
+                "original_excerpt": note.original_excerpt,
+                "note": note.note,
+                "translated_excerpt": note.translated_excerpt,
+            },
+        )
+
+    results = {
+        first.id: BlockProcessingResult(
+            first.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="— Мы опоздали, — сказал Хагрид.",
+            language_notes=(LanguageNote("n1", first.id, "We was", "Просторечие."),),
+        ),
+        second.id: BlockProcessingResult(
+            second.id,
+            BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(yeh_hint,),
+            content_evidence=ContentEvidence(
+                second_plan.sha256,
+                (
+                    HelpEvidence(
+                        late_glossary.id,
+                        late_glossary.required_points[0].id,
+                        "glossary_hint.translation",
+                        second.id,
+                        _hint_tr_key(second.id, yeh_hint),
+                        yeh_hint.translation,
+                    ),
+                ),
+            ),
+        ),
+        third.id: BlockProcessingResult(
+            third.id,
+            BlockTreatment.TRANSLATE,
+            translated_text="— И не забудь, — сказал Хагрид.",
+            language_notes=(shared_note, unbacked_note),
+            content_evidence=ContentEvidence(
+                second_plan.sha256,
+                (
+                    HelpEvidence(
+                        late_shared_style.id,
+                        late_shared_style.required_points[0].id,
+                        "language_note.note",
+                        third.id,
+                        _note_key(shared_note),
+                        shared_note.note,
+                    ),
+                    HelpEvidence(
+                        kept_idiom.id,
+                        kept_idiom.required_points[0].id,
+                        "language_note.note",
+                        third.id,
+                        _note_key(shared_note),
+                        shared_note.note,
+                    ),
+                ),
+            ),
+        ),
+    }
+
+    layout = build_book_layout(
+        _inputs(
+            _document((first_section, second_section)),
+            results,
+            (
+                _analysis("a1", first_section.id, plan=first_plan),
+                _analysis("a2", second_section.id, plan=second_plan),
+            ),
+        )
+    )
+
+    second_notes = _notes(layout, second.id)
+    assert len(second_notes) == 1
+    assert second_notes[0].term == "Yeh’ll"
+    assert second_notes[0].body == ("ты будешь",)
+    assert second_notes[0].labels == ()
+
+    third_notes = _notes(layout, third.id)
+    assert [note.body for note in third_notes] == [
+        ("Заметка без evidence.",),
+        ("Устойчивое напоминание.",),
+    ]
+
+
+def test_display_translation_typography_applies_only_to_russian_target_language() -> None:
+    """German quotes and spaced en-dashes are normalized for Russian display, preserved for German."""
+    block = _block("one", 0, "He said hello.")
+    section = _section("one", 0, "Chapter 1", (block,))
+    raw_text = "Сказал: „Привет“ и „Ещё” – потом „обрыв и „Точка“ и требовать\u00adся."
+    result = BlockProcessingResult(block.id, BlockTreatment.TRANSLATE, translated_text=raw_text)
+
+    ru_layout = build_book_layout(
+        _inputs(_document((section,), target_language="ru"), {block.id: result})
+    )
+    ru_translation = ru_layout.chapters[section.id].units[block.id][0].translation
+    assert ru_translation == "Сказал: «Привет» и «Ещё» — потом „обрыв и «Точка» и требоваться."
+
+    de_text = "Er sagte: „Hallo“ – und „Welt” – und tren\u00adnen."
+    de_result = BlockProcessingResult(block.id, BlockTreatment.TRANSLATE, translated_text=de_text)
+    de_layout = build_book_layout(
+        _inputs(_document((section,), target_language="de"), {block.id: de_result})
+    )
+    de_translation = de_layout.chapters[section.id].units[block.id][0].translation
+    assert de_translation == "Er sagte: „Hallo“ – und „Welt” – und trennen."

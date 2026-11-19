@@ -771,3 +771,36 @@ def test_ellipsis_clause_and_dash_terminated_quote_boundaries() -> None:
         for piece in quote_pieces
     )
 
+
+def test_combined_clause_fallback_comma_safety_and_spaced_ellipsis() -> None:
+    """Comma fallback never splits `1,000`, `3,14`, or `‘Look,’`, balances cuts, and handles `. . .`."""
+    part_a = "He counted 1,000 coins and weighed 3,14 ounces, " + _repeat("alpha", 130)
+    part_b = "‘Look,’ he whispered softly, " + _repeat("beta", 140)
+    part_c = _repeat("gamma", 140) + "."
+    long_sentence = f"{part_a}, {part_b}, {part_c}"
+    assert len(long_sentence) >= SEGMENT_MIN_BLOCK_CHARS
+    segments = segment_text(long_sentence)
+    _assert_exact_cover(long_sentence, segments)
+    pieces = [long_sentence[seg.start : seg.end] for seg in segments]
+    assert all(len(piece) <= SEGMENT_MAX_CHARS for piece in pieces)
+    assert any("1,000" in piece for piece in pieces)
+    assert any("3,14" in piece for piece in pieces)
+    assert any("‘Look,’" in piece for piece in pieces)
+
+    balanced = _repeat("one", 175) + ", " + _repeat("two", 165) + ", tail end."
+    assert len(balanced) > SEGMENT_MAX_CHARS
+    bal_segments = segment_text(balanced, min_block_chars=1)
+    bal_pieces = [balanced[seg.start : seg.end] for seg in bal_segments]
+    assert len(bal_pieces) == 2
+    assert min(len(piece) for piece in bal_pieces) > 100
+
+    spaced = _repeat("delta", 190) + " . . . " + _repeat("omega", 190) + "."
+    spaced_segments = segment_text(spaced, min_block_chars=1)
+    spaced_pieces = [spaced[seg.start : seg.end] for seg in spaced_segments]
+    assert len(spaced_pieces) == 2
+    assert spaced_pieces[0].endswith(". . . ")
+
+    attributed = "‘Look –’ Harry said. More " + _repeat("more", 450) + "."
+    attr_segments = segment_text(attributed)
+    assert attributed[attr_segments[0].start : attr_segments[0].end] == "‘Look –’ Harry said. "
+

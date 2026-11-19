@@ -468,7 +468,7 @@ def test_instructions_require_chapter_summary_in_source_language() -> None:
     assert "glossary_candidates" in instructions
 
 
-def test_a2_summary_is_two_parallel_paragraphs_for_whole_chapter_and_fragment() -> None:
+def test_a2_summary_is_single_source_paragraph_for_whole_chapter_and_fragment() -> None:
     whole = chapter_analysis_instructions(
         source_language=SOURCE_LANGUAGE,
         target_language=TARGET_LANGUAGE,
@@ -2184,5 +2184,63 @@ def test_short_chapter_caps_notes_budget_to_body_blocks() -> None:
         scenes=(Scene("s1", 0, short_section.blocks[0].id, short_section.blocks[-1].id, "Scene"),),
     )
     assert _scene_notes_budget(analysis, short_section, unit, per_chapter=8) == 2
+
+    from dataclasses import replace as dc_replace
+    from linguary.application.analysis_merge import ChapterFragment
+    from linguary.domain import GlossarySnapshot
+    from linguary.domain.content_plan import Difficulty, RequiredPoint, SourceAnchor
+
+    three_difficulties = tuple(
+        Difficulty(
+            f"d{idx}",
+            (SourceAnchor(block.id, 0, 3, block.text[:3]),),
+            block.id,
+            "grammar",
+            "useful",
+            "explanation",
+            (RequiredPoint(f"p{idx}", "Explain"),),
+        )
+        for idx, block in enumerate(short_section.blocks[1:], start=1)
+    )
+    crowded_analysis = dc_replace(
+        analysis,
+        content_plan=ContentPlan(
+            version=3, profile="content-plan-v3", difficulties=three_difficulties
+        ),
+    )
+    assert _scene_notes_budget(crowded_analysis, short_section, unit, per_chapter=8) == 2
+
+    no_scenes_analysis = dc_replace(analysis, scenes=())
+    tr_ctx = builder.for_translation_unit(
+        document=doc,
+        section=short_section,
+        unit=unit,
+        analysis=no_scenes_analysis,
+        glossary=GlossarySnapshot(),
+    )
+    assert "не больше 2 языковых заметок" in tr_ctx.request.input_text
+
+    ped_ctx = builder.for_chapter_pedagogical_analysis(
+        document=doc,
+        section=short_section,
+        narrative_summary="Short summary.",
+        glossary_candidates=(),
+        context_facts=(),
+    )
+    assert ped_ctx.language_notes_per_chapter == 2
+
+    frag0 = builder.for_chapter_fragment(
+        document=doc,
+        section=short_section,
+        fragment=ChapterFragment(order=0, blocks=short_section.blocks[:2]),
+        fragment_count=2,
+    )
+    frag1 = builder.for_chapter_fragment(
+        document=doc,
+        section=short_section,
+        fragment=ChapterFragment(order=1, blocks=short_section.blocks[2:]),
+        fragment_count=2,
+    )
+    assert frag0.language_notes_per_chapter + frag1.language_notes_per_chapter == 2
 
 

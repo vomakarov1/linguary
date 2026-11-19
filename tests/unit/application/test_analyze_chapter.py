@@ -541,7 +541,7 @@ async def test_missing_block_in_plan_is_retried_with_repair_instruction() -> Non
     assert result.analysis.coverage_status is CoverageStatus.COMPLETE
 
 
-async def test_a2_analysis_retries_when_summary_does_not_match_source_and_translation_languages() -> None:
+async def test_a2_analysis_retries_when_summary_contains_russian_translation_paragraph() -> None:
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (
@@ -558,7 +558,7 @@ async def test_a2_analysis_retries_when_summary_does_not_match_source_and_transl
     assert result.analysis.chapter_summary == "The story continues."
 
 
-async def test_a2_analysis_retries_when_first_summary_paragraph_is_in_another_latin_language() -> None:
+async def test_a2_analysis_retries_when_summary_is_in_another_latin_language() -> None:
     unit_of_work = two_block_book()
     client = FakeLLMClient.replying(
         (
@@ -573,6 +573,19 @@ async def test_a2_analysis_retries_when_first_summary_paragraph_is_in_another_la
     assert result.attempts == 2
     assert client.call_count == 2
     assert result.analysis.chapter_summary == "The story continues."
+
+
+async def test_a2_analysis_accepts_legacy_two_paragraph_summary_with_frozen_prompt_template() -> None:
+    unit_of_work = two_block_book()
+    legacy_summary = "The story continues.\n\nИстория продолжается."
+    client = FakeLLMClient.replying((analysis_reply(chapter_summary=legacy_summary),))
+    scenario, _ = make_analyze_chapter(unit_of_work, client, reader_level="a2")
+    scenario._context_builder._prompt_templates = {"analysis": "Верни ровно два абзаца."}
+
+    result = await scenario(command())
+
+    assert result.attempts == 1
+    assert result.analysis.chapter_summary == legacy_summary
 
 
 async def test_unknown_block_in_plan_is_rejected() -> None:

@@ -73,6 +73,9 @@ def test_a2_double_negative_instructions_keep_translation_and_byr_affirmative():
     [
         '',
         'The story continues.\n\nИстория продолжается.',
+        'The story continues.\nИстория продолжается.',
+        'Harry goes to Hogwarts with Hagrid.\nГарри едет в Хогвартс.',
+        'Harry goes to Hogwarts. Гарри едет в Хогвартс.',
         'The story continues.\n\nThe story continues.',
         'История продолжается.',
         'La historia continúa.',
@@ -96,6 +99,24 @@ def test_a2_summary_accepts_single_source_language_paragraph():
         source_language='en',
         language_detector=LANGUAGE_DETECTOR,
     )
+
+
+def test_a2_summary_supports_legacy_parallel_russian_for_frozen_conditions():
+    validate_a2_summary(
+        'The story continues.\n\nИстория продолжается.',
+        source_texts=('The story continues.',),
+        source_language='en',
+        language_detector=LANGUAGE_DETECTOR,
+        require_parallel_russian=True,
+    )
+    with pytest.raises(ReaderTextError, match='a2_summary_requires_parallel_russian'):
+        validate_a2_summary(
+            'The story continues.',
+            source_texts=('The story continues.',),
+            source_language='en',
+            language_detector=LANGUAGE_DETECTOR,
+            require_parallel_russian=True,
+        )
 
 
 def test_a2_summary_accepts_short_english_paragraph_with_low_classifier_confidence():
@@ -126,7 +147,7 @@ def test_translation_preserves_exact_source_quote_with_service_like_text():
     assert ReaderTextPolicy().prepare('translation', translation, source_quote_fragments((original,))) == translation
 
 
-def _parallel_summary(sentence_count: int) -> str:
+def _a2_summary(sentence_count: int) -> str:
     return " ".join(
         f"Sentence number {index} continues the chapter." for index in range(1, sentence_count + 1)
     )
@@ -144,7 +165,7 @@ def _summary_with_titles(sentence_count: int) -> str:
 def test_validate_a2_summary_rejects_overlong_multi_sentence_recap():
     """Six sentences are accepted, including titles and initials; seven are rejected."""
     validate_a2_summary(
-        _parallel_summary(6),
+        _a2_summary(6),
         source_texts=("The story continues.",),
         source_language="en",
         language_detector=LANGUAGE_DETECTOR,
@@ -157,7 +178,7 @@ def test_validate_a2_summary_rejects_overlong_multi_sentence_recap():
     )
     with pytest.raises(ReaderTextError):
         validate_a2_summary(
-            _parallel_summary(7),
+            _a2_summary(7),
             source_texts=("The story continues.",),
             source_language="en",
             language_detector=LANGUAGE_DETECTOR,
@@ -229,16 +250,22 @@ def test_reader_text_error_includes_kind_and_block_id():
     assert err.violation.artifact_kinds == ('language_note.note',)
 
 
-def test_reader_policy_strips_soft_hyphen_and_normalizes_german_quotes_and_inline_en_dash():
+def test_reader_policy_prepare_results_is_idempotent_with_stored_typography():
+    """Stored v3 bodies with soft hyphens, German quotes, or en-dashes pass re-validation unchanged."""
+    from linguary.domain import BlockProcessingResult, BlockTreatment, GlossaryHint, LanguageNote
+
     policy = ReaderTextPolicy()
-    assert policy.prepare("language_note.note", "Может требовать\u00adся помощь.", ()) == (
-        "Может требоваться помощь."
+    result = BlockProcessingResult(
+        'block-11',
+        BlockTreatment.TRANSLATE,
+        translated_text='Он сказал: „Привет“ – и ушёл.',
+        glossary_hints=(
+            GlossaryHint('require', 'требо\u00adваться', 'Здесь требо\u00adваться означает нужно.'),
+        ),
+        language_notes=(LanguageNote('n1', 'block-11', 'require', 'Может требовать\u00adся.'),),
     )
-    assert policy.prepare("translation", "Он сказал: „Привет“ – и ушёл.", ()) == (
-        "Он сказал: «Привет» — и ушёл."
-    )
-    # Protected source quotes remain untouched.
-    assert policy.prepare("translation", "Цитата „keep – me“ – дальше.", ("„keep – me“",)) == (
-        "Цитата „keep – me“ — дальше."
-    )
+    once = policy.prepare_results((result,))
+    twice = policy.prepare_results(once)
+    assert once == (result,)
+    assert twice == once
 

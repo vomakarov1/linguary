@@ -401,7 +401,7 @@ def notes_budget(*, unit_chars: int, chapter_chars: int, per_chapter: int) -> in
     return max(1, round(per_chapter * unit_chars / chapter_chars))
 
 
-def _chapter_note_limit(section: DocumentSection, per_chapter: int) -> int:
+def chapter_note_limit(section: DocumentSection, per_chapter: int) -> int:
     """Cap chapter note allowance on short chapters so 2-paragraph excerpts do not get 8 notes."""
     if per_chapter <= 0:
         return 0
@@ -943,6 +943,7 @@ class ContextBuilder:
             user_decisions=raw_decisions,
             target_language=document.target_language,
         )
+        effective_notes = chapter_note_limit(section, self._language_notes_per_chapter)
         context = self._chapter_context(document=document, section=section,
             blocks=fragment.blocks if fragment else textual_blocks(section),
             accumulated_candidates=(*accumulated_candidates, *chapter_candidates),
@@ -951,8 +952,8 @@ class ContextBuilder:
             fragment_label=_fragment_label(order, fragment_count) if fragment else None,
             before_you_read_limit=(10 // fragment_count + (order < 10 % fragment_count)
                 if before_you_read_limit is None else before_you_read_limit),
-            language_notes_limit=(self._language_notes_per_chapter // fragment_count +
-                (order < self._language_notes_per_chapter % fragment_count)
+            language_notes_limit=(effective_notes // fragment_count +
+                (order < effective_notes % fragment_count)
                 if language_notes_limit is None else language_notes_limit),
             pedagogical=True,
             extra_match_text=narrative_summary)
@@ -1078,7 +1079,14 @@ class ContextBuilder:
             user_decisions=user_decisions,
             nonbinding_suggestions=nonbinding_suggestions,
             before_you_read_limit=10 // fragment_count + (fragment.order < 10 % fragment_count),
-            language_notes_limit=self._language_notes_per_chapter // fragment_count + (fragment.order < self._language_notes_per_chapter % fragment_count),
+            language_notes_limit=(
+                chapter_note_limit(section, self._language_notes_per_chapter) // fragment_count
+                + (
+                    fragment.order
+                    < chapter_note_limit(section, self._language_notes_per_chapter)
+                    % fragment_count
+                )
+            ),
             fragment_label=_fragment_label(fragment.order, fragment_count),
             findings=findings if fragment.order > 0 else None,
         )
@@ -1349,7 +1357,7 @@ class ContextBuilder:
             budget = notes_budget(
                 unit_chars=sum(len(item.block.text) for item in unit.items),
                 chapter_chars=sum(len(block.text) for block in textual_blocks(section)),
-                per_chapter=self._language_notes_per_chapter,
+                per_chapter=chapter_note_limit(section, self._language_notes_per_chapter),
             )
         if analysis.content_plan is not None and self._language_notes_per_chapter == 0:
             budget = 0
@@ -1532,7 +1540,7 @@ class ContextBuilder:
         }
         candidate = self._content_plan_profile in {"content-plan-v2", "content-plan-v3"}
         version = 3 if self._content_plan_profile == "content-plan-v3" else (2 if candidate else 1)
-        effective_per_chapter = _chapter_note_limit(section, self._language_notes_per_chapter)
+        effective_per_chapter = chapter_note_limit(section, self._language_notes_per_chapter)
         note_limit = effective_per_chapter if language_notes_limit is None else min(language_notes_limit, effective_per_chapter)
         note_groups = self._analysis_note_groups(section, blocks) if candidate else ()
         if self._english_help:
@@ -1564,11 +1572,12 @@ class ContextBuilder:
                     f"Бюджет обязательных заметок этого анализа: {note_limit}.",
                     "Пределы обязательных заметок по группам обработки: " + json.dumps([dict(blocks=[alias for alias, block_id in aliases.items() if block_id in ids], limit=limit) for ids, limit in note_groups], ensure_ascii=False, separators=(",", ":")),
                 )
+        chapter_chars = sum(len(t.text) for t in textual_blocks(section))
         return ChapterAnalysisContext(
             before_you_read_limit=before_you_read_limit,
             note_group_limits=note_groups,
             language_notes_per_chapter=note_limit,
-            note_limits_by_block={b.id: 0 if self._english_help else (min(2, notes_budget(unit_chars=len(b.text), chapter_chars=sum(len(t.text) for t in textual_blocks(section)), per_chapter=effective_per_chapter)) if effective_per_chapter else 0) for b in blocks},
+            note_limits_by_block={b.id: 0 if self._english_help else (min(2, notes_budget(unit_chars=len(b.text), chapter_chars=chapter_chars, per_chapter=effective_per_chapter)) if effective_per_chapter else 0) for b in blocks},
             section_id=section.id,
             request=LLMRequest.for_chapter_analysis(
                 contract_version=self._analysis_contract_version if version == 3 else version,
@@ -1614,7 +1623,7 @@ class ContextBuilder:
         )
         visible = {b.id for b in blocks}
         chapter_chars = sum(len(b.text) for b in chapter)
-        effective_per_chapter = _chapter_note_limit(section, self._language_notes_per_chapter)
+        effective_per_chapter = chapter_note_limit(section, self._language_notes_per_chapter)
         result = []
         for unit in units:
             size = sum(len(item.block.text) for item in unit.items)
@@ -2284,8 +2293,9 @@ def _scene_notes_budget(
     }
     if len(owners) > per_chapter:
         raise ContextBuildError("обязательные объяснения превышают бюджет заметок главы")
+    effective_per_chapter = max(len(owners), chapter_note_limit(section, per_chapter))
     blocks = textual_blocks(section)
-    if len(owners) < per_chapter:
+    if len(owners) < effective_per_chapter:
         extra_owners = {
             difficulty.owner_block_id for difficulty in uncovered
             if difficulty.owner_block_id not in owners
@@ -2299,11 +2309,10 @@ def _scene_notes_budget(
             )
         }
         for block in blocks:
-            if len(owners) >= per_chapter:
+            if len(owners) >= effective_per_chapter:
                 break
             if block.id in extra_owners:
                 owners.add(block.id)
-    effective_per_chapter = max(len(owners), _chapter_note_limit(section, per_chapter))
     chapter_chars = sum(len(block.text) for block in blocks)
     remaining = max(0, effective_per_chapter - len(owners))
     targets = set(unit.block_ids)

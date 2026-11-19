@@ -62,6 +62,7 @@ from linguary.application.context_builder import (
     ChapterAnalysisContext,
     ContextBuilder,
     FragmentFindings,
+    chapter_note_limit,
     textual_blocks,
     source_text_for_model,
 )
@@ -421,7 +422,8 @@ class AnalyzeChapter:
         if self._context_builder._reader_level == 'a2':
             validate_a2_summary(pedagogical.reader_chapter_summary or '',
                 source_texts=tuple(b.text for b in blocks), source_language=document.source_language,
-                language_detector=self._language_detector)
+                language_detector=self._language_detector,
+                require_parallel_russian=self._a2_summary_requires_parallel_russian())
         payload = combine_staged_analysis_responses(narrative, pedagogical, resolved_scenes=scenes)
         _ensure_plan_covers_chapter(payload, context)
         plan = self._validate_pedagogical(payload, context, blocks, source_offsets=True)
@@ -434,6 +436,16 @@ class AnalyzeChapter:
             id_factory=self._id_factory, name_translation_policy=self._name_translation_policy,
             conditions_id=self._conditions_id)
         return replace(analysis, content_plan=plan, scenes=tuple(scenes))
+
+    def _a2_summary_requires_parallel_russian(self) -> bool:
+        """Preserve legacy two-paragraph validation for books with frozen old prompt templates."""
+        templates = getattr(self._context_builder, "_prompt_templates", None)
+        if not isinstance(templates, Mapping):
+            return False
+        return any(
+            isinstance(value, str) and "ровно два абзаца" in value
+            for value in templates.values()
+        )
 
     def _validate_pedagogical(
         self, payload: ChapterAnalysisResponse, context: ChapterAnalysisContext,
@@ -467,7 +479,7 @@ class AnalyzeChapter:
             textual_blocks(section), max_blocks=self._max_fragment_blocks, max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
         )
         is_narrative = pass_kind is AnalysisPassKind.NARRATIVE
-        notes = self._context_builder._language_notes_per_chapter
+        notes = chapter_note_limit(section, self._context_builder._language_notes_per_chapter)
         queue = [(fragment,
             0 if is_narrative else 10 // len(fragments) + (fragment.order < 10 % len(fragments)),
             0 if is_narrative else notes // len(fragments) + (fragment.order < notes % len(fragments)))
@@ -538,7 +550,8 @@ class AnalyzeChapter:
                 if self._context_builder._reader_level == 'a2':
                     validate_a2_summary(payload.reader_chapter_summary or '',
                         source_texts=tuple(b.text for b in fragment.blocks), source_language=document.source_language,
-                        language_detector=self._language_detector)
+                        language_detector=self._language_detector,
+                        require_parallel_russian=self._a2_summary_requires_parallel_russian())
                 _ensure_plan_covers_chapter(combined, context)
                 resolved_plan = self._validate_pedagogical(combined, context, fragment.blocks)
                 # The first fragment has no prior parts, but segment indexes are still rejected here.
@@ -1149,6 +1162,7 @@ class AnalyzeChapter:
                             source_texts=tuple(block.text for block in blocks),
                             source_language=source_language,
                             language_detector=self._language_detector,
+                            require_parallel_russian=self._a2_summary_requires_parallel_russian(),
                         )
                     if request.contract_version in {3, 5}:
                         record_reader_warnings(self._unit_of_work, response,

@@ -495,6 +495,7 @@ def block_notes(
     pronunciations: Sequence[PronunciationOccurrence],
     *,
     english_help: bool = False,
+    dropped_difficulty_ids: frozenset[str] = frozenset(),
 ) -> tuple[LayoutNote, ...]:
     """Project help for `block` into notes ordered by marker.
 
@@ -502,15 +503,26 @@ def block_notes(
     they have on `result`. A pronunciation whose `quote` equals a hint's
     `original` fills that hint. Any other pronunciation of this block follows
     them. `origin` is `glossary_hint`, `language_note`, `assistance`, or
-    `pronunciation`.
+    `pronunciation`. Items backed exclusively by `dropped_difficulty_ids` are
+    omitted (for `GLOSSARY_ONLY`, a hint keeps its translation without the
+    repeated dialect note). Empty notes are omitted before numbering.
     """
     evidences = _evidences(result)
     known = {} if plan is None else {item.id: item for item in plan.difficulties}
+    requires_hints = result.treatment.requires_glossary_hints or any(
+        mode.requires_glossary_hints for mode in result.segment_treatments
+    )
+    visible_hints: list[tuple[GlossaryHint, bool]] = []
+    for hint in result.glossary_hints:
+        only_dropped = _hint_only_dropped(hint, result.block_id, evidences, dropped_difficulty_ids)
+        if only_dropped and not requires_hints:
+            continue
+        visible_hints.append((hint, only_dropped))
     assigned, unmatched = _assign_pronunciations(
-        result.glossary_hints, pronunciations, block.id
+        [hint for hint, _ in visible_hints], pronunciations, block.id
     )
     drafts: list[_Draft] = []
-    for hint, pronunciation in zip(result.glossary_hints, assigned, strict=True):
+    for (hint, strip_note), pronunciation in zip(visible_hints, assigned, strict=True):
         drafts.append(
             _hint_draft(
                 hint,
@@ -520,19 +532,60 @@ def block_notes(
                 evidences,
                 known,
                 result.treatment,
+                strip_note=strip_note,
             )
         )
     for note in result.language_notes:
+        if _note_only_dropped(note, evidences, dropped_difficulty_ids):
+            continue
         drafts.append(_note_draft(note, block.text, evidences, known))
     for assistance in result.fragment_assistances:
-        if not assistance.resolved:
+        if not assistance.resolved or assistance.difficulty_id in dropped_difficulty_ids:
             continue
         drafts.append(
             _assistance_draft(assistance, block.id, known, english_help=english_help)
         )
     drafts.extend(_pronunciation_draft(item) for item in unmatched)
-    notes = _collapse(drafts, plan)
+    notes = [
+        note
+        for note in _collapse(drafts, plan)
+        if note.labels or note.term or note.ipa or note.body
+    ]
     return tuple(sorted(notes, key=_marker_key))
+
+
+def _hint_only_dropped(
+    hint: GlossaryHint,
+    block_id: str,
+    evidences: Sequence[HelpEvidence],
+    dropped: frozenset[str],
+) -> bool:
+    if not dropped:
+        return False
+    content = {"original": hint.original, "translation": hint.translation, "note": hint.note}
+    keys = {
+        artifact_key("glossary_hint.note", block_id, content),
+        artifact_key("glossary_hint.translation", block_id, content),
+    }
+    ids = _ids_for(evidences, keys)
+    return bool(ids) and set(ids) <= dropped
+
+
+def _note_only_dropped(
+    note: LanguageNote,
+    evidences: Sequence[HelpEvidence],
+    dropped: frozenset[str],
+) -> bool:
+    if not dropped:
+        return False
+    content = {
+        "original_excerpt": note.original_excerpt,
+        "note": note.note,
+        "translated_excerpt": note.translated_excerpt,
+    }
+    key = artifact_key("language_note.note", note.block_id, content)
+    ids = _ids_for(evidences, {key})
+    return bool(ids) and set(ids) <= dropped
 
 
 def _evidences(result: BlockProcessingResult) -> tuple[HelpEvidence, ...]:
@@ -603,6 +656,8 @@ def _hint_draft(
     evidences: Sequence[HelpEvidence],
     known: Mapping[str, Difficulty],
     treatment: BlockTreatment,
+    *,
+    strip_note: bool = False,
 ) -> _Draft:
     """A glossary hint. The marker is the end of the first match of `original`.
 
@@ -616,9 +671,9 @@ def _hint_draft(
         artifact_key("glossary_hint.note", block_id, content),
         artifact_key("glossary_hint.translation", block_id, content),
     }
-    ids = _ids_for(evidences, keys)
+    ids = () if strip_note else _ids_for(evidences, keys)
     marker_end = _find_end(text, hint.original)
-    cleaned_note = _cleaned_hint_note(hint.note)
+    cleaned_note = "" if strip_note else _cleaned_hint_note(hint.note)
     lexical = _plain_lexical(hint.original, ids, known)
     verbal = _verbal_infinitive_words(hint.original) is not None
     signaled = any(item_id in known and known[item_id].kind in _SIGNAL_KINDS for item_id in ids)
@@ -629,9 +684,10 @@ def _hint_draft(
         and _headword_gloss(cleaned_note, hint.original)
     ):
         kept_note = cleaned_note
-    kept_note = _strip_leading_translation(kept_note, hint.translation)
+    base_translation = _strip_leading_headword(hint.translation, hint.original)
+    kept_note = _strip_leading_translation(kept_note, base_translation)
     term: str | None = hint.original
-    translation = _strip_leading_headword(hint.translation, hint.original)
+    translation = base_translation
     if verbal:
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
@@ -768,37 +824,45 @@ def _shared_anchors(
 def _find_end(text: str, quote: str) -> int | None:
     """End of the first match of `quote`, or None when nothing matches.
 
-    Exact `str.find` wins (with apostrophe variants normalized 1-to-1).
-    Otherwise the same spelling on word boundaries ignoring case, a gapped
-    phrase with `…`/`...`, or `to` plus a verb matched to an inflected phrase.
+    Exact `str.find` wins first when it lands on word boundaries (or when
+    `quote` has non-word edges), then apostrophe-normalized exact/casefolded
+    word-bounded match, a single-sentence gapped phrase with `…`/`...`, or
+    `to` plus a verb matched to an inflected phrase.
     """
-    start = text.find(quote)
-    if start >= 0:
-        return start + len(quote)
     if not quote:
         return None
+    exact = _word_bounded_end(text, quote, ignore_case=False)
+    if exact is not None:
+        return exact
     norm_text = text.translate(_APOSTROPHE_CHARS)
     norm_quote = quote.translate(_APOSTROPHE_CHARS)
-    start = norm_text.find(norm_quote)
-    if start >= 0:
-        return start + len(norm_quote)
-    folded = _case_insensitive_end(norm_text, norm_quote)
+    normalized = _word_bounded_end(norm_text, norm_quote, ignore_case=False)
+    if normalized is not None:
+        return normalized
+    folded = _word_bounded_end(norm_text, norm_quote, ignore_case=True)
     if folded is not None:
         return folded
     gapped = _gapped_end(norm_text, norm_quote)
     if gapped is not None:
         return gapped
-    return _infinitive_end(text, quote)
+    infinitive = _infinitive_end(text, quote)
+    if infinitive is not None:
+        return infinitive
+    start = text.find(quote)
+    if start >= 0 and (not quote[0].isalnum() or not quote[-1].isalnum()):
+        return start + len(quote)
+    return None
 
 
-def _case_insensitive_end(text: str, quote: str) -> int | None:
-    """End of the first case-insensitive `quote` that starts and ends on a word boundary."""
+def _word_bounded_end(text: str, quote: str, *, ignore_case: bool) -> int | None:
+    """End of the first `quote` matching on word boundaries where edges are alphanumeric."""
     stripped = quote.strip()
     if not stripped:
         return None
     left_boundary = r"(?<!\w)" if stripped[0].isalnum() else ""
     right_boundary = r"(?!\w)" if stripped[-1].isalnum() else ""
-    pattern = re.compile(rf"{left_boundary}{re.escape(stripped)}{right_boundary}", re.IGNORECASE)
+    flags = re.IGNORECASE if ignore_case else 0
+    pattern = re.compile(rf"{left_boundary}{re.escape(stripped)}{right_boundary}", flags)
     match = pattern.search(text)
     if match is None:
         return None
@@ -806,14 +870,15 @@ def _case_insensitive_end(text: str, quote: str) -> int | None:
 
 
 _ELLIPSIS_GAP = re.compile(r"\s*(?:…|\.{3})\s*")
+_GAP_BRIDGE = r"[,;:\"'‘’“”()]*\s+(?:[^\s.!?\r\n]+\s+){0,8}[\"'‘’“”(]*"
 
 
 def _gapped_end(text: str, quote: str) -> int | None:
-    """End of a gapped phrase like `what does … do` in `text`."""
+    """End of a gapped phrase like `what does … do` within one sentence."""
     if "…" not in quote and "..." not in quote:
         return None
     parts = [part.strip() for part in _ELLIPSIS_GAP.split(quote.strip()) if part.strip()]
-    if len(parts) < 2:
+    if len(parts) < 2 or len(parts) > 4:
         return None
     pieces: list[str] = []
     for index, part in enumerate(parts):
@@ -824,7 +889,7 @@ def _gapped_end(text: str, quote: str) -> int | None:
             pieces.append(f"{left_b}{escaped}")
         else:
             pieces.append(f"{escaped}{right_b}")
-    pattern = re.compile(r"(?:\s+\S+){0,8}\s+".join(pieces), re.IGNORECASE)
+    pattern = re.compile(_GAP_BRIDGE.join(pieces), re.IGNORECASE)
     match = pattern.search(text)
     if match is None:
         return None
@@ -869,32 +934,65 @@ def _surface_tokens(text: str) -> list[tuple[str, int]]:
     ]
 
 
+def _regular_present_or_participle(surface: str, verb: str) -> bool:
+    """Valid 3rd-person singular or `-ing` participle of `verb`."""
+    if verb.endswith(("s", "x", "z", "ch", "sh", "o")):
+        if surface == f"{verb}es":
+            return True
+    elif verb.endswith("y") and len(verb) >= 3 and verb[-2] not in "aeiou":
+        if surface == f"{verb[:-1]}ies":
+            return True
+    elif surface == f"{verb}s":
+        return True
+    if surface == f"{verb}ing":
+        return True
+    if verb.endswith("ie") and surface == f"{verb[:-2]}ying":
+        return True
+    if (
+        verb.endswith("e")
+        and len(verb) >= 3
+        and not verb.endswith(("ee", "ye", "oe"))
+        and surface == f"{verb[:-1]}ing"
+    ):
+        return True
+    if (
+        len(verb) >= 3
+        and verb[-1] not in "aeiouwxy"
+        and _is_vowel(verb, -2)
+        and not _is_vowel(verb, -3)
+        and surface == f"{verb}{verb[-1]}ing"
+    ):
+        return True
+    return False
+
+
 def _same_verb(surface: str, verb: str) -> bool:
     """Whether `surface` is `verb` or one of its inflected forms."""
     if surface == verb or surface in _IRREGULAR_VERB_FORMS.get(verb, ()):
         return True
+    if verb == "be":
+        return False
+    if _regular_present_or_participle(surface, verb):
+        return True
+    if verb in _IRREGULAR_VERB_FORMS:
+        return False
     if _same_word(surface, verb):
         return True
     if _regular_ed_stem(surface) == verb:
         return True
-    if surface in {f"{verb}s", f"{verb}es", f"{verb}ed", f"{verb}ing", f"{verb}d"}:
+    if verb.endswith("e"):
+        return surface == f"{verb}d"
+    if surface == f"{verb}ed":
         return True
-    if len(verb) >= 3 and verb[-1] not in "aeiouwxy" and surface in {
-        f"{verb}{verb[-1]}ed",
-        f"{verb}{verb[-1]}ing",
-    }:
-        return True
-    if verb.endswith("e") and len(verb) >= 3 and surface == f"{verb[:-1]}ing":
-        return True
+    if verb.endswith("y") and len(verb) >= 3 and verb[-2] not in "aeiou":
+        return surface == f"{verb[:-1]}ied"
     if (
-        verb.endswith("y")
-        and len(verb) >= 3
-        and verb[-2] not in "aeiou"
-        and surface in {f"{verb[:-1]}ies", f"{verb[:-1]}ied"}
+        len(verb) >= 3
+        and verb[-1] not in "aeiouwxy"
+        and _is_vowel(verb, -2)
+        and not _is_vowel(verb, -3)
     ):
-        return True
-    if verb.endswith("ie") and surface == f"{verb[:-2]}ying":
-        return True
+        return surface == f"{verb}{verb[-1]}ed"
     return False
 
 
@@ -982,29 +1080,41 @@ def _last_anchor_end(block_id: str, anchors: Sequence[SourceAnchor]) -> int | No
 
 
 _DECLENSION_TAIL = re.compile(
-    r"\s*;\s*не\s+склонять\.?$",
+    r"\s*;\s*не\s+склоня(?:ется|ть)\.?$",
     re.IGNORECASE,
 )
-_DECLENSION_STANDALONE = re.compile(
-    r"^(?:(?:имя|фамилия|название)\s+не\s+склоня(?:ет(?:ся)?|ть)|"
-    r"при\s+слове\s+[«\"][^»\"]+[»\"]\s+(?:имя|фамилия|название)\s+\S+\s+не\s+склоня(?:ет(?:ся)?|ть))\.?$",
-    re.IGNORECASE,
+_DECLENSION_SENTENCE_CORE = (
+    r"(?:"
+    r"не\s+склонять|"
+    r"(?:имя|фамилия|название)(?:\s+[А-ЯЁA-Z][\w-]*)?\s+не\s+склоня(?:ется|ть)|"
+    r"при\s+слове\s+[«\"][^»\"]+[»\"]\s+(?:имя|фамилия|название)(?:\s+\S+)?\s+не\s+склоня(?:ется|ть)"
+    r")\.?"
+)
+_DECLENSION_STANDALONE = re.compile(rf"^{_DECLENSION_SENTENCE_CORE}$", re.IGNORECASE)
+_DECLENSION_TRAILING_SENTENCE = re.compile(
+    rf"(?<=[.!?])\s+{_DECLENSION_SENTENCE_CORE}$", re.IGNORECASE
 )
 
 
 def _strip_leading_headword(text: str, headword: str) -> str:
-    """Drop a redundant `headword — ` prefix inside `hint.translation`."""
+    """Drop a redundant `headword — ` prefix inside `hint.translation`.
+
+    Plain `-` requires surrounding spaces so hyphenated compounds (`mini-юбка`,
+    `Wi-Fi`) are preserved. Regex matching keeps slice indices exact under Unicode.
+    """
     stripped = text.strip()
     if not stripped or not headword.strip():
         return stripped
-    folded = stripped.translate(_APOSTROPHE_CHARS).casefold()
+    norm_text = stripped.translate(_APOSTROPHE_CHARS)
     for head in _headwords(headword):
-        norm_head = head.translate(_APOSTROPHE_CHARS).casefold()
-        if not folded.startswith(norm_head):
-            continue
-        rest = stripped[len(norm_head) :].lstrip()
-        if rest and rest[0] in _DASHES:
-            candidate = rest[1:].lstrip()
+        norm_head = head.translate(_APOSTROPHE_CHARS)
+        match = re.match(
+            rf"{re.escape(norm_head)}(?:\s+[—–-]\s+|\s*[—–]\s*)",
+            norm_text,
+            re.IGNORECASE,
+        )
+        if match is not None:
+            candidate = stripped[match.end() :].lstrip()
             if candidate:
                 return candidate
     return stripped
@@ -1017,6 +1127,7 @@ def _strip_declension_directive(text: str) -> str:
         return ""
     if _DECLENSION_STANDALONE.fullmatch(current):
         return ""
+    current = _DECLENSION_TRAILING_SENTENCE.sub("", current).rstrip()
     had_period = current.endswith(".")
     trimmed = _DECLENSION_TAIL.sub("", current).rstrip()
     if trimmed != current:

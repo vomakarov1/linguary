@@ -350,6 +350,8 @@ def test_notes_budget_at_least_one() -> None:
 
 
 def test_translation_input_states_notes_budget() -> None:
+    from linguary.application.context_builder import chapter_note_limit
+
     blocks = make_blocks(2)
     section = make_section(blocks)
     unit = make_unit(blocks[:1], treatments=(BlockTreatment.TRANSLATE,))
@@ -361,7 +363,7 @@ def test_translation_input_states_notes_budget() -> None:
     expected = notes_budget(
         unit_chars=len(blocks[0].text),
         chapter_chars=sum(len(block.text) for block in blocks),
-        per_chapter=8,
+        per_chapter=chapter_note_limit(section, 8),
     )
     assert f"В этом запросе — не больше {expected} языковых заметок" in context.request.input_text
     regenerated = builder.for_block_regeneration(

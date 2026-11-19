@@ -11,9 +11,7 @@ from linguary.domain.llm_log import Violation
 _SERVICE_TOKEN = re.compile(r'\b(?:b\d+|source_block_id|difficulty_id|artifact_index)\b', re.IGNORECASE)
 _EXPLANATION_LABEL = re.compile(r'\[b\d+\]\s*(?:[:—–-]\s*)?', re.IGNORECASE)
 _LEADING_EN_DASH = re.compile(r'^– ', re.MULTILINE)
-_INLINE_EN_DASH = re.compile(r' – ')
 _INLINE_DIALOGUE_BREAK = re.compile(r'([.:,!?…])\n— ')
-_GERMAN_QUOTES = re.compile(r'„([^“”]+)“')
 _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 'language_note.note'})
 # Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
@@ -106,15 +104,31 @@ def validate_a2_summary(
     source_texts: tuple[str, ...],
     source_language: str,
     language_detector: LanguageDetector,
+    require_parallel_russian: bool = False,
 ) -> None:
-    """Require a single source-language A2 paragraph without Russian translation."""
-    paragraphs = [part.strip() for part in re.split(r'\r?\n[ \t]*\r?\n+', body.strip())]
+    """Validate an A2 chapter summary.
+
+    By default requires a single source-language paragraph (no line breaks and
+    no Russian translation mixed in). Legacy frozen conditions with the old
+    two-paragraph prompt pass `require_parallel_russian=True`.
+    """
+    if require_parallel_russian:
+        _validate_legacy_parallel_a2_summary(
+            body,
+            source_texts=source_texts,
+            source_language=source_language,
+            language_detector=language_detector,
+        )
+        return
+    stripped = body.strip()
+    paragraphs = [part.strip() for part in re.split(r'\r?\n[ \t]*\r?\n+', stripped)]
     non_empty = [part for part in paragraphs if part]
-    if len(non_empty) != 1:
+    if len(non_empty) != 1 or '\n' in non_empty[0] or '\r' in non_empty[0]:
+        line_count = len([line for line in stripped.splitlines() if line.strip()])
         raise ReaderTextError(
             'a2_summary_requires_single_source_paragraph',
             detail=(
-                f'получено абзацев — {len(non_empty)}, '
+                f'получено абзацев — {max(len(non_empty), line_count)}, '
                 'требуется ровно один абзац на языке оригинала без перевода на русский'
             ),
         )
@@ -126,6 +140,18 @@ def validate_a2_summary(
             'a2_summary_requires_single_source_paragraph',
             detail=(
                 'алфавит не совпадает с языком оригинала; '
+                'требуется ровно один абзац на языке оригинала без перевода на русский'
+            ),
+        )
+    if source_script != 'CYRILLIC' and any(
+        unicodedata.name(char, '').startswith('CYRILLIC ')
+        for char in paragraph
+        if char.isalpha()
+    ):
+        raise ReaderTextError(
+            'a2_summary_requires_single_source_paragraph',
+            detail=(
+                'обнаружена кириллица в одноязычном пересказе; '
                 'требуется ровно один абзац на языке оригинала без перевода на русский'
             ),
         )
@@ -154,6 +180,76 @@ def validate_a2_summary(
         )
 
 
+def _validate_legacy_parallel_a2_summary(
+    body: str,
+    *,
+    source_texts: tuple[str, ...],
+    source_language: str,
+    language_detector: LanguageDetector,
+) -> None:
+    """Legacy two-paragraph EN + RU validation for frozen pre-migration BookConditions."""
+    paragraphs = [part.strip() for part in re.split(r'\r?\n[ \t]*\r?\n+', body.strip())]
+    if len(paragraphs) != 2 or not all(paragraphs):
+        bad_idx = (
+            1
+            if not paragraphs or not paragraphs[0]
+            else (2 if len(paragraphs) < 2 or not paragraphs[1] else 3)
+        )
+        non_empty = len([part for part in paragraphs if part])
+        raise ReaderTextError(
+            'a2_summary_requires_parallel_russian',
+            detail=(
+                f'абзац {bad_idx}: получено абзацев — {non_empty}, '
+                r'требуется двухабзацный формат EN\nRU через пустую строку '
+                '(абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+            ),
+        )
+    source_script = _dominant_script(' '.join(source_texts))
+    summary_script = _dominant_script(paragraphs[0])
+    if source_script is not None and summary_script != source_script:
+        raise ReaderTextError(
+            'a2_summary_requires_parallel_russian',
+            detail=(
+                'абзац 1: алфавит не совпадает с языком оригинала; '
+                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+            ),
+        )
+    source_language_probability = language_detector.probability_for_language(
+        paragraphs[0], source_language
+    )
+    if (
+        source_language_probability is not None
+        and source_language_probability < _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY
+    ):
+        raise ReaderTextError(
+            'a2_summary_requires_parallel_russian',
+            detail=(
+                f'абзац 1: текст не распознан как язык оригинала ({source_language}); '
+                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+            ),
+        )
+    letters = [char for char in paragraphs[1] if char.isalpha()]
+    cyrillic = [char for char in letters if unicodedata.name(char, '').startswith('CYRILLIC ')]
+    if not letters or len(cyrillic) / len(letters) < 0.5:
+        raise ReaderTextError(
+            'a2_summary_requires_parallel_russian',
+            detail=(
+                'абзац 2: ожидается перевод на русский язык; '
+                r'требуется формат EN\nRU (абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
+            ),
+        )
+    for index, paragraph in enumerate(paragraphs, start=1):
+        sentence_count = _sentence_count(paragraph)
+        if sentence_count > A2_SUMMARY_MAX_SENTENCES:
+            raise ReaderTextError(
+                'a2_summary_too_many_sentences',
+                detail=(
+                    f'абзац {index}: {sentence_count} предложений, '
+                    f'не больше {A2_SUMMARY_MAX_SENTENCES}'
+                ),
+            )
+
+
 class ReaderTextPolicy:
     semantic_correctness = 'not_evaluated'
 
@@ -161,10 +257,8 @@ class ReaderTextPolicy:
         if body is None:
             return None
         original = body
-        body = _replace_outside_quotes(body, re.compile('\u00ad'), '', protected_quotes)
         if kind == 'translation':
             body = _normalize_dialogue_dashes(body, protected_quotes)
-            body = _normalize_russian_typography(body, protected_quotes)
         if kind in _EXPLANATIONS:
             spans = _protected_spans(body, protected_quotes)
             matches = [match for match in _EXPLANATION_LABEL.finditer(body)
@@ -237,12 +331,6 @@ def _normalize_dialogue_dashes(body, protected_quotes):
     return _replace_outside_quotes(
         body, _INLINE_DIALOGUE_BREAK, r'\1 — ', protected_quotes,
     )
-
-
-def _normalize_russian_typography(body, protected_quotes):
-    """Replace stray en-dashes and German quotes outside protected source quotes."""
-    body = _replace_outside_quotes(body, _INLINE_EN_DASH, ' — ', protected_quotes)
-    return _replace_outside_quotes(body, _GERMAN_QUOTES, r'«\1»', protected_quotes)
 
 
 def _replace_outside_quotes(body, pattern, replacement, protected_quotes):

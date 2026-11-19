@@ -192,7 +192,10 @@ _CLAUSE_CONJUNCTION_PATTERN = re.compile(
     r",\s+(?:although|because|though|while|where|which|when|and|but|nor|yet|who|so|or|if)\b",
     re.IGNORECASE,
 )
-_CLAUSE_ELLIPSIS_PATTERN = re.compile(r"(?:…|\.\.\.+)\s+")
+_CLAUSE_ELLIPSIS_PATTERN = re.compile(
+    r'(?:…|\.\.\.+|(?:\.\s+){2,}\.)["\'\u201d\u2019\u00bb\u203a)\]]*\s+'
+)
+_CLAUSE_COMMA_PATTERN = re.compile(r',["\'\u201d\u2019\u00bb\u203a)\]]*\s+')
 _CLAUSE_LEVELS: tuple[str, ...] = (";", ":", "dash", "ellipsis", "conjunction")
 _DASH_MARKS: tuple[str, ...] = ("—", "–", " - ")
 
@@ -599,7 +602,17 @@ def _ellipsis_points(text: str, start: int, end: int) -> list[int]:
 
 
 def _comma_points(text: str, start: int, end: int) -> list[int]:
-    return _marked_points(text, start, end, ",")
+    """Comma boundaries followed by whitespace (optionally after closing quotes).
+
+    Numeric thousands separators (`1,000`, `3,14`) and mid-quote commas
+    (`‘Look,’`) are never split mid-token or before their closing quote.
+    """
+    points: list[int] = []
+    for match in _CLAUSE_COMMA_PATTERN.finditer(text, start, end):
+        point = match.end()
+        if start < point < end:
+            points.append(point)
+    return points
 
 
 def _clause_points(text: str, start: int, end: int, level: str) -> list[int]:
@@ -619,25 +632,41 @@ def _fit_clause_boundaries(
     protected: Sequence[tuple[int, int]],
     max_segment_chars: int,
 ) -> list[tuple[int, int]] | None:
-    """Greedily pick the fewest clause cuts so every span fits within `max_segment_chars`."""
+    """Choose the fewest, most balanced clause cuts so every span fits within `max_segment_chars`."""
     candidates = _boundaries_respecting_protected(start, end, sorted(set(points)), protected)
-    if len(candidates) < 3:
+    count = len(candidates)
+    if count < 3:
         return None
-    chosen = [start]
-    cursor = start
-    idx = 1
-    while end - cursor > max_segment_chars:
-        best: int | None = None
-        while idx < len(candidates) - 1 and candidates[idx] - cursor <= max_segment_chars:
-            best = candidates[idx]
-            idx += 1
-        if best is None:
-            return None
-        chosen.append(best)
-        cursor = best
-    chosen.append(end)
-    if any(b - a > max_segment_chars for a, b in zip(chosen, chosen[1:])):
+    span_len = end - start
+    min_parts = ceil(span_len / max_segment_chars)
+    target = span_len / max(2, min_parts)
+
+    # DP state: (part_count, balance_cost, cut_indices)
+    best: list[tuple[int, float, tuple[int, ...]] | None] = [None] * count
+    best[0] = (0, 0.0, ())
+    for right in range(1, count):
+        right_pos = candidates[right]
+        best_choice: tuple[int, float, tuple[int, ...]] | None = None
+        for left in range(right):
+            prev = best[left]
+            if prev is None:
+                continue
+            seg_len = right_pos - candidates[left]
+            if seg_len > max_segment_chars:
+                continue
+            candidate = (
+                prev[0] + 1,
+                prev[1] + (seg_len - target) ** 2,
+                prev[2] + (right,),
+            )
+            if best_choice is None or candidate < best_choice:
+                best_choice = candidate
+        best[right] = best_choice
+
+    winner = best[-1]
+    if winner is None:
         return None
+    chosen = [candidates[0], *(candidates[idx] for idx in winner[2])]
     return list(zip(chosen, chosen[1:]))
 
 
@@ -724,11 +753,14 @@ def _split_sentence(
     if end - start <= max_segment_chars:
         return [BlockSegment(start, end, sentence_index)]
 
+    combined_points: list[int] = []
     for level in _CLAUSE_LEVELS:
+        level_points = _clause_points(text, start, end, level)
+        combined_points.extend(level_points)
         boundaries = _boundaries_respecting_protected(
             start,
             end,
-            _clause_points(text, start, end, level),
+            level_points,
             protected,
         )
         if len(boundaries) < 3:
@@ -740,9 +772,6 @@ def _split_sentence(
                 for span_start, span_end in spans
             ]
 
-    combined_points: list[int] = []
-    for level in _CLAUSE_LEVELS:
-        combined_points.extend(_clause_points(text, start, end, level))
     fitted_clauses = _fit_clause_boundaries(
         start, end, combined_points, protected, max_segment_chars
     )
@@ -788,11 +817,13 @@ def segment_text(
 
     Text shorter than `min_block_chars` is one segment with sentence index 0.
     Longer text is split into sentences. A sentence longer than `max_segment_chars`
-    is split at the first level that keeps every part within the limit: `;`,
-    `:`, a dash (`—`, `–`, ` - `), a comma before a conjunction, then a word
-    boundary. Parts of one sentence share its `sentence_index`. Protected ranges
-    are never cut. A single covering span is returned as a segment and is not
-    collapsed to an empty tuple.
+    is split at the first single clause level that keeps every part within the limit:
+    `;`, `:`, a dash (`—`, `–`, ` - `), an ellipsis (`…`, `...`, `. . .`), or a
+    comma before a conjunction. If no single level fits, balanced cuts across
+    combined clause boundaries (and then spaced commas) are tried before falling
+    back to a word boundary. Parts of one sentence share its `sentence_index`.
+    Protected ranges are never cut. A single covering span is returned as a segment
+    and is not collapsed to an empty tuple.
     """
     if len(text) < min_block_chars:
         return (BlockSegment(0, len(text), 0),)
