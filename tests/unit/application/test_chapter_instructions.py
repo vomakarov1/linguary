@@ -295,7 +295,8 @@ def test_replace_rejected_glossary_variants_updates_petunya_in_required_points()
     """Rejected name forms in a required point become the approved name's case forms.
 
     Dropping the replacement, or mapping dative Петунье to Петуние instead of Петунии,
-    leaves the stale variant in the content-plan point.
+    leaves the stale variant in the content-plan point. A consonant-stem rejection of a
+    vowel-final decision takes that decision's case: Даскмира → Даскмеры, not Даскмера.
     """
     import linguary.application.chapter_instructions as chapter_instructions
 
@@ -365,9 +366,9 @@ def test_replace_rejected_glossary_variants_updates_petunya_in_required_points()
     )
     assert (
         replace(
-            "Путь в Даскмира короче. К Даскмиру ближе.",
+            "Путь в Даскмира короче. К Даскмиру ближе. О Даскмире речь. С Даскмиром рядом. Нет Даскмира.",
             decisions=(vowel_final,),
             chapter_candidates=(chapter_candidate("Duskmere", "Даскмир"),),
         )
-        == "Путь в Даскмера короче. К Даскмеру ближе."
+        == "Путь в Даскмеры короче. К Даскмере ближе. О Даскмере речь. С Даскмерой рядом. Нет Даскмеры."
     )

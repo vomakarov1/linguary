@@ -163,6 +163,8 @@ def replace_rejected_glossary_variants(
 
     A user decision wins over a chapter candidate for the same source spelling.
     ``Петунье`` maps to ``Петунии``: the dative of a ``-ья`` name is not ``-ие``.
+    A consonant stem takes the approved class: ``Даскмиру`` becomes ``Даскмере``
+    when the decision is ``Даскмера``, not ``Даскмеру``.
     """
     if not text or not decisions:
         return text
@@ -360,6 +362,20 @@ _YA_ENDING_TO_IYA = {
     "ьею": "иею",
 }
 
+# Consonant-stem singular endings mapped onto the approved declension class.
+# Masculine "-а" is genitive (Даскмира → Даскмеры), not animate accusative.
+# "-ья" keeps the soft sign; plain "-я" and "-ия" do not.
+_CONSONANT_CASE = {
+    "a": {"а": "ы", "у": "е", "е": "е", "ом": "ой", "ем": "ей"},
+    "ya": {"а": "и", "у": "е", "е": "е", "ом": "ей", "ем": "ей"},
+    "iya": {"а": "ии", "у": "ии", "е": "ии", "ом": "ией", "ем": "ией"},
+    "ья": {"а": "ьи", "у": "ье", "е": "ье", "ом": "ьей", "ем": "ьей"},
+}
+
+# Genitive -ы is spelled -и after these; instrumental -ой is -ей after hushers and ц.
+_GENITIVE_I = frozenset("кгхжчшщй")
+_INSTRUMENTAL_EY = frozenset("жчшщц")
+
 
 def _rejected_variant_pairs(
     decisions: Sequence[GlossarySnapshotEntry],
@@ -442,7 +458,10 @@ def _corresponding_form(surface: str, rejected: str, approved: str) -> str | Non
     suffix = surface[len(rejected):]
     approved_paradigm = _name_paradigm(approved)
     if _name_paradigm(rejected) is None and approved_paradigm is not None:
-        stem, _kind = approved_paradigm
+        stem, kind = approved_paradigm
+        ending = _consonant_case_ending(kind, approved, suffix)
+        if ending is not None:
+            return _spell_approved_ending(stem, ending)
         return stem + suffix
     return approved + suffix
 
@@ -466,6 +485,26 @@ def _inflect_like(surface: str, rejected: str, approved: str) -> str | None:
             return None
         return approved_stem + mapped
     return None
+
+
+def _consonant_case_ending(kind: str, approved: str, suffix: str) -> str | None:
+    """Approved-class ending for a consonant-stem suffix, if that case is known."""
+    if kind == "ya" and approved.endswith("ья"):
+        kind = "ья"
+    table = _CONSONANT_CASE.get(kind)
+    if table is None:
+        return None
+    return table.get(suffix)
+
+
+def _spell_approved_ending(stem: str, ending: str) -> str:
+    """Attach ``ending`` to ``stem``, applying the orthography of that ending."""
+    last = stem[-1:]
+    if ending == "ы" and last in _GENITIVE_I:
+        ending = "и"
+    elif ending == "ой" and last in _INSTRUMENTAL_EY:
+        ending = "ей"
+    return stem + ending
 
 
 def _name_paradigm(lemma: str) -> tuple[str, str] | None:
