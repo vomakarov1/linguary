@@ -2243,4 +2243,32 @@ def test_short_chapter_caps_notes_budget_to_body_blocks() -> None:
     )
     assert frag0.language_notes_per_chapter + frag1.language_notes_per_chapter == 2
 
+    # Heading-only section falls back to total textual block count.
+    from linguary.application.context_builder import chapter_note_limit
+
+    headings_only = make_analysis_section(
+        section_id="sec-head",
+        title="Part I",
+        blocks=(
+            make_analysis_block(
+                section_id="sec-head", order=0, text="PART ONE", type=BlockType.HEADING
+            ),
+        ),
+    )
+    assert chapter_note_limit(headings_only, 8) == 1
+
+    # Legacy READ_AS_IS owners exceeding chapter_note_limit are still honored without crashing.
+    read_as_is_plan = TreatmentPlan.of_treatments(
+        short_section.id,
+        ((b.id, BlockTreatment.READ_AS_IS) for b in short_section.blocks),
+    )
+    read_as_is_unit = TranslationUnit.of_blocks(
+        id="u-read", blocks=short_section.blocks, plan=read_as_is_plan
+    )
+    legacy_read_analysis = dc_replace(
+        crowded_analysis,
+        treatment_plan=read_as_is_plan,
+    )
+    assert _scene_notes_budget(legacy_read_analysis, short_section, read_as_is_unit, per_chapter=8) == 3
+
 

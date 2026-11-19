@@ -126,7 +126,7 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "become": frozenset({"became"}),
     "begin": frozenset({"began", "begun", "beginning"}),
     "bend": frozenset({"bent"}),
-    "bet": frozenset({"bet", "betting"}),
+    "bet": frozenset({"bet", "betted", "betting"}),
     "bind": frozenset({"bound"}),
     "bite": frozenset({"bit", "bitten", "biting"}),
     "bleed": frozenset({"bled"}),
@@ -161,7 +161,7 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "flee": frozenset({"fled"}),
     "fling": frozenset({"flung"}),
     "fly": frozenset({"flew", "flown"}),
-    "forbid": frozenset({"forbade", "forbidden"}),
+    "forbid": frozenset({"forbade", "forbad", "forbidden"}),
     "forget": frozenset({"forgot", "forgotten", "forgetting"}),
     "forgive": frozenset({"forgave", "forgiven", "forgiving"}),
     "freeze": frozenset({"froze", "frozen", "freezing"}),
@@ -238,7 +238,7 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "sting": frozenset({"stung"}),
     "stink": frozenset({"stank", "stunk"}),
     "stride": frozenset({"strode", "stridden", "striding"}),
-    "strike": frozenset({"struck", "striking"}),
+    "strike": frozenset({"struck", "stricken", "striking"}),
     "swear": frozenset({"swore", "sworn"}),
     "sweep": frozenset({"swept"}),
     "swell": frozenset({"swelled", "swollen"}),
@@ -256,7 +256,7 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "wear": frozenset({"wore", "worn"}),
     "weep": frozenset({"wept"}),
     "win": frozenset({"won", "winning"}),
-    "wind": frozenset({"wound"}),
+    "wind": frozenset({"wound", "winded"}),
     "wring": frozenset({"wrung"}),
     "write": frozenset({"wrote", "written", "writing"}),
 }
@@ -544,9 +544,26 @@ def block_notes(
     notes = [
         note
         for note in _collapse(drafts, plan)
-        if note.labels or note.term or note.ipa or note.body
+        if note.body or note.ipa
     ]
     return tuple(sorted(notes, key=_marker_key))
+
+
+def _hint_evidence_keys(hint: GlossaryHint, block_id: str) -> set[str]:
+    content = {"original": hint.original, "translation": hint.translation, "note": hint.note}
+    return {
+        artifact_key("glossary_hint.note", block_id, content),
+        artifact_key("glossary_hint.translation", block_id, content),
+    }
+
+
+def _note_evidence_key(note: LanguageNote) -> str:
+    content = {
+        "original_excerpt": note.original_excerpt,
+        "note": note.note,
+        "translated_excerpt": note.translated_excerpt,
+    }
+    return artifact_key("language_note.note", note.block_id, content)
 
 
 def _hint_only_dropped(
@@ -557,12 +574,7 @@ def _hint_only_dropped(
 ) -> bool:
     if not dropped:
         return False
-    content = {"original": hint.original, "translation": hint.translation, "note": hint.note}
-    keys = {
-        artifact_key("glossary_hint.note", block_id, content),
-        artifact_key("glossary_hint.translation", block_id, content),
-    }
-    ids = _ids_for(evidences, keys)
+    ids = _ids_for(evidences, _hint_evidence_keys(hint, block_id))
     return bool(ids) and set(ids) <= dropped
 
 
@@ -573,13 +585,7 @@ def _note_only_dropped(
 ) -> bool:
     if not dropped:
         return False
-    content = {
-        "original_excerpt": note.original_excerpt,
-        "note": note.note,
-        "translated_excerpt": note.translated_excerpt,
-    }
-    key = artifact_key("language_note.note", note.block_id, content)
-    ids = _ids_for(evidences, {key})
+    ids = _ids_for(evidences, {_note_evidence_key(note)})
     return bool(ids) and set(ids) <= dropped
 
 
@@ -661,12 +667,7 @@ def _hint_draft(
     may then drop a repeated sentence, a quoted or leading translation, or a
     headword gloss, and show a past-tense verb as an infinitive.
     """
-    content = {"original": hint.original, "translation": hint.translation, "note": hint.note}
-    keys = {
-        artifact_key("glossary_hint.note", block_id, content),
-        artifact_key("glossary_hint.translation", block_id, content),
-    }
-    ids = () if strip_note else _ids_for(evidences, keys)
+    ids = () if strip_note else _ids_for(evidences, _hint_evidence_keys(hint, block_id))
     marker_end = _find_end(text, hint.original)
     cleaned_note = "" if strip_note else _cleaned_hint_note(hint.note)
     lexical = _plain_lexical(hint.original, ids, known)
@@ -682,6 +683,7 @@ def _hint_draft(
     base_translation = _strip_leading_headword(hint.translation, hint.original)
     term: str | None = hint.original
     translation = base_translation
+    pre_infinitive: str | None = None
     if verbal:
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
@@ -691,15 +693,16 @@ def _hint_draft(
         infinitive = _to_infinitive_term(hint.original)
         if infinitive is not None:
             stripped_tr = _strip_leading_headword(translation, infinitive)
+            pre_infinitive = stripped_tr
             converted = _russian_past_to_infinitive(stripped_tr)
             if converted != stripped_tr or _has_russian_infinitive(stripped_tr):
                 term = infinitive
                 translation = converted
             else:
                 translation = stripped_tr
-    kept_note = _strip_leading_translation(kept_note, translation)
-    if base_translation != translation:
-        kept_note = _strip_leading_translation(kept_note, base_translation)
+    for candidate in (translation, pre_infinitive, base_translation):
+        if candidate:
+            kept_note = _strip_leading_translation(kept_note, candidate)
     long = (
         treatment is BlockTreatment.TRANSLATE
         and bool(cleaned_note)
@@ -734,13 +737,7 @@ def _note_draft(
     known: Mapping[str, Difficulty],
 ) -> _Draft:
     """A language note. A missing excerpt is kept, with no marker."""
-    content = {
-        "original_excerpt": note.original_excerpt,
-        "note": note.note,
-        "translated_excerpt": note.translated_excerpt,
-    }
-    key = artifact_key("language_note.note", note.block_id, content)
-    ids = _ids_for(evidences, {key})
+    ids = _ids_for(evidences, {_note_evidence_key(note)})
     return _Draft(
         label_ids=ids,
         kind_ids=ids,
@@ -847,12 +844,12 @@ def _find_end(text: str, quote: str) -> int | None:
 
 
 def _word_bounded_end(text: str, quote: str, *, ignore_case: bool) -> int | None:
-    """End of the first `quote` matching on word boundaries where edges are alphanumeric."""
+    """End of the first `quote` matching on word boundaries where edges are alphanumeric or apostrophe."""
     stripped = quote.strip()
     if not stripped:
         return None
     left_boundary = r"(?<!\w)" if stripped[0].isalnum() else ""
-    right_boundary = r"(?!\w)" if stripped[-1].isalnum() else ""
+    right_boundary = r"(?!\w)" if (stripped[-1].isalnum() or stripped[-1] in "'’") else ""
     flags = re.IGNORECASE if ignore_case else 0
     pattern = re.compile(rf"{left_boundary}{re.escape(stripped)}{right_boundary}", flags)
     match = pattern.search(text)
@@ -926,9 +923,29 @@ def _surface_tokens(text: str) -> list[tuple[str, int]]:
     ]
 
 
+_SINGLE_CONSONANT_CVC_EXCEPTIONS = frozenset({"bus", "gas"})
+
+
+def _is_monosyllabic_cvc(verb: str) -> bool:
+    """Whether `verb` is a single-syllable CVC stem that must double before `-ed`/`-ing`."""
+    if len(verb) < 3 or verb in _SINGLE_CONSONANT_CVC_EXCEPTIONS:
+        return False
+    if verb[-1] in "aeiouwxy" or not _is_vowel(verb, -2) or _is_vowel(verb, -3):
+        return False
+    vowel_groups = sum(
+        1
+        for i in range(len(verb))
+        if _is_vowel(verb, i) and (i == 0 or not _is_vowel(verb, i - 1))
+    )
+    return vowel_groups == 1
+
+
 def _regular_present_or_participle(surface: str, verb: str) -> bool:
     """Valid 3rd-person singular or `-ing` participle of `verb`."""
-    if verb.endswith(("s", "x", "z", "ch", "sh", "o")):
+    if verb.endswith("o"):
+        if surface in {f"{verb}es", f"{verb}s"}:
+            return True
+    elif verb.endswith(("s", "x", "z", "ch", "sh")):
         if surface == f"{verb}es":
             return True
     elif verb.endswith("y") and len(verb) >= 3 and verb[-2] not in "aeiou":
@@ -936,6 +953,8 @@ def _regular_present_or_participle(surface: str, verb: str) -> bool:
             return True
     elif surface == f"{verb}s":
         return True
+    if _is_monosyllabic_cvc(verb):
+        return surface == f"{verb}{verb[-1]}ing"
     if surface == f"{verb}ing":
         return True
     if verb.endswith("ie") and surface == f"{verb[:-2]}ying":
@@ -968,6 +987,8 @@ def _same_verb(surface: str, verb: str) -> bool:
         return True
     if verb in _IRREGULAR_VERB_FORMS:
         return False
+    if _is_monosyllabic_cvc(verb):
+        return surface == f"{verb}{verb[-1]}ed"
     if _same_word(surface, verb):
         return True
     if _regular_ed_stem(surface) == verb:

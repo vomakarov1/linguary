@@ -2952,6 +2952,7 @@ __all__ = [
     "block_regeneration_instructions",
     "chapter_analysis_instructions",
     "chapter_fragment_instructions",
+    "chapter_note_limit",
     "is_textual",
     "source_text_for_model",
     "textual_blocks",

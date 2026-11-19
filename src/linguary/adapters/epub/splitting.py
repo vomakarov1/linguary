@@ -641,32 +641,37 @@ def _fit_clause_boundaries(
     min_parts = ceil(span_len / max_segment_chars)
     target = span_len / max(2, min_parts)
 
-    # DP state: (part_count, balance_cost, cut_indices)
-    best: list[tuple[int, float, tuple[int, ...]] | None] = [None] * count
-    best[0] = (0, 0.0, ())
+    # DP state: (part_count, balance_cost) with parent index reconstruction.
+    best: list[tuple[int, float] | None] = [None] * count
+    parent: list[int] = [-1] * count
+    best[0] = (0, 0.0)
     for right in range(1, count):
         right_pos = candidates[right]
-        best_choice: tuple[int, float, tuple[int, ...]] | None = None
-        for left in range(right):
+        best_choice: tuple[int, float] | None = None
+        best_left = -1
+        for left in range(right - 1, -1, -1):
+            seg_len = right_pos - candidates[left]
+            if seg_len > max_segment_chars:
+                break
             prev = best[left]
             if prev is None:
                 continue
-            seg_len = right_pos - candidates[left]
-            if seg_len > max_segment_chars:
-                continue
-            candidate = (
-                prev[0] + 1,
-                prev[1] + (seg_len - target) ** 2,
-                prev[2] + (right,),
-            )
-            if best_choice is None or candidate < best_choice:
+            candidate = (prev[0] + 1, prev[1] + (seg_len - target) ** 2)
+            if best_choice is None or candidate <= best_choice:
                 best_choice = candidate
+                best_left = left
         best[right] = best_choice
+        parent[right] = best_left
 
-    winner = best[-1]
-    if winner is None:
+    if best[-1] is None:
         return None
-    chosen = [candidates[0], *(candidates[idx] for idx in winner[2])]
+    indices: list[int] = []
+    node = count - 1
+    while node >= 0:
+        indices.append(node)
+        node = parent[node]
+    indices.reverse()
+    chosen = [candidates[idx] for idx in indices]
     return list(zip(chosen, chosen[1:]))
 
 

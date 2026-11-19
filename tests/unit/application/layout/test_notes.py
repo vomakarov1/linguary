@@ -1254,6 +1254,11 @@ def test_same_verb_and_find_end_reject_false_positives_and_cross_sentence_gaps()
         ("He didn’t shout!", "out!"),
         ("She’s right?", "he’s?"),
         ("‘hello’", "‘he"),
+        ("He was hoping for rain.", "to hop"),
+        ("She stared across the hall.", "to star"),
+        ("They scared the birds away.", "to scar"),
+        ("He taped the box shut.", "to tap"),
+        ("‘I don’t know.’", "don'"),
     )
     for text, original in false_pairs:
         block = _block(text)
@@ -1264,7 +1269,17 @@ def test_same_verb_and_find_end_reject_false_positives_and_cross_sentence_gaps()
         )
         assert block_notes(block, result, None, ())[0].marker_end is None, (original, text)
 
-    # Regular/dual-paradigm verb forms (including US/UK spelling) still bind markers cleanly.
+    # Trailing-apostrophe truncation (`don'`) skips `don’t` and matches standalone `don’`.
+    trunc_text = "‘I don’t know — don’ ask me.’"
+    trunc_block = _block(trunc_text)
+    trunc_res = _result(
+        trunc_block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(GlossaryHint("don'", "не"),),
+    )
+    assert block_notes(trunc_block, trunc_res, None, ())[0].marker_end == trunc_text.rfind("don’") + len("don’")
+
+    # Regular/dual-paradigm verb forms (including US/UK spelling and vowel+o) bind markers cleanly.
     verb_pairs = (
         ("He sniveled quietly.", "to snivel", "sniveled"),
         ("He snivelled quietly.", "to snivel", "snivelled"),
@@ -1276,6 +1291,8 @@ def test_same_verb_and_find_end_reject_false_positives_and_cross_sentence_gaps()
         ("She hugged him.", "to hug", "hugged"),
         ("He nodded twice.", "to nod", "nodded"),
         ("The light faded fast.", "to fade", "faded"),
+        ("The dove coos softly.", "to coo", "coos"),
+        ("He hopped over the wall.", "to hop", "hopped"),
     )
     for text, original, matched in verb_pairs:
         block = _block(text)
@@ -1318,19 +1335,43 @@ def test_headword_stripping_preserves_hyphenated_compounds_and_empty_notes_drop_
     hints = (
         GlossaryHint("mini", "mini-юбка"),
         GlossaryHint("to single out", "to single out — выделить", "Выделить. Особо отметить."),
-        GlossaryHint("singled out", "to single out — выделил", "Выделить. Второе замечание."),
+        GlossaryHint("singled out", "to single out — выделил", "Выделил. Второе замечание."),
         GlossaryHint("Potter", "Поттер", "Уменьшительная форма. Фамилия Поттер не склоняется."),
     )
     empty_note = LanguageNote("n-empty", block.id, "Potter", "Имя не склоняется.")
     real_note = LanguageNote("n-real", block.id, "singled out", "Фразовый глагол.")
+    wordplay_diff = _difficulty(block.id, (_anchor(block, "Potter"),), "wordplay", difficulty_id="d-empty-wp")
+    wp_plan = _plan(wordplay_diff)
+    wp_evidence = ContentEvidence(
+        wp_plan.sha256,
+        (
+            HelpEvidence(
+                wordplay_diff.id,
+                wordplay_diff.required_points[0].id,
+                "language_note.note",
+                block.id,
+                artifact_key(
+                    "language_note.note",
+                    empty_note.block_id,
+                    {
+                        "original_excerpt": empty_note.original_excerpt,
+                        "note": empty_note.note,
+                        "translated_excerpt": empty_note.translated_excerpt,
+                    },
+                ),
+                empty_note.note,
+            ),
+        ),
+    )
     result = _result(
         block,
         treatment=BlockTreatment.GLOSSARY_ONLY,
         hints=hints,
         notes=(empty_note, real_note),
+        evidence=wp_evidence,
     )
 
-    notes = block_notes(block, result, None, ())
+    notes = block_notes(block, result, wp_plan, ())
     single_out_notes = [note.body for note in notes if note.term == "to single out"]
     assert single_out_notes == [
         ("выделить", "Особо отметить."),
@@ -1339,6 +1380,6 @@ def test_headword_stripping_preserves_hyphenated_compounds_and_empty_notes_drop_
     by_term = {note.term: note.body for note in notes if note.term}
     assert by_term["mini"] == ("mini-юбка",)
     assert by_term["Potter"] == ("Поттер", "Уменьшительная форма.")
-    # Empty LanguageNote is dropped before numbering, leaving only real_note.
+    # Empty LanguageNote is dropped even if it carried a kind label (wordplay), leaving only real_note.
     lang_notes = [note for note in notes if note.origin == "language_note"]
     assert [note.body for note in lang_notes] == [("Фразовый глагол.",)]
