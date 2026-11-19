@@ -339,6 +339,14 @@ def test_replace_rejected_glossary_variants_updates_petunya_in_required_points()
         )
         == "К тёте Петунии зашли. Дом Петунии рядом. Петуния молчит."
     )
+    assert (
+        replace(
+            "К Петуньям. С Петуньями. О Петуньях.",
+            decisions=(petunia,),
+            chapter_candidates=(chapter_candidate("Petunia", "Петунья"),),
+        )
+        == "К Петуниям. С Петуниями. О Петуниях."
+    )
     assert replace(text, decisions=(suggested,), chapter_candidates=(chapter_candidate("Petunia", "Петунья"),)) == text
     assert replace(text, decisions=(), chapter_candidates=(chapter_candidate("Petunia", "Петунья"),)) == text
     assert (
