@@ -180,6 +180,40 @@ def test_validate_a2_summary_rejects_overlong_multi_sentence_recap():
         )
 
 
+def test_reader_policy_normalizes_en_dash_and_inline_newline_before_dialogue_dash():
+    """Translation replies use an em dash, and one newline after punctuation joins the reply.
+
+    Leaving the en dash, or joining a paragraph break or a protected quote, fails the test.
+    """
+    policy = ReaderTextPolicy()
+    joined = {
+        ".": "Конец. — Да.",
+        ":": "Конец: — Да.",
+        ",": "Конец, — Да.",
+        "!": "Конец! — Да.",
+        "?": "Конец? — Да.",
+        "…": "Конец… — Да.",
+    }
+    for punct, expected in joined.items():
+        assert policy.prepare("translation", f"Конец{punct}\n— Да.", ()) == expected
+
+    assert policy.prepare("translation", "– Реплика.", ()) == "— Реплика."
+    assert policy.prepare("translation", "Абзац.\n– Реплика.", ()) == "Абзац. — Реплика."
+    assert policy.prepare("translation", "Конец.\n\n– Новая.", ()) == "Конец.\n\n— Новая."
+    assert policy.prepare("translation", "Конец.\n\n— Новая.", ()) == "Конец.\n\n— Новая."
+    assert policy.prepare("summary", "– Реплика.", ()) == "– Реплика."
+    assert (
+        policy.prepare("translation", "– Он сказал «– нет».", ("– нет",))
+        == "— Он сказал «– нет»."
+    )
+    protected = "Конец.\n— «.\n— внутри»."
+    assert policy.prepare("translation", protected, (".\n— внутри",)) == protected
+    outside = "– Снаружи.\nТекст.\n— Дальше «.\n— внутри»."
+    assert policy.prepare("translation", outside, (".\n— внутри",)) == (
+        "— Снаружи.\nТекст.\n— Дальше «.\n— внутри»."
+    )
+
+
 def test_reader_text_error_includes_kind_and_block_id():
     from linguary.domain import BlockProcessingResult, BlockTreatment, LanguageNote
 

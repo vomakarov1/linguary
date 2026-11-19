@@ -52,9 +52,14 @@ from linguary.application.block_labels import without_block_labels
 from linguary.application.chapter_instructions import (
     instructions_respecting_glossary,
     note_respecting_glossary,
+    replace_rejected_glossary_variants,
 )
 from linguary.application.errors import ApplicationError
-from linguary.application.reader_text import _A2_NOTE_DISCIPLINE, learner_instructions
+from linguary.application.reader_text import (
+    _A2_DIALOGUE_AND_CALQUE_RULES,
+    _A2_NOTE_DISCIPLINE,
+    learner_instructions,
+)
 from linguary.application.llm_dto import (
     BlockResultResponse,
     ChapterAnalysisResponse,
@@ -134,7 +139,7 @@ English Help, помощь и произношение, если они вклю
 «(только для контекста, в blocks не возвращать)» в массив blocks не включай). Соседи не цели:
 не переводи их отдельно, не возвращай для них помощь, произношение или новые ID.
 Запрещены кальки и несочетаемые союзы («хотя зато», «больше того», «не одобрял воображения», «пострел» вместо «сорванец / негодник»), пропуск конечного обстоятельства tonight, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», пометы «вариант стоит проверить» и «в переводе передано как...», шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
-""" + _A2_NOTE_DISCIPLINE
+""" + _A2_NOTE_DISCIPLINE + _A2_DIALOGUE_AND_CALQUE_RULES
 
 
 CONTENT_PLAN_PROMPT_VERSION = "content-plan-v2.1"
@@ -171,7 +176,8 @@ model_flagged_review, note, description. Соблюдай обязательны
 description для person и place пишется на языке перевода ({target_language}), строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
 context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor,
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
-Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора.
+Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора (said Harry). Не спойлерь каноническое имя (Hagrid) у said the stranger и said the giant до первого называния персонажа по имени в тексте.
+В glossary_candidates.note указывай грамматический род топонимов (Privet Drive — ж. р., улица) и животных (tabby cat — ж. р., кошка; boa constrictor — м. р., обращение на «ты»), а также несклоняемость фамилий.
 Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
 scenes: start_block_id, end_block_id, summary, location, participants,
 visual_facts, visual_assumptions, continues_previous_scene.
@@ -198,6 +204,10 @@ priority, help_kind, required_points [{{id, description}}]. Копируй quote
 не раскрывай сокращения. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end]. Владелец входит в anchors.
 false_friend — слово похоже на русское, значит другое.
 speech_style — диалект, акцент, особенности речи; только первое появление особенности персонажа.
+Отмечай speech_style («Речь персонажа.») также при первом появлении ненормативных грамматических форм (we was, you was, don' need, them as).
+В required_points трудности блока bK запрещено цитировать и разбирать фразы из более поздних блоков b(K+1)..bN.
+Бюджет заметок — верхний предел («не больше N»), а не норма, которую нужно заполнить.
+Для reader_chapter_summary (Previously in Chapter...) используй простую лексику A2 в Present Simple и стандартные английские кавычки вместо «ёлочек».
 parody — в required_points назвать исходный текст.
 Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
 lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR.
@@ -255,7 +265,7 @@ _CONTENT_PLAN_PROCESSING_V3 = _CONTENT_PLAN_PROCESSING.replace('content-plan-v2.
 Служебные context_facts применяй только к назначенным субъектам и их точным исходным привязкам.
 Не выдавай inferred/unknown за подтверждённый факт; решения глоссария имеют приоритет.
 Не превращай эти служебные сведения в обязательную заметку читателю.
-""" + _A2_NOTE_DISCIPLINE
+""" + _A2_NOTE_DISCIPLINE + _A2_DIALOGUE_AND_CALQUE_RULES
 
 _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS = """\
 Профиль content-plan-v3 для режима чтения на английском с помощью к трудным местам.
@@ -910,7 +920,7 @@ class ContextBuilder:
         raw_decisions = tuple(self._user_decisions if user_decisions is None else user_decisions)
         chapter_candidates = _pedagogical_glossary_candidates(
             glossary_candidates,
-            user_decisions=raw_decisions if self._name_translation_policy is None else (),
+            user_decisions=raw_decisions,
             target_language=document.target_language,
         )
         context = self._chapter_context(document=document, section=section,
@@ -1381,7 +1391,12 @@ class ContextBuilder:
                 pronunciation_version=pronunciation_version,
                 segment_lines=segment_lines,
             ),
-            _owned_content_plan(analysis, unit),
+            _owned_content_plan(
+                analysis,
+                unit,
+                decisions=glossary.mandatory_entries,
+                chapter_candidates=candidates,
+            ),
         ]
         return "\n\n".join(part for part in parts if part)
 
@@ -2969,7 +2984,13 @@ def _owned_difficulty_aliases(
     return mapping
 
 
-def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str:
+def _owned_content_plan(
+    analysis: ChapterAnalysis,
+    unit: TranslationUnit,
+    *,
+    decisions: Sequence[GlossarySnapshotEntry] = (),
+    chapter_candidates: Iterable[GlossaryCandidate] = (),
+) -> str:
     if analysis.content_plan is None:
         return ""
     aliases = {item.block.id: _alias(i) for i, item in enumerate(unit.items, 1)}
@@ -2989,6 +3010,12 @@ def _owned_content_plan(analysis: ChapterAnalysis, unit: TranslationUnit) -> str
             anchor["block_id"] = aliases.get(source_id, related.get(source_id))
             anchor.pop("start", None)
             anchor.pop("end", None)
+        for point in value["required_points"]:
+            point["description"] = replace_rejected_glossary_variants(
+                point["description"],
+                decisions=decisions,
+                chapter_candidates=chapter_candidates,
+            )
         difficulties.append(value)
     facts = []
     for fact in analysis.content_plan.context_facts:

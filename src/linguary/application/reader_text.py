@@ -10,6 +10,8 @@ from linguary.domain.llm_log import Violation
 
 _SERVICE_TOKEN = re.compile(r'\b(?:b\d+|source_block_id|difficulty_id|artifact_index)\b', re.IGNORECASE)
 _EXPLANATION_LABEL = re.compile(r'\[b\d+\]\s*(?:[:—–-]\s*)?', re.IGNORECASE)
+_LEADING_EN_DASH = re.compile(r'^– ', re.MULTILINE)
+_INLINE_DIALOGUE_BREAK = re.compile(r'([.:,!?…])\n— ')
 _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 'language_note.note'})
 # Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
@@ -173,6 +175,8 @@ class ReaderTextPolicy:
         if body is None:
             return None
         original = body
+        if kind == 'translation':
+            body = _normalize_dialogue_dashes(body, protected_quotes)
         if kind in _EXPLANATIONS:
             spans = _protected_spans(body, protected_quotes)
             matches = [match for match in _EXPLANATION_LABEL.finditer(body)
@@ -235,6 +239,31 @@ class ReaderTextPolicy:
         return tuple(checked)
 
 
+def _normalize_dialogue_dashes(body, protected_quotes):
+    """Use an em dash for a reply and join one newline after punctuation.
+
+    A protected quote that itself contains a newline blocks the join: the quote
+    must stay byte-for-byte, including a break the model copied from it.
+    """
+    body = _replace_outside_quotes(body, _LEADING_EN_DASH, '— ', protected_quotes)
+    if any('\n' in quote for quote in protected_quotes if quote):
+        return body
+    return _replace_outside_quotes(
+        body, _INLINE_DIALOGUE_BREAK, r'\1 — ', protected_quotes,
+    )
+
+
+def _replace_outside_quotes(body, pattern, replacement, protected_quotes):
+    spans = _protected_spans(body, protected_quotes)
+
+    def replace(match):
+        if any(start < match.end() and end > match.start() for start, end in spans):
+            return match.group(0)
+        return match.expand(replacement)
+
+    return pattern.sub(replace, body)
+
+
 def _rebuilt_translation(slots):
     """Join via the domain method. A half-built result would reject the new slots."""
     carrier = object.__new__(BlockProcessingResult)
@@ -246,6 +275,13 @@ _A2_NOTE_DISCIPLINE = """
 В блоках TRANSLATE запрещены капитанские сноски об очевидных местоимениях («she и her относятся к...», «he относится к...»), базовых предлогах («from no one») и прозрачных ремарках («sounding relieved»). Не склеивай разные концы абзаца в одну сноску. Не копируй в original или original_excerpt фразы длиннее 5 слов. Не повторяй объяснение конструкции, уже разобранной в главе (had + V3, must/could have + V3, snapped).
 В glossary_hints приводи глаголы к инфинитиву с to («to snigger — хихикать», «to nod — кивать») и оставляй note пустым для обычных слов без игры слов и идиоматики.
 Запрещены «помета к глаголу речи», «реалия», «страдательный оборот», «превосходная степень» и «причастие прошедшего времени». Не дублируй в сноске целое предложение и его перевод.
+"""
+
+_A2_DIALOGUE_AND_CALQUE_RULES = """
+Русские реплики оформляй длинным тире «— » в начале реплики, а не средним тире «– » и не кавычками вместо реплики.
+Сверяй род адресата во 2-м лице: You told me... тёте Петунии передавай как «Ты сказала».
+Сверяй местоимения 3-го лица с родом перевода: coat — пальто требует «оно».
+Не калькируй: marmalade передавай как апельсиновый джем; a great Muggle — отпетый/здоровенный магл; rather fond of — весьма люблю; any of the lights — нигде не включая свет; large chocolate ice-creams — большие порции шоколадного мороженого; go boil yer heads — катитесь оба к лешему, без вульгаризма «проблевался»; lot в her lot понимай как «компания, братия»; в Going to be any more showers...? не пропускай опущенное Are there.
 """
 
 
@@ -279,7 +315,7 @@ snapped и went out, если они встречаются; не считай �
 BYR, подсказки и заметки объясняют трудность понятным русским языком, без неподтверждённых деталей.
 Длина предложений и редкая лексика — повод для редакторской проверки, не сертификат CEFR.
 Для A2 без english help верни before_you_read: [] и before_you_read_evidence: []. Трудные места объясняй в language_notes под абзацем.
-''' + _A2_NOTE_DISCIPLINE
+''' + _A2_NOTE_DISCIPLINE + _A2_DIALOGUE_AND_CALQUE_RULES
     if reader_level.strip().lower() == 'c1':
         return common + '\nДля C1 сохраняй естественный ритм и давай помощь только к действительно редким, архаичным или неочевидным местам.\n'
     return common + '\nСохраняй прежнюю калибровку B1–B2; давай достаточную помощь для выбранного уровня.\n'

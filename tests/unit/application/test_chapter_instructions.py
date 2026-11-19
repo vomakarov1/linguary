@@ -289,3 +289,63 @@ def test_item_naming_decision_without_quotes_is_kept(item: str) -> None:
         )
         == instructions
     )
+
+
+def test_replace_rejected_glossary_variants_updates_petunya_in_required_points() -> None:
+    """Rejected name forms in a required point become the approved name's case forms.
+
+    Dropping the replacement, or mapping dative Петунье to Петуние instead of Петунии,
+    leaves the stale variant in the content-plan point.
+    """
+    import linguary.application.chapter_instructions as chapter_instructions
+
+    replace = getattr(chapter_instructions, "replace_rejected_glossary_variants", None)
+    assert replace is not None
+    assert "replace_rejected_glossary_variants" in chapter_instructions.__all__
+
+    text = "К тёте Петунье зашли. Дом Петуньи рядом. Петунья молчит."
+    aunt = GlossarySnapshotEntry(
+        source_text="Aunt Petunia",
+        translation="тётя Петуния",
+        type=ConceptType.PERSON,
+        status=TermStatus.APPROVED,
+    )
+    petunia = GlossarySnapshotEntry(
+        source_text="Petunia",
+        translation="Петуния",
+        type=ConceptType.PERSON,
+        status=TermStatus.APPROVED,
+    )
+    suggested = GlossarySnapshotEntry(
+        source_text="Petunia",
+        translation="Петуния",
+        type=ConceptType.PERSON,
+        status=TermStatus.SUGGESTED,
+    )
+
+    assert (
+        replace(
+            text,
+            decisions=(aunt,),
+            chapter_candidates=(chapter_candidate("Aunt Petunia", "тётя Петунья"),),
+        )
+        == "К тёте Петунии зашли. Дом Петунии рядом. Петуния молчит."
+    )
+    assert (
+        replace(
+            text,
+            decisions=(petunia,),
+            chapter_candidates=(chapter_candidate("Petunia", "Петунья"),),
+        )
+        == "К тёте Петунии зашли. Дом Петунии рядом. Петуния молчит."
+    )
+    assert replace(text, decisions=(suggested,), chapter_candidates=(chapter_candidate("Petunia", "Петунья"),)) == text
+    assert replace(text, decisions=(), chapter_candidates=(chapter_candidate("Petunia", "Петунья"),)) == text
+    assert (
+        replace(
+            "Путь в Даскмира короче.",
+            decisions=(DUSKMERE,),
+            chapter_candidates=(chapter_candidate("Duskmere", "Даскмир"),),
+        )
+        == "Путь в Даскмера короче."
+    )

@@ -1912,6 +1912,243 @@ def test_a2_instructions_require_help_for_winked_and_forbid_trivial_translate_no
             assert phrase in instructions
 
 
+def test_owned_content_plan_replaces_rejected_glossary_variants_and_pedagogical_pass_keeps_user_decisions_with_name_policy() -> None:
+    """Content-plan points use the approved name, and a name policy still applies user decisions.
+
+    The rejected suggestion belongs to this chapter's analysis: book candidates with the
+    same analysis id are not repeated. The pedagogical candidate is the only line the
+    model sees: the decision spelling «Пётуния Дурсли» is not a contiguous chapter phrase,
+    so the name-policy filter drops it, while «Петуния Дурсли» still matches. Keeping
+    user_decisions empty there leaves the rejected «Петунья».
+    """
+    from linguary.domain import GlossaryCandidate, TermConcept, TermVariant
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, SourceAnchor
+
+    section = make_analysis_section(section_id="sec-petunia", texts=("Aunt Petunia looked up.",))
+    document = make_analysis_document((section,))
+    block = section.blocks[0]
+    quote = "Aunt Petunia"
+    plan = TreatmentPlan.of_treatments(section.id, ((block.id, BlockTreatment.TRANSLATE),))
+    unit = TranslationUnit.of_blocks(id="unit-petunia", blocks=(block,), plan=plan)
+    description = "Петунья отказала. У Петуньи нет ключа. Петунье сказали нет."
+    candidate = GlossaryCandidate.create(
+        id="candidate-aunt-petunia",
+        analysis_id="analysis-petunia",
+        source_text="Aunt Petunia",
+        type=ConceptType.PERSON,
+        suggested_translation="тётя Петунья",
+        confidence=0.9,
+        model_flagged_review=False,
+        confidence_threshold=0.5,
+    )
+    content_plan = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(
+            Difficulty(
+                "diff-petunia",
+                (SourceAnchor(block.id, 0, len(quote), quote),),
+                block.id,
+                "vocabulary",
+                "useful",
+                "explanation",
+                (RequiredPoint("p-petunia", description),),
+            ),
+        ),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-petunia",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(block.id,),
+        content_plan=content_plan,
+        glossary_candidates=(candidate,),
+    )
+    glossary = GlossarySnapshot(
+        entries=(
+            GlossarySnapshotEntry(
+                source_text="Aunt Petunia",
+                translation="тётя Петуния",
+                type=ConceptType.PERSON,
+                status=TermStatus.APPROVED,
+            ),
+        )
+    )
+    rendered = ContextBuilder(content_plan_profile="content-plan-v3").for_translation_unit(
+        document=document,
+        section=section,
+        unit=unit,
+        analysis=analysis,
+        glossary=glossary,
+        book_candidates=(candidate,),
+    ).request.input_text
+
+    assert "Петуния отказала. У Петунии нет ключа. Петунии сказали нет." in rendered
+    assert "Петунья" not in rendered
+    assert "Петуньи" not in rendered
+    assert "Петунье" not in rendered
+
+    decision = TermConcept(
+        id="concept-petunia",
+        book_id="book-1",
+        type=ConceptType.PERSON,
+        canonical_source_text="Пётуния Дурсли",
+        status=TermStatus.APPROVED,
+        note="утверждённый женский род",
+        variants=(TermVariant("concept-petunia", "ru", "Петуния", TermStatus.APPROVED),),
+    )
+    chapter_candidate = GlossaryCandidate.create(
+        id="candidate-petunia-dursley",
+        analysis_id="analysis-petunia",
+        source_text="Петуния Дурсли",
+        type=ConceptType.PERSON,
+        suggested_translation="Петунья",
+        confidence=0.9,
+        model_flagged_review=False,
+        confidence_threshold=0.5,
+        note="черновик",
+    )
+    pedagogical_section = make_analysis_section(
+        section_id="sec-dursley",
+        texts=("Дурсли увидела Петуния.",),
+    )
+    pedagogical = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=_policy("sound"),
+    ).for_chapter_pedagogical_analysis(
+        make_analysis_document((pedagogical_section,)),
+        pedagogical_section,
+        narrative_summary="Short summary.",
+        glossary_candidates=(chapter_candidate,),
+        user_decisions=(decision,),
+    )
+    pedagogical_text = pedagogical.request.input_text
+
+    assert "- Петуния Дурсли [person] -> Петуния (утверждённый женский род)" in pedagogical_text
+    assert "Петунья" not in pedagogical_text
+    assert "черновик" not in pedagogical_text
+    assert "Пётуния Дурсли" not in pedagogical_text
+
+
+def test_a2_prompts_enforce_gender_dialogue_dash_a2_summary_and_forbid_calques() -> None:
+    """A2 prompts name gender, dialogue dashes, summary shape, and the reviewed calques.
+
+    Dropping a named example, or putting the new calque list into the legacy templates,
+    fails this test. The legacy SHA stays on the untouched constants.
+    """
+    from hashlib import sha256
+
+    from linguary.application.book_conditions import payload_digest
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_PROCESSING,
+        _CONTENT_PLAN_PROCESSING_V3,
+        _NARRATIVE_ANALYSIS_INSTRUCTIONS,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _TRANSLATION_CONTEXT_V2,
+        _TRANSLATION_INSTRUCTIONS,
+        _pedagogical_instructions,
+    )
+    from linguary.application.reader_text import learner_instructions
+
+    assert (
+        sha256(_TRANSLATION_INSTRUCTIONS.encode("utf-8")).hexdigest()
+        == "8c39d00a516d9db9a8a0079602c48bcfb6d9fc02714338d5d444be6304acbafa"
+    )
+    baseline_templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        pronunciation_help_enabled=True,
+    )
+    assert (
+        payload_digest(baseline_templates)
+        == "3bcf968fbeb3eea72bc191df4360d50ec62f005d45a670b54dbd738ef2fb069a"
+    )
+
+    narrative_rules = (
+        "Privet Drive — ж. р., улица",
+        "tabby cat — ж. р., кошка",
+        "boa constrictor — м. р., обращение на «ты»",
+        "несклоняемость фамилий",
+        "said Harry",
+        "certainty=explicit",
+        "said the stranger",
+        "said the giant",
+        "Hagrid",
+    )
+    pedagogical_rules = (
+        _SPEECH_STYLE_KIND,
+        "«Речь персонажа.»",
+        "we was",
+        "you was",
+        "don' need",
+        "them as",
+        "b(K+1)..bN",
+        "не больше N",
+        "reader_chapter_summary",
+        "Previously in Chapter",
+        "Present Simple",
+        "стандартные английские кавычки",
+        "«ёлочек»",
+    )
+    calques = (
+        "длинным тире «— »",
+        "You told me",
+        "Ты сказала",
+        "coat — пальто",
+        "«оно»",
+        "marmalade",
+        "апельсиновый джем",
+        "a great Muggle",
+        "отпетый/здоровенный магл",
+        "rather fond of",
+        "весьма люблю",
+        "any of the lights",
+        "нигде не включая свет",
+        "large chocolate ice-creams",
+        "большие порции шоколадного мороженого",
+        "go boil yer heads",
+        "катитесь оба к лешему",
+        "проблевался",
+        "her lot",
+        "компания, братия",
+        "Going to be any more showers",
+        "Are there",
+    )
+    narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="en", target_language="ru")
+    pedagogical = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="A2",
+    )
+    a2_pedagogy = _pedagogical_instructions("en", "ru", "a2", False)
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    for instructions in (narrative, templates["narrative_analysis"]):
+        for phrase in narrative_rules:
+            assert phrase in instructions
+    for instructions in (pedagogical, a2_pedagogy, templates["pedagogical_analysis"]):
+        for phrase in pedagogical_rules:
+            assert phrase in instructions
+    for instructions in (
+        _CONTENT_PLAN_PROCESSING_V3,
+        _TRANSLATION_CONTEXT_V2,
+        learner_instructions("a2"),
+        templates["content_processing"],
+        templates["learner_quality"],
+    ):
+        for phrase in calques:
+            assert phrase in instructions
+    for legacy in (_TRANSLATION_INSTRUCTIONS, _CONTENT_PLAN_PROCESSING, learner_instructions("b1")):
+        assert "апельсиновый джем" not in legacy
+        assert "длинным тире «— »" not in legacy
+
+
 def test_sound_policy_preserves_mc_prefix_in_mcgonagall() -> None:
     """SOUND keeps Mc-/Mac- as the prefix Мак- (McGonagall, not Магонагал)."""
     sound = snapshot_prompt_templates(

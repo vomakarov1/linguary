@@ -153,6 +153,38 @@ def note_respecting_glossary(
     return " ".join(line.strip() for item in kept for line in item.splitlines()).strip()
 
 
+def replace_rejected_glossary_variants(
+    text: str,
+    *,
+    decisions: Sequence[GlossarySnapshotEntry],
+    chapter_candidates: Iterable[GlossaryCandidate] = (),
+) -> str:
+    """Replace rejected name variants, including case forms, with the approved form.
+
+    A user decision wins over a chapter candidate for the same source spelling.
+    ``Петунье`` maps to ``Петунии``: the dative of a ``-ья`` name is not ``-ие``.
+    """
+    if not text or not decisions:
+        return text
+    pairs = _rejected_variant_pairs(decisions, chapter_candidates)
+    if not pairs:
+        return text
+
+    def replace_word(match: re.Match[str]) -> str:
+        word = match.group(0)
+        folded = word.casefold().replace("’", "'")
+        for rejected, approved in pairs:
+            if not _same_word(folded, rejected.casefold()):
+                continue
+            formed = _corresponding_form(folded, rejected.casefold(), approved.casefold())
+            if formed is None:
+                continue
+            return _copy_capitalization(word, formed)
+        return word
+
+    return _WORD.sub(replace_word, text)
+
+
 def _names_rejected(item: str, decisions: Sequence[_Decision]) -> bool:
     """Whether fragment mentions, even unquoted, a variant rejected by the user."""
     words = _words(item)
@@ -318,4 +350,145 @@ def _genders(text: str) -> frozenset[str]:
     return frozenset(match.group(1).casefold() for match in _GENDER.finditer(text))
 
 
-__all__ = ["instructions_respecting_glossary", "note_respecting_glossary"]
+# Dative and prepositional -ье of a -ья name correspond to -ии of an -ия name.
+_YA_ENDING_TO_IYA = {
+    "ья": "ия",
+    "ьи": "ии",
+    "ье": "ии",
+    "ью": "ию",
+    "ьей": "ией",
+    "ьею": "иею",
+}
+
+
+def _rejected_variant_pairs(
+    decisions: Sequence[GlossarySnapshotEntry],
+    chapter_candidates: Iterable[GlossaryCandidate],
+) -> tuple[tuple[str, str], ...]:
+    """Rejected candidate words paired with the approved word they replace."""
+    suggested: dict[str, set[str]] = {}
+    for candidate in chapter_candidates:
+        suggested.setdefault(glossary_key(candidate.source_text), set()).add(
+            candidate.suggested_translation
+        )
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in decisions:
+        if not entry.status.is_user_decision:
+            continue
+        key = glossary_key(entry.source_text)
+        approved_key = glossary_key(entry.translation)
+        for suggestion in suggested.get(key, ()):
+            if glossary_key(suggestion) == approved_key:
+                continue
+            for rejected, approved in _align_variant_words(suggestion, entry.translation):
+                marker = (rejected.casefold(), approved.casefold())
+                if marker in seen or marker[0] == marker[1]:
+                    continue
+                seen.add(marker)
+                pairs.append((rejected, approved))
+    pairs.sort(key=lambda item: len(item[0]), reverse=True)
+    return tuple(pairs)
+
+
+def _align_variant_words(rejected: str, approved: str) -> list[tuple[str, str]]:
+    """Words of a rejected variant aligned with the approved translation."""
+    rejected_words = _WORD.findall(rejected)
+    approved_words = _WORD.findall(approved)
+    if len(rejected_words) == len(approved_words) and rejected_words:
+        return [
+            (left, right)
+            for left, right in zip(rejected_words, approved_words, strict=True)
+            if _is_variant_word(left, right)
+        ]
+    used: set[int] = set()
+    pairs: list[tuple[str, str]] = []
+    for left in rejected_words:
+        best_index = None
+        best_score = 0
+        for index, right in enumerate(approved_words):
+            if index in used:
+                continue
+            score = _shared_prefix(left.casefold(), right.casefold())
+            if score > best_score:
+                best_score = score
+                best_index = index
+        if best_index is None or best_score < _MIN_SHARED_PREFIX:
+            continue
+        right = approved_words[best_index]
+        used.add(best_index)
+        if _is_variant_word(left, right):
+            pairs.append((left, right))
+    return pairs
+
+
+def _is_variant_word(left: str, right: str) -> bool:
+    """Whether two words are different spellings of one name, not the same word."""
+    if left.casefold() == right.casefold():
+        return False
+    return _shared_prefix(left.casefold(), right.casefold()) >= _MIN_SHARED_PREFIX
+
+
+def _corresponding_form(surface: str, rejected: str, approved: str) -> str | None:
+    """Inflect ``approved`` the way ``surface`` inflects ``rejected``."""
+    if surface == rejected:
+        return approved
+    mapped = _inflect_like(surface, rejected, approved)
+    if mapped is not None:
+        return mapped
+    extra = len(surface) - len(rejected)
+    if surface.startswith(rejected) and 0 < extra <= _MAX_ENDING:
+        return approved + surface[len(rejected):]
+    return None
+
+
+def _inflect_like(surface: str, rejected: str, approved: str) -> str | None:
+    """Transfer a Russian nominal ending from one name lemma to another."""
+    rejected_paradigm = _name_paradigm(rejected)
+    approved_paradigm = _name_paradigm(approved)
+    if rejected_paradigm is None or approved_paradigm is None:
+        return None
+    rejected_stem, rejected_kind = rejected_paradigm
+    approved_stem, approved_kind = approved_paradigm
+    if not surface.startswith(rejected_stem):
+        return None
+    ending = surface[len(rejected_stem):]
+    if rejected_kind == approved_kind:
+        return approved_stem + ending
+    if rejected_kind == "ya" and approved_kind == "iya":
+        mapped = _YA_ENDING_TO_IYA.get(ending)
+        if mapped is None:
+            return None
+        return approved_stem + mapped
+    return None
+
+
+def _name_paradigm(lemma: str) -> tuple[str, str] | None:
+    """Stem and declension class of a nominative name, if the ending is known."""
+    if len(lemma) > 2 and lemma.endswith("ия"):
+        return lemma[:-2], "iya"
+    if len(lemma) > 2 and lemma.endswith("ья"):
+        return lemma[:-2], "ya"
+    if len(lemma) > 1 and lemma.endswith("я"):
+        return lemma[:-1], "ya"
+    if len(lemma) > 1 and lemma.endswith("а"):
+        return lemma[:-1], "a"
+    return None
+
+
+def _copy_capitalization(source: str, replacement: str) -> str:
+    """Apply the capitalization of ``source`` to a casefolded replacement."""
+    if not replacement:
+        return replacement
+    if source.isupper():
+        return replacement.upper()
+    if source[:1].isupper():
+        return replacement[:1].upper() + replacement[1:]
+    return replacement
+
+
+__all__ = [
+    "instructions_respecting_glossary",
+    "note_respecting_glossary",
+    "replace_rejected_glossary_variants",
+]
