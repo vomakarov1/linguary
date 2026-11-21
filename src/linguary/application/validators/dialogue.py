@@ -74,7 +74,10 @@ _PREFIX_WORDS = rf"(?:(?:(?!{_NON_PREFIX_WORD}\b)[А-ЯЁа-яё-]+\s+){{0,2}})"
 _HYBRID_GUILLEMET_DASH = re.compile(r"«\s*[—–]")
 _HYBRID_LEADING_DASH_GUILLEMET = re.compile(r"(?:^|\n)\s*[—–]\s*«")
 _HYBRID_PUNCT_DASH_GUILLEMET = re.compile(r"[:.,!?…]\s*[—–]\s*«")
-_HYBRID_DASH_GUILLEMET_ATTRIBUTION = re.compile(r"[—–]\s*«[^«»\n]+»\s*,?\s*[—–]")
+_HYBRID_DASH_GUILLEMET_ATTRIBUTION = re.compile(
+    rf"[—–]\s*«[^«»\n]+»(?:\s*,\s*[—–]\s*|\s+[—–]\s*){_PREFIX_WORDS}{_SPOKEN_VERB_ALT}\b",
+    re.IGNORECASE,
+)
 
 #: (c) Matched `«…»` span and spoken author-attribution dash inside it.
 _GUILLEMET_SPAN = re.compile(r"«([^«»]+)»")

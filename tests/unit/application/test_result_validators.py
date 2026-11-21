@@ -1605,6 +1605,51 @@ def test_note_language_leak_catches_unmarked_english_and_cyrillic_in_quotes() ->
     assert note_language_leak_violation(non_ru_payload, target_language="de") is None
 
 
+def test_note_language_leak_scopes_notes_to_payload_blocks_for_per_block_validation() -> None:
+    """Per-block calls `replace(payload, blocks=(block,))` only inspect notes belonging to that block."""
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+    from linguary.application.validators.mixed_script import note_language_leak_violation
+
+    b1, b2 = make_blocks(2)
+    b1_result = make_block_result(b1)
+    b2_result = make_block_result(b2)
+    full_payload = TranslationResultResponse(
+        blocks=(b1_result, b2_result),
+        language_notes=(
+            make_note(b1, note="Чистая русская заметка без просачиваний."),
+            make_note(b2, note="Это слово really усиливает оттенок."),
+        ),
+        fragment_assistances=(
+            FragmentAssistanceResponse(
+                difficulty_id="diff-1",
+                point_ids=("p1",),
+                kind="russian_explanation",
+                text="Это пояснение really просачивается.",
+            ),
+        ),
+    )
+
+    # Checking only b1 must not blame b1 for b2's leaky note or fragment_assistances
+    single_b1 = replace(full_payload, blocks=(b1_result,))
+    assert note_language_leak_violation(single_b1, target_language="ru") is None
+
+    # Checking only b2 catches b2's leaky note and attributes it to b2
+    single_b2 = replace(full_payload, blocks=(b2_result,))
+    violation_b2 = note_language_leak_violation(single_b2, target_language="ru")
+    assert violation_b2 is not None
+    assert f"примечание блока {b2.id}" in violation_b2
+
+    # Standalone call with empty blocks checks fragment_assistances without mislabeling difficulty_id as block ID
+    assist_only = TranslationResultResponse(
+        blocks=(),
+        fragment_assistances=full_payload.fragment_assistances,
+    )
+    violation_assist = note_language_leak_violation(assist_only, target_language="ru")
+    assert violation_assist is not None
+    assert "помощь к трудности diff-1" in violation_assist
+    assert "примечание блока diff-1" not in violation_assist
+
+
 def test_quality_warnings_catch_dozen_preposition_initials_and_indeclinable_name() -> None:
     """Non-blocking quality warnings catch dozen/десяток, что-бы, со+sibilant+vowel, initials, indeclinable name, and glossary drift."""
     from linguary.application.validators.language import translation_quality_warnings

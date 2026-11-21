@@ -110,10 +110,10 @@ def note_language_leak_violation(
     """
     if target_language.strip().lower().split("-")[0] != "ru":
         return None
-    for block_id, text in _note_texts_of(payload):
+    for subject, text in _note_texts_of(payload):
         leak = _note_text_leak(text)
         if leak is not None:
-            return f"примечание блока {block_id} содержит языковое просачивание: {leak}"
+            return f"{subject} содержит языковое просачивание: {leak}"
     return None
 
 
@@ -187,18 +187,26 @@ def _overlaps_any(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
 
 
 def _note_texts_of(payload: TranslationResultResponse) -> Iterator[tuple[str, str]]:
-    """All note-bearing texts in a translation result paired with their block ID."""
+    """Note-bearing texts scoped to `payload.blocks` when present, or all notes/assistances otherwise."""
+    if payload.blocks:
+        for block in payload.blocks:
+            subject = f"примечание блока {block.source_block_id}"
+            for hint in block.glossary_hints:
+                if hint.note is not None:
+                    yield subject, hint.note
+            for note in payload.notes_for(block.source_block_id):
+                yield subject, note.note
+                if note.translated_excerpt is not None:
+                    yield subject, note.translated_excerpt
+        return
     for note in payload.language_notes:
-        yield note.source_block_id, note.note
+        subject = f"примечание блока {note.source_block_id}"
+        yield subject, note.note
         if note.translated_excerpt is not None:
-            yield note.source_block_id, note.translated_excerpt
-    for block in payload.blocks:
-        for hint in block.glossary_hints:
-            if hint.note is not None:
-                yield block.source_block_id, hint.note
+            yield subject, note.translated_excerpt
     for assistance in payload.fragment_assistances:
         if assistance.text is not None:
-            yield assistance.difficulty_id, assistance.text
+            yield f"помощь к трудности {assistance.difficulty_id}", assistance.text
 
 
 def mixed_script_word(text: str) -> str | None:

@@ -107,13 +107,35 @@ def test_dialogue_validator_catches_hybrid_variants(translated_text: str) -> Non
 
 
 def test_dialogue_validator_allows_explanatory_dash_before_quoted_title() -> None:
-    """An explanatory prose dash before a quoted book/sign title is not a dialogue hybrid."""
+    """Explanatory prose dashes before or around a quoted title are not dialogue hybrids."""
     assert (
         _check(
             "Он открыл первую книгу — «Историю магии».",
             source_text="He opened the first book — A History of Magic.",
         )
         is None
+    )
+    assert (
+        _check(
+            "Он открыл первую книгу — «Историю магии» — и начал читать.",
+            source_text="He opened the first book — A History of Magic — and began to read.",
+        )
+        is None
+    )
+    assert (
+        _check(
+            "Когда он открыл книгу — «Историю магии», — наступила тишина.",
+            source_text="When he opened the book — A History of Magic — silence fell.",
+        )
+        is None
+    )
+    # Genuine mid-sentence hybrid with spoken attribution is still caught
+    assert (
+        _check(
+            "Он шагнул вперёд — «Стой!» — крикнул Хагрид.",
+            source_text='He stepped forward — "Stop!" shouted Hagrid.',
+        )
+        is not None
     )
 
 
