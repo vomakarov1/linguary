@@ -1514,3 +1514,190 @@ def test_segment_translation_tail_is_normalized() -> None:
     assert result.segment_translations == ("Он сказал:", "Готово.")
     assert result.translated_text == "Он сказал: Готово."
 
+
+def test_note_language_leak_catches_unmarked_english_and_cyrillic_in_quotes() -> None:
+    """Asymmetric NOTE leak check catches Cyrillic in EN quotes >= 2 words and unmarked EN words."""
+    from linguary.application.validators.language import (
+        note_language_leak_violation as leak_from_language,
+    )
+    from linguary.application.validators.mixed_script import note_language_leak_violation
+
+    assert leak_from_language is note_language_leak_violation
+
+    block = make_block(order=0, text="He was strongly reminded of Dudley.")
+
+    # 1. Cyrillic inside EN quotes of >= 2 words (guillemets, double quotes, italics)
+    for leaky_note in (
+        "Оборот «was strongly reminded of Дадли» передаёт сильное сходство.",
+        'Выражение "was strongly reminded of Дадли" показывает сходство.',
+        "Фраза *was strongly reminded of Дадли* означает сильное напоминание.",
+    ):
+        payload = make_response(
+            (make_block_result(block),),
+            language_notes=(make_note(block, note=leaky_note),),
+        )
+        assert note_language_leak_violation(payload, target_language="ru") is not None
+
+    # Also caught inside glossary_hint.note
+    hint_payload = make_response(
+        (
+            make_block_result(
+                block,
+                treatment=BlockTreatment.GLOSSARY_ONLY,
+                translated_text=None,
+                glossary_hints=(
+                    make_hint(
+                        original="reminded of",
+                        translation="напомнил о",
+                        note="Фраза «was strongly reminded of Дадли» усиливает сравнение.",
+                    ),
+                ),
+            ),
+        )
+    )
+    assert note_language_leak_violation(hint_payload, target_language="ru") is not None
+
+    # 2. Unmarked frequent EN leak words between Russian words
+    for leak_word in (
+        "very",
+        "strong",
+        "really",
+        "just",
+        "means",
+        "shows",
+        "because",
+        "when",
+        "here",
+        "also",
+        "only",
+        "always",
+        "never",
+        "something",
+        "someone",
+    ):
+        payload = make_response(
+            (make_block_result(block),),
+            language_notes=(make_note(block, note=f"Это слово {leak_word} усиливает оттенок."),),
+        )
+        assert note_language_leak_violation(payload, target_language="ru") is not None
+
+    # 3. Clean notes: properly quoted EN, italics, whitelisted grammar/linguary terms, non-ru
+    for clean_note in (
+        "Оборот «was strongly reminded of Dudley» означает «сильно напомнил о Дадли».",
+        "Слово «really» и наречие *very* здесь усиливают значение.",
+        "Здесь используется Past Perfect для действия до другого события в Past Simple.",
+        "Сравни Present Simple, Present Continuous, Past Continuous, Future Simple и Present Perfect.",
+        "После Modal ставится Infinitive без частицы to; в UK и US это уровень A2–B1 (см. IPA).",
+        "Окончания -ing, -ed и -s меняют форму глагола на уровнях A1, B2, C1 и C2.",
+        "Конструкция «used to + инфинитив» описывает привычку в прошлом.",
+    ):
+        payload = make_response(
+            (make_block_result(block),),
+            language_notes=(make_note(block, note=clean_note),),
+        )
+        assert note_language_leak_violation(payload, target_language="ru") is None
+
+    # Non-Russian target language is skipped
+    non_ru_payload = make_response(
+        (make_block_result(block),),
+        language_notes=(make_note(block, note="Это слово really важно."),),
+    )
+    assert note_language_leak_violation(non_ru_payload, target_language="de") is None
+
+
+def test_quality_warnings_catch_dozen_preposition_initials_and_indeclinable_name() -> None:
+    """Non-blocking quality warnings catch dozen/десяток, что-бы, со+sibilant+vowel, initials, indeclinable name, and glossary drift."""
+    from linguary.application.validators.language import translation_quality_warnings
+    from linguary.domain import ConceptType, GlossarySnapshotEntry, TermStatus
+
+    glossary = (
+        GlossarySnapshotEntry(
+            source_text="Harry Potter",
+            translation="Гарри Поттер",
+            type=ConceptType.PERSON,
+            status=TermStatus.APPROVED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="Hogwarts",
+            translation="Хогвартс",
+            type=ConceptType.PLACE,
+            status=TermStatus.APPROVED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="Privet Drive",
+            translation="Тисовая улица",
+            type=ConceptType.PLACE,
+            status=TermStatus.APPROVED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="Diagon Alley",
+            translation="Косой переулок",
+            type=ConceptType.PLACE,
+            status=TermStatus.APPROVED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="You-Know-Who",
+            translation="Сам-Знаешь-Кто",
+            type=ConceptType.PERSON,
+            status=TermStatus.APPROVED,
+        ),
+        GlossarySnapshotEntry(
+            source_text="Muggle",
+            translation="магл",
+            type=ConceptType.FICTIONAL_CONCEPT,
+            status=TermStatus.APPROVED,
+        ),
+    )
+
+    def warnings_for(source: str, translated: str) -> tuple[str, ...]:
+        block = make_block(order=0, text=source)
+        unit = make_unit((block,))
+        payload = make_response((make_block_result(block, translated_text=translated),))
+        return translation_quality_warnings(
+            payload,
+            unit=unit,
+            target_language="ru",
+            mandatory_glossary=glossary,
+        )
+
+    # 1. dozen <-> десяток
+    assert any("dozen" in w or "десяток" in w for w in warnings_for("He bought two dozen owls.", "Он купил два десятка сов."))
+    assert warnings_for("He bought two dozen owls.", "Он купил две дюжины сов.") == ()
+
+    # 2. что-бы
+    assert any("что-бы" in w for w in warnings_for("He came to help.", "Он пришёл, что-бы помочь."))
+    assert warnings_for("He came to help.", "Он пришёл, чтобы помочь.") == ()
+
+    # 3. со + [зсжш][гласная] (positive) vs valid consonant clusters (negative)
+    for bad in ("Он шёл со золотой монетой.", "Она стояла со садом позади.", "Он говорил со женой.", "Мальчик бежал со шапкой в руках."):
+        assert any("со " in w for w in warnings_for("He walked slowly.", bad)), bad
+    for good in ("Он сделал это со зла.", "Он ответил со знанием дела.", "Он взял книгу со стола.", "Он пришёл со своей сестрой."):
+        assert warnings_for("He walked slowly.", good) == (), good
+
+    # 4. Calque initial Х. Поттер when canonical name starts with Г*
+    assert any("Х. Поттер" in w for w in warnings_for("Mr H. Potter", "Мистер Х. Поттер"))
+    assert any("Х. Поттер" in w for w in warnings_for("To Mr H. Potter", "Мистеру Х. Поттеру"))
+    assert warnings_for("Mr H. Potter", "Мистер Г. Поттер") == ()
+
+    # 5. Indeclinable Сам-Знаешь-Кто after prepositions
+    for bad in (
+        "Он боялся говорить о Сам-Знаешь-Кто.",
+        "Они сбежали от Сам-Знаешь-Кто.",
+        "Он пошёл к Сам-Знаешь-Кто.",
+        "Она спорила с Сам-Знаешь-Кто.",
+    ):
+        assert any("Сам-Знаешь-Кто" in w for w in warnings_for("They feared him.", bad)), bad
+    assert warnings_for("You-Know-Who arrived.", "Сам-Знаешь-Кто прибыл.") == ()
+    assert warnings_for("They spoke of You-Know-Who.", "Они говорили о Сам-Знаешь-Ком.") == ()
+
+    # 6. Mandatory glossary mismatch (when source_text is present in original) vs valid declensions
+    assert any("Хогвартс" in w for w in warnings_for("He went to Hogwarts.", "Он поехал в Школу магии."))
+    assert any("магл" in w for w in warnings_for("He was a Muggle.", "Он был магглом."))
+    assert warnings_for("He was a Muggle.", "Он был маглом.") == ()
+    assert warnings_for("He went to Hogwarts.", "Он поехал в Хогвартсе и Хогвартс.") == ()
+    assert warnings_for("He lived on Privet Drive.", "Он жил на Тисовой улице.") == ()
+    assert warnings_for("They walked down Diagon Alley.", "Они шли по Косому переулку.") == ()
+    # Term not in original must not trigger warning
+    assert warnings_for("He walked into the room.", "Он вошёл в комнату.") == ()
+
+
