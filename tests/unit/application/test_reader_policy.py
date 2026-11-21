@@ -192,25 +192,18 @@ def test_validate_a2_summary_rejects_overlong_multi_sentence_recap():
         )
 
 
-def test_reader_policy_normalizes_en_dash_and_inline_newline_before_dialogue_dash():
-    """Translation replies use an em dash, and one newline after punctuation joins the reply.
+def test_reader_policy_normalizes_en_dash_and_preserves_dialogue_newline():
+    """Translation replies use an em dash while newlines before dialogue dashes stay intact.
 
-    Leaving the en dash, or joining a paragraph break or a protected quote, fails the test.
+    Leaving the en dash, joining a newline before a reply, or changing a protected quote fails the test.
     """
     policy = ReaderTextPolicy()
-    joined = {
-        ".": "Конец. — Да.",
-        ":": "Конец: — Да.",
-        ",": "Конец, — Да.",
-        "!": "Конец! — Да.",
-        "?": "Конец? — Да.",
-        "…": "Конец… — Да.",
-    }
-    for punct, expected in joined.items():
-        assert policy.prepare("translation", f"Конец{punct}\n— Да.", ()) == expected
+    for punct in (".", ":", ",", "!", "?", "…"):
+        text = f"Конец{punct}\n— Да."
+        assert policy.prepare("translation", text, ()) == text
 
     assert policy.prepare("translation", "– Реплика.", ()) == "— Реплика."
-    assert policy.prepare("translation", "Абзац.\n– Реплика.", ()) == "Абзац. — Реплика."
+    assert policy.prepare("translation", "Абзац.\n– Реплика.", ()) == "Абзац.\n— Реплика."
     assert policy.prepare("translation", "Конец.\n\n– Новая.", ()) == "Конец.\n\n— Новая."
     assert policy.prepare("translation", "Конец.\n\n— Новая.", ()) == "Конец.\n\n— Новая."
     assert policy.prepare("summary", "– Реплика.", ()) == "– Реплика."
@@ -219,13 +212,49 @@ def test_reader_policy_normalizes_en_dash_and_inline_newline_before_dialogue_das
         == "— Он сказал «– нет»."
     )
     protected = "Конец.\n— «.\n— внутри»."
-    assert policy.prepare("translation", protected, (".\n— внутри",)) == (
-        "Конец. — «.\n— внутри»."
-    )
+    assert policy.prepare("translation", protected, (".\n— внутри",)) == protected
     outside = "– Снаружи.\nТекст.\n— Дальше «.\n— внутри»."
     assert policy.prepare("translation", outside, (".\n— внутри",)) == (
-        "— Снаружи.\nТекст. — Дальше «.\n— внутри»."
+        "— Снаружи.\nТекст.\n— Дальше «.\n— внутри»."
     )
+
+
+def test_reader_policy_preserves_dialogue_newlines_and_defines_four_russian_dialogue_rules():
+    policy = ReaderTextPolicy()
+    assert (
+        policy.prepare("translation", "— Привет, — сказал он.\n— Как дела?", ())
+        == "— Привет, — сказал он.\n— Как дела?"
+    )
+    assert (
+        policy.prepare("translation", "Он вошёл.\n– Кто здесь?", ())
+        == "Он вошёл.\n— Кто здесь?"
+    )
+
+    instructions = learner_instructions("a2")
+    for expected in (
+        "4 правила оформления русской прямой речи",
+        "1) Реплика диалога с начала абзаца",
+        "длинным тире «— »",
+        "2) Прямая речь внутри абзаца после двоеточия",
+        "Он сказал: «…»",
+        "3) Внутренняя речь (мысли)",
+        "«…», — подумал он",
+        "4) Названия, вывески и цитаты внутри реплики",
+        "„…“",
+        "— «",
+        "«—",
+        "слова автора внутри «…»",
+        "букву «ё»",
+        "всё/все",
+        "узнаёт/узнает",
+        "лубок",
+        "сленг",
+        "Различай роль заметок в GLOSSARY_ONLY и TRANSLATE",
+        "Не домысливай сюжетные детали",
+        "вежливое «вы»",
+    ):
+        assert expected in instructions
+    assert "4 правила оформления русской прямой речи" not in learner_instructions("b1")
 
 
 def test_reader_text_error_includes_kind_and_block_id():

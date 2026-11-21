@@ -10,7 +10,11 @@ import pytest
 
 from linguary.adapters.config.settings import AppSettings, LLMSettings
 from linguary.composition.book_runtime import conditions_payload
-from linguary.composition.correction_runtime import CorrectionRuntimeResolver, correction_snapshot
+from linguary.composition.correction_runtime import (
+    CORRECTION_PROMPT_V2,
+    CorrectionRuntimeResolver,
+    correction_snapshot,
+)
 from linguary.domain import ProcessingRunStatus
 from linguary.domain.book_conditions import BookConditions
 
@@ -309,4 +313,28 @@ async def test_runtime_resolvers_lease_and_snapshot_use_read_transaction() -> No
     assert read_calls == 2
 
     await resolver.aclose()
+
+
+def test_correction_prompt_v2_covers_numbers_calques_notes_and_boundary_consistency() -> None:
+    prompt = CORRECTION_PROMPT_V2
+    for expected in (
+        "two dozen",
+        "две дюжины",
+        "два десятка",
+        "смысловые кальки",
+        "ложных друзей",
+        "фактическую точность заметок",
+        "language_notes",
+        "glossary_hints.note",
+        "грамматическое согласование",
+        "грамматический род животных",
+        "«ты/вы»",
+        "стыки соседних блоков",
+        "пунктуации прямой речи",
+    ):
+        assert expected in prompt
+
+    assert correction_snapshot(_make_settings()).prompt == CORRECTION_PROMPT_V2
+    assert "условиям книги" not in prompt
+    assert "условия книги" not in prompt
 
