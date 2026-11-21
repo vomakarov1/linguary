@@ -443,6 +443,20 @@ def _language_note(schema: LanguageNoteSchema) -> LanguageNoteResponse:
     )
 
 
+def _format_loc(loc: tuple[int | str, ...]) -> str:
+    """Formats a Pydantic error location tuple into dot/bracket path notation."""
+    parts: list[str] = []
+    for segment in loc:
+        if isinstance(segment, int):
+            if parts:
+                parts[-1] = f"{parts[-1]}[{segment}]"
+            else:
+                parts.append(f"[{segment}]")
+        else:
+            parts.append(str(segment))
+    return ".".join(parts)
+
+
 def _format_error(
     kind: LLMResponseKind, *, error: ValidationError, truncated: bool
 ) -> str:
@@ -451,9 +465,18 @@ def _format_error(
     Token limit truncation is explicitly stated: otherwise it appears as random syntax
     corruption, whereas resolution requires a larger token budget rather than identical retries.
     """
-    violations = ", ".join(
-        sorted({str(item["type"]) for item in error.errors(include_input=False, include_context=False)})
-    )
+    entries: list[str] = []
+    seen: set[str] = set()
+    for item in error.errors(include_input=False, include_context=False):
+        path = _format_loc(item["loc"])
+        entry = f"{path}: {item['type']}" if path else str(item["type"])
+        if entry in seen:
+            continue
+        seen.add(entry)
+        entries.append(entry)
+        if len(entries) == 10:
+            break
+    violations = ", ".join(entries)
     reason = "обрыв ответа по лимиту токенов" if truncated else "ответ не оборван"
     return (
         f"ответ модели ({kind.value}) не соответствует схеме: "

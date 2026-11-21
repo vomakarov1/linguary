@@ -561,3 +561,79 @@ def test_quoted_scene_and_staged_dtos_normalize_sequences():
     assert QuotedContentPlanResponse(scenes=[value]).scenes == (value,)
     assert NarrativeAnalysisResponse('Tone.', 'Summary.', scenes=[value]).scenes == (value,)
     assert PedagogicalAnalysisResponse(difficulties=[]).difficulties == ()
+
+
+def test_format_error_includes_field_path_for_string_too_short() -> None:
+    data = pedagogical_payload() | {"reader_chapter_summary": ""}
+
+    with pytest.raises(LLMResponseFormatError) as caught:
+        parse_payload(
+            LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+            as_content(data),
+            contract_version=2,
+        )
+
+    assert "reader_chapter_summary: string_too_short" in str(caught.value)
+
+
+def test_format_error_formats_nested_list_paths_without_leaking_input() -> None:
+    from linguary.adapters.llm.payloads import _format_error
+    from linguary.adapters.llm.schemas import PedagogicalAnalysisA2Schema
+
+    data = pedagogical_payload() | {"reader_chapter_summary": "Summary"}
+    data["difficulties"][0]["required_points"][0]["description"] = ""
+    data["difficulties"][0]["kind"] = "SECRET_RAW_LLM_INPUT"
+
+    with pytest.raises(LLMResponseFormatError) as caught:
+        parse_payload(
+            LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+            as_content(data),
+            contract_version=2,
+        )
+
+    message = str(caught.value)
+    assert "difficulties[0].required_points[0].description: string_too_short" in message
+    assert "difficulties[0].kind: literal_error" in message
+    assert "SECRET_RAW_LLM_INPUT" not in message
+
+    many_payload = pedagogical_payload() | {"reader_chapter_summary": "Summary"}
+    many_payload["treatment_plan"] = [
+        {"source_block_id": "", "treatment": "TRANSLATE"} for _ in range(12)
+    ]
+    with pytest.raises(ValidationError) as val_error:
+        PedagogicalAnalysisA2Schema.model_validate(many_payload)
+
+    formatted = _format_error(
+        LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+        error=val_error.value,
+        truncated=False,
+    )
+    violations_part = formatted.split("(", 2)[2].rsplit(")", 1)[0]
+    items = [part.strip() for part in violations_part.split(",")]
+    assert len(items) == 10
+    assert items[0] == "treatment_plan[0].source_block_id: string_too_short"
+    assert items[9] == "treatment_plan[9].source_block_id: string_too_short"
+    assert "treatment_plan[10]" not in formatted
+
+
+def test_format_error_handles_empty_loc_without_leading_colon() -> None:
+    from linguary.adapters.llm.payloads import _format_error
+    from linguary.adapters.llm.schemas import PedagogicalAnalysisSchema
+
+    with pytest.raises(LLMResponseFormatError) as caught:
+        parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL, "[]")
+
+    message = str(caught.value)
+    assert "(model_type)" in message
+    assert ": model_type" not in message
+
+    with pytest.raises(ValidationError) as val_error:
+        PedagogicalAnalysisSchema.model_validate([])
+    assert any(item["loc"] == () for item in val_error.value.errors())
+    formatted = _format_error(
+        LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+        error=val_error.value,
+        truncated=False,
+    )
+    assert "(model_type)" in formatted
+    assert ": model_type" not in formatted
