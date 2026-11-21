@@ -1,6 +1,8 @@
 import pytest
 from linguary.adapters.validation import Py3LangidDetector
 from linguary.application.reader_text import (
+    A2_SUMMARY_HARD_MAX_SENTENCE_WORDS,
+    A2_SUMMARY_WARNING_MAX_WORDS,
     ReaderTextPolicy,
     ReaderTextError,
     learner_instructions,
@@ -339,3 +341,165 @@ def test_a2_summary_warnings_calibrated_to_22_words_and_protect_titles():
     assert policy.warnings('summary', long_25, reader_level='b1') == ()
     assert policy.warnings('language_note.note', note_16, reader_level='b2') == ()
 
+
+def test_validate_a2_summary_rejects_excessive_sentence_length_and_present_simple_for_duration():
+    assert A2_SUMMARY_WARNING_MAX_WORDS == 22
+    assert A2_SUMMARY_HARD_MAX_SENTENCE_WORDS == 26
+
+    # 26 words: passes hard validation, still triggers the 22-word editorial warning.
+    sentence_26 = (
+        "Nick and Allie carefully followed the strange boy through the dark silver forest "
+        "because they wanted to reach the distant glass towers before sunset arrived tonight."
+    )
+    assert len(sentence_26.split()) == 26
+    validate_a2_summary(
+        sentence_26,
+        source_texts=("The story continues.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+    )
+    assert ReaderTextPolicy().warnings('summary', sentence_26, reader_level='a2') == (
+        'complexity_requires_review',
+    )
+
+    # 27 words: rejected as too long, including when titles like "Mr." appear inside the sentence.
+    sentence_27 = (
+        "On a cold autumn morning near the old station Mr. Smith walked slowly down "
+        "the empty village street because he wanted to find the lost silver key."
+    )
+    assert len(sentence_27.split()) == 27
+    with pytest.raises(ReaderTextError, match='a2_summary_sentence_too_long') as exc_info:
+        validate_a2_summary(
+            sentence_27,
+            source_texts=("The story continues.",),
+            source_language="en",
+            language_detector=LANGUAGE_DETECTOR,
+        )
+    assert exc_info.value.reason_code == 'a2_summary_sentence_too_long'
+
+    # Legacy frozen two-paragraph mode keeps previous behavior unchanged.
+    validate_a2_summary(
+        f"{sentence_27}\n\nХолодным осенним утром мистер Смит медленно шёл по пустой улице.",
+        source_texts=("The story continues.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+        require_parallel_russian=True,
+    )
+
+    # Ungrammatical Present Simple + for <duration> within one sentence.
+    ungrammatical_cases = (
+        "Nick and Allie live in Everlost for a long time.",
+        "Mary lives in the tall tower for many years.",
+        "They stay in the quiet forest for centuries.",
+        "He stays in the dark village for months.",
+        "We work at the small station for years.",
+        "She works at the old museum for many years.",
+        "They know this strange secret for a long time.",
+        "Allie knows the hidden path for years.",
+        "He has arrived, and she lives in the tower for many years.",
+        "Nick's friends live in Mary's house for many years.",
+        "She does not live in the village for many years.",
+    )
+    for bad_summary in ungrammatical_cases:
+        with pytest.raises(
+            ReaderTextError, match='a2_summary_ungrammatical_present_for'
+        ) as exc_info:
+            validate_a2_summary(
+                bad_summary,
+                source_texts=("The story continues.",),
+                source_language="en",
+                language_detector=LANGUAGE_DETECTOR,
+            )
+        assert exc_info.value.reason_code == 'a2_summary_ungrammatical_present_for'
+
+
+def test_validate_a2_summary_allows_present_perfect_and_checks_factual_anchor():
+    # Valid Present Perfect, auxiliaries, wait/waits, cross-sentence, cross-clause, and noun uses.
+    grammatical_cases = (
+        "Nick and Allie have lived in Everlost for a long time.",
+        "Mary has stayed in the tower for many years.",
+        "They've known each other for years.",
+        "She\u2019s worked in the old house for months.",
+        "He had lived near the river for centuries.",
+        "They will stay in the quiet forest for months.",
+        "She would live in the village for years.",
+        "He did not work at the shop for many years.",
+        "He has to live in the village for months.",
+        "Nick waits at the gate for a long time.",
+        "They wait near the river for years.",
+        "Nick and Allie live in the forest. They waited there for many years.",
+        "He knows that they lived there for many years.",
+        "He works at the shop and waits for a long time.",
+        "They lived their lives in peace for many years.",
+    )
+    for good_summary in grammatical_cases:
+        validate_a2_summary(
+            good_summary,
+            source_texts=("The story continues.",),
+            source_language="en",
+            language_detector=LANGUAGE_DETECTOR,
+        )
+
+    narrative_summary = (
+        "Nick and Allie wake up in Everlost, meet Lief in the forest, "
+        "and walk toward the Twin Towers."
+    )
+
+    # On-topic summary with shared significant stems passes.
+    validate_a2_summary(
+        "Nick and Allie walk through the dark forest and reach the tall towers together.",
+        source_texts=("The story continues.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+        narrative_summary=narrative_summary,
+    )
+
+    # Off-topic summary with >= 4 stems in both summaries and zero shared stems is rejected.
+    off_topic = (
+        "Captain Morgan sails across the stormy ocean looking for golden treasure on an empty island."
+    )
+    with pytest.raises(ReaderTextError, match='a2_summary_off_topic') as exc_info:
+        validate_a2_summary(
+            off_topic,
+            source_texts=("The story continues.",),
+            source_language="en",
+            language_detector=LANGUAGE_DETECTOR,
+            narrative_summary=narrative_summary,
+        )
+    assert exc_info.value.reason_code == 'a2_summary_off_topic'
+
+    # Short summary (< 4 significant stems) or short narrative_summary (< 4 stems) does not false-positive.
+    validate_a2_summary(
+        "Two kids travel.",
+        source_texts=("The story continues.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+        narrative_summary=narrative_summary,
+    )
+    validate_a2_summary(
+        off_topic,
+        source_texts=("The story continues.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+        narrative_summary="Two kids travel.",
+    )
+
+    # Empty, whitespace, or omitted narrative_summary skips factual anchor validation.
+    for empty_narrative in (None, "", "   "):
+        validate_a2_summary(
+            off_topic,
+            source_texts=("The story continues.",),
+            source_language="en",
+            language_detector=LANGUAGE_DETECTOR,
+            narrative_summary=empty_narrative,
+        )
+
+    # Legacy parallel Russian mode skips factual anchor validation.
+    validate_a2_summary(
+        f"{off_topic}\n\nКапитан Морган плывёт через штормовой океан в поисках сокровищ.",
+        source_texts=("The story continues.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+        require_parallel_russian=True,
+        narrative_summary=narrative_summary,
+    )

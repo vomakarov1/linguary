@@ -3,7 +3,7 @@ from dataclasses import replace
 import re
 import unicodedata
 
-from linguary.application.analysis_merge import dominant_script
+from linguary.application.analysis_merge import _significant_summary_stems, dominant_script
 from linguary.application.ports.language_detection import LanguageDetector
 from linguary.application.retry_policy import ResultValidationError
 from linguary.domain import BlockProcessingResult
@@ -17,9 +17,55 @@ _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
 A2_SUMMARY_MAX_SENTENCES = 6
 A2_SUMMARY_WARNING_MAX_WORDS = 22
+A2_SUMMARY_HARD_MAX_SENTENCE_WORDS = 26
+_A2_SUMMARY_MIN_ANCHOR_STEMS = 4
 _DEFAULT_A2_WARNING_MAX_WORDS = 15
 _TITLE_PERIOD = re.compile(r'\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St)\.', re.IGNORECASE)
 _INITIAL_PERIOD = re.compile(r'\b[A-Z]\.')
+_APOSTROPHES = str.maketrans({'\u2019': "'", '\u2018': "'", '\u02bc': "'", '`': "'"})
+_A2_PRESENT_SIMPLE_DURATION_VERB = re.compile(
+    r'\b(live|lives|stay|stays|work|works|know|knows)\b',
+    re.IGNORECASE,
+)
+_A2_DURATION_FOR = re.compile(
+    r'\bfor\s+(?:a\s+long\s+time|many\s+years|years|centuries|months)\b',
+    re.IGNORECASE,
+)
+_A2_DETERMINER_BEFORE = re.compile(
+    r'\b(?:a|an|the|my|your|his|her|its|our|their|this|that|these|those)\s*$',
+    re.IGNORECASE,
+)
+_A2_BASE_VERB_AUX_BEFORE = re.compile(
+    r"(?:"
+    r"(?:\b(?:have|has|had|will|would|did|haven't|hasn't|hadn't|won't|wouldn't|didn't"
+    r"|can|could|may|might|must|should|shall|cannot|can't|couldn't|mightn't|mustn't|shouldn't)"
+    r"|(?:'ve|'s|'ll|'d))"
+    r"(?:\s+(?:not|never|always|still|just|already|only|also|really|probably|ever|rather|even|been|got|going|to)){0,3}"
+    r"|\bto"
+    r")\s*$",
+    re.IGNORECASE,
+)
+_A2_QUESTION_AUX_BEFORE = re.compile(
+    r"(?:^|[,;:]\s*|\b(?:and|but|or)\s+)"
+    r"(?:have|has|had|will|would|did|can|could|may|might|must|should|shall)"
+    r"(?:\s+(?:not|n't))?"
+    r"(?:\s+[A-Za-z']+){1,4}\s*$",
+    re.IGNORECASE,
+)
+_A2_COORDINATED_MODAL_BEFORE = re.compile(
+    r"(?:^|[,;:]\s*)"
+    r"[^,;:]*\b(?:will|would|did|can|could|may|might|must|should|shall|'ll|'d)\b"
+    r"[^,;:]*\band\s*$",
+    re.IGNORECASE,
+)
+_A2_CLAUSE_BREAK_BETWEEN_VERB_AND_FOR = re.compile(
+    r"(?:[;:]"
+    r"|,\s*(?:and|but|or|so|yet|while|when|where|because|although|though)\b"
+    r"|\b(?:that|which|who|whom|whose|where|when|while|because|although|though|if|unless"
+    r"|have|has|had|will|would|did|wait|waits|waited|waiting|lived|stayed|worked|known)\b"
+    r"|(?:'ve|'d|'ll)\b)",
+    re.IGNORECASE,
+)
 
 
 class ReaderTextError(ResultValidationError):
@@ -87,6 +133,33 @@ def _sentence_count(paragraph: str) -> int:
     return len(_split_sentences(paragraph))
 
 
+def _has_ungrammatical_present_for(sentence: str) -> bool:
+    """Detect explicit Present Simple + `for <duration>` errors within one sentence."""
+    normalized = sentence.translate(_APOSTROPHES)
+    duration_matches = tuple(_A2_DURATION_FOR.finditer(normalized))
+    if not duration_matches:
+        return False
+    for verb_match in _A2_PRESENT_SIMPLE_DURATION_VERB.finditer(normalized):
+        verb = verb_match.group(1).casefold()
+        prefix = normalized[:verb_match.start()]
+        if _A2_DETERMINER_BEFORE.search(prefix):
+            continue
+        is_base_verb = not verb.endswith('s')
+        if is_base_verb and (
+            _A2_BASE_VERB_AUX_BEFORE.search(prefix)
+            or _A2_QUESTION_AUX_BEFORE.search(prefix)
+            or _A2_COORDINATED_MODAL_BEFORE.search(prefix)
+        ):
+            continue
+        for duration_match in duration_matches:
+            if duration_match.start() < verb_match.end():
+                continue
+            between = normalized[verb_match.end():duration_match.start()]
+            if not _A2_CLAUSE_BREAK_BETWEEN_VERB_AND_FOR.search(between):
+                return True
+    return False
+
+
 def validate_a2_summary(
     body: str,
     *,
@@ -94,6 +167,7 @@ def validate_a2_summary(
     source_language: str,
     language_detector: LanguageDetector,
     require_parallel_russian: bool = False,
+    narrative_summary: str | None = None,
 ) -> None:
     """Validate an A2 chapter summary.
 
@@ -158,7 +232,8 @@ def validate_a2_summary(
                 'требуется ровно один абзац на языке оригинала без перевода на русский'
             ),
         )
-    sentence_count = _sentence_count(paragraph)
+    sentences = _split_sentences(paragraph)
+    sentence_count = len(sentences)
     if sentence_count > A2_SUMMARY_MAX_SENTENCES:
         raise ReaderTextError(
             'a2_summary_too_many_sentences',
@@ -167,6 +242,46 @@ def validate_a2_summary(
                 f'не больше {A2_SUMMARY_MAX_SENTENCES}'
             ),
         )
+    for index, sentence in enumerate(sentences, start=1):
+        word_count = len(re.findall(r'\w+', sentence))
+        if word_count > A2_SUMMARY_HARD_MAX_SENTENCE_WORDS:
+            raise ReaderTextError(
+                'a2_summary_sentence_too_long',
+                detail=(
+                    f'предложение {index}: {word_count} слов, '
+                    f'не больше {A2_SUMMARY_HARD_MAX_SENTENCE_WORDS}'
+                ),
+            )
+    for index, sentence in enumerate(sentences, start=1):
+        if _has_ungrammatical_present_for(sentence):
+            raise ReaderTextError(
+                'a2_summary_ungrammatical_present_for',
+                detail=(
+                    f'предложение {index}: Present Simple с for + длительность; '
+                    'используйте Present Perfect или Past Simple'
+                ),
+            )
+    if narrative_summary and narrative_summary.strip():
+        narrative_script = dominant_script(narrative_summary)
+        if (
+            narrative_script is None
+            or summary_script is None
+            or narrative_script == summary_script
+        ):
+            narrative_stems = _significant_summary_stems(narrative_summary)
+            summary_stems = _significant_summary_stems(paragraph)
+            if (
+                len(narrative_stems) >= _A2_SUMMARY_MIN_ANCHOR_STEMS
+                and len(summary_stems) >= _A2_SUMMARY_MIN_ANCHOR_STEMS
+                and not (narrative_stems & summary_stems)
+            ):
+                raise ReaderTextError(
+                    'a2_summary_off_topic',
+                    detail=(
+                        'пересказ A2 не имеет общих значимых основ с narrative_summary; '
+                        'требуется пересказ строго по фактам главы'
+                    ),
+                )
 
 
 def _validate_legacy_parallel_a2_summary(
