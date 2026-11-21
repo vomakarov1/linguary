@@ -1649,6 +1649,540 @@ async def test_analyze_chapter_preserves_attempts_and_usage_on_truncated_fallbac
     assert aliased == "не покрывает блоки: ['b2', 'b1']"
 
 
+def _staged_uow(tmp_path, document):
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.models import Base
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+
+    engine = create_database_engine(tmp_path / "staged.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    with uow.transaction() as tx:
+        tx.books.add(make_book_record())
+        tx.documents.save(document)
+    return engine, uow
+
+
+def _staged_narrative_reply(
+    aliases: tuple[str, ...] = ("b1",),
+    *,
+    participants: list[str] | None = None,
+    facts: list[dict[str, object]] | None = None,
+    summary: str = "Harry talks to Hermione.",
+) -> FakeReply:
+    return FakeReply.of_payload(
+        {
+            "translation_instructions": "Keep a natural tone.",
+            "chapter_summary": summary,
+            "glossary_candidates": [],
+            "context_facts": list(facts or ()),
+            "scenes": [
+                {
+                    "start_block_id": aliases[0],
+                    "end_block_id": aliases[-1],
+                    "summary": summary,
+                    "location": "Hallway",
+                    "participants": participants or ["Harry"],
+                    "visual_facts": [],
+                    "visual_assumptions": [],
+                }
+            ],
+        }
+    )
+
+
+def _staged_pedagogical_reply(
+    aliases: tuple[str, ...] = ("b1",),
+    *,
+    summary: str = "Harry walks down the hall.",
+    treatment: str = "TRANSLATE",
+    before_you_read: list[dict[str, object]] | None = None,
+    difficulties: list[dict[str, object]] | None = None,
+    before_you_read_evidence: list[dict[str, object]] | None = None,
+) -> FakeReply:
+    return FakeReply.of_payload(
+        {
+            "treatment_plan": [
+                {"source_block_id": alias, "treatment": treatment} for alias in aliases
+            ],
+            "before_you_read": list(before_you_read or ()),
+            "difficulties": list(difficulties or ()),
+            "before_you_read_evidence": list(before_you_read_evidence or ()),
+            "reader_chapter_summary": summary,
+        }
+    )
+
+
+async def test_staged_fragments_pass_prior_explained_topics_to_next_fragment(
+    tmp_path,
+) -> None:
+    """Staged pedagogical fragments accumulate prior lemmas/grammar topics across both fresh and cached fragments."""
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
+    from linguary.domain import LLMCallStage
+    from analysis_fakes import FakeLanguageDetector
+
+    section = make_analysis_section(
+        section_id="section-1",
+        title="Chapter 1",
+        order=0,
+        texts=(
+            "Harry squinted at the sign because he used to put up with noise.",
+            "Ron muttered softly near the door.",
+            "Hermione nodded and walked inside.",
+        ),
+    )
+    document = make_analysis_document((section,))
+    engine, uow = _staged_uow(tmp_path, document)
+    try:
+        context_builder = ContextBuilder(
+            content_plan_profile="content-plan-v3",
+            reader_level="a2",
+            prompt_templates=snapshot_prompt_templates(
+                source_language="en",
+                target_language="ru",
+                reader_level="a2",
+                profile="content-plan-v3",
+            ),
+        )
+        frag1_ped = _staged_pedagogical_reply(
+            aliases=("b1",),
+            treatment="GLOSSARY_ONLY",
+            before_you_read=[
+                {"expression": "put up with", "explanation": "мириться с чем-то"}
+            ],
+            before_you_read_evidence=[
+                {
+                    "difficulty_id": "d0",
+                    "point_id": "p1",
+                    "artifact_kind": "before_you_read.explanation",
+                    "source_block_id": "b1",
+                    "artifact_index": 0,
+                    "body_excerpt": "мириться с чем-то",
+                }
+            ],
+            difficulties=[
+                {
+                    "id": "d0",
+                    "anchors": [{"block_id": "b1", "quote": "put up with"}],
+                    "owner_block_id": "b1",
+                    "kind": "idiom",
+                    "priority": "useful",
+                    "help_kind": "lexical_hint",
+                    "required_points": [
+                        {"id": "p1", "description": "Фразовый глагол put up with — мириться"}
+                    ],
+                },
+                {
+                    "id": "d1",
+                    "anchors": [{"block_id": "b1", "quote": "squinted"}],
+                    "owner_block_id": "b1",
+                    "kind": "vocabulary",
+                    "priority": "useful",
+                    "help_kind": "lexical_hint",
+                    "required_points": [
+                        {"id": "p1", "description": "Значение глагола squinted — прищурился"}
+                    ],
+                },
+                {
+                    "id": "d2",
+                    "anchors": [{"block_id": "b1", "quote": "used to"}],
+                    "owner_block_id": "b1",
+                    "kind": "grammar",
+                    "priority": "critical",
+                    "help_kind": "explanation",
+                    "required_points": [
+                        {
+                            "id": "p1",
+                            "description": "Конструкция used to для прошлых привычек",
+                        }
+                    ],
+                },
+            ],
+        )
+        frag2_ped = _staged_pedagogical_reply(
+            aliases=("b1",),
+            treatment="GLOSSARY_ONLY",
+            difficulties=[
+                {
+                    "id": "d3",
+                    "anchors": [{"block_id": "b1", "quote": "muttered"}],
+                    "owner_block_id": "b1",
+                    "kind": "vocabulary",
+                    "priority": "useful",
+                    "help_kind": "lexical_hint",
+                    "required_points": [
+                        {"id": "p1", "description": "Значение muttered — пробормотал"}
+                    ],
+                }
+            ],
+        )
+        frag3_ped = _staged_pedagogical_reply(aliases=("b1",))
+
+        # Run 1: narrative succeeds (3 fragments), pedagogical frag 1 succeeds and caches, frag 2 fails.
+        first_client = FakeLLMClient(
+            [
+                _staged_narrative_reply(aliases=("b1",)),
+                _staged_narrative_reply(aliases=("b1",)),
+                _staged_narrative_reply(aliases=("b1",)),
+                frag1_ped,
+                LLMTransportError("temporary outage on fragment 2"),
+            ]
+        )
+        first_scenario = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=first_client,
+            language_detector=FakeLanguageDetector(),
+            retry_policy=RetryPolicy(max_attempts=1),
+            glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            max_fragment_blocks=1,
+            context_builder=context_builder,
+            staged_analysis=True,
+        )
+        with pytest.raises(LLMTransportError, match="temporary outage"):
+            await first_scenario(command())
+
+        first_ped_requests = [
+            req
+            for req in first_client.requests
+            if req.stage is LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
+        ]
+        assert len(first_ped_requests) == 2
+        assert "Уже объяснено в предыдущих фрагментах этой главы" not in first_ped_requests[0].input_text
+        assert "Уже объяснено в предыдущих фрагментах этой главы" in first_ped_requests[1].input_text
+        assert "put up with" in first_ped_requests[1].input_text
+        assert "squinted" in first_ped_requests[1].input_text
+        assert "used to" in first_ped_requests[1].input_text
+        assert "Конструкция used to для прошлых привычек" in first_ped_requests[1].input_text
+
+        # Run 2: narrative and pedagogical fragment 1 are reused from cache;
+        # fragment 2 must STILL receive fragment 1's topics, and fragment 3 receives both 1 and 2.
+        second_client = FakeLLMClient([frag2_ped, frag3_ped])
+        second_scenario = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=second_client,
+            language_detector=FakeLanguageDetector(),
+            retry_policy=RetryPolicy(max_attempts=1),
+            glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            max_fragment_blocks=1,
+            context_builder=context_builder,
+            staged_analysis=True,
+        )
+        result = await second_scenario(command())
+        assert result.analysis.is_complete
+        assert len(second_client.requests) == 2
+        assert all(
+            req.stage is LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
+            for req in second_client.requests
+        )
+        frag2_input = second_client.requests[0].input_text
+        assert "Уже объяснено в предыдущих фрагментах этой главы" in frag2_input
+        assert "put up with" in frag2_input
+        assert "squinted" in frag2_input
+        assert "used to" in frag2_input
+
+        frag3_input = second_client.requests[1].input_text
+        assert "put up with" in frag3_input
+        assert "squinted" in frag3_input
+        assert "used to" in frag3_input
+        assert "muttered" in frag3_input
+    finally:
+        engine.dispose()
+
+
+async def test_analyze_chapter_passes_cumulative_words_to_sha_and_pedagogical_pass(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cumulative_words_before counts story words strictly before the chapter and flows to sha, fragments, and assemble."""
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
+    from linguary.domain import LLMCallStage
+    from analysis_fakes import FakeLanguageDetector
+
+    front = make_analysis_section(
+        section_id="section-title",
+        title="Title Page",
+        order=0,
+        texts=("Harry Potter", "Rowling Edition"),
+    )
+    ch1_words = " ".join(["story"] * 12_000)
+    ch1 = make_analysis_section(
+        section_id="section-ch1",
+        title="Chapter 1",
+        order=1,
+        texts=(ch1_words,),
+    )
+    ch2 = make_analysis_section(
+        section_id="section-ch2",
+        title="Chapter 2",
+        order=2,
+        texts=("Harry walked down the quiet street.",),
+    )
+    ch3 = make_analysis_section(
+        section_id="section-ch3",
+        title="Chapter 3",
+        order=3,
+        texts=(" ".join(["later"] * 20_000),),
+    )
+    document = make_analysis_document((front, ch1, ch2, ch3))
+    engine, uow = _staged_uow(tmp_path, document)
+    try:
+        context_builder = ContextBuilder(
+            content_plan_profile="content-plan-v3",
+            reader_level="a2",
+            prompt_templates=snapshot_prompt_templates(
+                source_language="en",
+                target_language="ru",
+                reader_level="a2",
+                profile="content-plan-v3",
+            ),
+        )
+        sha_words_seen: list[int] = []
+        ped_words_seen: list[int] = []
+        original_sha = context_builder.pedagogical_input_sha256
+        original_ped = context_builder.for_chapter_pedagogical_analysis
+
+        def spy_sha(*args, **kwargs):
+            sha_words_seen.append(kwargs.get("cumulative_words_before", -1))
+            return original_sha(*args, **kwargs)
+
+        def spy_ped(*args, **kwargs):
+            ped_words_seen.append(kwargs.get("cumulative_words_before", -1))
+            return original_ped(*args, **kwargs)
+
+        monkeypatch.setattr(context_builder, "pedagogical_input_sha256", spy_sha)
+        monkeypatch.setattr(context_builder, "for_chapter_pedagogical_analysis", spy_ped)
+
+        # Chapter 1: front matter is excluded -> cumulative_words_before == 0 (78–85%).
+        ch1_client = FakeLLMClient(
+            [_staged_narrative_reply(("b1",)), _staged_pedagogical_reply(("b1",))]
+        )
+        scenario = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=ch1_client,
+            language_detector=FakeLanguageDetector(),
+            retry_policy=RetryPolicy(max_attempts=1),
+            glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            context_builder=context_builder,
+            staged_analysis=True,
+        )
+        await scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-ch1"))
+        assert sha_words_seen == [0]
+        # 1 call inside pedagogical_input_sha256 + 1 in _run_staged_fragments + 1 in _assemble_staged
+        assert ped_words_seen == [0, 0, 0]
+        ch1_ped_req = next(
+            r for r in ch1_client.requests if r.stage is LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
+        )
+        assert "прочитано до этой главы: 0 слов" in ch1_ped_req.input_text
+        assert "78–85%" in ch1_ped_req.input_text
+
+        # Chapter 2: strictly before = 12,000 words from Chapter 1 (neither front matter nor Chapter 3).
+        sha_words_seen.clear()
+        ped_words_seen.clear()
+        ch2_client = FakeLLMClient(
+            [_staged_narrative_reply(("b1",)), _staged_pedagogical_reply(("b1",))]
+        )
+        scenario_ch2 = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=ch2_client,
+            language_detector=FakeLanguageDetector(),
+            retry_policy=RetryPolicy(max_attempts=1),
+            glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            context_builder=context_builder,
+            staged_analysis=True,
+        )
+        await scenario_ch2(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-ch2"))
+        assert sha_words_seen == [12_000]
+        assert ped_words_seen == [12_000, 12_000, 12_000]
+        ch2_ped_req = next(
+            r for r in ch2_client.requests if r.stage is LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
+        )
+        assert "прочитано до этой главы: 12000 слов" in ch2_ped_req.input_text
+        assert "72–80%" in ch2_ped_req.input_text
+
+        # Growing Chapter 1 to 30,000 words changes pedagogical_input_sha256 -> recomputes only pedagogical pass.
+        from linguary.adapters.db.models import DocumentBlockRow
+
+        with uow.transaction() as tx:
+            row = tx.documents._session.get(DocumentBlockRow, ch1.ordered_blocks[0].id)
+            assert row is not None
+            row.text = " ".join(["story"] * 30_000)
+        sha_words_seen.clear()
+        ped_words_seen.clear()
+        ch2_recompute_client = FakeLLMClient([_staged_pedagogical_reply(("b1",))])
+        scenario_ch2_recompute = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=ch2_recompute_client,
+            language_detector=FakeLanguageDetector(),
+            retry_policy=RetryPolicy(max_attempts=1),
+            glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            context_builder=context_builder,
+            staged_analysis=True,
+        )
+        await scenario_ch2_recompute(
+            AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-ch2")
+        )
+        assert [r.stage for r in ch2_recompute_client.requests] == [
+            LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
+        ]
+        assert sha_words_seen == [30_000]
+        assert ped_words_seen == [30_000, 30_000, 30_000]
+        assert "68–76%" in ch2_recompute_client.requests[0].input_text
+    finally:
+        engine.dispose()
+
+
+async def test_assemble_staged_passes_resolved_blocks_and_mandatory_facts_for_pronoun_speaker(
+    tmp_path,
+) -> None:
+    """_assemble_staged passes resolved_blocks and mandatory_facts so unambiguous pronoun remarks resolve to explicit."""
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
+    from linguary.domain.content_plan import Scene
+    from linguary.application.llm_dto import (
+        NarrativeAnalysisResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContextFactResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from analysis_fakes import FakeLanguageDetector
+
+    section = make_analysis_section(
+        section_id="section-1",
+        title="Chapter 1",
+        order=0,
+        texts=('"Don\'t go!" he said.',),
+    )
+    document = make_analysis_document((section,))
+    block = section.ordered_blocks[0]
+    engine, uow = _staged_uow(tmp_path, document)
+    try:
+        harry_decision = TermConcept(
+            id="concept-harry",
+            book_id=BOOK_ID,
+            type=ConceptType.PERSON,
+            canonical_source_text="Harry",
+            status=TermStatus.APPROVED,
+            note="мужской род",
+            variants=(
+                TermVariant(
+                    concept_id="concept-harry",
+                    language=TARGET_LANGUAGE,
+                    text="Гарри",
+                    status=TermStatus.APPROVED,
+                ),
+            ),
+        )
+        hermione_decision = TermConcept(
+            id="concept-hermione",
+            book_id=BOOK_ID,
+            type=ConceptType.PERSON,
+            canonical_source_text="Hermione",
+            status=TermStatus.APPROVED,
+            note="женский род",
+            variants=(
+                TermVariant(
+                    concept_id="concept-hermione",
+                    language=TARGET_LANGUAGE,
+                    text="Гермиона",
+                    status=TermStatus.APPROVED,
+                ),
+            ),
+        )
+        with uow.transaction() as tx:
+            tx.glossary.save(harry_decision)
+            tx.glossary.save(hermione_decision)
+
+        context_builder = ContextBuilder(
+            content_plan_profile="content-plan-v3",
+            reader_level="a2",
+            prompt_templates=snapshot_prompt_templates(
+                source_language="en",
+                target_language="ru",
+                reader_level="a2",
+                profile="content-plan-v3",
+            ),
+        )
+        scenario = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=FakeLLMClient([]),
+            language_detector=FakeLanguageDetector(),
+            retry_policy=RetryPolicy(max_attempts=1),
+            glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+            context_builder=context_builder,
+            staged_analysis=True,
+        )
+
+        # Simulate a saved narrative pass whose pronoun speaker fact was stored as inferred.
+        narrative = NarrativeAnalysisResponse(
+            translation_instructions="Keep a natural tone.",
+            chapter_summary="Harry tells Hermione not to go.",
+            glossary_candidates=(),
+            context_facts=(
+                QuotedContextFactResponse(
+                    id="f1",
+                    kind="speaker",
+                    anchors=(
+                        QuotedSourceAnchorResponse(
+                            block_id=block.id, quote="he said", start=12, end=19
+                        ),
+                    ),
+                    subject_anchor=QuotedSourceAnchorResponse(
+                        block_id=block.id, quote="Don't go!", start=1, end=10
+                    ),
+                    value="Harry",
+                    certainty="inferred",
+                ),
+            ),
+            scenes=(),
+        )
+        pedagogical = PedagogicalAnalysisResponse(
+            treatment_plan=(
+                TreatmentPlanItemResponse(
+                    source_block_id=block.id, treatment=BlockTreatment.TRANSLATE
+                ),
+            ),
+            before_you_read=(),
+            difficulties=(),
+            before_you_read_evidence=(),
+            reader_chapter_summary="Harry speaks to Hermione.",
+        )
+        scene = Scene(
+            id="s1",
+            order=0,
+            start_block_id=block.id,
+            end_block_id=block.id,
+            summary="Harry speaks to Hermione.",
+            location="Hallway",
+            participants=("Harry", "Hermione"),
+        )
+
+        analysis = scenario._assemble_staged(
+            narrative,
+            pedagogical,
+            (scene,),
+            document,
+            section,
+            (),
+            (harry_decision, hermione_decision),
+        )
+        assert analysis.content_plan is not None
+        speaker_facts = [
+            f for f in analysis.content_plan.context_facts if f.kind == "speaker"
+        ]
+        assert len(speaker_facts) == 1
+        assert speaker_facts[0].value == "Harry"
+        assert speaker_facts[0].certainty == "explicit"
+    finally:
+        engine.dispose()
+
+
+
 
 
 

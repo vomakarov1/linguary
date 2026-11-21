@@ -354,7 +354,7 @@ class AnalyzeChapter:
             attempts += count
             usages.append(usage)
             narrative, scenes, facts = merge_narrative_fragments(narrative_parts)
-            validate_narrative_response(narrative, aliases, texts, visible,
+            scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
                 blocks=blocks, source_offsets=True)
@@ -369,19 +369,22 @@ class AnalyzeChapter:
                 ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
                 blocks=blocks, source_offsets=True)
+        cumulative_words = _cumulative_words_before(document, section)
         pedagogical_hash = self._context_builder.pedagogical_input_sha256(document, section,
             narrative_output_sha256=saved.output_sha256, narrative_summary=narrative.chapter_summary,
             context_facts=facts, glossary_candidates=narrative.glossary_candidates,
             accumulated_candidates=accumulated, user_decisions=user_decisions,
             model_dependencies=_pass_model_dependencies(dependencies, AnalysisPassKind.PEDAGOGICAL),
-            max_fragment_blocks=self._max_fragment_blocks)
+            max_fragment_blocks=self._max_fragment_blocks,
+            cumulative_words_before=cumulative_words)
         cached_pedagogical = self._cached_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash)
         if cached_pedagogical is None:
             parts, count, usage = await self._run_staged_fragments(
                 command, document, section, accumulated, user_decisions, suggestions, concepts,
                 pass_kind=AnalysisPassKind.PEDAGOGICAL, narrative=narrative, facts=facts,
                 chapter_input_sha=pedagogical_hash,
-                expected_conditions_id=expected_conditions_id)
+                expected_conditions_id=expected_conditions_id,
+                cumulative_words_before=cumulative_words)
             attempts += count
             usages.append(usage)
             merged = merge_chapter_analysis(parts, id=self._id_factory(), section_id=section.id,
@@ -390,7 +393,9 @@ class AnalyzeChapter:
                 id_factory=self._id_factory)
             pedagogical = pedagogical_response(merged, reader_level=self._context_builder._reader_level)
             analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
-                                             accumulated, user_decisions)
+                                             accumulated, user_decisions,
+                                             concepts=concepts,
+                                             cumulative_words_before=cumulative_words)
             self._save_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash,
                             pedagogical, expected_conditions_id)
         else:
@@ -398,20 +403,26 @@ class AnalyzeChapter:
             if saved_pedagogical.attempt_id is not None:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_pedagogical.attempt_id))
             analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
-                                             accumulated, user_decisions)
+                                             accumulated, user_decisions,
+                                             concepts=concepts,
+                                             cumulative_words_before=cumulative_words)
         return analysis, attempts, _total_usage(usages)
 
     def _assemble_staged(
         self, narrative: NarrativeAnalysisResponse, pedagogical: PedagogicalAnalysisResponse,
         scenes: Sequence[Scene], document: CanonicalDocument, section: DocumentSection,
         accumulated: Sequence[GlossaryCandidate], user_decisions: Sequence[TermConcept],
+        *,
+        concepts: Sequence[TermConcept] = (),
+        cumulative_words_before: int = 0,
     ) -> ChapterAnalysis:
         blocks = textual_blocks(section)
         context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
             narrative_summary=narrative.chapter_summary,
             glossary_candidates=narrative.glossary_candidates,
             accumulated_candidates=accumulated,
-            user_decisions=user_decisions)
+            user_decisions=user_decisions,
+            cumulative_words_before=cumulative_words_before)
         # Both saved DTOs use stable references scoped to this chapter.
         context = replace(context, block_ids_by_alias={b.id: b.id for b in blocks},
             visible_texts_by_alias={b.id: source_text_for_model(b) for b in blocks},
@@ -424,9 +435,18 @@ class AnalyzeChapter:
                 source_texts=tuple(b.text for b in blocks), source_language=document.source_language,
                 language_detector=self._language_detector,
                 require_parallel_russian=self._a2_summary_requires_parallel_russian())
-        payload = combine_staged_analysis_responses(narrative, pedagogical, resolved_scenes=scenes)
+        mandatory_facts = glossary_context_constraints((*concepts, *user_decisions))
+        payload = combine_staged_analysis_responses(
+            narrative,
+            pedagogical,
+            resolved_scenes=scenes,
+            resolved_blocks=blocks,
+            mandatory_facts=mandatory_facts,
+        )
         _ensure_plan_covers_chapter(payload, context)
-        plan = self._validate_pedagogical(payload, context, blocks, source_offsets=True)
+        plan = self._validate_pedagogical(
+            payload, context, blocks, source_offsets=True, mandatory_facts=mandatory_facts,
+        )
         analysis = merge_chapter_analysis([FragmentAnalysis.of_response(payload, order=0,
             block_ids_by_alias=context.block_ids_by_alias, texts={b.id: b.text for b in blocks},
             visible_texts_by_alias=context.visible_texts_by_alias, resolved_content_plan=plan,
@@ -450,6 +470,7 @@ class AnalyzeChapter:
     def _validate_pedagogical(
         self, payload: ChapterAnalysisResponse, context: ChapterAnalysisContext,
         blocks: Sequence[DocumentBlock], *, source_offsets: bool = False,
+        mandatory_facts: Mapping[str, Mapping[str, str]] | None = None,
     ) -> ContentPlan | None:
         return validate_content_plan(payload, context.block_ids_by_alias, {b.id: b.text for b in blocks},
             english_help=self._context_builder._english_help,
@@ -457,7 +478,7 @@ class AnalyzeChapter:
             language_notes_per_chapter=context.language_notes_per_chapter,
             note_limits_by_block=context.note_limits_by_block, note_group_limits=context.note_group_limits,
             visible_texts_by_alias=context.visible_texts_by_alias, blocks=blocks,
-            source_offsets=source_offsets)
+            source_offsets=source_offsets, mandatory_facts=mandatory_facts)
 
     def _normalize_a2_dialogue(self, payload, blocks, block_ids_by_alias):
         if self._context_builder._reader_level != 'a2' or self._context_builder._english_help:
@@ -474,6 +495,7 @@ class AnalyzeChapter:
         suggestions: Sequence[TermConcept], concepts: Sequence[TermConcept], *, pass_kind: AnalysisPassKind,
         narrative: NarrativeAnalysisResponse | None = None, facts: Sequence[ContextFact] = (),
         chapter_input_sha: str | None = None, expected_conditions_id: str | None = None,
+        cumulative_words_before: int = 0,
     ) -> tuple[list, int, TokenUsage | None]:
         fragments = plan_fragments(
             textual_blocks(section), max_blocks=self._max_fragment_blocks, max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
@@ -521,12 +543,15 @@ class AnalyzeChapter:
                     accumulated, user_decisions, suggestions, fragment=fragment if total > 1 else None,
                     fragment_count=total, findings=previous)
             else:
+                prior_topics = _prior_explained_topics(parts)
                 context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
                     narrative_summary=narrative.chapter_summary, context_facts=facts,
                     glossary_candidates=narrative.glossary_candidates,
                     accumulated_candidates=accumulated, user_decisions=user_decisions,
                     fragment=fragment if total > 1 else None, fragment_count=total,
-                    before_you_read_limit=byr_quota, language_notes_limit=note_quota)
+                    before_you_read_limit=byr_quota, language_notes_limit=note_quota,
+                    cumulative_words_before=cumulative_words_before,
+                    prior_explained_topics=prior_topics)
                 if parts:
                     context = replace(context, request=replace(context.request,
                         input_text=context.request.input_text + '\nУже найдено в предыдущих частях главы:\n' +
@@ -1729,6 +1754,76 @@ class ChapterAnalysisSequence:
         if book is None:
             raise AnalyzeChapterError(f"книги {book_id} нет в хранилище")
         return book
+
+
+_WORD_TOKEN_RE = re.compile(r"[^\W_]+(?:['’][^\W_]+)*", re.UNICODE)
+
+
+def _cumulative_words_before(
+    document: CanonicalDocument, section: DocumentSection
+) -> int:
+    """Total words in content sections strictly preceding `section` in reading order."""
+    total = 0
+    for other in getattr(document, "ordered_sections", document.sections):
+        if other.id == section.id:
+            break
+        if not _is_content_section(document, other):
+            continue
+        for block in textual_blocks(other):
+            total += len(_WORD_TOKEN_RE.findall(block.text))
+    return total
+
+
+def _prior_explained_topics(parts: Sequence[FragmentAnalysis]) -> tuple[str, ...]:
+    """Collect deduplicated lemmas and grammar topics explained in earlier chapter fragments."""
+    topics: list[str] = []
+    seen: set[str] = set()
+
+    def add(topic: str) -> None:
+        compact = " ".join(topic.split()).strip()
+        if not compact:
+            return
+        key = compact.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        topics.append(compact)
+
+    for part in parts:
+        for entry in part.before_you_read:
+            add(entry.expression)
+        plan = part.content_plan
+        if plan is None:
+            continue
+        for difficulty in plan.difficulties:
+            quotes = tuple(
+                dict.fromkeys(
+                    " ".join(anchor.quote.split())
+                    for anchor in difficulty.anchors
+                    if anchor.quote.strip()
+                )
+            )
+            if difficulty.kind == "grammar":
+                descriptions = "; ".join(
+                    dict.fromkeys(
+                        " ".join(point.description.split())
+                        for point in difficulty.required_points
+                        if point.description.strip()
+                    )
+                )
+                if len(descriptions) > 120:
+                    descriptions = descriptions[:117].rstrip() + "..."
+                quote_label = ", ".join(quotes[:3])
+                if quote_label and descriptions:
+                    add(f"grammar: {quote_label} — {descriptions}")
+                elif quote_label:
+                    add(f"grammar: {quote_label}")
+                elif descriptions:
+                    add(f"grammar: {descriptions}")
+            else:
+                for quote in quotes:
+                    add(quote if len(quote) <= 80 else quote[:77].rstrip() + "...")
+    return tuple(topics)
 
 
 def _is_content_section(
