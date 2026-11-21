@@ -56,6 +56,7 @@ from linguary.domain import (
     GlossaryCandidate,
     SupportStatus,
     TreatmentPlan,
+    TreatmentPlanError,
     TreatmentPlanItem,
     glossary_key,
     spellings_by_preference,
@@ -277,36 +278,53 @@ def _plan_item_from_response(
     if not item.segments:
         return TreatmentPlanItem(block_id=block_id, treatment=item.treatment)
     if block is None:
-        raise AnalysisMergeError(
-            f"режимы сегментов блока {block_id} нельзя собрать без самого блока"
+        raise _analysis_error(
+            f"режимы сегментов блока {block_id} нельзя собрать без самого блока",
+            rule_code="invalid_segment_treatment",
+            block_ids=(block_id,),
         )
     spans = block.segment_spans
     if len(spans) < 2:
-        raise AnalysisMergeError(
-            f"блок {block_id} состоит из одного сегмента, режимы сегментов не задаются"
+        raise _analysis_error(
+            f"блок {block_id} состоит из одного сегмента, режимы сегментов не задаются",
+            rule_code="invalid_segment_treatment",
+            block_ids=(block_id,),
         )
     by_index: dict[int, BlockTreatment] = {}
     for segment in item.segments:
         if segment.index < 1 or segment.index > len(spans):
-            raise AnalysisMergeError(
+            raise _analysis_error(
                 f"индекс сегмента {segment.index} блока {block_id} "
-                f"вне диапазона 1..{len(spans)}"
+                f"вне диапазона 1..{len(spans)}",
+                rule_code="invalid_segment_treatment",
+                block_ids=(block_id,),
             )
         if segment.index in by_index:
-            raise AnalysisMergeError(
-                f"сегмент {segment.index} блока {block_id} указан повторно"
+            raise _analysis_error(
+                f"сегмент {segment.index} блока {block_id} указан повторно",
+                rule_code="invalid_segment_treatment",
+                block_ids=(block_id,),
             )
         by_index[segment.index] = segment.treatment
     if set(by_index) != set(range(1, len(spans) + 1)):
-        raise AnalysisMergeError(
-            f"режимы сегментов блока {block_id} покрывают не все сегменты"
+        raise _analysis_error(
+            f"режимы сегментов блока {block_id} покрывают не все сегменты",
+            rule_code="invalid_segment_treatment",
+            block_ids=(block_id,),
         )
-    return TreatmentPlanItem(
-        block_id=block_id,
-        treatment=item.treatment,
-        segment_treatments=tuple(by_index[index] for index in range(1, len(spans) + 1)),
-        sentence_indexes=tuple(span.sentence_index for span in spans),
-    )
+    try:
+        return TreatmentPlanItem(
+            block_id=block_id,
+            treatment=item.treatment,
+            segment_treatments=tuple(by_index[index] for index in range(1, len(spans) + 1)),
+            sentence_indexes=tuple(span.sentence_index for span in spans),
+        )
+    except TreatmentPlanError as err:
+        raise _analysis_error(
+            str(err),
+            rule_code="invalid_segment_treatment",
+            block_ids=(block_id,),
+        ) from err
 
 
 def _is_oversized_block(
@@ -2846,6 +2864,38 @@ def _unresolved_quote_error(
     return _analysis_error(prefix, rule_code="unresolved_quote")
 
 
+def _overlapping_segment_treatments(
+    difficulty: Difficulty,
+    plan_item: TreatmentPlanItemResponse | None,
+    block: DocumentBlock | None,
+    fallback_treatment: BlockTreatment | None,
+) -> tuple[BlockTreatment, ...]:
+    if (
+        plan_item is not None
+        and plan_item.segments
+        and block is not None
+        and block.segment_spans
+    ):
+        by_index = {segment.index: segment.treatment for segment in plan_item.segments}
+        owner_anchors = tuple(
+            anchor
+            for anchor in difficulty.anchors
+            if anchor.block_id == difficulty.owner_block_id
+        )
+        if owner_anchors and len(by_index) == len(block.segment_spans):
+            overlapped = tuple(
+                by_index[index]
+                for index, span in enumerate(block.segment_spans, start=1)
+                if any(
+                    span.start < anchor.end and anchor.start < span.end
+                    for anchor in owner_anchors
+                )
+            )
+            if overlapped:
+                return overlapped
+    return (fallback_treatment,) if fallback_treatment is not None else ()
+
+
 def validate_content_plan(
     payload: ChapterAnalysisResponse,
     aliases: Mapping[str, str],
@@ -2862,7 +2912,10 @@ def validate_content_plan(
     source_offsets: bool = False,
 ) -> ContentPlan | None:
     """Validates source anchors and channel eligibility prior to accepting the response."""
+    if blocks is not None:
+        plan_items_from_response(payload, block_ids_by_alias=aliases, blocks=blocks)
     aliases_by_block_id = {bid: alias for alias, bid in (aliases or {}).items() if bid}
+    blocks_by_id = {block.id: block for block in blocks} if blocks is not None else {}
     plan = content_plan_from_response(
         payload,
         aliases,
@@ -2888,9 +2941,14 @@ def validate_content_plan(
     if len(payload.before_you_read) > before_you_read_limit:
         raise AnalysisMergeError("BYR превышает согласованный бюджет фрагмента")
     try:
-        treatments = {aliases[i.source_block_id]: i.treatment for i in payload.treatment_plan}
+        plan_items_by_block_id = {
+            aliases[i.source_block_id]: i for i in payload.treatment_plan
+        }
     except KeyError as error:
         raise AnalysisMergeError("привязка к невидимому блоку") from error
+    treatments = {
+        block_id: item.treatment for block_id, item in plan_items_by_block_id.items()
+    }
     bad_english_blocks = [
         block_id
         for block_id, treatment in treatments.items()
@@ -2925,10 +2983,17 @@ def validate_content_plan(
             for e in plan.before_you_read_evidence
             if e.difficulty_id == difficulty.id
         }
+        owner_treatment = treatments.get(difficulty.owner_block_id)
+        effective_treatments = _overlapping_segment_treatments(
+            difficulty,
+            plan_items_by_block_id.get(difficulty.owner_block_id),
+            blocks_by_id.get(difficulty.owner_block_id),
+            owner_treatment,
+        )
         fragment_help = (
             english_help
             and plan.version == 3
-            and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
+            and owner_treatment is BlockTreatment.READ_AS_IS
         )
         if (
             plan.version == 3
@@ -2947,10 +3012,13 @@ def validate_content_plan(
                 rule_code="grammar_requires_explanation",
                 block_ids=(difficulty.owner_block_id,),
             )
+        all_glossary = bool(effective_treatments) and all(
+            mode is BlockTreatment.GLOSSARY_ONLY for mode in effective_treatments
+        )
         if (
             difficulty.help_kind == "lexical_hint"
             and not fragment_help
-            and treatments.get(difficulty.owner_block_id) is not BlockTreatment.GLOSSARY_ONLY
+            and not all_glossary
             and covered != {p.id for p in difficulty.required_points}
         ):
             label = aliases_by_block_id.get(
@@ -2969,7 +3037,7 @@ def validate_content_plan(
             difficulty.help_kind == "explanation"
             and covered != {p.id for p in difficulty.required_points}
             and not fragment_help
-            and treatments.get(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
+            and any(mode is BlockTreatment.READ_AS_IS for mode in effective_treatments)
         ):
             note_owners.add(difficulty.owner_block_id)
         for item in plan.before_you_read_evidence:

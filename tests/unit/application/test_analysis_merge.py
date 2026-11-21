@@ -2453,3 +2453,300 @@ def test_validate_content_plan_hints_parent_block_for_segment_anchor_and_keeps_u
     assert unknown_exc.value.violation.block_ids == ()
     assert "используй идентификатор целого блока" not in str(unknown_exc.value)
 
+
+def test_plan_item_from_response_wraps_all_segment_errors_as_local_violation() -> None:
+    from linguary.application.analysis_merge import _plan_item_from_response
+    from linguary.application.llm_dto import SegmentTreatmentResponse
+    from linguary.domain import BlockSegment
+
+    single_block = make_analysis_block(
+        section_id=SECTION_ID, order=0, text="Single sentence."
+    )
+    two_seg_text = "First sentence. Second sentence."
+    split_at = len("First sentence. ")
+    two_seg_block = replace(
+        make_analysis_block(section_id=SECTION_ID, order=1, text=two_seg_text),
+        segments=(
+            BlockSegment(0, split_at, 0),
+            BlockSegment(split_at, len(two_seg_text), 1),
+        ),
+    )
+    same_sentence_block = replace(
+        make_analysis_block(section_id=SECTION_ID, order=2, text=two_seg_text),
+        segments=(
+            BlockSegment(0, split_at, 0),
+            BlockSegment(split_at, len(two_seg_text), 0),
+        ),
+    )
+
+    cases = [
+        # 1. block is None
+        (
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+            "block-missing",
+            None,
+        ),
+        # 2. single-segment block
+        (
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),),
+            ),
+            single_block.id,
+            single_block,
+        ),
+        # 3. out-of-range segment index
+        (
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(3, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+            two_seg_block.id,
+            two_seg_block,
+        ),
+        # 4. duplicate segment index
+        (
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+            two_seg_block.id,
+            two_seg_block,
+        ),
+        # 5. incomplete segment coverage
+        (
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),),
+            ),
+            two_seg_block.id,
+            two_seg_block,
+        ),
+        # 6a. TreatmentPlanError: block treatment weaker than strongest segment
+        (
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.GLOSSARY_ONLY,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+            two_seg_block.id,
+            two_seg_block,
+        ),
+        # 6b. TreatmentPlanError: different modes within the same sentence_index
+        (
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+            same_sentence_block.id,
+            same_sentence_block,
+        ),
+        # 6c. TreatmentPlanError: block treatment stronger than strongest segment
+        (
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),
+                    SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+            two_seg_block.id,
+            two_seg_block,
+        ),
+    ]
+
+    for item, block_id, block in cases:
+        with pytest.raises(AnalysisMergeError) as exc:
+            _plan_item_from_response(item, block_id=block_id, block=block)
+        assert exc.value.violation is not None
+        assert exc.value.violation.rule_code == "invalid_segment_treatment"
+        assert exc.value.violation.scope == "local"
+        assert exc.value.violation.block_ids == (block_id,)
+
+
+def test_validate_content_plan_resolves_lexical_hint_and_notes_by_overlapping_segment_treatments() -> None:
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import (
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse,
+    )
+    from linguary.domain import BlockSegment
+    from linguary.domain.content_plan import RequiredPoint
+
+    s1 = "He would have gone home. "
+    s2 = "She muttered quietly. "
+    s3 = "They waited outside."
+    text = s1 + s2 + s3
+    b = replace(
+        make_analysis_block(section_id=SECTION_ID, order=0, text=text),
+        segments=(
+            BlockSegment(0, len(s1), 0),
+            BlockSegment(len(s1), len(s1) + len(s2), 1),
+            BlockSegment(len(s1) + len(s2), len(text), 2),
+        ),
+    )
+    aliases = {"b1": b.id}
+    texts = {b.id: text}
+    visible = {"b1": text}
+    point = (RequiredPoint("p1", "Объяснить значение."),)
+    mixed_item = TreatmentPlanItemResponse(
+        "b1",
+        BlockTreatment.TRANSLATE,
+        (
+            SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+            SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+            SegmentTreatmentResponse(3, BlockTreatment.READ_AS_IS),
+        ),
+    )
+
+    def make_payload(difficulties, item=mixed_item) -> ChapterAnalysisResponse:
+        return ChapterAnalysisResponse(
+            translation_instructions="Keep voice.",
+            chapter_summary="Summary.",
+            treatment_plan=(item,),
+            content_plan=QuotedContentPlanResponse(
+                version=3,
+                profile="content-plan-v3",
+                difficulties=difficulties,
+            ),
+        )
+
+    # 1. lexical_hint on GLOSSARY_ONLY segment succeeds even when block treatment is TRANSLATE.
+    hint_on_glossary = QuotedDifficultyResponse(
+        "d-hint-ok",
+        (QuotedSourceAnchorResponse("b1", "muttered"),),
+        "b1",
+        "vocabulary",
+        "useful",
+        "lexical_hint",
+        point,
+    )
+    plan = validate_content_plan(
+        make_payload((hint_on_glossary,)),
+        aliases,
+        texts,
+        visible_texts_by_alias=visible,
+        blocks=(b,),
+        language_notes_per_chapter=0,
+    )
+    assert plan is not None
+    assert plan.difficulties[0].help_kind == "lexical_hint"
+
+    # 2. lexical_hint on TRANSLATE segment or spanning TRANSLATE + GLOSSARY_ONLY is rejected.
+    for bad_quote in ("would have gone", "home. She muttered"):
+        hint_bad = QuotedDifficultyResponse(
+            "d-hint-bad",
+            (QuotedSourceAnchorResponse("b1", bad_quote),),
+            "b1",
+            "vocabulary",
+            "useful",
+            "lexical_hint",
+            point,
+        )
+        with pytest.raises(AnalysisMergeError) as hint_exc:
+            validate_content_plan(
+                make_payload((hint_bad,)),
+                aliases,
+                texts,
+                visible_texts_by_alias=visible,
+                blocks=(b,),
+            )
+        assert hint_exc.value.violation is not None
+        assert hint_exc.value.violation.rule_code == "lexical_help_channel"
+        assert hint_exc.value.violation.block_ids == (b.id,)
+
+    # 3. explanation on TRANSLATE segment only does NOT count in note_owners (fits budget 0).
+    expl_on_translate = QuotedDifficultyResponse(
+        "d-expl-tr",
+        (QuotedSourceAnchorResponse("b1", "would have gone"),),
+        "b1",
+        "grammar",
+        "critical",
+        "explanation",
+        point,
+    )
+    assert validate_content_plan(
+        make_payload((expl_on_translate,)),
+        aliases,
+        texts,
+        visible_texts_by_alias=visible,
+        blocks=(b,),
+        language_notes_per_chapter=0,
+        note_limits_by_block={b.id: 0},
+    ) is not None
+
+    # 4. explanation overlapping READ_AS_IS segment DOES count in note_owners -> exceeds budget 0.
+    expl_on_read_as_is = QuotedDifficultyResponse(
+        "d-expl-rai",
+        (QuotedSourceAnchorResponse("b1", "waited outside"),),
+        "b1",
+        "vocabulary",
+        "useful",
+        "explanation",
+        point,
+    )
+    with pytest.raises(AnalysisMergeError) as note_exc:
+        validate_content_plan(
+            make_payload((expl_on_read_as_is,)),
+            aliases,
+            texts,
+            visible_texts_by_alias=visible,
+            blocks=(b,),
+            language_notes_per_chapter=0,
+            note_limits_by_block={b.id: 0},
+        )
+    assert note_exc.value.violation is not None
+    assert note_exc.value.violation.rule_code == "note_chapter_budget"
+    assert note_exc.value.violation.block_ids == (b.id,)
+
+    # 5. validate_content_plan validates segments upfront when blocks are passed.
+    bad_segments_item = TreatmentPlanItemResponse(
+        "b1",
+        BlockTreatment.GLOSSARY_ONLY,
+        (
+            SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+            SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+            SegmentTreatmentResponse(3, BlockTreatment.READ_AS_IS),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as seg_exc:
+        validate_content_plan(
+            make_payload((), item=bad_segments_item),
+            aliases,
+            texts,
+            visible_texts_by_alias=visible,
+            blocks=(b,),
+        )
+    assert seg_exc.value.violation is not None
+    assert seg_exc.value.violation.rule_code == "invalid_segment_treatment"
+    assert seg_exc.value.violation.scope == "local"
+    assert seg_exc.value.violation.block_ids == (b.id,)
+
+
