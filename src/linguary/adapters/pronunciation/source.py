@@ -1,6 +1,6 @@
 """Pinned local pronunciations; a lexicon row makes no semantic claim."""
 import asyncio
-from functools import cache
+from functools import cache, lru_cache
 from hashlib import sha256
 from importlib import resources
 import json
@@ -92,6 +92,18 @@ def _load_index(variant):
     index = _parse_rows(text, variant)
     _LOADED_INDICES[variant] = index
     return index
+
+
+@lru_cache(maxsize=1)
+def known_english_words() -> frozenset[str]:
+    """Cached casefolded union of forms from bundled `en_UK.txt` and `en_US.txt`."""
+    words: set[str] = set()
+    for filename, *_ in _FILES.values():
+        for line in _read_resource(filename).decode('utf-8').splitlines():
+            form, separator, _ = line.partition('\t')
+            if separator and valid_lookup_form(form):
+                words.add(canonicalize_pronunciation_apostrophes(form).casefold())
+    return frozenset(words)
 
 
 class IpaDictPronunciationSource:
