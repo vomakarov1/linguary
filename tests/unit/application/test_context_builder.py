@@ -425,8 +425,8 @@ def test_a2_analysis_preserves_affirmative_meaning_of_double_negation() -> None:
     assert "признание качества персонажа или события" in instructions
     assert "Объяснение такого выражения в Before You Read" in instructions
     assert "формулируй утвердительно" in instructions
-    assert "не отрицаю, что заклинание блестящее" in instructions
-    assert "Говорящий признаёт, что заклинание блестящее" in instructions
+    assert "не отрицаю, что план удачный" in instructions
+    assert "Говорящий признаёт, что план удачный" in instructions
 
 
 def test_before_you_read_instructions_use_advance_organizer() -> None:
@@ -1795,15 +1795,15 @@ _A2_SHORT_LINE_HELP = (
     "nodded",
     "sniggered",
     "moaned",
-    "Fancy seeing you here",
+    "What brings you here",
     "I suppose so",
-    "sweetums",
+    "sweetheart",
     "How very wrong he was",
     "нельзя оставлять в READ_AS_IS",
     "GLOSSARY_ONLY или TRANSLATE",
-    "The Boy Who Lived",
-    "The Vanishing Glass",
-    "The Letters from No One",
+    "The House on the Hill",
+    "The Missing Key",
+    "Letters from Abroad",
     "без грамматических сносок",
 )
 _A2_TRIVIAL_NOTE_BAN = (
@@ -2584,4 +2584,169 @@ def test_name_policy_meaning_includes_contrastive_opaque_name_example() -> None:
             assert name in text
     assert "Everlost" not in meaning["translation"]
     assert "Everlost" not in meaning["pedagogical_analysis"]
+
+
+def test_pedagogical_a2_instructions_have_no_duplicates_or_hp_examples() -> None:
+    """Pedagogical A2 instructions have no HP examples, no duplicate A2 note discipline, and no translation-only rules."""
+    import inspect
+
+    from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_BLOCKS
+    from linguary.application.context_builder import _reader_level_treatment_guidance
+    from linguary.application.reader_text import _A2_NOTE_DISCIPLINE, learner_instructions
+
+    hp_examples = (
+        "The Boy Who Lived",
+        "The Vanishing Glass",
+        "The Letters from No One",
+        "sweetums",
+        "Fancy seeing you here",
+        "not saying the spell isn’t brilliant",
+    )
+    a2_guidance = _reader_level_treatment_guidance("a2")
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    section = make_analysis_section(
+        section_id="sec-a2-ped",
+        title="Chapter 1",
+        order=0,
+        texts=("First paragraph.",),
+    )
+    document = make_analysis_document((section,))
+    live_ctx = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+    ).for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Short summary.",
+    )
+    template_ctx = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        prompt_templates=templates,
+    ).for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Short summary.",
+    )
+
+    for text in (
+        a2_guidance,
+        templates["pedagogical_analysis"],
+        live_ctx.request.instructions,
+        template_ctx.request.instructions,
+    ):
+        for phrase in hp_examples:
+            assert phrase not in text
+
+    note_discipline_body = _A2_NOTE_DISCIPLINE.strip()
+    for instructions in (live_ctx.request.instructions, template_ctx.request.instructions):
+        assert instructions.count(note_discipline_body) == 1
+        assert instructions.count("Различай роль заметок в GLOSSARY_ONLY и TRANSLATE") == 1
+        assert instructions.count("Для A2 без english help верни before_you_read: []") == 1
+        assert instructions.count("might have been") == 1
+        assert instructions.count("not saying ... isn’t ...") == 1
+        assert "Для A2 обеспечь необходимую лексическую опору" not in instructions
+        assert "Пересказ A2 верни ровно одним абзацем" not in instructions
+        assert "Соблюдай 4 правила оформления русской прямой речи" not in instructions
+        assert "длинным тире «— »" not in instructions
+        assert "род адресата во 2-м лице" not in instructions
+        assert "разговорность в русском переводе" not in instructions
+
+    # learner_instructions("a2") itself stays intact for other callers and regression checks.
+    assert note_discipline_body in learner_instructions("a2")
+    assert "Соблюдай 4 правила оформления русской прямой речи" in learner_instructions("a2")
+
+    assert (
+        inspect.signature(ContextBuilder.narrative_input_sha256)
+        .parameters["max_fragment_blocks"]
+        .default
+        == DEFAULT_MAX_FRAGMENT_BLOCKS
+    )
+    assert (
+        inspect.signature(ContextBuilder.pedagogical_input_sha256)
+        .parameters["max_fragment_blocks"]
+        .default
+        == DEFAULT_MAX_FRAGMENT_BLOCKS
+    )
+
+
+def test_pedagogical_a2_summary_instruction_targets_full_chapter() -> None:
+    """A2 pedagogical instructions adapt the full-chapter narrative summary, even for fragments."""
+    from linguary.application.context_builder import _pedagogical_instructions
+
+    section = make_analysis_section(
+        section_id="sec-a2-sum",
+        title="Chapter 1",
+        order=0,
+        texts=("Paragraph one.", "Paragraph two."),
+    )
+    document = make_analysis_document((section,))
+    fragment = plan_fragments(textual_blocks(section), max_blocks=1)[0]
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="a2")
+    whole_ctx = builder.for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="Full chapter narrative summary.",
+    )
+    frag_ctx = builder.for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Full chapter narrative summary.",
+        fragment=fragment,
+        fragment_count=2,
+    )
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    for instructions in (
+        _pedagogical_instructions("en", "ru", "a2", False),
+        templates["pedagogical_analysis"],
+        whole_ctx.request.instructions,
+        frag_ctx.request.instructions,
+    ):
+        assert "Принятый повествовательный анализ" in instructions
+        assert "chapter_summary" in instructions
+        assert "всей главы" in instructions
+        assert "3–5 коротких" in instructions
+        assert "до текущего фрагмента" not in instructions
+        assert "а не дописывается абзацем к каждому фрагменту" not in instructions
+        assert "Ограничь chapter_summary и reader_chapter_summary" not in instructions
+
+
+def test_baseline_b2_templates_sha256_unchanged() -> None:
+    """Frozen legacy-v1/B2 baseline templates and _TRANSLATION_INSTRUCTIONS retain exact SHA-256 digests."""
+    from hashlib import sha256
+
+    from linguary.application.book_conditions import payload_digest
+    from linguary.application.context_builder import _TRANSLATION_INSTRUCTIONS
+
+    assert (
+        sha256(_TRANSLATION_INSTRUCTIONS.encode("utf-8")).hexdigest()
+        == "8c39d00a516d9db9a8a0079602c48bcfb6d9fc02714338d5d444be6304acbafa"
+    )
+    baseline_with_pron = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+        pronunciation_help_enabled=True,
+    )
+    assert (
+        payload_digest(baseline_with_pron)
+        == "3bcf968fbeb3eea72bc191df4360d50ec62f005d45a670b54dbd738ef2fb069a"
+    )
+    baseline_default = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="b2",
+    )
+    assert (
+        payload_digest(baseline_default)
+        == "d6e4b0b6dfa1227f6ab86b34ce7d9cb05b465c4e2ba71a5f322dec1f9125d470"
+    )
 

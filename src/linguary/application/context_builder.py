@@ -44,6 +44,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from linguary.application.analysis_merge import (
+    DEFAULT_MAX_FRAGMENT_BLOCKS,
     ChapterFragment,
     _candidate_groups,
     _merged_candidate_suggestion,
@@ -1082,7 +1083,7 @@ class ContextBuilder:
         user_decisions: Iterable[TermConcept] | None = None,
         nonbinding_suggestions: Iterable[TermConcept | GlossaryCandidate] | None = None,
         *, model_dependencies: Mapping[str, object] | None = None,
-        max_fragment_blocks: int = 40,
+        max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
     ) -> str:
         context = self.for_chapter_narrative_analysis(document, section, accumulated_candidates,
             user_decisions, nonbinding_suggestions)
@@ -1100,7 +1101,7 @@ class ContextBuilder:
         accumulated_candidates: Iterable[GlossaryCandidate] = (),
         user_decisions: Iterable[TermConcept] | None = None,
         model_dependencies: Mapping[str, object] | None = None,
-        max_fragment_blocks: int = 40,
+        max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
         cumulative_words_before: int = 0,
     ) -> str:
         context = self.for_chapter_pedagogical_analysis(document, section,
@@ -1665,7 +1666,12 @@ class ContextBuilder:
                 learner_quality = self._prompt_templates.get(
                     "learner_quality", learner_instructions(self._reader_level)
                 )
-                if "might have been" in instructions:
+                if pedagogical:
+                    learner_quality = _deduplicate_a2_pedagogical_learner_quality(
+                        learner_quality,
+                        strip_a2_duplicates="might have been" in instructions,
+                    )
+                elif "might have been" in instructions:
                     learner_quality = _deduplicate_a2_analysis_learner_quality(
                         learner_quality
                     )
@@ -1972,8 +1978,8 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 не переводи такие фразы в GLOSSARY_ONLY только ради пояснения рода местоимения it). \
 Короткую фразу с глаголом мимики, речи или взгляда выше A1–A2 нельзя оставлять в READ_AS_IS: \
 «It winked.», а также winked, groaned, chuckled, peered, nodded, sniggered, moaned. \
-Наравне с ними нельзя оставлять в READ_AS_IS разговорные формулы «Fancy seeing you here», \
-«I suppose so», обращения «sweetums» и восклицательную инверсию «How very wrong he was»: \
+Наравне с ними нельзя оставлять в READ_AS_IS разговорные формулы «What brings you here», \
+«I suppose so», обращения «sweetheart» и восклицательную инверсию «How very wrong he was»: \
 для них обязателен GLOSSARY_ONLY или TRANSLATE.
 
 Короткая прозрачная реплика диалога длиной 4–8 слов уровня A1–A2 не требует полного \
@@ -1984,8 +1990,8 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 оборотов, авторских предложений действия и небазовых глаголов речи \
 (demanded, murmured, snapped). Реплики длиннее 8 слов либо сочетающие прямую речь с \
 авторским действием или сложной ремаркой получают TRANSLATE.
-Содержательный заголовок главы («The Boy Who Lived», «The Vanishing Glass», \
-«The Letters from No One») выбирай режимом TRANSLATE без грамматических сносок.
+Содержательный заголовок главы («The House on the Hill», «The Missing Key», \
+«Letters from Abroad») выбирай режимом TRANSLATE без грамматических сносок.
 Не оставляй без достаточной помощи грамматически скрытые конструкции уровня выше A2: \
 модальный перфект (например, «might have been»), придаточное с «what» в значении \
 «то, что» и отрыв предлога в конце придаточного или вопроса. Для каждой такой \
@@ -1994,9 +2000,9 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 Если встречается двойное отрицание вида «not saying ... isn’t ...», сохрани его \
 утвердительный смысл: это может быть признание качества персонажа или события, \
 а не отрицание этого качества. Объяснение такого выражения в Before You Read \
-формулируй утвердительно. Например, «not saying the spell isn’t brilliant» означает \
-«не отрицаю, что заклинание блестящее», а объяснение звучит так: «Говорящий признаёт, \
-что заклинание блестящее».
+формулируй утвердительно. Например, «not saying the plan isn’t clever» означает \
+«не отрицаю, что план удачный», а объяснение звучит так: «Говорящий признаёт, \
+что план удачный».
 Для A2 без english help верни before_you_read: [] и before_you_read_evidence: []. Трудные места объясняй в language_notes под абзацем.
 
 Длина блока не определяет режим. Если сомневаешься между режимами, выбирай более сильную помощь (TRANSLATE). \
@@ -3090,12 +3096,40 @@ _DUPLICATE_A2_ANALYSIS_LINES = (
 )
 
 
+_A2_PEDAGOGICAL_EXACT_DUPLICATE_LINES = frozenset(
+    line.strip()
+    for block in (_A2_NOTE_DISCIPLINE, _A2_DIALOGUE_AND_CALQUE_RULES)
+    for line in block.splitlines()
+    if line.strip()
+)
+
+_DUPLICATE_A2_PEDAGOGICAL_MARKERS = (
+    *_DUPLICATE_A2_ANALYSIS_LINES,
+    "Для A2 обеспечь необходимую лексическую опору:",
+    "Для A2 без english help верни before_you_read: []",
+)
+
+
 def _deduplicate_a2_analysis_learner_quality(learner_quality: str) -> str:
     return "\n".join(
         line
         for line in learner_quality.splitlines()
         if not any(marker in line for marker in _DUPLICATE_A2_ANALYSIS_LINES)
     )
+
+
+def _deduplicate_a2_pedagogical_learner_quality(
+    learner_quality: str, *, strip_a2_duplicates: bool
+) -> str:
+    return "\n".join(
+        line
+        for line in learner_quality.splitlines()
+        if line.strip() not in _A2_PEDAGOGICAL_EXACT_DUPLICATE_LINES
+        and (
+            not strip_a2_duplicates
+            or not any(marker in line for marker in _DUPLICATE_A2_PEDAGOGICAL_MARKERS)
+        )
+    ).strip()
 
 
 def _uncovered_difficulties(analysis: ChapterAnalysis) -> tuple[Difficulty, ...]:
@@ -3288,9 +3322,14 @@ def _pedagogical_instructions(source_language: str, target_language: str, reader
         instructions += '\nВсе блоки READ_AS_IS; before_you_read и before_you_read_evidence пусты. Помощь появится рядом с оригиналом; lexical_hint допустим для READ_AS_IS.'
     else:
         instructions += '\n' + _reader_level_treatment_guidance(reader_level)
-    if reader_level == 'a2':
+    if reader_level.strip().lower() == 'a2':
         instructions += '\n' + _A2_GRAMMAR_SUPPORT_GUIDANCE.strip()
-        instructions += '\nВерни reader_chapter_summary: простой пересказ на языке оригинала, ровно один абзац без перевода на русский, строго по фактам главы без выдуманных деталей. Ограничь chapter_summary и reader_chapter_summary 3–5 короткими предложениями на всю главу. Для фрагмента единый пересказ с начала главы до текущего фрагмента сжимается в 3–5 коротких предложений, а не дописывается абзацем к каждому фрагменту.'
+        instructions += (
+            '\nВерни reader_chapter_summary: адаптируй полную сводку chapter_summary из раздела '
+            '«Принятый повествовательный анализ» для уровня A2 — один абзац из 3–5 коротких '
+            'предложений на языке оригинала (без перевода на русский), строго по фактам всей '
+            'главы без выдуманных деталей и без усечения до отдельного фрагмента.'
+        )
     else:
         instructions += '\nНе возвращай пересказ: принятая фактическая сводка уже сохранена.'
     return instructions
