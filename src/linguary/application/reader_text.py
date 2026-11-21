@@ -3,6 +3,7 @@ from dataclasses import replace
 import re
 import unicodedata
 
+from linguary.application.analysis_merge import _dominant_script
 from linguary.application.ports.language_detection import LanguageDetector
 from linguary.application.retry_policy import ResultValidationError
 from linguary.domain import BlockProcessingResult
@@ -70,24 +71,6 @@ def _outside_quotes(body, protected_quotes):
     for start, end in _protected_spans(body, protected_quotes):
         chars[start:end] = ' ' * (end - start)
     return ''.join(chars)
-
-
-def _dominant_script(text: str) -> str | None:
-    counts = {}
-    for char in text:
-        if not char.isalpha():
-            continue
-        name = unicodedata.name(char, '')
-        if name.startswith('CJK UNIFIED IDEOGRAPH'):
-            script = 'CJK'
-        elif name:
-            script = name.split(' ', 1)[0]
-        else:
-            continue
-        counts[script] = counts.get(script, 0) + 1
-    if not counts:
-        return None
-    return max(counts, key=counts.get)
 
 
 def _sentence_count(paragraph: str) -> int:

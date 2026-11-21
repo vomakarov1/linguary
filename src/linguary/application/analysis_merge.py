@@ -66,9 +66,13 @@ from linguary.domain.name_translation import (
 )
 
 #: Fallback limit if provider does not report output token capacity.
-DEFAULT_MAX_FRAGMENT_BLOCKS = 40
+DEFAULT_MAX_FRAGMENT_BLOCKS = 160
 #: Source-text cap of one analysis fragment. A single block may exceed it.
 DEFAULT_MAX_FRAGMENT_CHARS = 24_000
+#: Per-block weight overhead representing structured analysis response cost per block.
+DEFAULT_FRAGMENT_BLOCK_OVERHEAD = 60
+#: Combined character + block-overhead budget of one analysis fragment.
+DEFAULT_MAX_FRAGMENT_WEIGHT = 26_000
 #: Upper-bound estimate of response tokens per analyzed block from real runs.
 TOKENS_PER_ANALYSED_BLOCK = 200
 MAX_BEFORE_YOU_READ = 10
@@ -298,37 +302,213 @@ def _plan_item_from_response(
     )
 
 
+def _is_oversized_block(
+    block: DocumentBlock, *, max_chars: int, block_overhead: int, max_weight: int
+) -> bool:
+    length = len(block.text)
+    return length > max_chars or length + block_overhead > max_weight
+
+
+def _split_around_oversized(
+    blocks: Sequence[DocumentBlock],
+    *,
+    max_chars: int,
+    block_overhead: int,
+    max_weight: int,
+) -> list[tuple[bool, Sequence[DocumentBlock]]]:
+    """Separates individually oversized blocks so they never skew neighbour balancing."""
+    runs: list[tuple[bool, Sequence[DocumentBlock]]] = []
+    normal_start: int | None = None
+    for index, block in enumerate(blocks):
+        if _is_oversized_block(
+            block,
+            max_chars=max_chars,
+            block_overhead=block_overhead,
+            max_weight=max_weight,
+        ):
+            if normal_start is not None:
+                runs.append((False, blocks[normal_start:index]))
+                normal_start = None
+            runs.append((True, (block,)))
+        elif normal_start is None:
+            normal_start = index
+    if normal_start is not None:
+        runs.append((False, blocks[normal_start:]))
+    return runs
+
+
+def _cut_priority_key(
+    blocks: Sequence[DocumentBlock],
+    *,
+    start: int,
+    cut: int,
+    rem_frags: int,
+    prefix_chars: Sequence[int],
+    prefix_weights: Sequence[int],
+    max_blocks: int,
+    max_chars: int,
+    max_weight: int,
+) -> tuple[float, int, int]:
+    """Scores a candidate fragment split: lower balance + boundary cost wins, fuller earlier breaks ties."""
+    n = len(blocks)
+    frag_b = cut - start
+    frag_c = prefix_chars[cut] - prefix_chars[start]
+    frag_w = prefix_weights[cut] - prefix_weights[start]
+    rem_b = n - start
+    rem_c = prefix_chars[n] - prefix_chars[start]
+    rem_w = prefix_weights[n] - prefix_weights[start]
+
+    weight_imbalance = abs(frag_w * rem_frags - rem_w) / (rem_frags * max_weight)
+    char_imbalance = abs(frag_c * rem_frags - rem_c) / (rem_frags * max_chars)
+    block_imbalance = abs(frag_b * rem_frags - rem_b) / (rem_frags * max_blocks)
+    balance_cost = max(weight_imbalance, char_imbalance) + block_imbalance
+
+    prev_block = blocks[cut - 1]
+    next_block = blocks[cut]
+    splits_quote = (
+        prev_block.type is BlockType.QUOTE
+        and next_block.type is BlockType.QUOTE
+        and next_block.order == prev_block.order + 1
+    )
+    trailing_heading = prev_block.type is BlockType.HEADING
+    has_order_gap = next_block.order - prev_block.order > 1
+    tiny_head = frag_b == 1 and 2 * frag_w * rem_frags <= rem_w
+    tiny_tail = (
+        rem_frags == 2
+        and (n - cut) == 1
+        and 2 * (rem_w - frag_w) * rem_frags <= rem_w
+    )
+
+    boundary_cost = (
+        (0.60 if splits_quote else 0.0)
+        + (0.60 if trailing_heading else 0.0)
+        + (0.20 if (tiny_head or tiny_tail) else 0.0)
+        - (0.26 if has_order_gap else 0.0)
+    )
+    return (round(balance_cost + boundary_cost, 12), -frag_w, -frag_b)
+
+
+def _plan_normal_run(
+    blocks: Sequence[DocumentBlock],
+    *,
+    max_blocks: int,
+    max_chars: int,
+    block_overhead: int,
+    max_weight: int,
+) -> list[tuple[DocumentBlock, ...]]:
+    """Partitions non-oversized blocks into the minimum balanced fragments."""
+    n = len(blocks)
+    prefix_chars = [0] * (n + 1)
+    prefix_weights = [0] * (n + 1)
+    for index, block in enumerate(blocks):
+        length = len(block.text)
+        prefix_chars[index + 1] = prefix_chars[index] + length
+        prefix_weights[index + 1] = prefix_weights[index] + length + block_overhead
+
+    farthest_end = [0] * n
+    right = 0
+    for left in range(n):
+        if right <= left:
+            right = left + 1
+        while (
+            right < n
+            and (right + 1 - left) <= max_blocks
+            and (prefix_chars[right + 1] - prefix_chars[left]) <= max_chars
+            and (prefix_weights[right + 1] - prefix_weights[left]) <= max_weight
+        ):
+            right += 1
+        farthest_end[left] = right
+
+    min_frags_from = [0] * (n + 1)
+    for index in range(n - 1, -1, -1):
+        min_frags_from[index] = 1 + min_frags_from[farthest_end[index]]
+
+    if min_frags_from[0] == 1:
+        return [tuple(blocks)]
+
+    groups: list[tuple[DocumentBlock, ...]] = []
+    start = 0
+    rem_frags = min_frags_from[0]
+    while rem_frags > 1:
+        cut = min(
+            (
+                candidate
+                for candidate in range(start + 1, farthest_end[start] + 1)
+                if min_frags_from[candidate] == rem_frags - 1
+            ),
+            key=lambda candidate: _cut_priority_key(
+                blocks,
+                start=start,
+                cut=candidate,
+                rem_frags=rem_frags,
+                prefix_chars=prefix_chars,
+                prefix_weights=prefix_weights,
+                max_blocks=max_blocks,
+                max_chars=max_chars,
+                max_weight=max_weight,
+            ),
+        )
+        groups.append(tuple(blocks[start:cut]))
+        start = cut
+        rem_frags -= 1
+    groups.append(tuple(blocks[start:]))
+    return groups
+
+
 def plan_fragments(
     blocks: Sequence[DocumentBlock],
     *,
     max_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
     max_chars: int = DEFAULT_MAX_FRAGMENT_CHARS,
+    block_overhead: int = DEFAULT_FRAGMENT_BLOCK_OVERHEAD,
+    max_weight: int | None = None,
 ) -> tuple[ChapterFragment, ...]:
-    """Splits textual blocks into sequential analysis fragments.
+    """Splits textual blocks into balanced sequential analysis fragments.
 
-    A fragment closes when the next block would pass `max_blocks` or `max_chars`
-    of source text, whichever comes first. A block is never divided, even when
-    that block alone is longer than `max_chars`.
+    Respects `max_blocks`, `max_chars`, and `effective_max_weight` (source characters
+    plus `block_overhead` per block) for every multi-block fragment. A single block
+    exceeding character or weight limits is emitted as its own 1-block fragment.
+    When splitting is required, distributes blocks across the minimum fragment count
+    while keeping consecutive quotes together, avoiding trailing headings, and
+    preferring scene breaks (`block.order` gaps).
     """
+    effective_max_weight = (
+        max_weight
+        if max_weight is not None
+        else max_chars + (DEFAULT_MAX_FRAGMENT_WEIGHT - DEFAULT_MAX_FRAGMENT_CHARS)
+    )
     if max_blocks < 1:
         raise AnalysisMergeError("размер фрагмента главы должен быть положительным")
     if max_chars < 1:
         raise AnalysisMergeError("предел знаков фрагмента главы должен быть положительным")
+    if block_overhead < 0:
+        raise AnalysisMergeError("накладной вес блока фрагмента не может быть отрицательным")
+    if effective_max_weight < 1:
+        raise AnalysisMergeError("весовой предел фрагмента главы должен быть положительным")
     if not blocks:
         return ()
-    groups: list[list[DocumentBlock]] = [[]]
-    chars = 0
-    for block in blocks:
-        length = len(block.text)
-        current = groups[-1]
-        if current and (len(current) >= max_blocks or chars + length > max_chars):
-            groups.append([])
-            chars = 0
-            current = groups[-1]
-        current.append(block)
-        chars += length
+
+    groups: list[tuple[DocumentBlock, ...]] = []
+    for is_oversized, run in _split_around_oversized(
+        blocks,
+        max_chars=max_chars,
+        block_overhead=block_overhead,
+        max_weight=effective_max_weight,
+    ):
+        if is_oversized:
+            groups.append(tuple(run))
+        else:
+            groups.extend(
+                _plan_normal_run(
+                    run,
+                    max_blocks=max_blocks,
+                    max_chars=max_chars,
+                    block_overhead=block_overhead,
+                    max_weight=effective_max_weight,
+                )
+            )
     return tuple(
-        ChapterFragment(order=order, blocks=tuple(group))
+        ChapterFragment(order=order, blocks=group)
         for order, group in enumerate(groups)
     )
 
@@ -460,6 +640,82 @@ def _merged_summary(fragments: Sequence[FragmentAnalysis]) -> str:
         ),
         "",
     )
+
+
+def _dominant_script(text: str) -> str | None:
+    """Dominant Unicode script name among alphabetic characters, or None if none."""
+    counts: dict[str, int] = {}
+    for char in text:
+        if not char.isalpha():
+            continue
+        name = unicodedata.name(char, "")
+        if name.startswith("CJK UNIFIED IDEOGRAPH"):
+            script = "CJK"
+        elif name:
+            script = name.split(" ", 1)[0]
+        else:
+            continue
+        counts[script] = counts.get(script, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.__getitem__)
+
+
+def _significant_summary_stems(text: str) -> frozenset[str]:
+    return frozenset(
+        stem
+        for word in expression_words(text)
+        if word not in _BYR_STOP_WORDS
+        and (stem := _stem_byr_word(word)) not in _BYR_STOP_WORDS
+    )
+
+
+def select_staged_a2_summary(
+    parts: Sequence[FragmentAnalysis], *, narrative_summary: str
+) -> str:
+    """Selects the staged A2 chapter summary best covering `narrative_summary`.
+
+    Candidates whose dominant script disagrees with `narrative_summary` (when known)
+    are excluded from overlap scoring. When no candidate achieves positive stem
+    overlap in the matching script, falls back predictably to the fullest non-empty
+    candidate, breaking ties in favor of earlier fragments (`parts[0]`).
+    """
+    candidates = [
+        (index, summary)
+        for index, part in enumerate(parts)
+        if (summary := part.chapter_summary.strip())
+    ]
+    if not candidates:
+        return ""
+
+    narrative_script = _dominant_script(narrative_summary)
+    narrative_stems = _significant_summary_stems(narrative_summary)
+
+    best_overlap: tuple[int, int, str] | None = None
+    if narrative_stems:
+        for index, summary in candidates:
+            candidate_script = _dominant_script(summary)
+            if narrative_script is not None and candidate_script != narrative_script:
+                continue
+            overlap = len(narrative_stems & _significant_summary_stems(summary))
+            if overlap > 0:
+                rank = (overlap, -index)
+                if best_overlap is None or rank > best_overlap[:2]:
+                    best_overlap = (overlap, -index, summary)
+    if best_overlap is not None:
+        return best_overlap[2]
+
+    best_fallback: tuple[bool, int, int, int, str] | None = None
+    for index, summary in candidates:
+        candidate_script = _dominant_script(summary)
+        script_matches = narrative_script is not None and candidate_script == narrative_script
+        word_count = len(expression_words(summary))
+        collapsed_len = len(" ".join(summary.split()))
+        rank = (script_matches, word_count, collapsed_len, -index)
+        if best_fallback is None or rank > best_fallback[:4]:
+            best_fallback = (*rank, summary)
+    assert best_fallback is not None
+    return best_fallback[4]
 
 
 def _merged_candidates(
@@ -968,8 +1224,10 @@ def deduplicate_book_before_you_read(
 
 
 __all__ = [
+    "DEFAULT_FRAGMENT_BLOCK_OVERHEAD",
     "DEFAULT_MAX_FRAGMENT_BLOCKS",
     "DEFAULT_MAX_FRAGMENT_CHARS",
+    "DEFAULT_MAX_FRAGMENT_WEIGHT",
     "MAX_BEFORE_YOU_READ",
     "TOKENS_PER_ANALYSED_BLOCK",
     "before_you_read_entries",
@@ -978,6 +1236,7 @@ __all__ = [
     "find_quote_span",
     "glossary_context_constraints",
     "sanitize_before_you_read_explanation",
+    "select_staged_a2_summary",
     "validate_content_plan",
     "validate_fact_glossary",
     "fragment_blocks_for",

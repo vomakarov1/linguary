@@ -471,3 +471,9 @@ pedagogical_analysis_model = "file-teaching"
 def test_invalid_staged_settings_are_rejected(overrides):
     with pytest.raises(SettingsError):
         LLMSettings(**overrides)
+
+
+def test_default_effective_max_fragment_blocks_is_160(tmp_path: Path) -> None:
+    assert LLMSettings().effective_max_fragment_blocks == 160
+    settings = load_settings(environ={}, config_path=write_config(tmp_path, ""))
+    assert settings.llm.effective_max_fragment_blocks == 160

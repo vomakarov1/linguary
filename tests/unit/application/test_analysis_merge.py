@@ -24,6 +24,7 @@ from linguary.application.llm_dto import (
 from linguary.domain import (
     AnalysisIncompleteError,
     BlockTreatment,
+    BlockType,
     ChapterAnalysis,
     ConceptType,
     CoverageStatus,
@@ -134,13 +135,13 @@ def test_old_merge_unchanged() -> None:
 
 
 def test_long_chapter_is_split_into_equal_fragments() -> None:
-    """A chapter over the block cap closes each fragment at that cap."""
+    """A chapter over the block cap balances blocks across the minimum fragments."""
     blocks = chapter_blocks(9)
 
     fragments = plan_fragments(blocks, max_blocks=4)
 
     assert [fragment.order for fragment in fragments] == [0, 1, 2]
-    assert [len(fragment.blocks) for fragment in fragments] == [4, 4, 1]
+    assert [len(fragment.blocks) for fragment in fragments] == [3, 3, 3]
     assert [
         block.id for fragment in fragments for block in fragment.blocks
     ] == [block.id for block in blocks]
@@ -617,7 +618,7 @@ def test_fragment_blocks_for_8000_is_40() -> None:
 
 
 def test_fragment_blocks_without_limit_is_default() -> None:
-    assert fragment_blocks_for(None) == 40
+    assert fragment_blocks_for(None) == 160
 
 
 def test_before_you_read_keeps_each_expression_once() -> None:
@@ -1446,9 +1447,13 @@ def _text_blocks(*texts: str) -> tuple[DocumentBlock, ...]:
 
 
 def test_fragment_splits_on_char_budget_and_keeps_block_whole() -> None:
-    """A fragment ends at 40 blocks or 24 000 source characters, without cutting a block."""
-    from linguary.application.analysis_merge import DEFAULT_MAX_FRAGMENT_CHARS
+    """A fragment stays within block, char, and weight budgets, without cutting a block."""
+    from linguary.application.analysis_merge import (
+        DEFAULT_MAX_FRAGMENT_BLOCKS,
+        DEFAULT_MAX_FRAGMENT_CHARS,
+    )
 
+    assert DEFAULT_MAX_FRAGMENT_BLOCKS == 160
     assert DEFAULT_MAX_FRAGMENT_CHARS == 24_000
     piece = "a" * 12_000
     fragments = plan_fragments(_text_blocks(piece, piece, piece))
@@ -1461,9 +1466,11 @@ def test_fragment_splits_on_char_budget_and_keeps_block_whole() -> None:
     assert fragments[0].blocks[0].text == huge
     assert fragments[1].blocks[0].text == "tail"
 
-    many = chapter_blocks(41)
+    assert len(plan_fragments(chapter_blocks(41))) == 1
+
+    many = chapter_blocks(DEFAULT_MAX_FRAGMENT_BLOCKS + 1)
     fragments = plan_fragments(many)
-    assert [len(fragment.blocks) for fragment in fragments] == [40, 1]
+    assert [len(fragment.blocks) for fragment in fragments] == [81, 80]
     assert [block.id for fragment in fragments for block in fragment.blocks] == [
         block.id for block in many
     ]
@@ -1777,4 +1784,257 @@ def test_russian_gender_adjective_matches_glossary_code() -> None:
     with pytest.raises(AnalysisMergeError) as conflict:
         validate_fact_glossary(plan("мужской"), {"Mrs Dursley": {"gender": "female"}})
     assert conflict.value.violation.rule_code == "glossary_fact_conflict"
+
+
+def test_everlost_ch2_dialogue_chapter_fits_single_fragment() -> None:
+    """A 121-block dialogue chapter (~15K chars) fits into one default fragment."""
+    from linguary.application.analysis_merge import (
+        DEFAULT_FRAGMENT_BLOCK_OVERHEAD,
+        DEFAULT_MAX_FRAGMENT_BLOCKS,
+        DEFAULT_MAX_FRAGMENT_WEIGHT,
+    )
+
+    assert DEFAULT_MAX_FRAGMENT_BLOCKS == 160
+    assert DEFAULT_FRAGMENT_BLOCK_OVERHEAD == 60
+    assert DEFAULT_MAX_FRAGMENT_WEIGHT == 26_000
+
+    # 121 blocks * 124 chars = 15,004 chars; weight = 15,004 + 121 * 60 = 22,264 <= 26,000.
+    blocks = tuple(
+        make_analysis_block(
+            section_id=SECTION_ID,
+            order=index + (1 if index >= 40 else 0) + (1 if index >= 85 else 0),
+            type=BlockType.QUOTE if index in (59, 60) else BlockType.PARAGRAPH,
+            text=("«Wake up!» " * 12)[:124],
+        )
+        for index in range(121)
+    )
+    fragments = plan_fragments(blocks)
+    assert len(fragments) == 1
+    assert fragments[0].block_ids == tuple(block.id for block in blocks)
+
+
+def test_plan_fragments_balances_long_chapter_without_single_block_tail() -> None:
+    """Exceeding block, char, or weight limits balances fragments without 1-block tails."""
+    from linguary.application.analysis_merge import (
+        DEFAULT_FRAGMENT_BLOCK_OVERHEAD,
+        DEFAULT_MAX_FRAGMENT_WEIGHT,
+    )
+
+    # 121 short blocks with explicit max_blocks=40 -> 4 balanced fragments, no 40+40+40+1 tail.
+    dialogue = tuple(
+        make_analysis_block(section_id=SECTION_ID, order=i, text="x" * 124)
+        for i in range(121)
+    )
+    by_blocks = plan_fragments(dialogue, max_blocks=40)
+    sizes = [len(f.blocks) for f in by_blocks]
+    assert len(by_blocks) == 4
+    assert min(sizes) >= 30
+    assert max(sizes) <= 31
+    assert sum(sizes) == 121
+
+    # 145 medium blocks: 145 <= 160 blocks and 21,750 <= 24,000 chars, but weight 30,450 > 26,000.
+    medium = tuple(
+        make_analysis_block(section_id=SECTION_ID, order=i, text="m" * 150)
+        for i in range(145)
+    )
+    by_weight = plan_fragments(medium)
+    assert len(by_weight) == 2
+    assert [len(f.blocks) for f in by_weight] == [73, 72]
+    for frag in by_weight:
+        weight = sum(len(b.text) + DEFAULT_FRAGMENT_BLOCK_OVERHEAD for b in frag.blocks)
+        assert weight <= DEFAULT_MAX_FRAGMENT_WEIGHT
+
+    # Oversized block in the middle stays isolated as its own 1-block fragment; sides stay balanced.
+    oversized = make_analysis_block(section_id=SECTION_ID, order=50, text="H" * 25_000)
+    with_huge = (
+        tuple(make_analysis_block(section_id=SECTION_ID, order=i, text="a" * 50) for i in range(50))
+        + (oversized,)
+        + tuple(make_analysis_block(section_id=SECTION_ID, order=51 + i, text="b" * 50) for i in range(50))
+    )
+    around_huge = plan_fragments(with_huge, max_blocks=40)
+    assert [len(f.blocks) for f in around_huge] == [25, 25, 1, 25, 25]
+    assert around_huge[2].blocks == (oversized,)
+
+    # Validation of new parameters and proportional max_weight default.
+    with pytest.raises(AnalysisMergeError):
+        plan_fragments(dialogue[:2], block_overhead=-1)
+    with pytest.raises(AnalysisMergeError):
+        plan_fragments(dialogue[:2], max_weight=0)
+    scaled = plan_fragments(
+        tuple(make_analysis_block(section_id=SECTION_ID, order=i, text="w" * 100) for i in range(20)),
+        max_chars=1_000,
+    )
+    # effective_max_weight = 1_000 + 2_000 = 3_000; 20 * 100 = 2_000 > 1_000 -> 2 fragments [10, 10].
+    assert [len(f.blocks) for f in scaled] == [10, 10]
+
+
+def test_plan_fragments_keeps_multiparagraph_quote_and_respects_explicit_limit() -> None:
+    """Soft rules keep consecutive QUOTE blocks and headings intact without violating limits."""
+    # 1a. Consecutive QUOTE blocks across naive midpoint (4, 5 of 10) stay together within max_blocks=6.
+    quote_blocks = tuple(
+        make_analysis_block(
+            section_id=SECTION_ID,
+            order=i,
+            type=BlockType.QUOTE if i in (4, 5) else BlockType.PARAGRAPH,
+            text=f"Block {i} content.",
+        )
+        for i in range(10)
+    )
+    quote_frags = plan_fragments(quote_blocks, max_blocks=6)
+    assert [len(f.blocks) for f in quote_frags] == [6, 4]
+    assert all(len(f.blocks) <= 6 for f in quote_frags)
+    assert len({frag.order for frag in quote_frags for b in frag.blocks if b.type is BlockType.QUOTE}) == 1
+
+    # 1b. Consecutive QUOTE blocks across greedy boundary (3, 4 of 9 with max_blocks=4) stay together.
+    quote_9 = tuple(
+        make_analysis_block(
+            section_id=SECTION_ID,
+            order=i,
+            type=BlockType.QUOTE if i in (3, 4) else BlockType.PARAGRAPH,
+            text=f"Block {i} content.",
+        )
+        for i in range(9)
+    )
+    quote_9_frags = plan_fragments(quote_9, max_blocks=4)
+    assert [len(f.blocks) for f in quote_9_frags] == [3, 3, 3]
+    assert len({frag.order for frag in quote_9_frags for b in frag.blocks if b.type is BlockType.QUOTE}) == 1
+
+    # 2. Avoid dangling trailing BlockType.HEADING (both on naive midpoint 4 of 10 and greedy boundary 3 of 9).
+    heading_blocks = tuple(
+        make_analysis_block(
+            section_id=SECTION_ID,
+            order=i,
+            type=BlockType.HEADING if i == 4 else BlockType.PARAGRAPH,
+            text=f"Heading {i}" if i == 4 else f"Body {i}.",
+        )
+        for i in range(10)
+    )
+    heading_frags = plan_fragments(heading_blocks, max_blocks=6)
+    assert len(heading_frags) == 2
+    assert heading_frags[0].blocks[-1].type is not BlockType.HEADING
+    assert all(len(f.blocks) <= 6 for f in heading_frags)
+
+    heading_9 = tuple(
+        make_analysis_block(
+            section_id=SECTION_ID,
+            order=i,
+            type=BlockType.HEADING if i == 3 else BlockType.PARAGRAPH,
+            text=f"Heading {i}" if i == 3 else f"Body {i}.",
+        )
+        for i in range(9)
+    )
+    heading_9_frags = plan_fragments(heading_9, max_blocks=4)
+    assert [len(f.blocks) for f in heading_9_frags] == [3, 3, 3]
+    assert all(frag.blocks[-1].type is not BlockType.HEADING for frag in heading_9_frags)
+
+    # 3. Prefer splitting on a block.order gap (scene separator) near the balanced midpoint.
+    gapped_10 = tuple(
+        make_analysis_block(
+            section_id=SECTION_ID,
+            order=i + (2 if i >= 4 else 0),
+            text=f"Scene block {i}.",
+        )
+        for i in range(10)
+    )
+    gapped_frags = plan_fragments(gapped_10, max_blocks=6)
+    assert [len(f.blocks) for f in gapped_frags] == [4, 6]
+    assert gapped_frags[0].blocks[-1].order == 3
+    assert gapped_frags[1].blocks[0].order == 6
+
+    # 4. Explicit max_blocks keeps unconditional priority and does not inflate fragment count.
+    tight_quote = tuple(
+        make_analysis_block(
+            section_id=SECTION_ID,
+            order=i,
+            type=BlockType.QUOTE if i in (2, 3, 4) else BlockType.PARAGRAPH,
+            text=f"Block {i}.",
+        )
+        for i in range(7)
+    )
+    tight_frags = plan_fragments(tight_quote, max_blocks=4)
+    assert [len(f.blocks) for f in tight_frags] == [4, 3]
+    assert all(len(f.blocks) <= 4 for f in tight_frags)
+
+
+def test_select_staged_a2_summary_keeps_full_chapter_over_short_tail_and_handles_zero_overlap() -> None:
+    """A2 summary selector maximizes narrative coverage with script check and predictable fallback."""
+    from linguary.application.analysis_merge import select_staged_a2_summary
+
+    narrative_summary = (
+        "Nick and Allie wake up in Everlost, meet Lief in the forest, "
+        "and walk toward the Twin Towers where Mary lives."
+    )
+
+    # 1. Full summary in parts[0] beats short tail in parts[1].
+    full_first = make_fragment(
+        0,
+        blocks=("b1",),
+        chapter_summary=(
+            "Nick and Allie woke up in Everlost, met Lief in the forest, "
+            "and walked to the Twin Towers where Mary lived."
+        ),
+    )
+    short_tail = make_fragment(
+        1,
+        blocks=("b2",),
+        chapter_summary="They walked into the towers and saw Mary.",
+    )
+    assert select_staged_a2_summary((full_first, short_tail), narrative_summary=narrative_summary) == full_first.chapter_summary
+
+    # 2. Full summary in later fragment beats incomplete earlier summary.
+    incomplete_first = make_fragment(
+        0,
+        blocks=("b1",),
+        chapter_summary="Nick and Allie woke up in Everlost.",
+    )
+    assert select_staged_a2_summary((incomplete_first, full_first), narrative_summary=narrative_summary) == full_first.chapter_summary
+
+    # 3. Wrong script is rejected in favor of matching script with overlap.
+    russian_summary = make_fragment(
+        0,
+        blocks=("b1",),
+        chapter_summary="Ник и Элли просыпаются в Эверлосте, встречают Лифа в лесу и идут к башням Мэри.",
+    )
+    assert select_staged_a2_summary((russian_summary, short_tail), narrative_summary=narrative_summary) == short_tail.chapter_summary
+
+    # 4. Zero overlap falls back to the fullest non-empty candidate (and skips empty ones).
+    empty_frag = make_fragment(0, blocks=("b1",), chapter_summary="   ")
+    short_no_overlap = make_fragment(1, blocks=("b2",), chapter_summary="Two kids travel far.")
+    full_no_overlap = make_fragment(
+        2,
+        blocks=("b3",),
+        chapter_summary="Two lost children explore a strange shadowy world together and reach a tall city building.",
+    )
+    assert (
+        select_staged_a2_summary(
+            (empty_frag, short_no_overlap, full_no_overlap),
+            narrative_summary="Completely different tokens without shared stems.",
+        )
+        == full_no_overlap.chapter_summary
+    )
+
+    # 5. All candidates mismatch script -> still falls back to fullest non-empty candidate.
+    assert (
+        select_staged_a2_summary(
+            (short_no_overlap, full_no_overlap),
+            narrative_summary="Совершенно другой русский текст без совпадений алфавита.",
+        )
+        == full_no_overlap.chapter_summary
+    )
+
+    # 6. Equal coverage or equal fallback fullness breaks ties in favor of parts[0].
+    tie_a = make_fragment(0, blocks=("b1",), chapter_summary="Nick and Allie reach Everlost.")
+    tie_b = make_fragment(1, blocks=("b2",), chapter_summary="Nick and Allie arrive at Everlost.")
+    assert select_staged_a2_summary((tie_a, tie_b), narrative_summary=narrative_summary) == tie_a.chapter_summary
+
+    fallback_tie_a = make_fragment(0, blocks=("b1",), chapter_summary="Alpha beta gamma.")
+    fallback_tie_b = make_fragment(1, blocks=("b2",), chapter_summary="Theta kappa zeta.")
+    assert (
+        select_staged_a2_summary(
+            (fallback_tie_a, fallback_tie_b),
+            narrative_summary="No overlap words here.",
+        )
+        == fallback_tie_a.chapter_summary
+    )
+    assert select_staged_a2_summary((), narrative_summary=narrative_summary) == ""
 
