@@ -1461,3 +1461,35 @@ def test_block_notes_respects_suppressed_and_stripped_indices_preserving_artifac
     # Stored BlockProcessingResult is never mutated.
     assert result.glossary_hints == (goose, lantern, cloak)
     assert result.language_notes == (kept_note, suppressed_note)
+
+
+def test_suppressed_hint_does_not_leak_paired_pronunciation_as_standalone_note() -> None:
+    """Pronunciations matching a suppressed glossary hint do not become standalone IPA notes."""
+    text = "The cloak rustled near the owl."
+    block = _block(text)
+    cloak = GlossaryHint("cloak", "плащ", "Длинная накидка.")
+    rustled = GlossaryHint("to rustle", "шуршать")
+    result = _result(
+        block,
+        treatment=BlockTreatment.TRANSLATE,
+        translation="Плащ зашуршал рядом с совой.",
+        hints=(cloak, rustled),
+    )
+    pron_cloak = _pron(block, "cloak", "/kləʊk/", "uk")
+    pron_rustled = _pron(block, "rustled", "/ˈrʌsəld/", "uk")
+    pron_owl = _pron(block, "owl", "/aʊl/", "uk")
+
+    notes = block_notes(
+        block,
+        result,
+        None,
+        (pron_cloak, pron_rustled, pron_owl),
+        suppressed_hint_indices=frozenset({0}),
+    )
+
+    assert [note.term for note in notes] == ["to rustle", "owl"]
+    assert notes[0].origin == "glossary_hint"
+    assert notes[0].ipa == "/ˈrʌsəld/"
+    assert notes[1].origin == "pronunciation"
+    assert notes[1].ipa == "/aʊl/"
+    assert all(note.term != "cloak" for note in notes)

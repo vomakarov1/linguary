@@ -16,6 +16,7 @@ from linguary.application.layout.ipa_reference import IpaSymbol, ipa_key
 from linguary.application.layout.legend import LayoutFeatures, legend_lines
 from linguary.application.layout.notes import (
     _evidences,
+    _find_end,
     _hint_only_dropped,
     _note_only_dropped,
     block_notes,
@@ -33,6 +34,7 @@ from linguary.domain import (
     ChapterAnalysis,
     ConceptType,
     DocumentBlock,
+    GlossaryHint,
     LanguageNote,
     TermConcept,
     glossary_key,
@@ -220,7 +222,10 @@ _GRAMMAR_PATTERN_RULES: tuple[tuple[str, re.Pattern[str], int, int], ...] = (
         "preposition_stranding",
         re.compile(
             r"\bpreposition\s+stranding\b|\bstranded\s+preposition\b"
-            r"|предлог\w*\s+(?:стоит\s+|уходит\s+|вынесен\w*\s+|остаётся\s+|переносится\s+)?в\s+кон(?:ец|це)"
+            r"|предлог\w*(?:\s+[«\"'(]?[a-z]{1,12}[»\"')]*?)?\s+"
+            r"(?:(?:часто|обычно)\s+)?"
+            r"(?:(?:стоит|уходит|вынесен\w*|оста[ёе]тся|переносится|ставится|оказывается)\s+)?"
+            r"в\s+кон(?:ец|це)"
             r"|в\s+кон(?:ец|це)\s+(?:вопроса|предложения|фразы|придаточного)[^.!?]{0,30}предлог",
             re.IGNORECASE,
         ),
@@ -257,6 +262,7 @@ class _HintSeen:
     count: int
     last_shown_block: int
     last_shown_chapter: int
+    last_counted_block: int
 
 
 @dataclass(slots=True)
@@ -380,6 +386,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             notes = ()
             if result is not None:
                 suppressed_hints, stripped_hints = _deduplicate_glossary_hints(
+                    block,
                     result,
                     dropped_difficulty_ids=dropped,
                     block_seq=block_seq,
@@ -998,7 +1005,33 @@ def _is_dialogue_opener(text: str, index: int, end: int) -> bool:
     return char == "-" and index + 1 < end and text[index + 1] in " —–"
 
 
+def _hint_is_glossary_only(
+    block: DocumentBlock,
+    result: BlockProcessingResult,
+    hint: GlossaryHint,
+    *,
+    requires_hints: bool,
+) -> bool:
+    """Whether `hint` serves an untranslated `GLOSSARY_ONLY` block or segment."""
+    if not requires_hints:
+        return False
+    if result.treatment is BlockTreatment.GLOSSARY_ONLY:
+        return True
+    spans = block.segment_spans
+    treatments = result.segment_treatments
+    if not treatments or len(treatments) != len(spans):
+        return True
+    marker_end = _find_end(block.text, hint.original)
+    if marker_end is None:
+        return True
+    for span, mode in zip(spans, treatments, strict=True):
+        if span.start < marker_end <= span.end:
+            return mode.requires_glossary_hints
+    return True
+
+
 def _deduplicate_glossary_hints(
+    block: DocumentBlock,
     result: BlockProcessingResult,
     *,
     dropped_difficulty_ids: frozenset[str],
@@ -1008,10 +1041,11 @@ def _deduplicate_glossary_hints(
 ) -> tuple[frozenset[int], frozenset[int]]:
     """Book-wide 3-stage deduplication for glossary hints without mutating `result`.
 
-    - Within a 20-block local window since last shown: suppress.
-    - 2nd–3rd occurrences: suppress in `TRANSLATE`, strip explanatory note in `GLOSSARY_ONLY`.
-    - 4th+ occurrences: suppress until a gap > 3 chapters since last shown (then reset).
-    - Untranslated `GLOSSARY_ONLY` blocks always retain at least one compact hint.
+    - After a gap > 3 chapters since last shown: reset and reintroduce cleanly.
+    - Within a 20-block local window: suppress without inflating occurrence count.
+    - 2nd–3rd occurrences: suppress on `TRANSLATE`, strip explanatory note on `GLOSSARY_ONLY`.
+    - 4th+ occurrences: suppress until a gap > 3 chapters since last shown.
+    - Untranslated `GLOSSARY_ONLY` blocks or segments always retain at least one compact hint.
     """
     if not result.glossary_hints:
         return frozenset(), frozenset()
@@ -1019,14 +1053,19 @@ def _deduplicate_glossary_hints(
     requires_hints = result.treatment.requires_glossary_hints or any(
         mode.requires_glossary_hints for mode in result.segment_treatments
     )
-    is_glossary_only = result.treatment is BlockTreatment.GLOSSARY_ONLY
     suppressed: set[int] = set()
     stripped: set[int] = set()
-    candidates_for_rescue: list[tuple[int, int, int, str]] = []
+    glossary_only_indices: set[int] = set()
+    glossary_only_rescue: list[tuple[int, int, int, str]] = []
     for index, hint in enumerate(result.glossary_hints):
         only_dropped = _hint_only_dropped(hint, result.block_id, evidences, dropped_difficulty_ids)
         if only_dropped and not requires_hints:
             continue
+        hint_glossary_only = _hint_is_glossary_only(
+            block, result, hint, requires_hints=requires_hints
+        )
+        if hint_glossary_only:
+            glossary_only_indices.add(index)
         key = vocabulary_dedup_key(hint.original)
         if not key:
             continue
@@ -1036,40 +1075,50 @@ def _deduplicate_glossary_hints(
                 count=1,
                 last_shown_block=block_seq,
                 last_shown_chapter=chapter_num,
+                last_counted_block=block_seq,
             )
             continue
-        if state.count >= 3 and (chapter_num - state.last_shown_chapter) > _HINT_REINTRODUCE_CHAPTER_GAP:
+        if (chapter_num - state.last_shown_chapter) > _HINT_REINTRODUCE_CHAPTER_GAP:
             history[key] = _HintSeen(
                 count=1,
                 last_shown_block=block_seq,
                 last_shown_chapter=chapter_num,
+                last_counted_block=block_seq,
             )
             continue
-        if (block_seq - state.last_shown_block) <= _HINT_LOCAL_WINDOW_BLOCKS:
+        window_anchor = state.last_shown_block if hint_glossary_only else state.last_counted_block
+        if (block_seq - window_anchor) <= _HINT_LOCAL_WINDOW_BLOCKS:
             suppressed.add(index)
-            candidates_for_rescue.append((1 if only_dropped else 0, state.count, index, key))
+            if hint_glossary_only:
+                glossary_only_rescue.append((1 if only_dropped else 0, state.count, index, key))
             continue
         if state.count >= 3:
             suppressed.add(index)
-            candidates_for_rescue.append((1 if only_dropped else 0, state.count, index, key))
+            if hint_glossary_only:
+                glossary_only_rescue.append((1 if only_dropped else 0, state.count, index, key))
             continue
         # 2nd or 3rd occurrence outside the 20-block local window.
         state.count += 1
-        if is_glossary_only:
+        state.last_counted_block = block_seq
+        if hint_glossary_only:
             stripped.add(index)
             state.last_shown_block = block_seq
             state.last_shown_chapter = chapter_num
         else:
             suppressed.add(index)
-            candidates_for_rescue.append((1 if only_dropped else 0, state.count, index, key))
-    if is_glossary_only and len(suppressed) >= len(result.glossary_hints) and candidates_for_rescue:
-        _, _, rescue_index, rescue_key = min(candidates_for_rescue)
+    if (
+        glossary_only_indices
+        and glossary_only_indices <= suppressed
+        and glossary_only_rescue
+    ):
+        _, _, rescue_index, rescue_key = min(glossary_only_rescue)
         suppressed.discard(rescue_index)
         stripped.add(rescue_index)
         state = history.get(rescue_key)
         if state is not None:
             state.last_shown_block = block_seq
             state.last_shown_chapter = chapter_num
+            state.last_counted_block = block_seq
     return frozenset(suppressed), frozenset(stripped)
 
 

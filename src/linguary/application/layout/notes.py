@@ -520,15 +520,21 @@ def block_notes(
         mode.requires_glossary_hints for mode in result.segment_treatments
     )
     visible_hints: list[tuple[GlossaryHint, bool]] = []
+    omitted_hints: list[GlossaryHint] = []
     for index, hint in enumerate(result.glossary_hints):
         if index in suppressed_hint_indices:
+            omitted_hints.append(hint)
             continue
         only_dropped = _hint_only_dropped(hint, result.block_id, evidences, dropped_difficulty_ids)
         if only_dropped and not requires_hints:
+            omitted_hints.append(hint)
             continue
         visible_hints.append((hint, only_dropped or index in stripped_hint_indices))
     assigned, unmatched = _assign_pronunciations(
-        [hint for hint, _ in visible_hints], pronunciations, block.id
+        [hint for hint, _ in visible_hints],
+        pronunciations,
+        block.id,
+        excluded_hints=omitted_hints,
     )
     drafts: list[_Draft] = []
     for (hint, strip_note), pronunciation in zip(visible_hints, assigned, strict=True):
@@ -660,12 +666,15 @@ def _assign_pronunciations(
     hints: Sequence[GlossaryHint],
     pronunciations: Sequence[PronunciationOccurrence],
     block_id: str,
+    *,
+    excluded_hints: Sequence[GlossaryHint] = (),
 ) -> tuple[list[PronunciationOccurrence | None], tuple[PronunciationOccurrence, ...]]:
     """Pair each hint with the first pronunciation of the same quote.
 
     A quote that matches some hint `original` (including case-insensitive or
-    infinitive `to` + verb forms) does not become its own note, even when a
-    later copy is left over. Other blocks are ignored.
+    infinitive `to` + verb forms, or a suppressed/dropped hint) does not become
+    its own standalone note, even when a later copy is left over. Other blocks
+    are ignored.
     """
     local = [item for item in pronunciations if item.block_id == block_id]
     used: set[int] = set()
@@ -679,8 +688,9 @@ def _assign_pronunciations(
             used.add(index)
             break
         assigned.append(match)
+    all_hints = (*hints, *excluded_hints)
     for index, item in enumerate(local):
-        if any(_hint_matches_pronunciation(hint.original, item.quote) for hint in hints):
+        if any(_hint_matches_pronunciation(hint.original, item.quote) for hint in all_hints):
             used.add(index)
     unmatched = tuple(item for index, item in enumerate(local) if index not in used)
     return assigned, unmatched

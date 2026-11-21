@@ -2124,3 +2124,216 @@ def test_book_layout_keeps_first_two_speech_style_and_unique_idioms() -> None:
     assert _labels(layout, b6.id) == ("Речь персонажа.",)
     # Chapter 3: `Codswallop` repeats already-shown `codswallop` -> dropped!
     assert _notes(layout, b7.id) == ()
+
+
+def test_vocab_dedup_no_translate_flip_or_double_count_and_mixed_segment_preserved() -> None:
+    """Covers review findings 1, 2, and 3:
+    1) Suppressed TRANSLATE never flips to full on the next block and adjacent TRANSLATE
+       blocks do not double-count occurrences to starve a following GLOSSARY_ONLY block.
+    2) Mixed TRANSLATE + GLOSSARY_ONLY blocks strip (not suppress) 2nd-3rd hints on the
+       untranslated segment and rescue >= 1 hint on the untranslated segment inside windows.
+    3) Russian preposition_stranding phrasing naming the preposition (e.g. «to», about, (with))
+       is matched and capped without requiring the English label.
+    """
+    from linguary.domain import LanguageNote
+
+    # --- Scenario 1a & 1b: adjacent TRANSLATE blocks + Ch1 -> Ch2 -> Ch5 reset ---
+    c1_blocks = [_block("c1", 0, "He grabbed the cloak and the lantern.")]
+    c1_blocks.extend(_block("c1", i, f"Filler c1 {i}.") for i in range(1, 23))
+
+    c2_tr_1 = _block("c2", 0, "The cloak billowed.")
+    c2_tr_2 = _block("c2", 1, "Another cloak passed.")
+    c2_gl_after = _block("c2", 2, "A cloak lay near a wand.")
+    c2_tr_lantern = _block("c2", 3, "The lantern flickered.")
+    c2_blocks = [c2_tr_1, c2_tr_2, c2_gl_after, c2_tr_lantern]
+    c2_blocks.extend(_block("c2", i, f"Filler c2 {i}.") for i in range(4, 26))
+
+    # Mixed segment block in ch3: segment 0 = TRANSLATE ("He opened the goblet."),
+    # segment 1 = GLOSSARY_ONLY (" The lantern glowed.")
+    mixed_text_1 = "He opened the goblet. The lantern glowed."
+    cut_1 = mixed_text_1.index(" The lantern")
+    c3_mixed_strip = _block(
+        "c3",
+        0,
+        mixed_text_1,
+        segments=(
+            BlockSegment(0, cut_1, 0),
+            BlockSegment(cut_1, len(mixed_text_1), 1),
+        ),
+    )
+    # Mixed block within 20-block window right after c3_mixed_strip:
+    # segment 0 = TRANSLATE with brand-new hint "quill", segment 1 = GLOSSARY_ONLY with "lantern" (within window!)
+    mixed_text_2 = "He held a quill. The lantern shone."
+    cut_2 = mixed_text_2.index(" The lantern")
+    c3_mixed_rescue = _block(
+        "c3",
+        1,
+        mixed_text_2,
+        segments=(
+            BlockSegment(0, cut_2, 0),
+            BlockSegment(cut_2, len(mixed_text_2), 1),
+        ),
+    )
+    c3_blocks = [c3_mixed_strip, c3_mixed_rescue]
+
+    c4_blocks = [_block("c4", 0, "Quiet chapter four.")]
+
+    # Ch 5: "cauldron" was shown in Ch 1 (count=1), suppressed in Ch 2 (count=2),
+    # and now appears in two adjacent TRANSLATE blocks in Ch 5 (gap 5 - 1 = 4 > 3).
+    # First Ch 5 block should reintroduce cleanly; second adjacent block must stay suppressed!
+    c5_tr_1 = _block("c5", 0, "A cauldron gleamed.")
+    c5_tr_2 = _block("c5", 1, "The cauldron fell.")
+    c5_blocks = [c5_tr_1, c5_tr_2]
+
+    c6_blocks = [_block("c6", 0, "Quiet chapter six.")]
+    c7_blocks = [_block("c7", 0, "Quiet chapter seven.")]
+
+    # Add Ch 1 & Ch 2 goblet + cauldron blocks for Scenario 1a & 2.
+    c1_goblet = _block("c1", len(c1_blocks), "He lifted a goblet and a cauldron.")
+    c1_blocks.insert(1, c1_goblet)
+    c2_goblet = _block("c2", len(c2_blocks), "She took the goblet and the cauldron.")
+    c2_blocks.insert(4, c2_goblet)
+
+    # Russian preposition_stranding notes without English label across chapters 1, 2, 3, 5, 7.
+    prep_samples = (
+        (1, c1_blocks, "talking to", "Предлог «to» стоит в конце вопроса."),
+        (2, c2_blocks, "thinking about", "Предлог about вынесен в конец предложения."),
+        (3, c3_blocks, "playing with", "Предлог (with) остаётся в конце."),
+        (5, c5_blocks, "looking for", "Предлог for обычно ставится в конце вопроса."),
+        (7, c7_blocks, "staring at", "Предлог «at» стоит в конце фразы."),
+    )
+    prep_blocks: dict[int, DocumentBlock] = {}
+    results: dict[str, BlockProcessingResult] = {}
+
+    for ch_num, bucket, excerpt, note_text in prep_samples:
+        blk = _block(f"c{ch_num}", len(bucket), f"Who is she {excerpt}?")
+        bucket.append(blk)
+        prep_blocks[ch_num] = blk
+        results[blk.id] = BlockProcessingResult(
+            blk.id,
+            BlockTreatment.READ_AS_IS,
+            language_notes=(LanguageNote(f"ln-prep-{ch_num}", blk.id, excerpt, note_text),),
+        )
+
+    cloak_h = GlossaryHint("cloak", "плащ", "Длинная накидка.")
+    lantern_h = GlossaryHint("lantern", "фонарь", "Переносной фонарь.")
+    wand_h = GlossaryHint("wand", "палочка", "Волшебная палочка.")
+    goblet_h = GlossaryHint("goblet", "кубок", "Большая чаша.")
+    cauldron_h = GlossaryHint("cauldron", "котёл", "Большой металлический котёл.")
+    quill_h = GlossaryHint("quill", "перо", "Писчее перо.")
+
+    results[c1_blocks[0].id] = BlockProcessingResult(
+        c1_blocks[0].id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_h, lantern_h),
+    )
+    results[c1_goblet.id] = BlockProcessingResult(
+        c1_goblet.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(goblet_h, cauldron_h),
+    )
+    # Adjacent TRANSLATE blocks in Ch 2 for cloak: must NOT double-count!
+    results[c2_tr_1.id] = BlockProcessingResult(
+        c2_tr_1.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Плащ развевался.",
+        glossary_hints=(cloak_h,),
+    )
+    results[c2_tr_2.id] = BlockProcessingResult(
+        c2_tr_2.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Другой плащ мелькнул.",
+        glossary_hints=(cloak_h,),
+    )
+    # Following GLOSSARY_ONLY block with wand + cloak: cloak is 3rd (not 4th!), so shown stripped!
+    results[c2_gl_after.id] = BlockProcessingResult(
+        c2_gl_after.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_h, wand_h),
+    )
+    results[c2_tr_lantern.id] = BlockProcessingResult(
+        c2_tr_lantern.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Фонарь мигнул.",
+        glossary_hints=(lantern_h,),
+    )
+    results[c2_goblet.id] = BlockProcessingResult(
+        c2_goblet.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Она взяла кубок и котёл.",
+        glossary_hints=(goblet_h, cauldron_h),
+    )
+    # Mixed block 1: segment 0 TRANSLATE ("goblet" -> 3rd occurrence in TRANSLATE -> suppressed),
+    # segment 1 GLOSSARY_ONLY ("lantern" -> 3rd occurrence in GLOSSARY_ONLY -> stripped!).
+    results[c3_mixed_strip.id] = BlockProcessingResult(
+        c3_mixed_strip.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Он открыл кубок.",
+        glossary_hints=(goblet_h, lantern_h),
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+        segment_translations=("Он открыл кубок.", None),
+    )
+    # Mixed block 2 (within 20-block window of lantern):
+    # segment 0 TRANSLATE ("quill" -> 1st, shown), segment 1 GLOSSARY_ONLY ("lantern" -> rescued compact!).
+    results[c3_mixed_rescue.id] = BlockProcessingResult(
+        c3_mixed_rescue.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Он держал перо.",
+        glossary_hints=(quill_h, lantern_h),
+        segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+        segment_translations=("Он держал перо.", None),
+    )
+    # Scenario 1a in Ch 5: cauldron was shown in Ch 1 (count=1), suppressed in Ch 2 (count=2), gap 5-1=4 > 3.
+    results[c5_tr_1.id] = BlockProcessingResult(
+        c5_tr_1.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Котёл сверкнул.",
+        glossary_hints=(cauldron_h,),
+    )
+    results[c5_tr_2.id] = BlockProcessingResult(
+        c5_tr_2.id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Котёл упал.",
+        glossary_hints=(cauldron_h,),
+    )
+
+    sections = (
+        _section("c1", 0, "Chapter 1", c1_blocks),
+        _section("c2", 1, "Chapter 2", c2_blocks),
+        _section("c3", 2, "Chapter 3", c3_blocks),
+        _section("c4", 3, "Chapter 4", c4_blocks),
+        _section("c5", 4, "Chapter 5", c5_blocks),
+        _section("c6", 5, "Chapter 6", c6_blocks),
+        _section("c7", 6, "Chapter 7", c7_blocks),
+    )
+    layout = build_book_layout(_inputs(_document(sections), results))
+
+    # Finding 1b: adjacent TRANSLATE blocks did not double-count; c2_gl_after keeps stripped cloak + full wand.
+    assert _notes(layout, c2_tr_1.id) == ()
+    assert _notes(layout, c2_tr_2.id) == ()
+    assert [(n.term, n.body) for n in _notes(layout, c2_gl_after.id)] == [
+        ("cloak", ("плащ",)),
+        ("wand", ("палочка", "Волшебная палочка.")),
+    ]
+
+    # Finding 1a: Ch 5 blk 0 reintroduces cauldron cleanly; Ch 5 blk 1 stays suppressed (no suppress->full flip!).
+    assert [(n.term, n.body) for n in _notes(layout, c5_tr_1.id)] == [
+        ("cauldron", ("котёл", "Большой металлический котёл.")),
+    ]
+    assert _notes(layout, c5_tr_2.id) == ()
+
+    # Finding 2: Mixed-segment blocks preserve hints on untranslated GLOSSARY_ONLY segments.
+    assert [(n.term, n.body) for n in _notes(layout, c3_mixed_strip.id)] == [
+        ("lantern", ("фонарь",)),
+    ]
+    assert [(n.term, n.body) for n in _notes(layout, c3_mixed_rescue.id)] == [
+        ("quill", ("перо", "Писчее перо.")),
+        ("lantern", ("фонарь",)),
+    ]
+
+    # Finding 3: Russian preposition_stranding notes naming the preposition are capped (cap 3, gap >= 2).
+    assert len(_notes(layout, prep_blocks[1].id)) == 1
+    assert len(_notes(layout, prep_blocks[2].id)) == 0
+    assert len(_notes(layout, prep_blocks[3].id)) == 1
+    assert len(_notes(layout, prep_blocks[5].id)) == 1
+    assert len(_notes(layout, prep_blocks[7].id)) == 0
