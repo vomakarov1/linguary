@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from linguary.application.llm_dto import ChapterAnalysisResponse, TranslationResultResponse
 from linguary.application.ports.llm import LLMResponseFormatError, LLMResponseKind
 from linguary.domain import BlockTreatment, ConceptType
-from linguary.domain.name_translation import NameTranslationMethod
+from linguary.domain.name_translation import NameTranslationMethod, NameTranslationReviewReason
 
 
 def pronunciation_candidate():
@@ -114,6 +114,58 @@ def test_malformed_assessment_rejected() -> None:
     data["glossary_candidates"][0]["name_translation_assessment"]["opaque_name"] = "true"
     with pytest.raises(LLMResponseFormatError):
         parse_payload(LLMResponseKind.CHAPTER_ANALYSIS, as_content(data), name_translation_policy_version=1)
+
+
+def test_parse_payload_deduplicates_name_assessment_review_reasons() -> None:
+    from linguary.adapters.llm.schemas import NameTranslationAssessmentSchema
+
+    raw_assessment = {
+        "applied_method": "creative",
+        "eligible_without_review": False,
+        "review_reasons": [
+            "wordplay",
+            "ambiguous",
+            "wordplay",
+            "creative_adaptation",
+            "ambiguous",
+        ],
+        "rationale": "Игра слов и авторская адаптация",
+        "opaque_name": False,
+    }
+    schema_obj = NameTranslationAssessmentSchema.model_validate(raw_assessment)
+    assert schema_obj.review_reasons == [
+        NameTranslationReviewReason.WORDPLAY,
+        NameTranslationReviewReason.AMBIGUOUS,
+        NameTranslationReviewReason.CREATIVE_ADAPTATION,
+    ]
+
+    chapter_data = analysis_payload()
+    chapter_data["glossary_candidates"][0]["name_translation_assessment"] = dict(raw_assessment)
+    chapter_dto = parse_payload(
+        LLMResponseKind.CHAPTER_ANALYSIS,
+        as_content(chapter_data),
+        name_translation_policy_version=1,
+    )
+    assert chapter_dto.glossary_candidates[0].name_translation_assessment is not None
+    assert chapter_dto.glossary_candidates[0].name_translation_assessment.review_reasons == (
+        NameTranslationReviewReason.WORDPLAY,
+        NameTranslationReviewReason.AMBIGUOUS,
+        NameTranslationReviewReason.CREATIVE_ADAPTATION,
+    )
+
+    narrative_data = narrative_payload()
+    narrative_data["glossary_candidates"][0]["name_translation_assessment"] = dict(raw_assessment)
+    narrative_dto = parse_payload(
+        LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE,
+        as_content(narrative_data),
+        name_translation_policy_version=1,
+    )
+    assert narrative_dto.glossary_candidates[0].name_translation_assessment is not None
+    assert narrative_dto.glossary_candidates[0].name_translation_assessment.review_reasons == (
+        NameTranslationReviewReason.WORDPLAY,
+        NameTranslationReviewReason.AMBIGUOUS,
+        NameTranslationReviewReason.CREATIVE_ADAPTATION,
+    )
 
 
 def test_chapter_analysis_is_mapped_to_dto() -> None:

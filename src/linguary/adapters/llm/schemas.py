@@ -436,6 +436,11 @@ class NameTranslationAssessmentSchema(_ResponseModel):
     opaque_name: bool = Field(strict=True)
 
     @model_validator(mode="after")
+    def _deduplicate_review_reasons(self) -> NameTranslationAssessmentSchema:
+        self.review_reasons = list(dict.fromkeys(self.review_reasons))
+        return self
+
+    @model_validator(mode="after")
     def _check_negative_reason(self) -> NameTranslationAssessmentSchema:
         if not self.eligible_without_review and not self.review_reasons:
             raise ValueError("negative assessment requires a reason")

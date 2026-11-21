@@ -57,7 +57,11 @@ class NameTranslationAssessment:
             raise ValueError("opaque name flag must be a boolean")
         if not isinstance(self.review_reasons, (tuple, list)):
             raise ValueError("review reasons must be a sequence")
-        object.__setattr__(self, "review_reasons", tuple(NameTranslationReviewReason(reason) for reason in self.review_reasons))
+        object.__setattr__(
+            self,
+            "review_reasons",
+            tuple(dict.fromkeys(NameTranslationReviewReason(reason) for reason in self.review_reasons)),
+        )
         if not isinstance(self.rationale, str) or not self.rationale.strip():
             raise ValueError("assessment rationale is empty")
         if not self.eligible_without_review and not self.review_reasons:

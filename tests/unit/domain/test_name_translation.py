@@ -10,6 +10,7 @@ from linguary.domain.name_translation import (
     NameTranslationEvidence,
     NameTranslationObservation,
     NameTranslationPolicy,
+    NameTranslationReviewReason,
     NameTranslationStrategy,
 )
 
@@ -80,3 +81,37 @@ def test_nonfinite_confidence_rejected(value: float) -> None:
         GlossaryCandidateResponse("Name", ConceptType.PERSON, "Имя", value, False)
     with pytest.raises(GlossaryError):
         GlossaryCandidate("c", "a", "Name", ConceptType.PERSON, "Имя", value, False, True)
+
+
+def test_name_translation_assessment_deduplicates_review_reasons_preserving_order() -> None:
+    assessment = NameTranslationAssessment(
+        "meaning",
+        False,
+        (
+            "wordplay",
+            "ambiguous",
+            "wordplay",
+            NameTranslationReviewReason.AMBIGUOUS,
+            "creative_adaptation",
+            "wordplay",
+        ),
+        "Есть игра слов и неоднозначность",
+    )
+    assert assessment.review_reasons == (
+        NameTranslationReviewReason.WORDPLAY,
+        NameTranslationReviewReason.AMBIGUOUS,
+        NameTranslationReviewReason.CREATIVE_ADAPTATION,
+    )
+    assert not assessment.supports(NameTranslationStrategy.MEANING)
+
+    from_list = NameTranslationAssessment(
+        "sound",
+        True,
+        ["ambiguous", "ambiguous", "wordplay"],
+        "Нужна проверка",
+    )
+    assert from_list.review_reasons == (
+        NameTranslationReviewReason.AMBIGUOUS,
+        NameTranslationReviewReason.WORDPLAY,
+    )
+    assert not from_list.supports(NameTranslationStrategy.SOUND)
