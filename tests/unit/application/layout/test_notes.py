@@ -1383,3 +1383,81 @@ def test_headword_stripping_preserves_hyphenated_compounds_and_empty_notes_drop_
     # Empty LanguageNote is dropped even if it carried a kind label (wordplay), leaving only real_note.
     lang_notes = [note for note in notes if note.origin == "language_note"]
     assert [note.body for note in lang_notes] == [("Фразовый глагол.",)]
+
+
+def test_block_notes_respects_suppressed_and_stripped_indices_preserving_artifact_key() -> None:
+    """Suppressed indices are skipped; stripped hints drop note text yet keep artifact_key linkage."""
+    text = "The goose met the lantern by the cloak."
+    block = _block(text)
+    goose = GlossaryHint("goose", "гусыня", "Не путать со значением «глупец».")
+    lantern = GlossaryHint("lantern", "фонарь", "Переносной фонарь с ручкой.")
+    cloak = GlossaryHint("cloak", "плащ", "Длинная накидка с капюшоном.")
+    kept_note = LanguageNote("n-kept", block.id, "met", "Прошедшее время от meet.")
+    suppressed_note = LanguageNote("n-drop", block.id, "by", "Предлог места.")
+
+    false_friend = _difficulty(
+        block.id,
+        (_anchor(block, "goose"),),
+        "false_friend",
+        difficulty_id="d-goose",
+    )
+    vocab = _difficulty(
+        block.id,
+        (_anchor(block, "lantern"),),
+        "vocabulary",
+        difficulty_id="d-lantern",
+    )
+    plan = _plan(false_friend, vocab)
+    evidence = ContentEvidence(
+        plan.sha256,
+        (
+            HelpEvidence(
+                false_friend.id,
+                false_friend.required_points[0].id,
+                "glossary_hint.note",
+                block.id,
+                _hint_key("glossary_hint.note", goose, block.id),
+                goose.note or "",
+            ),
+            HelpEvidence(
+                vocab.id,
+                vocab.required_points[0].id,
+                "glossary_hint.translation",
+                block.id,
+                _hint_key("glossary_hint.translation", lantern, block.id),
+                lantern.translation,
+            ),
+        ),
+    )
+    result = _result(
+        block,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        hints=(goose, lantern, cloak),
+        notes=(kept_note, suppressed_note),
+        evidence=evidence,
+    )
+
+    notes = block_notes(
+        block,
+        result,
+        plan,
+        (),
+        suppressed_hint_indices=frozenset({2}),
+        stripped_hint_indices=frozenset({0}),
+        suppressed_note_indices=frozenset({1}),
+    )
+
+    assert [note.term for note in notes] == ["goose", None, "lantern"]
+    # Stripped hint dropped explanatory note text, yet preserved artifact_key -> labels & kinds.
+    assert notes[0].body == ("гусыня",)
+    assert notes[0].labels == ("Ложный друг.",)
+    assert notes[0].difficulty_kinds == ("false_friend",)
+    # Kept language note remains; suppressed language note is omitted.
+    assert notes[1].origin == "language_note"
+    assert notes[1].body == ("Прошедшее время от meet.",)
+    # Non-stripped hint keeps full translation and note; suppressed hint (index 2) is omitted.
+    assert notes[2].body == ("фонарь", "Переносной фонарь с ручкой.")
+    assert notes[2].difficulty_kinds == ("vocabulary",)
+    # Stored BlockProcessingResult is never mutated.
+    assert result.glossary_hints == (goose, lantern, cloak)
+    assert result.language_notes == (kept_note, suppressed_note)

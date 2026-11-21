@@ -169,6 +169,7 @@ def _analysis(
     candidates: Sequence[GlossaryCandidate] = (),
     plan: ContentPlan | None = None,
     before: Sequence[BeforeYouReadEntry] = (),
+    chapter_summary: str = "Кратко.",
 ) -> ChapterAnalysis:
     return ChapterAnalysis(
         id=analysis_id,
@@ -176,7 +177,7 @@ def _analysis(
         coverage_status=CoverageStatus.INCOMPLETE,
         treatment_plan=TreatmentPlan(section_id),
         translation_instructions="Держи имена.",
-        chapter_summary="Кратко.",
+        chapter_summary=chapter_summary,
         glossary_candidates=tuple(candidates),
         before_you_read=tuple(before),
         content_plan=plan,
@@ -485,6 +486,7 @@ def test_structure_only_layout_whole_blocks_no_notes() -> None:
         "Абзац оригинала всегда идёт первым.",
         "Строка с линией слева — перевод этой части абзаца. "
         "Переведены не все абзацы: остальные вы читаете сами, с подсказками или без них. "
+        "По мере чтения переводов становится меньше — так вы постепенно привыкаете к тексту. "
         "Старайтесь сначала прочитать абзац оригинала целиком и только потом сверяться с переводом.",
     )
     assert layout.ipa_key == ()
@@ -1138,7 +1140,8 @@ def test_features_collected_for_legend() -> None:
     """Flags, labels, IPA, and section keys come from the finished projection.
 
     `english_help` hides the lexical-hint label, so it is not a legend label.
-    `previously` is absent. Before You Read counts only as a section key.
+    `previously` is set because chapter 1 (non-last content chapter) has a summary.
+    Before You Read counts only as a section key.
     """
     poem = _block("one", 0, "Twinkle, twinkle, little bat.", kind=BlockType.POEM)
     grammar_block = _block("one", 1, "She had a curious dream.")
@@ -1256,12 +1259,12 @@ def test_features_collected_for_legend() -> None:
         has_ipa=True,
         has_poems=True,
         has_speakers=False,
-        sections=frozenset({"before_you_read"}),
+        sections=frozenset({"previously", "before_you_read"}),
     )
-    assert "previously" not in layout.features.sections
+    assert "previously" in layout.features.sections
     assert "review" not in layout.features.sections
     assert layout.legend[0] == "Абзац оригинала всегда идёт первым."
-    assert "что было раньше" not in "\n".join(layout.legend)
+    assert "что было раньше" in "\n".join(layout.legend)
     assert "Говорит" not in "\n".join(layout.legend)
     assert layout.ipa_key == ipa_key(("kæt",))
     assert layout.legend == legend_lines(layout.features)
@@ -1328,10 +1331,10 @@ def test_front_matter_has_no_extras() -> None:
     note_unit = layout.chapters[notes.id].units[note.id][0]
     assert (front_unit.start, front_unit.end, front_unit.notes) == (0, len(front_block.text), ())
     assert (note_unit.start, note_unit.end, note_unit.notes) == (0, len(note.text), ())
-    assert "previously" not in layout.features.sections
+    assert "previously" in layout.features.sections
     assert "who_is_who" not in layout.features.sections
     assert "review" not in layout.features.sections
-    assert layout.features.sections == frozenset()
+    assert layout.features.sections == frozenset({"previously"})
 
 
 def test_book_layout_omits_who_is_who_and_review() -> None:
@@ -1504,9 +1507,9 @@ def test_repeated_speech_style_drops_language_notes_and_hints_backed_by_evidence
     from linguary.domain import LanguageNote
     from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
 
-    first = _block("one", 0, "‘We was late,’ Hagrid said.")
+    first = _block("one", 0, "‘Yeh’ll be late,’ Hagrid said.")
     second = _block("two", 0, "‘Yeh’ll see,’ Hagrid said.")
-    early = _difficulty(first, "We was", "speech_style", "d-early")
+    early = _difficulty(first, "Yeh’ll", "speech_style", "d-early")
     late = _difficulty(second, "Yeh’ll", "speech_style", "d-late")
     kept_grammar = _difficulty(second, "see", "grammar", "d-gram")
     first_fact = _fact("f1", first, first.text, "Hagrid", "explicit")
@@ -1516,7 +1519,7 @@ def test_repeated_speech_style_drops_language_notes_and_hints_backed_by_evidence
     first_section = _section("one", 0, "Chapter 1", (first,))
     second_section = _section("two", 1, "Chapter 2", (second,))
 
-    early_note = LanguageNote("n1", first.id, "We was", "Просторечное согласование.")
+    early_note = LanguageNote("n1", first.id, "Yeh’ll", "Просторечное yeh = you.")
     late_note = LanguageNote("n2", second.id, "Yeh’ll", "Повтор про yeh = you.")
     kept_note = LanguageNote("n3", second.id, "see", "Будущее время.")
     late_hint = GlossaryHint("Yeh’ll", "ты будешь", "Повтор про диалект.")
@@ -1621,10 +1624,10 @@ def test_repeated_speech_style_on_glossary_only_keeps_translation_and_shared_evi
     from linguary.domain import LanguageNote
     from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
 
-    first = _block("one", 0, "‘We was late,’ Hagrid said.")
+    first = _block("one", 0, "‘An’ yeh’ll be late,’ Hagrid said.")
     second = _block("two", 0, "‘Yeh’ll see,’ Hagrid said.")
     third = _block("two", 1, "‘An’ don’t forget,’ Hagrid said.")
-    early = _difficulty(first, "We was", "speech_style", "d-early")
+    early = _difficulty(first, "An’ yeh’ll", "speech_style", "d-early")
     late_glossary = _difficulty(second, "Yeh’ll", "speech_style", "d-late-g", help_kind="lexical_hint")
     late_shared_style = _difficulty(third, "An’", "speech_style", "d-late-s")
     kept_idiom = _difficulty(third, "don’t forget", "idiom", "d-keep-idiom")
@@ -1767,3 +1770,357 @@ def test_display_translation_typography_applies_only_to_russian_target_language(
     )
     de_translation = de_layout.chapters[section.id].units[block.id][0].translation
     assert de_translation == "Er sagte: „Hallo“ – und „Welt” – und trennen."
+
+
+def test_book_layout_includes_previously_only_with_multiple_content_chapters() -> None:
+    """`previously` appears only with >= 2 content chapters and a non-last chapter summary."""
+    front = _section("front", 0, "Contents", (_block("front", 0, "Table of contents."),))
+    ch1 = _section("ch1", 1, "Chapter 1", (_block("ch1", 0, "First chapter text."),))
+    notes = _section("notes", 2, "Notes", (_block("notes", 0, "Footnote.", kind=BlockType.FOOTNOTE),))
+    ch2 = _section("ch2", 3, "Chapter 2", (_block("ch2", 0, "Second chapter text."),))
+
+    # Only 1 content chapter (+ front matter + notes-only) -> no `previously`.
+    single = build_book_layout(_inputs(
+        _document((front, ch1, notes)),
+        analyses=(
+            _analysis("a-front", front.id, chapter_summary="Оглавление."),
+            _analysis("a-ch1", ch1.id, chapter_summary="Первая глава."),
+            _analysis("a-notes", notes.id, chapter_summary="Примечания."),
+        ),
+    ))
+    assert "previously" not in single.features.sections
+    assert "что было раньше" not in "\n".join(single.legend)
+
+    # 2 content chapters, but only the LAST content chapter has a non-empty summary -> no `previously`.
+    only_last_summary = build_book_layout(_inputs(
+        _document((ch1, ch2)),
+        analyses=(
+            _analysis("a-ch1", ch1.id, chapter_summary="   "),
+            _analysis("a-ch2", ch2.id, chapter_summary="Итог последней главы."),
+        ),
+    ))
+    assert "previously" not in only_last_summary.features.sections
+    assert "что было раньше" not in "\n".join(only_last_summary.legend)
+
+    # 2 content chapters, first (non-last) content chapter has a non-empty summary -> `previously` set.
+    multi = build_book_layout(_inputs(
+        _document((front, ch1, notes, ch2)),
+        analyses=(
+            _analysis("a-ch1", ch1.id, chapter_summary="Гарри получает письмо."),
+            _analysis("a-ch2", ch2.id, chapter_summary=""),
+        ),
+    ))
+    assert "previously" in multi.features.sections
+    assert "who_is_who" not in multi.features.sections
+    assert "review" not in multi.features.sections
+    assert "«Previously in…» — что было раньше" in "\n".join(multi.legend)
+
+
+def test_book_layout_three_stage_vocabulary_deduplication_and_11_grammar_caps() -> None:
+    """3-stage book-wide glossary deduplication and 11 grammar pattern caps work without mutating results."""
+    from linguary.domain import LanguageNote
+    from linguary.domain.content_plan import ContentEvidence, HelpEvidence, artifact_key
+
+    # Build 7 content chapters with spacing blocks so we can control both 20-block window and chapter gaps.
+    ch1_blocks = [
+        _block("c1", 0, "He wore a heavy cloak."),
+        _block("c1", 1, "The cloak swirled near a lantern."),
+        _block("c1", 2, "Another cloak hung nearby."),
+    ]
+    # Add 22 filler blocks in ch1 so block index jumps > 20 before ch2.
+    ch1_blocks.extend(_block("c1", idx, f"Filler sentence {idx}.") for idx in range(3, 25))
+    ch2_blocks = [
+        _block("c2", 0, "He grabbed the cloak in the hall."),
+        _block("c2", 1, "She saw the cloak on the chair."),
+    ]
+    ch2_blocks.extend(_block("c2", idx, f"Filler c2 {idx}.") for idx in range(2, 24))
+    ch3_blocks = [
+        _block("c3", 0, "The cloak fluttered in the wind."),
+    ]
+    ch3_blocks.extend(_block("c3", idx, f"Filler c3 {idx}.") for idx in range(1, 23))
+    ch4_blocks = [
+        _block("c4", 0, "A cloak and a wand lay there."),
+        _block("c4", 1, "Only the cloak remained."),
+    ]
+    ch5_blocks = [_block("c5", 0, "Quiet chapter five.")]
+    ch6_blocks = [_block("c6", 0, "Quiet chapter six.")]
+    ch7_blocks = [_block("c7", 0, "Quiet chapter seven.")]
+    ch8_blocks = [_block("c8", 0, "The cloak appeared again after a long break.")]
+
+    # Attach grammar language notes across chapters 1, 2, 3, 5, 7 to test all 11 closed regex keys.
+    grammar_cases = (
+        ("used_to", "used to live", "Конструкция used to обозначает привычку в прошлом."),
+        ("modal_must_have", "must have been", "Модальный глагол must have + V3: наверняка был."),
+        ("modal_would_have", "would have done", "would have + V3: сделал бы в прошлом."),
+        ("modal_could_have", "could have sworn", "could have + V3: мог бы поклясться."),
+        ("modal_should_have", "should have known", "should have + V3: следовало знать."),
+        ("modal_might_have", "might have heard", "might have + V3: возможно, слышал."),
+        ("past_perfect", "had already left", "Past Perfect: действие случилось раньше в прошлом."),
+        ("wish_past", "I wish I were", "После wish используется прошедшее время were."),
+        ("passive_infinitive", "to be seen", "Пассивный инфинитив to be + V3: быть увиденным."),
+        ("double_negative", "didn't know nothing", "Двойное отрицание в просторечной речи."),
+        ("preposition_stranding", "talking to", "Предлог в конце вопроса (preposition stranding)."),
+    )
+
+    grammar_blocks: dict[tuple[int, str], DocumentBlock] = {}
+    extra_sections: dict[int, list[DocumentBlock]] = {1: ch1_blocks, 2: ch2_blocks, 3: ch3_blocks, 4: ch4_blocks, 5: ch5_blocks, 6: ch6_blocks, 7: ch7_blocks, 8: ch8_blocks}
+    results: dict[str, BlockProcessingResult] = {}
+
+    # Vocabulary hints for `cloak`:
+    cloak_hint_1 = GlossaryHint("cloak", "плащ", "Длинная накидка с капюшоном.")
+    lantern_hint = GlossaryHint("lantern", "фонарь", "Переносной фонарь.")
+    cloak_hint_2_tr = GlossaryHint("cloak", "плащ", "Повтор в переведённом блоке.")
+    cloak_hint_2_gl = GlossaryHint("cloak", "плащ", "Пояснение должно исчезнуть при 2-3-м появлении.")
+    cloak_hint_3_gl = GlossaryHint("cloak", "плащ", "Пояснение при 3-м появлении.")
+    cloak_hint_4_with_other = GlossaryHint("cloak", "плащ", "4-е появление с другой подсказкой.")
+    wand_hint = GlossaryHint("wand", "палочка", "Волшебная палочка.")
+    cloak_hint_4_sole = GlossaryHint("cloak", "плащ", "Единственная подсказка в GLOSSARY_ONLY.")
+    cloak_hint_reset = GlossaryHint("cloak", "плащ", "Возвращение после перерыва > 3 глав.")
+
+    # Attach HelpEvidence on c2_blocks[1] (stripped hint) to verify artifact_key preservation through book.py.
+    c2_gl_block = ch2_blocks[1]
+    c2_diff = _difficulty(c2_gl_block, "cloak", "vocabulary", "d-cloak-c2")
+    c2_plan = _plan(c2_diff)
+    c2_hint_key = artifact_key(
+        "glossary_hint.note",
+        c2_gl_block.id,
+        {"original": cloak_hint_2_gl.original, "translation": cloak_hint_2_gl.translation, "note": cloak_hint_2_gl.note},
+    )
+
+    # c1[0]: 1st appearance of cloak -> FULL
+    results[ch1_blocks[0].id] = BlockProcessingResult(
+        ch1_blocks[0].id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_hint_1,),
+    )
+    # c1[1]: within 20 blocks, GLOSSARY_ONLY with another hint -> cloak suppressed, lantern kept
+    results[ch1_blocks[1].id] = BlockProcessingResult(
+        ch1_blocks[1].id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_hint_1, lantern_hint),
+    )
+    # c1[2]: within 20 blocks, GLOSSARY_ONLY with ONLY cloak -> MUST keep >= 1 compact hint!
+    results[ch1_blocks[2].id] = BlockProcessingResult(
+        ch1_blocks[2].id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_hint_1,),
+    )
+    # c2[0]: > 20 blocks later, 2nd appearance in TRANSLATE -> suppressed!
+    results[ch2_blocks[0].id] = BlockProcessingResult(
+        ch2_blocks[0].id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Он схватил плащ в прихожей.",
+        glossary_hints=(cloak_hint_2_tr,),
+    )
+    # c2[1]: > 20 blocks from last shown (c1[2]), 3rd appearance in GLOSSARY_ONLY -> stripped (translation only, artifact_key kept!)
+    results[c2_gl_block.id] = BlockProcessingResult(
+        c2_gl_block.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_hint_2_gl,),
+        content_evidence=ContentEvidence(
+            c2_plan.sha256,
+            (
+                HelpEvidence(
+                    c2_diff.id,
+                    c2_diff.required_points[0].id,
+                    "glossary_hint.note",
+                    c2_gl_block.id,
+                    c2_hint_key,
+                    cloak_hint_2_gl.note or "",
+                ),
+            ),
+        ),
+    )
+    # c3[0]: > 20 blocks later, 4th appearance (last shown c2, gap=1 <= 3) in TRANSLATE -> suppressed!
+    results[ch3_blocks[0].id] = BlockProcessingResult(
+        ch3_blocks[0].id,
+        BlockTreatment.TRANSLATE,
+        translated_text="Плащ развевался на ветру.",
+        glossary_hints=(cloak_hint_3_gl,),
+    )
+    # c4[0]: 4th+ appearance (last shown c2, gap=2 <= 3) in GLOSSARY_ONLY with another hint -> cloak suppressed, wand kept
+    results[ch4_blocks[0].id] = BlockProcessingResult(
+        ch4_blocks[0].id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_hint_4_with_other, wand_hint),
+    )
+    # c4[1]: 4th+ appearance in GLOSSARY_ONLY with ONLY cloak -> fallback keeps >= 1 compact hint!
+    results[ch4_blocks[1].id] = BlockProcessingResult(
+        ch4_blocks[1].id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_hint_4_sole,),
+    )
+    # c8[0]: after > 3 chapters gap (8 - 4 = 4 > 3) -> reset, shown FULL again!
+    results[ch8_blocks[0].id] = BlockProcessingResult(
+        ch8_blocks[0].id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(cloak_hint_reset,),
+    )
+
+    # Add grammar notes in chapters 1, 2, 3, 5, 7 (plus a duplicate in ch1 for used_to).
+    for ch_num in (1, 2, 3, 5, 7):
+        bucket = extra_sections[ch_num]
+        for g_key, excerpt, explanation in grammar_cases:
+            blk = _block(f"c{ch_num}", len(bucket), f"Sample {excerpt} text.")
+            bucket.append(blk)
+            grammar_blocks[(ch_num, g_key)] = blk
+            results[blk.id] = BlockProcessingResult(
+                blk.id,
+                BlockTreatment.READ_AS_IS,
+                language_notes=(LanguageNote(f"ln-{ch_num}-{g_key}", blk.id, excerpt, explanation),),
+            )
+    # Add an extra same-chapter used_to in ch1 to verify same-chapter suppression (gap 0 < 2).
+    same_ch_used_to = _block("c1", len(ch1_blocks), "He used to walk.")
+    ch1_blocks.append(same_ch_used_to)
+    results[same_ch_used_to.id] = BlockProcessingResult(
+        same_ch_used_to.id,
+        BlockTreatment.READ_AS_IS,
+        language_notes=(LanguageNote("ln-c1-used-dup", same_ch_used_to.id, "used to walk", "Конструкция used to — привычка."),),
+    )
+
+    sections = tuple(
+        _section(f"c{n}", n - 1, f"Chapter {n}", extra_sections[n])
+        for n in range(1, 9)
+    )
+    analyses = (_analysis("a-c2", "c2", plan=c2_plan),)
+    layout = build_book_layout(_inputs(_document(sections), results, analyses))
+
+    # --- Vocabulary assertions ---
+    # c1[0]: 1st appearance -> full translation + note
+    assert [(n.term, n.body) for n in _notes(layout, ch1_blocks[0].id)] == [
+        ("cloak", ("плащ", "Длинная накидка с капюшоном.")),
+    ]
+    # c1[1]: within 20 blocks -> cloak suppressed, lantern kept full
+    assert [(n.term, n.body) for n in _notes(layout, ch1_blocks[1].id)] == [
+        ("lantern", ("фонарь", "Переносной фонарь.")),
+    ]
+    # c1[2]: within 20 blocks, sole hint in untranslated GLOSSARY_ONLY -> rescued as compact (translation only)
+    assert [(n.term, n.body) for n in _notes(layout, ch1_blocks[2].id)] == [
+        ("cloak", ("плащ",)),
+    ]
+    # c2[0]: 2nd appearance in TRANSLATE -> suppressed
+    assert _notes(layout, ch2_blocks[0].id) == ()
+    # c2[1]: 3rd appearance in GLOSSARY_ONLY -> stripped note, preserved artifact_key -> difficulty_kinds=("vocabulary",)
+    c2_notes = _notes(layout, c2_gl_block.id)
+    assert [(n.term, n.body, n.difficulty_kinds) for n in c2_notes] == [
+        ("cloak", ("плащ",), ("vocabulary",)),
+    ]
+    # c3[0]: 4th appearance in TRANSLATE (gap <= 3) -> suppressed
+    assert _notes(layout, ch3_blocks[0].id) == ()
+    # c4[0]: 4th+ in GLOSSARY_ONLY with wand -> cloak suppressed, wand kept
+    assert [(n.term, n.body) for n in _notes(layout, ch4_blocks[0].id)] == [
+        ("wand", ("палочка", "Волшебная палочка.")),
+    ]
+    # c4[1]: 4th+ in GLOSSARY_ONLY with ONLY cloak -> fallback keeps compact translation
+    assert [(n.term, n.body) for n in _notes(layout, ch4_blocks[1].id)] == [
+        ("cloak", ("плащ",)),
+    ]
+    # c8[0]: gap 8 - 4 = 4 > 3 chapters -> reset, shown full again!
+    assert [(n.term, n.body) for n in _notes(layout, ch8_blocks[0].id)] == [
+        ("cloak", ("плащ", "Возвращение после перерыва > 3 глав.")),
+    ]
+    # Stored results are never mutated.
+    assert results[c2_gl_block.id].glossary_hints == (cloak_hint_2_gl,)
+    assert results[ch2_blocks[0].id].glossary_hints == (cloak_hint_2_tr,)
+
+    # --- 11 Grammar keys assertions ---
+    # Same-chapter duplicate of used_to is suppressed.
+    assert _notes(layout, same_ch_used_to.id) == ()
+    # used_to: cap 2, min gap 2 -> shown in ch1 (1), suppressed ch2, shown ch3 (2), suppressed ch5 & ch7.
+    assert len(_notes(layout, grammar_blocks[(1, "used_to")].id)) == 1
+    assert len(_notes(layout, grammar_blocks[(2, "used_to")].id)) == 0
+    assert len(_notes(layout, grammar_blocks[(3, "used_to")].id)) == 1
+    assert len(_notes(layout, grammar_blocks[(5, "used_to")].id)) == 0
+    assert len(_notes(layout, grammar_blocks[(7, "used_to")].id)) == 0
+    # All other 10 keys (including 5 distinct modal perfects): cap 3, min gap 2 ->
+    # shown in ch1 (1), suppressed ch2 (gap 1), shown ch3 (2), shown ch5 (3), suppressed ch7 (cap 3).
+    for g_key, _, _ in grammar_cases[1:]:
+        assert len(_notes(layout, grammar_blocks[(1, g_key)].id)) == 1, g_key
+        assert len(_notes(layout, grammar_blocks[(2, g_key)].id)) == 0, g_key
+        assert len(_notes(layout, grammar_blocks[(3, g_key)].id)) == 1, g_key
+        assert len(_notes(layout, grammar_blocks[(5, g_key)].id)) == 1, g_key
+        assert len(_notes(layout, grammar_blocks[(7, g_key)].id)) == 0, g_key
+
+
+def test_book_layout_keeps_first_two_speech_style_and_unique_idioms() -> None:
+    """First 2 speech_style notes in speaker's first scene/chapter stay, plus unique dialect lexemes later."""
+    from linguary.domain.content_plan import Scene
+
+    b1 = _block("one", 0, "‘Yeh’re a wizard,’ Hagrid said.")
+    b2 = _block("one", 1, "‘Yeh’ll see,’ Hagrid said.")
+    b3 = _block("one", 2, "‘Yeh’d better hurry,’ Hagrid said.")
+    b4 = _block("one", 3, "‘Gallopin’ Gorgons!’ Hagrid cried.")
+    b5 = _block("two", 0, "‘Yeh know what I mean,’ Hagrid said.")
+    b6 = _block("two", 1, "‘Codswallop!’ Hagrid barked.")
+    b7 = _block("three", 0, "‘Codswallop again!’ Hagrid laughed.")
+
+    d1 = _difficulty(b1, "Yeh’re", "speech_style", "d-s1")
+    d2 = _difficulty(b2, "Yeh’ll", "speech_style", "d-s2")
+    d3 = _difficulty(b3, "Yeh’d", "speech_style", "d-s3")
+    d4 = _difficulty(b4, "Gallopin’ Gorgons", "speech_style", "d-s4")
+    d5 = _difficulty(b5, "Yeh", "speech_style", "d-s5")
+    d6 = _difficulty(b6, "Codswallop", "speech_style", "d-s6")
+    d7 = _difficulty(b7, "Codswallop", "speech_style", "d-s7")
+
+    p1 = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(d1, d2, d3, d4),
+        context_facts=(
+            _fact("f1", b1, b1.text, "Hagrid", "explicit"),
+            _fact("f2", b2, b2.text, "Hagrid", "explicit"),
+            _fact("f3", b3, b3.text, "Hagrid", "explicit"),
+            _fact("f4", b4, b4.text, "Hagrid", "explicit"),
+        ),
+        scenes=(
+            Scene("sc-1", 0, b1.id, b4.id, "Hagrid arrives at the hut."),
+        ),
+    )
+    p2 = _plan(
+        d5,
+        d6,
+        facts=(
+            _fact("f5", b5, b5.text, "Hagrid", "explicit"),
+            _fact("f6", b6, b6.text, "Hagrid", "explicit"),
+        ),
+    )
+    p3 = _plan(d7, facts=(_fact("f7", b7, b7.text, "Hagrid", "explicit"),))
+
+    s1 = _section("one", 0, "Chapter 1", (b1, b2, b3, b4))
+    s2 = _section("two", 1, "Chapter 2", (b5, b6))
+    s3 = _section("three", 2, "Chapter 3", (b7,))
+
+    results = {
+        blk.id: BlockProcessingResult(
+            blk.id,
+            BlockTreatment.READ_AS_IS,
+            fragment_assistances=(_assistance(diff, f"пояснение {diff.id}", "sentence_rephrase"),),
+        )
+        for blk, diff in ((b1, d1), (b2, d2), (b3, d3), (b4, d4), (b5, d5), (b6, d6), (b7, d7))
+    }
+
+    layout = build_book_layout(
+        _inputs(
+            _document((s1, s2, s3)),
+            results,
+            (
+                _analysis("a1", s1.id, plan=p1),
+                _analysis("a2", s2.id, plan=p2),
+                _analysis("a3", s3.id, plan=p3),
+            ),
+        )
+    )
+
+    # First 2 in Hagrid's first scene stay (even though both use `yeh`).
+    assert _labels(layout, b1.id) == ("Речь персонажа.",)
+    assert _labels(layout, b2.id) == ("Речь персонажа.",)
+    # 3rd in first scene repeats `yeh` -> dropped!
+    assert _notes(layout, b3.id) == ()
+    # 4th in first scene has unique dialect idiom (`Gallopin' Gorgons`) -> kept!
+    assert _labels(layout, b4.id) == ("Речь персонажа.",)
+    # Chapter 2: `Yeh` repeats already-shown `yeh` -> dropped!
+    assert _notes(layout, b5.id) == ()
+    # Chapter 2: `Codswallop` is a new unique dialect lexeme -> kept!
+    assert _labels(layout, b6.id) == ("Речь персонажа.",)
+    # Chapter 3: `Codswallop` repeats already-shown `codswallop` -> dropped!
+    assert _notes(layout, b7.id) == ()

@@ -15,6 +15,7 @@ _ORIGINAL = "Абзац оригинала всегда идёт первым."
 _TRANSLATION = (
     "Строка с линией слева — перевод этой части абзаца. "
     "Переведены не все абзацы: остальные вы читаете сами, с подсказками или без них. "
+    "По мере чтения переводов становится меньше — так вы постепенно привыкаете к тексту. "
     "Старайтесь сначала прочитать абзац оригинала целиком и только потом сверяться с переводом."
 )
 _NOTES = (
@@ -245,3 +246,33 @@ def test_poem_line_only_with_poems() -> None:
         _section_line("previously", "review")
     )
     assert legend_lines(_features(has_poems=True)) == (_ORIGINAL, _POEM)
+
+
+def test_legend_lines_include_progression_guidance_and_previously() -> None:
+    """Legend translation line explains gradual reduction and includes Previously when present."""
+    lines = legend_lines(_features(
+        has_translation=True,
+        has_notes=True,
+        sections=frozenset({"previously"}),
+    ))
+    assert lines == (
+        _ORIGINAL,
+        _TRANSLATION,
+        _NOTES,
+        _section_line("previously"),
+    )
+    translation_line = lines[1]
+    assert "По мере чтения переводов становится меньше" in translation_line
+    assert "«Previously in…» — что было раньше" in lines[-1]
+    text = "\n".join(lines)
+    for phrase in (
+        "словарь",
+        "самопроверк",
+        "указател",
+        "Кэрролл",
+        "Льюис",
+        "После главы",
+        "В конце книги",
+        "листать",
+    ):
+        assert phrase not in text

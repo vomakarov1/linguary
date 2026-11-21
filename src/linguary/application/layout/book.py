@@ -14,7 +14,13 @@ from dataclasses import dataclass, replace
 from linguary.application.errors import ApplicationError
 from linguary.application.layout.ipa_reference import IpaSymbol, ipa_key
 from linguary.application.layout.legend import LayoutFeatures, legend_lines
-from linguary.application.layout.notes import block_notes
+from linguary.application.layout.notes import (
+    _evidences,
+    _hint_only_dropped,
+    _note_only_dropped,
+    block_notes,
+    vocabulary_dedup_key,
+)
 from linguary.application.layout.parts import LayoutPart, compose_parts
 from linguary.application.layout.review import ReviewEntry
 from linguary.application.layout.units import LayoutUnit, _whole_block_translation, block_units
@@ -27,6 +33,7 @@ from linguary.domain import (
     ChapterAnalysis,
     ConceptType,
     DocumentBlock,
+    LanguageNote,
     TermConcept,
     glossary_key,
 )
@@ -130,6 +137,132 @@ _RUSSIAN_TITLES = {
     glossary_key(translation): translation
     for translation in _TITLE_TRANSLATIONS.values()
 }
+_SPEECH_STYLE_FIRST_SCENE_KEEP = 2
+_SPEECH_STYLE_APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
+_SPEECH_STYLE_TOKEN = re.compile(r"[a-z]+(?:'[a-z]*)*|'[a-z]+", re.IGNORECASE)
+_CONTRACTION_SUFFIXES = frozenset({"ll", "re", "ve", "d", "m", "s"})
+_SPEECH_STYLE_STOPWORDS = frozenset(
+    {
+        "a", "an", "the", "i", "you", "he", "she", "it", "we", "they",
+        "me", "him", "her", "us", "them", "my", "your", "his", "its", "our", "their",
+        "to", "of", "in", "on", "at", "by", "for", "with", "from", "up", "out",
+        "is", "am", "are", "was", "were", "be", "been",
+        "do", "does", "did", "have", "has", "had",
+        "will", "would", "can", "could", "not", "no",
+        "and", "or", "but", "if", "that", "this", "so", "as", "all",
+    }
+)
+_HINT_LOCAL_WINDOW_BLOCKS = 20
+_HINT_REINTRODUCE_CHAPTER_GAP = 3
+_GRAMMAR_MIN_CHAPTER_GAP = 2
+_GRAMMAR_PATTERN_RULES: tuple[tuple[str, re.Pattern[str], int, int], ...] = (
+    (
+        "used_to",
+        re.compile(r"\bused\s+to\b|\bdid(?:n't|\s+not)\s+use\s+to\b", re.IGNORECASE),
+        2,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "modal_must_have",
+        re.compile(r"\bmust(?:\s+not|n't)?(?:\s+have|'ve)\b", re.IGNORECASE),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "modal_would_have",
+        re.compile(r"\bwould(?:\s+not|n't)?(?:\s+have|'ve)\b", re.IGNORECASE),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "modal_could_have",
+        re.compile(r"\bcould(?:\s+not|n't)?(?:\s+have|'ve)\b", re.IGNORECASE),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "modal_should_have",
+        re.compile(r"\bshould(?:\s+not|n't)?(?:\s+have|'ve)\b", re.IGNORECASE),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "modal_might_have",
+        re.compile(r"\bmight(?:\s+not|n't)?(?:\s+have|'ve)\b", re.IGNORECASE),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "wish_past",
+        re.compile(
+            r"\bwish(?:es|ed)?\s*\+\s*(?:past|прошедш|were|had)"
+            r"|\bwish(?:es|ed)?\s+(?:i|he|she|we|they|you|it)\s+"
+            r"(?:were|was|had|could|would|didn't|hadn't|weren't|knew|lived|spoke|went|came|did)\b"
+            r"|\bwish\b.{0,45}(?:прошедш\w*\s+врем|past\s+simple|past\s+perfect|сослагательн|нереальн\w*\s+желан|were\s+вместо\s+was)",
+            re.IGNORECASE,
+        ),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "double_negative",
+        re.compile(
+            r"\bdouble\s+negat(?:ive|ion)\b"
+            r"|двойн\w*\s+отрицан|два\s+отрицани"
+            r"|\b(?:don't|doesn't|didn't|ain't|won't|can't|couldn't|wouldn't|shouldn't|wasn't|weren't|haven't|hasn't|hadn't|never)\b"
+            r"[^.!?]{0,25}\b(?:nothing|nobody|no\s+one|nowhere|neither|none|no\s+[a-z]+)\b",
+            re.IGNORECASE,
+        ),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "preposition_stranding",
+        re.compile(
+            r"\bpreposition\s+stranding\b|\bstranded\s+preposition\b"
+            r"|предлог\w*\s+(?:стоит\s+|уходит\s+|вынесен\w*\s+|остаётся\s+|переносится\s+)?в\s+кон(?:ец|це)"
+            r"|в\s+кон(?:ец|це)\s+(?:вопроса|предложения|фразы|придаточного)[^.!?]{0,30}предлог",
+            re.IGNORECASE,
+        ),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "passive_infinitive",
+        re.compile(
+            r"\bpassive\s+infinitive\b|(?:пассивн\w*|страдательн\w*)\s+инфинитив"
+            r"|\bto\s+be\s*\+\s*(?:v3|3-?я|треть|причаст|past\s+participle)"
+            r"|\bto\s+be\s+(?:seen|done|told|found|made|taken|given|kept|left|sent|heard|known|called|held|put|set|shown|written|read|built|bought|caught|chosen|drawn|driven|eaten|fed|felt|forgotten|forgiven|frozen|grown|hidden|hit|hurt|led|lent|lost|meant|met|paid|ridden|rung|said|shaken|shut|sold|spent|spoken|stolen|struck|swept|taught|thought|thrown|understood|woken|worn|won|[a-z]{3,}ed)\b",
+            re.IGNORECASE,
+        ),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+    (
+        "past_perfect",
+        re.compile(
+            r"\bpast\s+perfect\b|предпрошедш"
+            r"|\bhad\s*\+\s*(?:v3|3-?я|треть\w*\s+форм|причаст|глагол|past\s+participle)"
+            r"|(?:ранее|раньше|до)\s+(?:другого\s+)?(?:события|действия|момента)\s+в\s+прошлом",
+            re.IGNORECASE,
+        ),
+        3,
+        _GRAMMAR_MIN_CHAPTER_GAP,
+    ),
+)
+
+
+@dataclass(slots=True)
+class _HintSeen:
+    count: int
+    last_shown_block: int
+    last_shown_chapter: int
+
+
+@dataclass(slots=True)
+class _GrammarSeen:
+    count: int
+    last_chapter: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,14 +335,15 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
     """Project `inputs` into chapters, legend lines, and the book-level lists.
 
     Unit labels use inferred speaker facts only. Repeated speech styles still
-    count explicit and inferred facts. A repeated speech-style
-    difficulty for the same speaker is removed from the plan copy and passed
-    to `block_notes` as `dropped_difficulty_ids`, which omits repeated
-    assistance, language notes, and hints backed exclusively by it (keeping
-    the word translation without the dialect note on `GLOSSARY_ONLY`). The id
-    is dropped only in the section that owns that later style. The stored plan
-    and the stored result are not changed. There is no Previously list. Chapter
-    review and the book who-is-who list stay empty.
+    count explicit and inferred facts: the first 2 speech-style difficulties
+    in a speaker's first scene/chapter and later difficulties with non-overlapping
+    dialect lexemes are kept; repeated ones are removed from the plan copy and
+    passed to `block_notes` as `dropped_difficulty_ids`. Glossary hints undergo
+    book-wide 3-stage deduplication and grammar `language_notes` are capped by
+    11 closed regex patterns via suppression/stripping index sets without
+    mutating stored results. `previously` is included in `features.sections`
+    when there are >= 2 content chapters and a non-last content chapter has a
+    non-empty summary. Chapter review and the book who-is-who list stay empty.
     """
     document = inputs.document
     numbers = _content_chapter_numbers(document)
@@ -229,7 +363,14 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
     plans = _plans_by_section(inputs.analyses)
     pronunciations = project_pronunciations(tuple(document.blocks()), inputs.results)
     chapters: dict[str, ChapterLayout] = {}
+    hint_history: dict[str, _HintSeen] = {}
+    grammar_history: dict[str, _GrammarSeen] = {}
+    block_seq = 0
+    current_chapter_num = 0
     for section in document.ordered_sections:
+        section_number = numbers.get(section.id)
+        if section_number is not None:
+            current_chapter_num = section_number
         dropped = dropped_by_section.get(section.id, frozenset())
         plan = _plan_without(plans.get(section.id), dropped)
         units: dict[str, tuple[LayoutUnit, ...]] = {}
@@ -238,6 +379,19 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             treatments = _treatments(block, result)
             notes = ()
             if result is not None:
+                suppressed_hints, stripped_hints = _deduplicate_glossary_hints(
+                    result,
+                    dropped_difficulty_ids=dropped,
+                    block_seq=block_seq,
+                    chapter_num=current_chapter_num,
+                    history=hint_history,
+                )
+                suppressed_notes = _deduplicate_grammar_notes(
+                    result,
+                    dropped_difficulty_ids=dropped,
+                    chapter_num=current_chapter_num,
+                    history=grammar_history,
+                )
                 notes = block_notes(
                     block,
                     result,
@@ -245,7 +399,11 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
                     pronunciations,
                     english_help=inputs.english_help,
                     dropped_difficulty_ids=dropped,
+                    suppressed_hint_indices=suppressed_hints,
+                    stripped_hint_indices=stripped_hints,
+                    suppressed_note_indices=suppressed_notes,
                 )
+            block_seq += 1
             block_facts = inferred_by_block.get(block.id, ())
             speakers = (
                 _speakers_for_block(
@@ -272,7 +430,7 @@ def build_book_layout(inputs: LayoutInputs) -> BookLayout:
             )
         chapters[section.id] = ChapterLayout(
             section_id=section.id,
-            number=numbers.get(section.id),
+            number=section_number,
             units=units,
             who_is_who=(),
             review=(),
@@ -840,18 +998,183 @@ def _is_dialogue_opener(text: str, index: int, end: int) -> bool:
     return char == "-" and index + 1 < end and text[index + 1] in " —–"
 
 
+def _deduplicate_glossary_hints(
+    result: BlockProcessingResult,
+    *,
+    dropped_difficulty_ids: frozenset[str],
+    block_seq: int,
+    chapter_num: int,
+    history: dict[str, _HintSeen],
+) -> tuple[frozenset[int], frozenset[int]]:
+    """Book-wide 3-stage deduplication for glossary hints without mutating `result`.
+
+    - Within a 20-block local window since last shown: suppress.
+    - 2nd–3rd occurrences: suppress in `TRANSLATE`, strip explanatory note in `GLOSSARY_ONLY`.
+    - 4th+ occurrences: suppress until a gap > 3 chapters since last shown (then reset).
+    - Untranslated `GLOSSARY_ONLY` blocks always retain at least one compact hint.
+    """
+    if not result.glossary_hints:
+        return frozenset(), frozenset()
+    evidences = _evidences(result)
+    requires_hints = result.treatment.requires_glossary_hints or any(
+        mode.requires_glossary_hints for mode in result.segment_treatments
+    )
+    is_glossary_only = result.treatment is BlockTreatment.GLOSSARY_ONLY
+    suppressed: set[int] = set()
+    stripped: set[int] = set()
+    candidates_for_rescue: list[tuple[int, int, int, str]] = []
+    for index, hint in enumerate(result.glossary_hints):
+        only_dropped = _hint_only_dropped(hint, result.block_id, evidences, dropped_difficulty_ids)
+        if only_dropped and not requires_hints:
+            continue
+        key = vocabulary_dedup_key(hint.original)
+        if not key:
+            continue
+        state = history.get(key)
+        if state is None:
+            history[key] = _HintSeen(
+                count=1,
+                last_shown_block=block_seq,
+                last_shown_chapter=chapter_num,
+            )
+            continue
+        if state.count >= 3 and (chapter_num - state.last_shown_chapter) > _HINT_REINTRODUCE_CHAPTER_GAP:
+            history[key] = _HintSeen(
+                count=1,
+                last_shown_block=block_seq,
+                last_shown_chapter=chapter_num,
+            )
+            continue
+        if (block_seq - state.last_shown_block) <= _HINT_LOCAL_WINDOW_BLOCKS:
+            suppressed.add(index)
+            candidates_for_rescue.append((1 if only_dropped else 0, state.count, index, key))
+            continue
+        if state.count >= 3:
+            suppressed.add(index)
+            candidates_for_rescue.append((1 if only_dropped else 0, state.count, index, key))
+            continue
+        # 2nd or 3rd occurrence outside the 20-block local window.
+        state.count += 1
+        if is_glossary_only:
+            stripped.add(index)
+            state.last_shown_block = block_seq
+            state.last_shown_chapter = chapter_num
+        else:
+            suppressed.add(index)
+            candidates_for_rescue.append((1 if only_dropped else 0, state.count, index, key))
+    if is_glossary_only and len(suppressed) >= len(result.glossary_hints) and candidates_for_rescue:
+        _, _, rescue_index, rescue_key = min(candidates_for_rescue)
+        suppressed.discard(rescue_index)
+        stripped.add(rescue_index)
+        state = history.get(rescue_key)
+        if state is not None:
+            state.last_shown_block = block_seq
+            state.last_shown_chapter = chapter_num
+    return frozenset(suppressed), frozenset(stripped)
+
+
+def _grammar_note_rule(note: LanguageNote) -> tuple[str, int, int] | None:
+    """Classify a `LanguageNote` into one of the 11 closed grammar keys, if matched."""
+    haystack = f"{note.original_excerpt or ''} {note.note}".translate(_SPEECH_STYLE_APOSTROPHES)
+    for key, pattern, cap, min_gap in _GRAMMAR_PATTERN_RULES:
+        if pattern.search(haystack) is not None:
+            return key, cap, min_gap
+    return None
+
+
+def _deduplicate_grammar_notes(
+    result: BlockProcessingResult,
+    *,
+    dropped_difficulty_ids: frozenset[str],
+    chapter_num: int,
+    history: dict[str, _GrammarSeen],
+) -> frozenset[int]:
+    """Suppress repeated grammar `LanguageNote`s per the 11 closed pattern caps."""
+    if not result.language_notes:
+        return frozenset()
+    evidences = _evidences(result)
+    suppressed: set[int] = set()
+    for index, note in enumerate(result.language_notes):
+        if _note_only_dropped(note, evidences, dropped_difficulty_ids):
+            continue
+        matched = _grammar_note_rule(note)
+        if matched is None:
+            continue
+        key, cap, min_gap = matched
+        state = history.get(key)
+        if state is None:
+            history[key] = _GrammarSeen(count=1, last_chapter=chapter_num)
+            continue
+        if state.count >= cap or (chapter_num - state.last_chapter) < min_gap:
+            suppressed.add(index)
+            continue
+        state.count += 1
+        state.last_chapter = chapter_num
+    return frozenset(suppressed)
+
+
+def _speech_style_lexemes(difficulty: Difficulty) -> frozenset[str]:
+    """Normalized dialect lexemes/anchors for `difficulty`."""
+    lexemes: set[str] = set()
+    for anchor in difficulty.anchors:
+        normalized = anchor.quote.translate(_SPEECH_STYLE_APOSTROPHES).casefold()
+        tokens = _SPEECH_STYLE_TOKEN.findall(normalized)
+        if not tokens:
+            fallback = normalized.strip()
+            if fallback:
+                lexemes.add(fallback)
+            continue
+        significant: set[str] = set()
+        for token in tokens:
+            if token.endswith("'") or token.startswith("'"):
+                significant.add(token)
+                continue
+            if "'" in token:
+                base, _, suffix = token.partition("'")
+                if suffix in _CONTRACTION_SUFFIXES:
+                    if base and base not in _SPEECH_STYLE_STOPWORDS and len(base) >= 2:
+                        significant.add(base)
+                        significant.add(token)
+                    continue
+            if token not in _SPEECH_STYLE_STOPWORDS:
+                significant.add(token)
+        if significant:
+            lexemes.update(significant)
+        else:
+            lexemes.add(" ".join(tokens))
+    return frozenset(lexemes)
+
+
+def _difficulty_scene_key(
+    section_id: str,
+    plan: ContentPlan,
+    position: tuple[int, int, int, str],
+    positions: Mapping[str, tuple[int, int]],
+) -> tuple[str, str | None]:
+    """Scene identifier containing `position`, or `(section_id, None)` without scenes."""
+    if not plan.scenes:
+        return (section_id, None)
+    block_pos = (position[0], position[1])
+    for scene in plan.scenes:
+        start = positions.get(scene.start_block_id)
+        end = positions.get(scene.end_block_id)
+        if start is not None and end is not None and start <= block_pos <= end:
+            return (section_id, scene.id)
+    return (section_id, None)
+
+
 def _repeated_speech_style_ids(
     document: CanonicalDocument,
     analyses: Sequence[ChapterAnalysis],
     facts: Sequence[ContextFact],
 ) -> dict[str, frozenset[str]]:
-    """Later speech-style difficulties of one speaker, by owning section.
+    """Repeated speech-style difficulties of one speaker, by owning section.
 
     The same source name is one speaker across chapters, whether the fact is
     explicit or inferred. The earliest anchor wins, not the difficulty id.
-    A style that overlaps no shown speaker is not repeated and is not listed.
-    Difficulty ids repeat across plans, so each dropped id is recorded only
-    for the section that owns that later style.
+    The speaker's first 2 speech-style difficulties in their first scene/chapter
+    are always kept, and any later difficulty whose dialect anchors/lexemes do
+    not overlap already-shown ones is also kept.
     """
     positions = _block_positions(document)
     anchors_by_speaker: dict[str, list[SourceAnchor]] = {}
@@ -859,7 +1182,10 @@ def _repeated_speech_style_ids(
         if not isinstance(fact.value, str):
             continue
         anchors_by_speaker.setdefault(glossary_key(fact.value), []).extend(fact.anchors)
-    grouped: dict[str, list[tuple[tuple[int, int, int, str], str, str]]] = {}
+    grouped: dict[
+        str,
+        list[tuple[tuple[int, int, int, str], str, Difficulty, tuple[str, str | None]]],
+    ] = {}
     for analysis in analyses:
         plan = analysis.content_plan
         if plan is None:
@@ -868,16 +1194,31 @@ def _repeated_speech_style_ids(
             if difficulty.kind != "speech_style":
                 continue
             position = _appearance(difficulty, positions)
+            scene_key = _difficulty_scene_key(analysis.section_id, plan, position, positions)
             for key, anchors in anchors_by_speaker.items():
                 if not _overlaps(difficulty.anchors, anchors):
                     continue
-                grouped.setdefault(key, []).append((position, analysis.section_id, difficulty.id))
+                grouped.setdefault(key, []).append(
+                    (position, analysis.section_id, difficulty, scene_key)
+                )
     kept: set[tuple[str, str]] = set()
     later: set[tuple[str, str]] = set()
     for items in grouped.values():
-        items.sort()
-        kept.add((items[0][1], items[0][2]))
-        later.update((section_id, difficulty_id) for _, section_id, difficulty_id in items[1:])
+        items.sort(key=lambda entry: entry[0])
+        first_scene = items[0][3]
+        first_scene_kept = 0
+        shown_lexemes: set[str] = set()
+        for _, section_id, difficulty, scene_key in items:
+            lexemes = _speech_style_lexemes(difficulty)
+            if scene_key == first_scene and first_scene_kept < _SPEECH_STYLE_FIRST_SCENE_KEEP:
+                kept.add((section_id, difficulty.id))
+                first_scene_kept += 1
+                shown_lexemes.update(lexemes)
+            elif lexemes and not (lexemes & shown_lexemes):
+                kept.add((section_id, difficulty.id))
+                shown_lexemes.update(lexemes)
+            else:
+                later.add((section_id, difficulty.id))
     dropped: dict[str, set[str]] = {}
     for section_id, difficulty_id in later - kept:
         dropped.setdefault(section_id, set()).add(difficulty_id)
@@ -952,13 +1293,14 @@ def _features(
 ) -> LayoutFeatures:
     """Layers and section keys that the finished chapters actually contain.
 
-    `previously` is not set: that list is not projected. Chapter who-is-who
-    lists are empty, so that section key is not set. Before You Read is a
-    section key when a content chapter's analysis has entries, except on A2
-    without English help. Labels are the strings written on notes, not kind
-    ids that lost their label. `has_notes` is true only when some note has a
-    number. An unnumbered «Говорит …» note sets `has_speakers` and does not
-    turn on the numbered-notes line.
+    `previously` is set only when there are at least 2 content chapters and at
+    least one non-last content chapter has a non-empty `chapter_summary`.
+    Chapter who-is-who lists are empty, so that section key is not set. Before
+    You Read is a section key when a content chapter's analysis has entries,
+    except on A2 without English help. Labels are the strings written on notes,
+    not kind ids that lost their label. `has_notes` is true only when some note
+    has a number. An unnumbered «Говорит …» note sets `has_speakers` and does
+    not turn on the numbered-notes line.
     """
     units = [
         unit
@@ -967,10 +1309,21 @@ def _features(
         for unit in grouped
     ]
     notes = [item.note for unit in units for item in unit.notes]
-    content_ids = {
-        section_id for section_id, chapter in chapters.items() if chapter.number is not None
-    }
+    ordered_content = sorted(
+        (chapter for chapter in chapters.values() if chapter.number is not None),
+        key=lambda chapter: chapter.number or 0,
+    )
+    content_ids = {chapter.section_id for chapter in ordered_content}
     sections: set[str] = set()
+    if len(ordered_content) >= 2:
+        earlier_content_ids = {chapter.section_id for chapter in ordered_content[:-1]}
+        if any(
+            analysis.section_id in earlier_content_ids
+            and isinstance(analysis.chapter_summary, str)
+            and analysis.chapter_summary.strip()
+            for analysis in analyses
+        ):
+            sections.add("previously")
     if any(chapter.who_is_who for chapter in chapters.values()):
         sections.add("who_is_who")
     if any(chapter.review for chapter in chapters.values()):

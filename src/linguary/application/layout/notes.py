@@ -260,6 +260,12 @@ _IRREGULAR_VERB_FORMS: Mapping[str, frozenset[str]] = {
     "wring": frozenset({"wrung"}),
     "write": frozenset({"wrote", "written", "writing"}),
 }
+_IRREGULAR_TO_BASE: Mapping[str, str] = {
+    form: base
+    for base, forms in _IRREGULAR_VERB_FORMS.items()
+    for form in forms
+    if form not in _IRREGULAR_VERB_FORMS
+}
 _LEADING_TRANSLATION_BREAKS = frozenset(".!?—–-:;")
 _APOSTROPHE_CHARS = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
 _SURFACE_WORD = re.compile(r"\w+(?:'\w+)*")
@@ -491,6 +497,9 @@ def block_notes(
     *,
     english_help: bool = False,
     dropped_difficulty_ids: frozenset[str] = frozenset(),
+    suppressed_hint_indices: frozenset[int] = frozenset(),
+    stripped_hint_indices: frozenset[int] = frozenset(),
+    suppressed_note_indices: frozenset[int] = frozenset(),
 ) -> tuple[LayoutNote, ...]:
     """Project help for `block` into notes ordered by marker.
 
@@ -500,7 +509,10 @@ def block_notes(
     them. `origin` is `glossary_hint`, `language_note`, `assistance`, or
     `pronunciation`. Items backed exclusively by `dropped_difficulty_ids` are
     omitted (for `GLOSSARY_ONLY`, a hint keeps its translation without the
-    repeated dialect note). Empty notes are omitted before numbering.
+    repeated dialect note). Hints in `suppressed_hint_indices` and language
+    notes in `suppressed_note_indices` are skipped without mutating `result`;
+    hints in `stripped_hint_indices` drop their explanatory note text while
+    preserving `artifact_key` linkage. Empty notes are omitted before numbering.
     """
     evidences = _evidences(result)
     known = {} if plan is None else {item.id: item for item in plan.difficulties}
@@ -508,11 +520,13 @@ def block_notes(
         mode.requires_glossary_hints for mode in result.segment_treatments
     )
     visible_hints: list[tuple[GlossaryHint, bool]] = []
-    for hint in result.glossary_hints:
+    for index, hint in enumerate(result.glossary_hints):
+        if index in suppressed_hint_indices:
+            continue
         only_dropped = _hint_only_dropped(hint, result.block_id, evidences, dropped_difficulty_ids)
         if only_dropped and not requires_hints:
             continue
-        visible_hints.append((hint, only_dropped))
+        visible_hints.append((hint, only_dropped or index in stripped_hint_indices))
     assigned, unmatched = _assign_pronunciations(
         [hint for hint, _ in visible_hints], pronunciations, block.id
     )
@@ -528,9 +542,12 @@ def block_notes(
                 known,
                 result.treatment,
                 strip_note=strip_note,
+                dropped_difficulty_ids=dropped_difficulty_ids,
             )
         )
-    for note in result.language_notes:
+    for index, note in enumerate(result.language_notes):
+        if index in suppressed_note_indices:
+            continue
         if _note_only_dropped(note, evidences, dropped_difficulty_ids):
             continue
         drafts.append(_note_draft(note, block.text, evidences, known))
@@ -547,6 +564,48 @@ def block_notes(
         if note.body or note.ipa
     ]
     return tuple(sorted(notes, key=_marker_key))
+
+
+def vocabulary_dedup_key(original: str) -> str:
+    """Normalized lemma-like key for book-wide glossary hint deduplication."""
+    words = expression_words(original)
+    if not words:
+        return original.strip().casefold()
+    if len(words) >= 2 and words[0] == "to" and words[1] not in _NOT_A_VERB_AFTER_TO:
+        words = words[1:]
+    head = _canonical_vocab_word(words[0])
+    if len(words) == 1:
+        return head
+    return " ".join((head, *words[1:]))
+
+
+def _canonical_vocab_word(word: str) -> str:
+    if word in _IRREGULAR_VERB_FORMS:
+        return word
+    irregular = _IRREGULAR_TO_BASE.get(word)
+    if irregular is not None:
+        return irregular
+    ed = _regular_ed_stem(word)
+    if ed is not None:
+        return ed
+    if len(word) > 5 and word.endswith("ing"):
+        stem = word[:-3]
+        if (
+            len(stem) >= 4
+            and stem[-1] == stem[-2]
+            and stem[-1] in _DOUBLED_CONSONANTS
+            and _is_vowel(stem, -3)
+            and not _is_vowel(stem, -4)
+        ):
+            return stem[:-1]
+        if _magic_e(stem):
+            return stem + "e"
+        return stem
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is", "os", "as")):
+        return word[:-1]
+    return word
 
 
 def _hint_evidence_keys(hint: GlossaryHint, block_id: str) -> set[str]:
@@ -659,15 +718,18 @@ def _hint_draft(
     treatment: BlockTreatment,
     *,
     strip_note: bool = False,
+    dropped_difficulty_ids: frozenset[str] = frozenset(),
 ) -> _Draft:
     """A glossary hint. The marker is the end of the first match of `original`.
 
     Evidence keys use the stored hint fields, before the marker search and
-    before a leading translation is cut out of the note. `term` and `body`
-    may then drop a repeated sentence, a quoted or leading translation, or a
-    headword gloss, and show a past-tense verb as an infinitive.
+    before a leading translation is cut out of the note or `strip_note` hides
+    it. `term` and `body` may then drop a repeated sentence, a quoted or
+    leading translation, or a headword gloss, and show a past-tense verb as an
+    infinitive.
     """
-    ids = () if strip_note else _ids_for(evidences, _hint_evidence_keys(hint, block_id))
+    raw_ids = _ids_for(evidences, _hint_evidence_keys(hint, block_id))
+    ids = tuple(item_id for item_id in raw_ids if item_id not in dropped_difficulty_ids)
     marker_end = _find_end(text, hint.original)
     cleaned_note = "" if strip_note else _cleaned_hint_note(hint.note)
     lexical = _plain_lexical(hint.original, ids, known)
