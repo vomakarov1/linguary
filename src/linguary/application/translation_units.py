@@ -18,12 +18,14 @@ they remain the concern of importer and exporter (PRD § 10.1).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable, Sequence
 
 from linguary.application.context_builder import is_textual
 from linguary.domain import (
     BlockType,
     DocumentBlock,
+    InlineAnnotationType,
     TranslationUnit,
     TranslationUnitError,
     TreatmentPlan,
@@ -41,6 +43,17 @@ DEFAULT_MAX_UNIT_SOURCE_CHARS = 8000
 #: Splitting a list midway deprives the model of its start, while poetry loses its stanza context.
 _COHESIVE_BLOCK_TYPES = frozenset(
     {BlockType.LIST_ITEM, BlockType.POEM, BlockType.QUOTE, BlockType.TABLE}
+)
+
+#: Maximum character length of a short list-like paragraph kept cohesive with adjacent list items.
+_LIST_ITEM_MAX_CHARS = 120
+_OPENING_DIALOGUE_QUOTES = frozenset({'“', '‘', '«', '„', '"', "'"})
+_TERMINAL_SENTENCE_PUNCT = re.compile(r"(?:\.\.\.|…|[.!?])[\"'”’»)\]]*$")
+_LEADING_LIST_NUMERAL = re.compile(r"^(?:\d{1,3}[.)]|\d{1,2})\s+\S")
+_LEADING_LIST_DASH = re.compile(r"^(?:[-–—•·])\s+\S")
+_INLINE_DIALOGUE_ATTRIBUTION = re.compile(r"[,!?….]\s*[—–]\s+[a-zа-яё]")
+_ITALIC_ANNOTATION_TYPES = frozenset(
+    {InlineAnnotationType.ITALIC, InlineAnnotationType.EMPHASIS}
 )
 
 
@@ -173,7 +186,41 @@ def _is_cohesive_with(previous: DocumentBlock, block: DocumentBlock) -> bool:
     """Whether adjacent blocks form a single cohesive unit."""
     if previous.parent_id is not None and previous.parent_id == block.parent_id:
         return True
-    return previous.type is block.type and block.type in _COHESIVE_BLOCK_TYPES
+    if previous.type is block.type and block.type in _COHESIVE_BLOCK_TYPES:
+        return True
+    if (
+        previous.parent_id == block.parent_id
+        and previous.type is BlockType.PARAGRAPH
+        and block.type is BlockType.PARAGRAPH
+    ):
+        return _is_list_like_paragraph(previous) and _is_list_like_paragraph(block)
+    return False
+
+
+def _is_list_like_paragraph(block: DocumentBlock) -> bool:
+    """Short homogeneous list-item paragraph (<= 120 chars, no terminal period or leading numeral/dash/italic)."""
+    stripped = block.text.strip()
+    if not stripped or len(stripped) > _LIST_ITEM_MAX_CHARS:
+        return False
+    if stripped[0] in _OPENING_DIALOGUE_QUOTES:
+        return False
+    if _LEADING_LIST_NUMERAL.match(stripped):
+        return True
+    if _LEADING_LIST_DASH.match(stripped):
+        return not _INLINE_DIALOGUE_ATTRIBUTION.search(stripped)
+    if _starts_with_italic(block):
+        return True
+    return not _TERMINAL_SENTENCE_PUNCT.search(stripped)
+
+
+def _starts_with_italic(block: DocumentBlock) -> bool:
+    """Whether inline italic/emphasis markup begins at the start of the paragraph text."""
+    leading_ws = len(block.text) - len(block.text.lstrip())
+    return any(
+        annotation.type in _ITALIC_ANNOTATION_TYPES
+        and annotation.start <= leading_ws < annotation.end
+        for annotation in block.inline_annotations
+    )
 
 
 def _split_oversized(

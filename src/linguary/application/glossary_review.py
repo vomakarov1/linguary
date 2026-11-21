@@ -207,6 +207,7 @@ def build_glossary_review(
     count_mentions: Callable[[Sequence[str]], int] | None = None,
     min_mentions: int = 5,
     min_chapters: int = 3,
+    total_chapters: int | None = None,
     name_translation_policy: NameTranslationPolicy | None = None,
     conditions_id: str | None = None,
     document: CanonicalDocument | None = None,
@@ -219,6 +220,12 @@ def build_glossary_review(
     if document is not None:
         order_by_section = {s.id: i for i, s in enumerate(document.ordered_sections)}
         analyses = sorted(analyses, key=lambda a: order_by_section.get(a.section_id, 999999))
+        if total_chapters is None:
+            total_chapters = sum(
+                1
+                for section in document.ordered_sections
+                if not document.is_front_matter(section) and not section.is_notes_only
+            )
     grouped: dict[str, list[GlossaryCandidate]] = {}
     for analysis in analyses:
         for candidate in analysis.glossary_candidates:
@@ -234,6 +241,7 @@ def build_glossary_review(
             count_mentions=count_mentions,
             min_mentions=min_mentions,
             min_chapters=min_chapters,
+            total_chapters=total_chapters,
             name_translation_policy=name_translation_policy,
             conditions_id=conditions_id,
         )
@@ -343,6 +351,7 @@ def _review_item(
     count_mentions: Callable[[Sequence[str]], int] | None,
     min_mentions: int,
     min_chapters: int,
+    total_chapters: int | None = None,
     name_translation_policy: NameTranslationPolicy | None = None,
     conditions_id: str | None = None,
 ) -> GlossaryReviewItem:
@@ -377,9 +386,14 @@ def _review_item(
     spellings = spellings_by_preference(
         (candidate.source_text, candidate.confidence) for candidate in group
     )
+    effective_min_chapters = (
+        min(min_chapters, max(1, total_chapters // 2))
+        if total_chapters is not None
+        else min_chapters
+    )
     is_frequent = count_mentions is None or (
         count_mentions(spellings) >= min_mentions
-        or len({candidate.analysis_id for candidate in group}) >= min_chapters
+        or len({candidate.analysis_id for candidate in group}) >= effective_min_chapters
     )
     decision, superseded = _chosen_decision(decisions, shown=spellings[0])
     concept_type = next(

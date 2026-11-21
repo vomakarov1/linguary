@@ -17,6 +17,8 @@ from linguary.domain import (
     BlockTreatment,
     BlockType,
     DocumentBlock,
+    InlineAnnotation,
+    InlineAnnotationType,
     SupportStatus,
     TranslationUnit,
     TranslationUnitError,
@@ -303,4 +305,63 @@ def test_translation_units_keep_block_whole() -> None:
     assert tuple(unit.block_ids for unit in units) == (
         (leading.id, first.id),
         (second.id,),
+    )
+
+
+def test_cohesive_runs_keep_homogeneous_book_list_in_single_unit() -> None:
+    """Short homogeneous list-item paragraphs stay in one unit within max_source_chars without gluing narrative/dialogue."""
+    lead = make_block(order=0, text="Hagrid handed Harry the parchment letter and watched him read it carefully. " * 2)
+    book_list = (
+        replace(
+            make_block(order=1, text="The Standard Book of Spells (Grade 1) by Miranda Goshawk"),
+            inline_annotations=(InlineAnnotation(InlineAnnotationType.ITALIC, 0, 37),),
+        ),
+        replace(
+            make_block(order=2, text="A History of Magic by Bathilda Bagshot."),
+            inline_annotations=(InlineAnnotation(InlineAnnotationType.ITALIC, 0, 18),),
+        ),
+        make_block(order=3, text="1. Three sets of plain work robes (black)"),
+        make_block(order=4, text="2. One plain pointed hat (black) for day wear."),
+        make_block(order=5, text="1 wand"),
+        make_block(order=6, text="1 cauldron (pewter, standard size 2)"),
+        make_block(order=7, text="Three sets of plain work robes (black)"),
+        make_block(order=8, text="- 1 telescope"),
+    )
+    list_chars = sum(len(b.text) for b in book_list)
+    assert all(len(b.text) <= 120 for b in book_list)
+    assert len(lead.text) + list_chars > 380
+    assert list_chars <= 380
+
+    units = plan_units((lead, *book_list), max_source_chars=380)
+
+    assert tuple(unit.block_ids for unit in units) == (
+        (lead.id,),
+        tuple(b.id for b in book_list),
+    )
+
+    # Oversized list run still respects max_source_chars by splitting into blocks.
+    oversized_units = plan_units(book_list, max_source_chars=120)
+    assert all(size <= 120 for size in sizes(oversized_units))
+    assert len(oversized_units) > 1
+
+    # Ordinary short narrative and dialogue paragraphs must NOT be glued into a cohesive run.
+    prose = (
+        make_block(order=0, text="Harry opened the letter quickly. " + "a" * 41 + "."),
+        make_block(order=1, text="He looked up at Hagrid."),
+        make_block(order=2, text="‘Where are we going?’"),
+        make_block(order=3, text="‘Diagon Alley!’"),
+        make_block(order=4, text="— Wait, — said Harry."),
+        make_block(order=5, text="Hagrid smiled broadly."),
+    )
+    prose_units = plan_units(prose, max_source_chars=140)
+    # Without list cohesion, the balanced boundary splits inside prose[1..5] instead of
+    # deferring the entire 102-char tail into a separate unit.
+    assert prose_units[0].block_ids == (prose[0].id, prose[1].id)
+    assert prose_units[1].block_ids == (prose[2].id, prose[3].id, prose[4].id, prose[5].id)
+
+    # Dialogue lines themselves (quotes and dash-attributed speech) are not glued either.
+    dialogue_units = plan_units(prose[2:], max_source_chars=60)
+    assert tuple(unit.block_ids for unit in dialogue_units) == (
+        (prose[2].id, prose[3].id),
+        (prose[4].id, prose[5].id),
     )

@@ -20,9 +20,15 @@ from linguary.application.glossary_review import (
     glossary_snapshot,
 )
 from linguary.domain import (
+    BlockType,
+    BookMetadata,
+    CanonicalDocument,
     ChapterAnalysis,
     ConceptType,
+    DocumentBlock,
+    DocumentSection,
     GlossaryCandidate,
+    SourceReference,
     TermConcept,
     TermStatus,
     TermVariant,
@@ -568,3 +574,168 @@ def test_matching_decisions_of_spellings_are_not_a_conflict() -> None:
     assert not item.has_decision_conflict
     assert item.decision is not None
     assert item.decision.canonical_source_text == "Mr. Wonka"
+
+
+def _doc_with_chapters(content_chapters: int) -> CanonicalDocument:
+    """Document with cover front matter, `content_chapters` story chapters, and a notes-only page."""
+    sections: list[DocumentSection] = [
+        DocumentSection(
+            id="sec-cover",
+            document_id=BOOK_ID,
+            title="Cover",
+            order=0,
+            source_resource_path="cover.xhtml",
+            blocks=(
+                DocumentBlock(
+                    id="b-cover",
+                    section_id="sec-cover",
+                    type=BlockType.IMAGE,
+                    order=0,
+                    text="",
+                    source_reference=SourceReference("cover.xhtml", "/img[1]"),
+                ),
+            ),
+        )
+    ]
+    for index in range(1, content_chapters + 1):
+        sec_id = f"section-{index}"
+        sections.append(
+            DocumentSection(
+                id=sec_id,
+                document_id=BOOK_ID,
+                title=f"Chapter {index}",
+                order=index,
+                source_resource_path=f"ch{index}.xhtml",
+                blocks=(
+                    DocumentBlock(
+                        id=f"b-{index}",
+                        section_id=sec_id,
+                        type=BlockType.PARAGRAPH,
+                        order=0,
+                        text=f"Chapter {index} narrative text.",
+                        source_reference=SourceReference(f"ch{index}.xhtml", "/p[1]"),
+                    ),
+                ),
+            )
+        )
+    notes_sec_id = "sec-notes"
+    sections.append(
+        DocumentSection(
+            id=notes_sec_id,
+            document_id=BOOK_ID,
+            title="Notes",
+            order=content_chapters + 1,
+            source_resource_path="notes.xhtml",
+            blocks=(
+                DocumentBlock(
+                    id="b-note-1",
+                    section_id=notes_sec_id,
+                    type=BlockType.FOOTNOTE,
+                    order=0,
+                    text="Footnote text.",
+                    source_reference=SourceReference("notes.xhtml", "/aside[1]"),
+                ),
+            ),
+        )
+    )
+    return CanonicalDocument(
+        id=BOOK_ID,
+        metadata=BookMetadata(title="Test Book"),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=tuple(sections),
+    )
+
+
+def test_build_glossary_review_adapts_chapter_threshold_from_document() -> None:
+    """Adaptive chapter threshold scales from content chapters in `document` or explicit `total_chapters`."""
+    cand_ch1 = make_analysis_candidate(
+        analysis_id="analysis-1", source_text="Ollivander", suggested_translation="Олливандер"
+    )
+    cand_ch2 = make_analysis_candidate(
+        analysis_id="analysis-2", source_text="Ollivander", suggested_translation="Олливандер"
+    )
+    cand_ch3 = make_analysis_candidate(
+        analysis_id="analysis-3", source_text="Ollivander", suggested_translation="Олливандер"
+    )
+
+    # 5 content chapters (+ front matter + notes-only) -> effective_min_chapters = min(3, 5 // 2) = 2
+    doc_5 = _doc_with_chapters(5)
+    review_5_one = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+        min_chapters=3,
+        document=doc_5,
+    )
+    assert not review_5_one.items[0].is_frequent
+    assert not review_5_one.items[0].requires_review
+
+    review_5_two = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1), chapter_two(cand_ch2)),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+        min_chapters=3,
+        document=doc_5,
+    )
+    assert review_5_two.items[0].is_frequent
+    assert review_5_two.items[0].requires_review
+
+    # 2 content chapters (+ front matter + notes-only) -> effective_min_chapters = max(1, 2 // 2) = 1
+    doc_2 = _doc_with_chapters(2)
+    review_2_one = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1),),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+        min_chapters=3,
+        document=doc_2,
+    )
+    assert review_2_one.items[0].is_frequent
+    assert review_2_one.items[0].requires_review
+
+    # 7 content chapters -> effective_min_chapters = min(3, 7 // 2) = 3
+    doc_7 = _doc_with_chapters(7)
+    review_7_two = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1), chapter_two(cand_ch2)),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+        min_chapters=3,
+        document=doc_7,
+    )
+    assert not review_7_two.items[0].is_frequent
+
+    review_7_three = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1), chapter_two(cand_ch2), chapter_three(cand_ch3)),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+        min_chapters=3,
+        document=doc_7,
+    )
+    assert review_7_three.items[0].is_frequent
+
+    # Explicit total_chapters edge cases: 0 and 1 -> effective_min_chapters = 1
+    for total in (0, 1):
+        edge_review = build_glossary_review(
+            book_id=BOOK_ID,
+            analyses=(chapter_one(cand_ch1),),
+            confidence_threshold=CONFIDENCE_THRESHOLD,
+            count_mentions=lambda _: 1,
+            min_chapters=3,
+            total_chapters=total,
+        )
+        assert edge_review.items[0].is_frequent
+
+    # Without document and without total_chapters -> preserves default min_chapters=3
+    default_two = build_glossary_review(
+        book_id=BOOK_ID,
+        analyses=(chapter_one(cand_ch1), chapter_two(cand_ch2)),
+        confidence_threshold=CONFIDENCE_THRESHOLD,
+        count_mentions=lambda _: 1,
+        min_chapters=3,
+    )
+    assert not default_two.items[0].is_frequent

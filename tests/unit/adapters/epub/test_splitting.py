@@ -11,7 +11,7 @@ from linguary.adapters.epub.splitting import (
     split_paragraph,
     split_sentences,
 )
-from linguary.application.layout.parts import compose_parts
+from linguary.application.layout.parts import PART_MAX_CHARS, compose_parts
 from linguary.domain import (
     BlockSegment,
     BlockTreatment,
@@ -410,8 +410,8 @@ def _assert_protected_intact(
 
 def test_short_text_single_segment() -> None:
     """Text below the block threshold is one span, even when it exceeds the segment cap."""
-    assert SEGMENT_MIN_BLOCK_CHARS == 450
-    assert SEGMENT_MAX_CHARS == 350
+    assert SEGMENT_MIN_BLOCK_CHARS == 480
+    assert SEGMENT_MAX_CHARS == 450
 
     short = "First sentence stays. Second sentence stays too."
     assert len(short) < SEGMENT_MIN_BLOCK_CHARS
@@ -421,7 +421,7 @@ def test_short_text_single_segment() -> None:
     assert len(below) == SEGMENT_MIN_BLOCK_CHARS - 1
     assert segment_text(below) == (BlockSegment(0, len(below), 0),)
 
-    bulky = _repeat("quartz", 400) + "."
+    bulky = _repeat("quartz", 460) + "."
     assert SEGMENT_MAX_CHARS < len(bulky) < SEGMENT_MIN_BLOCK_CHARS
     assert segment_text(bulky) == (BlockSegment(0, len(bulky), 0),)
 
@@ -619,14 +619,14 @@ def test_comma_before_conjunction_before_word_boundary() -> None:
 def test_word_fallback_only_without_punctuation() -> None:
     """Without clause punctuation a long sentence breaks on spaces, not inside a hyphenated word.
 
-    Lengths 701–719 are the window where a two-way split aimed at 300 characters
-    must exceed 350, while three word parts still fit.
+    Lengths 901–920 are the window where a two-way split aimed at ~386 characters
+    must exceed 450, while three word parts still fit.
     """
     samples = (
         _repeat("well-known", 650) + ".",
-        _repeat("well-known", 701),
+        _repeat("well-known", 901),
     )
-    assert 701 <= len(samples[1]) <= 719
+    assert 901 <= len(samples[1]) <= 920
     for text in samples:
         assert len(text) >= SEGMENT_MIN_BLOCK_CHARS
         assert not any(mark in text for mark in (";", ":", "—", "–", " - ", ","))
@@ -657,8 +657,8 @@ def test_segment_never_cuts_footnote_reference() -> None:
     _assert_exact_cover(semicolon_text, semicolon_segments)
     _assert_protected_intact(semicolon_segments, footnote)
 
-    plain = _repeat("nu", 900) + "."
-    wide = (200, 600)
+    plain = _repeat("nu", 1000) + "."
+    wide = (200, 700)
     assert len(plain) >= SEGMENT_MIN_BLOCK_CHARS
     assert wide[1] - wide[0] > SEGMENT_MAX_CHARS
     plain_segments = segment_text(plain, protected=(wide,))
@@ -787,14 +787,14 @@ def test_combined_clause_fallback_comma_safety_and_spaced_ellipsis() -> None:
     assert any("3,14" in piece for piece in pieces)
     assert any("‘Look,’" in piece for piece in pieces)
 
-    balanced = _repeat("one", 175) + ", " + _repeat("two", 165) + ", tail end."
+    balanced = _repeat("one", 225) + ", " + _repeat("two", 215) + ", tail end."
     assert len(balanced) > SEGMENT_MAX_CHARS
     bal_segments = segment_text(balanced, min_block_chars=1)
     bal_pieces = [balanced[seg.start : seg.end] for seg in bal_segments]
     assert len(bal_pieces) == 2
     assert min(len(piece) for piece in bal_pieces) > 100
 
-    spaced = _repeat("delta", 190) + " . . . " + _repeat("omega", 190) + "."
+    spaced = _repeat("delta", 240) + " . . . " + _repeat("omega", 240) + "."
     spaced_segments = segment_text(spaced, min_block_chars=1)
     spaced_pieces = [spaced[seg.start : seg.end] for seg in spaced_segments]
     assert len(spaced_pieces) == 2
@@ -804,16 +804,46 @@ def test_combined_clause_fallback_comma_safety_and_spaced_ellipsis() -> None:
     attr_segments = segment_text(attributed)
     assert attributed[attr_segments[0].start : attr_segments[0].end] == "‘Look –’ Harry said. "
 
-    # Combined multi-level DP (`;` + `—`) fits within 350 chars without falling back to plain commas.
-    seg_a = _repeat("first", 190) + ", extra"
-    seg_b = _repeat("second", 190) + ", extra"
-    seg_c = _repeat("third", 190) + "."
+    # Combined multi-level DP (`;` + `—`) fits within 450 chars without falling back to plain commas.
+    seg_a = _repeat("first", 240) + ", extra"
+    seg_b = _repeat("second", 240) + ", extra"
+    seg_c = _repeat("third", 240) + "."
     multi = f"{seg_a}; {seg_b} — {seg_c}"
     assert len(multi) >= SEGMENT_MIN_BLOCK_CHARS
-    # Neither `;` alone nor `—` alone keeps both halves <= 350.
+    # Neither `;` alone nor `—` alone keeps both halves <= 450.
     assert len(multi) - (multi.index(";") + 2) > SEGMENT_MAX_CHARS
     assert multi.index(" — ") + 3 > SEGMENT_MAX_CHARS
     multi_segments = segment_text(multi)
     multi_pieces = [multi[seg.start : seg.end] for seg in multi_segments]
     assert multi_pieces == [f"{seg_a}; ", f"{seg_b} — ", seg_c]
+
+
+def test_splitting_keeps_400_char_sentence_whole_and_splits_over_450() -> None:
+    """A ~400-char sentence stays intact under SEGMENT_MAX_CHARS=450 while >450 splits; PART_MAX_CHARS remains 350."""
+    assert SEGMENT_MAX_CHARS == 450
+    assert SEGMENT_MIN_BLOCK_CHARS == 480
+    assert PART_MAX_CHARS == 350
+
+    sentence_400 = _repeat("alpha", 190) + "; " + _repeat("beta", 200) + ". "
+    tail = "Then everyone stepped quietly outside into the chilly courtyard air for a brief rest."
+    assert 390 <= len(sentence_400) <= 420
+    paragraph = sentence_400 + tail
+    assert len(paragraph) >= SEGMENT_MIN_BLOCK_CHARS
+
+    segments = segment_text(paragraph)
+    assert segments == (
+        BlockSegment(0, len(sentence_400), 0),
+        BlockSegment(len(sentence_400), len(paragraph), 1),
+    )
+
+    sentence_over_450 = _repeat("gamma", 240) + "; " + _repeat("delta", 240) + "."
+    assert len(sentence_over_450) >= SEGMENT_MIN_BLOCK_CHARS
+    assert len(sentence_over_450) > SEGMENT_MAX_CHARS
+    split_at = sentence_over_450.index(";") + 2
+    over_segments = segment_text(sentence_over_450)
+    assert over_segments == (
+        BlockSegment(0, split_at, 0),
+        BlockSegment(split_at, len(sentence_over_450), 0),
+    )
+    assert all(seg.end - seg.start <= SEGMENT_MAX_CHARS for seg in over_segments)
 
