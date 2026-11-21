@@ -590,3 +590,127 @@ def test_retry_policy_uses_compact_local_repair_instruction_with_conversation_tu
         assert f"- b{idx}:" in decision_small.repair_instruction
 
 
+def test_repair_instruction_for_scene_bounds_uses_range_without_translation_template() -> None:
+    """Scene bounds errors on analysis emit a compact block range without the translation template."""
+    ten_blocks = expectation(blocks=tuple(ExpectedBlock(block_id=f"b{idx}") for idx in range(1, 11)))
+    instruction = build_repair_instruction(
+        ten_blocks,
+        violation="карта сцен должна непрерывно покрывать все блоки главы",
+        stage="chapter_analysis_narrative",
+        rule_code="scene_bounds",
+    )
+
+    assert "b1..b10" in instruction
+    assert "полный массив всех блоков" not in instruction
+    for idx in range(1, 11):
+        assert f"- b{idx}" not in instruction
+
+    small_blocks = expectation(blocks=tuple(ExpectedBlock(block_id=f"b{idx}") for idx in range(1, 4)))
+    small_instruction = build_repair_instruction(
+        small_blocks,
+        violation="границы сцен пересекаются",
+        stage="chapter_analysis_narrative",
+        rule_code="scene_bounds",
+    )
+
+    assert "b1..b3" in small_instruction
+    assert "полный массив всех блоков" not in small_instruction
+    for idx in range(1, 4):
+        assert f"- b{idx}" not in small_instruction
+
+
+def test_repair_instruction_for_analysis_large_chapter_without_local_ids_uses_range() -> None:
+    """Large analysis chapters without matched local blocks use a compact range instead of listing every block."""
+    six_blocks = expectation(blocks=tuple(ExpectedBlock(block_id=f"b{idx}") for idx in range(1, 7)))
+    instruction = build_repair_instruction(
+        six_blocks,
+        violation="в ответе не хватает данных по главе",
+        stage="chapter_analysis_pedagogical",
+    )
+
+    assert "b1..b6" in instruction
+    assert "полный массив всех блоков" not in instruction
+    for idx in range(1, 7):
+        assert f"- b{idx}" not in instruction
+
+
+def test_repair_instruction_for_analysis_local_error_omits_translation_array_prompt() -> None:
+    """Local analysis errors list only affected blocks using analysis wording instead of the translation array prompt."""
+    six_blocks = expectation(blocks=tuple(ExpectedBlock(block_id=f"b{idx}") for idx in range(1, 7)))
+    instruction = build_repair_instruction(
+        six_blocks,
+        violation="цитата не разрешается в исходном блоке",
+        local_block_ids=("b3",),
+        has_conversation_turns=True,
+        stage="chapter_analysis_narrative",
+        rule_code="unresolved_quote",
+    )
+
+    assert "- b3" in instruction
+    assert "полный массив всех блоков" not in instruction
+    for untouched in ("- b1", "- b2", "- b4", "- b5", "- b6"):
+        assert untouched not in instruction
+
+
+def test_retry_policy_passes_violation_stage_and_rule_code() -> None:
+    """RetryPolicy.decide forwards Violation.stage and Violation.rule_code to build_repair_instruction."""
+    from linguary.domain.llm_log import Violation
+
+    small_analysis_blocks = expectation(
+        blocks=tuple(ExpectedBlock(block_id=f"b{idx}") for idx in range(1, 4))
+    )
+    scene_err = ResultValidationError(
+        "карта сцен должна непрерывно покрывать все блоки главы",
+        expectation=small_analysis_blocks,
+        violation=Violation(
+            "scene_bounds",
+            "chapter_analysis_narrative",
+            scope="unit",
+            safe_message="карта сцен должна непрерывно покрывать все блоки главы",
+        ),
+    )
+    scene_decision = policy(max_attempts=3).decide(scene_err, attempts=1, raw_content="{}")
+    assert scene_decision.repair_instruction is not None
+    assert "b1..b3" in scene_decision.repair_instruction
+    assert "- b1" not in scene_decision.repair_instruction
+    assert "полный массив всех блоков" not in scene_decision.repair_instruction
+
+    six_typed_blocks = expectation(
+        blocks=tuple(
+            ExpectedBlock(block_id=f"b{idx}", treatment=BlockTreatment.TRANSLATE)
+            for idx in range(1, 7)
+        )
+    )
+    stage_only_err = ResultValidationError(
+        "отсутствуют трудности",
+        expectation=six_typed_blocks,
+        violation=Violation(
+            "missing_difficulty",
+            "chapter_analysis_pedagogical",
+            scope="unit",
+            safe_message="отсутствуют трудности",
+        ),
+    )
+    stage_decision = policy(max_attempts=3).decide(stage_only_err, attempts=1, raw_content="{}")
+    assert stage_decision.repair_instruction is not None
+    assert "b1..b6" in stage_decision.repair_instruction
+    assert "- b1: режим обработки TRANSLATE" not in stage_decision.repair_instruction
+
+    local_analysis_err = ResultValidationError(
+        "цитата не найдена",
+        expectation=expectation(
+            blocks=tuple(ExpectedBlock(block_id=f"b{idx}") for idx in range(1, 7))
+        ),
+        violation=Violation(
+            "unresolved_quote",
+            "chapter_analysis_narrative",
+            scope="local",
+            block_ids=("b3",),
+            safe_message="цитата не найдена",
+        ),
+    )
+    local_decision = policy(max_attempts=3).decide(local_analysis_err, attempts=1, raw_content="{}")
+    assert local_decision.repair_instruction is not None
+    assert "- b3" in local_decision.repair_instruction
+    assert "- b1" not in local_decision.repair_instruction
+    assert "полный массив всех блоков" not in local_decision.repair_instruction

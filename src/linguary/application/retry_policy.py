@@ -251,26 +251,14 @@ class RetryPolicy:
                 error=task_error,
                 backoff_seconds=self._backoff_for(attempts, error),
             )
+        if task_error.type is ErrorType.MODEL_OUTPUT and assistant_response is None:
+            return RetryDecision(action=RetryAction.RETRY_SAME_REQUEST, error=task_error)
         structured = getattr(error, "violation", None)
         is_local_turn = (
             assistant_response is not None
             and structured is not None
             and getattr(structured, "scope", None) == "local"
         )
-        if task_error.type is ErrorType.MODEL_OUTPUT:
-            if assistant_response is not None:
-                return RetryDecision(
-                    action=RetryAction.RETRY_WITH_REPAIR,
-                    error=task_error,
-                    repair_instruction=build_repair_instruction(
-                        _expectation_of(error),
-                        violation=task_error.message,
-                        local_block_ids=structured.block_ids if is_local_turn else None,
-                        has_conversation_turns=is_local_turn,
-                    ),
-                    assistant_response=assistant_response,
-                )
-            return RetryDecision(action=RetryAction.RETRY_SAME_REQUEST, error=task_error)
         return RetryDecision(
             action=RetryAction.RETRY_WITH_REPAIR,
             error=task_error,
@@ -279,6 +267,8 @@ class RetryPolicy:
                 violation=task_error.message,
                 local_block_ids=structured.block_ids if is_local_turn else None,
                 has_conversation_turns=is_local_turn,
+                stage=getattr(structured, "stage", None),
+                rule_code=getattr(structured, "rule_code", None),
             ),
             assistant_response=assistant_response,
         )
@@ -342,12 +332,21 @@ def classify_error(error: Exception) -> TaskError:
     return _task_error(ErrorType.TRANSIENT, error)
 
 
+_ANALYSIS_STAGES = frozenset({
+    "chapter_analysis",
+    "chapter_analysis_narrative",
+    "chapter_analysis_pedagogical",
+})
+
+
 def build_repair_instruction(
     expectation: ResultExpectation | None,
     *,
     violation: str | None = None,
     local_block_ids: Iterable[str] | None = None,
     has_conversation_turns: bool = False,
+    stage: str | None = None,
+    rule_code: str | None = None,
 ) -> str:
     """Refining instruction for retry (ALG-05).
 
@@ -370,7 +369,14 @@ def build_repair_instruction(
             if has_conversation_turns and len(expectation.blocks) > 4 and local_set
             else []
         )
-        if matched:
+        is_analysis = (
+            stage in _ANALYSIS_STAGES
+            or rule_code == "scene_bounds"
+            or all(block.treatment is None for block in expectation.blocks)
+        )
+        if is_analysis:
+            _append_analysis_repair_lines(lines, expectation, matched, rule_code=rule_code)
+        elif matched:
             lines.append(
                 "Исправь затронутые блоки и верни полный массив всех блоков из исходного "
                 "запроса в том же порядке, оставив остальные блоки без изменений:"
@@ -384,6 +390,43 @@ def build_repair_instruction(
             lines.extend(_block_lines(expectation))
     lines.append(f"Целевой язык результата — {expectation.target_language}.")
     return "\n".join(lines)
+
+
+def _append_analysis_repair_lines(
+    lines: list[str],
+    expectation: ResultExpectation,
+    matched: Sequence[ExpectedBlock],
+    *,
+    rule_code: str | None,
+) -> None:
+    """Append chapter-analysis repair scope without translation-stage array instructions."""
+    visible_blocks = [block for block in expectation.blocks if not block.context_only]
+    range_blocks = visible_blocks or expectation.blocks
+    block_range = f"{range_blocks[0].block_id}..{range_blocks[-1].block_id}"
+    if rule_code == "scene_bounds":
+        lines.append(
+            f"Исправь границы сцен так, чтобы они непрерывно и без пересечений "
+            f"покрывали все видимые блоки диапазона {block_range}."
+        )
+        return
+    if matched:
+        lines.append(
+            "Исправь затронутые блоки и верни корректный JSON ответа анализа "
+            "без изменения остальных блоков:"
+        )
+        lines.extend(_format_block_lines(matched))
+        return
+    if len(expectation.blocks) > 4:
+        lines.append(
+            f"Проверь и верни результат анализа для всех видимых блоков "
+            f"диапазона {block_range} в исходном порядке."
+        )
+        return
+    lines.append(
+        "Верни результат ровно для этих блоков, в том же порядке, без пропущенных "
+        "и без посторонних:"
+    )
+    lines.extend(_block_lines(expectation))
 
 
 def _format_block_lines(blocks: Sequence[ExpectedBlock]) -> list[str]:
