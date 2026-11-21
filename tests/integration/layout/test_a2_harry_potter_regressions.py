@@ -163,14 +163,16 @@ _PIERS = (
 
 _REGRESSED = (
     "nasty",
-    "hagrid-line",
     "good-luck",
     "bundle-and-scar",
     "no-problems",
     "couldnt-you",
+    "yvonne",
+)
+_GLOSSARY_KEPT = (
+    "hagrid-line",
     "demanded",
     "snapped",
-    "yvonne",
     "car",
 )
 _EXCEPTIONS = ("shoo", "up", "boa", "a-what", "no-why", "nearly")
@@ -178,10 +180,12 @@ _SHOWN_SPEAKERS = {
     "nasty": "миссис Дёрсли",
     "oh-yes": "мистер Дёрсли",
     "giant": "Хагрид",
+}
+_UNTRANSLATED_SPEAKERS = {
+    "shoo": "мистер Дёрсли",
     "demanded": "тётя Петуния",
     "car": "дядя Вернон",
 }
-_UNTRANSLATED_SPEAKERS = {"shoo": "мистер Дёрсли"}
 _HIDDEN_SPEAKERS = (
     "good-luck",
     "hagrid-line",
@@ -245,6 +249,7 @@ _LINES: tuple[_Line, ...] = (
         BlockTreatment.GLOSSARY_ONLY,
         "\u00abХагрид, \u2014 сказал Дамблдор с облегчением. \u2014 Наконец-то. "
         "И где ты взял этот мотоцикл?\u00bb",
+        hint=("sounding relieved", "с облегчением", None),
     ),
     _Line(
         "good-luck",
@@ -306,6 +311,7 @@ _LINES: tuple[_Line, ...] = (
         _DEMANDED,
         BlockTreatment.GLOSSARY_ONLY,
         "\u2014 Ты уже встал? \u2014 потребовала она.",
+        hint=("demanded", "потребовала", None),
     ),
     _Line(
         "snapped",
@@ -313,6 +319,7 @@ _LINES: tuple[_Line, ...] = (
         _SNAPPED,
         BlockTreatment.GLOSSARY_ONLY,
         "\u2014 Что ты сказал? \u2014 огрызнулась тётя через дверь.",
+        hint=("snapped", "огрызнулась", None),
     ),
     _Line(
         "yvonne",
@@ -329,6 +336,7 @@ _LINES: tuple[_Line, ...] = (
         _CAR,
         BlockTreatment.GLOSSARY_ONLY,
         "\u00abЭта машина новая, он не будет сидеть в ней один\u2026\u00bb",
+        hint=("alone", "один", None),
     ),
     _Line(
         "motorbikes",
@@ -842,7 +850,7 @@ def _assert_no_speaker_span(pages: Sequence[etree._Element]) -> None:
 def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouched(
     harry_regression: _Case,
 ) -> None:
-    """Ten light main blocks become TRANSLATE; six staged exceptions do not.
+    """Six complex light blocks become TRANSLATE; four within A2 15-word/single-verb thresholds stay GLOSSARY_ONLY.
 
     ``It winked.`` keeps the glossary hint and is not an unaided READ_AS_IS line.
     """
@@ -850,13 +858,17 @@ def test_six_regressed_a2_dialogues_promoted_while_short_exceptions_stay_untouch
         assert _mode(harry_regression, key) is BlockTreatment.TRANSLATE
         unit = _unit(harry_regression.pages, _BY_KEY[key].text)
         assert _translation(unit) == _BY_KEY[key].russian
+    for key in _GLOSSARY_KEPT:
+        assert _mode(harry_regression, key) is BlockTreatment.GLOSSARY_ONLY
+        unit = _unit(harry_regression.pages, _BY_KEY[key].text)
+        assert _translation(unit) is None
     assert {
         difficulty.id: difficulty.help_kind
         for difficulty in harry_regression.normalized.difficulties
     } == {
         "d-bundle": "explanation",
-        "d-demanded": "explanation",
-        "d-snapped": "explanation",
+        "d-demanded": "lexical_hint",
+        "d-snapped": "lexical_hint",
     }
     for key in _EXCEPTIONS:
         assert _mode(harry_regression, key) is _BY_KEY[key].original
@@ -1707,10 +1719,10 @@ def test_fifteen_ux_polish_and_a2_reader_fixes_end_to_end(tmp_path: Path) -> Non
     assert modes == {
         numbered.id: BlockTreatment.READ_AS_IS,
         title.id: BlockTreatment.TRANSLATE,
-        winked.id: BlockTreatment.TRANSLATE,
+        winked.id: BlockTreatment.GLOSSARY_ONLY,
         fancy.id: BlockTreatment.TRANSLATE,
-        groaned.id: BlockTreatment.TRANSLATE,
-        chuckled.id: BlockTreatment.TRANSLATE,
+        groaned.id: BlockTreatment.GLOSSARY_ONLY,
+        chuckled.id: BlockTreatment.GLOSSARY_ONLY,
         up.id: BlockTreatment.READ_AS_IS,
         a_what.id: BlockTreatment.READ_AS_IS,
         nearly.id: BlockTreatment.READ_AS_IS,
@@ -1786,10 +1798,7 @@ def test_fifteen_ux_polish_and_a2_reader_fixes_end_to_end(tmp_path: Path) -> Non
     six_hint = GlossaryHint(_SIX_WORDS, "чуть длиннее", "Пояснение к фразе из шести слов.")
     russians = {
         title.id: _LETTERS_RU,
-        winked.id: _WINKED_RU,
         fancy.id: _FANCY_RU,
-        groaned.id: _GROANED_RU,
-        chuckled.id: _CHUCKLED_RU,
         hagrid.id: _BY_KEY["hagrid-line"].russian,
         notes_block.id: "Полный перевод абзаца.",
     }
@@ -1797,6 +1806,21 @@ def test_fifteen_ux_polish_and_a2_reader_fixes_end_to_end(tmp_path: Path) -> Non
         block.id: BlockProcessingResult(block.id, BlockTreatment.READ_AS_IS)
         for block in (numbered, up, a_what, nearly, shoo, no_why)
     }
+    results[winked.id] = BlockProcessingResult(
+        winked.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint("winked", "подмигнула"),),
+    )
+    results[groaned.id] = BlockProcessingResult(
+        groaned.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint("groaned", "охнул"),),
+    )
+    results[chuckled.id] = BlockProcessingResult(
+        chuckled.id,
+        BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint("chuckled", "усмехнулся"),),
+    )
     results[verbs.id] = BlockProcessingResult(
         verbs.id,
         BlockTreatment.GLOSSARY_ONLY,
@@ -1988,10 +2012,13 @@ def test_fifteen_ux_polish_and_a2_reader_fixes_end_to_end(tmp_path: Path) -> Non
     hagrid_unit = _unit(pages, "sounding relieved")
     assert _translation(hagrid_unit) == _BY_KEY["hagrid-line"].russian
     assert _child(hagrid_unit, "lg-notes") is None
-    assert _translation(_unit(pages, _WINKED)) == _WINKED_RU
+    assert _translation(_unit(pages, _WINKED)) is None
+    assert _note_terms(_unit(pages, _WINKED)) == ["to wink"]
     assert _translation(_unit(pages, _FANCY)) == _FANCY_RU
-    assert _translation(_unit(pages, _GROANED)) == _GROANED_RU
-    assert _translation(_unit(pages, _CHUCKLED)) == _CHUCKLED_RU
+    assert _translation(_unit(pages, _GROANED)) is None
+    assert _note_terms(_unit(pages, _GROANED)) == ["to groan"]
+    assert _translation(_unit(pages, _CHUCKLED)) is None
+    assert _note_terms(_unit(pages, _CHUCKLED)) == ["to chuckle"]
     for text in (_UP, _A_WHAT, _NEARLY, _SHOO, _NO_WHY):
         assert _translation(_unit(pages, text)) is None
 
@@ -2004,7 +2031,7 @@ def test_fifteen_ux_polish_and_a2_reader_fixes_end_to_end(tmp_path: Path) -> Non
             strategy=NameTranslationStrategy.SOUND,
         ),
     ).for_chapter_narrative_analysis(document, section)
-    assert "«McGonagall» → «Макгонагал»" in sound.request.instructions
+    assert "«McGonagall» → «Макгонагалл»" in sound.request.instructions
 
 
 def _span_end(text: str, surface: str) -> int:
@@ -2523,7 +2550,7 @@ def test_a2_student_linguist_and_teacher_review_fixes_end_to_end(tmp_path: Path)
     assert policy.prepare("translation", "\u2013 Где пушка?", ()) == "\u2014 Где пушка?"
     assert (
         policy.prepare("translation", "К его удивлению.\n\u2014 Хагрид усмехнулся.", ())
-        == "К его удивлению. \u2014 Хагрид усмехнулся."
+        == "К его удивлению.\n\u2014 Хагрид усмехнулся."
     )
 
     templates = snapshot_prompt_templates(
@@ -2574,3 +2601,1080 @@ def test_a2_student_linguist_and_teacher_review_fixes_end_to_end(tmp_path: Path)
     for key in ("content_processing", "learner_quality"):
         for phrase in calques:
             assert phrase in templates[key]
+
+
+def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
+    """End-to-end regression across all 17 A2 Harry Potter ch1-ch7 quality fixes (no LLM calls)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from linguary.adapters.db.engine import create_database_engine
+    from linguary.adapters.db.models import Base
+    from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
+    from linguary.adapters.epub.splitting import (
+        SEGMENT_MAX_CHARS,
+        SEGMENT_MIN_BLOCK_CHARS,
+    )
+    from linguary.adapters.llm import FakeLLMClient, FakeReply
+    from linguary.adapters.validation.english_spelling import IpaDictSpellingChecker
+    from linguary.application.analysis_merge import (
+        content_plan_from_response,
+    )
+    from linguary.application.context_builder import (
+        ContextBuilder,
+        _matches_chapter_text,
+        scaled_chapter_note_limit,
+        snapshot_prompt_templates,
+    )
+    from linguary.application.glossary_review import build_glossary_review
+    from linguary.application.layout.parts import PART_MAX_CHARS
+    from linguary.application.llm_dto import (
+        BlockResultResponse,
+        ChapterAnalysisResponse,
+        GlossaryHintResponse,
+        LanguageNoteResponse,
+        QuotedContentPlanResponse,
+        QuotedContextFactResponse,
+        QuotedSceneResponse,
+        TranslationResultResponse,
+    )
+    from linguary.application.ports.persistence import BookRecord
+    from linguary.application.reader_text import ReaderTextPolicy
+    from linguary.application.retry_policy import ResultValidationError, RetryPolicy
+    from linguary.application.translation_units import plan_translation_units
+    from linguary.application.use_cases.analyze_chapter import (
+        AnalyzeChapter,
+        AnalyzeChapterCommand,
+    )
+    from linguary.application.validators.dialogue import dialogue_violation
+    from linguary.application.validators.mixed_script import note_language_leak_violation
+    from linguary.application.validators.result import TranslationResultValidator
+    from linguary.composition.correction_runtime import CORRECTION_PROMPT_V2
+    from linguary.domain import (
+        BookStatus,
+        GlossarySnapshotEntry,
+        LanguageNote,
+        ResultWarningKind,
+        TermStatus,
+        TranslationUnit,
+    )
+    from linguary.domain.content_plan import (
+        ContentEvidence,
+        Difficulty,
+        HelpEvidence,
+        Scene,
+        artifact_key,
+    )
+    from linguary.domain.name_translation import NameTranslationPolicy
+    from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
+    from linguary.web.labels import RESULT_WARNING_LABELS
+
+    # --- P3.T1: Separate segmentation thresholds (450/480 vs PART_MAX_CHARS=350) ---
+    assert SEGMENT_MAX_CHARS == 450
+    assert SEGMENT_MIN_BLOCK_CHARS == 480
+    assert PART_MAX_CHARS == 350
+    sentence_400 = (
+        "Harry stood beside the enormous oak front doors of Hogwarts castle, "
+        "watching the tall torches flicker against the dark stone walls while "
+        "Professor McGonagall adjusted her spectacles and waited for the nervous "
+        "first-year students to fall completely silent before she led them into "
+        "the Great Hall where hundreds of floating candles shone high above the "
+        "four long house tables tonight."
+    )
+    assert 360 <= len(sentence_400) <= 440
+    assert len(segment_text(sentence_400)) == 1
+    long_block_text = (
+        "Professor Quirrell trembled near the leaky cauldron doorway while holding "
+        "a heavy stack of parchment scrolls and whispering to the nervous boy beside "
+        "the firelight in the narrow hall. "
+        "Across the cobbled lane, Hagrid tightened his moleskin coat and pointed "
+        "towards the crooked brick wall behind the pub where an old brass lantern "
+        "swung gently in the cold evening wind. "
+        "Harry clutched his letter tightly, staring at the emerald ink as the "
+        "bricks began to shift and open into Diagon Alley."
+    )
+    assert len(long_block_text) > SEGMENT_MIN_BLOCK_CHARS
+    long_segments = segment_text(long_block_text)
+    assert len(long_segments) >= 2
+
+    # --- P1.T1 + P1.T2 + P1.T3: Multi-chapter EPUB layout (lg-cont numbering, typography,
+    #     previously/legend, 3-stage vocab dedup, 11 grammar caps, speech_style, .lg-tr CSS) ---
+    book_id = "hp-ch1-ch7-e2e"
+    sec_ids = tuple(f"sec-ch{idx}" for idx in range(1, 9))
+    chapters_blocks: dict[str, tuple[DocumentBlock, ...]] = {}
+    results: dict[str, BlockProcessingResult] = {}
+    analyses: list[ChapterAnalysis] = []
+
+    def _blk(sec_id: str, order: int, text: str, *, segments: tuple[BlockSegment, ...] = ()) -> DocumentBlock:
+        return DocumentBlock.create(
+            document_id=book_id,
+            section_id=sec_id,
+            type=BlockType.PARAGRAPH,
+            order=order,
+            text=text,
+            source_reference=SourceReference(f"{sec_id}.html", f"/body/p[{order + 1}]"),
+            segments=segments,
+        )
+
+    # Chapter 1: split block (lg-cont local numbering), display typography block,
+    # local 20-block vocab dedup, 2 speech_style notes for Hagrid, used_to + must_have grammar notes.
+    ch1_long = _blk(sec_ids[0], 0, long_block_text, segments=long_segments)
+    ch1_typo = _blk(sec_ids[0], 1, "P-P-Potter stuttered near the old castle gate.")
+    ch1_snig_1 = _blk(sec_ids[0], 2, "Dudley sniggered loudly at the doorway.")
+    ch1_snig_tr_near = _blk(sec_ids[0], 3, "Piers sniggered again behind him.")
+    ch1_snig_gl_near = _blk(sec_ids[0], 4, "Malcolm sniggered softly.")
+    ch1_hagrid_1 = _blk(sec_ids[0], 5, f"{_OPEN}Yeh don' know what yeh are, Harry.{_CLOSE}")
+    ch1_hagrid_2 = _blk(sec_ids[0], 6, f"{_OPEN}I've got summat fer yeh here.{_CLOSE}")
+    ch1_quill_1 = _blk(sec_ids[0], 7, "Harry dipped his quill into the inkpot.")
+    ch1_used_1 = _blk(sec_ids[0], 8, "He used to sleep in the cupboard under the stairs.")
+    ch1_must_1 = _blk(sec_ids[0], 9, "Someone must have left the letter on the mat.")
+    ch1_fillers = tuple(
+        _blk(sec_ids[0], 10 + i, f"The quiet corridor stretched ahead, step {i + 1}.")
+        for i in range(22)
+    )
+    chapters_blocks[sec_ids[0]] = (
+        ch1_long,
+        ch1_typo,
+        ch1_snig_1,
+        ch1_snig_tr_near,
+        ch1_snig_gl_near,
+        ch1_hagrid_1,
+        ch1_hagrid_2,
+        ch1_quill_1,
+        ch1_used_1,
+        ch1_must_1,
+        *ch1_fillers,
+    )
+
+    # Chapter 2: quill 2nd occurrence (GLOSSARY_ONLY -> stripped note), Hagrid repeated "yeh"
+    # (suppressed) + new "codswallop" (preserved), must_have gap<2 (suppressed).
+    ch2_quill_gl = _blk(sec_ids[1], 0, "He bought a silver quill at the shop.")
+    ch2_hagrid_rep = _blk(sec_ids[1], 1, f"{_OPEN}Yeh never told him!{_CLOSE}")
+    ch2_hagrid_new = _blk(sec_ids[1], 2, f"{_OPEN}Codswallop, in my opinion.{_CLOSE}")
+    ch2_must_gap1 = _blk(sec_ids[1], 3, "Hagrid must have forgotten the umbrella.")
+    ch2_fillers = tuple(
+        _blk(sec_ids[1], 4 + i, f"They walked past shop number {i + 1}.")
+        for i in range(22)
+    )
+    chapters_blocks[sec_ids[1]] = (
+        ch2_quill_gl,
+        ch2_hagrid_rep,
+        ch2_hagrid_new,
+        ch2_must_gap1,
+        *ch2_fillers,
+    )
+
+    # Chapter 3: quill 3rd occurrence on TRANSLATE (suppressed), used_to 2nd (kept), must_have 2nd (kept).
+    ch3_quill_tr = _blk(sec_ids[2], 0, "The quill scratched across the parchment.")
+    ch3_used_2 = _blk(sec_ids[2], 1, "Uncle Vernon used to shout every morning.")
+    ch3_must_2 = _blk(sec_ids[2], 2, "The owl must have flown all night.")
+    ch3_fillers = tuple(
+        _blk(sec_ids[2], 3 + i, f"Train compartment note {i + 1}.")
+        for i in range(22)
+    )
+    chapters_blocks[sec_ids[2]] = (ch3_quill_tr, ch3_used_2, ch3_must_2, *ch3_fillers)
+
+    # Chapter 4: quill 4th occurrence (suppressed: count>=3 and gap<=3).
+    ch4_quill_4 = _blk(sec_ids[3], 0, "Hermione sharpened her quill carefully.")
+    ch4_fillers = tuple(
+        _blk(sec_ids[3], 1 + i, f"Boat lantern reflection {i + 1}.")
+        for i in range(22)
+    )
+    chapters_blocks[sec_ids[3]] = (ch4_quill_4, *ch4_fillers)
+
+    # Chapter 5: used_to 3rd (suppressed: cap=2), must_have 3rd (kept: cap=3).
+    ch5_used_3 = _blk(sec_ids[4], 0, "Dumbledore used to teach Transfiguration.")
+    ch5_must_3 = _blk(sec_ids[4], 1, "Neville must have dropped the Remembrall.")
+    chapters_blocks[sec_ids[4]] = (ch5_used_3, ch5_must_3)
+
+    # Chapter 6: filler chapter for gap > 3.
+    ch6_plain = _blk(sec_ids[5], 0, "The Sorting Hat sang its quiet song.")
+    chapters_blocks[sec_ids[5]] = (ch6_plain,)
+
+    # Chapter 7: must_have 4th (suppressed: cap=3).
+    ch7_must_4 = _blk(sec_ids[6], 0, "Snape must have noticed the potion fumes.")
+    chapters_blocks[sec_ids[6]] = (ch7_must_4,)
+
+    # Chapter 8: quill reintroduced after gap > 3 chapters since last shown (ch2 -> ch8, gap 6).
+    ch8_quill_re = _blk(sec_ids[7], 0, "Harry picked up his quill once more.")
+    chapters_blocks[sec_ids[7]] = (ch8_quill_re,)
+
+    # Populate results
+    seg_count = len(long_segments)
+    seg1_text = long_block_text[long_segments[0].start : long_segments[0].end]
+    seg2_text = long_block_text[long_segments[1].start : long_segments[1].end]
+    seg1_word = "trembled"
+    seg2_word = "lantern" if "lantern" in seg2_text else "clutched"
+    assert seg1_word in seg1_text
+    assert seg2_word in seg2_text
+    seg_tr = tuple(f"Перевод части {i + 1}." for i in range(seg_count))
+    results[ch1_long.id] = BlockProcessingResult(
+        block_id=ch1_long.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text=" ".join(seg_tr),
+        segment_treatments=tuple(BlockTreatment.TRANSLATE for _ in range(seg_count)),
+        segment_translations=seg_tr,
+        glossary_hints=(
+            GlossaryHint(seg1_word, "дрожал", "tremble — дрожать"),
+            GlossaryHint(seg2_word, "фонарь" if seg2_word == "lantern" else "сжимал"),
+        ),
+    )
+    stutter_anchor = SourceAnchor(
+        ch1_typo.id,
+        ch1_typo.text.index("stuttered"),
+        ch1_typo.text.index("stuttered") + len("stuttered"),
+        "stuttered",
+    )
+    results[ch1_typo.id] = BlockProcessingResult(
+        block_id=ch1_typo.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text=(
+            "— ... П-П-Поттер заикался у за\u0301мка (10–15 шагов)... Что?.. Неужели!.. Он сказал–"
+        ),
+        glossary_hints=(
+            GlossaryHint(
+                "stuttered",
+                "заикался",
+                "У старого за\u0301мка ... 10–15 минут — ... П-П-Поттер замолчал–",
+            ),
+        ),
+        pronunciation_assistances=(
+            PronunciationAssistance(
+                anchor=stutter_anchor,
+                form="stuttered",
+                ipa="ˈstʌtəd",
+                variant="uk",
+                hint_id="ph-stuttered",
+                evidence=PronunciationEvidence(
+                    "ipa-dict", "1", "stuttered", "v", "verb", "stuttered", "ˈstʌtəd", "ipa-dict"
+                ),
+            ),
+        ),
+    )
+    results[ch1_snig_1.id] = BlockProcessingResult(
+        block_id=ch1_snig_1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Дадли громко хихикнул в дверях.",
+        glossary_hints=(GlossaryHint("sniggered", "хихикнул", "ехидно засмеялся"),),
+    )
+    results[ch1_snig_tr_near.id] = BlockProcessingResult(
+        block_id=ch1_snig_tr_near.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Пирз снова хихикнул позади него.",
+        glossary_hints=(GlossaryHint("sniggered", "хихикнул", "ехидно засмеялся"),),
+    )
+    results[ch1_snig_gl_near.id] = BlockProcessingResult(
+        block_id=ch1_snig_gl_near.id,
+        treatment=BlockTreatment.GLOSSARY_ONLY,
+        glossary_hints=(GlossaryHint("sniggered", "хихикнул", "ехидно засмеялся"),),
+    )
+
+    def _speech_parts(
+        block: DocumentBlock, tr: str, diff_id: str, pt_id: str, excerpt: str, note_text: str
+    ) -> tuple[DocumentBlock, str, Difficulty, ContextFact, LanguageNote, HelpEvidence]:
+        anchor = _anchor(block, excerpt)
+        diff = Difficulty(
+            diff_id,
+            (anchor,),
+            block.id,
+            "speech_style",
+            "useful",
+            "explanation",
+            (RequiredPoint(pt_id, note_text),),
+        )
+        note_id = f"ln-{diff_id}"
+        ln = LanguageNote(note_id, block.id, excerpt, note_text)
+        key = artifact_key(
+            "language_note.note",
+            block.id,
+            {"original_excerpt": excerpt, "note": note_text, "translated_excerpt": None},
+        )
+        ev = HelpEvidence(diff_id, pt_id, "language_note.note", block.id, key, note_text)
+        fact = ContextFact(
+            f"sp-{diff_id}", "speaker", (_anchor(block, block.text),), _anchor(block, block.text), "Hagrid", "explicit"
+        )
+        return block, tr, diff, fact, ln, ev
+
+    sp_h1 = _speech_parts(
+        ch1_hagrid_1, "— Ты не знаешь, кто ты, Гарри.", "d-hag-1", "p-h1", "Yeh", "Диалектное yeh вместо you."
+    )
+    sp_h2 = _speech_parts(
+        ch1_hagrid_2, "— У меня тут кое-что для тебя.", "d-hag-2", "p-h2", "summat", "Диалектное summat вместо something."
+    )
+    sp_h3 = _speech_parts(
+        ch2_hagrid_rep, "— Вы ему так и не сказали!", "d-hag-3", "p-h3", "Yeh", "Снова yeh вместо you."
+    )
+    sp_h4 = _speech_parts(
+        ch2_hagrid_new, "— Чушь собачья, по-моему.", "d-hag-4", "p-h4", "Codswallop", "Просторечное codswallop — ерунда."
+    )
+    cp_ch1 = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(sp_h1[2], sp_h2[2]),
+        context_facts=(sp_h1[3], sp_h2[3]),
+        scenes=(Scene("sc-1", 0, ch1_hagrid_1.id, ch1_hagrid_2.id, "Hut", "Hut", ("Hagrid", "Harry")),),
+    )
+    cp_ch2 = ContentPlan(
+        version=3,
+        profile="content-plan-v3",
+        difficulties=(sp_h3[2], sp_h4[2]),
+        context_facts=(sp_h3[3], sp_h4[3]),
+        scenes=(Scene("sc-2", 0, ch2_hagrid_rep.id, ch2_hagrid_new.id, "Shop", "Shop", ("Hagrid", "Harry")),),
+    )
+    for (blk, tr, _diff, _fact, ln, ev), cp_sha in (
+        (sp_h1, cp_ch1.sha256),
+        (sp_h2, cp_ch1.sha256),
+        (sp_h3, cp_ch2.sha256),
+        (sp_h4, cp_ch2.sha256),
+    ):
+        results[blk.id] = BlockProcessingResult(
+            block_id=blk.id,
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text=tr,
+            language_notes=(ln,),
+            content_evidence=ContentEvidence(cp_sha, (ev,)),
+        )
+
+    quill_hint = GlossaryHint("quill", "перо для письма", "Птичье перо, которым пишут чернилами.")
+    results[ch1_quill_1.id] = BlockProcessingResult(
+        ch1_quill_1.id, BlockTreatment.TRANSLATE, translated_text="Гарри обмакнул перо в чернильницу.", glossary_hints=(quill_hint,)
+    )
+    results[ch2_quill_gl.id] = BlockProcessingResult(
+        ch2_quill_gl.id, BlockTreatment.GLOSSARY_ONLY, glossary_hints=(quill_hint,)
+    )
+    results[ch3_quill_tr.id] = BlockProcessingResult(
+        ch3_quill_tr.id, BlockTreatment.TRANSLATE, translated_text="Перо заскрипело по пергаменту.", glossary_hints=(quill_hint,)
+    )
+    results[ch4_quill_4.id] = BlockProcessingResult(
+        ch4_quill_4.id, BlockTreatment.TRANSLATE, translated_text="Гермиона аккуратно очинила перо.", glossary_hints=(quill_hint,)
+    )
+    results[ch8_quill_re.id] = BlockProcessingResult(
+        ch8_quill_re.id, BlockTreatment.TRANSLATE, translated_text="Гарри снова взял перо.", glossary_hints=(quill_hint,)
+    )
+
+    for idx, blk in enumerate((ch1_used_1, ch3_used_2, ch5_used_3), start=1):
+        results[blk.id] = BlockProcessingResult(
+            blk.id,
+            BlockTreatment.TRANSLATE,
+            translated_text=f"Раньше он делал это регулярно ({idx}).",
+            language_notes=(LanguageNote(f"ln-used-{idx}", blk.id, "used to", "Конструкция used to обозначает привычку в прошлом."),),
+        )
+    for idx, blk in enumerate((ch1_must_1, ch2_must_gap1, ch3_must_2, ch5_must_3, ch7_must_4), start=1):
+        results[blk.id] = BlockProcessingResult(
+            blk.id,
+            BlockTreatment.TRANSLATE,
+            translated_text=f"Должно быть, это уже случилось ({idx}).",
+            language_notes=(LanguageNote(f"ln-must-{idx}", blk.id, "must have", "Конструкция must have + V3 выражает уверенное предположение о прошлом."),),
+        )
+    for blk in (*ch1_fillers, *ch2_fillers, *ch3_fillers, *ch4_fillers, ch6_plain):
+        results[blk.id] = BlockProcessingResult(blk.id, BlockTreatment.READ_AS_IS)
+
+    sections = tuple(
+        DocumentSection(
+            id=sec_id,
+            document_id=book_id,
+            title=f"Chapter {idx}",
+            order=idx - 1,
+            source_resource_path=f"{sec_id}.html",
+            blocks=chapters_blocks[sec_id],
+        )
+        for idx, sec_id in enumerate(sec_ids, start=1)
+    )
+    document = CanonicalDocument(
+        id=book_id,
+        metadata=BookMetadata(title="Harry Potter ch1-ch8 E2E"),
+        source_language="en",
+        target_language="ru",
+        sections=sections,
+    )
+    for idx, sec_id in enumerate(sec_ids, start=1):
+        blks = chapters_blocks[sec_id]
+        plan = TreatmentPlan.of_treatments(
+            sec_id, tuple((b.id, results[b.id].treatment) for b in blks)
+        )
+        cp: ContentPlan | None = None
+        if idx == 1:
+            cp = cp_ch1
+        elif idx == 2:
+            cp = cp_ch2
+        analyses.append(
+            ChapterAnalysis.create(
+                id=f"an-{idx}",
+                section_id=sec_id,
+                treatment_plan=plan,
+                translation_instructions="Keep names consistent.",
+                chapter_summary=f"Summary of chapter {idx}.",
+                expected_block_ids=tuple(b.id for b in blks),
+                content_plan=cp,
+            )
+        )
+
+    # 1-chapter layout omits "previously"
+    single_doc = CanonicalDocument(
+        id=book_id,
+        metadata=BookMetadata(title="One Chapter"),
+        source_language="en",
+        target_language="ru",
+        sections=(sections[0],),
+    )
+    single_layout = build_book_layout(
+        LayoutInputs(
+            document=single_doc,
+            results={b.id: results[b.id] for b in sections[0].blocks},
+            analyses=(analyses[0],),
+            concepts=(),
+            reader_level="a2",
+            english_help=False,
+        )
+    )
+    assert "previously" not in single_layout.features.sections
+
+    # Multi-chapter layout + EPUB export
+    layout = build_book_layout(
+        LayoutInputs(
+            document=document,
+            results=results,
+            analyses=tuple(analyses),
+            concepts=(),
+            reader_level="a2",
+            english_help=False,
+        )
+    )
+    assert "previously" in layout.features.sections
+
+    # P1.T1: Local numbering restarts at 1 inside lg-cont
+    long_units = layout.chapters[sec_ids[0]].units[ch1_long.id]
+    assert len(long_units) >= 2
+    assert long_units[0].continues is False
+    assert long_units[1].continues is True
+    assert [n.number for n in long_units[0].notes if n.number is not None] == [1]
+    assert [n.number for n in long_units[1].notes if n.number is not None] == [1]
+
+    # P1.T1: Display typography on translation and note.body without touching term/ipa
+    typo_unit = layout.chapters[sec_ids[0]].units[ch1_typo.id][0]
+    assert typo_unit.translation is not None
+    assert "…" in typo_unit.translation
+    assert "..." not in typo_unit.translation
+    assert "?.." in typo_unit.translation and "!.." in typo_unit.translation
+    assert "П-П-Поттер" in typo_unit.translation
+    assert "10–15" in typo_unit.translation
+    assert "— …" in typo_unit.translation
+    assert "сказал…" in typo_unit.translation
+    assert "\u0301" not in typo_unit.translation
+    typo_hint_note = next(item.note for item in typo_unit.notes if item.note.origin == "glossary_hint")
+    typo_body = " ".join(typo_hint_note.body)
+    assert "\u0301" not in typo_body
+    assert "..." not in typo_body
+    assert "П-П-Поттер" in typo_body and "10–15" in typo_body and "замолчал…" in typo_body
+    assert typo_hint_note.term == "to stutter"
+    assert typo_hint_note.ipa is not None and "ˈstʌtəd" in typo_hint_note.ipa
+
+    # P1.T2: 3-stage vocab dedup
+    assert len(layout.chapters[sec_ids[0]].units[ch1_snig_1.id][0].notes) == 1
+    assert layout.chapters[sec_ids[0]].units[ch1_snig_tr_near.id][0].notes == ()
+    assert len(layout.chapters[sec_ids[0]].units[ch1_snig_gl_near.id][0].notes) == 1
+    ch1_q_notes = layout.chapters[sec_ids[0]].units[ch1_quill_1.id][0].notes
+    ch2_q_notes = layout.chapters[sec_ids[1]].units[ch2_quill_gl.id][0].notes
+    assert len(ch1_q_notes) == 1 and "Птичье перо" in " ".join(ch1_q_notes[0].note.body)
+    assert len(ch2_q_notes) == 1 and "Птичье перо" not in " ".join(ch2_q_notes[0].note.body)
+    assert layout.chapters[sec_ids[2]].units[ch3_quill_tr.id][0].notes == ()
+    assert layout.chapters[sec_ids[3]].units[ch4_quill_4.id][0].notes == ()
+    assert len(layout.chapters[sec_ids[7]].units[ch8_quill_re.id][0].notes) == 1
+
+    # P1.T2: 11-pattern grammar caps (used_to cap=2; modal_must_have cap=3, gap>=2)
+    assert len(layout.chapters[sec_ids[0]].units[ch1_used_1.id][0].notes) == 1
+    assert len(layout.chapters[sec_ids[2]].units[ch3_used_2.id][0].notes) == 1
+    assert layout.chapters[sec_ids[4]].units[ch5_used_3.id][0].notes == ()
+    assert len(layout.chapters[sec_ids[0]].units[ch1_must_1.id][0].notes) == 1
+    assert layout.chapters[sec_ids[1]].units[ch2_must_gap1.id][0].notes == ()
+    assert len(layout.chapters[sec_ids[2]].units[ch3_must_2.id][0].notes) == 1
+    assert len(layout.chapters[sec_ids[4]].units[ch5_must_3.id][0].notes) == 1
+    assert layout.chapters[sec_ids[6]].units[ch7_must_4.id][0].notes == ()
+
+    # P1.T2: speech_style keeps first 2 in first scene + unique later dialect anchor, suppresses repeated "yeh"
+    assert len(layout.chapters[sec_ids[0]].units[ch1_hagrid_1.id][0].notes) == 1
+    assert len(layout.chapters[sec_ids[0]].units[ch1_hagrid_2.id][0].notes) == 1
+    assert layout.chapters[sec_ids[1]].units[ch2_hagrid_rep.id][0].notes == ()
+    assert len(layout.chapters[sec_ids[1]].units[ch2_hagrid_new.id][0].notes) == 1
+
+    # Export EPUB and verify legend.xhtml, lg-cont superscripts, CSS geometry, README sync
+    epub_path = tmp_path / "hp-ch1-ch7-e2e.epub"
+    EpubExportWriter().write(
+        EpubWriteRequest(
+            document=document,
+            target_path=str(epub_path),
+            block_results=results,
+            layout=layout,
+        )
+    )
+    pages = _read_pages(epub_path)
+    legend_page = _page_with(pages, "Previously in…")
+    assert "По мере чтения переводов становится меньше" in _text(legend_page)
+    cont_units = [
+        el
+        for page in pages
+        for el in page.iter()
+        if _local(el) == "div" and _has_class(el, "lg-cont")
+    ]
+    assert cont_units
+    assert _ref_superscripts(cont_units[0]) == ["1"]
+
+    epub_css = _stylesheet(epub_path)
+    web_css = (Path(__file__).resolve().parents[3] / "src/linguary/web/static/linguary.css").read_text()
+    for css_text in (epub_css, web_css):
+        tr_match = re.search(r"\.lg-tr\s*\{([^}]*)\}", css_text)
+        assert tr_match is not None
+        tr_rule = tr_match.group(1)
+        assert "margin: 0.55em 0 0 1.3em;" in tr_rule
+        assert "font-size: 0.88em;" in tr_rule
+        assert "padding-left: 0.7em;" in tr_rule
+        assert "border-left: 0.12em solid;" in tr_rule
+        assert "opacity" not in tr_rule
+    readme_text = (Path(__file__).resolve().parents[3] / "README.md").read_text()
+    assert "correction_model" in readme_text
+
+    # --- P2.T1 + P2.T2 + P2.T3: Dialogue, NOTE leak, EN-GB spelling, quality warnings, historical=True ---
+    prose_block = _blk("sec-v", 0, '"Hello. How are you?"')
+    poem_block = DocumentBlock.create(
+        document_id=book_id,
+        section_id="sec-v",
+        type=BlockType.POEM,
+        order=1,
+        text="Oh, you may not think I'm pretty,",
+        source_reference=SourceReference("sec-v.html", "/body/p[2]"),
+    )
+    prose_unit = TranslationUnit.of_blocks(
+        id="u-prose",
+        blocks=(prose_block,),
+        plan=TreatmentPlan.of_treatments("sec-v", ((prose_block.id, BlockTreatment.TRANSLATE),)),
+    )
+    poem_unit = TranslationUnit.of_blocks(
+        id="u-poem",
+        blocks=(poem_block,),
+        plan=TreatmentPlan.of_treatments("sec-v", ((poem_block.id, BlockTreatment.TRANSLATE),)),
+    )
+
+    def _tr_payload(block_id: str, text: str, *, hints=(), notes=()) -> TranslationResultResponse:
+        return TranslationResultResponse(
+            blocks=(BlockResultResponse(block_id, BlockTreatment.TRANSLATE, text, glossary_hints=hints),),
+            language_notes=notes,
+        )
+
+    assert dialogue_violation(_tr_payload(prose_block.id, "— «Привет», — спросил он."), target_language="ru", unit=prose_unit) is not None
+    assert dialogue_violation(_tr_payload(prose_block.id, "«Привет, — спросил он. — Как дела?»"), target_language="ru", unit=prose_unit) is not None
+    assert dialogue_violation(_tr_payload(prose_block.id, "— Привет. — Как дела?"), target_language="ru", unit=prose_unit) is not None
+    assert dialogue_violation(_tr_payload(prose_block.id, "«Привет», — спросил он."), target_language="ru", unit=prose_unit) is not None
+    assert dialogue_violation(_tr_payload(prose_block.id, "«Что происходит?» — подумал Гарри."), target_language="ru", unit=prose_unit) is None
+    assert dialogue_violation(_tr_payload(poem_block.id, "— «Пусть не кажусь я красивой»."), target_language="ru", unit=poem_unit) is None
+
+    assert note_language_leak_violation(
+        _tr_payload(
+            prose_block.id,
+            "— Привет, — спросил он.",
+            notes=(LanguageNoteResponse(prose_block.id, "reminded", "Фраза 'was strongly reminded of Дадли' описывает память."),),
+        ),
+        target_language="ru",
+    ) is not None
+    assert note_language_leak_violation(
+        _tr_payload(
+            prose_block.id,
+            "— Привет, — спросил он.",
+            notes=(LanguageNoteResponse(prose_block.id, "hello", "Слово really усиливает вопрос."),),
+        ),
+        target_language="ru",
+    ) is not None
+    assert note_language_leak_violation(
+        _tr_payload(
+            prose_block.id,
+            "— Привет, — спросил он.",
+            notes=(LanguageNoteResponse(prose_block.id, "hello", "Время Past Perfect и британский вариант UK в IPA."),),
+        ),
+        target_language="ru",
+    ) is None
+
+    checker = IpaDictSpellingChecker()
+    assert checker.is_known_word("colour") is True
+    assert checker.is_known_word("well-known") is True
+    assert checker.is_known_word("expell") is False
+    validator = TranslationResultValidator(
+        target_language_min_share=0.5,
+        language_check_min_length=20,
+        repetition_ngram_size=4,
+        repetition_min_repeats=3,
+        spelling_checker=checker,
+    )
+    assert ResultWarningKind.QUALITY in RESULT_WARNING_LABELS
+    expel_block = _blk("sec-v", 2, "Hermione feared Hogwarts might expel them for codswallop.")
+    expel_unit = TranslationUnit.of_blocks(
+        id="u-expel",
+        blocks=(expel_block,),
+        plan=TreatmentPlan.of_treatments("sec-v", ((expel_block.id, BlockTreatment.TRANSLATE),)),
+    )
+    with pytest.raises(ResultValidationError):
+        validator.validate(
+            _tr_payload(
+                expel_block.id,
+                "Гермиона боялась, что их исключат за ерунду.",
+                hints=(GlossaryHintResponse("to expell", "исключить"),),
+            ),
+            unit=expel_unit,
+            target_language="ru",
+            note_id_factory=lambda: "ln-1",
+        )
+    verbatim_res = validator.validate(
+        _tr_payload(
+            expel_block.id,
+            "Гермиона боялась, что их исключат за ерунду.",
+            hints=(GlossaryHintResponse("codswallop", "ерунда"),),
+        ),
+        unit=expel_unit,
+        target_language="ru",
+        note_id_factory=lambda: "ln-1",
+    )
+    assert verbatim_res[0].glossary_hints[0].original == "codswallop"
+
+    warn_block = _blk(
+        "sec-v",
+        3,
+        "Mr H. Potter bought two dozen owls and talked about You-Know-Who before Quidditch.",
+    )
+    warn_unit = TranslationUnit.of_blocks(
+        id="u-warn",
+        blocks=(warn_block,),
+        plan=TreatmentPlan.of_treatments("sec-v", ((warn_block.id, BlockTreatment.TRANSLATE),)),
+    )
+    mandatory = (
+        GlossarySnapshotEntry("Harry Potter", "Гарри Поттер", ConceptType.PERSON, TermStatus.APPROVED),
+        GlossarySnapshotEntry("Quidditch", "квиддич", ConceptType.FICTIONAL_CONCEPT, TermStatus.APPROVED),
+    )
+    warn_res = validator.validate(
+        _tr_payload(
+            warn_block.id,
+            "Мистер Х. Поттер купил два десятка сов, что-бы скрыться от Сам-Знаешь-Кто со залом перед игрой.",
+        ),
+        unit=warn_unit,
+        target_language="ru",
+        note_id_factory=lambda: "ln-w",
+        mandatory_glossary=mandatory,
+    )
+    quality_msgs = " | ".join(
+        w.message for w in warn_res[0].warnings if w.kind is ResultWarningKind.QUALITY
+    )
+    assert "dozen" in quality_msgs
+    assert "что-бы" in quality_msgs
+    assert "со залом" in quality_msgs
+    assert "Х. Поттер" in quality_msgs
+    assert "Сам-Знаешь-Кто" in quality_msgs
+    assert "Quidditch" in quality_msgs
+
+    legacy_payload = _tr_payload(
+        prose_block.id,
+        "— «Привет», — спросил он.",
+        notes=(LanguageNoteResponse(prose_block.id, "hello", "Слово really здесь важно."),),
+    )
+    with pytest.raises(ResultValidationError):
+        validator.validate(legacy_payload, unit=prose_unit, target_language="ru", note_id_factory=lambda: "ln-h", historical=False)
+    recovered = validator.validate(legacy_payload, unit=prose_unit, target_language="ru", note_id_factory=lambda: "ln-h", historical=True)
+    assert recovered[0].translated_text == "— «Привет», — спросил он."
+
+    # --- P3.T1: Cohesive list runs & adaptive build_glossary_review ---
+    list_intro = _blk("sec-list", 0, "A " + "long introductory paragraph " * 8)
+    list_items = (
+        _blk("sec-list", 1, "1 telescope"),
+        _blk("sec-list", 2, "1 set of brass scales"),
+        _blk("sec-list", 3, "1 cauldron (pewter, standard size 2)"),
+        _blk("sec-list", 4, "1 set glass or crystal phials"),
+    )
+    list_blocks = (list_intro, *list_items)
+    list_plan = TreatmentPlan.of_treatments(
+        "sec-list", tuple((b.id, BlockTreatment.TRANSLATE) for b in list_blocks)
+    )
+    unit_counter = iter(range(1, 20))
+    planned_units = plan_translation_units(
+        list_blocks,
+        list_plan,
+        id_factory=lambda: f"u-{next(unit_counter)}",
+        max_source_chars=260,
+    )
+    list_unit_ids = {
+        unit.id for unit in planned_units for item in unit.items if item.block in list_items
+    }
+    assert len(list_unit_ids) == 1
+
+    cand_hagrid = _candidate("an-1", "Hagrid", "Хагрид", "Великан.")
+    doc_2ch = CanonicalDocument(
+        id=book_id,
+        metadata=BookMetadata(title="Two Chapters"),
+        source_language="en",
+        target_language="ru",
+        sections=sections[:2],
+    )
+    review_2ch = build_glossary_review(
+        book_id=book_id,
+        analyses=(replace(analyses[0], glossary_candidates=(cand_hagrid,)), analyses[1]),
+        confidence_threshold=0.8,
+        count_mentions=lambda _spellings: 1,
+        min_mentions=5,
+        min_chapters=3,
+        document=doc_2ch,
+    )
+    assert review_2ch.item_for("Hagrid") is not None
+    assert review_2ch.item_for("Hagrid").requires_review is True
+    doc_6ch = CanonicalDocument(
+        id=book_id,
+        metadata=BookMetadata(title="Six Chapters"),
+        source_language="en",
+        target_language="ru",
+        sections=sections[:6],
+    )
+    cand_piers = _candidate("an-1", "Piers", "Пирз", "Приятель Дадли.")
+    review_6ch = build_glossary_review(
+        book_id=book_id,
+        analyses=(replace(analyses[0], glossary_candidates=(cand_piers,)), *analyses[1:6]),
+        confidence_threshold=0.8,
+        count_mentions=lambda _spellings: 1,
+        min_mentions=5,
+        min_chapters=3,
+        document=doc_6ch,
+    )
+    assert review_6ch.item_for("Piers") is not None
+    assert review_6ch.item_for("Piers").requires_review is False
+
+    # --- P4.T1 + P4.T2: ReaderTextPolicy, CORRECTION_PROMPT_V2, ContextBuilder progression/Ermolovich/initials/budget ---
+    assert ReaderTextPolicy().prepare("translation", "— Привет.\n— Пока.", ()) == "— Привет.\n— Пока."
+    for expected_check in ("two dozen", "ложных друзей", "согласование", "род животных", "ты/вы", "стыки соседних блоков"):
+        assert expected_check in CORRECTION_PROMPT_V2
+    a2_templates = snapshot_prompt_templates(
+        source_language="en", target_language="ru", reader_level="a2", profile="content-plan-v3"
+    )
+    assert "ё" in a2_templates["content_processing"]
+    cb = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=NameTranslationPolicy(version=1, strategy=NameTranslationStrategy.SOUND),
+    )
+    ped_early = cb.for_chapter_pedagogical_analysis(
+        document,
+        sections[0],
+        narrative_summary="Summary.",
+        cumulative_words_before=0,
+        prior_explained_topics=("used to",),
+    )
+    ped_late = cb.for_chapter_pedagogical_analysis(
+        document,
+        sections[0],
+        narrative_summary="Summary.",
+        cumulative_words_before=50_000,
+    )
+    assert "78–85%" in ped_early.request.input_text
+    assert "62–72%" in ped_late.request.input_text
+    assert "used to" in ped_early.request.input_text
+    sha_early = cb.pedagogical_input_sha256(
+        document, sections[0], narrative_output_sha256="nsha", cumulative_words_before=0
+    )
+    sha_late = cb.pedagogical_input_sha256(
+        document, sections[0], narrative_output_sha256="nsha", cumulative_words_before=50_000
+    )
+    assert sha_early != sha_late
+    narr_ctx = cb.for_chapter_narrative_analysis(document, sections[0])
+    assert "«McGonagall» → «Макгонагалл»" in narr_ctx.request.instructions
+    assert "маглы" in narr_ctx.request.instructions
+    assert (
+        _matches_chapter_text(
+            "Harry Potter",
+            "Mr H. Potter lived in the cupboard.",
+            {"mr", "h", "potter", "lived", "cupboard"},
+        )
+        is True
+    )
+    assert scaled_chapter_note_limit(300, 6) == 12
+    assert scaled_chapter_note_limit(300, 3) == 3
+
+    # --- P5.T1: A2 thresholds 15/45, non-dialogue demotion, forward-quote pruning, pronoun speaker resolution ---
+    b_dlg14 = _blk("sec-p5", 0, f"{_OPEN}Wait here for a minute,{_CLOSE} said Harry. {_OPEN}I will bring the key soon.{_CLOSE}")
+    b_narr40 = _blk(
+        "sec-p5",
+        1,
+        "Harry opened the small wooden door and stepped into the bright garden. "
+        "Two brown owls sat quietly on the stone wall near the green gate. "
+        "The warm morning sun shone over the quiet street while the neighbours slept.",
+    )
+    b_narr40_hard = _blk(
+        "sec-p5",
+        2,
+        "Harry opened the rusty iron gate and stepped into the dark alley. "
+        "Two strange owls sat silently on the crooked wall near the tavern. "
+        "The cold fog drifted over the empty street while the lanterns flickered.",
+    )
+    b_item = _blk("sec-p5", 3, "1 telescope")
+    b_future = _blk("sec-p5", 4, "Later they saw the giant brass cauldron boiling over green flames.")
+    p5_blocks = (b_dlg14, b_narr40, b_narr40_hard, b_item, b_future)
+    p5_norm = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=(
+                TreatmentPlanItemResponse(b_dlg14.id, BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItemResponse(b_narr40.id, BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItemResponse(b_narr40_hard.id, BlockTreatment.GLOSSARY_ONLY),
+                TreatmentPlanItemResponse(b_item.id, BlockTreatment.TRANSLATE),
+                TreatmentPlanItemResponse(b_future.id, BlockTreatment.TRANSLATE),
+            ),
+            difficulties=(
+                QuotedDifficultyResponse(
+                    "d-hard-1", (QuotedSourceAnchorResponse(b_narr40_hard.id, "rusty"),),
+                    b_narr40_hard.id, "vocabulary", "useful", "lexical_hint", (RequiredPoint("p1", "rusty — ржавый"),),
+                ),
+                QuotedDifficultyResponse(
+                    "d-hard-2", (QuotedSourceAnchorResponse(b_narr40_hard.id, "crooked"),),
+                    b_narr40_hard.id, "vocabulary", "useful", "lexical_hint", (RequiredPoint("p2", "crooked — кривой"),),
+                ),
+                QuotedDifficultyResponse(
+                    "d-hard-3", (QuotedSourceAnchorResponse(b_narr40_hard.id, "drifted"),),
+                    b_narr40_hard.id, "vocabulary", "useful", "lexical_hint", (RequiredPoint("p3", "drifted — плыл"),),
+                ),
+                QuotedDifficultyResponse(
+                    "d-hard-4", (QuotedSourceAnchorResponse(b_narr40_hard.id, "flickered"),),
+                    b_narr40_hard.id, "vocabulary", "useful", "lexical_hint", (RequiredPoint("p4", "flickered — мерцали"),),
+                ),
+                QuotedDifficultyResponse(
+                    "d-fwd",
+                    (
+                        QuotedSourceAnchorResponse(b_narr40.id, "sat quietly"),
+                        QuotedSourceAnchorResponse(b_future.id, "giant brass cauldron"),
+                    ),
+                    b_narr40.id,
+                    "grammar",
+                    "useful",
+                    "explanation",
+                    (
+                        RequiredPoint("p-now", "Здесь sat quietly описывает состояние сов."),
+                        RequiredPoint("p-later", 'Дальше появится "giant brass cauldron" в сцене.'),
+                    ),
+                ),
+            ),
+        ),
+        p5_blocks,
+        {b.id: b.id for b in p5_blocks},
+        reader_level="a2",
+        english_help=False,
+    )
+    p5_modes = {item.source_block_id: item.treatment for item in p5_norm.treatment_plan}
+    assert p5_modes[b_dlg14.id] is BlockTreatment.GLOSSARY_ONLY
+    assert p5_modes[b_narr40.id] is BlockTreatment.GLOSSARY_ONLY
+    assert p5_modes[b_narr40_hard.id] is BlockTreatment.TRANSLATE
+    assert p5_modes[b_item.id] is BlockTreatment.READ_AS_IS
+    pruned_fwd = next(d for d in p5_norm.difficulties if d.id == "d-fwd")
+    assert [a.block_id for a in pruned_fwd.anchors] == [b_narr40.id]
+    assert [p.id for p in pruned_fwd.required_points] == ["p-now"]
+
+    # Unambiguous pronoun remark resolution after scene resolution
+    b_she = _blk("sec-sp", 0, f"{_OPEN}No,{_CLOSE} she said.")
+    b_he = _blk("sec-sp", 1, f"{_OPEN}Why?{_CLOSE} he asked.")
+    sp_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep names.",
+        chapter_summary="Harry and Petunia talk.",
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse("b2", BlockTreatment.GLOSSARY_ONLY),
+        ),
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            context_facts=(
+                QuotedContextFactResponse(
+                    "f-petunia",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b1", b_she.text),),
+                    QuotedSourceAnchorResponse("b1", b_she.text),
+                    "Petunia",
+                    "inferred",
+                ),
+                QuotedContextFactResponse(
+                    "f-harry",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b2", b_he.text),),
+                    QuotedSourceAnchorResponse("b2", b_he.text),
+                    "Harry",
+                    "inferred",
+                ),
+            ),
+            scenes=(
+                QuotedSceneResponse("b1", "b1", "Kitchen", "Kitchen", ("Harry", "Petunia")),
+                QuotedSceneResponse("b2", "b2", "Hall", "Hall", ("Harry", "Stranger")),
+            ),
+        ),
+    )
+    resolved_plan = content_plan_from_response(
+        sp_payload,
+        {"b1": b_she.id, "b2": b_he.id},
+        texts={b_she.id: b_she.text, b_he.id: b_he.text},
+        visible_texts_by_alias={"b1": b_she.text, "b2": b_he.text},
+        blocks=(b_she, b_he),
+        mandatory_facts={"Harry": {"gender": "male"}, "Petunia": {"gender": "female"}},
+    )
+    assert resolved_plan is not None
+    facts_by_value = {f.value: f for f in resolved_plan.context_facts}
+    assert facts_by_value["Petunia"].certainty == "explicit"
+    assert facts_by_value["Harry"].certainty == "inferred"
+
+    # --- P5.T2: AnalyzeChapter cumulative words + inter-fragment prior_explained_topics ---
+    from datetime import UTC, datetime
+
+    st_sec1 = DocumentSection(
+        id="st-1",
+        document_id="st-book",
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=(
+            DocumentBlock.create(
+                document_id="st-book",
+                section_id="st-1",
+                type=BlockType.PARAGRAPH,
+                order=0,
+                text=" ".join(["magic"] * 11_000),
+                source_reference=SourceReference("ch1.xhtml", "/body/p[1]"),
+            ),
+        ),
+    )
+    st_sec2 = DocumentSection(
+        id="st-2",
+        document_id="st-book",
+        title="Chapter 2",
+        order=1,
+        source_resource_path="ch2.xhtml",
+        blocks=(
+            DocumentBlock.create(
+                document_id="st-book",
+                section_id="st-2",
+                type=BlockType.PARAGRAPH,
+                order=0,
+                text="Harry squinted at the sign because he used to live in the cupboard.",
+                source_reference=SourceReference("ch2.xhtml", "/body/p[1]"),
+            ),
+            DocumentBlock.create(
+                document_id="st-book",
+                section_id="st-2",
+                type=BlockType.PARAGRAPH,
+                order=1,
+                text="Aunt Petunia looked up and muttered quietly.",
+                source_reference=SourceReference("ch2.xhtml", "/body/p[2]"),
+            ),
+        ),
+    )
+    st_doc = CanonicalDocument(
+        id="st-book",
+        metadata=BookMetadata(title="Staged E2E"),
+        source_language="en",
+        target_language="ru",
+        sections=(st_sec1, st_sec2),
+    )
+    engine = create_database_engine(tmp_path / "staged-e2e.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    try:
+        with uow.transaction() as tx:
+            tx.books.add(
+                BookRecord(
+                    id="st-book",
+                    metadata=BookMetadata(title="Staged E2E", authors=("J.K. Rowling",)),
+                    source_language="en",
+                    target_language="ru",
+                    status=BookStatus.ANALYZING,
+                    source_epub_path=str(tmp_path / "src.epub"),
+                    created_at=datetime(2026, 11, 21, tzinfo=UTC),
+                )
+            )
+            tx.documents.save(st_doc)
+
+        narr_reply_1 = FakeReply.of_payload(
+            {
+                "translation_instructions": "Keep names consistent.",
+                "chapter_summary": "Harry reads the sign.",
+                "glossary_candidates": [],
+                "context_facts": [],
+                "scenes": [
+                    {
+                        "start_block_id": "b1",
+                        "end_block_id": "b1",
+                        "summary": "Hallway sign.",
+                        "location": "Hallway",
+                        "participants": ["Harry"],
+                        "visual_facts": [],
+                        "visual_assumptions": [],
+                    }
+                ],
+            }
+        )
+        narr_reply_2 = FakeReply.of_payload(
+            {
+                "translation_instructions": "Keep names consistent.",
+                "chapter_summary": "Harry reads the sign while Aunt Petunia mutters.",
+                "glossary_candidates": [],
+                "context_facts": [],
+                "scenes": [
+                    {
+                        "start_block_id": "b1",
+                        "end_block_id": "b1",
+                        "summary": "Hallway talk.",
+                        "location": "Hallway",
+                        "participants": ["Harry", "Aunt Petunia"],
+                        "visual_facts": [],
+                        "visual_assumptions": [],
+                    }
+                ],
+            }
+        )
+        ped_frag1 = FakeReply.of_payload(
+            {
+                "treatment_plan": [{"source_block_id": "b1", "treatment": "TRANSLATE"}],
+                "before_you_read": [],
+                "difficulties": [
+                    {
+                        "id": "d-frag1",
+                        "anchors": [{"block_id": "b1", "quote": "used to"}],
+                        "owner_block_id": "b1",
+                        "kind": "grammar",
+                        "priority": "useful",
+                        "help_kind": "explanation",
+                        "required_points": [{"id": "p1", "description": "Конструкция used to для привычек в прошлом."}],
+                    }
+                ],
+                "before_you_read_evidence": [],
+                "reader_chapter_summary": "Harry looks at a sign.",
+            }
+        )
+        ped_frag2 = FakeReply.of_payload(
+            {
+                "treatment_plan": [{"source_block_id": "b1", "treatment": "TRANSLATE"}],
+                "before_you_read": [],
+                "difficulties": [],
+                "before_you_read_evidence": [],
+                "reader_chapter_summary": "Aunt Petunia mutters quietly.",
+            }
+        )
+        fake_llm = FakeLLMClient.replying((narr_reply_1, narr_reply_2, ped_frag1, ped_frag2))
+        st_cb = ContextBuilder(
+            content_plan_profile="content-plan-v3",
+            reader_level="a2",
+            prompt_templates=a2_templates,
+        )
+        analyze = AnalyzeChapter(
+            unit_of_work=uow,
+            llm_client=fake_llm,
+            language_detector=SimpleNamespace(probability_for_language=lambda _t, _l: 1.0),
+            retry_policy=RetryPolicy(max_attempts=2),
+            glossary_confidence_threshold=0.8,
+            max_fragment_blocks=1,
+            context_builder=st_cb,
+            staged_analysis=True,
+            id_factory=lambda: f"st-{next(unit_counter)}",
+        )
+        asyncio.run(analyze(AnalyzeChapterCommand(book_id="st-book", section_id="st-2")))
+        assert len(fake_llm.requests) == 4
+        ped_req_1, ped_req_2 = fake_llm.requests[2], fake_llm.requests[3]
+        assert "72–80%" in ped_req_1.input_text
+        assert "Уже объяснено в предыдущих фрагментах этой главы" in ped_req_2.input_text
+        assert "used to" in ped_req_2.input_text
+    finally:
+        engine.dispose()
+

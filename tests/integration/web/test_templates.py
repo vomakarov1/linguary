@@ -552,7 +552,16 @@ def test_glossary_page_marks_model_doubts(
     client: TestClient, application: Application
 ) -> None:
     candidate = glossary_candidate(model_flagged_review=True)
-    scenario = store_book(application, glossary_candidates={0: (candidate,)})
+    scenario = store_book(
+        application,
+        chapters=(
+            ("Mr. Bennet appeared once.",),
+            ("Elizabeth walked through the garden.",),
+            ("Jane read the letter quietly.",),
+            ("The carriage arrived at dusk.",),
+        ),
+        glossary_candidates={0: (candidate,)},
+    )
 
     response = client.get(f"/books/{scenario.book_id}/glossary", headers=HTML_HEADERS)
 

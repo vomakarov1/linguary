@@ -2674,7 +2674,7 @@ def test_correction_issue_and_note_id_preservation_match_normalized_typography()
 
     proposed_b1 = ProposedBlockResponse(
         block_id=b1.id,
-        translated_text="«Не жди», — прошептала она.",
+        translated_text="— Не жди, — прошептала она.",
         glossary_hints=(),
         language_notes=(
             LanguageNoteResponse(

@@ -784,18 +784,12 @@ def test_dialogue_line_breaks_rejected_if_extra_line_lacks_dash() -> None:
 
 
 def test_reader_text_policy_preserves_dialogue_newlines() -> None:
-    """A blank line between turns stays. One newline after punctuation joins.
-
-    AC-009 still accepts a dialogue line break before this policy runs. The
-    translation policy joins a single ``\\n— `` after sentence punctuation.
-    """
+    """Dialogue newlines stay intact; the policy no longer joins ``\\n— `` inline."""
     from linguary.application.reader_text import ReaderTextPolicy
 
     policy = ReaderTextPolicy()
-    assert (
-        policy.prepare("translation", "— Привет, — сказал он.\n— Как дела?")
-        == "— Привет, — сказал он. — Как дела?"
-    )
+    single = "— Привет, — сказал он.\n— Как дела?"
+    assert policy.prepare("translation", single) == single
     kept = "— Привет, — сказал он.\n\n— Как дела?"
     assert policy.prepare("translation", kept) == kept
     assert "\n" in policy.prepare("translation", kept)

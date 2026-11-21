@@ -180,7 +180,30 @@ def started_book() -> FakeUnitOfWork:
 def test_start_allowed_when_only_rare_names_undecided() -> None:
     unit_of_work = glossary_book(make_analysis_candidate())
     unit_of_work.documents.save(make_analysis_document((
-        make_analysis_section(texts=("Mr. Bennet appeared once.",)),
+        make_analysis_section(
+            section_id="section-1",
+            title="Chapter 1",
+            order=0,
+            texts=("Mr. Bennet appeared once.",),
+        ),
+        make_analysis_section(
+            section_id="section-2",
+            title="Chapter 2",
+            order=1,
+            texts=("Elizabeth walked through the garden.",),
+        ),
+        make_analysis_section(
+            section_id="section-3",
+            title="Chapter 3",
+            order=2,
+            texts=("Jane read the letter quietly.",),
+        ),
+        make_analysis_section(
+            section_id="section-4",
+            title="Chapter 4",
+            order=3,
+            texts=("The carriage arrived at dusk.",),
+        ),
     )))
     assert start(unit_of_work)(StartProcessingCommand(book_id=BOOK_ID))
 

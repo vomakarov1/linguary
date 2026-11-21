@@ -61,7 +61,7 @@ def analysis_for(profile, *, indivisible=False):
             dict(id='referent', kind='pronoun_referent', anchors=[dict(block_id='b2', start=lamp_start, end=lamp_start + 4, quote='lamp')],
                 subject_anchor=dict(block_id='b2', start=it_start, end=it_start + 2, quote='It'), value='lamp', certainty='explicit')])
     if indivisible:
-        payload['content_plan']['difficulties'][0]['anchors'].append(dict(block_id='b4', start=1, end=6, quote='Shoo!'))
+        payload['content_plan']['difficulties'][3]['anchors'].append(dict(block_id='b1', start=0, end=9, quote='Mara said'))
     return payload
 
 
