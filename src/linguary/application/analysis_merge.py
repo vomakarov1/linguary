@@ -54,6 +54,7 @@ from linguary.domain import (
     DocumentBlock,
     DomainError,
     GlossaryCandidate,
+    SupportStatus,
     TreatmentPlan,
     TreatmentPlanItem,
     glossary_key,
@@ -601,22 +602,259 @@ def _merged_plan(
     )
 
 
+_INSTRUCTION_JACCARD_THRESHOLD = 0.70
+_INSTRUCTION_CONTAINMENT_THRESHOLD = 0.85
+_MIN_INSTRUCTION_SIGNIFICANT_STEMS = 3
+
+_TY_REGISTER_FORMS = frozenset({
+    "ты", "тебя", "тебе", "тобой", "тобою",
+    "твой", "твоя", "твое", "твои", "твоего", "твоей",
+    "твоему", "твоим", "твоем", "твою", "твоих", "твоими",
+})
+_VY_REGISTER_FORMS = frozenset({
+    "вы", "вас", "вам", "вами",
+    "ваш", "ваша", "ваше", "ваши", "вашего", "вашей",
+    "вашему", "вашим", "вашем", "вашу", "ваших", "вашими",
+})
+
+_RU_INSTRUCTION_STOP_WORDS = frozenset({
+    "в", "во", "на", "за", "к", "ко", "с", "со", "у", "о", "об", "обо",
+    "от", "ото", "до", "из", "изо", "по", "под", "подо", "над", "надо",
+    "при", "про", "без", "безо", "для", "через", "между", "перед", "передо",
+    "сквозь", "среди", "возле", "около", "вокруг", "после", "кроме", "вместо", "ради",
+    "и", "а", "но", "да", "или", "либо", "ни", "не", "бы", "б", "же", "ж",
+    "ли", "ль", "то", "что", "чтобы", "чтоб", "как", "когда", "если", "хотя",
+    "пока", "потому", "поэтому", "так", "также", "тоже", "ведь", "уже", "уж",
+    "еще", "лишь", "только", "даже", "вот", "вон", "тут", "там", "здесь",
+    "где", "куда", "откуда", "зачем", "почему", "чем", "словно", "будто",
+    "я", "меня", "мне", "мной", "мною",
+    "мой", "моя", "мое", "мои", "моего", "моей", "моему", "моим", "моем", "мою", "моих", "моими",
+    "мы", "нас", "нам", "нами",
+    "наш", "наша", "наше", "наши", "нашего", "нашей", "нашему", "нашим", "нашем", "нашу", "наших", "нашими",
+    *_TY_REGISTER_FORMS,
+    *_VY_REGISTER_FORMS,
+    "он", "она", "оно", "они", "его", "ее", "их", "ему", "ей", "им",
+    "него", "нее", "них", "нему", "ней", "ним", "ними", "нем",
+    "себя", "себе", "собой", "собою",
+    "свой", "своя", "свое", "свои", "своего", "своей", "своему", "своим", "своем", "свою", "своих", "своими",
+    "это", "этот", "эта", "эти", "этого", "этой", "этому", "этим", "этом", "эту", "этих", "этими",
+    "тот", "та", "те", "того", "той", "тому", "тем", "том", "ту", "тех", "теми",
+    "кто", "кого", "кому", "кем", "ком", "чего", "чему",
+    "который", "которая", "которое", "которые", "которого", "которой", "которому",
+    "которым", "котором", "которую", "которых", "которыми",
+    "весь", "вся", "все", "всего", "всей", "всему", "всем", "всю", "всех", "всеми",
+    "сам", "сама", "само", "сами", "самого", "самому", "самим", "самом", "саму", "самих", "самими",
+    "такой", "такая", "такое", "такие", "такого", "такой", "такому", "таким", "таком", "такую", "таких", "такими",
+    "один", "одна", "одно", "одни", "одного", "одной", "одному", "одним", "одном", "одну", "одних", "одними",
+    "другой", "другая", "другое", "другие", "другого", "другому", "другим", "других",
+    "быть", "есть", "был", "была", "было", "были", "будет", "будут", "будем", "будете", "буду", "будешь",
+})
+
+_RU_DAVAT_VERB_RE = re.compile(r"^(.+?(?:д|зн|ст)а)(?:вайте|вать|вай|вая|йте|ть|й)$")
+_RU_INSTRUCTION_SUFFIXES = tuple(
+    sorted(
+        {
+            "овать", "евать", "овал", "евал", "овала", "евала", "овали", "евали",
+            "яйте", "айте", "ейте", "уйте", "юйте", "ите", "йте",
+            "яете", "аете", "еете", "яет", "ает", "еет", "иет",
+            "яют", "ают", "еют", "иют", "яем", "аем", "еем", "ием",
+            "ять", "ать", "еть", "ить", "уть", "ыть", "ть",
+            "яй", "ай", "ей", "уй", "юй", "яя", "ая", "ея", "уя", "юя",
+            "ыми", "ими", "ого", "его", "ому", "ему", "ых", "их",
+            "ую", "юю", "ой", "ый", "ий", "ое", "ее", "ые", "ие", "ым", "им", "ом", "ем",
+            "иями", "ями", "ами", "иям", "иях", "ией", "ием", "ию", "ия", "ии",
+            "ов", "ев", "ам", "ям", "ах", "ях", "ью",
+            "а", "я", "о", "е", "у", "ю", "ы", "и", "ь", "й",
+        },
+        key=lambda suffix: (-len(suffix), suffix),
+    )
+)
+
+_INSTRUCTION_NEGATION_RE = re.compile(r"(?<!\w)не(?!\w)", re.IGNORECASE)
+_INSTRUCTION_QUOTED_RE = re.compile(
+    r"«([^»\n]+)»"
+    r"|„([^“”\n]+)[“”]"
+    r"|“([^”\n]+)”"
+    r"|\"([^\"\n]+)\""
+    r"|(?<!\w)'((?:[^'\n]|(?<=\w)'(?=\w))+)'(?!\w)"
+    r"|(?<!\w)‘((?:[^’\n]|(?<=\w)’(?=\w))+)’(?!\w)"
+)
+_QUOTE_APOSTROPHE_TRANS = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
+_INSTRUCTION_PROPER_NOUN_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9'’-]*")
+_HONORIFIC_OR_INITIAL_BEFORE_DOT_RE = re.compile(
+    r"(?:^|\W)(?:Mr|Mrs|Ms|Dr|Prof|St|[A-ZА-ЯЁ])\.$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _InstructionEntry:
+    key: str
+    text: str
+    stems: frozenset[str]
+    register: frozenset[str]
+    has_negation: bool
+    quotes: frozenset[str]
+    proper_nouns: frozenset[str]
+
+
+def _stem_instruction_word(word: str) -> str:
+    """Normalizes and stems a Russian or English instruction token."""
+    normalized = word.translate(_QUOTE_APOSTROPHE_TRANS).casefold().replace("ё", "е")
+    if not any("а" <= ch <= "я" for ch in normalized):
+        return _stem_byr_word(normalized)
+    if len(normalized) >= 5 and normalized.endswith(("ся", "сь")):
+        normalized = normalized[:-2]
+    if (
+        (davat_match := _RU_DAVAT_VERB_RE.match(normalized)) is not None
+        and len(davat_match.group(1)) >= 3
+    ):
+        return davat_match.group(1)
+    for suffix in _RU_INSTRUCTION_SUFFIXES:
+        if normalized.endswith(suffix) and len(normalized) - len(suffix) >= 3:
+            return normalized[: -len(suffix)]
+    return normalized
+
+
+def _significant_instruction_stems(text: str) -> frozenset[str]:
+    """Significant word stems extracted from a translation instruction item."""
+    stems: set[str] = set()
+    for raw_word in expression_words(text):
+        word = raw_word.replace("ё", "е")
+        if word in _RU_INSTRUCTION_STOP_WORDS or word in _BYR_STOP_WORDS:
+            continue
+        stem = _stem_instruction_word(word)
+        if stem in _BYR_STOP_WORDS:
+            continue
+        stems.add(stem)
+    return frozenset(stems)
+
+
+def _instruction_register(text: str) -> frozenset[str]:
+    tags: set[str] = set()
+    for raw_word in expression_words(text):
+        word = raw_word.replace("ё", "е")
+        if word in _TY_REGISTER_FORMS:
+            tags.add("ты")
+        elif word in _VY_REGISTER_FORMS:
+            tags.add("вы")
+    return frozenset(tags)
+
+
+def _instruction_quoted_strings(text: str) -> frozenset[str]:
+    quotes: set[str] = set()
+    for match in _INSTRUCTION_QUOTED_RE.finditer(text):
+        raw_quote = next((group for group in match.groups() if group is not None), "")
+        normalized = unicodedata.normalize("NFKC", raw_quote).translate(_QUOTE_APOSTROPHE_TRANS)
+        normalized = re.sub(r"\s+", " ", normalized).strip().casefold().replace("ё", "е")
+        if normalized:
+            quotes.add(normalized)
+    return frozenset(quotes)
+
+
+def _is_sentence_or_clause_start(prefix: str) -> bool:
+    stripped = prefix.rstrip()
+    if not stripped:
+        return True
+    if stripped[-1] in '«"“„([':
+        return True
+    if stripped[-1] in "'‘" and (len(stripped) == 1 or not stripped[-2].isalnum()):
+        return True
+    core = stripped.rstrip('«"“„([ ')
+    if not core:
+        return True
+    if core[-1] in "!?:;…—–":
+        return True
+    if core[-1] == "-" and (len(core) == 1 or core[-2].isspace()):
+        return True
+    if core[-1] == ".":
+        return _HONORIFIC_OR_INITIAL_BEFORE_DOT_RE.search(core) is None
+    return False
+
+
+def _instruction_proper_nouns(text: str) -> frozenset[str]:
+    """Capitalized non-initial words (excluding ты/вы forms) in normalized stem form."""
+    proper_nouns: set[str] = set()
+    for match in _INSTRUCTION_PROPER_NOUN_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        if len(token) < 2 or not token[0].isupper():
+            continue
+        if _is_sentence_or_clause_start(text[: match.start()]):
+            continue
+        folded = token.casefold().replace("ё", "е")
+        if folded in _TY_REGISTER_FORMS or folded in _VY_REGISTER_FORMS:
+            continue
+        proper_nouns.add(_stem_instruction_word(folded))
+    return frozenset(proper_nouns)
+
+
+def _instruction_entry(text: str) -> _InstructionEntry | None:
+    cleaned = without_block_labels(text)
+    key = re.sub(r"\s+", " ", cleaned).casefold().strip(" \t.,;:!?")
+    if not key:
+        return None
+    return _InstructionEntry(
+        key=key,
+        text=cleaned,
+        stems=_significant_instruction_stems(cleaned),
+        register=_instruction_register(cleaned),
+        has_negation=bool(_INSTRUCTION_NEGATION_RE.search(cleaned)),
+        quotes=_instruction_quoted_strings(cleaned),
+        proper_nouns=_instruction_proper_nouns(cleaned),
+    )
+
+
+def _instructions_semantically_match(
+    left: _InstructionEntry, right: _InstructionEntry
+) -> bool:
+    """Whether two directives repeat the same guidance without conflicting polarity or names."""
+    if (
+        left.register != right.register
+        or left.has_negation != right.has_negation
+        or left.quotes != right.quotes
+        or left.proper_nouns != right.proper_nouns
+    ):
+        return False
+    min_stems = min(len(left.stems), len(right.stems))
+    if min_stems < _MIN_INSTRUCTION_SIGNIFICANT_STEMS:
+        return False
+    overlap = len(left.stems & right.stems)
+    union = len(left.stems | right.stems)
+    return (
+        overlap / union >= _INSTRUCTION_JACCARD_THRESHOLD
+        or overlap / min_stems >= _INSTRUCTION_CONTAINMENT_THRESHOLD
+    )
+
+
 def _merged_instructions(fragments: Sequence[FragmentAnalysis]) -> str:
     """Chapter translation instructions: fragment directives ordered by reading sequence.
 
-    Identical directives from different fragments are deduplicated: narrator voice and
-    character speech quirks are noticed in every fragment, but the chapter translator
-    only needs the directive once.
+    Exact duplicates and guarded semantic rephrasings are folded; when a later directive
+    contains an earlier one and is more complete, it replaces the earlier item in place.
     """
-    points: dict[str, str] = {}
+    entries: list[_InstructionEntry] = []
+    exact_seen: set[str] = set()
     for fragment in fragments:
         for point in _instruction_points(fragment.translation_instructions):
-            cleaned = without_block_labels(point)
-            key = re.sub(r"\s+", " ", cleaned).casefold().strip(" \t.,;:!?")
-            if key:
-                points.setdefault(key, cleaned)
+            candidate = _instruction_entry(point)
+            if candidate is None or candidate.key in exact_seen:
+                continue
+            exact_seen.add(candidate.key)
+            matched = [
+                idx
+                for idx, existing in enumerate(entries)
+                if _instructions_semantically_match(existing, candidate)
+            ]
+            if not matched:
+                entries.append(candidate)
+                continue
+            if any(len(entries[idx].stems) >= len(candidate.stems) for idx in matched):
+                continue
+            entries[matched[0]] = candidate
+            for idx in reversed(matched[1:]):
+                del entries[idx]
     return "\n".join(
-        f"{index}. {point}" for index, point in enumerate(points.values(), 1)
+        f"{index}. {entry.text}" for index, entry in enumerate(entries, 1)
     )
 
 
@@ -1884,8 +2122,57 @@ def _quoted_fact(fact: ContextFact) -> QuotedContextFactResponse:
         fact.value, fact.certainty)
 
 
+def _normalize_location(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _merge_scene_locations(
+    prev_location: str | None, first_location: str | None
+) -> str | None:
+    """Combines scene locations across a merged boundary without duplicating the tail segment."""
+    prev_loc = (prev_location or "").strip()
+    first_loc = (first_location or "").strip()
+    if not prev_loc and not first_loc:
+        return None
+    if not prev_loc:
+        return first_loc
+    if not first_loc:
+        return prev_loc
+    last_segment = prev_loc.split("→")[-1]
+    if _normalize_location(last_segment) == _normalize_location(first_loc):
+        return prev_loc
+    return f"{prev_loc} → {first_loc}"
+
+
+def _is_scene_separator_block(block: DocumentBlock) -> bool:
+    return (
+        block.support_status is SupportStatus.PRESERVE_OPAQUE
+        or block.type in (BlockType.PAGE_BREAK, BlockType.IMAGE)
+    )
+
+
+def _has_scene_separator_between(
+    prev_end_block_id: str,
+    next_start_block_id: str,
+    section_blocks: Sequence[DocumentBlock],
+    block_index_by_id: Mapping[str, int],
+) -> bool:
+    if not section_blocks:
+        return False
+    prev_idx = block_index_by_id.get(prev_end_block_id)
+    next_idx = block_index_by_id.get(next_start_block_id)
+    if prev_idx is None or next_idx is None or prev_idx >= next_idx:
+        return False
+    return any(
+        _is_scene_separator_block(block)
+        for block in section_blocks[prev_idx + 1 : next_idx]
+    )
+
+
 def merge_narrative_fragments(
     fragments: Sequence[tuple[NarrativeAnalysisResponse, tuple[Scene, ...], tuple[ContextFact, ...]]],
+    *,
+    section_blocks: Sequence[DocumentBlock] = (),
 ) -> tuple[NarrativeAnalysisResponse, tuple[Scene, ...], tuple[ContextFact, ...]]:
     """Merge validated fragments; returned quoted references use stable block IDs.
 
@@ -1899,6 +2186,7 @@ def merge_narrative_fragments(
     candidates = []
     instruction_fragments = []
     previous_had_scene = False
+    block_index_by_id = {block.id: idx for idx, block in enumerate(section_blocks)}
     for index, (raw, resolved, context_facts) in enumerate(fragments):
         instruction_fragments.append(FragmentAnalysis(index, raw.translation_instructions, raw.chapter_summary))
         for candidate in raw.glossary_candidates:
@@ -1907,19 +2195,28 @@ def merge_narrative_fragments(
         for fact in context_facts:
             facts.setdefault(fact.canonical_id, replace(fact, id=fact.canonical_id))
         current = list(resolved)
+        has_separator = (
+            previous_had_scene and bool(current)
+            and _has_scene_separator_between(
+                scenes[-1].end_block_id,
+                current[0].start_block_id,
+                section_blocks,
+                block_index_by_id,
+            )
+        )
         implicit_continuation = (
-            previous_had_scene and current
+            previous_had_scene and current and not has_separator
             and scenes[-1].location is not None and bool(scenes[-1].location.strip())
             and scenes[-1].location == current[0].location
             and bool(scenes[-1].participants)
             and set(scenes[-1].participants) == set(current[0].participants)
         )
-        if (previous_had_scene and current
+        if (previous_had_scene and current and not has_separator
                 and ((raw.scenes and raw.scenes[0].continues_previous_scene) or implicit_continuation)):
             prev, first = scenes.pop(), current.pop(0)
             merged = replace(prev, end_block_id=first.end_block_id,
                 summary=' '.join(dict.fromkeys((prev.summary, first.summary))),
-                location=prev.location or first.location,
+                location=_merge_scene_locations(prev.location, first.location),
                 participants=tuple(dict.fromkeys((*prev.participants, *first.participants))),
                 visual_facts=tuple(dict.fromkeys((*prev.visual_facts, *first.visual_facts))),
                 visual_assumptions=tuple(dict.fromkeys((*prev.visual_assumptions, *first.visual_assumptions))))

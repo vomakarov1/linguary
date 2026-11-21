@@ -481,6 +481,99 @@ def test_merged_instructions_have_no_block_labels() -> None:
     assert "b3" not in analysis.translation_instructions
 
 
+def test_merged_instructions_deduplicates_semantic_rephrasings_preserving_polarity_and_names() -> None:
+    # 1. Semantic rephrasing with >= 3 shared significant stems folds; asymmetric containment replaces in-place.
+    expected = block_ids(3)
+    folded = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            translation_instructions="Сохранять иронию рассказчика в диалогах.",
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:2],
+            translation_instructions="Передавать живой тон писем без упрощения.",
+        ),
+        make_fragment(
+            2,
+            blocks=expected[2:],
+            translation_instructions=(
+                "- В диалогах сохраняйте иронию рассказчика.\n"
+                "- Сохранять лёгкую иронию рассказчика в диалогах без потери интонации."
+            ),
+        ),
+        expected=expected,
+    )
+    assert folded.translation_instructions == (
+        "1. Сохранять лёгкую иронию рассказчика в диалогах без потери интонации.\n"
+        "2. Передавать живой тон писем без упрощения."
+    )
+
+    # 2. Guards forbid merging on register (ты/вы), negation (не), quoted strings, and mid-sentence proper nouns.
+    guarded = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            translation_instructions="\n\n".join([
+                "Обращаться к спутнику на ты в диалогах главы.",
+                "Обращаться к спутнику на вы в диалогах главы.",
+                "Передавать обращение к тебе уважительным тоном в письмах.",
+                "Передавать обращение к вам уважительным тоном в письмах.",
+                "Не сглаживать грубую разговорную речь персонажей.",
+                "Сглаживать грубую разговорную речь персонажей.",
+                "Передавать восклицание «Oh my» естественной русской репликой.",
+                "Передавать восклицание «Good grief» естественной русской репликой.",
+                "Передавать ироничный тон реплик Ника в диалогах.",
+                "Передавать ироничный тон реплик Элли в диалогах.",
+                "Передавать речь героя в доме Nick's и Allie's мягко.",
+            ]),
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:2],
+            translation_instructions="\n\n".join([
+                'Передавать восклицание "oh my" естественной русской репликой.',
+                "Передавать восклицание 'Oh my' естественной русской репликой.",
+                "В диалогах передавать ироничный тон реплик Нику.",
+                "Мягко передавать речь героя в доме Nick's и Allie's.",
+            ]),
+        ),
+        make_fragment(
+            2,
+            blocks=expected[2:],
+            translation_instructions=(
+                "Сохранять иронию: Реплики звучат сухо.\n\n"
+                "Сохранять иронию — Реплики звучат сухо."
+            ),
+        ),
+        expected=expected,
+    )
+    lines = guarded.translation_instructions.splitlines()
+    assert len(lines) == 12
+    assert "Обращаться к спутнику на ты в диалогах главы." in guarded.translation_instructions
+    assert "Обращаться к спутнику на вы в диалогах главы." in guarded.translation_instructions
+    assert "Передавать обращение к тебе уважительным тоном в письмах." in guarded.translation_instructions
+    assert "Передавать обращение к вам уважительным тоном в письмах." in guarded.translation_instructions
+    assert "Не сглаживать грубую разговорную речь персонажей." in guarded.translation_instructions
+    assert "Сглаживать грубую разговорную речь персонажей." in guarded.translation_instructions
+    assert "Передавать восклицание «Oh my» естественной русской репликой." in guarded.translation_instructions
+    assert "Передавать восклицание «Good grief» естественной русской репликой." in guarded.translation_instructions
+    assert "Передавать ироничный тон реплик Ника в диалогах." in guarded.translation_instructions
+    assert "Передавать ироничный тон реплик Элли в диалогах." in guarded.translation_instructions
+    assert "Передавать речь героя в доме Nick's и Allie's мягко." in guarded.translation_instructions
+    assert "Сохранять иронию: Реплики звучат сухо." in guarded.translation_instructions
+    assert "Сохранять иронию — Реплики звучат сухо." not in guarded.translation_instructions
+
+    # 3. Short instructions with < 3 significant stems are not collapsed.
+    short = merge(
+        make_fragment(0, blocks=expected[:1], translation_instructions="Keep instruction one."),
+        make_fragment(1, blocks=expected[1:2], translation_instructions="Keep instruction two."),
+        expected=expected[:2],
+    )
+    assert short.translation_instructions == "1. Keep instruction one.\n2. Keep instruction two."
+
+
 def test_before_you_read_deduplicated_by_normalized_expression() -> None:
     entries = (
         BeforeYouReadEntryResponse(expression="  Entailed  estate! ", explanation="первое"),

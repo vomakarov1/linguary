@@ -19,7 +19,7 @@ from linguary.application.llm_dto import (
     QuotedSourceAnchorResponse,
     TreatmentPlanItemResponse,
 )
-from linguary.domain import BlockTreatment
+from linguary.domain import BlockTreatment, BlockType, DocumentBlock, SourceReference, SupportStatus
 
 ALIASES = {'b1': 'id-1', 'b2': 'id-2', 'b3': 'id-3'}
 TEXTS = {'id-1': 'Holmes wore a red coat.', 'id-2': 'Watson opened the door.', 'id-3': 'Lestrade arrived.'}
@@ -493,3 +493,117 @@ def test_validate_narrative_collects_all_scene_quote_and_conflict_errors_in_one_
     assert 'b2' in str(bounds_exc.value)
     assert 'b5' in str(bounds_exc.value)
     assert 'b4' in str(bounds_exc.value)
+
+
+def _doc_block(
+    block_id: str,
+    order: int,
+    *,
+    block_type: BlockType = BlockType.PARAGRAPH,
+    support_status: SupportStatus = SupportStatus.SUPPORTED,
+    text: str = 'Text.',
+) -> DocumentBlock:
+    return DocumentBlock(
+        id=block_id,
+        section_id='section-1',
+        type=block_type,
+        order=order,
+        text=text,
+        source_reference=SourceReference('ch1.xhtml', f'/body/p[{order + 1}]'),
+        support_status=support_status,
+    )
+
+
+def test_merge_narrative_fragments_preserves_location_change_without_chain_duplication():
+    def frag(block_id: str, location: str | None, *, continues: bool = False):
+        raw = scene('b1', 'b1', location=location, participants=('Nick', 'Allie'), continues_previous_scene=continues)
+        resolved = resolve_scenes(
+            (raw,),
+            {'b1': block_id},
+            {block_id: 'Scene text.'},
+            {'b1': 'Scene text.'},
+            ordered_block_ids=(block_id,),
+        )
+        return NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(raw,)), resolved, ()
+
+    # 3+ fragment chain: Forest -> Road + Road -> Forest -> Road (never Forest -> Road -> Road) -> Inn
+    _, merged_chain, _ = merge_narrative_fragments([
+        frag('id-1', 'Forest'),
+        frag('id-2', 'Road', continues=True),
+        frag('id-3', '  road  ', continues=True),
+        frag('id-4', 'Inn', continues=True),
+    ])
+    assert len(merged_chain) == 1
+    assert merged_chain[0].location == 'Forest → Road → Inn'
+
+    # Empty / whitespace-only locations are ignored on both sides.
+    _, blank_prev, _ = merge_narrative_fragments([
+        frag('id-1', '   '),
+        frag('id-2', '  Road  ', continues=True),
+    ])
+    assert len(blank_prev) == 1
+    assert blank_prev[0].location == 'Road'
+
+    _, blank_next, _ = merge_narrative_fragments([
+        frag('id-1', '  Forest  '),
+        frag('id-2', '', continues=True),
+    ])
+    assert len(blank_next) == 1
+    assert blank_next[0].location == 'Forest'
+
+    _, both_blank, _ = merge_narrative_fragments([
+        frag('id-1', '   '),
+        frag('id-2', None, continues=True),
+    ])
+    assert len(both_blank) == 1
+    assert both_blank[0].location is None
+
+
+@pytest.mark.parametrize('sep_type,sep_status', [
+    (BlockType.OTHER, SupportStatus.PRESERVE_OPAQUE),
+    (BlockType.PAGE_BREAK, SupportStatus.SUPPORTED),
+    (BlockType.IMAGE, SupportStatus.SUPPORTED),
+])
+def test_merge_narrative_fragments_respects_scene_separator_blocks(sep_type, sep_status):
+    b1 = _doc_block('id-1', 0, text='Holmes entered.')
+    sep = _doc_block('id-sep', 1, block_type=sep_type, support_status=sep_status, text='')
+    b2 = _doc_block('id-2', 2, text='Watson waited.')
+    section_blocks = (b1, sep, b2)
+
+    raw1 = scene('b1', 'b1', location='Baker Street', participants=('Holmes', 'Watson'))
+    raw2_explicit = scene('b1', 'b1', location='Baker Street', participants=('Holmes', 'Watson'), continues_previous_scene=True)
+    raw2_implicit = scene('b1', 'b1', location='Baker Street', participants=('Watson', 'Holmes'), continues_previous_scene=False)
+
+    res1 = resolve_scenes((raw1,), {'b1': 'id-1'}, {'id-1': b1.text}, {'b1': b1.text}, ordered_block_ids=('id-1',))
+    res2 = resolve_scenes((raw2_explicit,), {'b1': 'id-2'}, {'id-2': b2.text}, {'b1': b2.text}, ordered_block_ids=('id-2',))
+    res2_implicit = resolve_scenes((raw2_implicit,), {'b1': 'id-2'}, {'id-2': b2.text}, {'b1': b2.text}, ordered_block_ids=('id-2',))
+
+    # Explicit continuation AND implicit continuation must both be blocked by a separator strictly between boundary blocks.
+    _, explicit_scenes, _ = merge_narrative_fragments(
+        [(NarrativeAnalysisResponse('Keep.', 'S1.', scenes=(raw1,)), res1, ()),
+         (NarrativeAnalysisResponse('Keep.', 'S2.', scenes=(raw2_explicit,)), res2, ())],
+        section_blocks=section_blocks,
+    )
+    assert len(explicit_scenes) == 2
+
+    _, implicit_scenes, _ = merge_narrative_fragments(
+        [(NarrativeAnalysisResponse('Keep.', 'S1.', scenes=(raw1,)), res1, ()),
+         (NarrativeAnalysisResponse('Keep.', 'S2.', scenes=(raw2_implicit,)), res2_implicit, ())],
+        section_blocks=section_blocks,
+    )
+    assert len(implicit_scenes) == 2
+
+    # Without a separator between boundary blocks (normal supported paragraph or section_blocks omitted), merging still works.
+    normal_mid = _doc_block('id-mid', 1, block_type=BlockType.PARAGRAPH, support_status=SupportStatus.SUPPORTED, text='Mid.')
+    _, normal_merged, _ = merge_narrative_fragments(
+        [(NarrativeAnalysisResponse('Keep.', 'S1.', scenes=(raw1,)), res1, ()),
+         (NarrativeAnalysisResponse('Keep.', 'S2.', scenes=(raw2_explicit,)), res2, ())],
+        section_blocks=(b1, normal_mid, b2),
+    )
+    assert len(normal_merged) == 1
+
+    _, compat_merged, _ = merge_narrative_fragments(
+        [(NarrativeAnalysisResponse('Keep.', 'S1.', scenes=(raw1,)), res1, ()),
+         (NarrativeAnalysisResponse('Keep.', 'S2.', scenes=(raw2_explicit,)), res2, ())]
+    )
+    assert len(compat_merged) == 1
