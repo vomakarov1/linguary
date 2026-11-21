@@ -64,18 +64,23 @@ def test_resolve_scenes_resolves_visual_fact_and_canonical_id():
     assert resolved.visual_assumptions == ('Warm lamplight',)
 
 
-@pytest.mark.parametrize('block,quote,code', [
-    ('b3', 'Lestrade', 'scene_visual_anchor_out_of_bounds'),
-    ('b1', 'blue coat', 'unresolved_quote'),
-    ('b9', 'Holmes', 'unresolved_quote'),
+@pytest.mark.parametrize('block,quote,code,expected_blocks,expected_scope', [
+    ('b3', 'Lestrade', 'scene_visual_anchor_out_of_bounds', ('id-3',), 'local'),
+    ('b1', 'blue coat', 'unresolved_quote', ('id-1',), 'local'),
+    ('b9', 'Holmes', 'unresolved_quote', (), 'global'),
 ])
-def test_resolve_scenes_rejects_invalid_visual_fact(block, quote, code):
+def test_resolve_scenes_rejects_invalid_visual_fact(block, quote, code, expected_blocks, expected_scope):
     raw = scene('b1', 'b2', visual_facts=(QuotedSceneVisualFactResponse(
         QuotedSourceAnchorResponse(block, quote), 'Visitor', 'Coat',
     ),))
     with pytest.raises(AnalysisMergeError) as exc:
         resolve((raw,))
+    assert exc.value.violation is not None
     assert exc.value.violation.rule_code == code
+    assert exc.value.violation.scope == expected_scope
+    assert exc.value.violation.block_ids == expected_blocks
+    assert block in str(exc.value)
+    assert quote in str(exc.value)
 
 
 @pytest.mark.parametrize('scenes', [(), (scene('b2', 'b3'),), (scene('b1', 'b2'),),
@@ -251,3 +256,240 @@ def test_implicit_boundary_continuation_does_not_guess_unknown_matching_setting(
     fragments = [(NarrativeAnalysisResponse('Keep voice.', 'First.', scenes=(first,)), resolve((first,)), ()),
                  (NarrativeAnalysisResponse('Keep voice.', 'Full.', scenes=(second,)), resolve((second,)), ())]
     assert len(merge_narrative_fragments(fragments)[1]) == 2
+
+
+def test_visual_facts_accept_typography_and_dash_spaces():
+    text = (
+        "Holmes wore a red coat — one’s only defense — in dead-spots. "
+        "He is tall–very tall - and calm."
+    )
+    aliases = {'b1': 'id-1'}
+    texts = {'id-1': text}
+    visible = {'b1': text}
+    raw = scene(
+        'b1',
+        'b1',
+        visual_facts=(
+            QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b1', 'RED COAT'), 'Holmes', 'Red coat'),
+            QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b1', "one's only defense"), 'Holmes', 'Defense'),
+            QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b1', "He's tall"), 'Holmes', 'Height'),
+            QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b1', 'red coat—one\'s only defense—in dead-spots'), 'Holmes', 'Dash tolerance'),
+            QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b1', 'tall - very tall—and calm'), 'Holmes', 'En-dash and spaced hyphen'),
+        ),
+    )
+    resolved, = resolve_scenes((raw,), aliases, texts, visible, ordered_block_ids=('id-1',))
+    assert [fact.anchor.quote for fact in resolved.visual_facts] == [
+        'red coat',
+        'one’s only defense',
+        'He is tall',
+        'red coat — one’s only defense — in dead-spots',
+        'tall–very tall - and calm',
+    ]
+
+    # Intra-word hyphen in quote must not match spaced dash in source text.
+    spaced_source = 'Beware of dead - spots on the floor.'
+    bad = scene(
+        'b1',
+        'b1',
+        visual_facts=(QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b1', 'dead-spots'), 'Floor', 'Danger'),),
+    )
+    with pytest.raises(AnalysisMergeError) as exc:
+        resolve_scenes((bad,), {'b1': 'id-1'}, {'id-1': spaced_source}, {'b1': spaced_source}, ordered_block_ids=('id-1',))
+    assert exc.value.violation is not None
+    assert exc.value.violation.rule_code == 'unresolved_quote'
+
+
+def test_visual_fact_error_reports_fact_block_and_quote_including_unknown_alias():
+    local_raw = scene(
+        'b1',
+        'b3',
+        visual_facts=(
+            QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b2', 'blue door'), 'Door', 'Wrong color'),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as local_exc:
+        resolve((local_raw,))
+    assert local_exc.value.violation is not None
+    assert local_exc.value.violation.rule_code == 'unresolved_quote'
+    assert local_exc.value.violation.stage == 'chapter_analysis'
+    assert local_exc.value.violation.scope == 'local'
+    assert local_exc.value.violation.block_ids == ('id-2',)
+    assert 'b2' in str(local_exc.value)
+    assert 'blue door' in str(local_exc.value)
+    assert 'id-2' not in str(local_exc.value)
+
+    unknown_raw = scene(
+        'b1',
+        'b3',
+        visual_facts=(
+            QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b9', 'Holmes'), 'Visitor', 'Unknown alias'),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as unknown_exc:
+        resolve((unknown_raw,))
+    assert unknown_exc.value.violation is not None
+    assert unknown_exc.value.violation.rule_code == 'unresolved_quote'
+    assert unknown_exc.value.violation.stage == 'chapter_analysis'
+    assert unknown_exc.value.violation.scope == 'global'
+    assert unknown_exc.value.violation.block_ids == ()
+    assert 'b9' in str(unknown_exc.value)
+    assert 'Holmes' in str(unknown_exc.value)
+
+
+def test_validate_narrative_collects_all_scene_quote_and_conflict_errors_in_one_pass():
+    aliases = {'b1': 'id-1', 'b2': 'id-2', 'b3': 'id-3', 'b4': 'id-4', 'b5': 'id-5'}
+    texts = {
+        'id-1': 'Holmes wore a red coat.',
+        'id-2': 'Watson opened the door.',
+        'id-3': 'Lestrade checked the hall.',
+        'id-4': 'Hudson brought tea.',
+        'id-5': 'Moriarty watched outside.',
+    }
+    visible = {alias: texts[block_id] for alias, block_id in aliases.items()}
+    order = ('id-1', 'id-2', 'id-3', 'id-4', 'id-5')
+
+    holmes_anchor = QuotedSourceAnchorResponse('b1', 'Holmes')
+    hudson_anchor = QuotedSourceAnchorResponse('b4', 'Hudson')
+    payload = NarrativeAnalysisResponse(
+        'Keep voice.',
+        'Summary.',
+        context_facts=(
+            QuotedContextFactResponse(
+                'f-bad-1', 'speaker',
+                (QuotedSourceAnchorResponse('b2', 'missing context quote 1'),),
+                QuotedSourceAnchorResponse('b2', 'missing context quote 1'),
+                'Watson', 'explicit',
+            ),
+            QuotedContextFactResponse(
+                'f-bad-2', 'speaker',
+                (QuotedSourceAnchorResponse('b4', 'missing context quote 2'),),
+                QuotedSourceAnchorResponse('b4', 'missing context quote 2'),
+                'Hudson', 'explicit',
+            ),
+            QuotedContextFactResponse('f-conflict-1', 'gender', (holmes_anchor,), holmes_anchor, 'male', 'explicit'),
+            QuotedContextFactResponse('f-conflict-2', 'gender', (holmes_anchor,), holmes_anchor, 'female', 'explicit'),
+            QuotedContextFactResponse('f-glossary-1', 'gender', (hudson_anchor,), hudson_anchor, 'male', 'explicit'),
+            QuotedContextFactResponse('f-glossary-2', 'gender', (QuotedSourceAnchorResponse('b5', 'Moriarty'),), QuotedSourceAnchorResponse('b5', 'Moriarty'), 'female', 'explicit'),
+        ),
+        scenes=(
+            scene(
+                'b1',
+                'b2',
+                visual_facts=(
+                    QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b1', 'missing visual quote'), 'Holmes', 'Coat'),
+                    QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b5', 'Moriarty'), 'Moriarty', 'Outside'),
+                ),
+            ),
+            scene(
+                'b4',
+                'b5',
+                visual_facts=(
+                    QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b9', 'ghost'), 'Ghost', 'Missing alias'),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(AnalysisMergeError) as exc:
+        validate_narrative_response(
+            payload,
+            aliases,
+            texts,
+            visible,
+            ordered_block_ids=order,
+            mandatory_facts={'Hudson': {'gender': 'female'}, 'Moriarty': {'gender': 'male'}},
+        )
+    message = str(exc.value)
+    assert exc.value.violation is not None
+    assert exc.value.violation.rule_code == 'scene_bounds'
+    assert exc.value.violation.scope == 'local'
+    assert set(exc.value.violation.block_ids) == {'id-1', 'id-2', 'id-3', 'id-4', 'id-5'}
+    for expected in (
+        'b3',
+        'missing visual quote',
+        'b1',
+        'Moriarty',
+        'b5',
+        'ghost',
+        'b9',
+        'missing context quote 1',
+        'b2',
+        'missing context quote 2',
+        'b4',
+        'конфликт атрибуций одного субъекта',
+        'Holmes',
+        'Hudson',
+    ):
+        assert expected in message
+
+    # Verify strict rule_code priority order across subsets:
+    # notes_only_scenes > scene_bounds > unresolved_quote > scene_visual_anchor_out_of_bounds > context_fact_conflict > glossary_fact_conflict
+    full_scenes = (scene('b1', 'b5'),)
+    with pytest.raises(AnalysisMergeError) as notes_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                context_facts=(payload.context_facts[0],),
+                scenes=full_scenes,
+            ),
+            aliases, texts, visible, ordered_block_ids=order, is_notes_only=True,
+        )
+    assert notes_exc.value.violation.rule_code == 'notes_only_scenes'
+    assert 'missing context quote 1' in str(notes_exc.value)
+
+    with pytest.raises(AnalysisMergeError) as quote_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                context_facts=(payload.context_facts[0], payload.context_facts[2], payload.context_facts[3], payload.context_facts[4]),
+                scenes=(scene('b1', 'b2', visual_facts=(QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b5', 'Moriarty'), 'Moriarty', 'Outside'),)), scene('b3', 'b5')),
+            ),
+            aliases, texts, visible, ordered_block_ids=order,
+            mandatory_facts={'Hudson': {'gender': 'female'}},
+        )
+    assert quote_exc.value.violation.rule_code == 'unresolved_quote'
+    assert 'missing context quote 1' in str(quote_exc.value)
+    assert 'Moriarty' in str(quote_exc.value)
+
+    with pytest.raises(AnalysisMergeError) as oob_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                context_facts=(payload.context_facts[2], payload.context_facts[3], payload.context_facts[4]),
+                scenes=(scene('b1', 'b2', visual_facts=(QuotedSceneVisualFactResponse(QuotedSourceAnchorResponse('b5', 'Moriarty'), 'Moriarty', 'Outside'),)), scene('b3', 'b5')),
+            ),
+            aliases, texts, visible, ordered_block_ids=order,
+            mandatory_facts={'Hudson': {'gender': 'female'}},
+        )
+    assert oob_exc.value.violation.rule_code == 'scene_visual_anchor_out_of_bounds'
+    assert 'конфликт атрибуций одного субъекта' in str(oob_exc.value)
+    assert 'Hudson' in str(oob_exc.value)
+
+    with pytest.raises(AnalysisMergeError) as conflict_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                context_facts=(payload.context_facts[2], payload.context_facts[3], payload.context_facts[4]),
+                scenes=full_scenes,
+            ),
+            aliases, texts, visible, ordered_block_ids=order,
+            mandatory_facts={'Hudson': {'gender': 'female'}},
+        )
+    assert conflict_exc.value.violation.rule_code == 'context_fact_conflict'
+    assert conflict_exc.value.violation.block_ids == ('id-1', 'id-4')
+    assert 'Holmes' in str(conflict_exc.value)
+    assert 'Hudson' in str(conflict_exc.value)
+
+    # Inverted and overlapping scenes report exact blocks.
+    with pytest.raises(AnalysisMergeError) as bounds_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                scenes=(scene('b1', 'b2'), scene('b2', 'b3'), scene('b5', 'b4')),
+            ),
+            aliases, texts, visible, ordered_block_ids=order,
+        )
+    assert bounds_exc.value.violation.rule_code == 'scene_bounds'
+    assert 'b2' in str(bounds_exc.value)
+    assert 'b5' in str(bounds_exc.value)
+    assert 'b4' in str(bounds_exc.value)

@@ -2038,3 +2038,89 @@ def test_select_staged_a2_summary_keeps_full_chapter_over_short_tail_and_handles
     )
     assert select_staged_a2_summary((), narrative_summary=narrative_summary) == ""
 
+
+def test_lenient_quote_pattern_collapses_dash_spaces_and_preserves_intra_word_hyphen() -> None:
+    from linguary.application.analysis_merge import _lenient_quote_pattern, find_quote_span
+
+    assert find_quote_span("Wait—he paused.", "Wait — he paused.") == (0, 15, "Wait—he paused.")
+    assert find_quote_span("Wait — he paused.", "Wait—he paused.") == (0, 17, "Wait — he paused.")
+    assert find_quote_span("Wait–he paused.", "Wait - he paused.") == (0, 15, "Wait–he paused.")
+    assert find_quote_span("Wait - he paused.", "Wait–he paused.") == (0, 17, "Wait - he paused.")
+    assert find_quote_span("Alpha—-Beta", "Alpha — - Beta") == (0, 11, "Alpha—-Beta")
+    assert find_quote_span("Alpha--Beta", "Alpha - - Beta") == (0, 11, "Alpha--Beta")
+
+    intra_word_pattern = _lenient_quote_pattern("dead-spots")
+    assert r"\s*" not in intra_word_pattern
+    assert find_quote_span("Avoid dead - spots there.", "dead-spots") is None
+    assert find_quote_span("Avoid dead — spots there.", "dead-spots") is None
+    assert find_quote_span("Avoid dead-spots there.", "dead - spots") == (6, 16, "dead-spots")
+
+
+def test_validate_content_plan_collects_all_unresolved_quotes_and_global_unknown_alias() -> None:
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import (
+        QuotedContentPlanResponse,
+        QuotedContextFactResponse,
+        QuotedSourceAnchorResponse,
+    )
+
+    aliases = {"b1": "block-1", "b2": "block-2"}
+    texts = {"block-1": "Holmes stayed.", "block-2": "Watson left."}
+    visible = {"b1": "Holmes stayed.", "b2": "Watson left."}
+
+    multi_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep.",
+        chapter_summary="Summary.",
+        treatment_plan=(
+            TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse("b2", BlockTreatment.TRANSLATE),
+        ),
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(
+                _difficulty("missing first", difficulty_id="d1", owner="b1"),
+                _difficulty("missing unknown", difficulty_id="d2", owner="b9"),
+            ),
+            context_facts=(
+                QuotedContextFactResponse(
+                    "f1",
+                    "speaker",
+                    (QuotedSourceAnchorResponse("b2", "missing fact"),),
+                    QuotedSourceAnchorResponse("b2", "missing fact"),
+                    "Watson",
+                    "explicit",
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as multi_exc:
+        validate_content_plan(multi_payload, aliases, texts, visible_texts_by_alias=visible)
+    assert multi_exc.value.violation is not None
+    assert multi_exc.value.violation.rule_code == "unresolved_quote"
+    assert multi_exc.value.violation.scope == "local"
+    assert multi_exc.value.violation.block_ids == ("block-1", "block-2")
+    msg = str(multi_exc.value)
+    assert "missing first" in msg
+    assert "missing unknown" in msg
+    assert "b9" in msg
+    assert "missing fact" in msg
+
+    unknown_only_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep.",
+        chapter_summary="Summary.",
+        treatment_plan=(TreatmentPlanItemResponse("b1", BlockTreatment.TRANSLATE),),
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(_difficulty("missing unknown", difficulty_id="d1", owner="b9"),),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as unknown_exc:
+        validate_content_plan(unknown_only_payload, aliases, texts, visible_texts_by_alias=visible)
+    assert unknown_exc.value.violation is not None
+    assert unknown_exc.value.violation.rule_code == "unresolved_quote"
+    assert unknown_exc.value.violation.stage == "chapter_analysis"
+    assert unknown_exc.value.violation.scope == "global"
+    assert unknown_exc.value.violation.block_ids == ()
+

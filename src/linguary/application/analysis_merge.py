@@ -52,6 +52,7 @@ from linguary.domain import (
     ChapterAnalysis,
     ConceptType,
     DocumentBlock,
+    DomainError,
     GlossaryCandidate,
     TreatmentPlan,
     TreatmentPlanItem,
@@ -109,7 +110,12 @@ def _analysis_error(
             safe_message=message,
         )
         if local_blocks
-        else None
+        else Violation(
+            rule_code,
+            "chapter_analysis",
+            scope="global",
+            safe_message=message,
+        )
     )
     return AnalysisMergeError(message, violation=violation)
 
@@ -1264,20 +1270,30 @@ def _exact_quote_spans(text: str, quote: str) -> list[tuple[int, int, str]]:
     return spans
 
 
+_QUOTE_LENIENT_TOKEN_RE = re.compile(
+    r"(?P<dash_sp>\s*(?:[—–]|(?<=\s)-(?=\s))\s*)|(?P<ws>\s+)|(?P<ch>.)",
+    re.DOTALL,
+)
+
+
 def _lenient_quote_pattern(quote: str) -> str:
     """Typography-tolerant pattern used when the quote is not an exact substring."""
     pattern_parts: list[str] = []
-    for ch in quote:
-        if ch in ("'", "’", "‘", "`"):
-            pattern_parts.append(r"['’‘`]")
-        elif ch in ('"', "“", "”", "«", "»"):
-            pattern_parts.append(r'["“”«»]')
-        elif ch in ("-", "—", "–"):
-            pattern_parts.append(r"[-—–]")
-        elif ch.isspace():
+    for match in _QUOTE_LENIENT_TOKEN_RE.finditer(quote):
+        kind = match.lastgroup
+        token = match.group(0)
+        if kind == "dash_sp":
+            pattern_parts.append(r"\s*[-—–]\s*")
+        elif kind == "ws":
             pattern_parts.append(r"\s+")
+        elif token in ("'", "’", "‘", "`"):
+            pattern_parts.append(r"['’‘`]")
+        elif token in ('"', "“", "”", "«", "»"):
+            pattern_parts.append(r'["“”«»]')
+        elif token == "-":
+            pattern_parts.append(r"[-—–]")
         else:
-            pattern_parts.append(re.escape(ch))
+            pattern_parts.append(re.escape(token))
     pattern = "".join(pattern_parts)
     pattern = re.sub(r"\b(she|he|it|that|there|what|who)(?:\\s\+is|\['’‘`\]s)\b", r"\1(?:\\s+is|['’‘`]s)", pattern, flags=re.I)
     pattern = re.sub(r"\b(I)(?:\\s\+am|\['’‘`\]m)\b", r"\1(?:\\s+am|['’‘`]m)", pattern, flags=re.I)
@@ -1348,6 +1364,262 @@ def _substance(text: str) -> str:
     return "".join(re.findall(r"\w+", without_footnote_markers(text).casefold()))
 
 
+_NARRATIVE_RULE_PRIORITY = (
+    "notes_only_scenes",
+    "scene_bounds",
+    "unresolved_quote",
+    "scene_visual_anchor_out_of_bounds",
+    "context_fact_conflict",
+    "glossary_fact_conflict",
+)
+
+
+def _format_unresolved_anchor_issue(
+    block_alias: str,
+    quote: str,
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str] | None,
+    visible_texts_by_alias: Mapping[str, str] | None,
+    aliases_by_block_id: Mapping[str, str],
+) -> tuple[str, tuple[str, ...]]:
+    """Diagnose an unresolved quoted anchor, preserving block label and quote text."""
+    diag = _diagnose_quoted_anchor(
+        block_alias, quote, aliases, texts, visible_texts_by_alias, aliases_by_block_id
+    )
+    if diag is not None:
+        block_label, preview, reason, canonical = diag
+        return f"{block_label}: «{preview}» — {reason}", canonical
+    block_id = aliases.get(block_alias)
+    block_label = aliases_by_block_id.get(block_id, block_alias) if block_id else block_alias
+    canonical = (block_id,) if block_id and texts is not None and block_id in texts else ()
+    return f"{block_label}: «{_preview_quote(quote)}» — цитата не разрешается в исходном тексте блока", canonical
+
+
+def _raise_collected_narrative_issues(
+    issues: Sequence[tuple[str, str, tuple[str, ...]]],
+) -> None:
+    """Raise one AnalysisMergeError combining all collected narrative issues."""
+    rule_code = min(
+        (code for code, _, _ in issues),
+        key=lambda code: (
+            _NARRATIVE_RULE_PRIORITY.index(code)
+            if code in _NARRATIVE_RULE_PRIORITY
+            else len(_NARRATIVE_RULE_PRIORITY)
+        ),
+    )
+    message = "; ".join(dict.fromkeys(msg for _, msg, _ in issues))
+    block_ids = tuple(dict.fromkeys(bid for _, _, bids in issues for bid in bids))
+    raise _analysis_error(message, rule_code=rule_code, block_ids=block_ids)
+
+
+def _validate_scene_visual_facts(
+    visual_facts: Sequence[QuotedSceneVisualFactResponse],
+    start_pos: int,
+    end_pos: int,
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str],
+    visible_texts_by_alias: Mapping[str, str],
+    aliases_by_block_id: Mapping[str, str],
+    positions: Mapping[str, int],
+    *,
+    blocks: Sequence[DocumentBlock] | None,
+    source_offsets: bool,
+    vf_unresolved_details: list[str],
+    vf_unresolved_blocks: list[str],
+    vf_oob_details: list[str],
+    vf_oob_blocks: list[str],
+) -> tuple[SceneVisualFact, ...]:
+    """Resolve visual facts of a scene with valid bounds using lenient quote matching."""
+    facts: list[SceneVisualFact] = []
+    for fact in visual_facts:
+        anchor = _resolve_quoted_anchor(
+            fact.anchor.block_id,
+            fact.anchor.quote,
+            aliases,
+            texts,
+            visible_texts_by_alias,
+            start=fact.anchor.start,
+            end=fact.anchor.end,
+            strict=False,
+            blocks=blocks,
+            source_offsets=source_offsets,
+        )
+        if anchor is _AMBIGUOUS:
+            continue
+        if not isinstance(anchor, SourceAnchor):
+            detail, canonical = _format_unresolved_anchor_issue(
+                fact.anchor.block_id,
+                fact.anchor.quote,
+                aliases,
+                texts,
+                visible_texts_by_alias,
+                aliases_by_block_id,
+            )
+            vf_unresolved_details.append(detail)
+            vf_unresolved_blocks.extend(bid for bid in canonical if bid in positions)
+            continue
+        if anchor.block_id not in positions or not start_pos <= positions[anchor.block_id] <= end_pos:
+            fact_label = aliases_by_block_id.get(anchor.block_id, fact.anchor.block_id)
+            vf_oob_details.append(f"{fact_label}: «{_preview_quote(anchor.quote)}»")
+            if anchor.block_id in positions:
+                vf_oob_blocks.append(anchor.block_id)
+            continue
+        facts.append(SceneVisualFact(anchor, fact.subject, fact.detail))
+    return tuple(facts)
+
+
+def _inspect_scenes(
+    scenes: Sequence[QuotedSceneResponse],
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str],
+    visible_texts_by_alias: Mapping[str, str],
+    *,
+    ordered_block_ids: Sequence[str],
+    blocks: Sequence[DocumentBlock] | None = None,
+    source_offsets: bool = False,
+    check_coverage: bool = False,
+) -> tuple[tuple[Scene, ...], list[tuple[str, str, tuple[str, ...]]]]:
+    """Resolve valid scenes and collect all bounds, coverage, and visual-fact issues."""
+    positions = {block_id: index for index, block_id in enumerate(ordered_block_ids)}
+    aliases_by_block_id = {block_id: alias for alias, block_id in aliases.items() if block_id}
+    resolved: list[Scene] = []
+    covered_positions: set[int] = set()
+    previous_end = -1
+    bounds_details: list[str] = []
+    bounds_blocks: list[str] = []
+    vf_unresolved_details: list[str] = []
+    vf_unresolved_blocks: list[str] = []
+    vf_oob_details: list[str] = []
+    vf_oob_blocks: list[str] = []
+
+    for order, raw in enumerate(scenes):
+        start, end = aliases.get(raw.start_block_id), aliases.get(raw.end_block_id)
+        start_ok = (
+            start is not None
+            and start in positions
+            and raw.start_block_id in visible_texts_by_alias
+            and start in texts
+        )
+        end_ok = (
+            end is not None
+            and end in positions
+            and raw.end_block_id in visible_texts_by_alias
+            and end in texts
+        )
+        if not start_ok or not end_ok:
+            bad_labels = tuple(
+                dict.fromkeys(
+                    label
+                    for label, ok in ((raw.start_block_id, start_ok), (raw.end_block_id, end_ok))
+                    if not ok
+                )
+            )
+            bounds_details.append(f"границы вне главы: {', '.join(bad_labels)}")
+            for block_id in (start, end):
+                if block_id in positions:
+                    bounds_blocks.append(block_id)
+            continue
+
+        start_pos, end_pos = positions[start], positions[end]
+        start_label = aliases_by_block_id.get(start, raw.start_block_id)
+        end_label = aliases_by_block_id.get(end, raw.end_block_id)
+        if start_pos > end_pos:
+            bounds_details.append(f"перевёрнутые границы: {start_label}..{end_label}")
+            bounds_blocks.extend((start, end))
+            continue
+
+        scene_range = range(start_pos, end_pos + 1)
+        overlaps = [idx for idx in scene_range if idx in covered_positions]
+        if overlaps:
+            overlap_ids = [ordered_block_ids[idx] for idx in overlaps]
+            overlap_labels = tuple(
+                dict.fromkeys(aliases_by_block_id.get(bid, bid) for bid in overlap_ids)
+            )
+            bounds_details.append(f"пересекающиеся блоки: {', '.join(overlap_labels)}")
+            bounds_blocks.extend(overlap_ids)
+        elif start_pos <= previous_end:
+            bounds_details.append(f"нарушен порядок сцен: {start_label}..{end_label}")
+            bounds_blocks.extend((start, end))
+        covered_positions.update(scene_range)
+        previous_end = max(previous_end, end_pos)
+
+        facts = _validate_scene_visual_facts(
+            raw.visual_facts,
+            start_pos,
+            end_pos,
+            aliases,
+            texts,
+            visible_texts_by_alias,
+            aliases_by_block_id,
+            positions,
+            blocks=blocks,
+            source_offsets=source_offsets,
+            vf_unresolved_details=vf_unresolved_details,
+            vf_unresolved_blocks=vf_unresolved_blocks,
+            vf_oob_details=vf_oob_details,
+            vf_oob_blocks=vf_oob_blocks,
+        )
+
+        item = Scene(
+            "pending",
+            order,
+            start,
+            end,
+            raw.summary,
+            raw.location,
+            raw.participants,
+            facts,
+            raw.visual_assumptions,
+        )
+        resolved.append(replace(item, id=item.canonical_id))
+
+    if check_coverage and ordered_block_ids:
+        missing_ids = [
+            ordered_block_ids[idx]
+            for idx in range(len(ordered_block_ids))
+            if idx not in covered_positions
+        ]
+        if missing_ids:
+            missing_labels = [aliases_by_block_id.get(bid, bid) for bid in missing_ids]
+            bounds_details.append(f"пропущены блоки: {', '.join(missing_labels)}")
+            bounds_blocks.extend(missing_ids)
+
+    issues: list[tuple[str, str, tuple[str, ...]]] = []
+    if bounds_details:
+        prefix = (
+            "карта сцен должна непрерывно покрывать все блоки главы"
+            if check_coverage
+            else "границы сцен должны принадлежать главе, идти по порядку и не пересекаться"
+        )
+        unique_bounds = tuple(dict.fromkeys(bounds_details))
+        issues.append(
+            (
+                "scene_bounds",
+                f"{prefix} ({'; '.join(unique_bounds)})",
+                tuple(dict.fromkeys(bounds_blocks)),
+            )
+        )
+    if vf_unresolved_details:
+        unique_vf = tuple(dict.fromkeys(vf_unresolved_details))
+        issues.append(
+            (
+                "unresolved_quote",
+                f"цитата визуального факта не разрешается в исходном блоке ({'; '.join(unique_vf)})",
+                tuple(dict.fromkeys(vf_unresolved_blocks)),
+            )
+        )
+    if vf_oob_details:
+        unique_oob = tuple(dict.fromkeys(vf_oob_details))
+        issues.append(
+            (
+                "scene_visual_anchor_out_of_bounds",
+                f"визуальный факт находится вне сцены ({'; '.join(unique_oob)})",
+                tuple(dict.fromkeys(vf_oob_blocks)),
+            )
+        )
+    return tuple(resolved), issues
+
+
 def resolve_scenes(
     scenes: Sequence[QuotedSceneResponse],
     aliases: Mapping[str, str],
@@ -1359,41 +1631,110 @@ def resolve_scenes(
     source_offsets: bool = False,
 ) -> tuple[Scene, ...]:
     """Resolve scene references within the visible chapter or fragment."""
-    positions = {block_id: index for index, block_id in enumerate(ordered_block_ids)}
-    resolved = []
-    previous_end = -1
-    for order, raw in enumerate(scenes):
-        start, end = aliases.get(raw.start_block_id), aliases.get(raw.end_block_id)
-        if (start not in positions or end not in positions
-                or raw.start_block_id not in visible_texts_by_alias
-                or raw.end_block_id not in visible_texts_by_alias
-                or start not in texts or end not in texts
-                or positions[start] > positions[end] or positions[start] <= previous_end):
-            raise _analysis_error(
-                'границы сцен должны принадлежать главе, идти по порядку и не пересекаться',
-                rule_code='scene_bounds', block_ids=(start, end, *ordered_block_ids),
+    resolved, issues = _inspect_scenes(
+        scenes,
+        aliases,
+        texts,
+        visible_texts_by_alias,
+        ordered_block_ids=ordered_block_ids,
+        blocks=blocks,
+        source_offsets=source_offsets,
+        check_coverage=False,
+    )
+    if issues:
+        _raise_collected_narrative_issues(issues)
+    return resolved
+
+
+def _resolve_quoted_fact_entries(
+    context_facts: Sequence[QuotedContextFactResponse],
+    aliases: Mapping[str, str],
+    texts: Mapping[str, str] | None,
+    visible_texts_by_alias: Mapping[str, str] | None,
+    aliases_by_block_id: Mapping[str, str],
+    *,
+    blocks: Sequence[DocumentBlock] | None = None,
+    source_offsets: bool = False,
+) -> tuple[
+    list[tuple[QuotedContextFactResponse, tuple[SourceAnchor, ...], SourceAnchor]],
+    list[str],
+    list[str],
+]:
+    """Resolve quoted context facts in one pass without stopping on broken anchors."""
+    resolved_facts: list[tuple[QuotedContextFactResponse, tuple[SourceAnchor, ...], SourceAnchor]] = []
+    missing_details: list[str] = []
+    missing_blocks: list[str] = []
+
+    def resolve_anchor(anchor: QuotedSourceAnchorResponse):
+        resolved = _resolve_quoted_anchor(
+            anchor.block_id,
+            anchor.quote,
+            aliases,
+            texts,
+            visible_texts_by_alias,
+            start=anchor.start,
+            end=anchor.end,
+            blocks=blocks,
+            source_offsets=source_offsets,
+        )
+        if resolved is _MISSING:
+            detail, canonical = _format_unresolved_anchor_issue(
+                anchor.block_id,
+                anchor.quote,
+                aliases,
+                texts,
+                visible_texts_by_alias,
+                aliases_by_block_id,
             )
-        facts = []
-        for fact in raw.visual_facts:
-            anchor = _resolve_quoted_anchor(
-                fact.anchor.block_id, fact.anchor.quote, aliases, texts, visible_texts_by_alias,
-                start=fact.anchor.start, end=fact.anchor.end, strict=True,
-                blocks=blocks, source_offsets=source_offsets,
-            )
-            if anchor is _AMBIGUOUS:
-                continue
-            if not isinstance(anchor, SourceAnchor):
-                raise _analysis_error('цитата визуального факта не разрешается в исходном блоке',
-                                      rule_code='unresolved_quote', block_ids=(start, end))
-            if anchor.block_id not in positions or not positions[start] <= positions[anchor.block_id] <= positions[end]:
-                raise _analysis_error('визуальный факт находится вне сцены',
-                                      rule_code='scene_visual_anchor_out_of_bounds', block_ids=(anchor.block_id,))
-            facts.append(SceneVisualFact(anchor, fact.subject, fact.detail))
-        item = Scene('pending', order, start, end, raw.summary, raw.location,
-                     raw.participants, tuple(facts), raw.visual_assumptions)
-        resolved.append(replace(item, id=item.canonical_id))
-        previous_end = positions[end]
-    return tuple(resolved)
+            missing_details.append(detail)
+            missing_blocks.extend(canonical)
+        return resolved
+
+    for fact in context_facts:
+        subject_anchor = resolve_anchor(fact.subject_anchor)
+        fact_missing = subject_anchor is _MISSING
+        kept_anchors: list[SourceAnchor] = []
+        for anchor in fact.anchors:
+            resolved = resolve_anchor(anchor)
+            if resolved is _MISSING:
+                fact_missing = True
+            elif resolved is not _AMBIGUOUS:
+                kept_anchors.append(resolved)
+        if not fact_missing and isinstance(subject_anchor, SourceAnchor) and kept_anchors:
+            resolved_facts.append((fact, tuple(kept_anchors), subject_anchor))
+    return (
+        resolved_facts,
+        list(dict.fromkeys(missing_details)),
+        list(dict.fromkeys(missing_blocks)),
+    )
+
+
+def _conflicting_subject_block_ids(facts: Sequence[ContextFact]) -> tuple[str, ...]:
+    subjects: dict[tuple[str, SourceAnchor], set[tuple[str | None, str]]] = {}
+    for fact in facts:
+        subjects.setdefault((fact.kind, fact.subject_anchor), set()).add(
+            (fact.value, fact.certainty)
+        )
+    return tuple(
+        dict.fromkeys(
+            anchor.block_id
+            for (_, anchor), values in subjects.items()
+            if len(values) > 1
+        )
+    )
+
+
+def _alias_domain_conflict_message(
+    message: str,
+    block_ids: Sequence[str],
+    aliases_by_block_id: Mapping[str, str],
+) -> str:
+    aliased = message
+    for block_id in sorted(set(block_ids), key=len, reverse=True):
+        alias = aliases_by_block_id.get(block_id)
+        if alias and alias != block_id:
+            aliased = aliased.replace(f"@{block_id}(", f"@{alias}(")
+    return aliased
 
 
 def validate_narrative_response(
@@ -1409,22 +1750,27 @@ def validate_narrative_response(
     source_offsets: bool = False,
 ) -> tuple[tuple[Scene, ...], tuple[ContextFact, ...]]:
     """Validate complete scene coverage and source-bound narrative facts."""
+    issues: list[tuple[str, str, tuple[str, ...]]] = []
     if is_notes_only and payload.scenes:
-        raise _analysis_error('служебный раздел не должен содержать сцены',
-                              rule_code='notes_only_scenes', block_ids=ordered_block_ids)
-    scenes = resolve_scenes(payload.scenes, aliases, texts, visible_texts_by_alias,
-                            ordered_block_ids=ordered_block_ids, blocks=blocks,
-                            source_offsets=source_offsets)
-    if not is_notes_only and ordered_block_ids:
-        positions = {block: index for index, block in enumerate(ordered_block_ids)}
-        next_start = 0
-        for item in scenes:
-            if positions[item.start_block_id] != next_start:
-                break
-            next_start = positions[item.end_block_id] + 1
-        if next_start != len(ordered_block_ids):
-            raise _analysis_error('карта сцен должна непрерывно покрывать все блоки главы',
-                                  rule_code='scene_bounds', block_ids=ordered_block_ids)
+        issues.append(
+            (
+                "notes_only_scenes",
+                "служебный раздел не должен содержать сцены",
+                tuple(ordered_block_ids),
+            )
+        )
+    scenes, scene_issues = _inspect_scenes(
+        payload.scenes,
+        aliases,
+        texts,
+        visible_texts_by_alias,
+        ordered_block_ids=ordered_block_ids,
+        blocks=blocks,
+        source_offsets=source_offsets,
+        check_coverage=not is_notes_only,
+    )
+    issues.extend(scene_issues)
+
     block_order = {block: index for index, block in enumerate(ordered_block_ids)}
     scoped_aliases = dict(
         sorted(
@@ -1432,23 +1778,90 @@ def validate_narrative_response(
             key=lambda item: block_order[item[1]],
         )
     )
-    response = ChapterAnalysisResponse(
-        payload.translation_instructions,
-        payload.chapter_summary,
-        glossary_candidates=payload.glossary_candidates,
-        content_plan=QuotedContentPlanResponse(
-            context_facts=payload.context_facts,
-            scenes=payload.scenes,
-        ),
+    scoped_aliases_by_block_id = {v: k for k, v in scoped_aliases.items()}
+
+    resolved_facts, cf_missing_details, cf_missing_blocks = _resolve_quoted_fact_entries(
+        payload.context_facts,
+        scoped_aliases,
+        texts,
+        visible_texts_by_alias,
+        scoped_aliases_by_block_id,
+        blocks=blocks,
+        source_offsets=source_offsets,
     )
-    plan = content_plan_from_response(response, scoped_aliases, texts,
-                                      visible_texts_by_alias=visible_texts_by_alias,
-                                      blocks=blocks, source_offsets=source_offsets,
-                                      mandatory_facts=mandatory_facts)
-    if plan is None:
-        raise _unresolved_quote_error(response, scoped_aliases, texts, visible_texts_by_alias,
-                                      {v: k for k, v in scoped_aliases.items()})
-    validate_fact_glossary(plan, mandatory_facts or {}, {v: k for k, v in scoped_aliases.items()})
+    if cf_missing_details:
+        issues.append(
+            (
+                "unresolved_quote",
+                f"цитата не разрешается однозначно в тексте блока ({'; '.join(cf_missing_details)})",
+                tuple(cf_missing_blocks),
+            )
+        )
+
+    mapped_facts = [
+        ContextFact(
+            id=fact.id,
+            kind=fact.kind,
+            anchors=anchors,
+            subject_anchor=subject_anchor,
+            value=fact.value,
+            certainty=fact.certainty,
+        )
+        for fact, anchors, subject_anchor in resolved_facts
+    ]
+    facts: list[ContextFact] = []
+    for mapped in mapped_facts:
+        mapped = _explicit_speaker_if_remark_names(
+            mapped,
+            texts,
+            blocks,
+            scenes=scenes,
+            glossary_candidates=payload.glossary_candidates,
+            context_facts=mapped_facts,
+            mandatory_facts=mandatory_facts,
+            ordered_block_ids=ordered_block_ids,
+        )
+        mapped.validate(texts)
+        facts.append(replace(mapped, id=mapped.canonical_id))
+
+    plan: ContentPlan | None = None
+    try:
+        plan = ContentPlan(
+            version=3,
+            profile="content-plan-v3",
+            context_facts=tuple(facts),
+            scenes=scenes,
+        )
+    except DomainError as error:
+        if str(error).startswith("конфликт атрибуций одного субъекта"):
+            conflict_blocks = _conflicting_subject_block_ids(facts)
+            aliased_msg = _alias_domain_conflict_message(
+                str(error), conflict_blocks, scoped_aliases_by_block_id
+            )
+            issues.append(("context_fact_conflict", aliased_msg, conflict_blocks))
+        elif issues:
+            issues.append(("content_plan", str(error), ()))
+        else:
+            raise
+
+    glossary_details, glossary_blocks = _collect_glossary_fact_conflicts(
+        facts if plan is None else plan.context_facts,
+        mandatory_facts or {},
+        scoped_aliases_by_block_id,
+    )
+    if glossary_details:
+        issues.append(
+            (
+                "glossary_fact_conflict",
+                "контекстная атрибуция противоречит обязательному решению глоссария "
+                f"({'; '.join(glossary_details)})",
+                tuple(glossary_blocks),
+            )
+        )
+
+    if issues:
+        _raise_collected_narrative_issues(issues)
+    assert plan is not None
     return scenes, plan.context_facts
 
 
@@ -1595,21 +2008,18 @@ def content_plan_from_response(
                 dropped_difficulty_ids.add(difficulty.id)
                 continue
             resolved_difficulties.append((difficulty, anchors, owner_block_id))
-        for fact in payload.content_plan.context_facts:
-            anchors = _bind_quoted_anchors(
-                fact.anchors, aliases, texts, visible_texts_by_alias,
-                blocks=blocks, source_offsets=source_offsets,
-            )
-            subject_anchor = _resolve_quoted_anchor(
-                fact.subject_anchor.block_id, fact.subject_anchor.quote, aliases, texts,
-                visible_texts_by_alias, start=fact.subject_anchor.start, end=fact.subject_anchor.end,
-                blocks=blocks, source_offsets=source_offsets,
-            )
-            if anchors is _MISSING or subject_anchor is _MISSING:
-                return None
-            if subject_anchor is _AMBIGUOUS or not anchors:
-                continue
-            resolved_facts.append((fact, anchors, subject_anchor))
+        aliases_by_block_id = {bid: alias for alias, bid in aliases.items() if bid}
+        resolved_facts, missing_fact_details, _ = _resolve_quoted_fact_entries(
+            payload.content_plan.context_facts,
+            aliases,
+            texts,
+            visible_texts_by_alias,
+            aliases_by_block_id,
+            blocks=blocks,
+            source_offsets=source_offsets,
+        )
+        if missing_fact_details:
+            return None
 
     difficulties = []
     ids = {}
@@ -2054,40 +2464,46 @@ def _unresolved_quote_error(
 ) -> AnalysisMergeError:
     prefix = "цитата не разрешается однозначно в тексте блока"
     plan = payload.content_plan
+    details: list[str] = []
+    block_ids: list[str] = []
     if isinstance(plan, QuotedContentPlanResponse):
+        anchors_to_check: list[QuotedSourceAnchorResponse] = []
         for difficulty in plan.difficulties:
-            if aliases.get(difficulty.owner_block_id) is None:
-                sample = difficulty.anchors[0].quote if difficulty.anchors else difficulty.id
-                msg = f"{prefix} ({difficulty.owner_block_id}: «{_preview_quote(sample)}» — неизвестный блок-владелец трудности)"
-                return _analysis_error(msg, rule_code="unresolved_quote")
-            for anchor in difficulty.anchors:
-                diag = _diagnose_quoted_anchor(
-                    anchor.block_id,
-                    anchor.quote,
-                    aliases,
-                    texts,
-                    visible_texts_by_alias,
-                    aliases_by_block_id,
+            owner_missing = aliases.get(difficulty.owner_block_id) is None
+            sample = difficulty.anchors[0].quote if difficulty.anchors else difficulty.id
+            if owner_missing:
+                details.append(
+                    f"{difficulty.owner_block_id}: «{_preview_quote(sample)}» — неизвестный блок-владелец трудности"
                 )
-                if diag is not None:
-                    block_label, preview, reason, canonical = diag
-                    msg = f"{prefix} ({block_label}: «{preview}» — {reason})"
-                    return _analysis_error(msg, rule_code="unresolved_quote", block_ids=canonical)
+            for idx, anchor in enumerate(difficulty.anchors):
+                if (
+                    owner_missing
+                    and idx == 0
+                    and anchor.block_id == difficulty.owner_block_id
+                    and anchor.quote == sample
+                ):
+                    continue
+                anchors_to_check.append(anchor)
         for fact in plan.context_facts:
-            for anchor in (fact.subject_anchor, *fact.anchors):
-                diag = _diagnose_quoted_anchor(
-                    anchor.block_id,
-                    anchor.quote,
-                    aliases,
-                    texts,
-                    visible_texts_by_alias,
-                    aliases_by_block_id,
-                )
-                if diag is not None:
-                    block_label, preview, reason, canonical = diag
-                    msg = f"{prefix} ({block_label}: «{preview}» — {reason})"
-                    return _analysis_error(msg, rule_code="unresolved_quote", block_ids=canonical)
-    return AnalysisMergeError(prefix)
+            anchors_to_check.extend((fact.subject_anchor, *fact.anchors))
+        for anchor in anchors_to_check:
+            diag = _diagnose_quoted_anchor(
+                anchor.block_id,
+                anchor.quote,
+                aliases,
+                texts,
+                visible_texts_by_alias,
+                aliases_by_block_id,
+            )
+            if diag is not None:
+                block_label, preview, reason, canonical = diag
+                details.append(f"{block_label}: «{preview}» — {reason}")
+                block_ids.extend(canonical)
+    unique_details = tuple(dict.fromkeys(details))
+    if unique_details:
+        msg = f"{prefix} ({'; '.join(unique_details)})"
+        return _analysis_error(msg, rule_code="unresolved_quote", block_ids=block_ids)
+    return _analysis_error(prefix, rule_code="unresolved_quote")
 
 
 def validate_content_plan(
@@ -2306,19 +2722,18 @@ def _extract_gender(note: str | None) -> str | None:
     return None
 
 
-def validate_fact_glossary(
-    plan,
-    mandatory_facts,
+def _collect_glossary_fact_conflicts(
+    context_facts: Sequence[ContextFact],
+    mandatory_facts: Mapping[str, Mapping[str, str]],
     aliases_by_block_id: Mapping[str, str] | None = None,
-):
-    """Reject explicit contradictions with structured mandatory glossary decisions."""
-    if plan is None or plan.version != 3:
-        return
+) -> tuple[list[str], list[str]]:
     normalized_mandatory = {
         glossary_key(k): v for k, v in mandatory_facts.items()
     }
     alias_map = aliases_by_block_id or {}
-    for fact in plan.context_facts:
+    details: list[str] = []
+    block_ids: list[str] = []
+    for fact in context_facts:
         expected = normalized_mandatory.get(
             glossary_key(fact.subject_anchor.quote), {}
         ).get(fact.kind)
@@ -2333,15 +2748,32 @@ def validate_fact_glossary(
         if has_conflict:
             block_id = fact.subject_anchor.block_id
             label = alias_map.get(block_id, block_id)
-            msg = (
-                "контекстная атрибуция противоречит обязательному решению глоссария "
-                f"({label}: «{_preview_quote(fact.subject_anchor.quote)}»)"
-            )
-            raise _analysis_error(
-                msg,
-                rule_code="glossary_fact_conflict",
-                block_ids=(block_id,),
-            )
+            details.append(f"{label}: «{_preview_quote(fact.subject_anchor.quote)}»")
+            block_ids.append(block_id)
+    return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
+
+
+def validate_fact_glossary(
+    plan,
+    mandatory_facts,
+    aliases_by_block_id: Mapping[str, str] | None = None,
+):
+    """Reject explicit contradictions with structured mandatory glossary decisions."""
+    if plan is None or plan.version != 3:
+        return
+    details, block_ids = _collect_glossary_fact_conflicts(
+        plan.context_facts, mandatory_facts, aliases_by_block_id
+    )
+    if details:
+        msg = (
+            "контекстная атрибуция противоречит обязательному решению глоссария "
+            f"({'; '.join(details)})"
+        )
+        raise _analysis_error(
+            msg,
+            rule_code="glossary_fact_conflict",
+            block_ids=block_ids,
+        )
 
 
 # ’ inside a word (Don’t, car’s), before a word (’em), or after a word when a
