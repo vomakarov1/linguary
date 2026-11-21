@@ -180,19 +180,26 @@ def test_merge_fragments_normalizes_repeated_local_aliases_before_assembly():
     assert len(plan.context_facts) == 2
 
 
-@pytest.mark.parametrize('source,quote', [
-    ('Holmes wore a red coat.', 'RED COAT'),
-    ('He is tall.', "He's tall."),
-    ('Holmes wore a red coat.', '!red coat!'),
+@pytest.mark.parametrize('source,visible_text,quote', [
+    ('Holmes wore a red coat.', 'RED COAT', 'RED COAT'),
+    ('RED COAT', 'Holmes wore a red coat.', 'RED COAT'),
+    ('He is tall.', "He's tall.", "He's tall."),
+    ('Holmes wore a red coat.', '!red coat!', '!red coat!'),
+    ('Holmes wore a red coat.', 'Holmes wore a red coat.', 'red! coat'),
+    ('Holmes wore a red coat.', 'Holmes wore a red coat.', 'blue coat'),
 ])
-@pytest.mark.parametrize('imprecise_view', ['source', 'visible'])
-def test_visual_facts_require_verbatim_quotes_in_both_views(source, quote, imprecise_view):
-    texts = {'id-1': source if imprecise_view == 'source' else quote}
-    visible = {'b1': source if imprecise_view == 'visible' else quote}
+def test_visual_facts_reject_unaligned_views_and_non_typographic_mismatch(source, visible_text, quote):
     raw = scene('b1', 'b1', visual_facts=(QuotedSceneVisualFactResponse(
         QuotedSourceAnchorResponse('b1', quote), 'Visitor', 'A detail'),))
     with pytest.raises(AnalysisMergeError) as exc:
-        resolve_scenes((raw,), {'b1': 'id-1'}, texts, visible, ordered_block_ids=('id-1',))
+        resolve_scenes(
+            (raw,),
+            {'b1': 'id-1'},
+            {'id-1': source},
+            {'b1': visible_text},
+            ordered_block_ids=('id-1',),
+        )
+    assert exc.value.violation is not None
     assert exc.value.violation.rule_code == 'unresolved_quote'
 
 
@@ -350,6 +357,7 @@ def test_validate_narrative_collects_all_scene_quote_and_conflict_errors_in_one_
 
     holmes_anchor = QuotedSourceAnchorResponse('b1', 'Holmes')
     hudson_anchor = QuotedSourceAnchorResponse('b4', 'Hudson')
+    lestrade_anchor = QuotedSourceAnchorResponse('b3', 'Lestrade')
     payload = NarrativeAnalysisResponse(
         'Keep voice.',
         'Summary.',
@@ -369,7 +377,7 @@ def test_validate_narrative_collects_all_scene_quote_and_conflict_errors_in_one_
             QuotedContextFactResponse('f-conflict-1', 'gender', (holmes_anchor,), holmes_anchor, 'male', 'explicit'),
             QuotedContextFactResponse('f-conflict-2', 'gender', (holmes_anchor,), holmes_anchor, 'female', 'explicit'),
             QuotedContextFactResponse('f-glossary-1', 'gender', (hudson_anchor,), hudson_anchor, 'male', 'explicit'),
-            QuotedContextFactResponse('f-glossary-2', 'gender', (QuotedSourceAnchorResponse('b5', 'Moriarty'),), QuotedSourceAnchorResponse('b5', 'Moriarty'), 'female', 'explicit'),
+            QuotedContextFactResponse('f-glossary-2', 'gender', (lestrade_anchor,), lestrade_anchor, 'female', 'explicit'),
         ),
         scenes=(
             scene(
@@ -397,7 +405,7 @@ def test_validate_narrative_collects_all_scene_quote_and_conflict_errors_in_one_
             texts,
             visible,
             ordered_block_ids=order,
-            mandatory_facts={'Hudson': {'gender': 'female'}, 'Moriarty': {'gender': 'male'}},
+            mandatory_facts={'Hudson': {'gender': 'female'}, 'Lestrade': {'gender': 'male'}},
         )
     message = str(exc.value)
     assert exc.value.violation is not None
@@ -418,7 +426,11 @@ def test_validate_narrative_collects_all_scene_quote_and_conflict_errors_in_one_
         'b4',
         'конфликт атрибуций одного субъекта',
         'Holmes',
+        'контекстная атрибуция противоречит обязательному решению глоссария',
+        'b4: «Hudson»',
+        'b3: «Lestrade»',
         'Hudson',
+        'Lestrade',
     ):
         assert expected in message
 

@@ -764,6 +764,7 @@ async def test_everlost_a2_summary_and_validation_retry_end_to_end(
         assert "b5: «missing compass»" in repair_1
         assert "gender@b4('Allie'): male/explicit vs female/explicit" in repair_1
         assert "b6: «Lief»" in repair_1
+        assert "Nick—pale and translucent" not in repair_1
         for block in section_blocks:
             assert block.id not in repair_1
 

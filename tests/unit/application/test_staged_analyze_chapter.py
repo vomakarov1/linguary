@@ -3892,8 +3892,3 @@ async def test_staged_narrative_retry_translates_all_error_blocks_to_aliases_wit
     for block in blocks:
         assert block.id not in str(worded)
         assert block.id not in worded.violation.safe_message
-
-
-
-
-

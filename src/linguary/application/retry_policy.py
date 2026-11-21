@@ -352,6 +352,14 @@ def build_repair_instruction(
 
     Lists expected `block_id`s, expected treatment modes, and target language — the aspects
     in which model output diverged from request. Appended to the original prompt.
+
+    When `stage` is in `_ANALYSIS_STAGES`, `rule_code == "scene_bounds"`, or every expected
+    block has `treatment is None`, analysis-stage repair wording replaces translation-stage
+    array instructions: `rule_code == "scene_bounds"` requests continuous non-overlapping
+    scenes across the visible block range (`first..last`), conversation turns with
+    `local_block_ids` on > 4 blocks target only affected non-context blocks, and broader
+    failures on > 4 blocks reference the visible block range (`first..last`) instead of
+    enumerating every block.
     """
     lines = ["Уточнение к предыдущему запросу: предыдущий ответ отклонён проверкой."]
     if violation and violation.strip():

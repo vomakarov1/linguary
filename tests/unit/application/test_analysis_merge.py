@@ -574,6 +574,80 @@ def test_merged_instructions_deduplicates_semantic_rephrasings_preserving_polari
     assert short.translation_instructions == "1. Keep instruction one.\n2. Keep instruction two."
 
 
+def test_merged_instructions_lowercase_russian_abbreviations_do_not_block_dedup_while_initials_and_honorifics_do() -> None:
+    expected = block_ids(2)
+
+    # Lowercase Russian abbreviations ("и т. д.", "и т. п.") end a sentence/clause:
+    # the next capitalized word ("Передавай...") must not be misclassified as a proper noun.
+    ru_abbrev = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            translation_instructions=(
+                "Сохранять детали быта, титулы и т. д. "
+                "Передавай живую разговорную речь героев."
+            ),
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:],
+            translation_instructions=(
+                "Сохранять детали быта, титулы и т. д. "
+                "В диалогах передавай живую разговорную речь героев."
+            ),
+        ),
+        expected=expected,
+    )
+    assert ru_abbrev.translation_instructions == (
+        "1. Сохранять детали быта, титулы и т. д. "
+        "В диалогах передавай живую разговорную речь героев."
+    )
+
+    ru_tp = merge(
+        make_fragment(
+            0,
+            blocks=expected[:1],
+            translation_instructions=(
+                "Учитывать бытовые детали, прозвища и т. п. "
+                "Передавай живой тон диалогов."
+            ),
+        ),
+        make_fragment(
+            1,
+            blocks=expected[1:],
+            translation_instructions=(
+                "Учитывать бытовые детали, прозвища и т. п. "
+                "В диалогах передавай живой тон."
+            ),
+        ),
+        expected=expected,
+    )
+    assert len(ru_tp.translation_instructions.splitlines()) == 1
+
+    # Real uppercase initials ("J. Smith") and honorifics ("Mr. Smith", "mr. Smith")
+    # must still prevent sentence-start reset so distinct names are not merged.
+    for pair in (
+        (
+            "Сохранять сдержанный тон реплик в сценах. J. Smith говорит кратко в диалогах.",
+            "Сохранять сдержанный тон реплик в сценах. J. Brown говорит кратко в диалогах.",
+        ),
+        (
+            "Сохранять сдержанный тон реплик в сценах. Mr. Smith говорит кратко в диалогах.",
+            "Сохранять сдержанный тон реплик в сценах. Mr. Brown говорит кратко в диалогах.",
+        ),
+        (
+            "Сохранять сдержанный тон реплик в сценах. mr. Smith говорит кратко в диалогах.",
+            "Сохранять сдержанный тон реплик в сценах. mr. Brown говорит кратко в диалогах.",
+        ),
+    ):
+        preserved = merge(
+            make_fragment(0, blocks=expected[:1], translation_instructions=pair[0]),
+            make_fragment(1, blocks=expected[1:], translation_instructions=pair[1]),
+            expected=expected,
+        )
+        assert len(preserved.translation_instructions.splitlines()) == 2
+
+
 def test_before_you_read_deduplicated_by_normalized_expression() -> None:
     entries = (
         BeforeYouReadEntryResponse(expression="  Entailed  estate! ", explanation="первое"),

@@ -644,7 +644,7 @@ _RU_INSTRUCTION_STOP_WORDS = frozenset({
     "которым", "котором", "которую", "которых", "которыми",
     "весь", "вся", "все", "всего", "всей", "всему", "всем", "всю", "всех", "всеми",
     "сам", "сама", "само", "сами", "самого", "самому", "самим", "самом", "саму", "самих", "самими",
-    "такой", "такая", "такое", "такие", "такого", "такой", "такому", "таким", "таком", "такую", "таких", "такими",
+    "такой", "такая", "такое", "такие", "такого", "такому", "таким", "таком", "такую", "таких", "такими",
     "один", "одна", "одно", "одни", "одного", "одной", "одному", "одним", "одном", "одну", "одних", "одними",
     "другой", "другая", "другое", "другие", "другого", "другому", "другим", "других",
     "быть", "есть", "был", "была", "было", "были", "будет", "будут", "будем", "будете", "буду", "будешь",
@@ -682,8 +682,7 @@ _INSTRUCTION_QUOTED_RE = re.compile(
 _QUOTE_APOSTROPHE_TRANS = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
 _INSTRUCTION_PROPER_NOUN_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё0-9'’-]*")
 _HONORIFIC_OR_INITIAL_BEFORE_DOT_RE = re.compile(
-    r"(?:^|\W)(?:Mr|Mrs|Ms|Dr|Prof|St|[A-ZА-ЯЁ])\.$",
-    re.IGNORECASE,
+    r"(?:^|\W)(?:(?i:Mr|Mrs|Ms|Dr|Prof|St)|[A-ZА-ЯЁ])\.$",
 )
 
 
@@ -886,7 +885,7 @@ def _merged_summary(fragments: Sequence[FragmentAnalysis]) -> str:
     )
 
 
-def _dominant_script(text: str) -> str | None:
+def dominant_script(text: str) -> str | None:
     """Dominant Unicode script name among alphabetic characters, or None if none."""
     counts: dict[str, int] = {}
     for char in text:
@@ -932,13 +931,13 @@ def select_staged_a2_summary(
     if not candidates:
         return ""
 
-    narrative_script = _dominant_script(narrative_summary)
+    narrative_script = dominant_script(narrative_summary)
     narrative_stems = _significant_summary_stems(narrative_summary)
 
     best_overlap: tuple[int, int, str] | None = None
     if narrative_stems:
         for index, summary in candidates:
-            candidate_script = _dominant_script(summary)
+            candidate_script = dominant_script(summary)
             if narrative_script is not None and candidate_script != narrative_script:
                 continue
             overlap = len(narrative_stems & _significant_summary_stems(summary))
@@ -951,7 +950,7 @@ def select_staged_a2_summary(
 
     best_fallback: tuple[bool, int, int, int, str] | None = None
     for index, summary in candidates:
-        candidate_script = _dominant_script(summary)
+        candidate_script = dominant_script(summary)
         script_matches = narrative_script is not None and candidate_script == narrative_script
         word_count = len(expression_words(summary))
         collapsed_len = len(" ".join(summary.split()))
@@ -1477,6 +1476,7 @@ __all__ = [
     "before_you_read_entries",
     "deduplicate_book_before_you_read",
     "content_plan_from_response",
+    "dominant_script",
     "find_quote_span",
     "glossary_context_constraints",
     "sanitize_before_you_read_explanation",

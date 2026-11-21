@@ -3,7 +3,7 @@ from dataclasses import replace
 import re
 import unicodedata
 
-from linguary.application.analysis_merge import _dominant_script
+from linguary.application.analysis_merge import dominant_script
 from linguary.application.ports.language_detection import LanguageDetector
 from linguary.application.retry_policy import ResultValidationError
 from linguary.domain import BlockProcessingResult
@@ -115,8 +115,8 @@ def validate_a2_summary(
             ),
         )
     paragraph = non_empty[0]
-    source_script = _dominant_script(' '.join(source_texts))
-    summary_script = _dominant_script(paragraph)
+    source_script = dominant_script(' '.join(source_texts))
+    summary_script = dominant_script(paragraph)
     if source_script is not None and summary_script != source_script:
         raise ReaderTextError(
             'a2_summary_requires_single_source_paragraph',
@@ -186,8 +186,8 @@ def _validate_legacy_parallel_a2_summary(
                 '(абзац 1 — язык оригинала, абзац 2 — перевод на русский)'
             ),
         )
-    source_script = _dominant_script(' '.join(source_texts))
-    summary_script = _dominant_script(paragraphs[0])
+    source_script = dominant_script(' '.join(source_texts))
+    summary_script = dominant_script(paragraphs[0])
     if source_script is not None and summary_script != source_script:
         raise ReaderTextError(
             'a2_summary_requires_parallel_russian',
