@@ -16,6 +16,7 @@ PRONUNCIATION_VERSIONS = {'selection_policy': 2, 'form_rules': 1,
     'source': 'ipa-dict@972cd67dd5f96bc5660e28070cde26e3928abcd7:parser-1'}
 A2_CONTENT_PLAN_VERSIONS = {'runtime': 1, 'context_builder': 3, 'validators': 4, 'schemas': 3, 'prompts': 3}
 A2_CONTENT_PLAN_V5_VERSIONS = {'runtime': 1, 'context_builder': 3, 'validators': 4, 'schemas': 5, 'prompts': 5}
+A2_CONTENT_PLAN_V6_VERSIONS = {'runtime': 1, 'context_builder': 4, 'validators': 4, 'schemas': 5, 'prompts': 6}
 
 
 class ConditionsError(LLMConfigurationError):
@@ -145,12 +146,13 @@ class BookConditionsService:
         payload['english_help'] = english_help
         if english_help:
             payload['profile'] = 'content-plan-v3'
-            payload['versions'] = {'runtime': 1, 'context_builder': 3, 'validators': 3,
-                'schemas': 4 if continue_legacy else 5, 'prompts': 4 if continue_legacy else 5}
+            payload['versions'] = {'runtime': 1, 'context_builder': 3 if continue_legacy else 4,
+                'validators': 3, 'schemas': 4 if continue_legacy else 5,
+                'prompts': 4 if continue_legacy else 6}
         profile = payload.get('profile', 'legacy-v1')
         if payload['reader_level'] == 'a2' and not continue_legacy:
             if profile == 'legacy-v1' and not english_help:
-                payload['versions'] = dict(A2_CONTENT_PLAN_V5_VERSIONS)
+                payload['versions'] = dict(A2_CONTENT_PLAN_V6_VERSIONS)
             else:
                 payload['versions'] = {**payload['versions'], 'validators': 4}
         elif continue_legacy and not english_help:

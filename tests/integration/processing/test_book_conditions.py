@@ -157,8 +157,15 @@ async def test_explicit_english_help_conditions_are_revision_pinned(tmp_path, le
         conditions = choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, english_help=True, reader_level=level)
         assert conditions.payload['english_help'] is True
         assert conditions.payload['reader_level'] == level
-        assert conditions.payload['versions']['schemas'] == 5
-        assert conditions.payload['versions']['prompts'] == 5
+        assert conditions.payload['versions'] == {
+            'runtime': 1,
+            'context_builder': 4,
+            'validators': 4 if level == 'a2' else 3,
+            'schemas': 5,
+            'prompts': 6,
+        }
+        assert conditions.payload['prompt_templates']['analysis_contract_version'] == 5
+        app.book_runtime.settings_for(conditions)
         with pytest.raises(ConditionsError, match='conditions_revision_conflict'):
             choice('book-1', action='reanalyze', expected_revision=0, settings_revision=0, confirmed=True, english_help=False)
         assert app.book_conditions.require('book-1').id == conditions.id
@@ -676,7 +683,7 @@ async def test_staged_runtime_uses_pinned_models_and_reuses_narrative_on_reanaly
         if kind == 'chapter_analysis_narrative':
             payload = dict(translation_instructions='Keep the voice.', chapter_summary='The cat sat.',
                 glossary_candidates=[], context_facts=[], scenes=[dict(start_block_id='b1',
-                    end_block_id='b1', summary='The cat sits.', location=None, participants=[],
+                    end_block_id='b1', summary='Кот сидит.', location=None, participants=[],
                     visual_facts=[], visual_assumptions=[])])
         elif kind == 'chapter_analysis_pedagogical':
             payload = dict(treatment_plan=[dict(source_block_id='b1', treatment='READ_AS_IS')],
@@ -798,3 +805,109 @@ async def test_continue_legacy_with_current_opt_in_keeps_single_pass(tmp_path, h
         assert stats['passes']['narrative']['calls'] == stats['passes']['pedagogical']['calls'] == 0
     finally:
         await app.aclose()
+
+
+async def test_a2_and_continue_legacy_conditions_versions_preserve_backward_compatibility(tmp_path):
+    from linguary.application.book_conditions import (
+        A2_CONTENT_PLAN_VERSIONS,
+        A2_CONTENT_PLAN_V5_VERSIONS,
+        A2_CONTENT_PLAN_V6_VERSIONS,
+    )
+    from linguary.composition.book_runtime import effective_content_plan_profile
+    from linguary.domain.book_conditions import thaw
+
+    app = make_app(tmp_path / 'main')
+    try:
+        store_imported(app)
+        choice = ChooseBookConditions(app.book_conditions, app.book_runtime)
+
+        # B2 on legacy-v1 stays 1/1/1/1
+        b2_legacy = choice(
+            'book-1',
+            action='reanalyze',
+            expected_revision=0,
+            settings_revision=0,
+            confirmed=True,
+            reader_level='b2',
+            english_help=False,
+        )
+        assert b2_legacy.payload['profile'] == 'legacy-v1'
+        assert b2_legacy.payload['versions'] == {
+            'runtime': 1,
+            'context_builder': 1,
+            'validators': 1,
+            'schemas': 1,
+            'prompts': 1,
+        }
+        assert effective_content_plan_profile(b2_legacy) == 'legacy-v1'
+        app.book_runtime.settings_for(b2_legacy)
+
+        # A2 on legacy-v1 without english_help gets A2_CONTENT_PLAN_V6_VERSIONS
+        a2_v6 = choice(
+            'book-1',
+            action='reanalyze',
+            expected_revision=1,
+            settings_revision=0,
+            confirmed=True,
+            reader_level='a2',
+            english_help=False,
+        )
+        assert a2_v6.payload['profile'] == 'legacy-v1'
+        assert a2_v6.payload['versions'] == A2_CONTENT_PLAN_V6_VERSIONS
+        assert a2_v6.payload['prompt_templates']['analysis_contract_version'] == 5
+        assert effective_content_plan_profile(a2_v6) == 'content-plan-v3'
+        app.book_runtime.settings_for(a2_v6)
+
+        # Historical v5 A2 snapshot on legacy-v1 remains reproducible
+        a2_v5_payload = thaw(a2_v6.payload)
+        a2_v5_payload['versions'] = dict(A2_CONTENT_PLAN_V5_VERSIONS)
+        a2_v5 = replace(a2_v6, payload=a2_v5_payload)
+        assert effective_content_plan_profile(a2_v5) == 'content-plan-v3'
+        app.book_runtime.settings_for(a2_v5)
+    finally:
+        await app.aclose()
+
+    # continue_legacy with english_help in BookConditionsService.create preserves 3/3/4/4
+    app_help = make_app(tmp_path / 'legacy_help')
+    try:
+        store_imported(app_help)
+        with app_help.unit_of_work.transaction() as tx:
+            book = tx.books.get('book-1')
+            legacy_help = app_help.book_conditions.create(
+                tx,
+                book,
+                0,
+                english_help=True,
+                continue_legacy=True,
+                reader_level='b2',
+            )
+        assert legacy_help.payload['profile'] == 'content-plan-v3'
+        assert legacy_help.payload['versions'] == {
+            'runtime': 1,
+            'context_builder': 3,
+            'validators': 3,
+            'schemas': 4,
+            'prompts': 4,
+        }
+    finally:
+        await app_help.aclose()
+
+    # continue_legacy with A2 on legacy-v1 preserves A2_CONTENT_PLAN_VERSIONS (3/4/3/3)
+    app_a2 = make_app(tmp_path / 'legacy_a2')
+    try:
+        store_imported(app_a2)
+        legacy_a2 = ChooseBookConditions(app_a2.book_conditions, app_a2.book_runtime)(
+            'book-1',
+            action='continue_legacy',
+            expected_revision=0,
+            settings_revision=0,
+            confirmed=True,
+            english_help=False,
+            reader_level='a2',
+        )
+        assert legacy_a2.payload['profile'] == 'legacy-v1'
+        assert legacy_a2.payload['versions'] == A2_CONTENT_PLAN_VERSIONS
+        assert effective_content_plan_profile(legacy_a2) == 'content-plan-v3'
+        app_a2.book_runtime.settings_for(legacy_a2)
+    finally:
+        await app_a2.aclose()

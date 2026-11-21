@@ -10,7 +10,8 @@ from uuid import uuid4
 from linguary.adapters.config.settings import LLMSettings, ReadingSettings, CheckSettings, RecoverySettings
 from linguary.adapters.pronunciation.source import DisabledPronunciationSource, IpaDictPronunciationSource, SOURCE_VERSION
 from linguary.application.book_conditions import (
-    A2_CONTENT_PLAN_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS, ConditionsError, payload_digest,
+    A2_CONTENT_PLAN_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS, A2_CONTENT_PLAN_V6_VERSIONS,
+    ConditionsError, payload_digest,
 )
 from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask, TaskStatus
@@ -43,11 +44,14 @@ def effective_content_plan_profile(conditions):
     prompt_templates = thaw(payload.get('prompt_templates', {}))
     marker = (prompt_templates.get('analysis_contract_version')
               if isinstance(prompt_templates, dict) else None)
-    expected_a2_versions = (A2_CONTENT_PLAN_VERSIONS if marker is None
-                            else A2_CONTENT_PLAN_V5_VERSIONS if type(marker) is int and marker == 5
-                            else None)
+    expected_a2_versions = (
+        (A2_CONTENT_PLAN_VERSIONS,) if marker is None
+        else (A2_CONTENT_PLAN_V5_VERSIONS, A2_CONTENT_PLAN_V6_VERSIONS)
+        if type(marker) is int and marker == 5
+        else ()
+    )
     if (payload.get('reader_level') != 'a2' or payload.get('english_help', False)
-            or versions != expected_a2_versions
+            or versions not in expected_a2_versions
             or any(type(value) is not int for value in versions.values())):
         raise ConditionsError('conditions_unavailable')
     return 'content-plan-v3'
@@ -94,10 +98,10 @@ def conditions_payload(book, settings, revision, profile):
         'processing': settings.llm.effective_processing_model}, 'route': route_snapshot(settings.llm),
         'llm_parameters': llm, 'checks': asdict(settings.checks), 'profile': profile,
         'recovery_policy': asdict(settings.recovery),
-        'versions': {'runtime': 1, 'context_builder': 3 if profile == 'content-plan-v3' else 1,
+        'versions': {'runtime': 1, 'context_builder': 4 if profile == 'content-plan-v3' else 1,
                      'validators': 3 if profile == 'content-plan-v3' else 1,
                      'schemas': {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 5}[profile],
-                     'prompts': 5 if profile == 'content-plan-v3' else 1}, 'prompt_templates': templates,
+                     'prompts': 6 if profile == 'content-plan-v3' else 1}, 'prompt_templates': templates,
         'prompt_sha256': payload_digest(templates), 'settings_revision': revision}
 
 
@@ -378,14 +382,19 @@ class BookRuntimeResolver:
         if marker == 5:
             supported_versions = []
             if payload.get('profile') == 'content-plan-v3':
-                quoted_versions = {'runtime': 1, 'context_builder': 3,
-                    'validators': 3, 'schemas': 5, 'prompts': 5}
-                if payload.get('reader_level') == 'a2':
-                    quoted_versions['validators'] = 4
-                supported_versions.append(quoted_versions)
+                validators_version = 4 if payload.get('reader_level') == 'a2' else 3
+                supported_versions.extend((
+                    {'runtime': 1, 'context_builder': 3,
+                     'validators': validators_version, 'schemas': 5, 'prompts': 5},
+                    {'runtime': 1, 'context_builder': 4,
+                     'validators': validators_version, 'schemas': 5, 'prompts': 6},
+                ))
             elif (payload.get('profile') == 'legacy-v1' and payload.get('reader_level') == 'a2'
                     and not payload.get('english_help', False)):
-                supported_versions.append(dict(A2_CONTENT_PLAN_V5_VERSIONS))
+                supported_versions.extend((
+                    dict(A2_CONTENT_PLAN_V5_VERSIONS),
+                    dict(A2_CONTENT_PLAN_V6_VERSIONS),
+                ))
         else:
             supported_versions = [expected_versions]
             if payload.get('reader_level') == 'a2':
