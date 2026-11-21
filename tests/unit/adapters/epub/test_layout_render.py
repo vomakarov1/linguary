@@ -603,6 +603,27 @@ def test_stylesheet_typography_limits_and_page_breaks() -> None:
     assert re.search(r"(?<![\w-])border\s*:", _STYLESHEET) is None
 
 
+def test_translation_block_visual_separation_geometry() -> None:
+    """`.lg-tr` separates translation geometrically for e-ink in EPUB and web CSS without opacity."""
+    web = (
+        Path(__file__).resolve().parents[4] / "src" / "linguary" / "web" / "static" / "linguary.css"
+    ).read_text(encoding="utf-8")
+    for sheet in (_STYLESHEET, web):
+        match = re.search(r"(?:^|\n)\.lg-tr\s*\{([^}]+)\}", sheet)
+        assert match is not None
+        body = match.group(1)
+        compact = re.sub(r"\s+", " ", body)
+        assert "margin: 0.55em 0 0 1.3em;" in compact
+        assert "font-size: 0.88em;" in compact
+        assert "padding-left: 0.7em;" in compact
+        assert "border-left: 0.12em solid;" in compact
+        assert "color: inherit;" in compact
+        assert "hyphens: auto;" in compact
+        assert "page-break-before: avoid;" in compact
+        assert "break-before: avoid;" in compact
+        assert "opacity" not in body.lower()
+
+
 def test_inline_markup_preserved_across_parts() -> None:
     """Italic that crosses a cut survives in both parts. Anchors stay on the first."""
     text = "Hello bold world and a link."

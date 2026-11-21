@@ -9,7 +9,7 @@ A local application for adapting EPUB fiction books for language learners using 
 - **Glossary & name translation**: extracts characters, places, and recurring terms with configurable name strategies (`sound` or `meaning`), interactive glossary review in the Web UI, and optional automatic approval and processing start.
 - **Optional English & pronunciation help**: supports per-book simple English explanations and UK/US IPA pronunciation hints backed by pinned local `ipa-dict` snapshots.
 - **Resilient execution & quality workflow**: supports per-book pause/resume, bounded automatic translation recovery, manual block regeneration, chapter correction candidates, and optional quality review.
-- **Reader-ready EPUB export**: builds adapted EPUB files with a book legend, Who-is-Who guide, per-chapter review lists, optional IPA transcription key, and optional validation via EPUBCheck.
+- **Reader-ready EPUB export**: builds adapted EPUB files with a book legend, optional IPA transcription key, and optional validation via EPUBCheck.
 
 ## Requirements
 
@@ -97,7 +97,7 @@ Secrets such as the LLM API key and proxy credentials are never stored in the re
 Configuration sections:
 
 - `[llm]` — LLM provider, models, transport, and limits:
-  - Provider & models: `provider`, `base_url`, `api_key`, default `model`, optional per-stage overrides (`analysis_model`, `narrative_analysis_model`, `pedagogical_analysis_model`, `processing_model`, `correction_model`), and `staged_analysis` (default `true`);
+  - Provider & models: `provider`, `base_url`, `api_key`, default `model`, optional per-stage overrides (`analysis_model`, `narrative_analysis_model`, `pedagogical_analysis_model`, `processing_model`, `correction_model`), and `staged_analysis` (default `true`). For best translation and note quality during chapter correction, configure `correction_model` to a stronger model than `processing_model` (or the default `model`);
   - Proxy & call limits: `proxy_mode` (`auto` / `direct` / `custom`), `proxy_url`, `timeout_seconds`, `max_output_tokens`, `temperature`, `max_attempts`, `max_fragment_blocks`, `max_unit_source_chars`, `requests_per_minute`, `debug_llm_payloads`;
   - Local cost estimates: optional `input_price_per_mtok` and `output_price_per_mtok`.
 - `[checks]` — thresholds for automated checks (`glossary_confidence_threshold`, `glossary_review_min_mentions`, `glossary_review_min_chapters`, `target_language_min_share`, `language_check_min_length`, `repetition_ngram_size`, `repetition_min_repeats`, `language_notes_per_chapter`) and workflow automation flags (`auto_approve_glossary`, `auto_start_processing`, `seed_first_chapter`);

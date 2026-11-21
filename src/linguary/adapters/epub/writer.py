@@ -141,10 +141,10 @@ _STYLESHEET = """/* Linguary: оформление учебных слоёв п�
 }
 
 .lg-tr {
-  margin: 0.25em 0 0 1em;
+  margin: 0.55em 0 0 1.3em;
   padding-left: 0.7em;
   border-left: 0.12em solid;
-  font-size: 0.9em;
+  font-size: 0.88em;
   color: inherit;
   hyphens: auto;
   page-break-before: avoid;
