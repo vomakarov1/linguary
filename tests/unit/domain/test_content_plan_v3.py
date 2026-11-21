@@ -165,3 +165,44 @@ def test_analysis_pass_result_validates_hashes_and_pass_kind():
 def test_analysis_pass_result_rejects_invalid_identifiers_hashes_and_kind(changes):
     with pytest.raises(DomainError):
         pass_result(**changes)
+
+
+def test_context_fact_conflict_reports_subject_block_and_values():
+    subject = SourceAnchor('b12', 0, 4, 'Shoo')
+    evidence_a = SourceAnchor('b11', 0, 4, 'Mara')
+    evidence_b = SourceAnchor('b13', 0, 5, 'Elena')
+    facts = (
+        ContextFact('f1', 'speaker', (evidence_a,), subject, 'Mara', 'explicit'),
+        ContextFact('f2', 'speaker', (evidence_b,), subject, 'Elena', 'inferred'),
+    )
+    with pytest.raises(DomainError) as exc_info:
+        ContentPlan(version=3, profile='content-plan-v3', context_facts=facts)
+    message = str(exc_info.value)
+    assert message.startswith('конфликт атрибуций одного субъекта')
+    for expected in ('speaker', 'b12', 'Shoo', 'Mara/explicit', 'Elena/inferred'):
+        assert expected in message
+
+
+def test_context_fact_conflict_collects_multiple_subjects():
+    subject_one = SourceAnchor('b1', 0, 4, 'Shoo')
+    subject_two = SourceAnchor('b2', 5, 8, 'she')
+    subject_ok = SourceAnchor('b3', 0, 2, 'he')
+    evidence = SourceAnchor('b0', 0, 4, 'Mara')
+    facts = (
+        ContextFact('f1', 'speaker', (evidence,), subject_one, 'Mara', 'explicit'),
+        ContextFact('f2', 'speaker', (evidence,), subject_one, 'Elena', 'inferred'),
+        ContextFact('f3', 'pronoun_referent', (evidence,), subject_two, 'Mara', 'explicit'),
+        ContextFact('f4', 'pronoun_referent', (evidence,), subject_two, None, 'unknown'),
+        ContextFact('f5', 'gender', (evidence,), subject_ok, 'male', 'explicit'),
+        ContextFact('f6', 'gender', (evidence,), subject_ok, 'male', 'explicit'),
+    )
+    with pytest.raises(DomainError) as exc_info:
+        ContentPlan(version=3, profile='content-plan-v3', context_facts=facts)
+    message = str(exc_info.value)
+    assert message.startswith('конфликт атрибуций одного субъекта')
+    for expected in (
+        'speaker', 'b1', 'Shoo', 'Mara/explicit', 'Elena/inferred',
+        'pronoun_referent', 'b2', 'she', 'None/unknown',
+    ):
+        assert expected in message
+    assert 'b3' not in message

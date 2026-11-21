@@ -217,12 +217,21 @@ class ContentPlan:
         fact_ids = [fact.id for fact in self.context_facts]
         if len(fact_ids) != len(set(fact_ids)):
             raise DomainError('идентификаторы контекстных фактов повторяются')
-        subjects = {}
+        subjects: dict[tuple[str, SourceAnchor], list[tuple[str | None, str]]] = {}
         for fact in self.context_facts:
             key = (fact.kind, fact.subject_anchor)
             value = (fact.value, fact.certainty)
-            if subjects.setdefault(key, value) != value:
-                raise DomainError('конфликт атрибуций одного субъекта')
+            values = subjects.setdefault(key, [])
+            if value not in values:
+                values.append(value)
+        conflicts = [
+            f"{kind}@{anchor.block_id}({anchor.quote!r}): "
+            + " vs ".join(f"{value}/{certainty}" for value, certainty in values)
+            for (kind, anchor), values in subjects.items()
+            if len(values) > 1
+        ]
+        if conflicts:
+            raise DomainError(f"конфликт атрибуций одного субъекта: {'; '.join(conflicts)}")
         ids = [d.id for d in self.difficulties]
         if len(ids) != len(set(ids)):
             raise DomainError("идентификаторы трудностей повторяются")
