@@ -55,6 +55,7 @@ from linguary.application.analysis_merge import (
     merged_glossary_suggestion_keys,
     combine_staged_analysis_responses,
     normalize_a2_dialogue_response,
+    select_staged_a2_summary,
 )
 from linguary.application.analysis_pass_cache import decode_pass, encode_pass, pedagogical_response
 from linguary.application.block_labels import without_block_labels
@@ -353,7 +354,9 @@ class AnalyzeChapter:
                 expected_conditions_id=expected_conditions_id)
             attempts += count
             usages.append(usage)
-            narrative, scenes, facts = merge_narrative_fragments(narrative_parts)
+            narrative, scenes, facts = merge_narrative_fragments(
+                narrative_parts, section_blocks=section.ordered_blocks
+            )
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=section.is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
@@ -391,7 +394,15 @@ class AnalyzeChapter:
                 expected_block_ids=tuple(aliases),
                 glossary_confidence_threshold=self._glossary_confidence_threshold,
                 id_factory=self._id_factory)
-            pedagogical = pedagogical_response(merged, reader_level=self._context_builder._reader_level)
+            reader_level = 'a2' if self._is_a2_reader() else self._context_builder._reader_level
+            pedagogical = pedagogical_response(merged, reader_level=reader_level)
+            if reader_level == 'a2' and len(parts) > 1:
+                pedagogical = replace(
+                    pedagogical,
+                    reader_chapter_summary=select_staged_a2_summary(
+                        parts, narrative_summary=narrative.chapter_summary
+                    ),
+                )
             analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
                                              accumulated, user_decisions,
                                              concepts=concepts,
@@ -430,7 +441,7 @@ class AnalyzeChapter:
                 blocks=tuple(replace(e, block_id=b.id) for e, b in
                              zip(context.expectation.blocks, blocks, strict=True))))
         pedagogical = self._normalize_a2_dialogue(pedagogical, blocks, context.block_ids_by_alias)
-        if self._context_builder._reader_level == 'a2':
+        if self._is_a2_reader():
             validate_a2_summary(pedagogical.reader_chapter_summary or '',
                 source_texts=tuple(b.text for b in blocks), source_language=document.source_language,
                 language_detector=self._language_detector,
@@ -480,8 +491,12 @@ class AnalyzeChapter:
             visible_texts_by_alias=context.visible_texts_by_alias, blocks=blocks,
             source_offsets=source_offsets, mandatory_facts=mandatory_facts)
 
+    def _is_a2_reader(self) -> bool:
+        """Whether the configured reader level is A2 (case- and whitespace-insensitive)."""
+        return (getattr(self._context_builder, '_reader_level', '') or '').strip().lower() == 'a2'
+
     def _normalize_a2_dialogue(self, payload, blocks, block_ids_by_alias):
-        if self._context_builder._reader_level != 'a2' or self._context_builder._english_help:
+        if not self._is_a2_reader() or self._context_builder._english_help:
             return payload
         if not isinstance(payload, (ChapterAnalysisResponse, PedagogicalAnalysisResponse)):
             return payload
@@ -553,9 +568,16 @@ class AnalyzeChapter:
                     cumulative_words_before=cumulative_words_before,
                     prior_explained_topics=prior_topics)
                 if parts:
+                    previous_summary = (
+                        select_staged_a2_summary(
+                            parts, narrative_summary=narrative.chapter_summary
+                        )
+                        if self._is_a2_reader()
+                        else parts[-1].chapter_summary
+                    )
                     context = replace(context, request=replace(context.request,
                         input_text=context.request.input_text + '\nУже найдено в предыдущих частях главы:\n' +
-                            'Пересказ: ' + parts[-1].chapter_summary + '\nВыражения BYR: ' +
+                            'Пересказ: ' + previous_summary + '\nВыражения BYR: ' +
                             ', '.join(e.expression for p in parts for e in p.before_you_read)))
             context = replace(context, request=context.request.with_logging(book_id=command.book_id,
                 stage=LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE if is_narrative else LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
@@ -572,7 +594,7 @@ class AnalyzeChapter:
                         blocks=fragment.blocks)
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
-                if self._context_builder._reader_level == 'a2':
+                if self._is_a2_reader():
                     validate_a2_summary(payload.reader_chapter_summary or '',
                         source_texts=tuple(b.text for b in fragment.blocks), source_language=document.source_language,
                         language_detector=self._language_detector,
@@ -1918,18 +1940,27 @@ def _worded_for_the_model(
     if not isinstance(error, ResultValidationError):
         return error
     violation = getattr(error, "violation", None)
-    if violation is not None and getattr(violation, "block_ids", ()):
+    if violation is not None:
         aliases_by_block_id = {
             block_id: alias
             for alias, block_id in getattr(context, "block_ids_by_alias", {}).items()
             if block_id
         }
+        block_ids = getattr(violation, "block_ids", ())
         aliased_block_ids = tuple(
             aliases_by_block_id.get(block_id, block_id)
-            for block_id in violation.block_ids
+            for block_id in block_ids
         )
-        if aliased_block_ids != violation.block_ids:
-            violation = replace(violation, block_ids=aliased_block_ids)
+        safe_message = getattr(violation, "safe_message", "")
+        aliased_safe_message = (
+            _to_aliases(context, safe_message) if safe_message else safe_message
+        )
+        if aliased_block_ids != block_ids or aliased_safe_message != safe_message:
+            violation = replace(
+                violation,
+                block_ids=aliased_block_ids,
+                safe_message=aliased_safe_message,
+            )
     return ResultValidationError(
         _to_aliases(context, str(error)),
         expectation=error.expectation or context.expectation,

@@ -16,7 +16,7 @@ from linguary.application.ports.llm import LLMResponseFormatError, LLMTransportE
 from linguary.application.retry_policy import ResultValidationError, RetryPolicy
 from linguary.application.use_cases.analyze_chapter import AnalyzeChapter, AnalyzeChapterCommand
 from linguary.domain import (
-    AnalysisPassKind, BlockSegment, BlockTreatment, BlockType, LLMCallStage,
+    AnalysisPassKind, BlockSegment, BlockTreatment, BlockType, LLMCallStage, SupportStatus,
 )
 
 NARRATIVE = LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE
@@ -3616,6 +3616,283 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
         nar_blocks[1].id: 'explicit',
         nar_blocks[2].id: 'explicit',
     }
+
+
+async def test_staged_a2_fragmented_chapter_keeps_full_summary_when_last_fragment_is_short(stored_book):
+    _, uow, _ = stored_book
+    _store(uow, (
+        _block(0, 'Nick wakes up in Everlost.'),
+        _block(1, 'Allie meets Lief in the forest.'),
+        _block(2, 'They walk toward the Twin Towers where Mary lives.'),
+    ))
+
+    def nar_reply(summary):
+        return FakeReply.of_payload(dict(
+            translation_instructions='Keep a natural tone.',
+            chapter_summary=summary,
+            glossary_candidates=[],
+            context_facts=[],
+            scenes=[dict(
+                start_block_id='b1', end_block_id='b1', summary=summary,
+                location='Forest', participants=['Nick', 'Allie'],
+                visual_facts=[], visual_assumptions=[],
+            )],
+        ))
+
+    full_a2 = (
+        'Nick and Allie wake up in Everlost, meet Lief in the forest, '
+        'and walk to the Twin Towers where Mary lives.'
+    )
+    short_frag2 = 'They meet Lief in the forest.'
+    short_frag3 = 'Mary lives in the Twin Towers.'
+
+    client = FakeLLMClient([
+        nar_reply('Nick wakes up in Everlost.'),
+        nar_reply('Nick and Allie meet Lief in the forest.'),
+        nar_reply(
+            'Nick and Allie wake up in Everlost, meet Lief in the forest, '
+            'and walk toward the Twin Towers where Mary lives.'
+        ),
+        pedagogical(('b1',), summary=full_a2),
+        pedagogical(('b1',), summary=short_frag2),
+        pedagogical(('b1',), summary=short_frag3),
+    ])
+    result = await scenario(uow, client, context=builder('a2'), max_fragment_blocks=1)(COMMAND)
+
+    ped_requests = [r for r in client.requests if r.stage == PEDAGOGICAL]
+    assert len(ped_requests) == 3
+    assert f'Пересказ: {full_a2}' in ped_requests[2].input_text
+    assert short_frag2 not in ped_requests[2].input_text
+    assert result.analysis.chapter_summary == full_a2
+
+    with uow.transaction() as tx:
+        saved_ped = tx.analyses.get_pass(BOOK_ID, COMMAND.section_id, AnalysisPassKind.PEDAGOGICAL)
+    assert saved_ped is not None
+    assert saved_ped.payload['response']['reader_chapter_summary'] == full_a2
+
+    cached = await scenario(uow, FakeLLMClient(), context=builder('a2'), max_fragment_blocks=1)(COMMAND)
+    assert cached.attempts == 0
+    assert cached.analysis.chapter_summary == full_a2
+
+
+@pytest.mark.parametrize('sep_type,sep_status', [
+    (BlockType.OTHER, SupportStatus.PRESERVE_OPAQUE),
+    (BlockType.PAGE_BREAK, SupportStatus.SUPPORTED),
+    (BlockType.IMAGE, SupportStatus.SUPPORTED),
+])
+async def test_staged_narrative_merge_passes_section_separators(stored_book, sep_type, sep_status):
+    _, uow, _ = stored_book
+    b1 = make_analysis_block(section_id='section-1', order=0, text='Holmes entered Baker Street.')
+    sep = make_analysis_block(
+        section_id='section-1',
+        order=1,
+        text='***' if sep_type is BlockType.OTHER else '',
+        type=sep_type,
+        support_status=sep_status,
+    )
+    b2 = make_analysis_block(section_id='section-1', order=2, text='Watson waited inside.')
+    _store(uow, (b1, sep, b2))
+
+    def frag_narrative(*, continues=False):
+        return FakeReply.of_payload(dict(
+            translation_instructions='Keep the voice.',
+            chapter_summary='Holmes meets Watson.',
+            glossary_candidates=[],
+            context_facts=[],
+            scenes=[dict(
+                start_block_id='b1',
+                end_block_id='b1',
+                summary='Baker Street scene.',
+                location='Baker Street',
+                participants=['Holmes', 'Watson'],
+                visual_facts=[],
+                visual_assumptions=[],
+                continues_previous_scene=continues,
+            )],
+        ))
+
+    client = FakeLLMClient([
+        frag_narrative(continues=False),
+        frag_narrative(continues=True),
+        pedagogical(('b1',)),
+        pedagogical(('b1',)),
+    ])
+    result = await scenario(uow, client, max_fragment_blocks=1)(COMMAND)
+    assert [(s.start_block_id, s.end_block_id) for s in result.analysis.scenes] == [
+        (b1.id, b1.id),
+        (b2.id, b2.id),
+    ]
+
+
+async def test_staged_narrative_retry_translates_all_error_blocks_to_aliases_without_translation_template(
+    stored_book, monkeypatch,
+):
+    from linguary.application.use_cases.analyze_chapter import _worded_for_the_model
+    from linguary.domain import ConceptType, TermConcept, TermStatus, TermVariant
+    from linguary.domain.llm_log import Violation
+
+    _, uow, _ = stored_book
+    section = _store(uow, (
+        _block(0, 'Holmes arrived early.'),
+        _block(1, 'He wore a red coat.'),
+        _block(2, 'Watson opened the door.'),
+        _block(3, 'Lestrade checked the hall.'),
+        _block(4, 'Hudson brought warm tea.'),
+        _block(5, 'Moriarty watched outside.'),
+    ))
+    blocks = section.ordered_blocks
+    with uow.transaction() as tx:
+        tx.glossary.save(TermConcept(
+            'approved-hudson', BOOK_ID, ConceptType.PERSON, 'Hudson', TermStatus.APPROVED,
+            note='женский род',
+            variants=(TermVariant('approved-hudson', 'ru', 'Хадсон', TermStatus.APPROVED),),
+        ))
+
+    seen_decisions = []
+    original_decide = RetryPolicy.decide
+
+    def spy_decide(self, error, *, attempts, raw_content=None):
+        seen_decisions.append((error, getattr(error, 'violation', None)))
+        return original_decide(self, error, attempts=attempts, raw_content=raw_content)
+
+    monkeypatch.setattr(RetryPolicy, 'decide', spy_decide)
+
+    holmes_anchor = dict(block_id='b1', quote='Holmes')
+    hudson_anchor = dict(block_id='b5', quote='Hudson')
+    attempt_1 = FakeReply.of_payload(dict(
+        translation_instructions='Keep the voice.',
+        chapter_summary='Holmes arrives.',
+        glossary_candidates=[],
+        context_facts=[
+            dict(
+                id='f-bad-ctx', kind='speaker',
+                anchors=[dict(block_id='b3', quote='silver key')],
+                subject_anchor=dict(block_id='b3', quote='silver key'),
+                value='Watson', certainty='explicit',
+            ),
+            dict(id='f-c1', kind='gender', anchors=[holmes_anchor], subject_anchor=holmes_anchor, value='male', certainty='explicit'),
+            dict(id='f-c2', kind='gender', anchors=[holmes_anchor], subject_anchor=holmes_anchor, value='female', certainty='explicit'),
+            dict(id='f-gl', kind='gender', anchors=[hudson_anchor], subject_anchor=hudson_anchor, value='male', certainty='explicit'),
+        ],
+        scenes=[
+            dict(
+                start_block_id='b1', end_block_id='b3', summary='Arrival.',
+                location='Baker Street', participants=['Holmes', 'Watson'],
+                visual_facts=[dict(anchor=dict(block_id='b2', quote='blue hat'), subject='Holmes', detail='Hat')],
+                visual_assumptions=[],
+            ),
+            dict(
+                start_block_id='b5', end_block_id='b6', summary='Outside.',
+                location='Street', participants=['Hudson', 'Moriarty'],
+                visual_facts=[], visual_assumptions=[],
+            ),
+        ],
+    ))
+    attempt_2 = FakeReply.of_payload(dict(
+        translation_instructions='Keep the voice.',
+        chapter_summary='Holmes arrives.',
+        glossary_candidates=[],
+        context_facts=[
+            dict(id='f-c1', kind='gender', anchors=[holmes_anchor], subject_anchor=holmes_anchor, value='male', certainty='explicit'),
+            dict(id='f-c2', kind='gender', anchors=[holmes_anchor], subject_anchor=holmes_anchor, value='female', certainty='explicit'),
+            dict(id='f-gl', kind='gender', anchors=[hudson_anchor], subject_anchor=hudson_anchor, value='male', certainty='explicit'),
+        ],
+        scenes=[dict(
+            start_block_id='b1', end_block_id='b6', summary='Full chapter.',
+            location='Baker Street', participants=['Holmes', 'Watson'],
+            visual_facts=[dict(anchor=dict(block_id='b2', quote='blue hat'), subject='Holmes', detail='Hat')],
+            visual_assumptions=[],
+        )],
+    ))
+
+    aliases = tuple(f'b{i}' for i in range(1, 7))
+    inner_client = FakeLLMClient([attempt_1, attempt_2, narrative(aliases), pedagogical(aliases)])
+
+    class RawContentClient:
+        def __getattr__(self, name):
+            return getattr(inner_client, name)
+
+        async def generate(self, request):
+            response = await inner_client.generate(request)
+            return replace(response, raw_content='{"draft": true}')
+
+    client = RawContentClient()
+    result = await scenario(uow, client, attempts=3)(COMMAND)
+
+    assert result.analysis.is_complete
+    assert [r.stage for r in client.requests] == [NARRATIVE, NARRATIVE, NARRATIVE, PEDAGOGICAL]
+    assert len(seen_decisions) == 2
+
+    err_1, viol_1 = seen_decisions[0]
+    assert viol_1 is not None
+    assert viol_1.stage == 'chapter_analysis'
+    assert viol_1.rule_code == 'scene_bounds'
+    assert viol_1.scope == 'local'
+    assert set(viol_1.block_ids) == {'b1', 'b2', 'b3', 'b4', 'b5'}
+
+    err_2, viol_2 = seen_decisions[1]
+    assert viol_2 is not None
+    assert viol_2.stage == 'chapter_analysis'
+    assert viol_2.rule_code == 'unresolved_quote'
+    assert viol_2.scope == 'local'
+    assert set(viol_2.block_ids) == {'b1', 'b2', 'b5'}
+
+    repair_1 = client.requests[1].repair_instructions[-1]
+    assert 'полный массив всех блоков' not in repair_1
+    assert 'b1..b6' in repair_1
+    assert 'b4' in repair_1
+    assert 'b2' in repair_1 and 'blue hat' in repair_1
+    assert 'b3' in repair_1 and 'silver key' in repair_1
+    assert "@b1('Holmes')" in repair_1
+    assert 'b5' in repair_1
+    for block in blocks:
+        assert block.id not in repair_1
+        assert block.id not in str(err_1)
+        assert block.id not in viol_1.safe_message
+
+    repair_2 = client.requests[2].repair_instructions[-1]
+    assert 'полный массив всех блоков' not in repair_2
+    assert 'Исправь затронутые блоки и верни корректный JSON ответа анализа без изменения остальных блоков:' in repair_2
+    for affected in ('- b1', '- b2', '- b5'):
+        assert affected in repair_2
+    for untouched in ('- b3', '- b4', '- b6'):
+        assert untouched not in repair_2
+    for block in blocks:
+        assert block.id not in repair_2
+        assert block.id not in str(err_2)
+        assert block.id not in viol_2.safe_message
+
+    ctx = builder().for_chapter_narrative_analysis(make_analysis_document((section,)), section)
+    raw_msg = (
+        f"конфликт атрибуций одного субъекта: gender@{blocks[0].id}('Holmes'): male/explicit vs female/explicit\n"
+        f"дополнительно: {blocks[4].id}"
+    )
+    worded = _worded_for_the_model(
+        ResultValidationError(
+            raw_msg,
+            expectation=ctx.expectation,
+            violation=Violation(
+                'context_fact_conflict',
+                'chapter_analysis',
+                scope='local',
+                block_ids=(blocks[0].id, blocks[4].id),
+                safe_message=raw_msg,
+            ),
+        ),
+        ctx,
+    )
+    assert worded.violation is not None
+    assert worded.violation.stage == 'chapter_analysis'
+    assert worded.violation.rule_code == 'context_fact_conflict'
+    assert worded.violation.block_ids == ('b1', 'b5')
+    assert "@b1('Holmes')" in str(worded)
+    assert 'дополнительно: b5' in str(worded)
+    assert "@b1('Holmes')" in worded.violation.safe_message
+    assert 'дополнительно: b5' in worded.violation.safe_message
+    for block in blocks:
+        assert block.id not in str(worded)
+        assert block.id not in worded.violation.safe_message
+
 
 
 
