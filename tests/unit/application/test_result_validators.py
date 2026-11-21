@@ -1746,3 +1746,354 @@ def test_quality_warnings_catch_dozen_preposition_initials_and_indeclinable_name
     assert warnings_for("He walked into the room.", "Он вошёл в комнату.") == ()
 
 
+def test_result_validator_wires_dialogue_note_leak_glossary_warnings_and_spelling_checker() -> None:
+    """TranslationResultValidator wires dialogue, NOTE leak, spelling checker, and QUALITY warnings (P2.T3)."""
+    from linguary.adapters.config import AppSettings
+    from linguary.adapters.validation.english_spelling import IpaDictSpellingChecker
+    from linguary.application.llm_dto import FragmentAssistanceResponse
+    from linguary.application.validators import TranslationResultValidator
+    from linguary.composition.container import _validator as build_container_validator
+    from linguary.domain import ConceptType, GlossarySnapshotEntry, TermStatus
+    from linguary.web.labels import RESULT_WARNING_LABELS, result_warning_label
+
+    # 1. Domain enum & web label coverage
+    assert ResultWarningKind.QUALITY == "quality"
+    assert set(RESULT_WARNING_LABELS) == set(ResultWarningKind)
+    assert result_warning_label(ResultWarningKind.QUALITY).strip()
+
+    spelling_checker = IpaDictSpellingChecker()
+    validator = TranslationResultValidator(
+        target_language_min_share=0.5,
+        language_check_min_length=80,
+        repetition_ngram_size=3,
+        repetition_min_repeats=3,
+        spelling_checker=spelling_checker,
+    )
+
+    # 2. Blocking dialogue_violation (hybrid dash + guillemets)
+    dlg_block = make_block(order=0, text='"Hello," he said.')
+    dlg_unit = make_unit((dlg_block,))
+    dlg_payload = make_response(
+        (make_block_result(dlg_block, translated_text="— «Привет», — сказал он."),)
+    )
+    with pytest.raises(ResultValidationError) as dlg_err:
+        validator.validate(
+            dlg_payload,
+            unit=dlg_unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+        )
+    assert dlg_err.value.violation is not None
+    assert dlg_err.value.violation.rule_code == "dialogue_punctuation"
+
+    # 3. Blocking note_language_leak_violation (block note and unit-level fragment_assistances)
+    note_block = make_block(order=0, text="He was strongly reminded of Dudley.")
+    note_unit = make_unit((note_block,))
+    leaky_note_payload = make_response(
+        (make_block_result(note_block, translated_text="Он сильно напомнил ему Дадли."),),
+        language_notes=(make_note(note_block, note="Это слово really усиливает оттенок."),),
+    )
+    with pytest.raises(ResultValidationError) as note_err:
+        validator.validate(
+            leaky_note_payload,
+            unit=note_unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+        )
+    assert note_err.value.violation is not None
+    assert note_err.value.violation.rule_code == "note_language_leak"
+
+    leaky_assist_payload = TranslationResultResponse(
+        blocks=(make_block_result(note_block, translated_text="Он сильно напомнил ему Дадли."),),
+        fragment_assistances=(
+            FragmentAssistanceResponse(
+                difficulty_id="diff-1",
+                point_ids=("p1",),
+                kind="russian_explanation",
+                text="Это пояснение really просачивается.",
+            ),
+        ),
+    )
+    with pytest.raises(ResultValidationError):
+        validator.validate(
+            leaky_assist_payload,
+            unit=note_unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+        )
+
+    # 4. Blocking spelling check on `to <word>` lemmas (excluding verbatim words in block original)
+    expel_block = make_block(order=0, text="We could all have been killed — or worse, expelled.")
+    expel_unit = make_unit((expel_block,), treatments=(BlockTreatment.GLOSSARY_ONLY,))
+    bad_lemma_payload = make_response(
+        (
+            make_block_result(
+                expel_block,
+                treatment=BlockTreatment.GLOSSARY_ONLY,
+                translated_text=None,
+                glossary_hints=(make_hint(original="to expell", translation="исключать"),),
+            ),
+        )
+    )
+    with pytest.raises(ResultValidationError) as spell_err:
+        validator.validate(
+            bad_lemma_payload,
+            unit=expel_unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+        )
+    assert spell_err.value.violation is not None
+    assert spell_err.value.violation.rule_code == "glossary_hint_spelling"
+
+    # Known EN-GB/EN-US lemma passes cleanly with no warnings
+    good_lemma_payload = make_response(
+        (
+            make_block_result(
+                expel_block,
+                treatment=BlockTreatment.GLOSSARY_ONLY,
+                translated_text=None,
+                glossary_hints=(
+                    make_hint(original="to expel", translation="исключать"),
+                    make_hint(original="to colour", translation="окрашивать"),
+                ),
+            ),
+        )
+    )
+    good_results = validator.validate(
+        good_lemma_payload,
+        unit=expel_unit,
+        target_language=TARGET_LANGUAGE,
+        note_id_factory=note_ids(),
+    )
+    assert good_results[0].warnings == ()
+
+    # Fictional word appearing verbatim in original text is excluded from both blocking and warnings
+    verbatim_block = make_block(order=0, text="He loved to quidditch with a Muggle.")
+    verbatim_unit = make_unit((verbatim_block,), treatments=(BlockTreatment.GLOSSARY_ONLY,))
+    verbatim_payload = make_response(
+        (
+            make_block_result(
+                verbatim_block,
+                treatment=BlockTreatment.GLOSSARY_ONLY,
+                translated_text=None,
+                glossary_hints=(
+                    make_hint(original="to quidditch", translation="играть в квиддич"),
+                    make_hint(original="Muggle", translation="магл"),
+                ),
+            ),
+        )
+    )
+    verbatim_results = validator.validate(
+        verbatim_payload,
+        unit=verbatim_unit,
+        target_language=TARGET_LANGUAGE,
+        note_id_factory=note_ids(),
+    )
+    assert verbatim_results[0].warnings == ()
+
+    # 5. Non-blocking unknown English word in glossary_hints + translation_quality_warnings -> QUALITY
+    glossary = (
+        GlossarySnapshotEntry(
+            source_text="Hogwarts",
+            translation="Хогвартс",
+            type=ConceptType.PLACE,
+            status=TermStatus.APPROVED,
+        ),
+    )
+    warn_block = make_block(order=0, text="He bought two dozen mysterious owls at Hogwarts.")
+    warn_unit = make_unit((warn_block,))
+    warn_payload = make_response(
+        (
+            make_block_result(
+                warn_block,
+                translated_text="Он купил два десятка загадочных сов в Школе магии.",
+                glossary_hints=(
+                    make_hint(original="misterious", translation="загадочный"),
+                ),
+            ),
+        )
+    )
+    warn_results = validator.validate(
+        warn_payload,
+        unit=warn_unit,
+        target_language=TARGET_LANGUAGE,
+        note_id_factory=note_ids(),
+        mandatory_glossary=glossary,
+    )
+    quality_messages = [
+        warning.message
+        for warning in warn_results[0].warnings
+        if warning.kind is ResultWarningKind.QUALITY
+    ]
+    assert len(quality_messages) >= 3
+    assert any("десяток" in msg or "dozen" in msg for msg in quality_messages)
+    assert any("Хогвартс" in msg for msg in quality_messages)
+    assert any("misterious" in msg for msg in quality_messages)
+
+    # 6. Composition container injects IpaDictSpellingChecker into _validator(...)
+    container_validator = build_container_validator(AppSettings())
+    with pytest.raises(ResultValidationError):
+        container_validator.validate(
+            bad_lemma_payload,
+            unit=expel_unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+        )
+
+    # 7. block_processing.TranslationCall and correct_chapter.CorrectChapter pass mandatory_glossary
+    import asyncio
+    from types import SimpleNamespace
+    from linguary.application.block_processing import TranslationCall
+    from linguary.application.context_builder import ContextBuilder
+    from linguary.application.correction import CorrectionInputs
+    from linguary.application.correction_dto import (
+        CORRECTION_VERSIONS_V2,
+        ChapterCorrectionResponse,
+        CorrectedBlockResponse,
+        CorrectionSnapshotV2,
+    )
+    from linguary.application.ports.llm import LLMResponse
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.use_cases.correct_chapter import CorrectChapter
+    from linguary.domain import (
+        BookMetadata,
+        CanonicalDocument,
+        ChapterAnalysis,
+        DocumentSection,
+        GlossarySnapshot,
+    )
+
+    glossary_snapshot = GlossarySnapshot(entries=glossary)
+    section = DocumentSection(
+        id=warn_block.section_id,
+        document_id="book-1",
+        title="Chapter 1",
+        order=0,
+        source_resource_path="ch1.xhtml",
+        blocks=(warn_block,),
+    )
+    document = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="Book", authors=("Author",)),
+        source_language="en",
+        target_language=TARGET_LANGUAGE,
+        sections=(section,),
+    )
+    plan = TreatmentPlan.of_treatments(section.id, ((warn_block.id, BlockTreatment.TRANSLATE),))
+    analysis = ChapterAnalysis.create(
+        id="analysis-1",
+        section_id=section.id,
+        treatment_plan=plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(warn_block.id,),
+    )
+    context = ContextBuilder().for_translation_unit(
+        document=document,
+        section=section,
+        unit=warn_unit,
+        analysis=analysis,
+        glossary=glossary_snapshot,
+    )
+    call_payload = make_response(
+        (
+            BlockResultResponse(
+                source_block_id="b1",
+                treatment=BlockTreatment.TRANSLATE,
+                translated_text="Он поехал в Школу магии.",
+            ),
+        )
+    )
+
+    class _FakeLLM:
+        async def generate(self, request):
+            return LLMResponse(
+                payload=call_payload,
+                provider="fake",
+                model="gpt-test",
+                truncated=False,
+                call_context=request.call_context,
+            )
+
+    call = TranslationCall(
+        unit_of_work=None,
+        llm_client=_FakeLLM(),
+        retry_policy=RetryPolicy(max_attempts=1),
+        validator=validator,
+        sleep=None,
+    )
+    call_result = asyncio.run(
+        call.request(
+            context,
+            unit=warn_unit,
+            target_language=TARGET_LANGUAGE,
+            note_ids=note_ids(),
+            glossary=glossary_snapshot,
+        )
+    )
+    assert any(
+        w.kind is ResultWarningKind.QUALITY and "Хогвартс" in w.message
+        for w in call_result.results[0].warnings
+    )
+
+    previous_result = BlockProcessingResult(
+        block_id=warn_block.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="Он поехал в Хогвартс.",
+    )
+    snapshot = CorrectionSnapshotV2(
+        model="gpt-test",
+        route={"provider": "openai_compatible", "base_url": "https://example.test/v1", "proxy": "", "route_id": "r1"},
+        parameters={
+            "temperature": 0.0,
+            "max_output_tokens": 500,
+            "timeout_seconds": 30,
+            "max_attempts": 1,
+            "max_unit_source_chars": 8000,
+            "input_price_per_mtok": 0,
+            "output_price_per_mtok": 0,
+        },
+        prompt="Propose.",
+        review_prompt="Review.",
+        versions=CORRECTION_VERSIONS_V2,
+    )
+    corr_inputs = CorrectionInputs(
+        document=document,
+        section=section,
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=glossary_snapshot),
+        conditions=SimpleNamespace(id="cond-1", payload={"schema_version": 1, "versions": {"validators": 1}}),
+        snapshot=snapshot,
+        blocks=(warn_block,),
+        results={warn_block.id: previous_result},
+        bindings={warn_block.id: None},
+    )
+    fake_tx = SimpleNamespace(work=SimpleNamespace(list_correction_candidates=lambda *a, **kw: ()))
+    corrector = CorrectChapter(
+        unit_of_work=None,
+        llm_client=None,
+        snapshot=snapshot,
+        validator=validator,
+    )
+    corrected, = corrector._candidates(
+        fake_tx,
+        corr_inputs,
+        ChapterCorrectionResponse(
+            (
+                CorrectedBlockResponse(
+                    block_id=warn_block.id,
+                    translated_text="Он поехал в Школу магии.",
+                    glossary_hints=(),
+                    language_notes=(),
+                ),
+            )
+        ),
+    )
+    assert any(
+        w.kind is ResultWarningKind.QUALITY and "Хогвартс" in w.message
+        for w in corrected.warnings
+    )
+
+
+
+

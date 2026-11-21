@@ -899,6 +899,10 @@ class CorrectChapter:
             validators_version == 4
             and inputs.conditions.payload.get('reader_level') == 'a2'
         )
+        run_glossary = getattr(getattr(inputs, 'run', None), 'glossary_snapshot', None)
+        mandatory_glossary = (
+            () if run_glossary is None else run_glossary.mandatory_entries
+        )
         source_texts = {b.id: b.text for b in inputs.section.ordered_blocks}
         section_quote_fragments = None
         candidates = []
@@ -925,8 +929,13 @@ class CorrectChapter:
                 blocks=(BlockResultResponse(block.block_id, previous.treatment,
                     response_text, block.glossary_hints, response_segments),),
                 language_notes=block.language_notes)
-            validated, = self.validator.validate(payload, unit=unit,
-                target_language=inputs.document.target_language, note_id_factory=notes)
+            validated, = self.validator.validate(
+                payload,
+                unit=unit,
+                target_language=inputs.document.target_language,
+                note_id_factory=notes,
+                mandatory_glossary=mandatory_glossary,
+            )
             # Preserve identifiers of notes surviving a correction at the same source anchor.
             used = set()
             restored_notes = []
@@ -960,7 +969,8 @@ class CorrectChapter:
                 ),
                 glossary_hints=tuple(replace(h, original=raw.original)
                     for h, raw in zip(validated.glossary_hints, block.glossary_hints, strict=True)),
-                language_notes=tuple(restored_notes))
+                language_notes=tuple(restored_notes),
+                warnings=validated.warnings)
             if slots:
                 candidate = replace(candidate, translated_text=candidate.rebuild_translation())
             candidate, = ReaderTextPolicy().prepare_results((candidate,), section_quote_fragments)

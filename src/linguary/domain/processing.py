@@ -50,6 +50,7 @@ class ResultWarningKind(StrEnum):
 
     REPETITION = "repetition"
     DROPPED_BLOCK = "dropped_block"
+    QUALITY = "quality"
 
 
 @dataclass(frozen=True, slots=True)

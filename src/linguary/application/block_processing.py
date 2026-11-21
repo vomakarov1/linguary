@@ -245,6 +245,11 @@ class TranslationCall:
                     note_id_factory=note_ids,
                     truncated=response.truncated,
                     expectation=context.expectation,
+                    mandatory_glossary=(
+                        ()
+                        if resolved_glossary is None
+                        else resolved_glossary.mandatory_entries
+                    ),
                 )
                 conditions = None
                 call_context = getattr(response, 'call_context', None) or getattr(request, 'call_context', None)

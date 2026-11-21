@@ -68,6 +68,7 @@ from linguary.adapters.runtime import (
     to_async_handler,
 )
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator, Py3LangidDetector
+from linguary.adapters.validation.english_spelling import IpaDictSpellingChecker
 from linguary.application.use_cases.quality_review import QualityReviewService
 from linguary.application.use_cases.correct_chapter import CorrectionSequence
 from linguary.application.use_cases.resolve_correction_candidate import ResolveCorrectionCandidate
@@ -771,6 +772,7 @@ def _validator(settings: AppSettings) -> TranslationResultValidator:
         language_check_min_length=checks.language_check_min_length,
         repetition_ngram_size=checks.repetition_ngram_size,
         repetition_min_repeats=checks.repetition_min_repeats,
+        spelling_checker=IpaDictSpellingChecker(),
     )
 
 

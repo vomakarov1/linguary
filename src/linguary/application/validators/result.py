@@ -26,14 +26,22 @@ from linguary.application.llm_dto import (
     LanguageNoteResponse,
     TranslationResultResponse,
 )
+from linguary.application.ports.spelling import EnglishSpellingChecker
 from linguary.application.retry_policy import (
     ExpectedBlock,
     ResultExpectation,
     ResultValidationError,
 )
 from linguary.application.validators.coverage import coverage_violation
-from linguary.application.validators.language import language_violation
-from linguary.application.validators.mixed_script import mixed_script_violation
+from linguary.application.validators.dialogue import dialogue_violation
+from linguary.application.validators.language import (
+    language_violation,
+    translation_quality_warnings,
+)
+from linguary.application.validators.mixed_script import (
+    mixed_script_violation,
+    note_language_leak_violation,
+)
 from linguary.application.validators.paragraphs import paragraph_violation
 from linguary.application.validators.repetition import repetition_warning
 from linguary.application.validators.service_messages import service_message_violation
@@ -51,6 +59,7 @@ from linguary.domain import (
     DocumentBlock,
     DomainError,
     GlossaryHint,
+    GlossarySnapshotEntry,
     LanguageNote,
     ResultWarning,
     ResultWarningKind,
@@ -64,6 +73,23 @@ from linguary.domain.llm_log import Violation
 
 #: Footnote marker in a translation. The same shape the domain strips or keeps.
 _MARKER = re.compile(r" ?\[\^(\d+)\]")
+
+#: Normalization for English spelling token comparisons against block originals.
+_SPELL_TRANSLATION = str.maketrans(
+    {
+        "’": "'",
+        "‘": "'",
+        "ʼ": "'",
+        "‛": "'",
+        "\u2010": "-",
+        "\u2011": "-",
+    }
+)
+_EN_WORD = re.compile(r"[A-Za-z]+(?:['-][A-Za-z]+)*")
+_TO_LEMMA = re.compile(
+    r"(?:^|\(\s*)to\s+([A-Za-z]+(?:['-][A-Za-z]+)*)(?=$|[\s,.;:!?()—–/-])",
+    re.IGNORECASE,
+)
 
 
 class TranslationResultValidator:
@@ -80,11 +106,13 @@ class TranslationResultValidator:
         language_check_min_length: int,
         repetition_ngram_size: int,
         repetition_min_repeats: int,
+        spelling_checker: EnglishSpellingChecker | None = None,
     ) -> None:
         self._target_language_min_share = target_language_min_share
         self._language_check_min_length = language_check_min_length
         self._repetition_ngram_size = repetition_ngram_size
         self._repetition_min_repeats = repetition_min_repeats
+        self._spelling_checker = spelling_checker
 
     def validate(
         self,
@@ -95,6 +123,8 @@ class TranslationResultValidator:
         note_id_factory: Callable[[], str],
         truncated: bool = False,
         expectation: ResultExpectation | None = None,
+        mandatory_glossary: Sequence[GlossarySnapshotEntry] = (),
+        historical: bool = False,
     ) -> tuple[BlockProcessingResult, ...]:
         """Validates the model response and builds block processing results.
 
@@ -198,10 +228,54 @@ class TranslationResultValidator:
                 rule_code="mixed_script_leak",
                 safe_message="В тексте обнаружено смешение алфавитов внутри слова",
             )
+        if not historical:
+            for block in text_payload.blocks:
+                single = replace(text_payload, blocks=(block,))
+                self._ensure_block(
+                    dialogue_violation(single, target_language=target_language, unit=unit),
+                    expected,
+                    block_id=block.source_block_id,
+                    rule_code="dialogue_punctuation",
+                    safe_message="Нарушены правила оформления прямой речи",
+                )
+            for block in text_payload.blocks:
+                single = replace(text_payload, blocks=(block,))
+                self._ensure_block(
+                    note_language_leak_violation(single, target_language=target_language),
+                    expected,
+                    block_id=block.source_block_id,
+                    rule_code="note_language_leak",
+                    safe_message="В примечании обнаружено языковое просачивание",
+                )
+            if text_payload.fragment_assistances:
+                assist_payload = replace(text_payload, blocks=(), language_notes=())
+                self._ensure(
+                    note_language_leak_violation(
+                        assist_payload, target_language=target_language
+                    ),
+                    expected,
+                )
+            if self._spelling_checker is not None:
+                for block in normalized_payload.blocks:
+                    item = items.get(block.source_block_id)
+                    if item is None:
+                        continue
+                    self._ensure_block(
+                        _to_lemma_spelling_violation(
+                            block, item.block, self._spelling_checker
+                        ),
+                        expected,
+                        block_id=block.source_block_id,
+                        rule_code="glossary_hint_spelling",
+                        safe_message="В словарной подсказке обнаружена ошибка английской орфографии",
+                    )
         results = tuple(
             self._result(
                 block,
+                payload=normalized_payload,
                 unit=unit,
+                target_language=target_language,
+                mandatory_glossary=mandatory_glossary,
                 notes=normalized_payload.notes_for(block.source_block_id),
                 note_id_factory=note_id_factory,
             )
@@ -214,7 +288,10 @@ class TranslationResultValidator:
         self,
         block: BlockResultResponse,
         *,
+        payload: TranslationResultResponse,
         unit: TranslationUnit,
+        target_language: str,
+        mandatory_glossary: Sequence[GlossarySnapshotEntry],
         notes: Sequence[LanguageNoteResponse],
         note_id_factory: Callable[[], str],
     ) -> BlockProcessingResult:
@@ -265,24 +342,59 @@ class TranslationResultValidator:
                 )
                 for note in notes
             ),
-            warnings=self._warnings(block),
+            warnings=self._warnings(
+                block,
+                source=source,
+                payload=payload,
+                unit=unit,
+                target_language=target_language,
+                mandatory_glossary=mandatory_glossary,
+            ),
             segment_treatments=modes,
             segment_translations=segment_translations,
         )
 
-    def _warnings(self, block: BlockResultResponse) -> tuple[ResultWarning, ...]:
+    def _warnings(
+        self,
+        block: BlockResultResponse,
+        *,
+        source: DocumentBlock,
+        payload: TranslationResultResponse,
+        unit: TranslationUnit,
+        target_language: str,
+        mandatory_glossary: Sequence[GlossarySnapshotEntry],
+    ) -> tuple[ResultWarning, ...]:
         """Non-blocking warnings for a block result (PRD § 15)."""
+        warnings: list[ResultWarning] = []
         text = joined_segment_translation(block)
-        if text is None:
-            return ()
-        repetition = repetition_warning(
-            text,
-            ngram_size=self._repetition_ngram_size,
-            min_repeats=self._repetition_min_repeats,
-        )
-        if repetition is None:
-            return ()
-        return (ResultWarning(kind=ResultWarningKind.REPETITION, message=repetition),)
+        if text is not None:
+            repetition = repetition_warning(
+                text,
+                ngram_size=self._repetition_ngram_size,
+                min_repeats=self._repetition_min_repeats,
+            )
+            if repetition is not None:
+                warnings.append(
+                    ResultWarning(kind=ResultWarningKind.REPETITION, message=repetition)
+                )
+        single = replace(payload, blocks=(block,))
+        for message in translation_quality_warnings(
+            single,
+            unit=unit,
+            target_language=target_language,
+            mandatory_glossary=mandatory_glossary,
+        ):
+            warnings.append(
+                ResultWarning(kind=ResultWarningKind.QUALITY, message=message)
+            )
+        if self._spelling_checker is not None:
+            for message in _unknown_glossary_hint_warnings(
+                block, source, self._spelling_checker
+            ):
+                warnings.append(
+                    ResultWarning(kind=ResultWarningKind.QUALITY, message=message)
+                )
+        return tuple(warnings)
 
     def _ensure(self, violation: str | None, expectation: ResultExpectation) -> None:
         """Converts an encountered violation into rejection of the entire unit."""
@@ -347,6 +459,74 @@ def _unmarked(text: str) -> str:
     if unmarked == text:
         return text
     return unmarked.strip() or text
+
+
+def _source_word_tokens(text: str) -> frozenset[str]:
+    """Normalized English word tokens present verbatim in the block's original text."""
+    normalized_text = text.translate(_SPELL_TRANSLATION)
+    tokens: set[str] = set()
+    for match in _EN_WORD.finditer(normalized_text):
+        token = match.group().casefold()
+        tokens.add(token)
+        if token.endswith("'s") and len(token) > 2:
+            tokens.add(token[:-2])
+        if "-" in token:
+            for part in token.split("-"):
+                if part:
+                    tokens.add(part)
+    return frozenset(tokens)
+
+
+def _to_lemma_spelling_violation(
+    block: BlockResultResponse,
+    source: DocumentBlock,
+    spelling_checker: EnglishSpellingChecker,
+) -> str | None:
+    """Blocking check for misspelled `to <word>` lemmas in glossary hints."""
+    if not block.glossary_hints:
+        return None
+    source_words = _source_word_tokens(source.text)
+    for hint in block.glossary_hints:
+        original = _unmarked(hint.original).translate(_SPELL_TRANSLATION)
+        for match in _TO_LEMMA.finditer(original):
+            word = match.group(1)
+            normalized = word.casefold()
+            if len(normalized) < 2 or normalized in source_words:
+                continue
+            if not spelling_checker.is_known_word(word):
+                return (
+                    f"в словарной подсказке блока {block.source_block_id} ошибочное написание "
+                    f"леммы 'to {word}': проверь английскую орфографию"
+                )
+    return None
+
+
+def _unknown_glossary_hint_warnings(
+    block: BlockResultResponse,
+    source: DocumentBlock,
+    spelling_checker: EnglishSpellingChecker,
+) -> tuple[str, ...]:
+    """Non-blocking warnings for unknown English words in glossary hints not verbatim in source."""
+    if not block.glossary_hints:
+        return ()
+    source_words = _source_word_tokens(source.text)
+    warnings: list[str] = []
+    for hint in block.glossary_hints:
+        original = _unmarked(hint.original)
+        normalized_original = original.translate(_SPELL_TRANSLATION)
+        for match in _EN_WORD.finditer(normalized_original):
+            word = match.group()
+            normalized = word.casefold()
+            if len(normalized) < 2 or normalized in source_words:
+                continue
+            if not spelling_checker.is_known_word(word):
+                message = (
+                    f"блок {block.source_block_id}: неизвестное английское слово {word!r} "
+                    f"в словарной подсказке {original!r}"
+                )
+                if message not in warnings:
+                    warnings.append(message)
+    return tuple(warnings)
 
 
 def _normalize_block(block: BlockResultResponse) -> BlockResultResponse:

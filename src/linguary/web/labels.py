@@ -160,6 +160,7 @@ IMPORT_WARNING_LABELS: Mapping[ImportWarningKind, str] = {
 RESULT_WARNING_LABELS: Mapping[ResultWarningKind, str] = {
     ResultWarningKind.REPETITION: "Повторы в переводе",
     ResultWarningKind.DROPPED_BLOCK: "Фрагмент книги пропущен",
+    ResultWarningKind.QUALITY: "Замечание по качеству перевода",
 }
 
 EXPORT_VALIDATION_STATUS_LABELS: Mapping[ExportValidationStatus, str] = {

@@ -1837,5 +1837,160 @@ def test_recovery_historical_validation_uses_section_local_source_texts(
     assert tuple(roots[0].manifest["historical_coverage"]) == (b1.id,)
 
 
+def test_historical_validation_skips_new_blocking_dialogue_and_note_checks():
+    """Recovery._validate_historical passes historical=True so new blocking checks do not reject saved results (P2.T3)."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from processing_fakes import (
+        BOOK_ID,
+        TARGET_LANGUAGE,
+        make_block,
+        make_block_result,
+        make_hint,
+        make_note,
+        make_response,
+        make_unit,
+        note_ids,
+    )
+    from linguary.adapters.validation.english_spelling import IpaDictSpellingChecker
+    from linguary.application.recovery import Recovery
+    from linguary.application.retry_policy import ResultValidationError
+    from linguary.application.validators import TranslationResultValidator
+    from linguary.domain import (
+        BlockProcessingResult,
+        BlockTreatment,
+        ChapterAnalysis,
+        GlossaryHint,
+        GlossarySnapshot,
+        LanguageNote,
+        TranslationUnit,
+        TreatmentPlan,
+    )
+
+    validator = TranslationResultValidator(
+        target_language_min_share=0.5,
+        language_check_min_length=80,
+        repetition_ngram_size=3,
+        repetition_min_repeats=3,
+        spelling_checker=IpaDictSpellingChecker(),
+    )
+
+    b1 = make_block(
+        order=0,
+        text='"You will be expelled," he said.',
+    )
+    b2 = make_block(order=1, text="Another sentence follows.")
+    unit = make_unit((b1,))
+
+    # Same payload is rejected in live validation (historical=False)
+    live_payload = make_response(
+        (
+            make_block_result(
+                b1,
+                translated_text="— «Тебя исключат», — сказал он.",
+                glossary_hints=(make_hint(original="to expell", translation="исключать"),),
+            ),
+        ),
+        language_notes=(make_note(b1, note="Это слово really важно."),),
+    )
+    with pytest.raises(ResultValidationError):
+        validator.validate(
+            live_payload,
+            unit=unit,
+            target_language=TARGET_LANGUAGE,
+            note_id_factory=note_ids(),
+        )
+
+    # Accepted when historical=True
+    historical_results = validator.validate(
+        live_payload,
+        unit=unit,
+        target_language=TARGET_LANGUAGE,
+        note_id_factory=note_ids(),
+        historical=True,
+    )
+    assert len(historical_results) == 1
+
+    # End-to-end through Recovery.prepare_roots -> _validate_historical
+    saved_b1 = BlockProcessingResult(
+        block_id=b1.id,
+        treatment=BlockTreatment.TRANSLATE,
+        translated_text="— «Тебя исключат», — сказал он.",
+        glossary_hints=(GlossaryHint(original="to expell", translation="исключать"),),
+        language_notes=(
+            LanguageNote(
+                id="ln-ch01-001",
+                block_id=b1.id,
+                original_excerpt="expelled",
+                note="Это слово really важно.",
+            ),
+        ),
+    )
+    treatment_plan = TreatmentPlan.of_treatments(
+        b1.section_id,
+        ((b1.id, BlockTreatment.TRANSLATE), (b2.id, BlockTreatment.TRANSLATE)),
+    )
+    analysis = ChapterAnalysis.create(
+        id="analysis-hist",
+        section_id=b1.section_id,
+        treatment_plan=treatment_plan,
+        translation_instructions="",
+        chapter_summary="",
+        expected_block_ids=(b1.id, b2.id),
+    )
+    conditions = SimpleNamespace(
+        id="00000000-0000-0000-0000-000000000001",
+        payload={
+            "schema_version": 1,
+            "versions": {"validators": 1},
+            "checks": {"language_notes_per_chapter": 4},
+        },
+    )
+    roots, scopes = [], []
+
+    class WorkStore:
+        def latest_conditions(self, _book_id):
+            return conditions
+
+        def add_root(self, root):
+            roots.append(root)
+
+        def list_scopes(self, root_id):
+            return tuple(s for s in scopes if s.root_id == root_id)
+
+        def add_scope(self, scope):
+            scopes.append(scope)
+
+    class ResultsStore:
+        def get(self, _run_id, block_id):
+            return saved_b1 if block_id == b1.id else None
+
+    class FakeUow:
+        @contextmanager
+        def transaction(self):
+            yield SimpleNamespace(work=WorkStore(), results=ResultsStore())
+
+    work = SimpleNamespace(
+        document=SimpleNamespace(id=BOOK_ID),
+        analysis=analysis,
+        run=SimpleNamespace(id="run-1", glossary_snapshot=GlossarySnapshot()),
+        processed_block_ids={b1.id},
+        target_language=TARGET_LANGUAGE,
+    )
+    units = (
+        TranslationUnit.of_blocks(id="u-1", blocks=(b1,), plan=treatment_plan),
+        TranslationUnit.of_blocks(id="u-2", blocks=(b2,), plan=treatment_plan),
+    )
+    Recovery(FakeUow()).prepare_roots(
+        work,
+        units,
+        max_source_chars=1000,
+        validator=validator,
+    )
+    assert len(roots) == 2
+    assert tuple(roots[0].manifest["historical_coverage"]) == (b1.id,)
+
+
+
 
 

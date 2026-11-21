@@ -282,8 +282,13 @@ class Recovery:
         payload = TranslationResultResponse(blocks=tuple(_historical_block(result) for result in stored),
             language_notes=tuple(LanguageNoteResponse(note.block_id, note.original_excerpt, note.note, note.translated_excerpt)
                                  for result in stored for note in result.language_notes))
-        validator.validate(payload, unit=unit, target_language=work.target_language,
-                           note_id_factory=lambda: str(uuid4()))
+        validator.validate(
+            payload,
+            unit=unit,
+            target_language=work.target_language,
+            note_id_factory=lambda: str(uuid4()),
+            historical=True,
+        )
         if work.analysis.content_plan is not None:
             plan = work.analysis.content_plan
             validators_version = conditions.payload['versions']['validators']
