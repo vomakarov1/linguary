@@ -2112,7 +2112,7 @@ def test_a2_prompts_enforce_gender_dialogue_dash_a2_summary_and_forbid_calques()
 
 
 def test_sound_policy_preserves_mc_prefix_in_mcgonagall() -> None:
-    """SOUND keeps Mc-/Mac- as the prefix Мак- (McGonagall, not Магонагал)."""
+    """SOUND keeps Mc-/Mac- as the prefix Мак- and doubled consonants in proper names (McGonagall → Макгонагалл)."""
     sound = snapshot_prompt_templates(
         source_language="en",
         target_language="ru",
@@ -2127,11 +2127,11 @@ def test_sound_policy_preserves_mc_prefix_in_mcgonagall() -> None:
         profile="content-plan-v3",
         name_translation_policy=_policy("meaning"),
     )
-    required = ("Mc-", "Mac-", "McGonagall", "Макгонагал", "а не «Магонагал»")
+    required = ("Mc-", "Mac-", "McGonagall", "Макгонагалл", "а не «Магонагал»")
     for key in ("analysis", "fragment", "translation", "regeneration", "narrative_analysis"):
         for phrase in required:
             assert phrase in sound[key]
-        assert "Макгонагал" not in meaning[key]
+        assert "Макгонагалл" not in meaning[key]
 
 
 def test_short_chapter_caps_notes_budget_to_body_blocks() -> None:
@@ -2270,5 +2270,256 @@ def test_short_chapter_caps_notes_budget_to_body_blocks() -> None:
         treatment_plan=read_as_is_plan,
     )
     assert _scene_notes_budget(legacy_read_analysis, short_section, read_as_is_unit, per_chapter=8) == 3
+
+
+def test_a2_word_share_progression_in_input_text_and_sha() -> None:
+    """A2 progression corridor and prior topics enter input_text (even with frozen templates) and SHA."""
+    from linguary.application.context_builder import (
+        _CONTENT_PLAN_PROCESSING_V3,
+        _NARRATIVE_ANALYSIS_INSTRUCTIONS,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _TRANSLATION_CONTEXT_V2,
+        _reader_level_treatment_guidance,
+    )
+
+    section = make_analysis_section(
+        section_id="sec-prog",
+        title="Chapter 4",
+        texts=("Harry looked at the strange hut in the storm.",),
+    )
+    document = make_analysis_document((section,))
+    frozen_a2_templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    a2_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        prompt_templates=frozen_a2_templates,
+    )
+
+    expected_bands = (
+        (0, "78–85%"),
+        (12_000, "72–80%"),
+        (30_000, "68–76%"),
+        (50_000, "62–72%"),
+    )
+    all_bands = tuple(band for _, band in expected_bands)
+    shas: list[str] = []
+    for words_before, band in expected_bands:
+        ctx = a2_builder.for_chapter_pedagogical_analysis(
+            document,
+            section,
+            narrative_summary="Harry arrives at the hut.",
+            cumulative_words_before=words_before,
+        )
+        assert f"целевая доля слов в режиме TRANSLATE — {band}" in ctx.request.input_text
+        for other_band in all_bands:
+            if other_band != band:
+                assert other_band not in ctx.request.input_text
+        assert "Предохранитель" in ctx.request.input_text
+        shas.append(
+            a2_builder.pedagogical_input_sha256(
+                document,
+                section,
+                narrative_output_sha256="narr-sha-1",
+                narrative_summary="Harry arrives at the hut.",
+                cumulative_words_before=words_before,
+            )
+        )
+    assert len(set(shas)) == len(expected_bands)
+    assert shas[0] == a2_builder.pedagogical_input_sha256(
+        document,
+        section,
+        narrative_output_sha256="narr-sha-1",
+        narrative_summary="Harry arrives at the hut.",
+    )
+
+    ctx_with_topics = a2_builder.for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Harry arrives at the hut.",
+        cumulative_words_before=12_000,
+        prior_explained_topics=("used to", "to squint", "used to", " "),
+    )
+    assert "used to" in ctx_with_topics.request.input_text
+    assert "to squint" in ctx_with_topics.request.input_text
+    assert ctx_with_topics.request.input_text.count("- used to") == 1
+
+    b2_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="b2",
+    )
+    b2_ctx = b2_builder.for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Harry arrives at the hut.",
+        cumulative_words_before=30_000,
+    )
+    assert "78–85%" not in b2_ctx.request.input_text
+    assert "68–76%" not in b2_ctx.request.input_text
+
+    # Prompt updates for false_friend, strict A2 reader_chapter_summary, contextual notes, and ты/вы pairs.
+    ped = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS
+    assert _FALSE_FRIEND_KIND in ped
+    assert _SPEECH_STYLE_KIND in ped
+    for example in ("actual", "magazine", "sympathetic"):
+        assert example in ped
+    assert "3–5" in ped
+    assert "общеязыковых слов" in ped
+
+    a2_guidance = _reader_level_treatment_guidance("a2")
+    assert "GLOSSARY_ONLY" in a2_guidance
+    assert "15 слов" in a2_guidance
+    assert "45 слов" in a2_guidance
+
+    for text in (_NARRATIVE_ANALYSIS_INSTRUCTIONS, _CONTENT_PLAN_PROCESSING_V3, _TRANSLATION_CONTEXT_V2):
+        for word in ("robes", "drills", "witch", "hut", "term"):
+            assert word in text
+        assert "ты/вы" in text or "«ты» или «вы»" in text
+
+
+def test_name_policy_sound_keeps_doubled_consonants_in_proper_names() -> None:
+    """SOUND follows Ermolovich rule: keep doubled consonants in proper names, simplify common nouns."""
+    sound = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+        name_translation_policy=_policy("sound"),
+    )
+    for key in ("analysis", "fragment", "translation", "regeneration", "narrative_analysis", "pedagogical_analysis"):
+        text = sound[key]
+        assert "Ермоловича" in text
+        assert "«McGonagall» → «Макгонагалл», а не «Магонагал»" in text
+        for proper in ("Гринготтс", "Квиррелл", "Невилл", "Макгонагалл"):
+            assert proper in text
+        assert "«маглы», а не «магглы»" in text
+
+
+def test_matches_chapter_text_links_initials_to_full_name() -> None:
+    """Initial forms like Mr H. Potter match full names like Harry Potter in both directions without false positives."""
+    from linguary.application.context_builder import _extract_word_stems, _matches_chapter_text
+
+    initial_text = "The letter was addressed to Mr H. Potter, The Cupboard under the Stairs."
+    initial_stems = _extract_word_stems(initial_text)
+    assert _matches_chapter_text("Harry Potter", initial_text, initial_stems)
+    assert not _matches_chapter_text("James Potter", initial_text, initial_stems)
+    assert not _matches_chapter_text("Lily Potter", initial_text, initial_stems)
+
+    bare_initial_text = "H. Potter's parcel and Mrs M. Weasley's note arrived together."
+    bare_stems = _extract_word_stems(bare_initial_text)
+    assert _matches_chapter_text("Harry Potter", bare_initial_text, bare_stems)
+    assert _matches_chapter_text("Molly Weasley", bare_initial_text, bare_stems)
+    assert not _matches_chapter_text("Arthur Weasley", bare_initial_text, bare_stems)
+
+    full_name_text = "Harry Potter opened the door while Molly Weasley smiled."
+    full_stems = _extract_word_stems(full_name_text)
+    assert _matches_chapter_text("Mr H. Potter", full_name_text, full_stems)
+    assert _matches_chapter_text("H. Potter", full_name_text, full_stems)
+    assert _matches_chapter_text("Mrs M. Weasley", full_name_text, full_stems)
+    assert not _matches_chapter_text("Mr J. Potter", full_name_text, full_stems)
+
+    # Guard against common-word false positives.
+    false_pos_text = "He handed Potter a potter book. A Potter always remembers."
+    false_pos_stems = _extract_word_stems(false_pos_text)
+    assert not _matches_chapter_text("Harry Potter", false_pos_text, false_pos_stems)
+    assert not _matches_chapter_text("Albus Potter", false_pos_text, false_pos_stems)
+    assert not _matches_chapter_text("Mr H. Potter", false_pos_text, false_pos_stems)
+
+
+def test_chapter_note_limit_and_scene_budget_scale_for_long_chapters() -> None:
+    """chapter_note_limit and _scene_notes_budget scale up to 16 for long chapters and respect low caps."""
+    from linguary.application.context_builder import (
+        _scene_notes_budget,
+        chapter_note_limit,
+        scaled_chapter_note_limit,
+    )
+    from linguary.domain import ChapterAnalysis, CoverageStatus, TranslationUnit, TreatmentPlan
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, Scene, SourceAnchor
+
+    assert scaled_chapter_note_limit(0, 8) == 0
+    assert scaled_chapter_note_limit(300, 0) == 0
+    assert scaled_chapter_note_limit(300, -1) == 0
+    assert scaled_chapter_note_limit(300, 4) == 4
+    assert scaled_chapter_note_limit(2, 4) == 2
+    assert scaled_chapter_note_limit(2, 8) == 2
+    assert scaled_chapter_note_limit(100, 8) == 8
+    assert scaled_chapter_note_limit(250, 8) == 10
+    assert scaled_chapter_note_limit(300, 8) == 12
+    assert scaled_chapter_note_limit(400, 8) == 16
+    assert scaled_chapter_note_limit(600, 8) == 16
+    assert scaled_chapter_note_limit(300, 20) == 20
+
+    long_blocks = tuple(
+        make_analysis_block(
+            section_id="sec-long",
+            order=i,
+            text=f"Paragraph number {i} with enough words to fill a chapter.",
+            type=BlockType.PARAGRAPH,
+        )
+        for i in range(300)
+    )
+    long_section = make_analysis_section(section_id="sec-long", title="Chapter 5", blocks=long_blocks)
+    assert chapter_note_limit(long_section, 8) == 12
+    assert chapter_note_limit(long_section, 4) == 4
+
+    plan = TreatmentPlan.of_treatments(
+        long_section.id,
+        ((b.id, BlockTreatment.READ_AS_IS) for b in long_section.blocks),
+    )
+    unit = TranslationUnit.of_blocks(id="u-long", blocks=long_section.blocks, plan=plan)
+
+    ten_difficulties = tuple(
+        Difficulty(
+            f"d{idx}",
+            (SourceAnchor(block.id, 0, 9, block.text[:9]),),
+            block.id,
+            "grammar",
+            "useful",
+            "explanation",
+            (RequiredPoint(f"p{idx}", "Explain grammar"),),
+        )
+        for idx, block in enumerate(long_section.blocks[:10], start=1)
+    )
+    analysis_ten = ChapterAnalysis(
+        id="a-long-10",
+        section_id=long_section.id,
+        coverage_status=CoverageStatus.COMPLETE,
+        treatment_plan=plan,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=ten_difficulties),
+        scenes=(Scene("s1", 0, long_section.blocks[0].id, long_section.blocks[-1].id, "Long scene"),),
+    )
+    assert _scene_notes_budget(analysis_ten, long_section, unit, per_chapter=8) == 12
+
+    thirteen_difficulties = tuple(
+        Difficulty(
+            f"d{idx}",
+            (SourceAnchor(block.id, 0, 9, block.text[:9]),),
+            block.id,
+            "grammar",
+            "useful",
+            "explanation",
+            (RequiredPoint(f"p{idx}", "Explain grammar"),),
+        )
+        for idx, block in enumerate(long_section.blocks[:13], start=1)
+    )
+    analysis_thirteen = ChapterAnalysis(
+        id="a-long-13",
+        section_id=long_section.id,
+        coverage_status=CoverageStatus.COMPLETE,
+        treatment_plan=plan,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=thirteen_difficulties),
+        scenes=(Scene("s1", 0, long_section.blocks[0].id, long_section.blocks[-1].id, "Long scene"),),
+    )
+    with pytest.raises(ContextBuildError):
+        _scene_notes_budget(analysis_thirteen, long_section, unit, per_chapter=8)
+
 
 

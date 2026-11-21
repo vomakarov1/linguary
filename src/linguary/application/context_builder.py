@@ -119,6 +119,12 @@ _NOT_A_PERSON_GUIDANCE = """
 """
 
 
+_CONTEXTUAL_TRANSLATION_GUIDANCE = """
+Учитывай контекст многозначных слов и не переводи их механически: «robes» для одежды одного человека переводи в ед. ч. («мантия», не «мантии»), «drills» различай по контексту («дрели» или «свёрла»), «witch» — «ведьма» или «волшебница» по регистру сцены, «hut» — «хижина», «term» в школьном контексте — «триместр/семестр».
+Соблюдай единые пары обращения «ты/вы» между персонажами на протяжении всей главы и не путай обычную многозначность с false_friend (примеры false_friend: actual/actually, magazine, sympathetic, fabric).
+"""
+
+
 _TRANSLATION_CONTEXT_V2 = """
 Политика translation-context-v2. Соблюдай назначенные режимы каждого целевого блока,
 English Help, помощь и произношение, если они включены; не меняй схему ответа.
@@ -139,7 +145,7 @@ English Help, помощь и произношение, если они вклю
 «(только для контекста, в blocks не возвращать)» в массив blocks не включай). Соседи не цели:
 не переводи их отдельно, не возвращай для них помощь, произношение или новые ID.
 Запрещены буквальные кальки и несочетаемые союзы («хотя зато», «больше того»), пропуск обстоятельств времени и места, термины «окказиональный», «окказиональное прилагательное/сложение», «дериват», «инверсия», «эллипсис», «V2/V3», пометы «вариант стоит проверить» и «в переводе передано как...», переводческие инструкции («не склонять») в заметках читателю, шаблон «не X, а Y» (кроме false_friend) и пустые пересказы в glossary_hints.note.
-""" + _A2_NOTE_DISCIPLINE + _A2_DIALOGUE_AND_CALQUE_RULES
+""" + _A2_NOTE_DISCIPLINE + _A2_DIALOGUE_AND_CALQUE_RULES + _CONTEXTUAL_TRANSLATION_GUIDANCE
 
 
 CONTENT_PLAN_PROMPT_VERSION = "content-plan-v2.1"
@@ -178,6 +184,7 @@ context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null.
 Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора (said Harry). Не спойлерь каноническое имя у анонимных обозначений (the stranger, the giant и т. п.) до первого называния персонажа по имени в тексте.
 В glossary_candidates.note указывай только внутренние переводческие пометы: грамматический род топонимов и животных, если он неочевиден в переводе, обращение на «ты» или «вы», а также несклоняемость действительно несклоняемых заимствованных имён и фамилий (мужские фамилии на согласный в русском склоняются всегда). Эти внутренние пометы не копируй в заметки читателю.
+В translation_instructions фиксируй устойчивые пары обращения «ты/вы» между персонажами сцены и контекстные пометы для многозначных слов главы («robes» в ед. ч. «мантия» для одного человека, «drills» — «дрели» или «свёрла», «witch» — «ведьма/волшебница», «hut» — «хижина», «term» — «триместр/семестр»).
 Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
 scenes: start_block_id, end_block_id, summary, location, participants,
 visual_facts, visual_assumptions, continues_previous_scene.
@@ -202,13 +209,13 @@ _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS = """\
 Каждая трудность: id, anchors [{{block_id, quote}}], owner_block_id, kind,
 priority, help_kind, required_points [{{id, description}}]. Копируй quote дословно,
 не раскрывай сокращения. Если цитата в блоке одна, start и end не возвращай. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end]. Владелец входит в anchors.
-false_friend — слово похоже на русское, значит другое.
+false_friend — слово похоже на русское, значит другое. Примеры: actual/actually («фактический/на самом деле», не «актуальный»), magazine («журнал», не «магазин»), sympathetic («сочувствующий», не «симпатичный»), fabric («ткань», не «фабрика»); не помечай как false_friend обычные многозначные слова без ложного сходства с русским.
 speech_style — диалект, акцент, особенности речи; только первое появление особенности персонажа.
 Отмечай speech_style («Речь персонажа.») также при первом появлении ненормативных грамматических форм (we was, you was, don' need, them as).
 В required_points трудности блока bK запрещено цитировать и разбирать фразы из более поздних блоков b(K+1)..bN.
 Бюджет заметок — верхний предел («не больше N»), а не норма, которую нужно заполнить. В блоках TRANSLATE планируй не больше 1–2 заметок на абзац.
 В блоках без перевода (GLOSSARY_ONLY, READ_AS_IS) проверяй каждое знаменательное слово выше уровня читателя (включая редкие значения знакомых слов и официальные титулы), но не добавляй подсказки на базовые слова A1 и прозрачные интернационализмы.
-Для reader_chapter_summary (Previously in Chapter...) используй простую лексику A2 в Present Simple, стандартные английские кавычки вместо «ёлочек», строго по фактам главы без выдуманных деталей, одним абзацем без перевода на русский.
+Для reader_chapter_summary (Previously in Chapter...) используй строго простую лексику A2 (без редких слов уровня B2–C1) в Present Simple, стандартные английские кавычки вместо «ёлочек», строго по фактам главы без выдуманных деталей, одним абзацем без перевода на русский; естественно вплети 3–5 полезных общеязыковых слов главы в простой контекст.
 parody — в required_points назвать исходный текст.
 Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
 lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR.
@@ -273,7 +280,7 @@ _CONTENT_PLAN_PROCESSING_V3 = """
 Служебные context_facts применяй только к назначенным субъектам и их точным исходным привязкам.
 Не выдавай inferred/unknown за подтверждённый факт; решения глоссария имеют приоритет.
 Не превращай эти служебные сведения в обязательную заметку читателю.
-""" + _A2_NOTE_DISCIPLINE + _A2_DIALOGUE_AND_CALQUE_RULES
+""" + _A2_NOTE_DISCIPLINE + _A2_DIALOGUE_AND_CALQUE_RULES + _CONTEXTUAL_TRANSLATION_GUIDANCE
 
 _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS = """\
 Профиль content-plan-v3 для режима чтения на английском с помощью к трудным местам.
@@ -401,8 +408,18 @@ def notes_budget(*, unit_chars: int, chapter_chars: int, per_chapter: int) -> in
     return max(1, round(per_chapter * unit_chars / chapter_chars))
 
 
+def scaled_chapter_note_limit(effective_blocks: int, per_chapter: int) -> int:
+    """Scale chapter note allowance for long chapters while capping short chapters."""
+    if per_chapter <= 0 or effective_blocks <= 0:
+        return 0
+    if per_chapter < 6:
+        return min(per_chapter, effective_blocks)
+    scaled = max(per_chapter, min(16, max(6, round(effective_blocks / 25))))
+    return min(effective_blocks, scaled)
+
+
 def chapter_note_limit(section: DocumentSection, per_chapter: int) -> int:
-    """Cap chapter note allowance on short chapters so 2-paragraph excerpts do not get 8 notes."""
+    """Cap chapter note allowance on short chapters and scale it for long chapters."""
     if per_chapter <= 0:
         return 0
     blocks = textual_blocks(section)
@@ -410,7 +427,7 @@ def chapter_note_limit(section: DocumentSection, per_chapter: int) -> int:
         return 0
     body_blocks = sum(1 for block in blocks if block.type is not BlockType.HEADING)
     effective_blocks = body_blocks if body_blocks > 0 else len(blocks)
-    return min(per_chapter, max(1, effective_blocks))
+    return scaled_chapter_note_limit(effective_blocks, per_chapter)
 
 
 class AliasedBlocksContext:
@@ -790,6 +807,78 @@ _GLOSSARY_STOP_WORDS = frozenset({
 })
 
 
+_INITIAL_BEFORE_SURNAME = re.compile(
+    r"(?<![A-Za-zА-Яа-яЁё0-9])"
+    r"(?:(?P<dotted>(?:[A-Za-zА-Яа-яЁё]\.\s*)+)"
+    r"|(?P<honorific>\b(?:Mr|Mrs|Ms|Miss|Dr|Prof|Professor|Sir|Lady|Lord)\.?\s+)?"
+    r"(?P<plain>(?:[A-ZА-ЯЁ]\s+)+))"
+    r"(?P<surname>[A-Za-zА-Яа-яЁё]{2,})"
+)
+
+_FULL_NAME_CANDIDATE = re.compile(
+    r"(?<![A-Za-zА-Яа-яЁё0-9])"
+    r"(?P<given>(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё]+\s+){1,3})"
+    r"(?P<surname>[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё]+)"
+)
+
+
+def _stems_overlap(left: str, right: str) -> bool:
+    return bool(_stem_word(left) & _stem_word(right))
+
+
+def _matches_initials_in_text(
+    significant_words: Sequence[str],
+    blocks_text: str,
+    word_stems: set[str],
+) -> bool:
+    """Link initial-based person names (`Mr H. Potter`) with full names (`Harry Potter`)."""
+    if len(significant_words) < 2:
+        return False
+    surname = significant_words[-1]
+    if len(surname) < 2 or not any(stem in word_stems for stem in _stem_word(surname)):
+        return False
+    given = significant_words[:-1]
+
+    # Direction 1: full-name term (Harry Potter) vs initial-form text (Mr H. Potter / H. Potter).
+    if all(len(word) >= 2 and word[0].isalpha() for word in given):
+        for match in _INITIAL_BEFORE_SURNAME.finditer(blocks_text):
+            matched_surname = match.group("surname")
+            if not _stems_overlap(surname, matched_surname.casefold()):
+                continue
+            dotted = match.group("dotted")
+            if dotted is not None:
+                initials = tuple(ch.casefold() for ch in dotted if ch.isalpha())
+            else:
+                if not matched_surname[0].isupper():
+                    continue
+                plain = match.group("plain") or ""
+                initials = tuple(ch.casefold() for ch in plain if ch.isalpha())
+                if not match.group("honorific") and initials and initials[0] in {"a", "i"}:
+                    continue
+            if initials and all(g.startswith(init) for g, init in zip(given, initials)):
+                return True
+
+    # Direction 2: initial-form term (Mr H. Potter / H. Potter) vs full-name text (Harry Potter).
+    if all(len(word) == 1 and word.isalpha() for word in given):
+        for match in _FULL_NAME_CANDIDATE.finditer(blocks_text):
+            matched_surname = match.group("surname")
+            if not _stems_overlap(surname, matched_surname.casefold()):
+                continue
+            raw_given = re.findall(r"[A-Za-zА-Яа-яЁё]+", match.group("given").casefold())
+            candidate_given = [w for w in raw_given if w not in _GLOSSARY_STOP_WORDS]
+            if len(candidate_given) < len(given):
+                continue
+            if all(cg.startswith(init) for cg, init in zip(candidate_given, given)):
+                return True
+            if len(candidate_given) > len(given) and all(
+                cg.startswith(init)
+                for cg, init in zip(candidate_given[-len(given) :], given)
+            ):
+                return True
+
+    return False
+
+
 def _matches_chapter_text(
     term_source: str,
     blocks_text: str,
@@ -808,14 +897,16 @@ def _matches_chapter_text(
     )
     if key in haystack:
         return True
-    term_words = re.findall(r"[A-Za-zА-Яа-я0-9]+", term_source.casefold())
+    term_words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", term_source.casefold())
     if not term_words:
         return False
     significant_words = [w for w in term_words if w not in _GLOSSARY_STOP_WORDS] or term_words
-    return all(
+    if all(
         any(stem in word_stems for stem in _stem_word(w))
         for w in significant_words
-    )
+    ):
+        return True
+    return _matches_initials_in_text(significant_words, blocks_text, word_stems)
 
 
 class ContextBuilder:
@@ -926,6 +1017,8 @@ class ContextBuilder:
         fragment: ChapterFragment | None = None, fragment_count: int = 1,
         before_you_read_limit: int | None = None,
         language_notes_limit: int | None = None,
+        cumulative_words_before: int = 0,
+        prior_explained_topics: Sequence[str] = (),
     ) -> ChapterAnalysisContext:
         """Source-bound pedagogical context with existing chapter and group budgets."""
         if fragment_count < 1 or fragment is not None and fragment.order >= fragment_count:
@@ -964,10 +1057,22 @@ class ContextBuilder:
                 context_facts=_pedagogical_context_facts(context_facts, aliases_by_block_id),
             ),
             ensure_ascii=False, sort_keys=True)
+        extra_sections = [accepted]
+        if self._reader_level == 'a2' and not self._english_help:
+            extra_sections.append('\n\n' + _a2_progression_guidance(cumulative_words_before))
+        cleaned_topics = tuple(
+            dict.fromkeys(topic.strip() for topic in prior_explained_topics if topic and topic.strip())
+        )
+        if cleaned_topics:
+            extra_sections.append(
+                '\n\nУже объяснено в предыдущих фрагментах этой главы '
+                '(не планируй повторно без нового языкового аспекта):\n'
+                + '\n'.join(f'- {topic}' for topic in cleaned_topics)
+            )
         return replace(context, request=replace(context.request,
             kind=LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
             contract_version=2 if self._reader_level == 'a2' else 1,
-            input_text=context.request.input_text + accepted))
+            input_text=context.request.input_text + ''.join(extra_sections)))
 
     def narrative_input_sha256(
         self, document: CanonicalDocument, section: DocumentSection,
@@ -994,11 +1099,13 @@ class ContextBuilder:
         user_decisions: Iterable[TermConcept] | None = None,
         model_dependencies: Mapping[str, object] | None = None,
         max_fragment_blocks: int = 40,
+        cumulative_words_before: int = 0,
     ) -> str:
         context = self.for_chapter_pedagogical_analysis(document, section,
             narrative_summary=narrative_summary, context_facts=context_facts,
             glossary_candidates=glossary_candidates,
-            accumulated_candidates=accumulated_candidates, user_decisions=user_decisions)
+            accumulated_candidates=accumulated_candidates, user_decisions=user_decisions,
+            cumulative_words_before=cumulative_words_before)
         return canonical_sha(dict(schema_version=1, narrative_output_sha256=narrative_output_sha256,
             source=[(b.id, b.text) for b in textual_blocks(section)],
             instructions=context.request.instructions, input=context.request.input_text,
@@ -1891,7 +1998,8 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 Для A2 без english help верни before_you_read: [] и before_you_read_evidence: []. Трудные места объясняй в language_notes под абзацем.
 
 Длина блока не определяет режим. Если сомневаешься между режимами, выбирай более сильную помощь (TRANSLATE). \
-Перед ответом в этом же запросе проверь план: ориентир TRANSLATE — 65–80% блоков; GLOSSARY_ONLY — до 25% блоков.\
+Перед ответом в этом же запросе проверь план: ориентир TRANSLATE — 65–80% блоков; GLOSSARY_ONLY — до 25% блоков. \
+Соблюдай адаптивный коридор доли переведённых слов из текста запроса: прозрачные реплики без диалекта длиной до 15 слов и простой нарратив до 45 слов (при ≤ 3 трудностях) оставляй в GLOSSARY_ONLY со словарными подсказками, чтобы читатель тренировал чтение в оригинале, не снимая TRANSLATE с действительно трудных абзацев.\
 """
     if level == "b1":
         return """\
@@ -2288,9 +2396,10 @@ def _scene_notes_budget(
         if difficulty.help_kind == "explanation"
         and analysis.treatment_plan.treatment_for(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
     }
-    if len(owners) > per_chapter:
+    chapter_limit = chapter_note_limit(section, per_chapter)
+    if len(owners) > max(per_chapter, chapter_limit):
         raise ContextBuildError("обязательные объяснения превышают бюджет заметок главы")
-    effective_per_chapter = max(len(owners), chapter_note_limit(section, per_chapter))
+    effective_per_chapter = max(len(owners), chapter_limit)
     blocks = textual_blocks(section)
     if len(owners) < effective_per_chapter:
         extra_owners = {
@@ -2837,11 +2946,13 @@ def _with_name_policy(instructions: str, policy: NameTranslationPolicy | None, *
         return instructions
     if policy.strategy == NameTranslationStrategy.SOUND:
         rule = ('Передавай имена и названия по звучанию: сохраняй произношение средствами языка перевода; '
-                'не переводи смысловые части имени, не подменяй произношение побуквенной транслитерацией, '
-                'не копируй непроизносимые удвоенные согласные английской орфографии («маглы», а не «магглы»), '
+                'не переводи смысловые части имени, не подменяй произношение побуквенной транслитерацией; '
+                'по правилу Ермоловича сохраняй удвоенные согласные в именах собственных, фамилиях и названиях '
+                '(«Гринготтс», «Квиррелл», «Невилл», «Макгонагалл»), '
+                'но упрощай их в нарицательных словах и терминах («маглы», а не «магглы»); '
                 'передавай гласный /ɔː/ (aw/au) через «о», а не «оу» («Поз», а не «Поуз»), '
                 'шотландские и ирландские фамилии на Mc- и Mac- передавай с приставкой «Мак-» '
-                '(«McGonagall» → «Макгонагал», а не «Магонагал»); '
+                '(«McGonagall» → «Макгонагалл», а не «Магонагал»); '
                 'не усекай конечные гласные и слоги ради склоняемости (например, -ley/-ly со звучанием /li/ передавай как -ли, а не -ль) '
                 'и не заменяй корневую гласную под русское созвучие; '
                 'не бери готовые имена из известных переводов книги, если они искажают звучание '
@@ -2954,6 +3065,7 @@ __all__ = [
     "chapter_fragment_instructions",
     "chapter_note_limit",
     "is_textual",
+    "scaled_chapter_note_limit",
     "source_text_for_model",
     "textual_blocks",
     "translation_unit_instructions",
@@ -3137,6 +3249,33 @@ def _pedagogical_context_facts(
             anchor.pop("end", None)
         facts.append(value)
     return facts
+
+
+def _a2_word_share_corridor(cumulative_words_before: int) -> tuple[int, int]:
+    """Target A2 translated-word share band by cumulative words read before the chapter."""
+    words = max(0, cumulative_words_before)
+    if words < 10_000:
+        return (78, 85)
+    if words < 25_000:
+        return (72, 80)
+    if words < 45_000:
+        return (68, 76)
+    return (62, 72)
+
+
+def _a2_progression_guidance(cumulative_words_before: int) -> str:
+    """Dynamic A2 progression corridor injected into pedagogical `input_text`."""
+    words = max(0, cumulative_words_before)
+    low, high = _a2_word_share_corridor(words)
+    return (
+        f"Ориентир адаптивной прогрессии A2 (прочитано до этой главы: {words} слов): "
+        f"целевая доля слов в режиме TRANSLATE — {low}–{high}% объёма главы "
+        "(по мере чтения книги доля перевода постепенно снижается). "
+        "Простые реплики без диалекта (до 15 слов) и прозрачный нарратив (до 45 слов при ≤ 3 трудностях) "
+        "переводи в GLOSSARY_ONLY, чтобы читатель тренировал чтение. "
+        "Предохранитель: если глава объективно труднее обычного (плотный диалект, сложный синтаксис, "
+        "письма или архаика), не снимай TRANSLATE с трудных блоков ради процента."
+    )
 
 
 def _pedagogical_instructions(source_language: str, target_language: str, reader_level: str, english_help: bool) -> str:
