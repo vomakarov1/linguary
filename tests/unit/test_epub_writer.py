@@ -19,6 +19,7 @@ from linguary.domain.document import (
     DocumentSection,
     ImportWarningKind,
     SourceReference,
+    has_meaningful_part_title,
     is_cover_section,
     is_front_matter,
     is_part_divider,
@@ -646,6 +647,134 @@ def test_part_divider_classification_and_export_preservation() -> None:
         "sec-book1",
         "sec-combined",
     ]
+
+
+def test_has_meaningful_part_title_distinguishes_titled_and_bare_dividers() -> None:
+    """Part dividers with real subtitles are distinguished from bare numbered dividers while staying front matter."""
+    titled_heading = DocumentSection(
+        id="sec-part1-titled",
+        document_id="book-1",
+        title="PART ONE / Afterlights",
+        order=0,
+        source_resource_path="part1.xhtml",
+        blocks=(
+            _block("sec-part1-titled", "b-p1t-1", "PART ONE", BlockType.HEADING, 0),
+            _block("sec-part1-titled", "b-p1t-2", "Afterlights", BlockType.HEADING, 1),
+        ),
+    )
+    titled_paragraphs = DocumentSection(
+        id="sec-part2-titled",
+        document_id="book-1",
+        title="PART TWO / Mary, Queen of Snots",
+        order=1,
+        source_resource_path="part2.xhtml",
+        blocks=(
+            _block("sec-part2-titled", "b-p2t-1", "PART TWO", BlockType.PARAGRAPH, 0),
+            _block("sec-part2-titled", "b-p2t-2", "Mary, Queen of Snots", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    subtitle_in_block_only = DocumentSection(
+        id="sec-part3-block-title",
+        document_id="book-1",
+        title="Part Three",
+        order=2,
+        source_resource_path="part3.xhtml",
+        blocks=(
+            _block("sec-part3-block-title", "b-p3t-1", "PART THREE", BlockType.PARAGRAPH, 0),
+            _block("sec-part3-block-title", "b-p3t-2", "The Chocolate Ogre", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    bare_part_one = DocumentSection(
+        id="sec-bare-part-one",
+        document_id="book-1",
+        title="PART ONE",
+        order=3,
+        source_resource_path="bare1.xhtml",
+        blocks=(_block("sec-bare-part-one", "b-bp1", "PART ONE", BlockType.HEADING, 0),),
+    )
+    bare_part_two = DocumentSection(
+        id="sec-bare-part-two",
+        document_id="book-1",
+        title="Part 2 —",
+        order=4,
+        source_resource_path="bare2.xhtml",
+        blocks=(
+            _block("sec-bare-part-two", "b-bp2a", "Part 2", BlockType.PARAGRAPH, 0),
+            _block("sec-bare-part-two", "b-bp2b", "— 2024 —", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    bare_book_iv = DocumentSection(
+        id="sec-bare-book-iv",
+        document_id="book-1",
+        title="Book IV",
+        order=5,
+        source_resource_path="bare3.xhtml",
+        blocks=(_block("sec-bare-book-iv", "b-biv", "Book IV.", BlockType.HEADING, 0),),
+    )
+    bare_ru_part = DocumentSection(
+        id="sec-bare-ru",
+        document_id="book-1",
+        title="Часть вторая",
+        order=6,
+        source_resource_path="bare4.xhtml",
+        blocks=(_block("sec-bare-ru", "b-bru", "Часть вторая.", BlockType.HEADING, 0),),
+    )
+    regular_chapter = DocumentSection(
+        id="sec-ch1",
+        document_id="book-1",
+        title="Chapter 1: Afterlights",
+        order=7,
+        source_resource_path="ch1.xhtml",
+        blocks=(
+            _block("sec-ch1", "b-ch1h", "Chapter 1", BlockType.HEADING, 0),
+            _block("sec-ch1", "b-ch1p", "Nick and Allie woke up in the woods.", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    dedication = DocumentSection(
+        id="sec-ded",
+        document_id="book-1",
+        title="Dedication",
+        order=8,
+        source_resource_path="dedication.xhtml",
+        blocks=(_block("sec-ded", "b-ded", "For everyone.", BlockType.PARAGRAPH, 0),),
+    )
+
+    doc = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="Everlost"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            titled_heading,
+            titled_paragraphs,
+            subtitle_in_block_only,
+            bare_part_one,
+            bare_part_two,
+            bare_book_iv,
+            bare_ru_part,
+            regular_chapter,
+            dedication,
+        ),
+    )
+
+    for section in (titled_heading, titled_paragraphs, subtitle_in_block_only):
+        assert is_part_divider(section) is True
+        assert is_front_matter(section, doc) is True
+        assert doc.is_front_matter(section) is True
+        assert has_meaningful_part_title(section) is True
+        assert doc.has_meaningful_part_title(section) is True
+
+    for section in (bare_part_one, bare_part_two, bare_book_iv, bare_ru_part):
+        assert is_part_divider(section) is True
+        assert is_front_matter(section, doc) is True
+        assert doc.is_front_matter(section) is True
+        assert has_meaningful_part_title(section) is False
+        assert doc.has_meaningful_part_title(section) is False
+
+    for section in (regular_chapter, dedication):
+        assert is_part_divider(section) is False
+        assert has_meaningful_part_title(section) is False
+        assert doc.has_meaningful_part_title(section) is False
 
 
 def test_every_import_warning_kind_has_ui_label() -> None:

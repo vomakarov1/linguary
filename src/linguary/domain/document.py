@@ -442,6 +442,10 @@ class CanonicalDocument:
         """Whether the section is a standalone part/book/act divider page."""
         return is_part_divider(section)
 
+    def has_meaningful_part_title(self, section: DocumentSection) -> bool:
+        """Whether the section is a part divider carrying a meaningful subtitle."""
+        return has_meaningful_part_title(section)
+
 
 _FRONT_MATTER_FILENAMES = frozenset(
     {
@@ -598,6 +602,28 @@ def is_part_divider(section: DocumentSection) -> bool:
         return False
 
     return any(_PART_DIVIDER_PATTERN.search(text) for text in candidates)
+
+
+def has_meaningful_part_title(section: DocumentSection) -> bool:
+    """Whether a standalone part divider has meaningful title words beyond the part marker."""
+    if not is_part_divider(section):
+        return False
+
+    candidates = [
+        _collapse_spaces(section.title),
+        *(
+            _collapse_spaces(block.text)
+            for block in section.blocks
+            if block.type is BlockType.HEADING or block.type in _TEXT_BLOCK_TYPES
+        ),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        remainder = _PART_DIVIDER_PATTERN.sub(" ", candidate)
+        if any(char.isalpha() for char in remainder):
+            return True
+    return False
 
 
 def is_front_matter(
