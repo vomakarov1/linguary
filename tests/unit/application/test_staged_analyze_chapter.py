@@ -1316,8 +1316,8 @@ async def test_description_kept_for_person_and_place_only(stored_book):
 
 
 A2_SUMMARY = 'A speaker asks for a small box.'
-_LONG_QUOTE = '“Please bring the small red box from the hall before noon.”'
-_LONG_CRATE = '“Please carry the small red crate from the hall before noon.”'
+_LONG_QUOTE = '“Please bring the small red wooden box from the front hall to the kitchen table before noon.”'
+_LONG_CRATE = '“Please carry the small red wooden crate from the front hall to the kitchen table before noon.”'
 
 
 def _block(order, text, *, type=BlockType.PARAGRAPH, segments=()):
@@ -1352,7 +1352,7 @@ def _modes(analysis, blocks):
 
 
 async def test_a2_dialogue_longer_than_eight_words_promoted_to_translate(stored_book):
-    """A quoted A2 block or dialogue segment longer than eight words becomes TRANSLATE."""
+    """A quoted A2 block or dialogue segment longer than fifteen words becomes TRANSLATE."""
     from sqlalchemy import update
 
     from linguary.adapters.db.models import AnalysisPassResultRow
@@ -1428,8 +1428,9 @@ async def test_a2_dialogue_longer_than_eight_words_promoted_to_translate(stored_
 async def test_a2_dialogue_with_conditional_or_reporting_difficulty_promoted_to_translate(stored_book):
     """A short quote is translated for a subordinator or a non-basic reporting verb.
 
-    Remark vocabulary promotes a reply only when it is longer than eight words
-    or the speech verb is non-basic. A short elementary reply keeps its mode.
+    Remark vocabulary promotes a reply only when it is longer than fifteen words
+    or the speech verb is non-basic without a glossary-only difficulty covering it.
+    A short elementary reply keeps its mode.
     """
     _, uow, _ = stored_book
     cases = (
@@ -1842,14 +1843,14 @@ def test_short_elementary_dialogue_with_adverb_difficulty_stays_or_demotes_to_gl
 
 
 def test_short_dialogue_with_non_elementary_speech_verb_still_promotes_to_translate():
-    """Demanded, snapped, a question tag, and a reply over eight words are translated."""
+    """Demanded, snapped, a question tag, and a reply over fifteen words are translated."""
     from linguary.application.analysis_merge import normalize_a2_dialogue_response
     from linguary.application.llm_dto import PedagogicalAnalysisResponse, TreatmentPlanItemResponse
 
     demanded = '‘Are you up yet?’ she demanded.'
     snapped = '‘What did you say?’ his aunt snapped through the door.'
     tag = '‘No problems, were there?’'
-    long_reply = '‘Please bring the small red box from the hall,’ she said.'
+    long_reply = '‘Please bring the small red wooden box from the front hall to the kitchen table,’ she said.'
     blocks = (
         _block(0, demanded),
         _block(1, snapped),
@@ -1939,7 +1940,7 @@ def test_normalize_a2_dialogue_response_clears_before_you_read():
 def test_cried_and_shouted_stay_glossary_only_like_other_basic_speech_verbs():
     """cried and shouted are basic: a light mode is not raised, and TRANSLATE drops.
 
-    ‘Are you up yet?’ she demanded. still promotes. A reply longer than eight
+    ‘Are you up yet?’ she demanded. still promotes. A reply longer than fifteen
     words still becomes TRANSLATE, and a model TRANSLATE on that reply stays.
     """
     from linguary.application.analysis_merge import normalize_a2_dialogue_response
@@ -1952,7 +1953,7 @@ def test_cried_and_shouted_stay_glossary_only_like_other_basic_speech_verbs():
     cried = '‘Yes,’ he cried.'
     shouted = '‘Yes,’ he shouted.'
     demanded = '‘Are you up yet?’ she demanded.'
-    long_reply = '‘Please bring the small red box from the hall,’ she said.'
+    long_reply = '‘Please bring the small red wooden box from the front hall to the kitchen table,’ she said.'
     blocks = (
         _block(0, cried),
         _block(1, shouted),
@@ -2267,15 +2268,25 @@ def test_a2_short_lines_with_winked_groaned_chuckled_or_fancy_seeing_you_do_not_
     normalized = normalize_a2_dialogue_response(
         payload, ordered, aliases, reader_level='a2', english_help=False,
     )
-    expected = (
-        [BlockTreatment.TRANSLATE] * len(translate_lines)
-        + [BlockTreatment.GLOSSARY_ONLY]
-        + [BlockTreatment.READ_AS_IS] * len(stay_lines)
-        + [BlockTreatment.GLOSSARY_ONLY, BlockTreatment.TRANSLATE]
-    )
+    expected = [
+        BlockTreatment.GLOSSARY_ONLY,   # It winked.
+        BlockTreatment.GLOSSARY_ONLY,   # Harry groaned.
+        BlockTreatment.GLOSSARY_ONLY,   # Uncle Vernon chuckled.
+        BlockTreatment.TRANSLATE,       # Fancy seeing you...
+        BlockTreatment.TRANSLATE,       # sweetums
+        BlockTreatment.TRANSLATE,       # How very wrong he was.
+        BlockTreatment.GLOSSARY_ONLY,   # He peered.
+        BlockTreatment.GLOSSARY_ONLY,   # They sniggered.
+        BlockTreatment.GLOSSARY_ONLY,   # She moaned.
+        BlockTreatment.TRANSLATE,       # I suppose so.
+        BlockTreatment.GLOSSARY_ONLY,
+        *[BlockTreatment.READ_AS_IS] * len(stay_lines),
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
     assert [item.treatment for item in normalized.treatment_plan] == expected
     assert [segment.treatment for segment in normalized.treatment_plan[-1].segments] == [
-        BlockTreatment.TRANSLATE, BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY, BlockTreatment.GLOSSARY_ONLY,
     ]
     assert normalized.difficulties[0].help_kind == 'lexical_hint'
     assert normalized.difficulties[1].help_kind == 'explanation'
@@ -2299,7 +2310,7 @@ def test_a2_translate_block_drops_trivial_sounding_relieved_grammar_difficulty()
     short = '‘Hagrid,’ said Dumbledore, sounding relieved.'
     promoted = (
         '‘Hagrid,’ said Dumbledore, sounding relieved. '
-        '‘At last. And where did you get that motorbike?’'
+        '‘At last. And where on earth did you get that flying motorbike?’'
     )
     wrong = 'How very wrong he was, sounding relieved.'
     blocks = (
@@ -2596,7 +2607,7 @@ def test_a2_translate_blocks_drop_trivial_ch5_grammar_and_vocabulary_notes_and_p
         _block(2, '‘I mighta sat on it,’ he said. Got summat fer meself las\' night.'),
         _block(3, 'Harry kept his eyes shut tight in the cupboard under the stairs.'),
         _block(4, 'The small cupboard was dark.'),
-        _block(5, 'He waited until morning.'),
+        _block(5, 'He waited quietly in the dark room until the grey morning light finally appeared.'),
     )
     aliases = {f'b{index + 1}': block.id for index, block in enumerate(blocks)}
     point = (RequiredPoint('p1', 'Объяснить конструкцию в этом блоке.'),)
@@ -2949,6 +2960,575 @@ def test_pruned_speech_point_drops_its_evidence_and_the_plan_still_builds():
     assert [point.id for point in chapter.content_plan.difficulties[0].required_points] == ['p-kept']
     assert [item.point_id for item in chapter.content_plan.before_you_read_evidence] == ['p-kept']
     assert_plan(chapter)
+
+
+def test_a2_thresholds_allow_15_word_dialogue_and_45_word_simple_narrative_in_glossary_only():
+    """A2 thresholds allow up to 15-word dialogue, single covered non-basic reporting verb,
+    and up to 45-word / 4-sentence / <=3-difficulty narrative in GLOSSARY_ONLY."""
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    # 15 words total, no dialect/idioms/subordinators/tags -> stays GLOSSARY_ONLY
+    dialogue_15 = '‘Please put the small green cup on the table near the kitchen window,’ she said.'
+    # 16 words total -> promotes to TRANSLATE
+    dialogue_16 = '‘Please put the small green cup on the round table near the kitchen window,’ she said.'
+    # 12 words with dialect -> promotes to TRANSLATE
+    dialogue_dialect = '‘Yer can bring the old brown bag to the door,’ said Hagrid.'
+    # Single non-basic reporting verb in GLOSSARY_ONLY with difficulty covering it -> stays GLOSSARY_ONLY
+    single_nonbasic_covered = '‘Come in,’ she demanded.'
+    # Same line in READ_AS_IS -> promotes to TRANSLATE
+    single_nonbasic_read = '‘Come in,’ she demanded.'
+    # Two non-basic reporting words in GLOSSARY_ONLY -> promotes to TRANSLATE
+    two_nonbasic = '‘Stop,’ she snapped furiously.'
+
+    # 45-word simple narrative, 4 sentences, 3 difficulties -> stays GLOSSARY_ONLY
+    narrative_45_sentences = (
+        'Harry walked down the quiet street in the morning sun. ',
+        'He carried a heavy brown bag in his left hand. ',
+        'A small grey cat sat near the wooden garden gate and watched him pass by. ',
+        'Everything looked calm and bright before the red bus arrived.',
+    )
+    narrative_45_text = ''.join(narrative_45_sentences)
+    from linguary.application.explained_expressions import expression_words
+    assert len(expression_words(dialogue_15)) == 15
+    assert len(expression_words(dialogue_16)) == 16
+    assert len(expression_words(narrative_45_text)) == 45
+    offsets = []
+    pos = 0
+    for idx, sent in enumerate(narrative_45_sentences):
+        offsets.append(BlockSegment(pos, pos + len(sent), idx))
+        pos += len(sent)
+
+    # 46-word simple narrative -> promotes to TRANSLATE
+    narrative_46_text = narrative_45_text + ' Today.'
+    # 5-sentence narrative (short words) -> promotes to TRANSLATE
+    five_sents = ('One dog ran. ', 'Two cats sat. ', 'Three birds flew. ', 'Four fish swam. ', 'Five frogs jumped.')
+    five_sents_text = ''.join(five_sents)
+    five_spans = []
+    pos = 0
+    for idx, sent in enumerate(five_sents):
+        five_spans.append(BlockSegment(pos, pos + len(sent), idx))
+        pos += len(sent)
+
+    # Short narrative with 4 difficulties (>3) -> promotes to TRANSLATE
+    narrative_4_diffs = 'The tall stranger stood beside the narrow wooden door near the cold iron gate.'
+    # Short narrative with 3 difficulties (<=3) -> stays GLOSSARY_ONLY
+    narrative_3_diffs = 'The tall stranger stood beside the narrow wooden door near the cold iron gate.'
+
+    blocks = (
+        _block(0, dialogue_15),
+        _block(1, dialogue_16),
+        _block(2, dialogue_dialect),
+        _block(3, single_nonbasic_covered),
+        _block(4, single_nonbasic_read),
+        _block(5, two_nonbasic),
+        _block(6, narrative_45_text, segments=tuple(offsets)),
+        _block(7, narrative_46_text),
+        _block(8, five_sents_text, segments=tuple(five_spans)),
+        _block(9, narrative_4_diffs),
+        _block(10, narrative_3_diffs),
+    )
+    aliases = {f'b{i + 1}': b.id for i, b in enumerate(blocks)}
+    point = (RequiredPoint('p1', 'Объяснить значение слова в контексте.'),)
+
+    def vocab(diff_id, alias, quote):
+        return QuotedDifficultyResponse(
+            diff_id, (QuotedSourceAnchorResponse(alias, quote),), alias,
+            'vocabulary', 'useful', 'lexical_hint', point,
+        )
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b2', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b3', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b4', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b5', BlockTreatment.READ_AS_IS),
+            TreatmentPlanItemResponse('b6', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b7', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b8', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b9', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b10', BlockTreatment.GLOSSARY_ONLY),
+            TreatmentPlanItemResponse('b11', BlockTreatment.GLOSSARY_ONLY),
+        ),
+        difficulties=(
+            vocab('d-demanded', 'b4', 'demanded'),
+            vocab('d-snapped', 'b6', 'snapped'),
+            vocab('d-n45-1', 'b7', 'quiet'),
+            vocab('d-n45-2', 'b7', 'heavy'),
+            vocab('d-n45-3', 'b7', 'wooden'),
+            vocab('d-4d-1', 'b10', 'stranger'),
+            vocab('d-4d-2', 'b10', 'narrow'),
+            vocab('d-4d-3', 'b10', 'wooden'),
+            vocab('d-4d-4', 'b10', 'iron'),
+            vocab('d-3d-1', 'b11', 'stranger'),
+            vocab('d-3d-2', 'b11', 'narrow'),
+            vocab('d-3d-3', 'b11', 'wooden'),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.GLOSSARY_ONLY,  # b1: 15 words
+        BlockTreatment.TRANSLATE,      # b2: 16 words
+        BlockTreatment.TRANSLATE,      # b3: 12 words + dialect
+        BlockTreatment.GLOSSARY_ONLY,  # b4: single covered non-basic reporting verb
+        BlockTreatment.TRANSLATE,      # b5: READ_AS_IS + non-basic reporting verb
+        BlockTreatment.TRANSLATE,      # b6: two non-basic reporting words
+        BlockTreatment.GLOSSARY_ONLY,  # b7: 45 words, 4 sentences, 3 difficulties
+        BlockTreatment.TRANSLATE,      # b8: 46 words
+        BlockTreatment.TRANSLATE,      # b9: 5 sentences
+        BlockTreatment.TRANSLATE,      # b10: 4 difficulties (> 3)
+        BlockTreatment.GLOSSARY_ONLY,  # b11: 3 difficulties (<= 3)
+    ]
+
+
+def test_a2_demotes_elementary_non_dialogue_item_like_1_telescope():
+    """Short elementary non-dialogue and list-item blocks without quotes demote from TRANSLATE."""
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    blocks = (
+        _block(0, '1 telescope', type=BlockType.LIST_ITEM),
+        _block(1, '1 telescope', type=BlockType.LIST_ITEM),
+        _block(2, '1 telescope', type=BlockType.PARAGRAPH),
+        _block(3, 'Hagrid was watching him sadly.'),
+        _block(4, 'Hagrid was watching him sadly.'),
+        _block(5, 'Hagrid was watching him sadly.'),
+        _block(6, 'He left because it rained.'),
+        _block(7, 'Harry shivered.'),
+        _block(8, 'The old brown owl flew across the dark cold garden toward the house.'),
+    )
+    aliases = {f'b{i + 1}': b.id for i, b in enumerate(blocks)}
+    point = (RequiredPoint('p1', 'Объяснить слово в блоке.'),)
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(f'b{i + 1}', BlockTreatment.TRANSLATE)
+            for i in range(len(blocks))
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                'd-tele', (QuotedSourceAnchorResponse('b2', 'telescope'),), 'b2',
+                'vocabulary', 'useful', 'explanation', point,
+            ),
+            QuotedDifficultyResponse(
+                'd-sadly', (QuotedSourceAnchorResponse('b5', 'sadly'),), 'b5',
+                'vocabulary', 'useful', 'explanation', point,
+            ),
+            QuotedDifficultyResponse(
+                'd-gram', (QuotedSourceAnchorResponse('b6', 'was watching'),), 'b6',
+                'grammar', 'useful', 'explanation', point,
+            ),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert [item.treatment for item in normalized.treatment_plan] == [
+        BlockTreatment.READ_AS_IS,     # b1: list item without difficulties
+        BlockTreatment.GLOSSARY_ONLY,  # b2: list item with vocabulary difficulty
+        BlockTreatment.READ_AS_IS,     # b3: paragraph "1 telescope"
+        BlockTreatment.READ_AS_IS,     # b4: "Hagrid was watching him sadly."
+        BlockTreatment.GLOSSARY_ONLY,  # b5: same with vocabulary difficulty
+        BlockTreatment.TRANSLATE,      # b6: grammar difficulty keeps TRANSLATE
+        BlockTreatment.TRANSLATE,      # b7: subordinator "because" keeps TRANSLATE
+        BlockTreatment.TRANSLATE,      # b8: B1 word "shivered" keeps TRANSLATE
+        BlockTreatment.TRANSLATE,      # b9: > 8 words keeps TRANSLATE
+    ]
+    help_by_id = {d.id: d.help_kind for d in normalized.difficulties}
+    assert help_by_id == {'d-tele': 'lexical_hint', 'd-sadly': 'lexical_hint', 'd-gram': 'explanation'}
+
+
+def test_a2_trivial_anchors_keep_turn_back_dreadlocks_and_have_got_to():
+    """New trivial A2 anchors are dropped on TRANSLATE, non-trivial ones are kept,
+    and single reporting verbs from _SHORT_B1_WORDS stay/move to GLOSSARY_ONLY."""
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    long_block = _block(
+        0,
+        "Where's Mr H. Potter? You've got to stand up in Brazil, not to turn back with dreadlocks.",
+    )
+    verb_blocks = (
+        _block(1, 'It winked.'),
+        _block(2, 'Uncle Vernon chuckled.'),
+        _block(3, 'Harry groaned.'),
+        _block(4, 'He peered.'),
+        _block(5, 'They sniggered.'),
+        _block(6, 'She moaned.'),
+        _block(7, 'It was a cannon.'),
+    )
+    blocks = (long_block, *verb_blocks)
+    aliases = {f'b{i + 1}': b.id for i, b in enumerate(blocks)}
+    point = (RequiredPoint('p1', 'Объяснить выражение в контексте.'),)
+
+    def note(diff_id, quote, kind='vocabulary'):
+        return QuotedDifficultyResponse(
+            diff_id, (QuotedSourceAnchorResponse('b1', quote),), 'b1',
+            kind, 'useful', 'explanation', point,
+        )
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),
+            *(TreatmentPlanItemResponse(f'b{i}', BlockTreatment.READ_AS_IS) for i in range(2, 9)),
+        ),
+        difficulties=(
+            note('d-wheres', "Where's", 'grammar'),
+            note('d-wheres-curly', 'Where’s', 'grammar'),
+            note('d-stand-up', 'stand up', 'vocabulary'),
+            note('d-brazil', 'Brazil', 'vocabulary'),
+            note('d-mr-potter', 'Mr H. Potter', 'vocabulary'),
+            note('d-mr-dot-potter', 'Mr. H. Potter', 'vocabulary'),
+            note('d-turn-back', 'to turn back', 'vocabulary'),
+            note('d-dreadlocks', 'dreadlocks', 'vocabulary'),
+            note('d-got-to', "you've got to", 'grammar'),
+            note('d-have-got-to', 'have got to', 'grammar'),
+        ),
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    assert {d.id for d in normalized.difficulties} == {
+        'd-turn-back',
+        'd-dreadlocks',
+        'd-got-to',
+        'd-have-got-to',
+    }
+    assert [item.treatment for item in normalized.treatment_plan[1:]] == [
+        BlockTreatment.GLOSSARY_ONLY,  # winked
+        BlockTreatment.GLOSSARY_ONLY,  # chuckled
+        BlockTreatment.GLOSSARY_ONLY,  # groaned
+        BlockTreatment.GLOSSARY_ONLY,  # peered
+        BlockTreatment.GLOSSARY_ONLY,  # sniggered
+        BlockTreatment.GLOSSARY_ONLY,  # moaned
+        BlockTreatment.TRANSLATE,      # cannon (not a reporting verb)
+    ]
+
+
+def test_forward_reference_pruning_applies_to_all_a2_difficulty_kinds():
+    """In A2 normalization (not shared content_plan_from_response), all difficulty kinds
+    prune anchors after owner_block_id and drop required_points with multi-word later quotes,
+    always preserving at least one required_point."""
+    from linguary.application.analysis_merge import (
+        content_plan_from_response,
+        normalize_a2_dialogue_response,
+    )
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain.content_plan import RequiredPoint
+
+    blocks = (
+        _block(0, 'Harry saw an old wooden door in the dark hall.'),
+        _block(1, 'He opened the heavy brass lock with a rusty key and walked inside.'),
+        _block(2, 'A bright silver dragon flew across the stone bridge above the quiet lake.'),
+    )
+    aliases = {'b1': blocks[0].id, 'b2': blocks[1].id, 'b3': blocks[2].id}
+    diffs = (
+        QuotedDifficultyResponse(
+            'd-grammar',
+            (
+                QuotedSourceAnchorResponse('b1', 'old wooden'),
+                QuotedSourceAnchorResponse('b2', 'heavy brass'),
+                QuotedSourceAnchorResponse('b3', 'silver dragon'),
+            ),
+            'b2',
+            'grammar',
+            'useful',
+            'explanation',
+            (
+                RequiredPoint('p-cur', 'В этом блоке "heavy brass" описывает замок.'),
+                RequiredPoint('p-one-word', 'Позже встречается слово "dragon" из другого блока.'),
+                RequiredPoint('p-later', 'Впереди появится фраза "bright silver dragon" над озером.'),
+            ),
+        ),
+        QuotedDifficultyResponse(
+            'd-vocab-min',
+            (
+                QuotedSourceAnchorResponse('b2', 'rusty key'),
+                QuotedSourceAnchorResponse('b3', 'stone bridge'),
+            ),
+            'b2',
+            'vocabulary',
+            'useful',
+            'explanation',
+            (
+                RequiredPoint('p-only-later-1', 'Дальше встретится «stone bridge» в сцене у воды.'),
+                RequiredPoint('p-only-later-2', 'Также там есть "quiet lake" в конце главы.'),
+            ),
+        ),
+        QuotedDifficultyResponse(
+            'd-idiom',
+            (
+                QuotedSourceAnchorResponse('b2', 'walked inside'),
+                QuotedSourceAnchorResponse('b3', 'flew across'),
+            ),
+            'b2',
+            'idiom',
+            'useful',
+            'explanation',
+            (
+                RequiredPoint('p-keep', 'Выражение "walked inside" означает вошёл внутрь.'),
+                RequiredPoint('p-drop', 'Позже герой увидит «flew across the stone» сверху.'),
+            ),
+        ),
+    )
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse('b1', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b2', BlockTreatment.TRANSLATE),
+            TreatmentPlanItemResponse('b3', BlockTreatment.TRANSLATE),
+        ),
+        difficulties=diffs,
+    )
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level='a2', english_help=False,
+    )
+    by_id = {d.id: d for d in normalized.difficulties}
+    # Earlier (b1) and owner (b2) anchors kept; later (b3) pruned
+    assert [(a.block_id, a.quote) for a in by_id['d-grammar'].anchors] == [
+        ('b1', 'old wooden'),
+        ('b2', 'heavy brass'),
+    ]
+    assert [p.id for p in by_id['d-grammar'].required_points] == ['p-cur', 'p-one-word']
+    # Always keeps at least 1 required_point
+    assert [(a.block_id, a.quote) for a in by_id['d-vocab-min'].anchors] == [('b2', 'rusty key')]
+    assert [p.id for p in by_id['d-vocab-min'].required_points] == ['p-only-later-1']
+    # Idiom also pruned
+    assert [(a.block_id, a.quote) for a in by_id['d-idiom'].anchors] == [('b2', 'walked inside')]
+    assert [p.id for p in by_id['d-idiom'].required_points] == ['p-keep']
+
+    # Shared content_plan_from_response MUST NOT prune forward anchors or points
+    chapter = ChapterAnalysisResponse(
+        translation_instructions='Keep tone.',
+        chapter_summary='Summary.',
+        treatment_plan=payload.treatment_plan,
+        content_plan=QuotedContentPlanResponse(difficulties=diffs),
+    )
+    plan = content_plan_from_response(
+        chapter,
+        aliases,
+        {b.id: b.text for b in blocks},
+        visible_texts_by_alias={alias: blocks[i].text for i, alias in enumerate(aliases)},
+        blocks=blocks,
+    )
+    assert plan is not None
+    grammar_plan = next(d for d in plan.difficulties if d.kind == 'grammar')
+    assert len(grammar_plan.anchors) == 3
+    assert {p.id for p in grammar_plan.required_points} == {'p-cur', 'p-one-word', 'p-later'}
+
+
+def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
+    """Pronoun speaker remarks (he/she said) become explicit ONLY when gender is known
+    for ALL scene participants (from mandatory_facts, candidate.note, ContextFact(gender),
+    or titles) AND strictly ONE participant matches the pronoun."""
+    from linguary.application.analysis_merge import content_plan_from_response
+    from linguary.application.llm_dto import (
+        ChapterAnalysisResponse,
+        GlossaryCandidateResponse,
+        QuotedContentPlanResponse,
+        QuotedContextFactResponse,
+        QuotedSceneResponse,
+        QuotedSourceAnchorResponse,
+        TreatmentPlanItemResponse,
+    )
+    from linguary.domain import ConceptType
+
+    blocks = (
+        # Scene 1: Harry (mandatory_facts: male) + Aunt Petunia (title: female)
+        _block(0, '‘Yes,’ he said.'),
+        _block(1, '‘No,’ she whispered.'),
+        # Scene 2: Hagrid (candidate.note: мужской род) + Professor McGonagall (ContextFact gender: female)
+        _block(2, '‘Good evening,’ she said.'),
+        _block(3, '‘Evenin’,’ he murmured.'),
+        # Scene 3: Harry (male) + Uncle Vernon (male) + Aunt Petunia (female) -> 2 males, 1 female
+        _block(4, '‘Wait,’ he said.'),
+        _block(5, '‘Stop,’ she said.'),
+        # Scene 4: Harry (male) + Aunt Petunia (female) + Mystery Stranger (unknown) -> stays inferred!
+        _block(6, '‘Hello,’ he said.'),
+        _block(7, '‘Quiet,’ she said.'),
+        # Scene 5: Mr. Dursley (title) + Mrs. Dursley (title), addressee in remark
+        _block(8, '‘Look at that,’ she said to Mr. Dursley.'),
+    )
+    aliases = {f'b{i + 1}': b.id for i, b in enumerate(blocks)}
+
+    def spk(alias, fact_id, value, quote):
+        anchor = QuotedSourceAnchorResponse(alias, quote)
+        return QuotedContextFactResponse(fact_id, 'speaker', (anchor,), anchor, value, 'inferred')
+
+    gender_anchor = QuotedSourceAnchorResponse('b3', 'she')
+    payload = ChapterAnalysisResponse(
+        translation_instructions='Keep tone.',
+        chapter_summary='Dialogue scenes.',
+        glossary_candidates=(
+            GlossaryCandidateResponse(
+                source_text='Hagrid',
+                type=ConceptType.PERSON,
+                suggested_translation='Хагрид',
+                confidence=0.95,
+                model_flagged_review=False,
+                note='мужской род',
+            ),
+        ),
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(f'b{i + 1}', BlockTreatment.READ_AS_IS)
+            for i in range(len(blocks))
+        ),
+        content_plan=QuotedContentPlanResponse(
+            scenes=(
+                QuotedSceneResponse('b1', 'b2', 'Scene 1', 'Kitchen', ('Harry', 'Aunt Petunia')),
+                QuotedSceneResponse('b3', 'b4', 'Scene 2', 'Street', ('Hagrid', 'Professor McGonagall')),
+                QuotedSceneResponse('b5', 'b6', 'Scene 3', 'Hall', ('Harry', 'Uncle Vernon', 'Aunt Petunia')),
+                QuotedSceneResponse('b7', 'b8', 'Scene 4', 'Door', ('Harry', 'Aunt Petunia', 'Mystery Stranger')),
+                QuotedSceneResponse('b9', 'b9', 'Scene 5', 'Drive', ('Mr. Dursley', 'Mrs. Dursley')),
+            ),
+            context_facts=(
+                spk('b1', 'f-s1-he', 'Harry', 'Yes,'),
+                spk('b2', 'f-s1-she', 'Aunt Petunia', 'No,'),
+                spk('b3', 'f-s2-she', 'Professor McGonagall', 'Good evening,'),
+                spk('b4', 'f-s2-he', 'Hagrid', 'Evenin’,'),
+                # Placed AFTER speaker facts to verify order-independence
+                QuotedContextFactResponse(
+                    'f-mcgonagall-gender', 'gender',
+                    (gender_anchor,),
+                    QuotedSourceAnchorResponse('b3', 'Good evening,'),
+                    'female', 'explicit',
+                ),
+                spk('b5', 'f-s3-he', 'Harry', 'Wait,'),
+                spk('b6', 'f-s3-she', 'Aunt Petunia', 'Stop,'),
+                spk('b7', 'f-s4-he', 'Harry', 'Hello,'),
+                spk('b8', 'f-s4-she', 'Aunt Petunia', 'Quiet,'),
+                spk('b9', 'f-s5-she', 'Mrs. Dursley', 'Look at that,'),
+            ),
+        ),
+    )
+    # Give Professor McGonagall a proper subject_anchor quoting her name in a block,
+    # so ContextFact(kind="gender") binds to Professor McGonagall cleanly.
+    blocks_with_name = (
+        *blocks[:2],
+        _block(2, '‘Good evening,’ she said. Professor McGonagall waited.'),
+        *blocks[3:],
+    )
+    aliases = {f'b{i + 1}': b.id for i, b in enumerate(blocks_with_name)}
+    mc_anchor = QuotedSourceAnchorResponse('b3', 'Professor McGonagall')
+    payload = replace(
+        payload,
+        content_plan=replace(
+            payload.content_plan,
+            context_facts=tuple(
+                QuotedContextFactResponse(
+                    'f-mcgonagall-gender', 'gender', (mc_anchor,), mc_anchor, 'female', 'explicit',
+                )
+                if f.id == 'f-mcgonagall-gender'
+                else f
+                for f in payload.content_plan.context_facts
+            ),
+        ),
+    )
+
+    plan = content_plan_from_response(
+        payload,
+        aliases,
+        {b.id: b.text for b in blocks_with_name},
+        visible_texts_by_alias={f'b{i + 1}': b.text for i, b in enumerate(blocks_with_name)},
+        blocks=blocks_with_name,
+        mandatory_facts={'Harry Potter': {'gender': 'male'}},
+    )
+    assert plan is not None
+    certainty_by_block = {
+        f.subject_anchor.block_id: f.certainty
+        for f in plan.context_facts
+        if f.kind == 'speaker'
+    }
+    assert certainty_by_block == {
+        blocks_with_name[0].id: 'explicit',  # Scene 1: he -> Harry (all known, 1 male)
+        blocks_with_name[1].id: 'explicit',  # Scene 1: she -> Aunt Petunia (all known, 1 female)
+        blocks_with_name[2].id: 'explicit',  # Scene 2: she -> Professor McGonagall (candidate.note + ContextFact)
+        blocks_with_name[3].id: 'explicit',  # Scene 2: he -> Hagrid
+        blocks_with_name[4].id: 'inferred',  # Scene 3: he -> ambiguous (Harry + Uncle Vernon)
+        blocks_with_name[5].id: 'explicit',  # Scene 3: she -> Aunt Petunia (all known, 1 female)
+        blocks_with_name[6].id: 'inferred',  # Scene 4: Mystery Stranger gender unknown -> inferred
+        blocks_with_name[7].id: 'inferred',  # Scene 4: Mystery Stranger gender unknown -> inferred
+        blocks_with_name[8].id: 'explicit',  # Scene 5: Mr. + Mrs. Dursley from titles -> explicit
+    }
+
+    # Without mandatory_facts (default), Harry's gender is unknown so Scene 1 stays inferred,
+    # while Scene 2 (candidate.note + ContextFact) and Scene 5 (titles) still become explicit.
+    plan_default = content_plan_from_response(
+        payload,
+        aliases,
+        {b.id: b.text for b in blocks_with_name},
+        visible_texts_by_alias={f'b{i + 1}': b.text for i, b in enumerate(blocks_with_name)},
+        blocks=blocks_with_name,
+    )
+    assert plan_default is not None
+    default_certainty = {
+        f.subject_anchor.block_id: f.certainty
+        for f in plan_default.context_facts
+        if f.kind == 'speaker'
+    }
+    assert default_certainty[blocks_with_name[0].id] == 'inferred'
+    assert default_certainty[blocks_with_name[1].id] == 'inferred'
+    assert default_certainty[blocks_with_name[2].id] == 'explicit'
+    assert default_certainty[blocks_with_name[3].id] == 'explicit'
+    assert default_certainty[blocks_with_name[8].id] == 'explicit'
+
+    # Also verify combine_staged_analysis_responses with resolved_scenes, resolved_blocks, mandatory_facts
+    from linguary.application.analysis_merge import combine_staged_analysis_responses
+    from linguary.application.llm_dto import NarrativeAnalysisResponse, PedagogicalAnalysisResponse
+
+    b0, b1 = blocks_with_name[0], blocks_with_name[1]
+    a0 = QuotedSourceAnchorResponse(b0.id, 'Yes,')
+    a1 = QuotedSourceAnchorResponse(b1.id, 'No,')
+    combined = combine_staged_analysis_responses(
+        NarrativeAnalysisResponse(
+            'Keep tone.',
+            'Scene 1.',
+            context_facts=(
+                QuotedContextFactResponse('f0', 'speaker', (a0,), a0, 'Harry', 'inferred'),
+                QuotedContextFactResponse('f1', 'speaker', (a1,), a1, 'Aunt Petunia', 'inferred'),
+            ),
+        ),
+        PedagogicalAnalysisResponse(
+            treatment_plan=(
+                TreatmentPlanItemResponse(b0.id, BlockTreatment.READ_AS_IS),
+                TreatmentPlanItemResponse(b1.id, BlockTreatment.READ_AS_IS),
+            ),
+        ),
+        resolved_scenes=(plan.scenes[0],),
+        resolved_blocks=(b0, b1),
+        mandatory_facts={'Harry Potter': {'gender': 'male'}},
+    )
+    assert [(f.id, f.certainty) for f in combined.content_plan.context_facts] == [
+        ('f0', 'explicit'),
+        ('f1', 'explicit'),
+    ]
+
 
 
 

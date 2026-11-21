@@ -1171,7 +1171,8 @@ def validate_narrative_response(
         content_plan=QuotedContentPlanResponse(context_facts=payload.context_facts))
     plan = content_plan_from_response(response, scoped_aliases, texts,
                                       visible_texts_by_alias=visible_texts_by_alias,
-                                      blocks=blocks, source_offsets=source_offsets)
+                                      blocks=blocks, source_offsets=source_offsets,
+                                      mandatory_facts=mandatory_facts)
     if plan is None:
         raise _unresolved_quote_error(response, scoped_aliases, texts, visible_texts_by_alias,
                                       {v: k for k, v in scoped_aliases.items()})
@@ -1255,13 +1256,25 @@ def combine_staged_analysis_responses(
     *,
     resolved_scenes: Sequence[Scene] = (),
     resolved_blocks: Sequence[DocumentBlock] = (),
+    mandatory_facts: Mapping[str, Mapping[str, str]] | Sequence[object] | None = (),
 ) -> ChapterAnalysisResponse:
     """Assemble both pass contracts without changing pedagogical reference aliases."""
     facts = narrative.context_facts
     if resolved_blocks:
         texts_by_id = {block.id: block.text for block in resolved_blocks}
+        ordered_block_ids = tuple(block.id for block in resolved_blocks)
         facts = tuple(
-            _explicit_speaker_if_remark_names(fact, texts_by_id, resolved_blocks) for fact in facts
+            _explicit_speaker_if_remark_names(
+                fact,
+                texts_by_id,
+                resolved_blocks,
+                scenes=resolved_scenes,
+                glossary_candidates=narrative.glossary_candidates,
+                context_facts=facts,
+                mandatory_facts=mandatory_facts,
+                ordered_block_ids=ordered_block_ids,
+            )
+            for fact in facts
         )
     return ChapterAnalysisResponse(narrative.translation_instructions,
         pedagogical.reader_chapter_summary or narrative.chapter_summary,
@@ -1280,6 +1293,7 @@ def content_plan_from_response(
     visible_texts_by_alias: Mapping[str, str] | None = None,
     blocks: Sequence[DocumentBlock] | None = None,
     source_offsets: bool = False,
+    mandatory_facts: Mapping[str, Mapping[str, str]] | Sequence[object] | None = (),
 ) -> ContentPlan | None:
     """Replaces local aliases and computes stable application references."""
     if payload.content_plan is None:
@@ -1446,7 +1460,21 @@ def content_plan_from_response(
                 evidence.append(HelpEvidence(ids[item.difficulty_id], item.point_id, item.artifact_kind, aliases[item.source_block_id], artifact_key(item.artifact_kind, aliases[item.source_block_id], {"expression": entry.expression, "explanation": entry.explanation}), body_excerpt))
             except KeyError as error:
                 raise AnalysisMergeError("неизвестная трудность или владелец свидетельства") from error
-    facts = []
+    ordered_block_ids = tuple(dict.fromkeys(aliases.values()))
+    scenes = (
+        resolve_scenes(
+            payload.content_plan.scenes,
+            aliases,
+            texts,
+            visible_texts_by_alias,
+            ordered_block_ids=ordered_block_ids,
+            blocks=blocks,
+            source_offsets=source_offsets,
+        )
+        if is_quoted
+        else ()
+    )
+    mapped_facts: list[ContextFact] = []
     fact_rows = (resolved_facts if is_quoted else
                  [(fact, None, None) for fact in payload.content_plan.context_facts])
     for fact, resolved_anchors, resolved_subject in fact_rows:
@@ -1460,14 +1488,24 @@ def content_plan_from_response(
                     subject_anchor=replace(fact.subject_anchor, block_id=aliases[fact.subject_anchor.block_id]))
             except KeyError:
                 raise AnalysisMergeError('контекстная атрибуция ссылается на невидимый блок') from None
-        mapped = _explicit_speaker_if_remark_names(mapped, texts, blocks)
+        mapped_facts.append(mapped)
+    facts = []
+    for mapped in mapped_facts:
+        mapped = _explicit_speaker_if_remark_names(
+            mapped,
+            texts,
+            blocks,
+            scenes=scenes,
+            glossary_candidates=payload.glossary_candidates,
+            context_facts=mapped_facts,
+            mandatory_facts=mandatory_facts,
+            ordered_block_ids=ordered_block_ids,
+        )
         mapped.validate(texts)
         facts.append(replace(mapped, id=mapped.canonical_id))
     return ContentPlan(version=payload.content_plan.version, profile=payload.content_plan.profile,
         difficulties=tuple(difficulties), before_you_read_evidence=tuple(evidence), context_facts=tuple(facts),
-        scenes=(resolve_scenes(payload.content_plan.scenes, aliases, texts, visible_texts_by_alias,
-                               ordered_block_ids=tuple(dict.fromkeys(aliases.values())),
-                               blocks=blocks, source_offsets=source_offsets) if is_quoted else ()))
+        scenes=scenes)
 
 
 _MISSING = object()
@@ -1804,6 +1842,7 @@ def validate_content_plan(
         visible_texts_by_alias=visible_texts_by_alias,
         blocks=blocks,
         source_offsets=source_offsets,
+        mandatory_facts=mandatory_facts,
     )
     if plan is None:
         if payload.content_plan is not None:
@@ -2062,11 +2101,14 @@ _QUESTION_TAG_RE = re.compile(
     r"shouldn['’]t|should)\s+(?:there|it|he|she|they|we|you|i)\s*\?",
     re.IGNORECASE,
 )
-_NARRATIVE_GLOSSARY_WORD_LIMIT = 25
-_NARRATIVE_GLOSSARY_SENTENCE_LIMIT = 3
+_NARRATIVE_GLOSSARY_WORD_LIMIT = 45
+_NARRATIVE_GLOSSARY_SENTENCE_LIMIT = 4
+_NARRATIVE_GLOSSARY_DIFFICULTY_LIMIT = 3
+_DIALOGUE_GLOSSARY_WORD_LIMIT = 15
 _REMARK_DIFFICULTY_KINDS = frozenset({"vocabulary", "false_friend"})
 _LIGHT_DIALOGUE_TREATMENTS = frozenset({BlockTreatment.GLOSSARY_ONLY, BlockTreatment.READ_AS_IS})
 _DIALOGUE_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.QUOTE})
+_DEMOTABLE_BLOCK_TYPES = frozenset({BlockType.PARAGRAPH, BlockType.QUOTE, BlockType.LIST_ITEM})
 _BASIC_REPORTING = frozenset({
     "said", "asked", "replied", "answered", "told", "cried", "shouted", "called",
 })
@@ -2127,6 +2169,13 @@ _NONBASIC_REPORTING = frozenset({
     "sternly", "firmly", "anxiously", "bitterly", "wearily", "sleepily", "coldly",
 })
 _SHORT_B1_WORD_LIMIT = 10
+_SINGLE_B1_REPORTING_VERBS = frozenset({
+    "winked", "chuckled", "groaned", "peered", "sniggered", "moaned",
+})
+_DIALECT_WORDS = frozenset({
+    "yeh", "yer", "ter", "summat", "fer", "meself", "mighta", "dunno",
+    "shan't", "blimey", "codswallop",
+})
 _SHORT_B1_WORDS = frozenset({
     "winked", "groaned", "chuckled", "peered", "sniggered", "moaned", "sweetums",
     "cannon", "budge", "lump", "shack", "shivered", "yeh", "yer", "ter", "summat",
@@ -2148,8 +2197,14 @@ _TRIVIAL_A2_ANCHORS = frozenset({
     ("was", "going", "to", "a", "school"),
     ("i", "was", "going", "to", "a", "school", "for", "wizards"),
     ("when", "i", "open", "my", "eyes"),
+    ("where's",),
+    ("stand", "up"),
+    ("brazil",),
+    ("mr", "h", "potter"),
 })
-_SPEECH_POINT_QUOTES = re.compile(r'"([^"]+)"|«([^»]+)»')
+_SPEECH_POINT_QUOTES = re.compile(
+    rf'"([^"]+)"|«([^»]+)»|“([^”]+)”|‘((?:[^‘’]|{_SINGLE_QUOTE_APOSTROPHE})+)’(?!\w)'
+)
 _LEMMA_GLOSS = re.compile(r"(?<![\w'’])([A-Za-z][\w'’]*)\s*=\s*[^,;\n]+")
 _STANDARD_SPEECH_GLOSS_WORDS = frozenset({
     "you", "your", "yours", "to", "for", "of", "from", "my", "myself",
@@ -2157,9 +2212,38 @@ _STANDARD_SPEECH_GLOSS_WORDS = frozenset({
     "were", "was", "have", "had", "will", "shall", "not",
 })
 _SPEAKER_TITLES = frozenset({"mr", "mrs", "miss", "ms", "dr"})
+_MALE_TITLES = frozenset({
+    "mr", "uncle", "sir", "lord", "king", "prince", "father", "brother",
+    "grandfather", "grandpa", "мистер", "дядя", "сэр", "лорд",
+})
+_FEMALE_TITLES = frozenset({
+    "mrs", "miss", "ms", "aunt", "madam", "madame", "lady", "queen", "princess",
+    "mother", "sister", "grandmother", "grandma", "миссис", "мисс", "тётя",
+    "тетя", "мадам", "леди",
+})
+_ALL_GENDER_TITLES = _MALE_TITLES | _FEMALE_TITLES | _SPEAKER_TITLES
+_PRONOUN_WORDS = frozenset({
+    "he", "she", "it", "they", "him", "her", "his", "hers", "i", "you", "we", "them",
+})
+_EXTRA_REPORTING_VERBS = frozenset({
+    "added", "adding", "began", "beginning", "continued", "continuing",
+    "finished", "finishing", "repeated", "repeating", "suggested", "suggesting",
+    "explained", "explaining", "agreed", "agreeing", "laughed", "laughing",
+    "smiled", "smiling", "grinned", "grinning", "nodded", "nodding",
+    "spoke", "speaking", "went", "answered", "answering", "replied", "replying",
+    "asked", "asking", "told", "telling", "said", "saying", "called", "calling",
+})
+_ALL_REPORTING_VERBS = (
+    _BASIC_REPORTING | _NONBASIC_REPORTING | _SINGLE_B1_REPORTING_VERBS | _EXTRA_REPORTING_VERBS
+)
+_CLAUSE_BOUNDARY_WORDS = frozenset({
+    "and", "but", "or", "while", "as", "when", "before", "after", "because",
+    "until", "although", "though", "if", "since", "so", "that", "who", "which",
+})
 _ADDRESSEE_PREPOSITIONS = frozenset({"to", "at"})
 _SPEAKER_NAME_STOPWORDS = frozenset({
     "the", "a", "an", "of", "and", "mr", "mrs", "miss", "ms", "dr",
+    "uncle", "aunt", "sir", "madam", "madame", "lord", "lady", "professor",
 })
 _REMARK_ABBREVIATIONS = frozenset({"mr", "mrs", "ms", "dr", "st"})
 _CHAPTER_NUMBER_WORDS = frozenset({
@@ -2223,6 +2307,7 @@ def normalize_a2_dialogue_response(
         demoted = None
         if block.type in _DIALOGUE_BLOCK_TYPES:
             updated, promoted = _promote_dialogue_item(item, block, difficulties)
+        if block.type in _DEMOTABLE_BLOCK_TYPES:
             updated, demoted = _demote_elementary_reply(item, updated, block, difficulties)
         owners = frozenset(part for part in (item.source_block_id, block.id) if part)
         if block.type is BlockType.HEADING and _is_meaningful_chapter_title(block.text):
@@ -2244,9 +2329,11 @@ def normalize_a2_dialogue_response(
             promoted = None
             demoted = None
         elif _is_short_b1_read_as_is(block, updated):
+            words = expression_words(block.text)
             mode = (
                 BlockTreatment.GLOSSARY_ONLY
                 if _owns_vocabulary(difficulties, owners)
+                or _is_single_b1_reporting_verb_only(words)
                 else BlockTreatment.TRANSLATE
             )
             updated = _force_block_treatment(updated, mode)
@@ -2262,7 +2349,7 @@ def normalize_a2_dialogue_response(
         if demoted is not None:
             demoted_blocks.append(demoted)
     switched = tuple(
-        _prune_forward_speech_style_points(
+        _prune_forward_difficulty_references(
             _switch_demoted_hint(
                 _switch_promoted_hint(difficulty, promoted_blocks, covered_points),
                 demoted_blocks,
@@ -2410,7 +2497,13 @@ def _sentence_segments_to_promote(segments, spans, difficulties, owners, block_t
         checked_sentences.add(sentence_index)
         sentence_start, sentence_end = sentence_bounds[sentence_index]
         text = block_text[sentence_start:sentence_end]
-        if _dialogue_needs_translation(text, difficulties, owners, sentence_start):
+        if _dialogue_needs_translation(
+            text,
+            difficulties,
+            owners,
+            sentence_start,
+            is_glossary_only=(segment.treatment is BlockTreatment.GLOSSARY_ONLY),
+        ):
             promoted_sentences.add(sentence_index)
     if not promoted_sentences:
         return set()
@@ -2446,25 +2539,58 @@ def _promote_dialogue_item(item, block, difficulties):
     if item.treatment not in _LIGHT_DIALOGUE_TREATMENTS:
         return item, None
     had_glossary = item.treatment is BlockTreatment.GLOSSARY_ONLY
-    if not _dialogue_needs_translation(block.text, difficulties, owners, 0) and not (
-        had_glossary and _narrative_needs_translation(block)
+    if not _dialogue_needs_translation(
+        block.text, difficulties, owners, 0, is_glossary_only=had_glossary
+    ) and not (
+        had_glossary and _narrative_needs_translation(block, difficulties, owners)
     ):
         return item, None
     return replace(item, treatment=BlockTreatment.TRANSLATE), (owners, had_glossary)
 
 
-def _narrative_needs_translation(block: DocumentBlock) -> bool:
-    if len(expression_words(block.text)) >= _NARRATIVE_GLOSSARY_WORD_LIMIT:
+def _narrative_needs_translation(
+    block: DocumentBlock,
+    difficulties: Sequence[object] = (),
+    owners: frozenset[str] = frozenset(),
+) -> bool:
+    if len(expression_words(block.text)) > _NARRATIVE_GLOSSARY_WORD_LIMIT:
         return True
     sentences = {span.sentence_index for span in block.segment_spans}
-    return len(sentences) >= _NARRATIVE_GLOSSARY_SENTENCE_LIMIT
+    if len(sentences) > _NARRATIVE_GLOSSARY_SENTENCE_LIMIT:
+        return True
+    if owners:
+        owned_count = sum(
+            1 for difficulty in difficulties if difficulty.owner_block_id in owners
+        )
+        if owned_count > _NARRATIVE_GLOSSARY_DIFFICULTY_LIMIT:
+            return True
+    return False
 
 
-def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
+def _dialogue_needs_translation(
+    text,
+    difficulties,
+    owners,
+    span_start,
+    *,
+    is_glossary_only: bool = False,
+) -> bool:
     quotes = list(_DIALOGUE_QUOTES.finditer(text))
     if not quotes:
         return False
-    long_reply = len(expression_words(text)) > 8
+    all_words = expression_words(text)
+    has_dialect_or_idiom = (
+        any(word in _DIALECT_WORDS for word in all_words)
+        or any(_contains_phrase(all_words, phrase) for phrase in _SHORT_B1_PHRASES)
+        or any(
+            difficulty.kind in {"speech_style", "idiom"}
+            and difficulty.owner_block_id in owners
+            for difficulty in difficulties
+        )
+    )
+    long_reply = len(all_words) > _DIALOGUE_GLOSSARY_WORD_LIMIT or (
+        has_dialect_or_idiom and len(all_words) > 8
+    )
     quoted = " ".join(match.group(0)[1:-1] for match in quotes)
     quoted_words = expression_words(quoted)
     if any(word in _SUBORDINATORS for word in quoted_words):
@@ -2475,20 +2601,33 @@ def _dialogue_needs_translation(text, difficulties, owners, span_start) -> bool:
         return True
     ranges = _remark_ranges(quotes, len(text))
     remark = " ".join(text[start:end] for start, end in ranges)
-    structural = long_reply or bool(
-        set(expression_words(remark)) & (_NONBASIC_REPORTING - _BASIC_REPORTING)
-    )
-    if structural and any(
-        difficulty.kind in _REMARK_DIFFICULTY_KINDS
-        and difficulty.owner_block_id in owners
-        and any(
-            anchor.block_id in owners and _anchor_hits_ranges(anchor, text, span_start, ranges)
-            for anchor in difficulty.anchors
+    nonbasic_words = set(expression_words(remark)) & (_NONBASIC_REPORTING - _BASIC_REPORTING)
+    single_covered_nonbasic = (
+        is_glossary_only
+        and len(nonbasic_words) == 1
+        and _difficulty_covers_remark_word(
+            difficulties, owners, next(iter(nonbasic_words)), text, span_start, ranges
         )
-        for difficulty in difficulties
-    ):
-        return True
-    return structural
+    )
+    has_uncovered_nonbasic = bool(nonbasic_words) and not single_covered_nonbasic
+    return long_reply or has_uncovered_nonbasic
+
+
+def _difficulty_covers_remark_word(
+    difficulties, owners, word: str, text: str, span_start: int, ranges
+) -> bool:
+    for difficulty in difficulties:
+        if difficulty.owner_block_id not in owners:
+            continue
+        for anchor in difficulty.anchors:
+            if getattr(anchor, "block_id", None) not in owners:
+                continue
+            if not _anchor_hits_ranges(anchor, text, span_start, ranges):
+                continue
+            anchor_words = expression_words(getattr(anchor, "quote", ""))
+            if any(anchor_word == word or _same_word(anchor_word, word) for anchor_word in anchor_words):
+                return True
+    return False
 
 
 def _remark_ranges(quotes, length) -> tuple[tuple[int, int], ...]:
@@ -2542,7 +2681,8 @@ def _demote_elementary_reply(original, updated, block, difficulties):
     ):
         return updated, None
     owners = frozenset(part for part in (original.source_block_id, block.id) if part)
-    mode = _elementary_reply_mode(block.text, difficulties, owners)
+    sentence_count = len({span.sentence_index for span in block.segment_spans})
+    mode = _elementary_reply_mode(block.text, difficulties, owners, sentence_count=sentence_count)
     if mode is None:
         return updated, None
     segments = tuple(SegmentTreatmentResponse(segment.index, mode) for segment in updated.segments)
@@ -2554,8 +2694,10 @@ def _demote_elementary_reply(original, updated, block, difficulties):
     return demoted, owners
 
 
-def _elementary_reply_mode(text, difficulties, owners):
+def _elementary_reply_mode(text, difficulties, owners, *, sentence_count: int = 1):
     words = expression_words(text)
+    if not words:
+        return None
     if any(word in _SHORT_B1_WORDS for word in words) or any(
         _contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES
     ):
@@ -2563,22 +2705,34 @@ def _elementary_reply_mode(text, difficulties, owners):
     if len(words) > 8:
         return None
     quotes = list(_DIALOGUE_QUOTES.finditer(text))
-    if not quotes or len(quotes) > 2:
-        return None
-    quoted = " ".join(match.group(0)[1:-1] for match in quotes)
-    quoted_words = expression_words(quoted)
-    if any(word in _SUBORDINATORS for word in quoted_words):
-        return None
-    if _QUESTION_TAG_RE.search(quoted) is not None:
-        return None
-    if len(quoted_words) >= 5 and any(sep in quoted for sep in (" \u2013 ", " \u2014 ")):
-        return None
-    ranges = _remark_ranges(quotes, len(text))
-    remark_words = set(expression_words(" ".join(text[start:end] for start, end in ranges)))
-    if remark_words & (_NONBASIC_REPORTING - _BASIC_REPORTING):
-        return None
-    if not (remark_words & _BASIC_REPORTING):
-        return None
+    if not quotes:
+        if sentence_count > 1:
+            return None
+        if any(word in _SUBORDINATORS for word in words):
+            return None
+        if _QUESTION_TAG_RE.search(text) is not None:
+            return None
+        if len(words) >= 5 and any(sep in text for sep in (" \u2013 ", " \u2014 ")):
+            return None
+        if set(words) & (_NONBASIC_REPORTING - _BASIC_REPORTING):
+            return None
+    else:
+        if len(quotes) > 2:
+            return None
+        quoted = " ".join(match.group(0)[1:-1] for match in quotes)
+        quoted_words = expression_words(quoted)
+        if any(word in _SUBORDINATORS for word in quoted_words):
+            return None
+        if _QUESTION_TAG_RE.search(quoted) is not None:
+            return None
+        if len(quoted_words) >= 5 and any(sep in quoted for sep in (" \u2013 ", " \u2014 ")):
+            return None
+        ranges = _remark_ranges(quotes, len(text))
+        remark_words = set(expression_words(" ".join(text[start:end] for start, end in ranges)))
+        if remark_words & (_NONBASIC_REPORTING - _BASIC_REPORTING):
+            return None
+        if not (remark_words & _BASIC_REPORTING):
+            return None
     related = tuple(
         difficulty for difficulty in difficulties
         if difficulty.owner_block_id in owners or any(
@@ -2648,6 +2802,13 @@ def _is_short_b1_read_as_is(block: DocumentBlock, item) -> bool:
     return any(_contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES)
 
 
+def _is_single_b1_reporting_verb_only(words: tuple[str, ...]) -> bool:
+    if any(_contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES):
+        return False
+    b1_hits = {word for word in words if word in _SHORT_B1_WORDS}
+    return len(b1_hits) == 1 and b1_hits <= _SINGLE_B1_REPORTING_VERBS
+
+
 def _contains_phrase(words: tuple[str, ...], phrase: tuple[str, ...]) -> bool:
     size = len(phrase)
     return any(words[index:index + size] == phrase for index in range(len(words) - size + 1))
@@ -2702,24 +2863,39 @@ def _is_unevidenced_trivial_grammar(
     )
 
 
-def _prune_forward_speech_style_points(difficulty, blocks, block_ids_by_alias):
-    """Drop speech_style points that cite a later block, keeping at least one."""
-    points = difficulty.required_points
-    if difficulty.kind != "speech_style" or len(points) < 2:
-        return difficulty
+def _prune_forward_difficulty_references(difficulty, blocks, block_ids_by_alias):
+    """For A2 difficulties, prune forward anchors and forward-quoting points, keeping >= 1 point."""
     owner_index = _block_order_index(difficulty.owner_block_id, blocks, block_ids_by_alias)
     if owner_index is None:
         return difficulty
-    block_words = tuple(expression_words(block.text) for block in blocks)
-    kept = tuple(
-        point for point in points
-        if not _is_forward_speech_point(point.description, block_words, owner_index)
-    )
-    if len(kept) == len(points):
-        return difficulty
-    if not kept:
-        kept = (points[0],)
-    return replace(difficulty, required_points=kept)
+    updated = difficulty
+    anchors = getattr(difficulty, "anchors", ())
+    if anchors:
+        kept_anchors = tuple(
+            anchor for anchor in anchors
+            if (anchor_index := _block_order_index(anchor.block_id, blocks, block_ids_by_alias)) is None
+            or anchor_index <= owner_index
+        )
+        if kept_anchors and len(kept_anchors) != len(anchors):
+            updated = replace(updated, anchors=kept_anchors)
+    points = updated.required_points
+    if len(points) >= 2:
+        block_words = tuple(expression_words(block.text) for block in blocks)
+        if updated.kind == "speech_style":
+            kept_points = tuple(
+                point for point in points
+                if not _is_forward_speech_point(point.description, block_words, owner_index)
+            )
+        else:
+            kept_points = tuple(
+                point for point in points
+                if not _quotes_later_block(point.description, block_words, owner_index, min_words=2)
+            )
+        if len(kept_points) != len(points):
+            if not kept_points:
+                kept_points = (points[0],)
+            updated = replace(updated, required_points=kept_points)
+    return updated
 
 
 def _block_order_index(owner_id, blocks, block_ids_by_alias) -> int | None:
@@ -2733,18 +2909,19 @@ def _block_order_index(owner_id, blocks, block_ids_by_alias) -> int | None:
 
 
 def _is_forward_speech_point(description, block_words, owner_index) -> bool:
-    if _quotes_later_block(description, block_words, owner_index):
+    if _quotes_later_block(description, block_words, owner_index, min_words=1):
         return True
     tokens = _only_lemma_tokens(description)
     return tokens is not None and _future_only_tokens(tokens, block_words, owner_index)
 
 
-def _quotes_later_block(description, block_words, owner_index) -> bool:
+def _quotes_later_block(description, block_words, owner_index, *, min_words: int = 1) -> bool:
     earlier = block_words[:owner_index + 1]
     later = block_words[owner_index + 1:]
     for match in _SPEECH_POINT_QUOTES.finditer(description):
-        phrase = expression_words(match.group(1) or match.group(2) or "")
-        if not phrase:
+        raw = next((group for group in match.groups() if group), "")
+        phrase = expression_words(raw)
+        if not phrase or len(phrase) < min_words:
             continue
         if len(phrase) == 1 and phrase[0] in _STANDARD_SPEECH_GLOSS_WORDS:
             continue
@@ -2782,14 +2959,339 @@ def _future_only_tokens(tokens, block_words, owner_index) -> bool:
     return True
 
 
-def _explicit_speaker_if_remark_names(fact, texts, blocks):
-    """inferred → explicit when the opening remark already names the speaker."""
+def _explicit_speaker_if_remark_names(
+    fact,
+    texts,
+    blocks,
+    *,
+    scenes: Sequence[Scene] = (),
+    glossary_candidates: Sequence[object] = (),
+    context_facts: Sequence[object] = (),
+    mandatory_facts: Mapping[str, Mapping[str, str]] | Sequence[object] | None = (),
+    ordered_block_ids: Sequence[str] = (),
+):
+    """inferred → explicit when the opening remark names the speaker or an unambiguous pronoun."""
     if fact.kind != "speaker" or fact.certainty != "inferred" or not isinstance(fact.value, str):
         return fact
     text = _fact_block_text(fact.subject_anchor.block_id, texts, blocks)
-    if text and _opening_remark_names_speaker(text, fact.value):
+    if not text:
+        return fact
+    if _opening_remark_names_speaker(text, fact.value):
+        return replace(fact, certainty="explicit")
+    if scenes and _opening_remark_pronoun_resolves_speaker(
+        fact,
+        text,
+        scenes=scenes,
+        glossary_candidates=glossary_candidates,
+        context_facts=context_facts,
+        mandatory_facts=mandatory_facts,
+        ordered_block_ids=ordered_block_ids,
+        blocks=blocks,
+        texts=texts,
+    ):
         return replace(fact, certainty="explicit")
     return fact
+
+
+def _normalize_gender_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    extracted = _extract_gender(value)
+    if extracted is not None:
+        return extracted
+    lowered = value.strip().casefold()
+    if lowered in {"male", "female", "neuter"}:
+        return lowered
+    return None
+
+
+def _gender_map_from_mandatory_facts(
+    mandatory_facts: Mapping[str, Mapping[str, str]] | Sequence[object] | None,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not mandatory_facts:
+        return result
+    if isinstance(mandatory_facts, Mapping):
+        for raw_key, raw_val in mandatory_facts.items():
+            if not isinstance(raw_key, str):
+                continue
+            gender_raw: str | None = None
+            if isinstance(raw_val, Mapping):
+                gender_raw = raw_val.get("gender")
+            elif isinstance(raw_val, str):
+                gender_raw = raw_val
+            gender = _normalize_gender_value(gender_raw)
+            if gender is not None:
+                key = glossary_key(raw_key)
+                if key:
+                    result[key] = gender
+        return result
+    for item in mandatory_facts:
+        source = getattr(item, "canonical_source_text", None) or getattr(item, "source_text", None)
+        if not isinstance(source, str) or not source.strip():
+            continue
+        gender = _normalize_gender_value(getattr(item, "note", None))
+        if gender is not None:
+            key = glossary_key(source)
+            if key:
+                result[key] = gender
+    return result
+
+
+def _gender_map_from_candidates(candidates: Sequence[object]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for candidate in candidates:
+        gender = _extract_gender(getattr(candidate, "note", None))
+        if gender is None:
+            continue
+        for attr in ("source_text", "suggested_translation"):
+            raw = getattr(candidate, attr, None)
+            if isinstance(raw, str) and raw.strip():
+                key = glossary_key(raw)
+                if key:
+                    result.setdefault(key, gender)
+    return result
+
+
+def _gender_map_from_context_facts(context_facts: Sequence[object]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for cf in context_facts:
+        if getattr(cf, "kind", None) != "gender":
+            continue
+        if getattr(cf, "certainty", None) == "unknown":
+            continue
+        gender = _normalize_gender_value(getattr(cf, "value", None))
+        if gender is None:
+            continue
+        subject = getattr(cf, "subject_anchor", None)
+        quote = getattr(subject, "quote", None) if subject is not None else None
+        if not isinstance(quote, str) or not quote.strip():
+            continue
+        words = expression_words(quote)
+        if not words or (len(words) == 1 and words[0] in _PRONOUN_WORDS):
+            continue
+        key = glossary_key(quote)
+        if key:
+            result[key] = gender
+    return result
+
+
+def _gender_from_title(name: str) -> str | None:
+    words = expression_words(name)
+    if not words:
+        return None
+    male_hit = any(word in _MALE_TITLES for word in words)
+    female_hit = any(word in _FEMALE_TITLES for word in words)
+    if male_hit and female_hit:
+        return None
+    if words[0] in _MALE_TITLES:
+        return "male"
+    if words[0] in _FEMALE_TITLES:
+        return "female"
+    return None
+
+
+def _title_tokens(name: str) -> frozenset[str]:
+    return frozenset(word for word in expression_words(name) if word in _ALL_GENDER_TITLES)
+
+
+def _titles_conflict(left_titles: frozenset[str], right_titles: frozenset[str]) -> bool:
+    left_male = bool(left_titles & _MALE_TITLES)
+    left_female = bool(left_titles & _FEMALE_TITLES)
+    right_male = bool(right_titles & _MALE_TITLES)
+    right_female = bool(right_titles & _FEMALE_TITLES)
+    return (left_male and right_female) or (left_female and right_male)
+
+
+def _name_core_words(name: str) -> frozenset[str]:
+    return frozenset(
+        word for word in expression_words(name)
+        if word not in _ALL_GENDER_TITLES and word not in _SPEAKER_NAME_STOPWORDS
+    )
+
+
+def _lookup_gender_in_map(name: str, gender_map: Mapping[str, str]) -> str | None:
+    if not gender_map:
+        return None
+    key = glossary_key(name)
+    if key in gender_map:
+        return gender_map[key]
+    name_titles = _title_tokens(name)
+    name_core = _name_core_words(name)
+    if not name_core:
+        return None
+    matched_genders: set[str] = set()
+    for candidate_key, candidate_gender in gender_map.items():
+        candidate_titles = _title_tokens(candidate_key)
+        if _titles_conflict(name_titles, candidate_titles):
+            continue
+        candidate_core = _name_core_words(candidate_key)
+        if not candidate_core:
+            continue
+        if name_core <= candidate_core or candidate_core <= name_core:
+            matched_genders.add(candidate_gender)
+    if len(matched_genders) == 1:
+        return next(iter(matched_genders))
+    return None
+
+
+def _participant_gender(
+    participant: str,
+    gender_sources: Sequence[Mapping[str, str]],
+) -> str | None:
+    for source in gender_sources:
+        found = _lookup_gender_in_map(participant, source)
+        if found is not None:
+            return found
+    return _gender_from_title(participant)
+
+
+def _same_speaker_name(
+    fact_value: str,
+    participant: str,
+    glossary_candidates: Sequence[object] = (),
+) -> bool:
+    key_a = glossary_key(fact_value)
+    key_b = glossary_key(participant)
+    if key_a and key_a == key_b:
+        return True
+    titles_a = _title_tokens(fact_value)
+    titles_b = _title_tokens(participant)
+    if _titles_conflict(titles_a, titles_b):
+        return False
+    core_a = _name_core_words(fact_value)
+    core_b = _name_core_words(participant)
+    if core_a and core_b and (core_a <= core_b or core_b <= core_a):
+        return True
+    for candidate in glossary_candidates:
+        src = getattr(candidate, "source_text", "")
+        tr = getattr(candidate, "suggested_translation", "")
+        pair = {glossary_key(src), glossary_key(tr)} - {""}
+        if key_a in pair and key_b in pair:
+            return True
+    return False
+
+
+def _opening_remark_pronoun_gender(text: str) -> str | None:
+    remark_words = expression_words(_opening_remark(text))
+    if not remark_words:
+        return None
+    verb_positions = [
+        index for index, word in enumerate(remark_words) if word in _ALL_REPORTING_VERBS
+    ]
+    if not verb_positions:
+        return None
+    attached: set[str] = set()
+    for verb_index in verb_positions:
+        # Inverted: "said he" / "asked she"
+        if verb_index + 1 < len(remark_words):
+            after = remark_words[verb_index + 1]
+            if after == "he":
+                attached.add("male")
+            elif after == "she":
+                attached.add("female")
+        # Direct or 1-word adverb/auxiliary before verb: "he said", "she softly whispered"
+        for offset in (1, 2):
+            idx = verb_index - offset
+            if idx < 0:
+                continue
+            if offset == 2 and remark_words[verb_index - 1] in _CLAUSE_BOUNDARY_WORDS:
+                continue
+            word = remark_words[idx]
+            if idx > 0 and remark_words[idx - 1] in _ADDRESSEE_PREPOSITIONS:
+                continue
+            if word == "he":
+                attached.add("male")
+            elif word == "she":
+                attached.add("female")
+    if len(attached) == 1:
+        return next(iter(attached))
+    if len(attached) > 1:
+        return None
+    # Fallback: single subject pronoun in the same clause before the first reporting verb
+    first_verb = verb_positions[0]
+    clause_start = 0
+    for idx in range(first_verb - 1, -1, -1):
+        if remark_words[idx] in _CLAUSE_BOUNDARY_WORDS and remark_words[idx] != "and":
+            clause_start = idx + 1
+            break
+    pronouns = {
+        "male" if word == "he" else "female"
+        for idx in range(clause_start, first_verb)
+        if (word := remark_words[idx]) in {"he", "she"}
+        and (idx == 0 or remark_words[idx - 1] not in _ADDRESSEE_PREPOSITIONS)
+    }
+    if len(pronouns) == 1:
+        return next(iter(pronouns))
+    return None
+
+
+def _scene_for_block(
+    block_id: str,
+    scenes: Sequence[Scene],
+    ordered_block_ids: Sequence[str],
+    blocks: Sequence[DocumentBlock] | None,
+    texts: Mapping[str, str] | None,
+) -> Scene | None:
+    order = tuple(ordered_block_ids)
+    if not order and blocks:
+        order = tuple(block.id for block in blocks)
+    if not order and texts:
+        order = tuple(texts.keys())
+    positions = {bid: index for index, bid in enumerate(order)}
+    block_pos = positions.get(block_id)
+    if block_pos is None:
+        return None
+    for scene in scenes:
+        start_pos = positions.get(scene.start_block_id)
+        end_pos = positions.get(scene.end_block_id)
+        if start_pos is not None and end_pos is not None and start_pos <= block_pos <= end_pos:
+            return scene
+    return None
+
+
+def _opening_remark_pronoun_resolves_speaker(
+    fact,
+    text: str,
+    *,
+    scenes: Sequence[Scene],
+    glossary_candidates: Sequence[object],
+    context_facts: Sequence[object],
+    mandatory_facts: Mapping[str, Mapping[str, str]] | Sequence[object] | None,
+    ordered_block_ids: Sequence[str],
+    blocks: Sequence[DocumentBlock] | None,
+    texts: Mapping[str, str] | None,
+) -> bool:
+    pronoun_gender = _opening_remark_pronoun_gender(text)
+    if pronoun_gender is None:
+        return False
+    scene = _scene_for_block(
+        fact.subject_anchor.block_id, scenes, ordered_block_ids, blocks, texts
+    )
+    if scene is None or not scene.participants:
+        return False
+    gender_sources = (
+        _gender_map_from_mandatory_facts(mandatory_facts),
+        _gender_map_from_context_facts(context_facts),
+        _gender_map_from_candidates(glossary_candidates),
+    )
+    participant_genders = [
+        (participant, _participant_gender(participant, gender_sources))
+        for participant in scene.participants
+    ]
+    if any(gender is None for _, gender in participant_genders):
+        return False
+    matching = [
+        participant
+        for participant, gender in participant_genders
+        if gender == pronoun_gender
+    ]
+    if len(matching) != 1:
+        return False
+    fact_gender = _participant_gender(fact.value, gender_sources)
+    if fact_gender is not None and fact_gender != pronoun_gender:
+        return False
+    return _same_speaker_name(fact.value, matching[0], glossary_candidates)
 
 
 def _fact_block_text(block_id, texts, blocks) -> str | None:
