@@ -98,8 +98,11 @@ def test_images_survive_export_including_those_inside_tables(tmp_path: Path) -> 
     with zipfile.ZipFile(run.path) as archive:
         names = set(archive.namelist())
 
-    assert len(image_blocks) == 28
-    assert len(exported) == 41
+    assert len(image_blocks) == 29
+    assert len(exported) == 42
+    assert any(
+        element.get("src") == "2058487975940264262_cover.jpg" for element in exported
+    )
     assert all(
         f"OEBPS/{element.get('src')}" in names for element in exported
     )

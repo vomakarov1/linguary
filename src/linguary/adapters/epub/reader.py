@@ -75,6 +75,8 @@ from linguary.domain import (
 
 _XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 _EPUB_NAMESPACE = "http://www.idpf.org/2007/ops"
+_SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+_XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
 
 #: Tags whose presence inside an element turns it into a container: such an element has no direct text,
 #: and blocks are produced by its descendants.
@@ -96,6 +98,7 @@ _STRUCTURAL_TAGS = frozenset(
         "table",
         "pre",
         "img",
+        "image",
         "ol",
         "ul",
         "dl",
@@ -114,15 +117,34 @@ _STRUCTURAL_TAGS = frozenset(
 
 #: Tags that remain a single block even if structural elements exist inside.
 #: Tables are parsed as a whole (`PRESERVE_OPAQUE`) rather than as individual cells.
-_ALWAYS_LEAF_TAGS = frozenset({"table", "pre", "img", "hr"})
+_ALWAYS_LEAF_TAGS = frozenset({"table", "pre", "img", "image", "hr"})
 
 #: Tags for which a block is created even without text: they inherently represent structure.
-_KEEP_EMPTY_TAGS = frozenset({"img", "hr", "table"})
+_KEEP_EMPTY_TAGS = frozenset({"img", "image", "hr", "table"})
+
+#: Image element tags: standard XHTML `<img>` and SVG `<image>` (commonly used for publisher covers).
+_IMAGE_TAGS = frozenset({"img", "image"})
 
 #: Document auxiliary tags: not considered book content.
 _IGNORED_TAGS = frozenset({"head", "title", "script", "style", "link", "meta", "base"})
 
 _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+
+#: Block types subject to oversized-block import warnings: indivisible textual blocks exceeding
+#: the default processing unit budget (`8000` chars) indicate broken markup or unsplit chapters.
+_OVERSIZED_BLOCK_TYPES = frozenset(
+    {
+        BlockType.PARAGRAPH,
+        BlockType.HEADING,
+        BlockType.QUOTE,
+        BlockType.LIST_ITEM,
+        BlockType.FOOTNOTE,
+        BlockType.POEM,
+    }
+)
+
+#: Character threshold above which a single textual block emits an `OVERSIZED_BLOCK` warning.
+_OVERSIZED_BLOCK_CHARS = 8_000
 
 #: Class and `epub:type` markers indicating verse lines or stanzas.
 _VERSE_MARKERS = frozenset({"l", "line", "verse", "poem", "stanza", "linegroup"})
@@ -144,9 +166,19 @@ _DEFAULT_MEDIA_TYPE = "application/octet-stream"
 _DEFAULT_SOURCE_LANGUAGE = "en"
 
 _STRUCTURAL_QUALIFIED_NAMES = tuple(
-    name
-    for tag in sorted(_STRUCTURAL_TAGS)
-    for name in (tag, f"{{{_XHTML_NAMESPACE}}}{tag}")
+    dict.fromkeys(
+        name
+        for tag in sorted(_STRUCTURAL_TAGS)
+        for name in (
+            tag,
+            f"{{{_XHTML_NAMESPACE}}}{tag}",
+            *(
+                (f"{{{_SVG_NAMESPACE}}}{tag}",)
+                if tag == "image"
+                else ()
+            ),
+        )
+    )
 )
 
 
@@ -675,7 +707,13 @@ class _SectionBuilder:
         return [*self.warnings, *self._drops.warnings()]
 
     def walk(self, container: etree._Element, context: _BlockContext) -> None:
-        """Traverses container contents while preserving document order."""
+        """Traverses container contents while preserving document order.
+
+        Non-structural wrappers (such as `<span>` emitted by FB2-to-EPUB converters around
+        chapter `<p>`/`<div>` elements, or `<svg>` wrapping an `<image>`) are descended into
+        as containers whenever they hold structural descendants, preventing entire chapters
+        from collapsing into one inline run.
+        """
         run = _InlineRun(builder=self._new_content_builder())
         run.builder.add_text(container.text)
         for child in container:
@@ -684,11 +722,12 @@ class _SectionBuilder:
                 run.builder.add_text(child.tail)
                 continue
             structural = _is_structural(child)
-            if not structural and not _is_anchor_only(child):
+            container_wrapper = not structural and _is_container(child)
+            if not structural and not container_wrapper and not _is_anchor_only(child):
                 run.builder.add_element(child)
                 continue
             self._flush_run(run, container=container, context=context)
-            if structural:
+            if structural or container_wrapper:
                 self._emit(child, context)
             else:
                 self._emit_leaf(child, context)
@@ -794,6 +833,24 @@ class _SectionBuilder:
         self._order += 1
         self._last_block = block
         self._pending_anchor_ids.clear()
+        if (
+            block.support_status is SupportStatus.SUPPORTED
+            and block.type in _OVERSIZED_BLOCK_TYPES
+            and len(block.text) > _OVERSIZED_BLOCK_CHARS
+        ):
+            self.warnings.append(
+                BookImportWarning(
+                    kind=ImportWarningKind.OVERSIZED_BLOCK,
+                    message=(
+                        f"в документе {self._resource_path} найден слишком длинный текстовый блок "
+                        f"({len(block.text)} символов при ориентире {_OVERSIZED_BLOCK_CHARS}): "
+                        f"блок не делится при переводе и может не поместиться в один ответ модели. "
+                        f"Проверьте разметку абзацев исходного EPUB"
+                    ),
+                    section_id=self.section_id,
+                    block_id=block.id,
+                )
+            )
         return block
 
     def _attributes(
@@ -812,14 +869,14 @@ class _SectionBuilder:
         )
         if anchors:
             attributes["anchor_ids"] = " ".join(anchors)
-        if element is not None and local_name(element) == "img":
+        if element is not None and local_name(element) in _IMAGE_TAGS:
             attributes.update(self._image_attributes(element))
         return attributes
 
     def _image_attributes(self, element: etree._Element) -> dict[str, str]:
         """Image resource reference and its text description."""
         attributes: dict[str, str] = {}
-        source = element.get("src")
+        source = _image_source(element)
         if source:
             target = resolve_link_target(source, resource_path=self._resource_path)
             attributes["src"] = target
@@ -834,7 +891,7 @@ class _SectionBuilder:
                         section_id=self.section_id,
                     )
                 )
-        alternative = element.get("alt")
+        alternative = element.get("alt") or element.get("aria-label")
         if alternative and alternative.strip():
             attributes["alt"] = alternative.strip()
         return attributes
@@ -861,7 +918,12 @@ class _SectionBuilder:
             )
         if content.text:
             return None
-        if local_name(element) in _KEEP_EMPTY_TAGS:
+        tag = local_name(element)
+        if tag == "image" and not _image_source(element):
+            if element.get("id") or content.anchor_ids:
+                return None
+            return DropReason.EMPTY_DECORATION
+        if tag in _KEEP_EMPTY_TAGS:
             return None
         if element.get("id") or content.anchor_ids:
             return None
@@ -941,6 +1003,17 @@ def _inherited_context(
     return context
 
 
+def _image_source(element: etree._Element) -> str | None:
+    """Resource path referenced by an XHTML `<img>` or SVG `<image>` element."""
+    if local_name(element) == "img":
+        return element.get("src")
+    return (
+        element.get(f"{{{_XLINK_NAMESPACE}}}href")
+        or element.get("href")
+        or element.get("xlink:href")
+    )
+
+
 def _leaf_type(
     element: etree._Element, *, context: _BlockContext, content: InlineContent
 ) -> BlockType:
@@ -948,7 +1021,7 @@ def _leaf_type(
     tag = local_name(element)
     if _is_page_break(element):
         return BlockType.PAGE_BREAK
-    if tag == "img":
+    if tag in _IMAGE_TAGS:
         return BlockType.IMAGE
     if tag in _HEADING_TAGS:
         return BlockType.HEADING

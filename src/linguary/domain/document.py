@@ -438,6 +438,10 @@ class CanonicalDocument:
         """Whether the section is the book cover."""
         return is_cover_section(section)
 
+    def is_part_divider(self, section: DocumentSection) -> bool:
+        """Whether the section is a standalone part/book/act divider page."""
+        return is_part_divider(section)
+
 
 _FRONT_MATTER_FILENAMES = frozenset(
     {
@@ -526,6 +530,76 @@ def _is_story_chapter(section: DocumentSection) -> bool:
     return False
 
 
+_PART_DIVIDER_PATTERN = re.compile(
+    r"\b(part|часть|book|книга|act|акт|volume|том)\s+"
+    r"([0-9ivxlcdm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"first|second|third|fourth|fifth|первая|вторая|третья|четвёртая|четвертая|пятая)\b",
+    re.IGNORECASE,
+)
+
+_NON_DIVIDER_CHAPTER_PATTERNS = (
+    re.compile(r"\b(chapter|глава)\b", re.IGNORECASE),
+    re.compile(r"\b(prologue|пролог)\b", re.IGNORECASE),
+    re.compile(r"\b(epilogue|эпилог)\b", re.IGNORECASE),
+    re.compile(r"\b(scene|сцена)\s+([0-9ivxlcdm]+|\w+)\b", re.IGNORECASE),
+)
+
+_PART_DIVIDER_MAX_TEXT_BLOCKS = 3
+_PART_DIVIDER_MAX_CHARS = 200
+
+
+def _collapse_spaces(text: str) -> str:
+    return " ".join(text.split())
+
+
+def is_part_divider(section: DocumentSection) -> bool:
+    """Whether the section is a standalone part/book/act title divider without story prose.
+
+    Novels frequently place a short title page between parts ("PART TWO / Mary, Queen of Snots").
+    Such a page is kept in the exported book in its original position, but should not be analyzed
+    as a story chapter or interrupt the 'Previously in...' recap chain.
+    """
+    if section.is_notes_only or is_cover_section(section):
+        return False
+
+    title_norm = _collapse_spaces(section.title).casefold().strip("\"'«»")
+    headings = [
+        _collapse_spaces(b.text).casefold()
+        for b in section.blocks
+        if b.type is BlockType.HEADING and b.text.strip()
+    ]
+    text_blocks = [
+        b for b in section.blocks if b.type in _TEXT_BLOCK_TYPES and b.text.strip()
+    ]
+
+    if text_blocks:
+        # A section with both headings and prose blocks is treated as content, not a bare divider.
+        if headings:
+            return False
+        if len(text_blocks) > _PART_DIVIDER_MAX_TEXT_BLOCKS:
+            return False
+        stripped_texts = [_collapse_spaces(b.text) for b in text_blocks]
+        total_chars = sum(len(text) for text in stripped_texts)
+        if total_chars > _PART_DIVIDER_MAX_CHARS:
+            return False
+        joined_norm = " ".join(stripped_texts).casefold()
+        matches_title = bool(title_norm) and joined_norm == title_norm
+        if not matches_title and any(text.endswith(".") for text in stripped_texts):
+            return False
+        candidates = [title_norm, joined_norm, *(text.casefold() for text in stripped_texts)]
+    else:
+        candidates = [title_norm, *headings]
+
+    if any(
+        pattern.search(text)
+        for text in candidates
+        for pattern in _NON_DIVIDER_CHAPTER_PATTERNS
+    ):
+        return False
+
+    return any(_PART_DIVIDER_PATTERN.search(text) for text in candidates)
+
+
 def is_front_matter(
     section: DocumentSection, document: CanonicalDocument | None = None
 ) -> bool:
@@ -536,6 +610,9 @@ def is_front_matter(
     """
     if section.is_notes_only:
         return False
+
+    if is_part_divider(section):
+        return True
 
     if _is_story_chapter(section):
         return False
@@ -637,6 +714,7 @@ class ImportWarningKind(StrEnum):
     UNSUPPORTED_CONSTRUCT = "unsupported_construct"
     TOC_MISMATCH = "toc_mismatch"
     MISSING_RESOURCE = "missing_resource"
+    OVERSIZED_BLOCK = "oversized_block"
 
 
 @dataclass(frozen=True, slots=True)

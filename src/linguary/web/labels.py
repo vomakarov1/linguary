@@ -155,6 +155,7 @@ IMPORT_WARNING_LABELS: Mapping[ImportWarningKind, str] = {
     ImportWarningKind.UNSUPPORTED_CONSTRUCT: "Неподдерживаемая конструкция",
     ImportWarningKind.TOC_MISMATCH: "Оглавление расходится с порядком чтения",
     ImportWarningKind.MISSING_RESOURCE: "Ресурс книги не найден",
+    ImportWarningKind.OVERSIZED_BLOCK: "Слишком длинный блок",
 }
 
 RESULT_WARNING_LABELS: Mapping[ResultWarningKind, str] = {

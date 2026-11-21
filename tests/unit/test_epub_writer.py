@@ -1,17 +1,29 @@
 """Unit tests for EPUB writer front-matter handling and recap behavior (P1.T1, AC-003, AC-004)."""
 
-from linguary.adapters.epub.writer import _previously_heading, _render_chapters, EpubWriteRequest
-from linguary.adapters.epub.writer import _OpaqueSource, _ExportWarnings
+from linguary.adapters.epub.writer import (
+    EpubWriteRequest,
+    _ExportWarnings,
+    _OpaqueSource,
+    _exported_sections,
+    _previously_heading,
+    _render_chapters,
+    _split_leading_front_matter,
+)
+from linguary.application.layout.book import BookLayout
+from linguary.application.layout.legend import LayoutFeatures
 from linguary.domain.document import (
     BlockType,
     BookMetadata,
     CanonicalDocument,
     DocumentBlock,
     DocumentSection,
+    ImportWarningKind,
     SourceReference,
     is_cover_section,
     is_front_matter,
+    is_part_divider,
 )
+from linguary.web.labels import IMPORT_WARNING_LABELS
 
 
 def _block(section_id: str, block_id: str, text: str, block_type: BlockType = BlockType.PARAGRAPH, order: int = 0) -> DocumentBlock:
@@ -488,3 +500,154 @@ def test_first_story_chapter_does_not_recap_front_matter() -> None:
     assert chapters[0].section_id == "sec-title"
     assert chapters[1].section_id == "sec-ch1"
     assert chapters[2].section_id == "sec-ch2"
+
+
+def test_part_divider_classification_and_export_preservation() -> None:
+    """Standalone part dividers are skipped as non-story sections, kept in learner export, and stay after the legend."""
+    cover = DocumentSection(
+        id="sec-cover",
+        document_id="book-1",
+        title="Cover",
+        order=0,
+        source_resource_path="cover.xhtml",
+        blocks=(_block("sec-cover", "b-cov", "", BlockType.IMAGE, 0),),
+    )
+    dedication = DocumentSection(
+        id="sec-ded",
+        document_id="book-1",
+        title="Dedication",
+        order=1,
+        source_resource_path="dedication.xhtml",
+        blocks=(_block("sec-ded", "b-ded", "For my aunt.", BlockType.PARAGRAPH, 0),),
+    )
+    part1_heading_divider = DocumentSection(
+        id="sec-part1",
+        document_id="book-1",
+        title="Part One: Afterlights",
+        order=2,
+        source_resource_path="part1.xhtml",
+        blocks=(
+            _block("sec-part1", "b-p1h1", "PART ONE", BlockType.HEADING, 0),
+            _block("sec-part1", "b-p1h2", "Afterlights", BlockType.HEADING, 1),
+        ),
+    )
+    ch1 = DocumentSection(
+        id="sec-ch1",
+        document_id="book-1",
+        title="Chapter 1",
+        order=3,
+        source_resource_path="ch1.xhtml",
+        blocks=(
+            _block("sec-ch1", "b-c1h", "Chapter 1", BlockType.HEADING, 0),
+            _block("sec-ch1", "b-c1p", "Story begins here.", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    part2_paragraph_divider = DocumentSection(
+        id="sec-part2",
+        document_id="book-1",
+        title="PART TWO Mary, Queen of Snots",
+        order=4,
+        source_resource_path="ch1-7.xhtml",
+        blocks=(
+            _block("sec-part2", "b-p2a", "PART TWO", BlockType.PARAGRAPH, 0),
+            _block("sec-part2", "b-p2b", "Mary, Queen of Snots", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    book_story_chapter = DocumentSection(
+        id="sec-book1",
+        document_id="book-1",
+        title="Book 1",
+        order=5,
+        source_resource_path="book1.xhtml",
+        blocks=(
+            _block("sec-book1", "b-bk1h", "Book 1", BlockType.HEADING, 0),
+            _block("sec-book1", "b-bk1p", "A real chapter titled Book 1.", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    combined_part_and_chapter = DocumentSection(
+        id="sec-combined",
+        document_id="book-1",
+        title="PART ONE Afterlights",
+        order=6,
+        source_resource_path="ch1-2.xhtml",
+        blocks=(
+            _block("sec-combined", "b-cmb1", "PART ONE", BlockType.PARAGRAPH, 0),
+            _block("sec-combined", "b-cmb2", "CHAPTER 1", BlockType.PARAGRAPH, 1),
+            _block("sec-combined", "b-cmb3", "On a hairpin turn, a car crashed.", BlockType.PARAGRAPH, 2),
+        ),
+    )
+
+    doc = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="Everlost"),
+        source_language="en",
+        target_language="ru",
+        sections=(
+            cover,
+            dedication,
+            part1_heading_divider,
+            ch1,
+            part2_paragraph_divider,
+            book_story_chapter,
+            combined_part_and_chapter,
+        ),
+    )
+
+    assert is_part_divider(part1_heading_divider) is True
+    assert doc.is_front_matter(part1_heading_divider) is True
+    assert is_part_divider(part2_paragraph_divider) is True
+    assert doc.is_front_matter(part2_paragraph_divider) is True
+
+    assert is_part_divider(cover) is False
+    assert is_part_divider(ch1) is False
+    assert is_part_divider(book_story_chapter) is False
+    assert doc.is_front_matter(book_story_chapter) is False
+    assert is_part_divider(combined_part_and_chapter) is False
+    assert doc.is_front_matter(combined_part_and_chapter) is False
+
+    request = EpubWriteRequest(
+        document=doc,
+        target_path="output.epub",
+        layout=BookLayout(
+            chapters={},
+            legend=(),
+            ipa_key=(),
+            who_is_who=(),
+            features=LayoutFeatures(
+                has_translation=False,
+                has_notes=False,
+                labels=frozenset(),
+                has_ipa=False,
+                has_poems=False,
+                has_speakers=False,
+                sections=frozenset(),
+            ),
+        ),
+    )
+    exported_ids = [section.id for section in _exported_sections(request)]
+    assert exported_ids == [
+        "sec-cover",
+        "sec-part1",
+        "sec-ch1",
+        "sec-part2",
+        "sec-book1",
+        "sec-combined",
+    ]
+
+    chapters = _render_chapters(
+        request, opaque=_OpaqueSource(source_path=None), warnings=_ExportWarnings()
+    )
+    leading, rest = _split_leading_front_matter(chapters, request)
+    assert [c.section_id for c in leading] == ["sec-cover"]
+    assert [c.section_id for c in rest] == [
+        "sec-part1",
+        "sec-ch1",
+        "sec-part2",
+        "sec-book1",
+        "sec-combined",
+    ]
+
+
+def test_every_import_warning_kind_has_ui_label() -> None:
+    """Every `ImportWarningKind` enum value is mapped to a Russian label."""
+    assert set(IMPORT_WARNING_LABELS) == set(ImportWarningKind)

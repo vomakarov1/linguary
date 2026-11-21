@@ -479,6 +479,100 @@ def test_import_is_rejected_after_book_moved_past_import(
         import_book(command)
 
 
+def test_inline_wrapper_with_structural_descendants_is_unwrapped(
+    reader: EbookLibEpubReader, tmp_path: Path
+) -> None:
+    """Block tags wrapped in `<span>` (e.g. FB2-to-EPUB conversions) stay separate blocks."""
+    source = build_epub(
+        tmp_path / "span_wrapped.epub",
+        documents={
+            "chapter1.xhtml": xhtml_document(
+                "<span id='part1'><div class='title1'><p>PART ONE</p></div>"
+                "<span id='ch1'><p>First paragraph.</p><p>Second paragraph.</p></span></span>"
+            )
+        },
+    )
+
+    imported = reader.read(_request(source))
+    blocks = list(imported.document.blocks())
+
+    assert [block.text for block in blocks] == [
+        "PART ONE",
+        "First paragraph.",
+        "Second paragraph.",
+    ]
+    assert blocks[0].attributes.get("anchor_ids") == "part1"
+    assert blocks[1].attributes.get("anchor_ids") == "ch1"
+
+
+def test_svg_image_cover_is_parsed_as_image_block(
+    reader: EbookLibEpubReader, tmp_path: Path
+) -> None:
+    """SVG `<image>` covers (`xlink:href` and `href`) become `Image` blocks; empty `<image/>` is dropped."""
+    image_bytes = b"\x89PNG\r\n\x1a\n fake cover"
+    source = build_epub(
+        tmp_path / "svg_cover.epub",
+        documents={
+            "cover.xhtml": xhtml_document(
+                "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' viewBox='0 0 100 150'>"
+                "<image width='100' height='150' xlink:href='images/cover.png' aria-label='Book Cover'/>"
+                "</svg>"
+            ),
+            "chapter1.xhtml": xhtml_document(
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+                "<image href='images/plate.png'/>"
+                "<image/>"
+                "</svg>"
+                "<p>Story text.</p>"
+            ),
+        },
+        extra_files={
+            "images/cover.png": image_bytes,
+            "images/plate.png": image_bytes,
+        },
+    )
+
+    imported = reader.read(_request(source))
+    cover_section, ch1_section = imported.document.ordered_sections
+
+    assert imported.document.is_cover_section(cover_section) is True
+    assert len(cover_section.blocks) == 1
+    assert cover_section.blocks[0].type is BlockType.IMAGE
+    assert cover_section.blocks[0].attributes["src"] == "images/cover.png"
+    assert cover_section.blocks[0].attributes["alt"] == "Book Cover"
+
+    assert [b.type for b in ch1_section.blocks] == [BlockType.IMAGE, BlockType.PARAGRAPH]
+    assert ch1_section.blocks[0].attributes["src"] == "images/plate.png"
+    assert any(
+        w.kind is ImportWarningKind.DROPPED_BLOCK and w.section_id == ch1_section.id
+        for w in imported.warnings
+    )
+
+
+def test_oversized_textual_block_emits_import_warning(
+    reader: EbookLibEpubReader, tmp_path: Path
+) -> None:
+    """A textual block exceeding 8000 chars emits `OVERSIZED_BLOCK`, while normal blocks do not."""
+    huge_text = "Word " * 1700  # 8500 chars
+    normal_text = "Short paragraph."
+    source = build_epub(
+        tmp_path / "oversized.epub",
+        documents={
+            "chapter1.xhtml": xhtml_document(f"<p>{normal_text}</p><p>{huge_text}</p>")
+        },
+    )
+
+    imported = reader.read(_request(source))
+    oversized_warnings = [
+        w for w in imported.warnings if w.kind is ImportWarningKind.OVERSIZED_BLOCK
+    ]
+    blocks = list(imported.document.blocks())
+
+    assert len(oversized_warnings) == 1
+    assert oversized_warnings[0].section_id == imported.document.ordered_sections[0].id
+    assert oversized_warnings[0].block_id == blocks[1].id
+
+
 def _request(source: Path) -> EpubReadRequest:
     """Request to read an in-test synthesized EPUB book."""
     return EpubReadRequest(

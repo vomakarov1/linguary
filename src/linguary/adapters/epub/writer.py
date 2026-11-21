@@ -482,7 +482,7 @@ def _exported_sections(request: EpubWriteRequest) -> tuple[DocumentSection, ...]
     """Sections written into a book.
 
     Without a layout, every section is exported. A learner layout keeps the
-    cover and drops every other front-matter section.
+    cover and standalone part dividers, and drops every other front-matter section.
     """
     sections = request.document.ordered_sections
     if request.layout is None:
@@ -493,6 +493,7 @@ def _exported_sections(request: EpubWriteRequest) -> tuple[DocumentSection, ...]
         if not (
             request.document.is_front_matter(section)
             and not request.document.is_cover_section(section)
+            and not request.document.is_part_divider(section)
         )
     )
 
@@ -500,7 +501,7 @@ def _exported_sections(request: EpubWriteRequest) -> tuple[DocumentSection, ...]
 def _split_leading_front_matter(
     chapters: Sequence[_Chapter], request: EpubWriteRequest
 ) -> tuple[list[_Chapter], list[_Chapter]]:
-    """Opening front matter stays ahead of the legend. Later sections keep their order."""
+    """Opening front matter stays ahead of the legend. Part dividers and later sections keep their order."""
     document = request.document
     exported = {section.id for section in _exported_sections(request)}
     leading: list[_Chapter] = []
@@ -510,7 +511,11 @@ def _split_leading_front_matter(
         if chapter.section_id not in exported:
             continue
         section = document.section(chapter.section_id)
-        if not started and document.is_front_matter(section):
+        if (
+            not started
+            and document.is_front_matter(section)
+            and not document.is_part_divider(section)
+        ):
             leading.append(chapter)
             continue
         started = True
