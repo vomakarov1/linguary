@@ -205,7 +205,7 @@ def test_one_span_translated_text_is_the_unit_translation() -> None:
 
 
 def test_note_in_marker_part_numbering_restarts() -> None:
-    """The first marked note of this block is 1, ordered by marker, even on a later part."""
+    """Marked note numbering restarts from 1 inside each display part (`lg-cont` included)."""
     text, segments = _spans(10, 10, 10)
     block = _block(text, segments)
     treatments = (
@@ -220,10 +220,11 @@ def test_note_in_marker_part_numbering_restarts() -> None:
 
     units = block_units(block, None, treatments, (loose, third, second, first), {})
 
+    assert [unit.continues for unit in units] == [False, True, True]
     assert [unit.notes for unit in units] == [
         (),
         (NumberedNote(1, first), NumberedNote(2, second)),
-        (NumberedNote(3, third), NumberedNote(None, loose)),
+        (NumberedNote(1, third), NumberedNote(None, loose)),
     ]
 
     boundary = _note(10, "boundary")
@@ -231,9 +232,61 @@ def test_note_in_marker_part_numbering_restarts() -> None:
     placed = block_units(block, None, treatments, (inside, boundary), {})
     assert [unit.notes for unit in placed] == [
         (NumberedNote(1, boundary),),
-        (NumberedNote(2, inside),),
+        (NumberedNote(1, inside),),
         (),
     ]
+
+
+def test_display_translation_and_note_body_normalize_typography_safely() -> None:
+    """Russian display projection normalizes ellipsis, cutoff dashes, and U+0301 safely."""
+    block = _block("Original sentence for display checks.")
+    treatments = (BlockTreatment.TRANSLATE,)
+    raw_translation = (
+        "— ... я видел П-П-Поттера в 10–15 шагах ... и за\u0301мок!\n"
+        "Что?.. Неужели!.. Он вошёл — и сказал: « ... Вол– ».\n"
+        "— Я имел в виду, Вол– — перебил его Хагрид.\n"
+        "— … — прошептал он, — не\u0301—"
+    )
+    result = _result(block, treatments, (raw_translation,))
+    note = LayoutNote(
+        labels=("Речь персонажа.",),
+        term="Vol– / за\u0301мок...",
+        ipa="/ˈvɒl.də.mɔːt\u0301/",
+        variant="UK",
+        body=(
+            "Обры\u0301в речи ... «Вол–» (ср. П-П-Поттер и 10–15).",
+            "Что?.. Неужели!.. — … — пауза ...  и продолжение.",
+        ),
+        marker_end=8,
+        origin="glossary_hint",
+        difficulty_kinds=("speech_style",),
+    )
+
+    ru_units = block_units(block, result, treatments, (note,), {}, target_language="ru")
+
+    assert len(ru_units) == 1
+    assert ru_units[0].translation == (
+        "— …я видел П-П-Поттера в 10–15 шагах… и замок!\n"
+        "Что?.. Неужели!.. Он вошёл — и сказал: «…Вол…».\n"
+        "— Я имел в виду, Вол… — перебил его Хагрид.\n"
+        "— … — прошептал он, — не…"
+    )
+    assert len(ru_units[0].notes) == 1
+    normalized_note = ru_units[0].notes[0].note
+    assert normalized_note.term == "Vol– / за\u0301мок..."
+    assert normalized_note.ipa == "/ˈvɒl.də.mɔːt\u0301/"
+    assert normalized_note.body == (
+        "Обрыв речи… «Вол…» (ср. П-П-Поттер и 10–15).",
+        "Что?.. Неужели!.. — … — пауза… и продолжение.",
+    )
+
+    en_units = block_units(block, result, treatments, (note,), {}, target_language="en")
+    assert en_units[0].translation == raw_translation
+    assert en_units[0].notes[0].note == note
+
+    none_units = block_units(block, result, treatments, (note,), {}, target_language=None)
+    assert none_units[0].translation == raw_translation
+    assert none_units[0].notes[0].note == note
 
 
 def test_inferred_speaker_prefixes_matching_dialogue_line() -> None:

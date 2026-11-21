@@ -9,20 +9,33 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from linguary.application.layout.notes import LayoutNote
 from linguary.application.layout.parts import LayoutPart, compose_parts
 from linguary.domain import BlockProcessingResult, BlockTreatment, BlockType, DocumentBlock
 
 _SOFT_HYPHEN = re.compile("\u00ad")
+_COMBINING_ACUTE = re.compile("\u0301")
 _INLINE_EN_DASH = re.compile(" – ")
 _GERMAN_QUOTES = re.compile(r"„([^„“”]+)[“”]")
+_ASCII_ELLIPSIS = re.compile(r"(?<![.?!])\.{3}(?!\.)")
+_INTERRUPTED_DASH = re.compile(
+    r"(?<=[А-Яа-яЁёA-Za-z])[–—](?=[ \t\u00a0]*(?:$|\n|[»”\"“])|,|[ \t\u00a0]+—)"
+)
+_SPACE_BEFORE_ELLIPSIS = re.compile(r"(?<=[\w«(\[])[ \t\u00a0]+…")
+_MULTI_SPACE_AFTER_DASH_ELLIPSIS = re.compile(r"(?<=—)[ \t\u00a0]{2,}(?=…)")
+_SPACE_AFTER_ELLIPSIS_CLOSING = re.compile(r"…[ \t\u00a0]+(?=[»)\],;:?!])")
+_SPACE_AFTER_LEADING_ELLIPSIS = re.compile(
+    r"((?:^|\n|—[ \t\u00a0]|[«(\[]|[.!?][ \t\u00a0])…)[ \t\u00a0]+(?=\w)"
+)
+_MULTI_SPACE_AFTER_ELLIPSIS = re.compile(r"…[ \t\u00a0]{2,}")
+_TRAILING_SPACE_AFTER_ELLIPSIS = re.compile(r"…[ \t\u00a0]+(?=$|\n)")
 
 
 @dataclass(frozen=True, slots=True)
 class NumberedNote:
-    """One note and its number inside this block.
+    """One note and its number inside its layout unit.
 
     `number` is none when the note has no marker. A speaker line shown because
     the unit has no translation is also unnumbered.
@@ -63,10 +76,11 @@ def block_units(
     not continue and ends the paragraph. Each later unit continues, and only
     the last of them ends the paragraph.
 
-    A note with `marker_end` is numbered from 1 in increasing marker order
-    inside this call and placed on the part where `start < marker_end <= end`.
-    A note without a marker stays on the last part and is not numbered. A
-    marker that sits on no part stays on the last part and keeps its number.
+    A note with `marker_end` is placed on the part where
+    `start < marker_end <= end` and numbered from 1 in increasing marker order
+    independently inside each part. A note without a marker stays on the last
+    part and is not numbered. A marker that sits on no part stays on the last
+    part and is numbered with that part.
 
     A part translation joins the non-empty translations of that part's
     `TRANSLATE` segments, the same way `rebuild_translation` joins them. No
@@ -101,7 +115,10 @@ def block_units(
                 segments=tuple(range(len(spans))),
             ),
         )
-    note_buckets = _notes_by_part(parts, notes)
+    normalized_notes = tuple(
+        _normalize_display_note(note, target_language) for note in notes
+    )
+    note_buckets = _notes_by_part(parts, normalized_notes)
     speaker_names = _speakers_by_part(parts, speakers)
     poem = block.type is BlockType.POEM
     last = len(parts) - 1
@@ -189,14 +206,17 @@ def _notes_by_part(
     parts: Sequence[LayoutPart],
     notes: Sequence[LayoutNote],
 ) -> list[list[NumberedNote]]:
-    """Number marked notes from 1 and bucket them by the owning part."""
-    buckets: list[list[NumberedNote]] = [[] for _ in parts]
+    """Bucket notes by owning part and number marked notes from 1 in each part."""
+    raw_buckets: list[list[LayoutNote]] = [[] for _ in parts]
     if not parts:
-        return buckets
-    for item in _numbered(notes):
-        buckets[_part_index(parts, item.note.marker_end)].append(item)
-    for bucket in buckets:
-        bucket.sort(key=_note_order)
+        return []
+    for note in notes:
+        raw_buckets[_part_index(parts, note.marker_end)].append(note)
+    buckets: list[list[NumberedNote]] = []
+    for bucket in raw_buckets:
+        numbered = list(_numbered(bucket))
+        numbered.sort(key=_note_order)
+        buckets.append(numbered)
     return buckets
 
 
@@ -248,12 +268,46 @@ def _speakers_by_part(
     return chosen
 
 
+def _is_russian(target_language: str | None) -> bool:
+    return (target_language or "").strip().lower() == "ru"
+
+
+def _normalize_display_note(note: LayoutNote, target_language: str | None) -> LayoutNote:
+    """Normalize Russian display typography in `note.body`, leaving `term` and `ipa` intact."""
+    if not _is_russian(target_language) or not note.body:
+        return note
+    normalized_body = tuple(
+        _normalize_display_translation(paragraph, target_language)
+        for paragraph in note.body
+    )
+    if normalized_body == note.body:
+        return note
+    return replace(note, body=normalized_body)
+
+
 def _normalize_display_translation(text: str, target_language: str | None) -> str:
-    """Clean invisible soft hyphens and stray outer Russian typography at display projection."""
+    """Clean invisible soft hyphens and Russian display typography at display projection."""
     cleaned = _SOFT_HYPHEN.sub("", text)
-    if (target_language or "").strip().lower() == "ru":
+    if _is_russian(target_language):
+        cleaned = _COMBINING_ACUTE.sub("", cleaned)
         cleaned = _INLINE_EN_DASH.sub(" — ", cleaned)
         cleaned = _normalize_outer_german_quotes(cleaned)
+        cleaned = _ASCII_ELLIPSIS.sub("…", cleaned)
+        cleaned = _INTERRUPTED_DASH.sub("…", cleaned)
+        cleaned = _normalize_ellipsis_spacing(cleaned)
+    return cleaned
+
+
+def _normalize_ellipsis_spacing(text: str) -> str:
+    """Clean stray spaces around `…` while preserving `— …` and normal post-ellipsis spacing."""
+    if "…" not in text:
+        return text
+    cleaned = _SPACE_BEFORE_ELLIPSIS.sub("…", text)
+    cleaned = _MULTI_SPACE_AFTER_DASH_ELLIPSIS.sub(" ", cleaned)
+    cleaned = _SPACE_AFTER_ELLIPSIS_CLOSING.sub("…", cleaned)
+    cleaned = _SPACE_AFTER_LEADING_ELLIPSIS.sub(r"\1", cleaned)
+    cleaned = _MULTI_SPACE_AFTER_ELLIPSIS.sub("… ", cleaned)
+    cleaned = _TRAILING_SPACE_AFTER_ELLIPSIS.sub("…", cleaned)
     return cleaned
 
 
