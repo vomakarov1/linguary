@@ -2291,3 +2291,165 @@ def test_validate_content_plan_collects_all_unresolved_quotes_and_global_unknown
     assert unknown_exc.value.violation.scope == "global"
     assert unknown_exc.value.violation.block_ids == ()
 
+
+def test_validate_content_plan_hints_parent_block_and_targets_local_repair_for_segment_owner() -> None:
+    from linguary.application.analysis_merge import validate_content_plan
+    from linguary.application.llm_dto import QuotedContentPlanResponse, QuotedSourceAnchorResponse
+    from linguary.application.retry_policy import (
+        ExpectedBlock,
+        ResultExpectation,
+        ResultValidationError,
+        RetryPolicy,
+    )
+
+    aliases = {f"b{i}": f"block-{i}" for i in range(1, 122)}
+    texts = {f"block-{i}": f"Block {i} text. Nick paused." for i in range(1, 122)}
+    visible = {alias: texts[block_id] for alias, block_id in aliases.items()}
+    treatment_plan = tuple(
+        TreatmentPlanItemResponse(f"b{i}", BlockTreatment.TRANSLATE) for i in range(1, 122)
+    )
+
+    for bad_owner in ("b120.1", "B120.1"):
+        payload = ChapterAnalysisResponse(
+            translation_instructions="Keep.",
+            chapter_summary="Summary.",
+            treatment_plan=treatment_plan,
+            content_plan=QuotedContentPlanResponse(
+                version=3,
+                profile="content-plan-v3",
+                difficulties=(
+                    _difficulty("Nick paused.", difficulty_id="d1", owner=bad_owner),
+                ),
+            ),
+        )
+        with pytest.raises(AnalysisMergeError) as exc:
+            validate_content_plan(payload, aliases, texts, visible_texts_by_alias=visible)
+
+        violation = exc.value.violation
+        assert violation is not None
+        assert violation.rule_code == "unresolved_quote"
+        assert violation.scope == "local"
+        assert violation.block_ids == ("block-120",)
+        msg = str(exc.value)
+        assert f"неизвестный блок-владелец трудности: используй идентификатор целого блока b120, а не сегмента {bad_owner}" in msg
+
+    # Verify owner_block_id="b120.1" with valid whole-block anchor "b120" still attaches block-120 locally.
+    owner_only_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep.",
+        chapter_summary="Summary.",
+        treatment_plan=treatment_plan,
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(
+                replace(
+                    _difficulty("Nick paused.", difficulty_id="d1", owner="b120"),
+                    owner_block_id="b120.1",
+                    anchors=(QuotedSourceAnchorResponse("b120", "Nick paused."),),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as owner_exc:
+        validate_content_plan(owner_only_payload, aliases, texts, visible_texts_by_alias=visible)
+    assert owner_exc.value.violation is not None
+    assert owner_exc.value.violation.scope == "local"
+    assert owner_exc.value.violation.block_ids == ("block-120",)
+
+    # Verify RetryPolicy builds a targeted local repair (- b120) instead of b1..b121.
+    aliased_violation = replace(owner_exc.value.violation, block_ids=("b120",))
+    err = ResultValidationError(
+        str(owner_exc.value),
+        expectation=ResultExpectation(
+            target_language="ru",
+            blocks=tuple(ExpectedBlock(block_id=f"b{i}") for i in range(1, 122)),
+        ),
+        violation=aliased_violation,
+    )
+    decision = RetryPolicy(max_attempts=3).decide(err, attempts=1, raw_content="{}")
+    assert decision.repair_instruction is not None
+    assert "- b120" in decision.repair_instruction
+    assert "b1..b121" not in decision.repair_instruction
+    assert "- b1\n" not in decision.repair_instruction
+    assert "- b121" not in decision.repair_instruction
+
+
+def test_validate_content_plan_hints_parent_block_for_segment_anchor_and_keeps_unknown_global() -> None:
+    from linguary.application.analysis_merge import _diagnose_quoted_anchor, validate_content_plan
+    from linguary.application.llm_dto import QuotedContentPlanResponse, QuotedSourceAnchorResponse
+
+    aliases = {f"b{i}": f"block-{i}" for i in range(1, 122)}
+    texts = {f"block-{i}": f"Block {i} text. Nick paused. Allie waited." for i in range(1, 122)}
+    visible = {alias: texts[block_id] for alias, block_id in aliases.items()}
+    aliases_by_id = {block_id: alias for alias, block_id in aliases.items()}
+    treatment_plan = tuple(
+        TreatmentPlanItemResponse(f"b{i}", BlockTreatment.TRANSLATE) for i in range(1, 122)
+    )
+
+    assert _diagnose_quoted_anchor("b120.2", "Allie waited.", aliases, texts, visible, aliases_by_id) == (
+        "b120.2",
+        "Allie waited.",
+        "указана метка сегмента b120.2 — используй идентификатор целого блока b120",
+        ("block-120",),
+    )
+    assert _diagnose_quoted_anchor("B120.1", "Nick paused.", aliases, texts, visible, aliases_by_id) == (
+        "B120.1",
+        "Nick paused.",
+        "указана метка сегмента B120.1 — используй идентификатор целого блока b120",
+        ("block-120",),
+    )
+    assert _diagnose_quoted_anchor("b999.1", "Nick paused.", aliases, texts, visible, aliases_by_id) == (
+        "b999.1",
+        "Nick paused.",
+        "неизвестный блок",
+        (),
+    )
+
+    bad_anchor_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep.",
+        chapter_summary="Summary.",
+        treatment_plan=treatment_plan,
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(
+                replace(
+                    _difficulty("Nick paused.", difficulty_id="d1", owner="b120"),
+                    anchors=(
+                        QuotedSourceAnchorResponse("b120", "Nick paused."),
+                        QuotedSourceAnchorResponse("b120.2", "Allie waited."),
+                    ),
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as exc:
+        validate_content_plan(bad_anchor_payload, aliases, texts, visible_texts_by_alias=visible)
+
+    assert exc.value.violation is not None
+    assert exc.value.violation.rule_code == "unresolved_quote"
+    assert exc.value.violation.scope == "local"
+    assert exc.value.violation.block_ids == ("block-120",)
+    assert "указана метка сегмента b120.2 — используй идентификатор целого блока b120" in str(exc.value)
+
+    unknown_parent_payload = ChapterAnalysisResponse(
+        translation_instructions="Keep.",
+        chapter_summary="Summary.",
+        treatment_plan=treatment_plan,
+        content_plan=QuotedContentPlanResponse(
+            version=3,
+            profile="content-plan-v3",
+            difficulties=(
+                _difficulty("Nick paused.", difficulty_id="d1", owner="b999.1"),
+            ),
+        ),
+    )
+    with pytest.raises(AnalysisMergeError) as unknown_exc:
+        validate_content_plan(unknown_parent_payload, aliases, texts, visible_texts_by_alias=visible)
+
+    assert unknown_exc.value.violation is not None
+    assert unknown_exc.value.violation.rule_code == "unresolved_quote"
+    assert unknown_exc.value.violation.scope == "global"
+    assert unknown_exc.value.violation.block_ids == ()
+    assert "используй идентификатор целого блока" not in str(unknown_exc.value)
+

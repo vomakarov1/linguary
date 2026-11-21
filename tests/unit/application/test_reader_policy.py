@@ -298,3 +298,44 @@ def test_reader_policy_prepare_results_is_idempotent_with_stored_typography():
     assert once == (result,)
     assert twice == once
 
+
+def test_a2_summary_warnings_calibrated_to_22_words_and_protect_titles():
+    policy = ReaderTextPolicy()
+
+    clean_18 = "Nick and Allie walked along the dark path, and they tried to stay quiet near the old trees."
+    assert len(clean_18.split()) == 18
+    assert policy.warnings('summary', clean_18, reader_level='a2') == ()
+
+    clean_21 = "Nick and Allie looked for the hidden road, but the thick silver fog covered every stone sign along the narrow path."
+    assert len(clean_21.split()) == 21
+    assert policy.warnings('summary', clean_21, reader_level='a2') == ()
+
+    title_22 = "Mr. Smith and Mrs. Brown walked slowly down the quiet village street and talked about the old map before dinner arrived tonight."
+    assert len(title_22.split()) == 22
+    assert policy.warnings('summary', title_22, reader_level='a2') == ()
+
+    # 10 words before "Mr. Smith" and 12 after: splitting at "Mr." would stay under threshold, unsplit is 23 > 22.
+    title_23 = "On a cold morning in November near the tall clock Mr. Smith walked slowly down the empty village street with his little dog."
+    assert len(title_23.split()) == 23
+    assert policy.warnings('summary', title_23, reader_level='a2') == ('complexity_requires_review',)
+
+    long_25 = "Nick and Allie carefully followed the strange boy through the dark silver forest because they wanted to reach the distant towers before sunset arrived again."
+    assert len(long_25.split()) == 25
+    assert policy.warnings('summary', long_25, reader_level='a2') == ('complexity_requires_review',)
+
+    assert policy.warnings('summary', 'One ' * 40 + '.', reader_level='a2') == ('complexity_requires_review',)
+
+    # Non-summary channels keep the stricter 15-word threshold.
+    note_15 = "Это объяснение состоит ровно из пятнадцати русских слов и не должно вызывать лишнее предупреждение сейчас."
+    assert len(note_15.split()) == 15
+    assert policy.warnings('language_note.note', note_15, reader_level='a2') == ()
+
+    note_16 = "Это длинное объяснение состоит из шестнадцати разных русских слов и поэтому должно вызывать предупреждение редактору сейчас."
+    assert len(note_16.split()) == 16
+    assert policy.warnings('language_note.note', note_16, reader_level='a2') == ('complexity_requires_review',)
+    assert policy.warnings('before_you_read.explanation', note_16, reader_level='a2') == ('complexity_requires_review',)
+
+    # Non-A2 levels emit no complexity warnings.
+    assert policy.warnings('summary', long_25, reader_level='b1') == ()
+    assert policy.warnings('language_note.note', note_16, reader_level='b2') == ()
+

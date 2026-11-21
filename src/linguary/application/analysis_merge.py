@@ -2722,6 +2722,26 @@ def _merged_content_plan(fragments: Sequence[FragmentAnalysis]) -> ContentPlan |
         context_facts=tuple(facts.values()))
 
 
+_SEGMENT_ALIAS_RE = re.compile(r"^(b\d+)\.\d+$", re.IGNORECASE)
+
+
+def _segment_parent_alias(
+    block_alias: str,
+    aliases: Mapping[str, str],
+    aliases_by_block_id: Mapping[str, str],
+) -> tuple[str, str] | None:
+    """Return `(parent_label, parent_block_id)` when `block_alias` is `bN.M` for a known `bN`."""
+    match = _SEGMENT_ALIAS_RE.match(block_alias)
+    if match is None:
+        return None
+    raw_parent = match.group(1)
+    for candidate in (raw_parent, raw_parent.lower()):
+        parent_block_id = aliases.get(candidate)
+        if parent_block_id is not None:
+            return aliases_by_block_id.get(parent_block_id, candidate), parent_block_id
+    return None
+
+
 def _diagnose_quoted_anchor(
     block_alias: str,
     quote: str,
@@ -2733,10 +2753,21 @@ def _diagnose_quoted_anchor(
     block_id = aliases.get(block_alias)
     label = aliases_by_block_id.get(block_id, block_alias) if block_id else block_alias
     preview = _preview_quote(quote)
-    if visible_texts_by_alias is None:
-        return (label, preview, "нет видимого представления блока", (block_id,) if block_id else ())
     if block_id is None:
+        parent = _segment_parent_alias(block_alias, aliases, aliases_by_block_id)
+        if parent is not None:
+            parent_label, parent_block_id = parent
+            return (
+                block_alias,
+                preview,
+                f"указана метка сегмента {block_alias} — используй идентификатор целого блока {parent_label}",
+                (parent_block_id,),
+            )
+        if visible_texts_by_alias is None:
+            return (label, preview, "нет видимого представления блока", ())
         return (block_alias, preview, "неизвестный блок", ())
+    if visible_texts_by_alias is None:
+        return (label, preview, "нет видимого представления блока", (block_id,))
     if texts is None or block_id not in texts:
         return (label, preview, "нет текста исходного блока", ())
     if block_alias not in visible_texts_by_alias:
@@ -2769,9 +2800,21 @@ def _unresolved_quote_error(
             owner_missing = aliases.get(difficulty.owner_block_id) is None
             sample = difficulty.anchors[0].quote if difficulty.anchors else difficulty.id
             if owner_missing:
-                details.append(
-                    f"{difficulty.owner_block_id}: «{_preview_quote(sample)}» — неизвестный блок-владелец трудности"
+                parent = _segment_parent_alias(
+                    difficulty.owner_block_id, aliases, aliases_by_block_id
                 )
+                if parent is not None:
+                    parent_label, parent_block_id = parent
+                    details.append(
+                        f"{difficulty.owner_block_id}: «{_preview_quote(sample)}» — "
+                        f"неизвестный блок-владелец трудности: используй идентификатор целого блока "
+                        f"{parent_label}, а не сегмента {difficulty.owner_block_id}"
+                    )
+                    block_ids.append(parent_block_id)
+                else:
+                    details.append(
+                        f"{difficulty.owner_block_id}: «{_preview_quote(sample)}» — неизвестный блок-владелец трудности"
+                    )
             for idx, anchor in enumerate(difficulty.anchors):
                 if (
                     owner_missing

@@ -16,6 +16,8 @@ _EXPLANATIONS = frozenset({'before_you_read.explanation', 'glossary_hint.note', 
 # Keep short but informative paragraphs; lower scores mean the expected language is unlikely.
 _A2_SUMMARY_LANGUAGE_MIN_PROBABILITY = 0.05
 A2_SUMMARY_MAX_SENTENCES = 6
+A2_SUMMARY_WARNING_MAX_WORDS = 22
+_DEFAULT_A2_WARNING_MAX_WORDS = 15
 _TITLE_PERIOD = re.compile(r'\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St)\.', re.IGNORECASE)
 _INITIAL_PERIOD = re.compile(r'\b[A-Z]\.')
 
@@ -73,11 +75,16 @@ def _outside_quotes(body, protected_quotes):
     return ''.join(chars)
 
 
-def _sentence_count(paragraph: str) -> int:
-    """Count sentences without treating titles or initials as boundaries."""
+def _split_sentences(paragraph: str) -> list[str]:
+    """Split text into sentences without treating titles or initials as boundaries."""
     protected = _TITLE_PERIOD.sub(lambda match: match.group(0).replace('.', '\0'), paragraph)
     protected = _INITIAL_PERIOD.sub(lambda match: match.group(0).replace('.', '\0'), protected)
-    return len([part for part in re.split(r'[.!?]+', protected) if part.strip()])
+    return [part.replace('\0', '.') for part in re.split(r'[.!?]+', protected) if part.strip()]
+
+
+def _sentence_count(paragraph: str) -> int:
+    """Count sentences without treating titles or initials as boundaries."""
+    return len(_split_sentences(paragraph))
 
 
 def validate_a2_summary(
@@ -269,8 +276,12 @@ class ReaderTextPolicy:
     def warnings(self, kind, body, *, reader_level):
         if reader_level.strip().lower() != 'a2':
             return ()
-        sentences = [part for part in re.split(r'[.!?]+', body) if part.strip()]
-        if any(len(re.findall(r'\w+', sentence)) > 15 for sentence in sentences):
+        max_words = (
+            A2_SUMMARY_WARNING_MAX_WORDS
+            if kind == 'summary'
+            else _DEFAULT_A2_WARNING_MAX_WORDS
+        )
+        if any(len(re.findall(r'\w+', sentence)) > max_words for sentence in _split_sentences(body)):
             return ('complexity_requires_review',)
         return ()
 

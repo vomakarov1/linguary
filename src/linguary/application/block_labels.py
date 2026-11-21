@@ -6,9 +6,9 @@ import re
 
 _LABEL = r"b\d{1,4}"
 _LIST = rf"{_LABEL}(?:\s*[,;–—-]\s*{_LABEL})*"
-_PARENTHESISED = re.compile(rf"\(\s*{_LIST}\s*\)", re.IGNORECASE)
-_WITH_WORD = re.compile(rf"\bблок(?:и|а|у|е)?\s+{_LABEL}\b", re.IGNORECASE)
-_BARE = re.compile(rf"\b{_LABEL}\b", re.IGNORECASE)
+_PARENTHESISED = re.compile(rf"\(\s*{_LIST}\s*\)")
+_WITH_WORD = re.compile(rf"\b(?i:блок(?:и|а|у|е|ом|ов|ам|ами|ах)?)\s+{_LIST}\b")
+_BARE = re.compile(rf"\b{_LIST}\b")
 
 
 def without_block_labels(text: str) -> str:
@@ -17,6 +17,8 @@ def without_block_labels(text: str) -> str:
     text = _WITH_WORD.sub("", text)
     text = _BARE.sub("", text)
     text = re.sub(r"\(\s*[,;–—-]*\s*\)", "", text)
+    text = re.sub(r"(?<!\S)(?:[–—-]\s*)+(?=—)", "", text)
+    text = re.sub(r"(?<=—)(?:\s*[–—-])+(?=\s|$)", "", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
     text = re.sub(r"[ \t]+", " ", text)
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()

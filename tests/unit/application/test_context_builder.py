@@ -2750,3 +2750,71 @@ def test_baseline_b2_templates_sha256_unchanged() -> None:
         == "d6e4b0b6dfa1227f6ab86b34ce7d9cb05b465c4e2ba71a5f322dec1f9125d470"
     )
 
+
+def test_narrative_and_pedagogical_prompt_rules_for_labels_languages_and_segments() -> None:
+    """Narrative prompts forbid block labels & enforce languages/gender; pedagogical forbids bN.M in difficulties."""
+    from linguary.application.context_builder import (
+        _NARRATIVE_ANALYSIS_INSTRUCTIONS,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+    )
+
+    narrative_ru = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="en", target_language="ru")
+    narrative_es = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="de", target_language="es")
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    section = make_analysis_section(
+        section_id="sec-rules",
+        title="Chapter 1",
+        order=0,
+        texts=("First paragraph.",),
+    )
+    document = make_analysis_document((section,))
+    live_nar = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+    ).for_chapter_narrative_analysis(document, section).request.instructions
+    live_ped = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+    ).for_chapter_pedagogical_analysis(
+        document, section, narrative_summary="First paragraph."
+    ).request.instructions
+
+    # Fix 1: forbid technical block labels in translation_instructions.
+    for text in (narrative_ru, templates["narrative_analysis"], live_nar):
+        assert "Не ссылайся в translation_instructions на служебные метки блоков" in text
+        assert "b1, b8, b51" in text
+        assert "событие, сцену или цитату" in text
+
+    # Fix 3: explicit languages for chapter_summary, scenes & translation_instructions, and English male/female.
+    for text in (narrative_ru, templates["narrative_analysis"], live_nar):
+        assert "на языке оригинала en (3–5 предложений)" in text
+        assert (
+            "Поля scenes (summary, location, visual_facts.detail, visual_assumptions) "
+            "и translation_instructions пиши на языке перевода (ru)."
+        ) in text
+        assert "Для kind=gender используй единообразные английские значения male / female." in text
+
+    assert "на языке оригинала de (3–5 предложений)" in narrative_es
+    assert (
+        "Поля scenes (summary, location, visual_facts.detail, visual_assumptions) "
+        "и translation_instructions пиши на языке перевода (es)."
+    ) in narrative_es
+
+    # Fix 2: forbid segment labels bN.M in difficulties; allow only in treatment_plan.segments.
+    ped_raw = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="A2"
+    )
+    for text in (ped_raw, templates["pedagogical_analysis"], live_ped):
+        assert "difficulties" in text
+        assert "owner_block_id" in text
+        assert "anchors[].block_id" in text
+        assert "целого блока bN" in text
+        assert "b4, b120" in text
+        assert "bN.M" in text
+        assert "treatment_plan.segments" in text
+
