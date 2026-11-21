@@ -1166,9 +1166,22 @@ def validate_narrative_response(
         if next_start != len(ordered_block_ids):
             raise _analysis_error('карта сцен должна непрерывно покрывать все блоки главы',
                                   rule_code='scene_bounds', block_ids=ordered_block_ids)
-    scoped_aliases = {alias: block for alias, block in aliases.items() if block in ordered_block_ids}
-    response = ChapterAnalysisResponse(payload.translation_instructions, payload.chapter_summary,
-        content_plan=QuotedContentPlanResponse(context_facts=payload.context_facts))
+    block_order = {block: index for index, block in enumerate(ordered_block_ids)}
+    scoped_aliases = dict(
+        sorted(
+            ((alias, block) for alias, block in aliases.items() if block in block_order),
+            key=lambda item: block_order[item[1]],
+        )
+    )
+    response = ChapterAnalysisResponse(
+        payload.translation_instructions,
+        payload.chapter_summary,
+        glossary_candidates=payload.glossary_candidates,
+        content_plan=QuotedContentPlanResponse(
+            context_facts=payload.context_facts,
+            scenes=payload.scenes,
+        ),
+    )
     plan = content_plan_from_response(response, scoped_aliases, texts,
                                       visible_texts_by_alias=visible_texts_by_alias,
                                       blocks=blocks, source_offsets=source_offsets,
@@ -2222,15 +2235,17 @@ _FEMALE_TITLES = frozenset({
     "тетя", "мадам", "леди",
 })
 _ALL_GENDER_TITLES = _MALE_TITLES | _FEMALE_TITLES | _SPEAKER_TITLES
+_SURNAME_TITLES = frozenset({
+    "mr", "mrs", "miss", "ms", "dr", "professor", "мистер", "миссис", "мисс",
+})
 _PRONOUN_WORDS = frozenset({
     "he", "she", "it", "they", "him", "her", "his", "hers", "i", "you", "we", "them",
 })
 _EXTRA_REPORTING_VERBS = frozenset({
     "added", "adding", "began", "beginning", "continued", "continuing",
     "finished", "finishing", "repeated", "repeating", "suggested", "suggesting",
-    "explained", "explaining", "agreed", "agreeing", "laughed", "laughing",
-    "smiled", "smiling", "grinned", "grinning", "nodded", "nodding",
-    "spoke", "speaking", "went", "answered", "answering", "replied", "replying",
+    "explained", "explaining", "agreed", "agreeing",
+    "spoke", "speaking", "answered", "answering", "replied", "replying",
     "asked", "asking", "told", "telling", "said", "saying", "called", "calling",
 })
 _ALL_REPORTING_VERBS = (
@@ -2240,6 +2255,7 @@ _CLAUSE_BOUNDARY_WORDS = frozenset({
     "and", "but", "or", "while", "as", "when", "before", "after", "because",
     "until", "although", "though", "if", "since", "so", "that", "who", "which",
 })
+_SUBORDINATING_CLAUSE_BOUNDARIES = _CLAUSE_BOUNDARY_WORDS - {"and"}
 _ADDRESSEE_PREPOSITIONS = frozenset({"to", "at"})
 _SPEAKER_NAME_STOPWORDS = frozenset({
     "the", "a", "an", "of", "and", "mr", "mrs", "miss", "ms", "dr",
@@ -3110,20 +3126,38 @@ def _name_core_words(name: str) -> frozenset[str]:
     )
 
 
+def _is_surname_only_titled(name: str) -> bool:
+    titles = _title_tokens(name)
+    return bool(titles & _SURNAME_TITLES) and len(_name_core_words(name)) == 1
+
+
+def _incompatible_surname_titles(left: str, right: str) -> bool:
+    left_surname = _is_surname_only_titled(left)
+    right_surname = _is_surname_only_titled(right)
+    if left_surname == right_surname:
+        return False
+    return not (_title_tokens(left) & _title_tokens(right) & _SURNAME_TITLES)
+
+
 def _lookup_gender_in_map(name: str, gender_map: Mapping[str, str]) -> str | None:
     if not gender_map:
         return None
     key = glossary_key(name)
     if key in gender_map:
         return gender_map[key]
+    title_gender = _gender_from_title(name)
     name_titles = _title_tokens(name)
     name_core = _name_core_words(name)
     if not name_core:
         return None
     matched_genders: set[str] = set()
     for candidate_key, candidate_gender in gender_map.items():
+        if title_gender is not None and candidate_gender != title_gender:
+            continue
         candidate_titles = _title_tokens(candidate_key)
         if _titles_conflict(name_titles, candidate_titles):
+            continue
+        if _incompatible_surname_titles(name, candidate_key):
             continue
         candidate_core = _name_core_words(candidate_key)
         if not candidate_core:
@@ -3159,6 +3193,8 @@ def _same_speaker_name(
     titles_b = _title_tokens(participant)
     if _titles_conflict(titles_a, titles_b):
         return False
+    if _incompatible_surname_titles(fact_value, participant):
+        return False
     core_a = _name_core_words(fact_value)
     core_b = _name_core_words(participant)
     if core_a and core_b and (core_a <= core_b or core_b <= core_a):
@@ -3172,57 +3208,92 @@ def _same_speaker_name(
     return False
 
 
-def _opening_remark_pronoun_gender(text: str) -> str | None:
-    remark_words = expression_words(_opening_remark(text))
-    if not remark_words:
-        return None
-    verb_positions = [
-        index for index, word in enumerate(remark_words) if word in _ALL_REPORTING_VERBS
-    ]
-    if not verb_positions:
-        return None
+def _clause_pronoun_for_verb(clause_words: tuple[str, ...], verb_index: int) -> str | None:
     attached: set[str] = set()
-    for verb_index in verb_positions:
-        # Inverted: "said he" / "asked she"
-        if verb_index + 1 < len(remark_words):
-            after = remark_words[verb_index + 1]
-            if after == "he":
-                attached.add("male")
-            elif after == "she":
-                attached.add("female")
-        # Direct or 1-word adverb/auxiliary before verb: "he said", "she softly whispered"
-        for offset in (1, 2):
-            idx = verb_index - offset
-            if idx < 0:
-                continue
-            if offset == 2 and remark_words[verb_index - 1] in _CLAUSE_BOUNDARY_WORDS:
-                continue
-            word = remark_words[idx]
-            if idx > 0 and remark_words[idx - 1] in _ADDRESSEE_PREPOSITIONS:
-                continue
-            if word == "he":
-                attached.add("male")
-            elif word == "she":
-                attached.add("female")
+    if verb_index + 1 < len(clause_words):
+        after = clause_words[verb_index + 1]
+        if after == "he":
+            attached.add("male")
+        elif after == "she":
+            attached.add("female")
+    for offset in (1, 2):
+        idx = verb_index - offset
+        if idx < 0:
+            continue
+        if offset == 2 and clause_words[verb_index - 1] in _CLAUSE_BOUNDARY_WORDS:
+            continue
+        word = clause_words[idx]
+        if idx > 0 and clause_words[idx - 1] in _ADDRESSEE_PREPOSITIONS:
+            continue
+        if word == "he":
+            attached.add("male")
+        elif word == "she":
+            attached.add("female")
     if len(attached) == 1:
         return next(iter(attached))
     if len(attached) > 1:
         return None
-    # Fallback: single subject pronoun in the same clause before the first reporting verb
-    first_verb = verb_positions[0]
-    clause_start = 0
-    for idx in range(first_verb - 1, -1, -1):
-        if remark_words[idx] in _CLAUSE_BOUNDARY_WORDS and remark_words[idx] != "and":
-            clause_start = idx + 1
-            break
-    pronouns = {
-        "male" if word == "he" else "female"
-        for idx in range(clause_start, first_verb)
-        if (word := remark_words[idx]) in {"he", "she"}
-        and (idx == 0 or remark_words[idx - 1] not in _ADDRESSEE_PREPOSITIONS)
-    }
-    if len(pronouns) == 1:
-        return next(iter(pronouns))
+    # Coordinate predicate with subject pronoun at start of clause: "he turned and said"
+    if verb_index > 0:
+        pronouns = {
+            "male" if word == "he" else "female"
+            for idx in range(0, verb_index)
+            if (word := clause_words[idx]) in {"he", "she"}
+            and (idx == 0 or clause_words[idx - 1] not in _ADDRESSEE_PREPOSITIONS)
+        }
+        if len(pronouns) == 1:
+            return next(iter(pronouns))
+    return None
+
+
+def _opening_remark_pronoun_gender(text: str) -> str | None:
+    quotes = list(_DIALOGUE_QUOTES.finditer(text))
+    if not quotes:
+        return None
+    first = quotes[0]
+    previous = _sentence_end_before(text, first.start())
+    prefix_start = previous + 1 if previous >= 0 else 0
+    next_quote = quotes[1].start() if len(quotes) > 1 else len(text)
+    prefix = text[prefix_start:first.start()]
+    trailing = _trailing_remark(text, first.end(), next_quote)
+
+    trailing_words = expression_words(trailing)
+    if trailing_words:
+        boundary = next(
+            (i for i, word in enumerate(trailing_words) if word in _SUBORDINATING_CLAUSE_BOUNDARIES),
+            len(trailing_words),
+        )
+        primary_trailing = trailing_words[:boundary]
+        first_verb = next(
+            (i for i, word in enumerate(primary_trailing) if word in _ALL_REPORTING_VERBS),
+            None,
+        )
+        if first_verb is not None:
+            return _clause_pronoun_for_verb(primary_trailing, first_verb)
+
+    if prefix.strip():
+        # Strip leading subordinate clause ("As she smiled, Harry said,") before inspecting prefix
+        prefix_tail = prefix
+        prefix_words_full = expression_words(prefix)
+        if prefix_words_full and prefix_words_full[0] in _SUBORDINATING_CLAUSE_BOUNDARIES:
+            comma_at = prefix.find(",")
+            if comma_at >= 0:
+                prefix_tail = prefix[comma_at + 1 :]
+            else:
+                return None
+        prefix_words = expression_words(prefix_tail)
+        last_verb = next(
+            (i for i in range(len(prefix_words) - 1, -1, -1) if prefix_words[i] in _ALL_REPORTING_VERBS),
+            None,
+        )
+        if last_verb is not None:
+            clause_start = 0
+            for idx in range(last_verb - 1, -1, -1):
+                if prefix_words[idx] in _SUBORDINATING_CLAUSE_BOUNDARIES:
+                    clause_start = idx + 1
+                    break
+            return _clause_pronoun_for_verb(prefix_words[clause_start:], last_verb - clause_start)
+
     return None
 
 

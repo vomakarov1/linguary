@@ -3529,6 +3529,117 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
         ('f1', 'explicit'),
     ]
 
+    # Finding 1 regression: explicit gendered title ("Mrs. Dursley") must never be overridden
+    # by surname subset matching against untitled full name ("Vernon Dursley" -> male).
+    from linguary.application.analysis_merge import _same_speaker_name
+
+    assert not _same_speaker_name('Vernon Dursley', 'Mrs. Dursley')
+    assert not _same_speaker_name('Mrs. Dursley', 'Vernon Dursley')
+
+    reg_blocks = (
+        _block(0, '‘Stop,’ she said.'),
+        _block(1, '‘No,’ he said.'),
+        _block(2, '‘Really?’ she asked.'),
+        # Finding 3 regression: subordinate-clause pronoun/verb must NOT trigger promotion
+        _block(3, '‘Hello,’ said the stranger as she went inside.'),
+        _block(4, '‘Yes,’ said Harry as she smiled.'),
+    )
+    reg_aliases = {f'b{i + 1}': b.id for i, b in enumerate(reg_blocks)}
+    reg_payload = ChapterAnalysisResponse(
+        translation_instructions='Keep tone.',
+        chapter_summary='Dursleys and subordinate clauses.',
+        treatment_plan=tuple(
+            TreatmentPlanItemResponse(f'b{i + 1}', BlockTreatment.READ_AS_IS)
+            for i in range(len(reg_blocks))
+        ),
+        content_plan=QuotedContentPlanResponse(
+            scenes=(
+                QuotedSceneResponse('b1', 'b2', 'Vernon & Mrs. Dursley', 'Hall', ('Vernon Dursley', 'Mrs. Dursley')),
+                QuotedSceneResponse('b3', 'b3', 'Two women', 'Kitchen', ('Aunt Petunia', 'Mrs. Dursley')),
+                QuotedSceneResponse('b4', 'b5', 'Subordinate clauses', 'Door', ('Harry', 'Mrs. Dursley')),
+            ),
+            context_facts=(
+                spk('b1', 'f-mrs', 'Mrs. Dursley', 'Stop,'),
+                spk('b2', 'f-vernon', 'Vernon Dursley', 'No,'),
+                spk('b3', 'f-two-women', 'Mrs. Dursley', 'Really?'),
+                spk('b4', 'f-sub-went', 'Mrs. Dursley', 'Hello,'),
+                spk('b5', 'f-sub-smiled', 'Mrs. Dursley', 'Yes,'),
+            ),
+        ),
+    )
+    reg_plan = content_plan_from_response(
+        reg_payload,
+        reg_aliases,
+        {b.id: b.text for b in reg_blocks},
+        visible_texts_by_alias={f'b{i + 1}': b.text for i, b in enumerate(reg_blocks)},
+        blocks=reg_blocks,
+        mandatory_facts={
+            'Vernon Dursley': {'gender': 'male'},
+            'Harry': {'gender': 'male'},
+        },
+    )
+    assert reg_plan is not None
+    reg_certainty = {
+        f.subject_anchor.block_id: f.certainty
+        for f in reg_plan.context_facts
+        if f.kind == 'speaker'
+    }
+    assert reg_certainty == {
+        reg_blocks[0].id: 'explicit',  # Vernon (male) + Mrs. Dursley (female from title, NOT male!)
+        reg_blocks[1].id: 'explicit',  # he -> Vernon Dursley (strictly 1 male)
+        reg_blocks[2].id: 'inferred',  # Aunt Petunia (female) + Mrs. Dursley (female) -> 2 females!
+        reg_blocks[3].id: 'inferred',  # "said the stranger as she went inside" -> subordinate clause!
+        reg_blocks[4].id: 'inferred',  # "said Harry as she smiled" -> subordinate clause!
+    }
+
+    # Finding 2 regression: validate_narrative_response must promote unambiguous pronoun remarks
+    # using payload.scenes, payload.glossary_candidates, and mandatory_facts.
+    from linguary.application.analysis_merge import validate_narrative_response
+
+    nar_blocks = (
+        _block(0, '‘Yes,’ he said.'),
+        _block(1, '‘No,’ she whispered.'),
+        _block(2, '‘Wait,’ he murmured.'),
+    )
+    nar_aliases = {'b1': nar_blocks[0].id, 'b2': nar_blocks[1].id, 'b3': nar_blocks[2].id}
+    nar_payload = NarrativeAnalysisResponse(
+        translation_instructions='Keep tone.',
+        chapter_summary='Kitchen talk.',
+        glossary_candidates=(
+            GlossaryCandidateResponse(
+                source_text='Hagrid',
+                type=ConceptType.PERSON,
+                suggested_translation='Хагрид',
+                confidence=0.95,
+                model_flagged_review=False,
+                note='мужской род',
+            ),
+        ),
+        scenes=(
+            QuotedSceneResponse('b1', 'b2', 'Kitchen', 'Kitchen', ('Hagrid', 'Aunt Petunia')),
+            QuotedSceneResponse('b3', 'b3', 'Hall', 'Hall', ('Harry', 'Aunt Petunia')),
+        ),
+        context_facts=(
+            spk('b1', 'f-nar-he', 'Hagrid', 'Yes,'),
+            spk('b2', 'f-nar-she', 'Aunt Petunia', 'No,'),
+            spk('b3', 'f-nar-harry', 'Harry', 'Wait,'),
+        ),
+    )
+    _nar_scenes, nar_facts = validate_narrative_response(
+        nar_payload,
+        nar_aliases,
+        {b.id: b.text for b in nar_blocks},
+        {'b1': nar_blocks[0].text, 'b2': nar_blocks[1].text, 'b3': nar_blocks[2].text},
+        ordered_block_ids=tuple(b.id for b in nar_blocks),
+        mandatory_facts={'Harry': {'gender': 'male'}},
+        blocks=nar_blocks,
+    )
+    assert {f.subject_anchor.block_id: f.certainty for f in nar_facts} == {
+        nar_blocks[0].id: 'explicit',
+        nar_blocks[1].id: 'explicit',
+        nar_blocks[2].id: 'explicit',
+    }
+
 
 
 
