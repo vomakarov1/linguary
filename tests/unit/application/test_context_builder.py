@@ -1490,7 +1490,7 @@ def test_instructions_have_no_language_reference_requirement() -> None:
     assert "Языковая справка" not in legacy.request.instructions
 
 
-_OFFSET_ONCE = "Если цитата в блоке одна, start и end не возвращай."
+_OFFSET_ONCE = "Если цитата в блоке одна, укажи start=null и end=null."
 _OFFSET_REPEATED = (
     "Если цитата встречается больше одного раза, верни start и end этого вхождения, "
     "quote == text[start:end]."
@@ -1498,7 +1498,7 @@ _OFFSET_REPEATED = (
 
 
 def test_instructions_request_offset_only_for_repeated_quote() -> None:
-    """V5 prompts ask for start and end only when the quote occurs more than once."""
+    """V5 prompts ask for null offsets on a unique quote and start/end when repeated."""
     from linguary.application.context_builder import (
         _CONTENT_PLAN_ANALYSIS_V5,
         _ENGLISH_HELP_CONTENT_PLAN_ANALYSIS_V5,
@@ -1532,6 +1532,7 @@ def test_instructions_request_offset_only_for_repeated_quote() -> None:
     for text in texts:
         assert _OFFSET_ONCE in text
         assert _OFFSET_REPEATED in text
+        assert "start и end не возвращай" not in text
         assert "у опор нет полей start и end" not in text
         assert "Не возвращай смещения" not in text
         assert "приложение найдёт точные координаты" not in text
@@ -2527,4 +2528,60 @@ def test_chapter_note_limit_and_scene_budget_scale_for_long_chapters() -> None:
         _scene_notes_budget(analysis_thirteen, long_section, unit, per_chapter=8)
 
 
+def test_narrative_instructions_require_headings_in_first_scene_and_clean_glossary() -> None:
+    """Narrative instructions require headings in scene 1, clean glossary fields, and verbatim subject_anchor."""
+    from linguary.application.context_builder import _NARRATIVE_ANALYSIS_INSTRUCTIONS
+
+    narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="en", target_language="ru")
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    for text in (narrative, templates["narrative_analysis"]):
+        # 1. Headings in the first scene.
+        assert "b1" in text and "b2" in text
+        assert "первую сцену" in text
+        assert "заголовки" in text
+        # 2. Ban brands / household items / common nouns from person.
+        assert "торговые марки" in text
+        assert "бытовые предметы" in text
+        assert "нарицательные" in text
+        # 3. Ban parenthetical alternatives and extra quotes in glossary fields.
+        assert "source_text" in text and "suggested_translation" in text
+        assert "в скобках" in text
+        assert "слэш" in text
+        assert "лишних кавычек" in text
+        # 4. Allow fictional books and their authors from epigraphs/quotes.
+        assert "вымышленные книги" in text.lower()
+        assert "эпиграфов" in text
+        # 5. Ban duplicating name translations in translation_instructions.
+        assert "translation_instructions" in text
+        assert "Не дублируй" in text or "не дублируй" in text
+        assert "переводы имён" in text
+        # 6. Explicit null offsets for unique quote.
+        assert "start=null и end=null" in text
+        # 7. Verbatim subject_anchor explanation.
+        assert "subject_anchor" in text
+        assert "дословн" in text
+
+
+def test_name_policy_meaning_includes_contrastive_opaque_name_example() -> None:
+    """Meaning name-translation policy for analysis includes contrastive opaque_name examples."""
+    meaning = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+        name_translation_policy=_policy("meaning"),
+    )
+    for key in ("analysis", "fragment", "narrative_analysis"):
+        text = meaning[key]
+        assert "opaque_name=true" in text
+        assert "opaque_name=false" in text
+        for name in ("Nick", "Alexandra", "Everlost", "Hightower"):
+            assert name in text
+    assert "Everlost" not in meaning["translation"]
+    assert "Everlost" not in meaning["pedagogical_analysis"]
 
