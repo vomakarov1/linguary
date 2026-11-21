@@ -609,6 +609,8 @@ def _canonical_vocab_word(word: str) -> str:
         return stem
     if len(word) > 4 and word.endswith("ies"):
         return word[:-3] + "y"
+    if len(word) > 4 and word.endswith(("shes", "ches", "xes", "zes", "sses")):
+        return word[:-2]
     if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is", "os", "as")):
         return word[:-1]
     return word

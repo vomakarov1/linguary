@@ -1525,6 +1525,7 @@ def test_note_language_leak_catches_unmarked_english_and_cyrillic_in_quotes() ->
         "Оборот «was strongly reminded of Дадли» передаёт сильное сходство.",
         'Выражение "was strongly reminded of Дадли" показывает сходство.',
         "Фраза *was strongly reminded of Дадли* означает сильное напоминание.",
+        "Фраза «went to Дадли» смешивает английский оборот с русским именем.",
     ):
         payload = make_response(
             (make_block_result(block),),
@@ -1584,6 +1585,7 @@ def test_note_language_leak_catches_unmarked_english_and_cyrillic_in_quotes() ->
         "После Modal ставится Infinitive без частицы to; в UK и US это уровень A2–B1 (см. IPA).",
         "Окончания -ing, -ed и -s меняют форму глагола на уровнях A1, B2, C1 и C2.",
         "Конструкция «used to + инфинитив» описывает привычку в прошлом.",
+        "Конструкция «to + инфинитив» выражает цель действия.",
     ):
         payload = make_response(
             (make_block_result(block),),
@@ -1808,13 +1810,16 @@ def test_result_validator_wires_dialogue_note_leak_glossary_warnings_and_spellin
             ),
         ),
     )
-    with pytest.raises(ResultValidationError):
+    with pytest.raises(ResultValidationError) as assist_err:
         validator.validate(
             leaky_assist_payload,
             unit=note_unit,
             target_language=TARGET_LANGUAGE,
             note_id_factory=note_ids(),
         )
+    assert assist_err.value.violation is not None
+    assert assist_err.value.violation.rule_code == "note_language_leak"
+    assert assist_err.value.violation.scope == "unit"
 
     # 4. Blocking spelling check on `to <word>` lemmas (excluding verbatim words in block original)
     expel_block = make_block(order=0, text="We could all have been killed — or worse, expelled.")

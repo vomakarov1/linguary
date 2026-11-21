@@ -1493,3 +1493,18 @@ def test_suppressed_hint_does_not_leak_paired_pronunciation_as_standalone_note()
     assert notes[1].origin == "pronunciation"
     assert notes[1].ipa == "/aʊl/"
     assert all(note.term != "cloak" for note in notes)
+
+
+def test_vocabulary_dedup_key_strips_sibilant_es_without_overstripping_silent_e() -> None:
+    """Sibilant `-es` plurals/3sg deduplicate with their base forms while `-ce/-se/-ge` keep `-e`."""
+    from linguary.application.layout.notes import vocabulary_dedup_key
+
+    assert vocabulary_dedup_key("watches") == vocabulary_dedup_key("watch") == "watch"
+    assert vocabulary_dedup_key("boxes") == vocabulary_dedup_key("box") == "box"
+    assert vocabulary_dedup_key("glasses") == vocabulary_dedup_key("glass") == "glass"
+    assert vocabulary_dedup_key("wishes") == vocabulary_dedup_key("wish") == "wish"
+    assert vocabulary_dedup_key("buzzes") == vocabulary_dedup_key("buzz") == "buzz"
+    # Silent-e stems (`closes`, `faces`, `pages`) must keep their trailing `e`.
+    assert vocabulary_dedup_key("closes") == vocabulary_dedup_key("close") == "close"
+    assert vocabulary_dedup_key("faces") == vocabulary_dedup_key("face") == "face"
+    assert vocabulary_dedup_key("pages") == vocabulary_dedup_key("page") == "page"

@@ -2236,7 +2236,7 @@ _FEMALE_TITLES = frozenset({
 })
 _ALL_GENDER_TITLES = _MALE_TITLES | _FEMALE_TITLES | _SPEAKER_TITLES
 _SURNAME_TITLES = frozenset({
-    "mr", "mrs", "miss", "ms", "dr", "professor", "мистер", "миссис", "мисс",
+    "mr", "mrs", "miss", "ms", "dr", "мистер", "миссис", "мисс",
 })
 _PRONOUN_WORDS = frozenset({
     "he", "she", "it", "they", "him", "her", "his", "hers", "i", "you", "we", "them",
@@ -2283,22 +2283,25 @@ def normalize_a2_dialogue_response(
 ) -> ChapterAnalysisResponse | PedagogicalAnalysisResponse:
     """Promote non-elementary quoted A2 dialogue and keep a short elementary reply light.
 
-    Remark vocabulary does not promote a reply of at most eight words when the
-    remark has no non-basic speech verb and the quotes have no subordinator or
-    question tag. A model TRANSLATE on that reply, with a basic speech verb and
-    at most two phrases, drops to GLOSSARY_ONLY when it has a vocabulary
-    difficulty and to READ_AS_IS otherwise. A2 without English help clears
-    before_you_read when nothing cites it. Promoting a block to TRANSLATE
-    retargets unbacked lexical hints on that block to explanation. A meaningful
-    chapter heading becomes TRANSLATE and loses an unevidenced grammar note.
-    A short READ_AS_IS line with a listed B1+ word or phrase becomes
-    GLOSSARY_ONLY when it owns vocabulary, and TRANSLATE otherwise. TRANSLATE
-    drops an unevidenced grammar quote of sounding relieved, and the same
-    closed A1–A2 anchors when the note is a grammar or vocabulary explanation.
-    A numbered chapter heading is forced to READ_AS_IS and loses an unevidenced
-    grammar note. A speech_style point that quotes a later block, or that only
-    glosses dialect lemmas first seen later, is removed, leaving at least one point.
-    Evidence that cites a removed point is dropped with it.
+    Quoted dialogue stays light up to 15 words (or 8 words when it contains
+    dialect or an idiom) unless the quotes have a subordinator, question tag,
+    or long dash clause, or the remark uses an uncovered non-basic speech verb.
+    A model TRANSLATE on an elementary reply of at most eight words, with a
+    basic speech verb and at most two phrases, drops to GLOSSARY_ONLY when it
+    has a vocabulary difficulty and to READ_AS_IS otherwise. A2 without English
+    help clears before_you_read when nothing cites it. Promoting a block to
+    TRANSLATE retargets unbacked lexical hints on that block to explanation. A
+    meaningful chapter heading becomes TRANSLATE and loses an unevidenced
+    grammar note. A short READ_AS_IS line with a listed B1+ word or phrase
+    becomes GLOSSARY_ONLY when it owns vocabulary, and TRANSLATE otherwise.
+    TRANSLATE drops an unevidenced grammar quote of sounding relieved, and the
+    same closed A1–A2 anchors when the note is a grammar or vocabulary
+    explanation. A numbered chapter heading is forced to READ_AS_IS and loses
+    an unevidenced grammar note. For A2 difficulties, anchors pointing to later
+    blocks and required points quoting later blocks (any single-word quote or
+    later-only dialect lemma gloss for speech_style, or multi-word quotes for
+    other difficulty kinds) are pruned, leaving at least one point. Evidence
+    that cites a removed point is dropped with it.
     """
     if reader_level != "a2" or english_help:
         return payload

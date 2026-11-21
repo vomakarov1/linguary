@@ -249,12 +249,20 @@ class TranslationResultValidator:
                 )
             if text_payload.fragment_assistances:
                 assist_payload = replace(text_payload, blocks=(), language_notes=())
-                self._ensure(
-                    note_language_leak_violation(
-                        assist_payload, target_language=target_language
-                    ),
-                    expected,
+                assist_leak = note_language_leak_violation(
+                    assist_payload, target_language=target_language
                 )
+                if assist_leak is not None:
+                    raise ResultValidationError(
+                        assist_leak,
+                        expectation=expected,
+                        violation=Violation(
+                            "note_language_leak",
+                            "translation_unit",
+                            scope="unit",
+                            safe_message="В примечании обнаружено языковое просачивание",
+                        ),
+                    )
             if self._spelling_checker is not None:
                 for block in normalized_payload.blocks:
                     item = items.get(block.source_block_id)

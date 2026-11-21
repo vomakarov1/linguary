@@ -2180,11 +2180,3 @@ async def test_assemble_staged_passes_resolved_blocks_and_mandatory_facts_for_pr
         assert speaker_facts[0].certainty == "explicit"
     finally:
         engine.dispose()
-
-
-
-
-
-
-
-

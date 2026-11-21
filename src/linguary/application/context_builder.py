@@ -809,7 +809,7 @@ _GLOSSARY_STOP_WORDS = frozenset({
 
 _INITIAL_BEFORE_SURNAME = re.compile(
     r"(?<![A-Za-zА-Яа-яЁё0-9])"
-    r"(?:(?P<dotted>(?:[A-Za-zА-Яа-яЁё]\.\s*)+)"
+    r"(?:(?P<dotted>(?:[A-ZА-ЯЁ]\.\s*)+)"
     r"|(?P<honorific>\b(?:Mr|Mrs|Ms|Miss|Dr|Prof|Professor|Sir|Lady|Lord)\.?\s+)?"
     r"(?P<plain>(?:[A-ZА-ЯЁ]\s+)+))"
     r"(?P<surname>[A-Za-zА-Яа-яЁё]{2,})"
@@ -843,14 +843,14 @@ def _matches_initials_in_text(
     if all(len(word) >= 2 and word[0].isalpha() for word in given):
         for match in _INITIAL_BEFORE_SURNAME.finditer(blocks_text):
             matched_surname = match.group("surname")
-            if not _stems_overlap(surname, matched_surname.casefold()):
+            if not matched_surname[0].isupper() or not _stems_overlap(
+                surname, matched_surname.casefold()
+            ):
                 continue
             dotted = match.group("dotted")
             if dotted is not None:
                 initials = tuple(ch.casefold() for ch in dotted if ch.isalpha())
             else:
-                if not matched_surname[0].isupper():
-                    continue
                 plain = match.group("plain") or ""
                 initials = tuple(ch.casefold() for ch in plain if ch.isalpha())
                 if not match.group("honorific") and initials and initials[0] in {"a", "i"}:

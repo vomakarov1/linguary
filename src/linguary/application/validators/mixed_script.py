@@ -63,6 +63,19 @@ _NOTE_WHITELIST = re.compile(
     re.IGNORECASE,
 )
 
+#: Same whitelist without the particle `to`, used inside quoted English spans so 2-word
+#: leaks such as `«went to Дадли»` retain both Latin words while `«to + инфинитив»` stays
+#: allowed via `_FORMULA_CYRILLIC_TAIL`.
+_QUOTE_NOTE_WHITELIST = re.compile(
+    r"(?:"
+    r"\b(?:Past Perfect|Present Simple|Present Continuous|Past Simple|"
+    r"Past Continuous|Future Simple|Present Perfect|"
+    r"Modal|Infinitive|UK|US|IPA|[ABC][12])\b"
+    r"|(?<!\w)-(?:ing|ed|s)\b"
+    r")",
+    re.IGNORECASE,
+)
+
 #: Marked quotation / italic / code spans inside notes.
 _MARKED_SPAN = re.compile(
     r"«([^«»\n]+)»"
@@ -162,7 +175,7 @@ def _has_cyrillic_in_english_quote(inner: str) -> bool:
     """Whether a quoted/italicized English phrase of >= 2 words contains leaked Cyrillic."""
     cleaned = _PARENTHETICAL_GLOSS.sub(" ", inner)
     cleaned = _FORMULA_CYRILLIC_TAIL.sub(" ", cleaned)
-    cleaned = _NOTE_WHITELIST.sub(" ", cleaned)
+    cleaned = _QUOTE_NOTE_WHITELIST.sub(" ", cleaned)
     latin_words = 0
     cyrillic_words = 0
     for match in _LETTERS.finditer(cleaned):

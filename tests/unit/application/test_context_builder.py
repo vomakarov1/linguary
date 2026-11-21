@@ -2429,6 +2429,11 @@ def test_matches_chapter_text_links_initials_to_full_name() -> None:
     assert not _matches_chapter_text("Albus Potter", false_pos_text, false_pos_stems)
     assert not _matches_chapter_text("Mr H. Potter", false_pos_text, false_pos_stems)
 
+    # Guard against lowercase abbreviations (e.g. "a.m.") before a surname.
+    abbrev_text = "At 7 a.m. Potter arrived."
+    abbrev_stems = _extract_word_stems(abbrev_text)
+    assert not _matches_chapter_text("Albus Potter", abbrev_text, abbrev_stems)
+
 
 def test_chapter_note_limit_and_scene_budget_scale_for_long_chapters() -> None:
     """chapter_note_limit and _scene_notes_budget scale up to 16 for long chapters and respect low caps."""

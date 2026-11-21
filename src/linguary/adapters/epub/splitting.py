@@ -798,7 +798,7 @@ def _split_sentence(
         target_chars=_word_split_target(max_segment_chars),
     )
     # The helper's count can exceed the cap when min-part and max-part disagree
-    # (701–719 characters want two parts near 300, but each half is over 350).
+    # (901–920 characters want two parts near 386, but each half is over 450).
     if any(span_end - span_start > max_segment_chars for span_start, span_end in word_spans):
         fitted = _fit_word_spans(text, start, end, max_segment_chars)
         if fitted is not None:

@@ -7,6 +7,7 @@ replies is the staged rendering, not a new model call.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -1536,10 +1537,7 @@ _LETTERS_RU = "Письма ниоткуда"
 _FANCY = f"{_OPEN}Fancy seeing you here, Professor McGonagall.{_CLOSE}"
 _FANCY_RU = "\u2014 Вот так встреча, профессор Макгонагал."
 _GROANED = "Harry groaned."
-_GROANED_RU = "Гарри охнул."
 _CHUCKLED = "Uncle Vernon chuckled."
-_CHUCKLED_RU = "Дядя Вернон усмехнулся."
-_WINKED_RU = "Она подмигнула."
 _RUMBLING = "A low rumbling sound had broken the silence around them."
 _NOT_KNOWING = (
     "not knowing he was special, not knowing he was famous, not knowing he would be "
@@ -3289,7 +3287,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
     list_plan = TreatmentPlan.of_treatments(
         "sec-list", tuple((b.id, BlockTreatment.TRANSLATE) for b in list_blocks)
     )
-    unit_counter = iter(range(1, 20))
+    unit_counter = itertools.count(1)
     planned_units = plan_translation_units(
         list_blocks,
         list_plan,
@@ -3347,7 +3345,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
     a2_templates = snapshot_prompt_templates(
         source_language="en", target_language="ru", reader_level="a2", profile="content-plan-v3"
     )
-    assert "ё" in a2_templates["content_processing"]
+    assert "букву «ё»" in a2_templates["content_processing"]
     cb = ContextBuilder(
         content_plan_profile="content-plan-v3",
         reader_level="a2",
@@ -3658,6 +3656,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
             reader_level="a2",
             prompt_templates=a2_templates,
         )
+        staged_counter = itertools.count(1)
         analyze = AnalyzeChapter(
             unit_of_work=uow,
             llm_client=fake_llm,
@@ -3667,7 +3666,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
             max_fragment_blocks=1,
             context_builder=st_cb,
             staged_analysis=True,
-            id_factory=lambda: f"st-{next(unit_counter)}",
+            id_factory=lambda: f"st-{next(staged_counter)}",
         )
         asyncio.run(analyze(AnalyzeChapterCommand(book_id="st-book", section_id="st-2")))
         assert len(fake_llm.requests) == 4

@@ -3364,7 +3364,7 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
         _block(0, '‘Yes,’ he said.'),
         _block(1, '‘No,’ she whispered.'),
         # Scene 2: Hagrid (candidate.note: мужской род) + Professor McGonagall (ContextFact gender: female)
-        _block(2, '‘Good evening,’ she said.'),
+        _block(2, '‘Good evening,’ she said. Professor McGonagall waited.'),
         _block(3, '‘Evenin’,’ he murmured.'),
         # Scene 3: Harry (male) + Uncle Vernon (male) + Aunt Petunia (female) -> 2 males, 1 female
         _block(4, '‘Wait,’ he said.'),
@@ -3381,7 +3381,7 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
         anchor = QuotedSourceAnchorResponse(alias, quote)
         return QuotedContextFactResponse(fact_id, 'speaker', (anchor,), anchor, value, 'inferred')
 
-    gender_anchor = QuotedSourceAnchorResponse('b3', 'she')
+    mc_anchor = QuotedSourceAnchorResponse('b3', 'Professor McGonagall')
     payload = ChapterAnalysisResponse(
         translation_instructions='Keep tone.',
         chapter_summary='Dialogue scenes.',
@@ -3415,8 +3415,8 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
                 # Placed AFTER speaker facts to verify order-independence
                 QuotedContextFactResponse(
                     'f-mcgonagall-gender', 'gender',
-                    (gender_anchor,),
-                    QuotedSourceAnchorResponse('b3', 'Good evening,'),
+                    (mc_anchor,),
+                    mc_anchor,
                     'female', 'explicit',
                 ),
                 spk('b5', 'f-s3-he', 'Harry', 'Wait,'),
@@ -3427,36 +3427,13 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
             ),
         ),
     )
-    # Give Professor McGonagall a proper subject_anchor quoting her name in a block,
-    # so ContextFact(kind="gender") binds to Professor McGonagall cleanly.
-    blocks_with_name = (
-        *blocks[:2],
-        _block(2, '‘Good evening,’ she said. Professor McGonagall waited.'),
-        *blocks[3:],
-    )
-    aliases = {f'b{i + 1}': b.id for i, b in enumerate(blocks_with_name)}
-    mc_anchor = QuotedSourceAnchorResponse('b3', 'Professor McGonagall')
-    payload = replace(
-        payload,
-        content_plan=replace(
-            payload.content_plan,
-            context_facts=tuple(
-                QuotedContextFactResponse(
-                    'f-mcgonagall-gender', 'gender', (mc_anchor,), mc_anchor, 'female', 'explicit',
-                )
-                if f.id == 'f-mcgonagall-gender'
-                else f
-                for f in payload.content_plan.context_facts
-            ),
-        ),
-    )
 
     plan = content_plan_from_response(
         payload,
         aliases,
-        {b.id: b.text for b in blocks_with_name},
-        visible_texts_by_alias={f'b{i + 1}': b.text for i, b in enumerate(blocks_with_name)},
-        blocks=blocks_with_name,
+        {b.id: b.text for b in blocks},
+        visible_texts_by_alias={f'b{i + 1}': b.text for i, b in enumerate(blocks)},
+        blocks=blocks,
         mandatory_facts={'Harry Potter': {'gender': 'male'}},
     )
     assert plan is not None
@@ -3466,15 +3443,15 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
         if f.kind == 'speaker'
     }
     assert certainty_by_block == {
-        blocks_with_name[0].id: 'explicit',  # Scene 1: he -> Harry (all known, 1 male)
-        blocks_with_name[1].id: 'explicit',  # Scene 1: she -> Aunt Petunia (all known, 1 female)
-        blocks_with_name[2].id: 'explicit',  # Scene 2: she -> Professor McGonagall (candidate.note + ContextFact)
-        blocks_with_name[3].id: 'explicit',  # Scene 2: he -> Hagrid
-        blocks_with_name[4].id: 'inferred',  # Scene 3: he -> ambiguous (Harry + Uncle Vernon)
-        blocks_with_name[5].id: 'explicit',  # Scene 3: she -> Aunt Petunia (all known, 1 female)
-        blocks_with_name[6].id: 'inferred',  # Scene 4: Mystery Stranger gender unknown -> inferred
-        blocks_with_name[7].id: 'inferred',  # Scene 4: Mystery Stranger gender unknown -> inferred
-        blocks_with_name[8].id: 'explicit',  # Scene 5: Mr. + Mrs. Dursley from titles -> explicit
+        blocks[0].id: 'explicit',  # Scene 1: he -> Harry (all known, 1 male)
+        blocks[1].id: 'explicit',  # Scene 1: she -> Aunt Petunia (all known, 1 female)
+        blocks[2].id: 'explicit',  # Scene 2: she -> Professor McGonagall (candidate.note + ContextFact)
+        blocks[3].id: 'explicit',  # Scene 2: he -> Hagrid
+        blocks[4].id: 'inferred',  # Scene 3: he -> ambiguous (Harry + Uncle Vernon)
+        blocks[5].id: 'explicit',  # Scene 3: she -> Aunt Petunia (all known, 1 female)
+        blocks[6].id: 'inferred',  # Scene 4: Mystery Stranger gender unknown -> inferred
+        blocks[7].id: 'inferred',  # Scene 4: Mystery Stranger gender unknown -> inferred
+        blocks[8].id: 'explicit',  # Scene 5: Mr. + Mrs. Dursley from titles -> explicit
     }
 
     # Without mandatory_facts (default), Harry's gender is unknown so Scene 1 stays inferred,
@@ -3482,9 +3459,9 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
     plan_default = content_plan_from_response(
         payload,
         aliases,
-        {b.id: b.text for b in blocks_with_name},
-        visible_texts_by_alias={f'b{i + 1}': b.text for i, b in enumerate(blocks_with_name)},
-        blocks=blocks_with_name,
+        {b.id: b.text for b in blocks},
+        visible_texts_by_alias={f'b{i + 1}': b.text for i, b in enumerate(blocks)},
+        blocks=blocks,
     )
     assert plan_default is not None
     default_certainty = {
@@ -3492,17 +3469,17 @@ def test_pronoun_speaker_remark_explicit_only_when_all_scene_genders_known():
         for f in plan_default.context_facts
         if f.kind == 'speaker'
     }
-    assert default_certainty[blocks_with_name[0].id] == 'inferred'
-    assert default_certainty[blocks_with_name[1].id] == 'inferred'
-    assert default_certainty[blocks_with_name[2].id] == 'explicit'
-    assert default_certainty[blocks_with_name[3].id] == 'explicit'
-    assert default_certainty[blocks_with_name[8].id] == 'explicit'
+    assert default_certainty[blocks[0].id] == 'inferred'
+    assert default_certainty[blocks[1].id] == 'inferred'
+    assert default_certainty[blocks[2].id] == 'explicit'
+    assert default_certainty[blocks[3].id] == 'explicit'
+    assert default_certainty[blocks[8].id] == 'explicit'
 
     # Also verify combine_staged_analysis_responses with resolved_scenes, resolved_blocks, mandatory_facts
     from linguary.application.analysis_merge import combine_staged_analysis_responses
     from linguary.application.llm_dto import NarrativeAnalysisResponse, PedagogicalAnalysisResponse
 
-    b0, b1 = blocks_with_name[0], blocks_with_name[1]
+    b0, b1 = blocks[0], blocks[1]
     a0 = QuotedSourceAnchorResponse(b0.id, 'Yes,')
     a1 = QuotedSourceAnchorResponse(b1.id, 'No,')
     combined = combine_staged_analysis_responses(
