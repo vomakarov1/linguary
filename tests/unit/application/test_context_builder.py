@@ -2818,3 +2818,413 @@ def test_narrative_and_pedagogical_prompt_rules_for_labels_languages_and_segment
         assert "bN.M" in text
         assert "treatment_plan.segments" in text
 
+
+def test_name_policy_backfills_unmatched_prior_chapter_key_candidates_preserving_suggested_metadata() -> None:
+    """Narrative/single-pass analysis with name policy backfills unmatched key prior candidates and keeps metadata."""
+    from linguary.application.context_builder import _name_context
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import GlossaryCandidate, TermConcept, TermVariant
+    from linguary.domain.name_translation import (
+        NameTranslationAssessment,
+        NameTranslationEvidence,
+        NameTranslationMethod,
+        NameTranslationObservation,
+    )
+
+    def _evidence(*, translation: str, opaque: bool, method: NameTranslationMethod) -> NameTranslationEvidence:
+        return NameTranslationEvidence(
+            version=1,
+            conditions_id="cond-1",
+            policy_version=1,
+            strategy=NameTranslationStrategy.MEANING,
+            observations=(
+                NameTranslationObservation(
+                    suggested_translation=translation,
+                    confidence=0.9,
+                    model_flagged_review=False,
+                    assessment=NameTranslationAssessment(
+                        applied_method=method,
+                        eligible_without_review=True,
+                        review_reasons=(),
+                        rationale="Оценка из прошлой главы.",
+                        opaque_name=opaque,
+                    ),
+                ),
+            ),
+        )
+
+    section = make_analysis_section(
+        section_id="sec-ch2",
+        title="Chapter 2",
+        order=1,
+        texts=("Allie stepped carefully along the gray path while Nick watched.",),
+    )
+    document = make_analysis_document((section,))
+
+    approved_nick = TermConcept(
+        id="c-nick",
+        book_id="book-1",
+        type=ConceptType.PERSON,
+        canonical_source_text="Nick",
+        status=TermStatus.APPROVED,
+        note="мужской род",
+        variants=(TermVariant("c-nick", "ru", "Ник", TermStatus.APPROVED),),
+    )
+    approved_unmatched = TermConcept(
+        id="c-mary",
+        book_id="book-1",
+        type=ConceptType.PERSON,
+        canonical_source_text="Mary Hightower",
+        status=TermStatus.APPROVED,
+        variants=(TermVariant("c-mary", "ru", "Мэри Хайтауэр", TermStatus.APPROVED),),
+    )
+    suggested_lief = TermConcept(
+        id="c-lief",
+        book_id="book-1",
+        type=ConceptType.PERSON,
+        canonical_source_text="Lief",
+        status=TermStatus.SUGGESTED,
+        note="мужской род",
+        variants=(TermVariant("c-lief", "ru", "Лист", TermStatus.SUGGESTED),),
+    )
+    suggested_allie = TermConcept(
+        id="c-allie",
+        book_id="book-1",
+        type=ConceptType.PERSON,
+        canonical_source_text="Allie",
+        status=TermStatus.SUGGESTED,
+        variants=(TermVariant("c-allie", "ru", "Элли", TermStatus.SUGGESTED),),
+    )
+
+    cand_allie = GlossaryCandidate(
+        id="cand-allie",
+        analysis_id="an-1",
+        source_text="Allie",
+        type=ConceptType.PERSON,
+        suggested_translation="Элли",
+        confidence=0.95,
+        model_flagged_review=False,
+        requires_review=False,
+        description="Сокращённое имя Александры.",
+        name_translation_evidence=_evidence(
+            translation="Элли", opaque=True, method=NameTranslationMethod.SOUND
+        ),
+    )
+    cand_alexandra = GlossaryCandidate(
+        id="cand-alexandra",
+        analysis_id="an-1",
+        source_text="Alexandra",
+        type=ConceptType.PERSON,
+        suggested_translation="Александра",
+        confidence=0.9,
+        model_flagged_review=False,
+        requires_review=False,
+        description="Полное имя Элли.",
+        name_translation_evidence=_evidence(
+            translation="Александра", opaque=True, method=NameTranslationMethod.SOUND
+        ),
+    )
+    cand_alexandra_dup = GlossaryCandidate(
+        id="cand-alexandra-dup",
+        analysis_id="an-2",
+        source_text="ALEXANDRA",
+        type=ConceptType.PERSON,
+        suggested_translation="Александра",
+        confidence=0.85,
+        model_flagged_review=False,
+        requires_review=False,
+    )
+    cand_lief = GlossaryCandidate(
+        id="cand-lief",
+        analysis_id="an-1",
+        source_text="Lief",
+        type=ConceptType.PERSON,
+        suggested_translation="Лиф",
+        confidence=0.9,
+        model_flagged_review=False,
+        requires_review=True,
+        description="Мальчик, чьё имя происходит от слова leaf.",
+        name_translation_evidence=_evidence(
+            translation="Лист", opaque=False, method=NameTranslationMethod.MEANING
+        ),
+    )
+    cand_afterlights = GlossaryCandidate(
+        id="cand-afterlights",
+        analysis_id="an-0",
+        source_text="Afterlights",
+        type=ConceptType.FICTIONAL_CONCEPT,
+        suggested_translation="Послесветы",
+        confidence=0.9,
+        model_flagged_review=False,
+        requires_review=False,
+        name_translation_evidence=_evidence(
+            translation="Послесветы", opaque=False, method=NameTranslationMethod.MEANING
+        ),
+    )
+    cand_place = GlossaryCandidate(
+        id="cand-place",
+        analysis_id="an-1",
+        source_text="Everlost",
+        type=ConceptType.PLACE,
+        suggested_translation="Междумирье",
+        confidence=0.9,
+        model_flagged_review=False,
+        requires_review=False,
+    )
+    cand_org = GlossaryCandidate(
+        id="cand-org",
+        analysis_id="an-1",
+        source_text="Twin Towers Guild",
+        type=ConceptType.ORGANIZATION,
+        suggested_translation="Гильдия Башен",
+        confidence=0.9,
+        model_flagged_review=False,
+        requires_review=False,
+    )
+    cand_flagged_term = GlossaryCandidate(
+        id="cand-flagged",
+        analysis_id="an-1",
+        source_text="deadspot",
+        type=ConceptType.TERM,
+        suggested_translation="мёртвая точка",
+        confidence=0.8,
+        model_flagged_review=True,
+        requires_review=True,
+    )
+    cand_plain_term = GlossaryCandidate(
+        id="cand-plain",
+        analysis_id="an-1",
+        source_text="chocolate coin",
+        type=ConceptType.TERM,
+        suggested_translation="шоколадная монета",
+        confidence=0.95,
+        model_flagged_review=False,
+        requires_review=False,
+    )
+    cand_mary = GlossaryCandidate(
+        id="cand-mary",
+        analysis_id="an-1",
+        source_text="Mary Hightower",
+        type=ConceptType.PERSON,
+        suggested_translation="Мэри Высокобашенная",
+        confidence=0.9,
+        model_flagged_review=False,
+        requires_review=False,
+    )
+    accumulated = (
+        cand_allie,
+        cand_alexandra,
+        cand_alexandra_dup,
+        cand_lief,
+        cand_afterlights,
+        cand_place,
+        cand_org,
+        cand_flagged_term,
+        cand_plain_term,
+        cand_mary,
+    )
+
+    builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=_policy("meaning"),
+        max_accumulated_candidates=10,
+    )
+    narrative_ctx = builder.for_chapter_narrative_analysis(
+        document,
+        section,
+        accumulated_candidates=accumulated,
+        user_decisions=(approved_nick, approved_unmatched),
+        nonbinding_suggestions=(suggested_allie, suggested_lief),
+    )
+    text = narrative_ctx.request.input_text
+
+    # Accepted line keeps exact format without extra metadata.
+    assert "- Nick [person] -> Ник (мужской род)" in text
+    assert "- Nick [person] -> Ник (мужской род) —" not in text
+    # Approved unmatched user decision is not backfilled as unconfirmed suggestion.
+    assert "Mary Hightower" not in text
+    # Matched Allie keeps suggested translation and enriches description from GlossaryCandidate.
+    assert "- Allie [person] -> Элли — описание: Сокращённое имя Александры." in text
+    assert "Allie [person] -> Элли" in text and "непрозрачное=false" not in text.split("Allie [person] -> Элли")[1].splitlines()[0]
+    # Overlapping TermConcept(SUGGESTED) + GlossaryCandidate for Lief keeps description and непрозрачное=false.
+    lief_line = next(line for line in text.splitlines() if line.startswith("- Lief [person] -> Лист"))
+    assert "(мужской род)" in lief_line
+    assert "Мальчик, чьё имя происходит от слова leaf." in lief_line
+    assert "непрозрачное=false" in lief_line
+    # Key unmatched types + requires_review term are backfilled; plain TERM without review is excluded.
+    assert "Alexandra [person] -> Александра" in text
+    assert "Полное имя Элли." in text
+    assert text.count("Alexandra") == 1
+    assert "ALEXANDRA" not in text
+    assert "- Afterlights [fictional_concept] -> Послесветы — непрозрачное=false" in text
+    # Lines without metadata keep exact original format.
+    assert "\n- Everlost [place] -> Междумирье\n" in text
+    assert "\n- Twin Towers Guild [organization] -> Гильдия Башен\n" in text
+    assert "\n- deadspot [term] -> мёртвая точка\n" in text
+    assert "chocolate coin" not in text
+
+    # Cap limits total optional slots after matched candidates.
+    capped_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=_policy("meaning"),
+        max_accumulated_candidates=2,
+    )
+    capped_text = capped_builder.for_chapter_narrative_analysis(
+        document,
+        section,
+        accumulated_candidates=accumulated,
+        user_decisions=(approved_nick,),
+        nonbinding_suggestions=(suggested_allie, suggested_lief),
+    ).request.input_text
+    assert "- Allie [person] -> Элли" in capped_text
+    assert "- Lief [person] -> Лист" in capped_text
+    assert "непрозрачное=false" in capped_text
+    assert "Afterlights" not in capped_text
+    assert "Everlost" not in capped_text
+
+    # Single-pass for_chapter_analysis also backfills unmatched key candidates.
+    single_pass_text = builder.for_chapter_analysis(
+        document=document,
+        section=section,
+        accumulated_candidates=accumulated,
+        user_decisions=(approved_nick,),
+        nonbinding_suggestions=(suggested_allie, suggested_lief),
+    ).request.input_text
+    assert "Afterlights" in single_pass_text
+    assert "Alexandra" in single_pass_text
+    assert "chocolate coin" not in single_pass_text
+
+    # Pedagogical pass must NOT backfill unmatched prior-chapter candidates.
+    ped_text = builder.for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Allie and Nick walk on the path.",
+        accumulated_candidates=accumulated,
+        user_decisions=(approved_nick,),
+    ).request.input_text
+    assert "Allie" in ped_text
+    assert "Afterlights" not in ped_text
+    assert "Alexandra" not in ped_text
+    assert "Twin Towers Guild" not in ped_text
+    assert "deadspot" not in ped_text
+
+    # Without name_translation_policy, unmatched candidates remain filtered out.
+    legacy_text = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=None,
+    ).for_chapter_analysis(
+        document=document,
+        section=section,
+        accumulated_candidates=accumulated,
+    ).request.input_text
+    assert "Allie" in legacy_text
+    assert "Afterlights" not in legacy_text
+    assert "Alexandra" not in legacy_text
+
+    # DTO GlossaryCandidateResponse also exposes opaque_name=False via name_translation_assessment.
+    dto_cand = GlossaryCandidateResponse(
+        source_text="Skinjacker",
+        type=ConceptType.FICTIONAL_CONCEPT,
+        suggested_translation="Перехватчик",
+        confidence=0.9,
+        model_flagged_review=False,
+        description="Тот, кто вселяется в живых.",
+        name_translation_assessment=NameTranslationAssessment(
+            applied_method=NameTranslationMethod.MEANING,
+            eligible_without_review=True,
+            review_reasons=(),
+            rationale="Прозрачное составное слово.",
+            opaque_name=False,
+        ),
+    )
+    _, optional_block = _name_context((), (dto_cand,), "ru")
+    assert "Skinjacker [fictional_concept] -> Перехватчик" in optional_block
+    assert "Тот, кто вселяется в живых." in optional_block
+    assert "непрозрачное=false" in optional_block
+
+
+def test_narrative_instructions_require_declension_visual_only_facts_and_part_divider_rule() -> None:
+    """Narrative instructions cover prior hints, gender/declension, visual-only facts, sound review_reasons, anti-spoiler/participants, and part dividers."""
+    from linguary.application.context_builder import _NARRATIVE_ANALYSIS_INSTRUCTIONS
+
+    divider_section = make_analysis_section(
+        section_id="sec-part-1",
+        title="PART ONE",
+        order=0,
+        blocks=(
+            make_analysis_block(section_id="sec-part-1", order=0, text="PART ONE", type=BlockType.HEADING),
+            make_analysis_block(section_id="sec-part-1", order=1, text="Afterlights", type=BlockType.HEADING),
+        ),
+    )
+    bare_divider = make_analysis_section(
+        section_id="sec-part-2",
+        title="PART TWO",
+        order=1,
+        blocks=(
+            make_analysis_block(section_id="sec-part-2", order=0, text="PART TWO", type=BlockType.HEADING),
+        ),
+    )
+    chapter_section = make_analysis_section(
+        section_id="sec-ch1",
+        title="Chapter 1",
+        order=2,
+        texts=("A stranger stepped out of the mist.",),
+    )
+    doc = make_analysis_document((divider_section, bare_divider, chapter_section))
+
+    meaning_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=_policy("meaning"),
+    )
+    sound_builder = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        name_translation_policy=_policy("sound"),
+    )
+
+    divider_instr = meaning_builder.for_chapter_narrative_analysis(doc, divider_section).request.instructions
+    bare_instr = meaning_builder.for_chapter_narrative_analysis(doc, bare_divider).request.instructions
+    chapter_meaning_instr = meaning_builder.for_chapter_narrative_analysis(doc, chapter_section).request.instructions
+    chapter_sound_instr = sound_builder.for_chapter_narrative_analysis(doc, chapter_section).request.instructions
+    raw_narrative = _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language="en", target_language="ru")
+
+    # Meaningful part divider gets dedicated rule: scenes=[], glossary_candidates, neutral source-language summary without plot invention.
+    assert "scenes=[]" in divider_instr
+    assert "glossary_candidates" in divider_instr
+    assert "chapter_summary" in divider_instr
+    assert "нейтральный заголовок" in divider_instr
+    assert "(en)" in divider_instr
+    assert "без выдумывания сюжета" in divider_instr
+    assert "нейтральный заголовок" not in bare_instr
+    assert "Это служебный раздел: верни scenes=[]." in bare_instr
+    assert "Это служебный раздел: верни scenes=[]." not in chapter_meaning_instr
+
+    # Core narrative rules in raw template and both policies.
+    for text in (raw_narrative, chapter_meaning_instr, chapter_sound_instr):
+        # Prior-chapter reference hints.
+        assert "справочные подсказки прошлых глав" in text
+        # Mandatory gender and declension rules (given names and surnames) in note.
+        assert "род персонажей" in text
+        assert "склоняемости" in text
+        assert "женские фамилии на согласный" in text
+        assert "мужские фамилии на согласный" in text
+        # Visual-only facts in visual_facts.
+        assert "только зрительные детали" in text
+        assert "звуки" in text and "запахи" in text
+        # No name spoilers & single language for participants.
+        assert "едином языке" in text
+        assert "participants" in text
+        assert "Не спойлерь имя персонажа" in text
+
+    # Name policy analysis instructions reinforce prior hints and review_reasons purity for sound.
+    for text in (chapter_meaning_instr, chapter_sound_instr):
+        assert "непрозрачное=false" in text
+        assert "review_reasons пустым ([])" in text
+        assert "creative_adaptation" in text
+        assert "personal_name_substitution" in text
+
+

@@ -83,6 +83,7 @@ from linguary.domain import (
     BlockType,
     CanonicalDocument,
     ChapterAnalysis,
+    ConceptType,
     DocumentBlock,
     DocumentSection,
     GlossaryCandidate,
@@ -93,12 +94,21 @@ from linguary.domain import (
     TranslationUnit,
     TranslationUnitItem,
     TreatmentPlan,
+    TreatmentPlanItem,
     footnote_marker,
     footnote_references,
     glossary_key,
     TermConcept,
 )
+from linguary.domain.document import has_meaningful_part_title
 from linguary.domain.name_translation import NameTranslationPolicy, NameTranslationStrategy
+
+_KEY_GLOSSARY_BACKFILL_TYPES = frozenset({
+    ConceptType.PERSON,
+    ConceptType.PLACE,
+    ConceptType.ORGANIZATION,
+    ConceptType.FICTIONAL_CONCEPT,
+})
 
 #: Maximum number of accumulated decisions from previous chapters passed into chapter analysis context.
 #: By the end of a novel, candidates can number in the hundreds, whereas requests only need those
@@ -179,7 +189,7 @@ chapter_summary — фактическая сводка событий на яз
 для фрагмента сожми единый пересказ с начала главы до текущего фрагмента в те же 3–5 предложений, а не дописывай абзац к каждому фрагменту; ключевые предметы и понятия из glossary_candidates называй их каноническим source_text.
 Поля scenes (summary, location, visual_facts.detail, visual_assumptions) и translation_instructions пиши на языке перевода ({target_language}).
 glossary_candidates: source_text, type, suggested_translation, confidence,
-model_flagged_review, note, description. Соблюдай обязательные решения глоссария.
+model_flagged_review, note, description. Соблюдай обязательные решения глоссария. Опирайся на справочные подсказки прошлых глав (включая описание, этимологию и признак непрозрачное=false), чтобы сохранять связность имён, сокращённых форм, неологизмов и способа их передачи между главами, не меняя без основания удачный вариант прошлой главы.
 Не клади в glossary_candidates (person) случайно упомянутых или вымышленных в диалоге людей, фоновых ведущих и дикторов, клички животных и собирательные названия семей во множественном числе. Не помечай типом person торговые марки, блюда, напитки, бытовые предметы и обычные нарицательные слова (даже названные в честь людей — при необходимости единообразия это term или не включай обычную лексику). Вымышленные книги и их авторы из эпиграфов и цитат в тексте допустимы в glossary_candidates, если их перевод требует единообразия. Требуй одну каноническую запись на персонажа: не плоди отдельно имя и форму с титулом или фамилией.
 В source_text и suggested_translation не добавляй лишних кавычек вокруг значения; в suggested_translation указывай ровно один вариант перевода на языке {target_language}, без пояснений и альтернатив в скобках и без вторых вариантов через слэш.
 description для person и place пишется на языке перевода ({target_language}), строго до первого упоминания в данной главе и по прошлым главам, без спойлеров текущей и будущих глав.
@@ -187,15 +197,15 @@ context_facts: kind (speaker, gender, pronoun_referent), anchors, subject_anchor
 value, certainty (explicit, inferred, unknown). При unknown укажи value=null. Для kind=gender используй единообразные английские значения male / female.
 В subject_anchor передай block_id и дословную quote субъекта из видимого текста этого блока (местоимение, именную группу или реплику, о которой факт), а не пересказ и не подставленное имя из другого места.
 Для speaker указывай в value канонический source_text персонажа из glossary_candidates: ставь certainty=inferred у реплик, открывающих абзац без явного имени говорящего в словах автора, и certainty=explicit, когда имя говорящего прямо названо в словах автора (said Harry). Не спойлерь каноническое имя у анонимных обозначений (the stranger, the giant и т. п.) до первого называния персонажа по имени в тексте.
-В glossary_candidates.note указывай только внутренние переводческие пометы: грамматический род топонимов и животных, если он неочевиден в переводе, обращение на «ты» или «вы», а также несклоняемость действительно несклоняемых заимствованных имён и фамилий (мужские фамилии на согласный в русском склоняются всегда). Эти внутренние пометы не копируй в заметки читателю.
+В glossary_candidates.note указывай только внутренние переводческие пометы: обязательный грамматический род персонажей (если неочевиден по форме), грамматический род топонимов и животных, если он неочевиден в переводе, обращение на «ты» или «вы», а также точные правила склоняемости имён и фамилий — указывай несклоняемость только для действительно несклоняемых заимствованных имён и фамилий (имена на гласные вроде Элли, Мэри; женские фамилии на согласный в русском не склоняются, а мужские фамилии на согласный в русском склоняются всегда). Эти внутренние пометы не копируй в заметки читателю.
 В translation_instructions фиксируй устойчивые пары обращения «ты/вы» между персонажами сцены и контекстные пометы для многозначных слов главы («robes» в ед. ч. «мантия» для одного человека, «drills» — «дрели» или «свёрла», «witch» — «ведьма/волшебница», «hut» — «хижина», «term» — «триместр/семестр»). Не дублируй здесь переводы имён и терминов из глоссария — при необходимости просто сошлись на глоссарий. Не ссылайся в translation_instructions на служебные метки блоков (b1, b8, b51 и т. п.) — описывай место через событие, сцену или цитату.
 Каждая опора: block_id и дословная quote из видимого текста. Если цитата в блоке одна, укажи start=null и end=null. Если цитата встречается больше одного раза, верни start и end этого вхождения, quote == text[start:end].
 scenes: start_block_id, end_block_id, summary, location, participants,
 visual_facts, visual_assumptions, continues_previous_scene.
 Сцены должны непрерывно покрывать все переданные блоки в исходном порядке,
 без пересечений и пропусков: включай начальные заголовки главы (b1, b2 и т. п.) в первую сцену (она начинается с первого переданного блока, а последняя заканчивается последним). Для служебных разделов scenes всегда пуст.
-visual_facts содержат anchor {{block_id, quote}}, subject, detail: только
-подтверждённые дословными цитатами визуальные сведения внутри этой сцены.
+В scenes[].participants указывай всех участников сцены на едином языке (в канонической форме на языке оригинала {source_language}, не смешивая в одном списке имена на разных языках). Не спойлерь имя персонажа в scenes[].summary, participants, visual_facts и context_facts до первого называния этого имени в тексте книги (пока персонаж не назван, используй нейтральное обозначение без подстановки будущего имени).
+visual_facts содержат anchor {{block_id, quote}}, subject, detail: только зрительные детали — подтверждённые дословными цитатами видимые глазом сведения внутри этой сцены (внешность, одежда, позы, предметы, освещение, обстановка); не включай в visual_facts звуки, голоса, интонации, запахи, вкус, температуру, мысли и внутренние ощущения.
 Неподтверждённые детали отделяй в visual_assumptions; не выдавай их за факты.
 У первой сцены нового фрагмента укажи continues_previous_scene=true, если она
 продолжает последнюю сцену предыдущего фрагмента.
@@ -996,7 +1006,14 @@ class ContextBuilder:
         instructions = self._prompt_templates.get('narrative_analysis') or _with_name_policy(
             _NARRATIVE_ANALYSIS_INSTRUCTIONS.format(source_language=document.source_language,
                 target_language=document.target_language), self._name_translation_policy, analysis=True)
-        if document.is_front_matter(section) or section.is_notes_only:
+        if has_meaningful_part_title(section):
+            instructions += (
+                '\nЭто разделитель части с содержательным подзаголовком: верни scenes=[], '
+                'вынеси ключевые неологизмы, термины и имена из заголовка в glossary_candidates, '
+                f'а в chapter_summary верни нейтральный заголовок части на языке оригинала '
+                f'({document.source_language}) без выдумывания сюжета.'
+            )
+        elif document.is_front_matter(section) or section.is_notes_only:
             instructions += '\nЭто служебный раздел: верни scenes=[].'
         return ChapterAnalysisContext(section_id=section.id,
             request=LLMRequest(kind=LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE,
@@ -1709,6 +1726,7 @@ class ContextBuilder:
                     limit_lines=limit_lines,
                     extra_match_text=extra_match_text,
                     label_segments=pedagogical,
+                    pedagogical=pedagogical,
                 ),
             ),
             block_ids_by_alias=aliases,
@@ -1772,6 +1790,7 @@ class ContextBuilder:
         limit_lines: Sequence[str] = (),
         extra_match_text: str = "",
         label_segments: bool = False,
+        pedagogical: bool = False,
     ) -> str:
         """Prompt text: chapter header, accepted book decisions, and aliased blocks."""
         blocks_text = " ".join(block.text for block in blocks)
@@ -1797,6 +1816,7 @@ class ContextBuilder:
         else:
             raw_decisions = tuple(self._user_decisions if user_decisions is None else user_decisions)
             raw_suggestions = tuple(self._nonbinding_suggestions if nonbinding_suggestions is None else nonbinding_suggestions)
+            raw_accumulated = tuple(accumulated_candidates)
 
             decisions = tuple(
                 d for d in raw_decisions
@@ -1816,22 +1836,28 @@ class ContextBuilder:
                     normalized_blocks_text=normalized_blocks_text,
                 )
             )
-            parts.extend(
-                _name_context(
-                    decisions,
-                    (
-                        *suggestions,
-                        *self._selected_candidates(
-                            accumulated_candidates,
-                            blocks=blocks,
-                            blocks_text=blocks_text,
-                            word_stems=word_stems,
-                            normalized_blocks_text=normalized_blocks_text,
-                        ),
-                    ),
-                    document.target_language,
-                )
+            matched_candidates = self._selected_candidates(
+                raw_accumulated,
+                blocks=blocks,
+                blocks_text=blocks_text,
+                word_stems=word_stems,
+                normalized_blocks_text=normalized_blocks_text,
             )
+            optional_items: list[TermConcept | GlossaryCandidate | GlossaryCandidateResponse] = [
+                *suggestions,
+                *matched_candidates,
+            ]
+            if not pedagogical and self._max_accumulated_candidates > 0:
+                optional_items.extend(
+                    self._backfilled_prior_candidates(
+                        raw_accumulated=raw_accumulated,
+                        raw_suggestions=raw_suggestions,
+                        raw_decisions=raw_decisions,
+                        already_selected=optional_items,
+                        target_language=document.target_language,
+                    )
+                )
+            parts.extend(_name_context(decisions, optional_items, document.target_language))
         if findings is not None:
             parts.append(
                 "Уже найдено в предыдущих частях главы:\n"
@@ -1886,6 +1912,47 @@ class ContextBuilder:
                 break
             selected.setdefault(glossary_key(candidate.source_text), candidate)
         return tuple(selected.values())
+
+    def _backfilled_prior_candidates(
+        self,
+        *,
+        raw_accumulated: Sequence[GlossaryCandidate | GlossaryCandidateResponse],
+        raw_suggestions: Sequence[TermConcept | GlossaryCandidate | GlossaryCandidateResponse],
+        raw_decisions: Sequence[TermConcept],
+        already_selected: Sequence[TermConcept | GlossaryCandidate | GlossaryCandidateResponse],
+        target_language: str,
+    ) -> tuple[TermConcept | GlossaryCandidate | GlossaryCandidateResponse, ...]:
+        """Fill remaining context slots with unconfirmed key prior-chapter candidates."""
+        accepted_keys = {
+            glossary_key(concept.canonical_source_text)
+            for concept in raw_decisions
+            if concept.status.is_user_decision
+            and (variant := concept.variant_for(target_language)) is not None
+            and variant.status.is_user_decision
+        }
+        used_keys: set[str] = set()
+        for item in already_selected:
+            key = _optional_item_key(item, target_language)
+            if key and key not in accepted_keys:
+                used_keys.add(key)
+
+        backfilled_keys: set[str] = set()
+        result: list[TermConcept | GlossaryCandidate | GlossaryCandidateResponse] = []
+        for item in (*raw_suggestions, *raw_accumulated):
+            key = _optional_item_key(item, target_language)
+            if not key or key in accepted_keys:
+                continue
+            if key in used_keys or key in backfilled_keys:
+                # Enrich already-selected entries (e.g., SUGGESTED TermConcept) with candidate metadata.
+                if isinstance(item, (GlossaryCandidate, GlossaryCandidateResponse)):
+                    result.append(item)
+                continue
+            if len(used_keys) + len(backfilled_keys) >= self._max_accumulated_candidates:
+                continue
+            if _is_backfill_eligible(item, target_language):
+                backfilled_keys.add(key)
+                result.append(item)
+        return tuple(result)
 
 
 def chapter_analysis_instructions(
@@ -2984,8 +3051,56 @@ def _with_name_policy(instructions: str, policy: NameTranslationPolicy | None, *
                    'передачи звучания без лишних слогов, дефисов, усечения конечных гласных ради склоняемости, '
                    'замены корневой гласной под русское созвучие и перевода корней; литературные адаптации из известных '
                    'переводов книги не помечай как sound. '
+                   'При applied_method=sound и eligible_without_review=true оставляй review_reasons пустым ([]); '
+                   'не дублируй значения в review_reasons и не совмещай applied_method=sound с противоречащими причинами '
+                   'вроде creative_adaptation или personal_name_substitution. '
+                   'Опирайся на справочные подсказки прошлых глав (включая описание и непрозрачное=false), '
+                   'чтобы сохранять связность передачи имён и не терять прозрачность корней между главами. '
                    'Если способ сомнителен, укажи причину проверки; отсутствие оценки не означает пригодность без проверки.')
     return f'{instructions}\n\n{rule}\n{common}'
+
+
+def _item_opaque_name(item: TermConcept | GlossaryCandidate | GlossaryCandidateResponse) -> bool | None:
+    if isinstance(item, GlossaryCandidateResponse):
+        assessment = item.name_translation_assessment
+        return assessment.opaque_name if assessment is not None else None
+    if isinstance(item, GlossaryCandidate):
+        evidence = item.name_translation_evidence
+        if evidence is None:
+            return None
+        flags = [
+            obs.assessment.opaque_name
+            for obs in evidence.observations
+            if obs.assessment is not None
+        ]
+        if not flags:
+            return None
+        return False if any(flag is False for flag in flags) else True
+    return None
+
+
+def _optional_item_key(
+    item: TermConcept | GlossaryCandidate | GlossaryCandidateResponse,
+    language: str,
+) -> str:
+    if isinstance(item, (GlossaryCandidate, GlossaryCandidateResponse)):
+        return glossary_key(item.source_text)
+    if item.variant_for(language) is None:
+        return ""
+    return glossary_key(item.canonical_source_text)
+
+
+def _is_backfill_eligible(
+    item: TermConcept | GlossaryCandidate | GlossaryCandidateResponse,
+    language: str,
+) -> bool:
+    if isinstance(item, GlossaryCandidate):
+        return item.type in _KEY_GLOSSARY_BACKFILL_TYPES or item.requires_review
+    if isinstance(item, GlossaryCandidateResponse):
+        return item.type in _KEY_GLOSSARY_BACKFILL_TYPES or item.model_flagged_review
+    if item.status.is_user_decision or item.variant_for(language) is None:
+        return False
+    return item.type in _KEY_GLOSSARY_BACKFILL_TYPES
 
 
 def _name_context(
@@ -3002,22 +3117,52 @@ def _name_context(
         accepted_keys.add(glossary_key(concept.canonical_source_text))
         line = f'- {concept.canonical_source_text} [{concept.type}] -> {variant.text}'
         accepted.append(f'{line} ({concept.note.strip()})' if concept.note.strip() else line)
-    optional: list[str] = []
-    seen = set(accepted_keys)
+    optional_entries: dict[str, dict[str, object]] = {}
     for item in suggestions:
         if isinstance(item, (GlossaryCandidate, GlossaryCandidateResponse)):
-            source, kind, translation, note = item.source_text, item.type, item.suggested_translation, item.note
+            source, kind, translation, note = item.source_text, item.type, item.suggested_translation, item.note.strip()
+            description = item.description.strip()
+            opaque_name = _item_opaque_name(item)
         else:
             variant = item.variant_for(language)
             if variant is None:
                 continue
-            source, kind, translation, note = item.canonical_source_text, item.type, variant.text, item.note
+            source, kind, translation, note = item.canonical_source_text, item.type, variant.text, item.note.strip()
+            description = ""
+            opaque_name = None
         key = glossary_key(source)
-        if key in seen:
+        if key in accepted_keys:
             continue
-        seen.add(key)
-        line = f'- {source} [{kind}] -> {translation}'
-        optional.append(f'{line} ({note.strip()})' if note.strip() else line)
+        existing = optional_entries.get(key)
+        if existing is None:
+            optional_entries[key] = {
+                "source": source,
+                "kind": kind,
+                "translation": translation,
+                "note": note,
+                "description": description,
+                "opaque_name": opaque_name,
+            }
+        else:
+            if not existing["note"] and note:
+                existing["note"] = note
+            if not existing["description"] and description:
+                existing["description"] = description
+            if opaque_name is False or (existing["opaque_name"] is None and opaque_name is not None):
+                existing["opaque_name"] = opaque_name
+    optional: list[str] = []
+    for entry in optional_entries.values():
+        line = f"- {entry['source']} [{entry['kind']}] -> {entry['translation']}"
+        if entry["note"]:
+            line = f"{line} ({entry['note']})"
+        details: list[str] = []
+        if entry["description"]:
+            details.append(f"описание: {entry['description']}")
+        if entry["opaque_name"] is False:
+            details.append("непрозрачное=false")
+        if details:
+            line = f"{line} — {'; '.join(details)}"
+        optional.append(line)
     return (
         f'Принятые решения пользователя ({language}); сохраняй форму дословно:\n' + ('\n'.join(accepted) if accepted else 'Нет.'),
         f'Необязательные подсказки ({language}); это не принятые решения:\n' + ('\n'.join(optional) if optional else 'Нет.'),
