@@ -44,6 +44,7 @@ from linguary.application.llm_dto import (
     SegmentTreatmentResponse,
     TreatmentPlanItemResponse,
 )
+from linguary.application.ports.language_detection import LanguageDetector
 from linguary.domain import (
     BeforeYouReadEntry,
     BlockTreatment,
@@ -65,7 +66,11 @@ from linguary.domain import (
 )
 from linguary.domain.treatment import strongest_treatment
 from linguary.domain.name_translation import (
-    NameTranslationEvidence, NameTranslationObservation, NameTranslationPolicy,
+    NameTranslationEvidence,
+    NameTranslationMethod,
+    NameTranslationObservation,
+    NameTranslationPolicy,
+    NameTranslationReviewReason,
 )
 
 #: Fallback limit if provider does not report output token capacity.
@@ -1625,9 +1630,386 @@ _NARRATIVE_RULE_PRIORITY = (
     "scene_bounds",
     "unresolved_quote",
     "scene_visual_anchor_out_of_bounds",
+    "narrative_summary_language",
+    "scene_summary_language",
+    "name_assessment_conflict",
+    "spoiler_name_leak",
+    "non_visual_fact",
     "context_fact_conflict",
     "glossary_fact_conflict",
 )
+_NARRATIVE_LANGUAGE_MIN_PROBABILITY = 0.05
+_SCENE_SUMMARY_DETECTOR_MIN_LETTERS = 30
+_LATIN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’-][A-Za-z]+)*")
+_SPOILER_TOKEN_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+(?:['’][A-Za-z]+)?")
+_VISUAL_SAFE_EXCLUSIONS_RE = re.compile(
+    r"\b(?:беззвучн\w*|бесшумн\w*|soundless\w*)\b",
+    re.IGNORECASE,
+)
+_NON_VISUAL_FACT_RE = re.compile(
+    r"\b(?:"
+    # Russian sound markers
+    r"звук\w*|звуч\w*|шум\w*|голос\w*|шёпот\w*|шепот\w*|крик\w*|вопл\w*|визг\w*"
+    r"|грохот\w*|стук\w*|скрип\w*|звон(?:а|ом|е|у|ит|ел\w*|ящ\w*|к\w*)?|гул(?:а|ом|е|у)?\b|гудит|гудел\w*"
+    r"|свист\w*|шорох\w*|шелест\w*|хруст\w*|щёлкань\w*|щелкань\w*|щелчк\w*|щелчок\w*"
+    r"|рычан\w*|рёв\w*|ревёт|ревет|ревел\w*|громк\w*|хрипл\w*|пискляв\w*"
+    r"|мелоди\w*|музык\w*|эхо\w*|слышн\w*|слышит\w*|слышать\w*|аудио\w*|интонаци\w*|акцент\w*"
+    # Russian smell markers
+    r"|запах\w*|аромат\w*|вонь\w*|воня\w*|пахн\w*|благоухан\w*|смрад\w*|зловон\w*|душист\w*"
+    # Russian taste markers
+    r"|вкус\w*|привкус\w*|сладк\w*|горьк\w*|кисл\w*|солён\w*|солен\w*|безвкусн\w*"
+    # English sound/smell/taste markers
+    r"|sound(?:s|ed|ing)?|noise(?:s|y)?|noisy|loud(?:ly|er|est)?|voice(?:s)?"
+    r"|whisper(?:s|ed|ing)?|scream(?:s|ed|ing)?|shout(?:s|ed|ing)?|echo(?:es|ed|ing)?"
+    r"|creak(?:s|ed|ing)?|buzz(?:es|ed|ing)?|hum(?:s|med|ming)?|audible|audibly|melody|music"
+    r"|smell(?:s|ed|ing|y)?|scent(?:s|ed)?|odou?r(?:s)?|aroma(?:s)?|stench|stink(?:s|ing)?"
+    r"|fragrance(?:s)?|fragrant|reek(?:s|ed|ing)?"
+    r"|taste(?:s|d|ing|y)?|flavou?r(?:s|ed)?|bitter(?:ly)?|sour(?:ly)?|salty|savou?ry|sweetness|aftertaste"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _has_cyrillic(text: str) -> bool:
+    return any(
+        unicodedata.name(char, "").startswith("CYRILLIC ")
+        for char in text
+        if char.isalpha()
+    )
+
+
+def _collect_narrative_language_issues(
+    payload: NarrativeAnalysisResponse,
+    scenes: Sequence[Scene],
+    texts: Mapping[str, str],
+    ordered_block_ids: Sequence[str],
+    aliases_by_block_id: Mapping[str, str],
+    *,
+    source_language: str | None,
+    target_language: str | None,
+    language_detector: LanguageDetector | None,
+    is_notes_only: bool,
+) -> list[tuple[str, str, tuple[str, ...]]]:
+    issues: list[tuple[str, str, tuple[str, ...]]] = []
+    if source_language is not None:
+        summary = payload.chapter_summary.strip()
+        if summary:
+            source_corpus = " ".join(
+                texts.get(bid, "") for bid in ordered_block_ids if bid in texts
+            ) or " ".join(texts.values())
+            source_script = dominant_script(source_corpus)
+            summary_script = dominant_script(summary)
+            if source_script is not None and summary_script != source_script:
+                issues.append(
+                    (
+                        "narrative_summary_language",
+                        f"пересказ главы должен быть на языке оригинала ({source_language})",
+                        (),
+                    )
+                )
+            elif source_script == "LATIN" and _has_cyrillic(summary):
+                issues.append(
+                    (
+                        "narrative_summary_language",
+                        f"пересказ главы на языке оригинала ({source_language}) не должен содержать кириллицу",
+                        (),
+                    )
+                )
+            elif language_detector is not None:
+                prob = language_detector.probability_for_language(summary, source_language)
+                if prob is not None and prob < _NARRATIVE_LANGUAGE_MIN_PROBABILITY:
+                    issues.append(
+                        (
+                            "narrative_summary_language",
+                            f"пересказ главы не распознан как язык оригинала ({source_language})",
+                            (),
+                        )
+                    )
+
+    if target_language is not None and not is_notes_only:
+        norm_target = target_language.strip().casefold().replace("_", "-").split("-", 1)[0]
+        bad_scene_details: list[str] = []
+        bad_scene_blocks: list[str] = []
+        for sc in scenes:
+            sc_summary = sc.summary.strip()
+            if not sc_summary:
+                continue
+            bad = False
+            if norm_target == "ru":
+                if not _has_cyrillic(sc_summary):
+                    bad = True
+                elif (
+                    language_detector is not None
+                    and sum(ch.isalpha() for ch in sc_summary) >= _SCENE_SUMMARY_DETECTOR_MIN_LETTERS
+                ):
+                    prob = language_detector.probability_for_language(sc_summary, target_language)
+                    if prob is not None and prob < _NARRATIVE_LANGUAGE_MIN_PROBABILITY:
+                        latin_tokens = _LATIN_WORD_RE.findall(sc_summary)
+                        if latin_tokens and all(token[0].isupper() for token in latin_tokens):
+                            stripped_latin = _LATIN_WORD_RE.sub(" ", sc_summary)
+                            recheck = language_detector.probability_for_language(
+                                stripped_latin, target_language
+                            )
+                            if recheck is not None and recheck < _NARRATIVE_LANGUAGE_MIN_PROBABILITY:
+                                bad = True
+                        else:
+                            bad = True
+            elif (
+                language_detector is not None
+                and sum(ch.isalpha() for ch in sc_summary) >= _SCENE_SUMMARY_DETECTOR_MIN_LETTERS
+            ):
+                prob = language_detector.probability_for_language(sc_summary, target_language)
+                if prob is not None and prob < _NARRATIVE_LANGUAGE_MIN_PROBABILITY:
+                    bad = True
+            if bad:
+                start_label = aliases_by_block_id.get(sc.start_block_id, sc.start_block_id)
+                bad_scene_details.append(f"{start_label}: «{_preview_quote(sc_summary)}»")
+                bad_scene_blocks.append(sc.start_block_id)
+        if bad_scene_details:
+            issues.append(
+                (
+                    "scene_summary_language",
+                    f"описание сцены должно быть на целевом языке ({target_language}) "
+                    f"({'; '.join(dict.fromkeys(bad_scene_details))})",
+                    tuple(dict.fromkeys(bad_scene_blocks)),
+                )
+            )
+    return issues
+
+
+def _collect_name_assessment_conflicts(
+    candidates: Sequence[GlossaryCandidateResponse],
+) -> list[str]:
+    details: list[str] = []
+    for candidate in candidates:
+        assessment = candidate.name_translation_assessment
+        if assessment is None:
+            continue
+        method = assessment.applied_method
+        reasons = set(assessment.review_reasons)
+        if method is NameTranslationMethod.SOUND and (
+            reasons
+            & {
+                NameTranslationReviewReason.CREATIVE_ADAPTATION,
+                NameTranslationReviewReason.PERSONAL_NAME_SUBSTITUTION,
+            }
+        ):
+            details.append(
+                f"«{candidate.source_text}»: метод sound несовместим с creative_adaptation/personal_name_substitution"
+            )
+        if (
+            method is NameTranslationMethod.SOUND
+            and assessment.opaque_name
+            and (
+                reasons
+                & {
+                    NameTranslationReviewReason.WORDPLAY,
+                    NameTranslationReviewReason.ANAGRAM,
+                }
+            )
+        ):
+            details.append(
+                f"«{candidate.source_text}»: непрозрачное имя с методом sound несовместимо с wordplay/anagram"
+            )
+        if method is NameTranslationMethod.MEANING and assessment.opaque_name:
+            details.append(
+                f"«{candidate.source_text}»: метод meaning несовместим с opaque_name=True"
+            )
+        if (
+            method in {NameTranslationMethod.CREATIVE, NameTranslationMethod.UNCERTAIN}
+            and assessment.eligible_without_review
+        ):
+            details.append(
+                f"«{candidate.source_text}»: метод {method.value} не может иметь eligible_without_review=True"
+            )
+    return list(dict.fromkeys(details))
+
+
+def _strip_possessive_token(token: str) -> str:
+    lowered = token.casefold().replace("ё", "е")
+    if lowered.endswith(("'s", "’s")) and len(lowered) > 2:
+        return lowered[:-2]
+    return lowered.rstrip("'’")
+
+
+def _spoiler_name_stems(name: str) -> frozenset[str]:
+    cleaned = re.sub(r"\([^)]*\)", " ", name)
+    stems: set[str] = set()
+    for raw in _SPOILER_TOKEN_RE.findall(cleaned):
+        base = _strip_possessive_token(raw)
+        if (
+            len(base) < 2
+            or base in _ALL_GENDER_TITLES
+            or base in _SPEAKER_NAME_STOPWORDS
+        ):
+            continue
+        stems.add(base)
+    return frozenset(stems)
+
+
+def _same_spoiler_name(
+    left: str,
+    right: str,
+    glossary_candidates: Sequence[GlossaryCandidateResponse] = (),
+) -> bool:
+    key_a = glossary_key(left)
+    key_b = glossary_key(right)
+    if key_a and key_a == key_b:
+        return True
+    titles_a = _title_tokens(left)
+    titles_b = _title_tokens(right)
+    if _titles_conflict(titles_a, titles_b):
+        return False
+    stems_a = _spoiler_name_stems(left)
+    stems_b = _spoiler_name_stems(right)
+    if stems_a and stems_b and (stems_a <= stems_b or stems_b <= stems_a):
+        return True
+    for candidate in glossary_candidates:
+        src = candidate.source_text
+        tr = candidate.suggested_translation
+        if not src or not tr:
+            continue
+        src_stems = _spoiler_name_stems(src)
+        tr_stems = _spoiler_name_stems(tr)
+        a_matches_src = bool(stems_a and src_stems and (stems_a <= src_stems or src_stems <= stems_a))
+        a_matches_tr = bool(stems_a and tr_stems and (stems_a <= tr_stems or tr_stems <= stems_a))
+        b_matches_src = bool(stems_b and src_stems and (stems_b <= src_stems or src_stems <= stems_b))
+        b_matches_tr = bool(stems_b and tr_stems and (stems_b <= tr_stems or tr_stems <= stems_b))
+        if (a_matches_src and b_matches_tr) or (a_matches_tr and b_matches_src):
+            return True
+    return False
+
+
+def _extract_block_spoiler_tokens(
+    ordered_block_ids: Sequence[str],
+    texts: Mapping[str, str],
+) -> tuple[tuple[tuple[str, bool, str | None], ...], ...]:
+    result: list[tuple[tuple[str, bool, str | None], ...]] = []
+    for bid in ordered_block_ids:
+        text = texts.get(bid, "")
+        tokens: list[tuple[str, bool, str | None]] = []
+        prev: str | None = None
+        for match in _SPOILER_TOKEN_RE.finditer(text):
+            raw = match.group(0)
+            base = _strip_possessive_token(raw)
+            tokens.append((base, raw[:1].isupper(), prev))
+            prev = base
+        result.append(tuple(tokens))
+    return tuple(result)
+
+
+def _first_name_block_index(
+    name: str,
+    block_tokens: Sequence[tuple[tuple[str, bool, str | None], ...]],
+    glossary_candidates: Sequence[GlossaryCandidateResponse],
+) -> int | None:
+    forms: list[str] = [name]
+    for candidate in glossary_candidates:
+        if candidate.source_text and candidate.suggested_translation and _same_spoiler_name(
+            name, candidate.suggested_translation
+        ):
+            forms.append(candidate.source_text)
+    stems: set[str] = set()
+    titles: set[str] = set()
+    for form in forms:
+        stems.update(_spoiler_name_stems(form))
+        titles.update(_title_tokens(form))
+    if not stems:
+        return None
+    name_titles = frozenset(titles)
+
+    def scan(*, require_capitalized: bool) -> int | None:
+        for idx, tokens in enumerate(block_tokens):
+            for base, is_cap, prev in tokens:
+                if base not in stems:
+                    continue
+                if require_capitalized and not is_cap:
+                    continue
+                if (
+                    prev is not None
+                    and prev in _ALL_GENDER_TITLES
+                    and _titles_conflict(name_titles, frozenset({prev}))
+                ):
+                    continue
+                return idx
+        return None
+
+    found = scan(require_capitalized=True)
+    if found is not None:
+        return found
+    return scan(require_capitalized=False)
+
+
+def _collect_spoiler_name_leaks(
+    scenes: Sequence[Scene],
+    mapped_facts: Sequence[ContextFact],
+    texts: Mapping[str, str],
+    ordered_block_ids: Sequence[str],
+    block_order: Mapping[str, int],
+    known_names: Iterable[str],
+    glossary_candidates: Sequence[GlossaryCandidateResponse],
+    aliases_by_block_id: Mapping[str, str],
+) -> tuple[list[str], list[str]]:
+    known = tuple(name for name in known_names if isinstance(name, str) and name.strip())
+    block_tokens = _extract_block_spoiler_tokens(ordered_block_ids, texts)
+    details: list[str] = []
+    block_ids: list[str] = []
+
+    for sc in scenes:
+        end_pos = block_order.get(sc.end_block_id)
+        if end_pos is None:
+            continue
+        start_label = aliases_by_block_id.get(sc.start_block_id, sc.start_block_id)
+        end_label = aliases_by_block_id.get(sc.end_block_id, sc.end_block_id)
+        for participant in sc.participants:
+            if not participant.strip():
+                continue
+            if any(
+                _same_spoiler_name(participant, kn, glossary_candidates) for kn in known
+            ):
+                continue
+            first_pos = _first_name_block_index(participant, block_tokens, glossary_candidates)
+            if first_pos is not None and first_pos > end_pos:
+                details.append(
+                    f"сцена {start_label}..{end_label}: участник «{participant}» появляется позже в главе"
+                )
+                block_ids.append(sc.start_block_id)
+
+    for fact in mapped_facts:
+        if fact.certainty != "explicit":
+            continue
+        if fact.kind not in {"speaker", "pronoun_referent"} or not fact.value:
+            continue
+        fact_pos = block_order.get(fact.subject_anchor.block_id)
+        if fact_pos is None:
+            continue
+        first_pos = _first_name_block_index(fact.value, block_tokens, glossary_candidates)
+        if first_pos is not None and first_pos > fact_pos:
+            label = aliases_by_block_id.get(
+                fact.subject_anchor.block_id, fact.subject_anchor.block_id
+            )
+            details.append(
+                f"{label}: явная атрибуция «{fact.value}» опережает первое упоминание в главе"
+            )
+            block_ids.append(fact.subject_anchor.block_id)
+
+    return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
+
+
+def _collect_non_visual_facts(
+    scenes: Sequence[Scene],
+    aliases_by_block_id: Mapping[str, str],
+) -> tuple[list[str], list[str]]:
+    details: list[str] = []
+    block_ids: list[str] = []
+    for sc in scenes:
+        for fact in sc.visual_facts:
+            cleaned = _VISUAL_SAFE_EXCLUSIONS_RE.sub(" ", fact.detail)
+            if _NON_VISUAL_FACT_RE.search(cleaned) is not None:
+                label = aliases_by_block_id.get(fact.anchor.block_id, fact.anchor.block_id)
+                details.append(f"{label}: «{_preview_quote(fact.detail)}»")
+                block_ids.append(fact.anchor.block_id)
+    return list(dict.fromkeys(details)), list(dict.fromkeys(block_ids))
 
 
 def _format_unresolved_anchor_issue(
@@ -2004,6 +2386,10 @@ def validate_narrative_response(
     is_notes_only: bool = False,
     blocks: Sequence[DocumentBlock] | None = None,
     source_offsets: bool = False,
+    source_language: str | None = None,
+    target_language: str | None = None,
+    language_detector: LanguageDetector | None = None,
+    known_names: Iterable[str] = (),
 ) -> tuple[tuple[Scene, ...], tuple[ContextFact, ...]]:
     """Validate complete scene coverage and source-bound narrative facts."""
     issues: list[tuple[str, str, tuple[str, ...]]] = []
@@ -2036,6 +2422,30 @@ def validate_narrative_response(
     )
     scoped_aliases_by_block_id = {v: k for k, v in scoped_aliases.items()}
 
+    issues.extend(
+        _collect_narrative_language_issues(
+            payload,
+            scenes,
+            texts,
+            ordered_block_ids,
+            scoped_aliases_by_block_id,
+            source_language=source_language,
+            target_language=target_language,
+            language_detector=language_detector,
+            is_notes_only=is_notes_only,
+        )
+    )
+
+    assessment_conflicts = _collect_name_assessment_conflicts(payload.glossary_candidates)
+    if assessment_conflicts:
+        issues.append(
+            (
+                "name_assessment_conflict",
+                f"несогласованная оценка перевода имени ({'; '.join(assessment_conflicts)})",
+                (),
+            )
+        )
+
     resolved_facts, cf_missing_details, cf_missing_blocks = _resolve_quoted_fact_entries(
         payload.context_facts,
         scoped_aliases,
@@ -2065,6 +2475,38 @@ def validate_narrative_response(
         )
         for fact, anchors, subject_anchor in resolved_facts
     ]
+
+    spoiler_details, spoiler_blocks = _collect_spoiler_name_leaks(
+        scenes,
+        mapped_facts,
+        texts,
+        ordered_block_ids,
+        block_order,
+        known_names,
+        payload.glossary_candidates,
+        scoped_aliases_by_block_id,
+    )
+    if spoiler_details:
+        issues.append(
+            (
+                "spoiler_name_leak",
+                f"обнаружен спойлер имени до первого упоминания в главе ({'; '.join(spoiler_details)})",
+                tuple(spoiler_blocks),
+            )
+        )
+
+    non_visual_details, non_visual_blocks = _collect_non_visual_facts(
+        scenes, scoped_aliases_by_block_id
+    )
+    if non_visual_details:
+        issues.append(
+            (
+                "non_visual_fact",
+                f"визуальный факт содержит незрительное описание ({'; '.join(non_visual_details)})",
+                tuple(non_visual_blocks),
+            )
+        )
+
     facts: list[ContextFact] = []
     for mapped in mapped_facts:
         mapped = _explicit_speaker_if_remark_names(

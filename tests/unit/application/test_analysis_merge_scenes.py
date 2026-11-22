@@ -619,3 +619,348 @@ def test_merge_narrative_fragments_respects_scene_separator_blocks(sep_type, sep
          (NarrativeAnalysisResponse('Keep.', 'S2.', scenes=(raw2_explicit,)), res2, ())]
     )
     assert len(compat_merged) == 1
+
+
+def test_validate_narrative_rejects_wrong_summary_and_allows_latin_names_in_russian_scenes():
+    from types import SimpleNamespace
+
+    def stub_detector(scores):
+        def probability_for_language(text: str, language_code: str) -> float | None:
+            return scores(text, language_code)
+
+        return SimpleNamespace(probability_for_language=probability_for_language)
+
+    # Backward compatibility: without language params, English scene summaries still pass.
+    legacy = NarrativeAnalysisResponse('Keep voice.', 'Holmes investigates.', scenes=(scene('b1', 'b3'),))
+    assert len(validate_narrative_response(legacy, ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER)[0]) == 1
+
+    # 1. Valid English chapter_summary + Russian scene summaries with borrowed Latin names (short & long).
+    ru_scene_short = QuotedSceneResponse('b1', 'b2', 'Holmes и Watson в комнате.', participants=('Holmes', 'Watson'))
+    ru_scene_long = QuotedSceneResponse(
+        'b3', 'b3',
+        'Инспектор Lestrade приходит на Baker Street и разговаривает с Holmes.',
+        participants=('Lestrade',),
+    )
+    ok_payload = NarrativeAnalysisResponse(
+        'Keep voice.',
+        'Holmes wears a red coat while Watson opens the door for Lestrade.',
+        scenes=(ru_scene_short, ru_scene_long),
+    )
+    detector_ok = stub_detector(
+        lambda text, lang: 0.95 if (lang == 'en' and 'Holmes wears' in text) or (lang == 'ru' and 'приходит' in text) else 0.01
+    )
+    scenes, _ = validate_narrative_response(
+        ok_payload,
+        ALIASES,
+        TEXTS,
+        VISIBLE,
+        ordered_block_ids=ORDER,
+        source_language='en',
+        target_language='ru',
+        language_detector=detector_ok,
+    )
+    assert len(scenes) == 2
+
+    # 1b. Russian scene summary dominated by capitalized Latin names still passes even if detector is unsure on full text.
+    latin_heavy_scene = QuotedSceneResponse(
+        'b1', 'b3',
+        'Sherlock Holmes и John Watson встречают Inspector Lestrade на Baker Street.',
+        participants=('Holmes', 'Watson', 'Lestrade'),
+    )
+    latin_heavy_detector = stub_detector(
+        lambda text, lang: (
+            0.95 if lang == 'en' and 'Holmes wears' in text
+            else (0.95 if lang == 'ru' and 'Sherlock' not in text else 0.01)
+        )
+    )
+    assert len(validate_narrative_response(
+        replace(ok_payload, scenes=(latin_heavy_scene,)),
+        ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+        source_language='en', target_language='ru', language_detector=latin_heavy_detector,
+    )[0]) == 1
+
+    # 2. Russian chapter_summary rejected when source_language='en'.
+    with pytest.raises(AnalysisMergeError) as cyr_summary_exc:
+        validate_narrative_response(
+            replace(ok_payload, chapter_summary='Холмс в красном пальто ждёт Лестрейда.'),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            source_language='en', target_language='ru',
+        )
+    assert cyr_summary_exc.value.violation.rule_code == 'narrative_summary_language'
+
+    # 3. English chapter_summary containing stray Cyrillic rejected for Latin source.
+    with pytest.raises(AnalysisMergeError) as mixed_summary_exc:
+        validate_narrative_response(
+            replace(ok_payload, chapter_summary='Holmes wears a red coat в Лондоне.'),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            source_language='en', target_language='ru',
+        )
+    assert mixed_summary_exc.value.violation.rule_code == 'narrative_summary_language'
+
+    # 4. Wrong Latin language in chapter_summary rejected via LanguageDetector.
+    spanish_detector = stub_detector(lambda _text, lang: 0.01 if lang == 'en' else 0.95)
+    with pytest.raises(AnalysisMergeError) as es_summary_exc:
+        validate_narrative_response(
+            replace(ok_payload, chapter_summary='La historia comienza en Londres con Holmes y Watson.'),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            source_language='en', target_language='ru', language_detector=spanish_detector,
+        )
+    assert es_summary_exc.value.violation.rule_code == 'narrative_summary_language'
+
+    # 5. Pure English scenes[].summary rejected when target_language='ru'.
+    with pytest.raises(AnalysisMergeError) as en_scene_exc:
+        validate_narrative_response(
+            replace(ok_payload, scenes=(scene('b1', 'b3'),)),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            source_language='en', target_language='ru',
+        )
+    assert en_scene_exc.value.violation.rule_code == 'scene_summary_language'
+
+    # 6. Long mixed-English scene summary with one stray Cyrillic word rejected via LanguageDetector.
+    long_bad_scene = QuotedSceneResponse(
+        'b1', 'b3',
+        'Holmes and Watson walk through the dark street and wait for Lestrade (комната).',
+        participants=('Holmes',),
+    )
+    detector_reject_ru = stub_detector(lambda _text, lang: 0.95 if lang == 'en' else 0.01)
+    with pytest.raises(AnalysisMergeError) as long_scene_exc:
+        validate_narrative_response(
+            replace(ok_payload, scenes=(long_bad_scene,)),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            source_language='en', target_language='ru', language_detector=detector_reject_ru,
+        )
+    assert long_scene_exc.value.violation.rule_code == 'scene_summary_language'
+
+    # 7. Priority: narrative_summary_language outranks scene_summary_language.
+    with pytest.raises(AnalysisMergeError) as prio_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Русский пересказ.', scenes=(scene('b1', 'b3'),)),
+            ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            source_language='en', target_language='ru',
+        )
+    assert prio_exc.value.violation.rule_code == 'narrative_summary_language'
+
+
+def test_validate_narrative_checks_spoilers_with_known_names_assessment_conflicts_and_visual_facts():
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import ConceptType
+    from linguary.domain.name_translation import (
+        NameTranslationAssessment,
+        NameTranslationMethod,
+        NameTranslationReviewReason,
+    )
+
+    # 1. Name translation assessment conflicts (all 4 rules).
+    bad_assessments = (
+        NameTranslationAssessment(
+            NameTranslationMethod.SOUND, False,
+            (NameTranslationReviewReason.CREATIVE_ADAPTATION,),
+            'Транскрипция.', opaque_name=False,
+        ),
+        NameTranslationAssessment(
+            NameTranslationMethod.SOUND, False,
+            (NameTranslationReviewReason.PERSONAL_NAME_SUBSTITUTION,),
+            'Транскрипция.', opaque_name=False,
+        ),
+        NameTranslationAssessment(
+            NameTranslationMethod.SOUND, False,
+            (NameTranslationReviewReason.WORDPLAY,),
+            'Непрозрачное имя.', opaque_name=True,
+        ),
+        NameTranslationAssessment(
+            NameTranslationMethod.SOUND, False,
+            (NameTranslationReviewReason.ANAGRAM,),
+            'Непрозрачное имя.', opaque_name=True,
+        ),
+        NameTranslationAssessment(
+            NameTranslationMethod.MEANING, True,
+            (), 'Перевод по смыслу.', opaque_name=True,
+        ),
+        NameTranslationAssessment(
+            NameTranslationMethod.CREATIVE, True,
+            (), 'Творческий вариант.', opaque_name=False,
+        ),
+        NameTranslationAssessment(
+            NameTranslationMethod.UNCERTAIN, True,
+            (), 'Неуверенный вариант.', opaque_name=False,
+        ),
+    )
+    for bad_assessment in bad_assessments:
+        candidate = GlossaryCandidateResponse(
+            source_text='Everlost',
+            type=ConceptType.PLACE,
+            suggested_translation='Эверлост',
+            confidence=0.9,
+            model_flagged_review=False,
+            name_translation_assessment=bad_assessment,
+        )
+        with pytest.raises(AnalysisMergeError) as assess_exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse(
+                    'Keep voice.', 'Summary.',
+                    glossary_candidates=(candidate,),
+                    scenes=(scene('b1', 'b3'),),
+                ),
+                ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            )
+        assert assess_exc.value.violation.rule_code == 'name_assessment_conflict'
+
+    valid_candidate = GlossaryCandidateResponse(
+        source_text='Holmes',
+        type=ConceptType.PERSON,
+        suggested_translation='Холмс',
+        confidence=0.95,
+        model_flagged_review=False,
+        name_translation_assessment=NameTranslationAssessment(
+            NameTranslationMethod.SOUND, True, (), 'Непрозрачная фамилия.', opaque_name=True,
+        ),
+    )
+
+    # 2. Anti-spoilers: scenes[].participants vs known_names & stem/'s matching (Harry Potter <-> Harry's).
+    sp_aliases = {'b1': 'id-1', 'b2': 'id-2', 'b3': 'id-3'}
+    sp_texts = {
+        'id-1': '‘Stay back!’ he shouted in the dark.',
+        'id-2': 'The boy opened the door.',
+        'id-3': "Harry's owl landed beside Lestrade.",
+    }
+    sp_visible = {alias: sp_texts[bid] for alias, bid in sp_aliases.items()}
+    sp_order = ('id-1', 'id-2', 'id-3')
+
+    spoiler_scenes = (
+        QuotedSceneResponse('b1', 'b2', 'Разговор в темноте.', participants=('Harry Potter',)),
+        QuotedSceneResponse('b3', 'b3', 'Появляется сова.', participants=('Harry Potter', 'Lestrade')),
+    )
+    with pytest.raises(AnalysisMergeError) as spoiler_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=spoiler_scenes),
+            sp_aliases, sp_texts, sp_visible, ordered_block_ids=sp_order,
+        )
+    assert spoiler_exc.value.violation.rule_code == 'spoiler_name_leak'
+
+    # With known_names=('Harry',), participant 'Harry Potter' in scene 1 is allowed.
+    resolved_scenes, _ = validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            glossary_candidates=(valid_candidate,),
+            scenes=spoiler_scenes,
+        ),
+        sp_aliases, sp_texts, sp_visible, ordered_block_ids=sp_order,
+        known_names=('Harry',),
+    )
+    assert len(resolved_scenes) == 2
+
+    # 3. context_facts anti-spoiler: original certainty=='explicit' before first mention fails,
+    #    while original certainty=='inferred' (even if promoted to explicit by pronoun resolution!) passes.
+    b1_anchor = QuotedSourceAnchorResponse('b1', 'he shouted')
+    explicit_spoiler_fact = QuotedContextFactResponse(
+        'f-sp-explicit', 'speaker', (b1_anchor,), b1_anchor, 'Harry Potter', 'explicit',
+    )
+    with pytest.raises(AnalysisMergeError) as fact_spoiler_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                context_facts=(explicit_spoiler_fact,),
+                scenes=spoiler_scenes,
+            ),
+            sp_aliases, sp_texts, sp_visible, ordered_block_ids=sp_order,
+            known_names=('Harry',),
+        )
+    assert fact_spoiler_exc.value.violation.rule_code == 'spoiler_name_leak'
+    assert fact_spoiler_exc.value.violation.block_ids == ('id-1',)
+
+    inferred_pronoun_fact = QuotedContextFactResponse(
+        'f-sp-inferred', 'speaker', (b1_anchor,), b1_anchor, 'Harry Potter', 'inferred',
+    )
+    _, promoted_facts = validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            context_facts=(inferred_pronoun_fact,),
+            scenes=spoiler_scenes,
+            glossary_candidates=(
+                GlossaryCandidateResponse(
+                    source_text='Harry Potter',
+                    type=ConceptType.PERSON,
+                    suggested_translation='Гарри Поттер',
+                    confidence=0.95,
+                    model_flagged_review=False,
+                    note='мужской род',
+                ),
+            ),
+        ),
+        sp_aliases, sp_texts, sp_visible, ordered_block_ids=sp_order,
+        known_names=('Harry',),
+    )
+    # Upgraded to explicit AFTER spoiler check!
+    assert promoted_facts[0].certainty == 'explicit'
+
+    # 4. Visual facts: reject obvious sound/smell/taste markers by word boundary, allow visual forms like беззвучно.
+    for bad_detail in (
+        'Громкий звук шагов за дверью',
+        'Резкий запах дыма в комнате',
+        'Горький вкус лекарства',
+        'Loud sound of footsteps',
+        'Sweet smell of rain',
+    ):
+        bad_vf_scene = scene(
+            'b1', 'b3',
+            visual_facts=(QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b1', 'red coat'), 'Holmes', bad_detail,
+            ),),
+        )
+        with pytest.raises(AnalysisMergeError) as vf_exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(bad_vf_scene,)),
+                ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+            )
+        assert vf_exc.value.violation.rule_code == 'non_visual_fact'
+        assert vf_exc.value.violation.block_ids == ('id-1',)
+
+    good_vf_scene = scene(
+        'b1', 'b3',
+        visual_facts=(
+            QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b1', 'red coat'), 'Holmes', 'Беззвучно шевелит губами в красном пальто',
+            ),
+            QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b2', 'opened the door'), 'Watson', 'Бесшумно открывает дверь и гуляет с револьвером',
+            ),
+        ),
+    )
+    assert len(validate_narrative_response(
+        NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=(good_vf_scene,)),
+        ALIASES, TEXTS, VISIBLE, ordered_block_ids=ORDER,
+    )[0]) == 1
+
+    # 5. Strict priority: name_assessment_conflict > spoiler_name_leak > non_visual_fact > context_fact_conflict.
+    bad_vf_spoiler_scene = (
+        QuotedSceneResponse(
+            'b1', 'b2', 'Разговор.', participants=('Harry Potter',),
+            visual_facts=(QuotedSceneVisualFactResponse(
+                QuotedSourceAnchorResponse('b1', 'Stay back!'), 'Boy', 'Громкий звук крика',
+            ),),
+        ),
+        QuotedSceneResponse('b3', 'b3', 'Сова.', participants=('Harry Potter',)),
+    )
+    with pytest.raises(AnalysisMergeError) as prio_assess_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                glossary_candidates=(GlossaryCandidateResponse(
+                    source_text='Everlost', type=ConceptType.PLACE,
+                    suggested_translation='Эверлост', confidence=0.9,
+                    model_flagged_review=False,
+                    name_translation_assessment=bad_assessments[0],
+                ),),
+                scenes=bad_vf_spoiler_scene,
+            ),
+            sp_aliases, sp_texts, sp_visible, ordered_block_ids=sp_order,
+        )
+    assert prio_assess_exc.value.violation.rule_code == 'name_assessment_conflict'
+
+    with pytest.raises(AnalysisMergeError) as prio_spoiler_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=bad_vf_spoiler_scene),
+            sp_aliases, sp_texts, sp_visible, ordered_block_ids=sp_order,
+        )
+    assert prio_spoiler_exc.value.violation.rule_code == 'spoiler_name_leak'
+

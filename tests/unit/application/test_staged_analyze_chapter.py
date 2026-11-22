@@ -3682,7 +3682,7 @@ async def test_staged_a2_fragmented_chapter_keeps_full_summary_when_last_fragmen
 ])
 async def test_staged_narrative_merge_passes_section_separators(stored_book, sep_type, sep_status):
     _, uow, _ = stored_book
-    b1 = make_analysis_block(section_id='section-1', order=0, text='Holmes entered Baker Street.')
+    b1 = make_analysis_block(section_id='section-1', order=0, text='Holmes and Watson entered Baker Street.')
     sep = make_analysis_block(
         section_id='section-1',
         order=1,
