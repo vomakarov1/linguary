@@ -3594,7 +3594,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
                     {
                         "start_block_id": "b1",
                         "end_block_id": "b1",
-                        "summary": "Hallway sign.",
+                        "summary": "Табличка в коридоре.",
                         "location": "Hallway",
                         "participants": ["Harry"],
                         "visual_facts": [],
@@ -3613,7 +3613,7 @@ def test_a2_ch1_ch7_reading_quality_fixes_end_to_end(tmp_path: Path) -> None:
                     {
                         "start_block_id": "b1",
                         "end_block_id": "b1",
-                        "summary": "Hallway talk.",
+                        "summary": "Разговор в коридоре.",
                         "location": "Hallway",
                         "participants": ["Harry", "Aunt Petunia"],
                         "visual_facts": [],

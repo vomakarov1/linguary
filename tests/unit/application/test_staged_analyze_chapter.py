@@ -29,7 +29,7 @@ def narrative(aliases=('b1',), *, scenes=True, facts=()):
         translation_instructions='Keep the voice.', chapter_summary='Holmes opens the door.',
         glossary_candidates=[], context_facts=list(facts),
         scenes=[dict(start_block_id=aliases[0], end_block_id=aliases[-1],
-                     summary='Holmes arrives.', location='Baker Street', participants=['Holmes'],
+                     summary='Холмс прибывает.', location='Baker Street', participants=['Holmes'],
                      visual_facts=[], visual_assumptions=[])] if scenes else [],
     ))
 
@@ -3626,15 +3626,15 @@ async def test_staged_a2_fragmented_chapter_keeps_full_summary_when_last_fragmen
         _block(2, 'They walk toward the Twin Towers where Mary lives.'),
     ))
 
-    def nar_reply(summary):
+    def nar_reply(summary, scene_summary, participants):
         return FakeReply.of_payload(dict(
             translation_instructions='Keep a natural tone.',
             chapter_summary=summary,
             glossary_candidates=[],
             context_facts=[],
             scenes=[dict(
-                start_block_id='b1', end_block_id='b1', summary=summary,
-                location='Forest', participants=['Nick', 'Allie'],
+                start_block_id='b1', end_block_id='b1', summary=scene_summary,
+                location='Forest', participants=participants,
                 visual_facts=[], visual_assumptions=[],
             )],
         ))
@@ -3647,11 +3647,13 @@ async def test_staged_a2_fragmented_chapter_keeps_full_summary_when_last_fragmen
     short_frag3 = 'Mary lives in the Twin Towers.'
 
     client = FakeLLMClient([
-        nar_reply('Nick wakes up in Everlost.'),
-        nar_reply('Nick and Allie meet Lief in the forest.'),
+        nar_reply('Nick wakes up in Everlost.', 'Ник просыпается в Эверлосте.', ['Nick']),
+        nar_reply('Nick and Allie meet Lief in the forest.', 'Элли встречает Лифа в лесу.', ['Allie', 'Lief']),
         nar_reply(
             'Nick and Allie wake up in Everlost, meet Lief in the forest, '
-            'and walk toward the Twin Towers where Mary lives.'
+            'and walk toward the Twin Towers where Mary lives.',
+            'Герои идут к башням-близнецам, где живёт Мэри.',
+            ['Nick', 'Allie'],
         ),
         pedagogical(('b1',), summary=full_a2),
         pedagogical(('b1',), summary=short_frag2),
@@ -3702,7 +3704,7 @@ async def test_staged_narrative_merge_passes_section_separators(stored_book, sep
             scenes=[dict(
                 start_block_id='b1',
                 end_block_id='b1',
-                summary='Baker Street scene.',
+                summary='Сцена на Бейкер-стрит.',
                 location='Baker Street',
                 participants=['Holmes', 'Watson'],
                 visual_facts=[],
@@ -3776,13 +3778,13 @@ async def test_staged_narrative_retry_translates_all_error_blocks_to_aliases_wit
         ],
         scenes=[
             dict(
-                start_block_id='b1', end_block_id='b3', summary='Arrival.',
+                start_block_id='b1', end_block_id='b3', summary='Прибытие.',
                 location='Baker Street', participants=['Holmes', 'Watson'],
                 visual_facts=[dict(anchor=dict(block_id='b2', quote='blue hat'), subject='Holmes', detail='Hat')],
                 visual_assumptions=[],
             ),
             dict(
-                start_block_id='b5', end_block_id='b6', summary='Outside.',
+                start_block_id='b5', end_block_id='b6', summary='На улице.',
                 location='Street', participants=['Hudson', 'Moriarty'],
                 visual_facts=[], visual_assumptions=[],
             ),
@@ -3798,7 +3800,7 @@ async def test_staged_narrative_retry_translates_all_error_blocks_to_aliases_wit
             dict(id='f-gl', kind='gender', anchors=[hudson_anchor], subject_anchor=hudson_anchor, value='male', certainty='explicit'),
         ],
         scenes=[dict(
-            start_block_id='b1', end_block_id='b6', summary='Full chapter.',
+            start_block_id='b1', end_block_id='b6', summary='Вся глава.',
             location='Baker Street', participants=['Holmes', 'Watson'],
             visual_facts=[dict(anchor=dict(block_id='b2', quote='blue hat'), subject='Holmes', detail='Hat')],
             visual_assumptions=[],
@@ -3892,3 +3894,307 @@ async def test_staged_narrative_retry_translates_all_error_blocks_to_aliases_wit
     for block in blocks:
         assert block.id not in str(worded)
         assert block.id not in worded.violation.safe_message
+
+
+async def test_staged_analysis_rejects_non_target_scene_summary_and_passes_prior_chapter_topics(
+    tmp_path,
+) -> None:
+    """Staged analysis rejects English scenes[].summary for ru target, anchors A2 summary to narrative_summary, and passes prior chapter topics (excluding front matter and notes-only)."""
+    from linguary.domain import BeforeYouReadEntry, ChapterAnalysis, TreatmentPlan
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, SourceAnchor
+
+    engine = create_database_engine(tmp_path / 'p6t2_topics.db')
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    try:
+        titlepage = make_analysis_section(
+            section_id='titlepage', title='Title Page', order=0, texts=('Novel Title',),
+        )
+        notes_only = make_analysis_section(
+            section_id='notes-1',
+            title='Notes',
+            order=1,
+            blocks=(
+                make_analysis_block(
+                    section_id='notes-1', order=0, text='Footnote note.', type=BlockType.FOOTNOTE,
+                ),
+            ),
+        )
+        assert notes_only.is_notes_only
+        ch1 = make_analysis_section(
+            section_id='section-1',
+            title='Chapter 1',
+            order=2,
+            texts=('Holmes used to put up with the fog on Baker Street.',),
+        )
+        ch2 = make_analysis_section(
+            section_id='section-2',
+            title='Chapter 2',
+            order=3,
+            texts=('Holmes walked across the quiet bridge in London.',),
+        )
+        document = make_analysis_document((titlepage, notes_only, ch1, ch2))
+        with uow.transaction() as tx:
+            tx.books.add(make_book_record())
+            tx.documents.save(document)
+            # Persist synthetic analyses for front matter and notes-only with decoy BYR to verify filtering.
+            tx.analyses.save(
+                BOOK_ID,
+                ChapterAnalysis.create(
+                    id='an-fm',
+                    section_id='titlepage',
+                    treatment_plan=TreatmentPlan.of_treatments(
+                        'titlepage', ((titlepage.blocks[0].id, BlockTreatment.READ_AS_IS),)
+                    ),
+                    translation_instructions='',
+                    chapter_summary='',
+                    expected_block_ids=(titlepage.blocks[0].id,),
+                    before_you_read=(
+                        BeforeYouReadEntry(expression='front-matter-decoy', explanation='не должно попасть'),
+                    ),
+                ),
+            )
+            tx.analyses.save(
+                BOOK_ID,
+                ChapterAnalysis.create(
+                    id='an-notes',
+                    section_id='notes-1',
+                    treatment_plan=TreatmentPlan.of_treatments(
+                        'notes-1', ((notes_only.blocks[0].id, BlockTreatment.READ_AS_IS),)
+                    ),
+                    translation_instructions='',
+                    chapter_summary='',
+                    expected_block_ids=(notes_only.blocks[0].id,),
+                    before_you_read=(
+                        BeforeYouReadEntry(expression='notes-only-decoy', explanation='не должно попасть'),
+                    ),
+                ),
+            )
+            # Persist Chapter 1 analysis with BYR and grammar difficulty.
+            b_ch1 = ch1.blocks[0]
+            tx.analyses.save(
+                BOOK_ID,
+                ChapterAnalysis.create(
+                    id='an-ch1',
+                    section_id='section-1',
+                    treatment_plan=TreatmentPlan.of_treatments(
+                        'section-1', ((b_ch1.id, BlockTreatment.TRANSLATE),)
+                    ),
+                    translation_instructions='Keep tone.',
+                    chapter_summary='Holmes walked on Baker Street.',
+                    expected_block_ids=(b_ch1.id,),
+                    before_you_read=(
+                        BeforeYouReadEntry(expression='put up with', explanation='мириться с чем-то'),
+                    ),
+                    content_plan=ContentPlan(
+                        version=3,
+                        profile='content-plan-v3',
+                        difficulties=(
+                            Difficulty(
+                                id='d1',
+                                anchors=(SourceAnchor(block_id=b_ch1.id, quote='used to', start=7, end=14),),
+                                owner_block_id=b_ch1.id,
+                                kind='grammar',
+                                priority='critical',
+                                help_kind='explanation',
+                                required_points=(
+                                    RequiredPoint(
+                                        id='p1',
+                                        description='Конструкция used to для прошлых привычек',
+                                    ),
+                                ),
+                            ),
+                        ),
+                        before_you_read_evidence=(),
+                        context_facts=(),
+                    ),
+                ),
+            )
+
+        bad_lang_narrative = FakeReply.of_payload(dict(
+            translation_instructions='Keep the voice.',
+            chapter_summary='Holmes walks across the quiet bridge in London.',
+            glossary_candidates=[],
+            context_facts=[],
+            scenes=[dict(
+                start_block_id='b1',
+                end_block_id='b1',
+                summary='Holmes walks across the quiet bridge in London.',
+                location='Лондонский мост',
+                participants=['Holmes'],
+                visual_facts=[],
+                visual_assumptions=[],
+            )],
+        ))
+        good_narrative = FakeReply.of_payload(dict(
+            translation_instructions='Keep the voice.',
+            chapter_summary='Holmes walks across the quiet bridge in London.',
+            glossary_candidates=[],
+            context_facts=[],
+            scenes=[dict(
+                start_block_id='b1',
+                end_block_id='b1',
+                summary='Холмс идёт по тихому мосту в Лондоне.',
+                location='Лондонский мост',
+                participants=['Holmes'],
+                visual_facts=[],
+                visual_assumptions=[],
+            )],
+        ))
+        off_topic_ped = pedagogical(
+            ('b1',),
+            treatment_plan=[dict(source_block_id='b1', treatment='TRANSLATE')],
+            summary='Pirates discover a hidden treasure chest on a tropical desert island.',
+        )
+        on_topic_ped = pedagogical(
+            ('b1',),
+            treatment_plan=[dict(source_block_id='b1', treatment='TRANSLATE')],
+            summary='Holmes walks across a quiet bridge in London.',
+        )
+
+        client = FakeLLMClient([bad_lang_narrative, good_narrative, off_topic_ped, on_topic_ped])
+        result = await scenario(uow, client, context=builder('a2'), attempts=2)(
+            AnalyzeChapterCommand(BOOK_ID, 'section-2')
+        )
+        assert result.analysis.is_complete
+        # First narrative rejected (English scene summary), second accepted; first ped rejected (off-topic A2 summary), second accepted.
+        assert [r.stage for r in client.requests] == [NARRATIVE, NARRATIVE, PEDAGOGICAL, PEDAGOGICAL]
+        assert 'язык' in client.requests[1].repair_instructions[-1].casefold()
+        assert 'narrative_summary' in client.requests[3].repair_instructions[-1]
+
+        ped_input = client.requests[2].input_text
+        assert 'Уже объяснено в предыдущих главах' in ped_input
+        assert 'put up with' in ped_input
+        assert 'used to' in ped_input
+        assert 'front-matter-decoy' not in ped_input
+        assert 'notes-only-decoy' not in ped_input
+    finally:
+        engine.dispose()
+
+
+async def test_staged_analysis_allows_known_names_in_ch2_participants_and_rejects_spoilers(
+    tmp_path,
+) -> None:
+    """Chapter 2 allows characters already known from Chapter 1 in early scene participants while still rejecting unintroduced spoilers."""
+    engine = create_database_engine(tmp_path / 'p6t2_spoilers.db')
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    try:
+        ch1 = make_analysis_section(
+            section_id='section-1',
+            title='Chapter 1',
+            order=0,
+            texts=('Harry opened the old letter in the kitchen.',),
+        )
+        ch2 = make_analysis_section(
+            section_id='section-2',
+            title='Chapter 2',
+            order=1,
+            texts=(
+                'He walked slowly down the dark corridor.',
+                'Harry stopped when Malfoy stepped out of the shadows.',
+            ),
+        )
+        document = make_analysis_document((ch1, ch2))
+        with uow.transaction() as tx:
+            tx.books.add(make_book_record())
+            tx.documents.save(document)
+
+        ch1_narrative = FakeReply.of_payload(dict(
+            translation_instructions='Keep tone.',
+            chapter_summary='Harry opens the old letter in the kitchen.',
+            glossary_candidates=[
+                dict(
+                    source_text='Harry',
+                    type='person',
+                    suggested_translation='Гарри',
+                    confidence=0.95,
+                    model_flagged_review=False,
+                    note='мужской род',
+                )
+            ],
+            context_facts=[],
+            scenes=[dict(
+                start_block_id='b1',
+                end_block_id='b1',
+                summary='Гарри открывает старое письмо на кухне.',
+                location='Кухня',
+                participants=['Harry'],
+                visual_facts=[],
+                visual_assumptions=[],
+            )],
+        ))
+        ch1_ped = pedagogical(('b1',))
+        await scenario(uow, FakeLLMClient([ch1_narrative, ch1_ped]))(
+            AnalyzeChapterCommand(BOOK_ID, 'section-1')
+        )
+
+        # Chapter 2 attempt 1: Scene 1 mentions both Harry (known from Ch1) and Malfoy (spoiler from b2).
+        ch2_spoiler_narrative = FakeReply.of_payload(dict(
+            translation_instructions='Keep tone.',
+            chapter_summary='Harry walks down the corridor and meets Malfoy.',
+            glossary_candidates=[],
+            context_facts=[],
+            scenes=[
+                dict(
+                    start_block_id='b1',
+                    end_block_id='b1',
+                    summary='Гарри медленно идёт по тёмному коридору.',
+                    location='Коридор',
+                    participants=['Harry', 'Malfoy'],
+                    visual_facts=[],
+                    visual_assumptions=[],
+                ),
+                dict(
+                    start_block_id='b2',
+                    end_block_id='b2',
+                    summary='Гарри встречает Малфоя в коридоре.',
+                    location='Коридор',
+                    participants=['Harry', 'Malfoy'],
+                    visual_facts=[],
+                    visual_assumptions=[],
+                ),
+            ],
+        ))
+        # Chapter 2 attempt 2: Scene 1 lists only Harry (known from Ch1 -> allowed!), Scene 2 introduces Malfoy.
+        ch2_clean_narrative = FakeReply.of_payload(dict(
+            translation_instructions='Keep tone.',
+            chapter_summary='Harry walks down the corridor and meets Malfoy.',
+            glossary_candidates=[],
+            context_facts=[],
+            scenes=[
+                dict(
+                    start_block_id='b1',
+                    end_block_id='b1',
+                    summary='Гарри медленно идёт по тёмному коридору.',
+                    location='Коридор',
+                    participants=['Harry'],
+                    visual_facts=[],
+                    visual_assumptions=[],
+                ),
+                dict(
+                    start_block_id='b2',
+                    end_block_id='b2',
+                    summary='Гарри встречает Малфоя в коридоре.',
+                    location='Коридор',
+                    participants=['Harry', 'Malfoy'],
+                    visual_facts=[],
+                    visual_assumptions=[],
+                ),
+            ],
+        ))
+        ch2_ped = pedagogical(('b1', 'b2'))
+        ch2_client = FakeLLMClient([ch2_spoiler_narrative, ch2_clean_narrative, ch2_ped])
+        result = await scenario(uow, ch2_client, attempts=2)(
+            AnalyzeChapterCommand(BOOK_ID, 'section-2')
+        )
+        assert result.analysis.is_complete
+        assert [r.stage for r in ch2_client.requests] == [NARRATIVE, NARRATIVE, PEDAGOGICAL]
+        repair = ch2_client.requests[1].repair_instructions[-1]
+        assert 'Malfoy' in repair
+        assert 'Harry' not in repair
+        assert result.analysis.scenes[0].participants == ('Harry',)
+        assert result.analysis.scenes[1].participants == ('Harry', 'Malfoy')
+    finally:
+        engine.dispose()
+

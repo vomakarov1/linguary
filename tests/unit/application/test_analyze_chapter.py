@@ -1669,6 +1669,7 @@ def _staged_narrative_reply(
     participants: list[str] | None = None,
     facts: list[dict[str, object]] | None = None,
     summary: str = "Harry talks to Hermione.",
+    scene_summary: str = "Гарри разговаривает с Гермионой.",
 ) -> FakeReply:
     return FakeReply.of_payload(
         {
@@ -1680,7 +1681,7 @@ def _staged_narrative_reply(
                 {
                     "start_block_id": aliases[0],
                     "end_block_id": aliases[-1],
-                    "summary": summary,
+                    "summary": scene_summary,
                     "location": "Hallway",
                     "participants": participants or ["Harry"],
                     "visual_facts": [],

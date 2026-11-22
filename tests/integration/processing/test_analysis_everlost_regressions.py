@@ -260,7 +260,7 @@ def _narrative_payload(
                 {
                     "start_block_id": "b1",
                     "end_block_id": f"b{block_count}",
-                    "summary": f"Scene covering {block_count} blocks.",
+                    "summary": f"Сцена, охватывающая {block_count} блоков.",
                     "location": location,
                     "participants": list(participants),
                     "visual_facts": [],
@@ -565,7 +565,7 @@ async def test_everlost_a2_summary_and_validation_retry_end_to_end(
             {
                 "start_block_id": "b1",
                 "end_block_id": "b14",
-                "summary": "Arrival.",
+                "summary": "Прибытие.",
                 "location": "Forest",
                 "participants": ["Nick", "Allie"],
                 "visual_facts": [
@@ -585,7 +585,7 @@ async def test_everlost_a2_summary_and_validation_retry_end_to_end(
             {
                 "start_block_id": "b16",
                 "end_block_id": f"b{frag_sizes[0]}",
-                "summary": "Path.",
+                "summary": "Тропа.",
                 "location": "Forest",
                 "participants": ["Nick", "Allie", "Lief"],
                 "visual_facts": [],
@@ -637,7 +637,7 @@ async def test_everlost_a2_summary_and_validation_retry_end_to_end(
             {
                 "start_block_id": "b1",
                 "end_block_id": f"b{frag_sizes[0]}",
-                "summary": "Forest arrival.",
+                "summary": "Прибытие в лес.",
                 "location": "Forest",
                 "participants": ["Nick", "Allie", "Lief"],
                 "visual_facts": [
@@ -660,7 +660,7 @@ async def test_everlost_a2_summary_and_validation_retry_end_to_end(
             {
                 "start_block_id": "b1",
                 "end_block_id": f"b{frag_sizes[0]}",
-                "summary": "Forest arrival.",
+                "summary": "Прибытие в лес.",
                 "location": "Forest",
                 "participants": ["Nick", "Allie", "Lief"],
                 "visual_facts": [

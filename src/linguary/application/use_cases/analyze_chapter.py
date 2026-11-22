@@ -426,6 +426,12 @@ class AnalyzeChapter:
             own_outputs.update(merged_glossary_suggestion_keys(accumulated))
             suggestions = tuple(s for s in suggestions
                 if _suggestion_key(s, document.target_language) not in own_outputs - previous_inputs)
+        known_names = _known_names_from_glossary(
+            accumulated,
+            user_decisions,
+            suggestions,
+            target_language=document.target_language,
+        )
         expected_conditions_id = (getattr(self._llm_client, 'conditions_id', None)
                                   or self._conditions_id or (conditions.id if conditions else None))
         dependencies = conditions.payload if conditions else {}
@@ -446,7 +452,8 @@ class AnalyzeChapter:
                 command, document, section, accumulated, user_decisions, suggestions, concepts,
                 pass_kind=AnalysisPassKind.NARRATIVE,
                 chapter_input_sha=narrative_hash,
-                expected_conditions_id=expected_conditions_id)
+                expected_conditions_id=expected_conditions_id,
+                known_names=known_names)
             attempts += count
             usages.append(usage)
             narrative, scenes, facts = merge_narrative_fragments(
@@ -455,7 +462,11 @@ class AnalyzeChapter:
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
-                blocks=blocks, source_offsets=True)
+                blocks=blocks, source_offsets=True,
+                source_language=document.source_language,
+                target_language=document.target_language,
+                language_detector=self._language_detector,
+                known_names=known_names)
             saved = self._save_pass(command, AnalysisPassKind.NARRATIVE, narrative_hash,
                                     narrative, expected_conditions_id,
                                     input_suggestions=tuple(_suggestion_key(s, document.target_language)
@@ -466,7 +477,11 @@ class AnalyzeChapter:
             scenes, facts = validate_narrative_response(narrative, aliases, texts, visible,
                 ordered_block_ids=tuple(aliases), is_notes_only=is_notes_only,
                 mandatory_facts=glossary_context_constraints(concepts),
-                blocks=blocks, source_offsets=True)
+                blocks=blocks, source_offsets=True,
+                source_language=document.source_language,
+                target_language=document.target_language,
+                language_detector=self._language_detector,
+                known_names=known_names)
         return narrative, saved, scenes, facts, attempts, _total_usage(usages), dependencies, expected_conditions_id
 
     async def _analyze_staged(
@@ -483,13 +498,15 @@ class AnalyzeChapter:
         )
         usages: list[TokenUsage | None] = [narrative_usage]
         cumulative_words = _cumulative_words_before(document, section)
+        prior_chapter_topics = self._load_prior_chapter_topics(command, document, section)
         pedagogical_hash = self._context_builder.pedagogical_input_sha256(document, section,
             narrative_output_sha256=saved.output_sha256, narrative_summary=narrative.chapter_summary,
             context_facts=facts, glossary_candidates=narrative.glossary_candidates,
             accumulated_candidates=accumulated, user_decisions=user_decisions,
             model_dependencies=_pass_model_dependencies(dependencies, AnalysisPassKind.PEDAGOGICAL),
             max_fragment_blocks=self._max_fragment_blocks,
-            cumulative_words_before=cumulative_words)
+            cumulative_words_before=cumulative_words,
+            prior_chapter_topics=prior_chapter_topics)
         cached_pedagogical = self._cached_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash)
         if cached_pedagogical is None:
             parts, count, usage = await self._run_staged_fragments(
@@ -497,7 +514,8 @@ class AnalyzeChapter:
                 pass_kind=AnalysisPassKind.PEDAGOGICAL, narrative=narrative, facts=facts,
                 chapter_input_sha=pedagogical_hash,
                 expected_conditions_id=expected_conditions_id,
-                cumulative_words_before=cumulative_words)
+                cumulative_words_before=cumulative_words,
+                prior_chapter_topics=prior_chapter_topics)
             attempts += count
             usages.append(usage)
             merged = merge_chapter_analysis(parts, id=self._id_factory(), section_id=section.id,
@@ -516,7 +534,8 @@ class AnalyzeChapter:
             analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
                                              accumulated, user_decisions,
                                              concepts=concepts,
-                                             cumulative_words_before=cumulative_words)
+                                             cumulative_words_before=cumulative_words,
+                                             prior_chapter_topics=prior_chapter_topics)
             self._save_pass(command, AnalysisPassKind.PEDAGOGICAL, pedagogical_hash,
                             pedagogical, expected_conditions_id)
         else:
@@ -526,7 +545,8 @@ class AnalyzeChapter:
             analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
                                              accumulated, user_decisions,
                                              concepts=concepts,
-                                             cumulative_words_before=cumulative_words)
+                                             cumulative_words_before=cumulative_words,
+                                             prior_chapter_topics=prior_chapter_topics)
         return analysis, attempts, _total_usage(usages)
 
     def _assemble_staged(
@@ -536,6 +556,7 @@ class AnalyzeChapter:
         *,
         concepts: Sequence[TermConcept] = (),
         cumulative_words_before: int = 0,
+        prior_chapter_topics: Sequence[str] = (),
     ) -> ChapterAnalysis:
         blocks = textual_blocks(section)
         context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
@@ -543,7 +564,8 @@ class AnalyzeChapter:
             glossary_candidates=narrative.glossary_candidates,
             accumulated_candidates=accumulated,
             user_decisions=user_decisions,
-            cumulative_words_before=cumulative_words_before)
+            cumulative_words_before=cumulative_words_before,
+            prior_chapter_topics=prior_chapter_topics)
         # Both saved DTOs use stable references scoped to this chapter.
         context = replace(context, block_ids_by_alias={b.id: b.id for b in blocks},
             visible_texts_by_alias={b.id: source_text_for_model(b) for b in blocks},
@@ -555,7 +577,8 @@ class AnalyzeChapter:
             validate_a2_summary(pedagogical.reader_chapter_summary or '',
                 source_texts=tuple(b.text for b in blocks), source_language=document.source_language,
                 language_detector=self._language_detector,
-                require_parallel_russian=self._a2_summary_requires_parallel_russian())
+                require_parallel_russian=self._a2_summary_requires_parallel_russian(),
+                narrative_summary=narrative.chapter_summary)
         mandatory_facts = glossary_context_constraints((*concepts, *user_decisions))
         payload = combine_staged_analysis_responses(
             narrative,
@@ -621,6 +644,8 @@ class AnalyzeChapter:
         narrative: NarrativeAnalysisResponse | None = None, facts: Sequence[ContextFact] = (),
         chapter_input_sha: str | None = None, expected_conditions_id: str | None = None,
         cumulative_words_before: int = 0,
+        known_names: Sequence[str] = (),
+        prior_chapter_topics: Sequence[str] = (),
     ) -> tuple[list, int, TokenUsage | None]:
         fragments = plan_fragments(
             textual_blocks(section), max_blocks=self._max_fragment_blocks, max_chars=DEFAULT_MAX_FRAGMENT_CHARS,
@@ -676,7 +701,8 @@ class AnalyzeChapter:
                     fragment=fragment if total > 1 else None, fragment_count=total,
                     before_you_read_limit=byr_quota, language_notes_limit=note_quota,
                     cumulative_words_before=cumulative_words_before,
-                    prior_explained_topics=prior_topics)
+                    prior_explained_topics=prior_topics,
+                    prior_chapter_topics=prior_chapter_topics)
                 if parts:
                     previous_summary = (
                         select_staged_a2_summary(
@@ -693,6 +719,21 @@ class AnalyzeChapter:
                 stage=LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE if is_narrative else LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL,
                 task_id=command.task_id, scope_id=section.id, ordered_block_ids=fragment.block_ids))
 
+            fragment_known_names = known_names
+            if is_narrative and parts:
+                prior_part_names = [
+                    name
+                    for part_payload, part_scenes, _ in parts
+                    for name in (
+                        *(c.source_text for c in part_payload.glossary_candidates),
+                        *(c.suggested_translation for c in part_payload.glossary_candidates),
+                        *(p for scene in part_scenes for p in scene.participants),
+                    )
+                    if isinstance(name, str) and name.strip()
+                ]
+                if prior_part_names:
+                    fragment_known_names = tuple(dict.fromkeys((*known_names, *prior_part_names)))
+
             def validate(payload):
                 if is_narrative:
                     _ensure_candidates_single_script(payload, context)
@@ -701,14 +742,19 @@ class AnalyzeChapter:
                         ordered_block_ids=fragment.block_ids,
                         is_notes_only=section.is_notes_only or document.is_front_matter(section),
                         mandatory_facts=glossary_context_constraints(concepts),
-                        blocks=fragment.blocks)
+                        blocks=fragment.blocks,
+                        source_language=document.source_language,
+                        target_language=document.target_language,
+                        language_detector=self._language_detector,
+                        known_names=fragment_known_names)
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
                 if self._is_a2_reader():
                     validate_a2_summary(payload.reader_chapter_summary or '',
                         source_texts=tuple(b.text for b in fragment.blocks), source_language=document.source_language,
                         language_detector=self._language_detector,
-                        require_parallel_russian=self._a2_summary_requires_parallel_russian())
+                        require_parallel_russian=self._a2_summary_requires_parallel_russian(),
+                        narrative_summary=narrative.chapter_summary)
                 _ensure_plan_covers_chapter(combined, context)
                 resolved_plan = self._validate_pedagogical(combined, context, fragment.blocks)
                 # The first fragment has no prior parts, but segment indexes are still rejected here.
@@ -1137,6 +1183,52 @@ class AnalyzeChapter:
         )
         return analysis, attempts, _total_usage(usages)
 
+    def _parallel_batch_and_seed(
+        self, transaction: UnitOfWork, command: AnalyzeChapterCommand
+    ) -> tuple[bool, bool]:
+        tasks_repo = getattr(transaction, "tasks", None)
+        parallel_batch = self._max_concurrency > 1 or (
+            tasks_repo is not None
+            and any(
+                task.task_type is TaskType.ANALYZE_CHAPTER
+                and task.scope_id != command.section_id
+                and task.status is TaskStatus.RUNNING
+                for task in tasks_repo.list_for_book(command.book_id)
+            )
+        )
+        work_repo = getattr(transaction, "work", None)
+        conditions = (
+            work_repo.latest_conditions(command.book_id)
+            if work_repo is not None
+            else None
+        )
+        if conditions is not None and isinstance(getattr(conditions, "payload", None), Mapping):
+            seed_active = bool(
+                (conditions.payload.get("checks") or {}).get(
+                    "seed_first_chapter", self._seed_first_chapter
+                )
+            )
+        else:
+            seed_active = bool(self._seed_first_chapter)
+        return parallel_batch, seed_active
+
+    def _load_prior_chapter_topics(
+        self,
+        command: AnalyzeChapterCommand,
+        document: CanonicalDocument,
+        section: DocumentSection,
+    ) -> tuple[str, ...]:
+        with self._unit_of_work.transaction() as transaction:
+            analyses = transaction.analyses.list_for_book(command.book_id)
+            parallel_batch, seed_active = self._parallel_batch_and_seed(transaction, command)
+        return _prior_chapter_topics(
+            document,
+            section,
+            analyses,
+            parallel_batch=parallel_batch,
+            seed_active=seed_active,
+        )
+
     def _load(
         self, command: AnalyzeChapterCommand
     ) -> tuple[CanonicalDocument, tuple[GlossaryCandidate, ...], tuple[TermConcept, ...], tuple[TermConcept, ...]]:
@@ -1160,30 +1252,7 @@ class AnalyzeChapter:
             analyses = transaction.analyses.list_for_book(command.book_id)
             concepts = tuple(transaction.glossary.list_for_book(command.book_id))
             self._loaded_concepts.set(concepts)
-            tasks_repo = getattr(transaction, "tasks", None)
-            parallel_batch = self._max_concurrency > 1 or (
-                tasks_repo is not None
-                and any(
-                    task.task_type is TaskType.ANALYZE_CHAPTER
-                    and task.scope_id != command.section_id
-                    and task.status is TaskStatus.RUNNING
-                    for task in tasks_repo.list_for_book(command.book_id)
-                )
-            )
-            work_repo = getattr(transaction, "work", None)
-            conditions = (
-                work_repo.latest_conditions(command.book_id)
-                if work_repo is not None
-                else None
-            )
-            if conditions is not None and isinstance(getattr(conditions, "payload", None), Mapping):
-                seed_active = bool(
-                    (conditions.payload.get("checks") or {}).get(
-                        "seed_first_chapter", self._seed_first_chapter
-                    )
-                )
-            else:
-                seed_active = bool(self._seed_first_chapter)
+            parallel_batch, seed_active = self._parallel_batch_and_seed(transaction, command)
             seed_section = _first_content_section(document) if (parallel_batch and seed_active) else None
             seed_section_ids: set[str] = set()
             if seed_section is not None:
@@ -1937,8 +2006,33 @@ def _cumulative_words_before(
     return total
 
 
-def _prior_explained_topics(parts: Sequence[FragmentAnalysis]) -> tuple[str, ...]:
-    """Collect deduplicated lemmas and grammar topics explained in earlier chapter fragments."""
+def _known_names_from_glossary(
+    accumulated: Sequence[GlossaryCandidate],
+    user_decisions: Sequence[TermConcept],
+    suggestions: Sequence[TermConcept],
+    *,
+    target_language: str,
+) -> tuple[str, ...]:
+    """Collect known source and translated names from earlier chapters and glossary concepts."""
+    names: list[str] = []
+    for candidate in accumulated:
+        if candidate.source_text.strip():
+            names.append(candidate.source_text.strip())
+        if candidate.suggested_translation.strip():
+            names.append(candidate.suggested_translation.strip())
+    for concept in (*user_decisions, *suggestions):
+        if concept.canonical_source_text.strip():
+            names.append(concept.canonical_source_text.strip())
+        variant = concept.variant_for(target_language)
+        if variant is not None and variant.text.strip():
+            names.append(variant.text.strip())
+    return tuple(dict.fromkeys(names))
+
+
+def _collect_explained_topics(
+    items: Sequence[FragmentAnalysis | ChapterAnalysis],
+) -> tuple[str, ...]:
+    """Collect deduplicated lemmas and grammar topics from fragment or chapter analyses."""
     topics: list[str] = []
     seen: set[str] = set()
 
@@ -1952,10 +2046,10 @@ def _prior_explained_topics(parts: Sequence[FragmentAnalysis]) -> tuple[str, ...
         seen.add(key)
         topics.append(compact)
 
-    for part in parts:
-        for entry in part.before_you_read:
+    for item in items:
+        for entry in item.before_you_read:
             add(entry.expression)
-        plan = part.content_plan
+        plan = item.content_plan
         if plan is None:
             continue
         for difficulty in plan.difficulties:
@@ -1987,6 +2081,47 @@ def _prior_explained_topics(parts: Sequence[FragmentAnalysis]) -> tuple[str, ...
                 for quote in quotes:
                     add(quote if len(quote) <= 80 else quote[:77].rstrip() + "...")
     return tuple(topics)
+
+
+def _prior_explained_topics(parts: Sequence[FragmentAnalysis]) -> tuple[str, ...]:
+    """Collect deduplicated lemmas and grammar topics explained in earlier chapter fragments."""
+    return _collect_explained_topics(parts)
+
+
+def _prior_chapter_topics(
+    document: CanonicalDocument,
+    section: DocumentSection,
+    analyses: Sequence[ChapterAnalysis],
+    *,
+    parallel_batch: bool,
+    seed_active: bool,
+) -> tuple[str, ...]:
+    """Collect deduplicated topics explained in earlier content chapters in reading order."""
+    ordered_sections = getattr(document, "ordered_sections", document.sections)
+    if parallel_batch:
+        if not seed_active:
+            return ()
+        seed_section = _first_content_section(document)
+        if seed_section is None or seed_section.order >= section.order:
+            return ()
+        eligible_ids = {seed_section.id}
+    else:
+        eligible_ids = {
+            other.id
+            for other in ordered_sections
+            if other.order < section.order
+            and not document.is_front_matter(other)
+            and not getattr(other, "is_notes_only", False)
+        }
+    if not eligible_ids:
+        return ()
+    analyses_by_section = {analysis.section_id: analysis for analysis in analyses}
+    ordered_prior = tuple(
+        analyses_by_section[other.id]
+        for other in ordered_sections
+        if other.id in eligible_ids and other.id in analyses_by_section
+    )
+    return _collect_explained_topics(ordered_prior)
 
 
 def _has_meaningful_part_title(
