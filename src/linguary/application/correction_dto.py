@@ -12,13 +12,17 @@ from linguary.application.llm_dto import (
     BlockResultResponse, GlossaryHintResponse, LanguageNoteResponse, LLMPayloadError,
     SegmentTranslationResponse,
 )
-from linguary.domain import BlockTreatment
+from linguary.domain import BlockProcessingResult, BlockTreatment
 from linguary.domain.book_conditions import freeze, thaw
-from linguary.domain.correction import CORRECTION_POLICY_VERSION, CORRECTION_POLICY_VERSION_V2
+from linguary.domain.correction import (
+    CORRECTION_POLICY_VERSION, CORRECTION_POLICY_VERSION_V2, CORRECTION_POLICY_VERSION_V3,
+    is_candidate_correction_policy,
+)
 
 
 CORRECTION_VERSIONS = {'context': 1, 'schema': 1, 'validation': 1, 'grouping': 1}
 CORRECTION_VERSIONS_V2 = {'context': 2, 'schema': 2, 'validation': 2, 'grouping': 1, 'review_schema': 1}
+CORRECTION_VERSIONS_V3 = {'context': 2, 'schema': 2, 'validation': 3, 'grouping': 1, 'review_schema': 1}
 CORRECTION_PARAMETERS = frozenset({
     'temperature', 'max_output_tokens', 'timeout_seconds', 'max_attempts',
     'max_unit_source_chars', 'input_price_per_mtok', 'output_price_per_mtok',
@@ -205,12 +209,14 @@ class CorrectionSnapshotV2:
     policy_version: str = CORRECTION_POLICY_VERSION_V2
 
     def __post_init__(self):
-        if self.required is not True or self.policy_version != CORRECTION_POLICY_VERSION_V2:
+        if self.required is not True or not is_candidate_correction_policy(self.policy_version):
             raise LLMPayloadError('неподдерживаемая политика исправления главы')
         # Reuse the unchanged route/parameter validation of the first contract.
         base = CorrectionSnapshot(self.model, self.route, self.parameters, self.prompt, CORRECTION_VERSIONS)
+        expected = (CORRECTION_VERSIONS_V3 if self.policy_version == CORRECTION_POLICY_VERSION_V3
+                    else CORRECTION_VERSIONS_V2)
         if (not isinstance(self.review_prompt, str) or not self.review_prompt.strip()
-                or not isinstance(self.versions, Mapping) or dict(self.versions) != CORRECTION_VERSIONS_V2
+                or not isinstance(self.versions, Mapping) or dict(self.versions) != expected
                 or any(type(v) is not int for v in self.versions.values())):
             raise LLMPayloadError('неполный снимок проверки кандидатов')
         object.__setattr__(self, 'route', base.route)
@@ -221,12 +227,32 @@ class CorrectionSnapshotV2:
         return {name: thaw(getattr(self, name)) for name in self.__dataclass_fields__}
 
 
+def unchanged_reader_texts(previous: BlockProcessingResult) -> frozenset[str]:
+    """Every reader string already stored on one block result."""
+    texts: list[str] = []
+    if isinstance(previous.translated_text, str):
+        texts.append(previous.translated_text)
+    texts.extend(text for text in previous.segment_translations if isinstance(text, str))
+    for hint in previous.glossary_hints:
+        texts.append(hint.translation)
+        if isinstance(hint.note, str):
+            texts.append(hint.note)
+    for note in previous.language_notes:
+        texts.append(note.note)
+        if isinstance(note.translated_excerpt, str):
+            texts.append(note.translated_excerpt)
+    for assistance in previous.fragment_assistances:
+        if isinstance(assistance.text, str):
+            texts.append(assistance.text)
+    return frozenset(texts)
+
+
 def parse_correction_snapshot(payload):
     if not isinstance(payload, Mapping):
         raise LLMPayloadError('неполный снимок исправления главы')
     if payload.get('policy_version') == CORRECTION_POLICY_VERSION:
         return CorrectionSnapshot.from_payload(payload)
-    if (payload.get('policy_version') != CORRECTION_POLICY_VERSION_V2
+    if (not is_candidate_correction_policy(payload.get('policy_version'))
             or set(payload) != set(CorrectionSnapshotV2.__dataclass_fields__)):
         raise LLMPayloadError('неполный снимок проверки кандидатов')
     return CorrectionSnapshotV2(**payload)

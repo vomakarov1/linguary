@@ -13,7 +13,7 @@ from linguary.adapters.llm.rate_limit import RateLimitedLLMClient
 from linguary.application.book_conditions import ConditionsError
 from linguary.application.correction_dto import (
     CORRECTION_PARAMETERS, ChapterCorrectionResponse, CorrectionSnapshot,
-    CORRECTION_VERSIONS_V2, CorrectionSnapshotV2, ChapterCorrectionV2Response,
+    CORRECTION_VERSIONS_V3, CorrectionSnapshotV2, ChapterCorrectionV2Response,
     ChapterCorrectionReviewResponse, parse_correction_snapshot,
 )
 from linguary.application.llm_dto import LLMPayloadError
@@ -23,7 +23,9 @@ from linguary.composition.book_runtime import route_snapshot
 from linguary.composition.llm import ConfiguredLLMClient
 from linguary.domain import LLMCallStage, ProcessingRunStatus, TaskStatus, TaskType
 from linguary.domain.book_conditions import WorkStateError, thaw
-from linguary.domain.correction import correction_policy, correction_task_identity
+from linguary.domain.correction import (
+    CORRECTION_POLICY_VERSION_V3, correction_policy, correction_task_identity,
+)
 from linguary.domain.llm_log import CallContext, TokenPricing
 from linguary.domain.recovery import CallAttempt
 
@@ -95,7 +97,8 @@ def correction_snapshot(settings) -> CorrectionSnapshotV2:
     return CorrectionSnapshotV2(
         model=llm.effective_correction_model, route=route_snapshot(llm),
         parameters={name: getattr(llm, name) for name in CORRECTION_PARAMETERS},
-        prompt=CORRECTION_PROMPT_V2, review_prompt=CORRECTION_REVIEW_PROMPT, versions=CORRECTION_VERSIONS_V2,
+        prompt=CORRECTION_PROMPT_V2, review_prompt=CORRECTION_REVIEW_PROMPT,
+        versions=CORRECTION_VERSIONS_V3, policy_version=CORRECTION_POLICY_VERSION_V3,
     )
 
 
