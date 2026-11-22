@@ -67,7 +67,14 @@ def _route(value, settings):
         _text(bound[key])
     # A fixed verified token bound applies only inside its attested full wire-size envelope.
     # This does not infer a token/byte ratio or download the supporting document.
-    wire_settings = replace(settings, model=value['model'], temperature=None, max_output_tokens=None)
+    wire_settings = replace(
+        settings,
+        model=value['model'],
+        temperature=None,
+        max_output_tokens=None,
+        reasoning_effort=None,
+        reasoning_max_tokens=None,
+    )
     def input_bound(request):
         if request.max_completion_tokens != completion:
             raise WorkStateError('предел запроса не соответствует подтверждённому маршруту')

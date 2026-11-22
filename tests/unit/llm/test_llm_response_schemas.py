@@ -522,3 +522,85 @@ def test_visual_fact_schema_rejects_empty_description(field):
     data = {'anchor': {'block_id': 'b1', 'quote': 'Holmes'}, 'subject': 'Holmes', 'detail': 'coat', field: ' '}
     with pytest.raises(ValidationError):
         QuotedSceneVisualFactSchema.model_validate(data)
+
+
+def test_quoted_context_fact_inferred_falls_back_to_subject_anchor_when_anchors_empty():
+    import json
+    from linguary.adapters.llm.json_schema import strict_json_schema
+    from linguary.adapters.llm.payloads import parse_payload
+    from linguary.adapters.llm.schemas import NarrativeAnalysisSchema, QuotedContextFactSchema
+    from linguary.application.ports.llm import LLMResponseKind
+
+    inferred = QuotedContextFactSchema.model_validate(
+        {
+            "kind": "speaker",
+            "anchors": [],
+            "subject_anchor": {"block_id": "b1", "quote": "‘What’s his name again?’"},
+            "value": "Mr Dursley",
+            "certainty": "inferred",
+        }
+    )
+    assert len(inferred.anchors) == 1
+    assert inferred.anchors[0].block_id == "b1"
+    assert inferred.anchors[0].quote == "‘What’s his name again?’"
+
+    # End-to-end through parse_payload for narrative analysis.
+    narrative_json = json.dumps(
+        {
+            "translation_instructions": "Keep tone.",
+            "chapter_summary": "Summary.",
+            "glossary_candidates": [],
+            "context_facts": [
+                {
+                    "kind": "speaker",
+                    "anchors": [],
+                    "subject_anchor": {"block_id": "b1", "quote": "‘What’s his name again?’"},
+                    "value": "Mr Dursley",
+                    "certainty": "inferred",
+                }
+            ],
+            "scenes": [],
+        }
+    )
+    parsed = parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE, narrative_json)
+    assert len(parsed.context_facts) == 1
+    assert len(parsed.context_facts[0].anchors) == 1
+
+    # Strict JSON schema still requires `anchors` on QuotedContextFactSchema.
+    schema = strict_json_schema(NarrativeAnalysisSchema)
+    cf_def = schema["$defs"]["QuotedContextFactSchema"]
+    assert "anchors" in cf_def["required"]
+
+    # Explicit, unknown, invalid subject_anchor, or inferred with value=None are still rejected.
+    for bad_payload in (
+        {
+            "kind": "speaker",
+            "anchors": [],
+            "subject_anchor": {"block_id": "b1", "quote": "‘What’s his name again?’"},
+            "value": "Mr Dursley",
+            "certainty": "explicit",
+        },
+        {
+            "kind": "speaker",
+            "anchors": [],
+            "subject_anchor": {"block_id": "b1", "quote": "‘What’s his name again?’"},
+            "value": None,
+            "certainty": "unknown",
+        },
+        {
+            "kind": "speaker",
+            "anchors": [],
+            "subject_anchor": {"block_id": "b1", "quote": "‘What’s his name again?’"},
+            "value": None,
+            "certainty": "inferred",
+        },
+        {
+            "kind": "speaker",
+            "anchors": [],
+            "subject_anchor": {"block_id": "b1", "quote": "   "},
+            "value": "Mr Dursley",
+            "certainty": "inferred",
+        },
+    ):
+        with pytest.raises(ValidationError):
+            QuotedContextFactSchema.model_validate(bad_payload)

@@ -389,6 +389,20 @@ class QuotedContextFactSchema(ContextFactSchema):
     anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)
     subject_anchor: QuotedSourceAnchorSchema
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fallback_inferred_anchors(cls, data: object) -> object:
+        if (
+            isinstance(data, dict)
+            and isinstance(certainty := data.get("certainty"), str)
+            and certainty.strip() == "inferred"
+            and isinstance(data.get("anchors"), list)
+            and len(data["anchors"]) == 0
+            and isinstance(data.get("subject_anchor"), dict)
+        ):
+            return {**data, "anchors": [dict(data["subject_anchor"])]}
+        return data
+
 
 class QuotedContentPlanSchema(ContentPlanV3Schema):
     version: Literal[3] = 3

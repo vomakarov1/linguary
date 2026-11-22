@@ -23,6 +23,9 @@ from linguary.application.ports.llm import LLMConfigurationError
 from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
 from linguary.domain.name_translation import NameTranslationStrategy
 
+#: Supported reasoning effort levels for reasoning-capable LLM endpoints.
+SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high"})
+
 #: Provider of the initial implementation: HTTP API compatible with OpenAI chat completions
 #: and structured outputs (ADR § 3). The same adapter serves compatible gateways and local
 #: servers, so they do not have separate provider names.
@@ -156,6 +159,8 @@ class LLMSettings:
     proxy_url: str | None = field(default=None, repr=False)
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_output_tokens: int | None = None
+    reasoning_effort: str | None = None
+    reasoning_max_tokens: int | None = None
     temperature: float | None = None
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     max_fragment_blocks: int | None = None
@@ -182,6 +187,26 @@ class LLMSettings:
             raise SettingsError("предел ожидания ответа модели должен быть положительным")
         if self.max_output_tokens is not None and self.max_output_tokens <= 0:
             raise SettingsError("лимит выходных токенов должен быть положительным")
+        if self.reasoning_effort is not None:
+            if not isinstance(self.reasoning_effort, str):
+                raise SettingsError("уровень рассуждения модели должен быть строкой")
+            normalized_effort = self.reasoning_effort.strip().lower()
+            if normalized_effort not in SUPPORTED_REASONING_EFFORTS:
+                raise SettingsError(
+                    "неподдерживаемый уровень рассуждения модели; допустимо: none, minimal, low, medium, high"
+                )
+            object.__setattr__(self, "reasoning_effort", normalized_effort)
+        if self.reasoning_max_tokens is not None:
+            if isinstance(self.reasoning_max_tokens, bool) or not isinstance(self.reasoning_max_tokens, int) or self.reasoning_max_tokens <= 0:
+                raise SettingsError("лимит токенов рассуждения должен быть положительным целым числом")
+        if self.reasoning_effort is not None and self.reasoning_max_tokens is not None:
+            raise SettingsError("нельзя одновременно задавать reasoning_effort и reasoning_max_tokens")
+        if (
+            self.max_output_tokens is not None
+            and self.reasoning_max_tokens is not None
+            and self.reasoning_max_tokens >= self.max_output_tokens
+        ):
+            raise SettingsError("лимит токенов рассуждения должен быть меньше лимита выходных токенов")
         if self.max_attempts < 1:
             raise SettingsError("число попыток вызова модели должно быть положительным")
         if self.max_fragment_blocks is not None and self.max_fragment_blocks < 1:
@@ -199,9 +224,20 @@ class LLMSettings:
             raise SettingsError("цена выходных токенов не может быть отрицательной")
 
     @property
+    def effective_output_token_budget(self) -> int | None:
+        """Visible output token budget after reserving explicit reasoning_max_tokens."""
+        if self.max_output_tokens is None:
+            return None
+        if self.reasoning_max_tokens is not None:
+            return max(1, self.max_output_tokens - self.reasoning_max_tokens)
+        return self.max_output_tokens
+
+    @property
     def effective_max_fragment_blocks(self) -> int:
         """Explicit limit or size calculated from available output tokens."""
-        return self.max_fragment_blocks or fragment_blocks_for(self.max_output_tokens)
+        if self.max_fragment_blocks is not None:
+            return self.max_fragment_blocks
+        return fragment_blocks_for(self.effective_output_token_budget)
 
     @property
     def effective_analysis_model(self) -> str:
@@ -465,6 +501,7 @@ __all__ = [
     "DEFAULT_WORKER_CONCURRENCY",
     "OPENAI_COMPATIBLE_PROVIDER",
     "SUPPORTED_READER_LEVELS",
+    "SUPPORTED_REASONING_EFFORTS",
     "AppSettings",
     "DiagnosticsSettings",
     "RecoverySettings",

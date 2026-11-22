@@ -15,6 +15,7 @@ and rejected requests are permanent. The provider API key is never exposed in er
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
@@ -132,7 +133,8 @@ class OpenAICompatibleLLMClient(LLMClient):
         truncated = False
         try:
             choice = _choice(document)
-            truncated = _finish_reason(choice) == _LENGTH_FINISH_REASON
+            finish_reason = _finish_reason(choice)
+            truncated = finish_reason == _LENGTH_FINISH_REASON
             if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
                 message = choice.get('message')
                 if isinstance(message, dict) and message.get('refusal'):
@@ -141,7 +143,12 @@ class OpenAICompatibleLLMClient(LLMClient):
                         violation=Violation('provider_refusal', request.kind.value,
                                             safe_message='Провайдер отказался исправлять главу'),
                     )
-            content = _content(choice)
+            content = _content(
+                choice,
+                truncated=truncated,
+                finish_reason=finish_reason,
+                stage=request.kind.value,
+            )
             payload = parse_payload(request.kind, content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=truncated)
             if request.kind == LLMResponseKind.CHAPTER_CORRECTION and request.block_aliases:
                 payload = payload.with_resolved_block_ids(dict(request.block_aliases))
@@ -204,13 +211,14 @@ class OpenAICompatibleLLMClient(LLMClient):
         if _is_openrouter_url(self._settings.base_url) and isinstance(self._http, httpx.AsyncClient):
             body = {**body, "provider": {"require_parameters": True}}
         try:
-            response = await self._http.post(
-                _endpoint(self._settings.base_url),
-                json=body,
-                headers=_headers(self._settings),
-                timeout=self._settings.timeout_seconds,
-            )
-        except httpx.TimeoutException as error:
+            async with asyncio.timeout(self._settings.timeout_seconds):
+                response = await self._http.post(
+                    _endpoint(self._settings.base_url),
+                    json=body,
+                    headers=_headers(self._settings),
+                    timeout=self._settings.timeout_seconds,
+                )
+        except (httpx.TimeoutException, TimeoutError):
             raise LLMTransportError(
                 f"провайдер {self._settings.provider} не ответил за "
                 f"{self._settings.timeout_seconds:g} с"
@@ -292,6 +300,25 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
         body["max_completion_tokens"] = settings.max_output_tokens
     if settings.temperature is not None:
         body["temperature"] = settings.temperature
+    if settings.reasoning_effort is not None:
+        if _is_openrouter_url(settings.base_url):
+            body["reasoning"] = {"effort": settings.reasoning_effort}
+        else:
+            body["reasoning_effort"] = settings.reasoning_effort
+    elif settings.reasoning_max_tokens is not None:
+        if not _is_openrouter_url(settings.base_url):
+            raise LLMConfigurationError(
+                "reasoning_max_tokens поддерживается только для OpenRouter; используйте reasoning_effort"
+            )
+        effective_completion = body.get("max_completion_tokens")
+        if (
+            effective_completion is not None
+            and settings.reasoning_max_tokens >= effective_completion
+        ):
+            raise LLMConfigurationError(
+                "лимит токенов рассуждения должен быть меньше общего предела выходных токенов"
+            )
+        body["reasoning"] = {"max_tokens": settings.reasoning_max_tokens}
     return body
 
 
@@ -414,12 +441,32 @@ def _choice(document: dict[str, Any]) -> dict[str, Any]:
     return first
 
 
-def _content(choice: dict[str, Any]) -> str:
+def _content(
+    choice: dict[str, Any],
+    *,
+    truncated: bool = False,
+    finish_reason: str | None = None,
+    stage: str = "unknown",
+) -> str:
     """Structured response message text."""
     message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, str):
-        raise LLMResponseFormatError("модель вернула ответ без содержимого")
+    if not isinstance(content, str) or not content.strip():
+        reason_suffix = f" (finish_reason={finish_reason})" if finish_reason else ""
+        if truncated:
+            raise LLMResponseFormatError(
+                f"модель вернула ответ без содержимого; обрыв ответа по лимиту токенов{reason_suffix}",
+                truncated=True,
+                violation=Violation(
+                    "provider_truncated",
+                    stage,
+                    safe_message="Ответ оборван по лимиту токенов",
+                ),
+            )
+        raise LLMResponseFormatError(
+            f"модель вернула ответ без содержимого{reason_suffix}",
+            truncated=False,
+        )
     return content
 
 

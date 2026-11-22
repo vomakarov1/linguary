@@ -514,3 +514,81 @@ def test_invalid_sequential_analysis_in_toml_is_rejected(tmp_path: Path) -> None
             environ={},
             config_path=write_config(tmp_path, "[checks]\nsequential_analysis = 'maybe'\n"),
         )
+
+
+def test_reasoning_settings_load_from_toml_and_env_and_adjust_fragment_budget(tmp_path: Path) -> None:
+    from linguary.adapters.config import SUPPORTED_REASONING_EFFORTS
+    from linguary.application.analysis_merge import fragment_blocks_for
+
+    assert {"none", "minimal", "low", "medium", "high"} == SUPPORTED_REASONING_EFFORTS
+    default = LLMSettings()
+    assert default.reasoning_effort is None
+    assert default.reasoning_max_tokens is None
+    assert default.effective_output_token_budget is None
+
+    effort_toml = load_settings(
+        environ={},
+        config_path=write_config(tmp_path, "[llm]\nreasoning_effort = 'LOW'\n"),
+    )
+    assert effort_toml.llm.reasoning_effort == "low"
+
+    effort_env = load_settings(
+        environ={"LINGUARY_LLM_REASONING_EFFORT": "medium"},
+        config_path=write_config(tmp_path, "[llm]\nreasoning_effort = 'low'\n"),
+    )
+    assert effort_env.llm.reasoning_effort == "medium"
+
+    empty_env_ignored = load_settings(
+        environ={"LINGUARY_LLM_REASONING_EFFORT": ""},
+        config_path=write_config(tmp_path, ""),
+    )
+    assert empty_env_ignored.llm.reasoning_effort is None
+
+    tokens_toml = load_settings(
+        environ={},
+        config_path=write_config(tmp_path, "[llm]\nmax_output_tokens = 32768\nreasoning_max_tokens = 8192\n"),
+    )
+    assert tokens_toml.llm.reasoning_max_tokens == 8192
+    assert tokens_toml.llm.effective_output_token_budget == 24576
+    assert tokens_toml.llm.effective_max_fragment_blocks == fragment_blocks_for(24576)
+
+    explicit_blocks = LLMSettings(
+        max_output_tokens=16384,
+        reasoning_max_tokens=4096,
+        max_fragment_blocks=15,
+    )
+    assert explicit_blocks.effective_max_fragment_blocks == 15
+
+    tokens_env = load_settings(
+        environ={
+            "LINGUARY_LLM_MAX_OUTPUT_TOKENS": "16384",
+            "LINGUARY_LLM_REASONING_MAX_TOKENS": "4096",
+        },
+        config_path=write_config(tmp_path, ""),
+    )
+    assert tokens_env.llm.reasoning_max_tokens == 4096
+    assert tokens_env.llm.effective_output_token_budget == 12288
+    assert tokens_env.llm.effective_max_fragment_blocks == fragment_blocks_for(12288)
+
+
+def test_reasoning_settings_validation() -> None:
+    with pytest.raises(SettingsError):
+        LLMSettings(reasoning_effort="ultra")
+    with pytest.raises(SettingsError):
+        LLMSettings(reasoning_effort="")
+    with pytest.raises(SettingsError):
+        LLMSettings(reasoning_effort="   ")
+    with pytest.raises(SettingsError):
+        LLMSettings(reasoning_effort=123)  # type: ignore[arg-type]
+    with pytest.raises(SettingsError):
+        LLMSettings(reasoning_max_tokens=0)
+    with pytest.raises(SettingsError):
+        LLMSettings(reasoning_max_tokens=-1)
+    with pytest.raises(SettingsError):
+        LLMSettings(reasoning_max_tokens=True)  # type: ignore[arg-type]
+    with pytest.raises(SettingsError):
+        LLMSettings(reasoning_effort="low", reasoning_max_tokens=2048)
+    with pytest.raises(SettingsError):
+        LLMSettings(max_output_tokens=4096, reasoning_max_tokens=4096)
+    with pytest.raises(SettingsError):
+        LLMSettings(max_output_tokens=4096, reasoning_max_tokens=8192)

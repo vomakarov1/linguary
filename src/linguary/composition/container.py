@@ -502,7 +502,13 @@ def build_application(
             limiter=rate_limiter, on_logged=on_logged, injected_client=llm_client),
         validator_factory=lambda settings, conditions: _validator(replace(settings,
             checks=check_settings_from_mapping(thaw(conditions.payload['checks'])))))
-    quality_settings = replace(app_settings.llm, temperature=None, max_output_tokens=None)
+    quality_settings = replace(
+        app_settings.llm,
+        temperature=None,
+        max_output_tokens=None,
+        reasoning_effort=None,
+        reasoning_max_tokens=None,
+    )
     quality_configured = ConfiguredLLMClient(quality_settings)
     quality_clients = {}
     def quality_client_for(route):
@@ -669,7 +675,7 @@ def _analysis_sequence(
             max_concurrency=settings.worker.concurrency,
             seed_first_chapter=settings.checks.seed_first_chapter,
             sequential_analysis=settings.checks.sequential_analysis,
-            max_output_tokens=settings.llm.max_output_tokens,
+            max_output_tokens=settings.llm.effective_output_token_budget,
             staged_analysis=settings.llm.staged_analysis,
         ),
     )

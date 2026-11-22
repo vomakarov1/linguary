@@ -2928,11 +2928,19 @@ def _pass_model_dependencies(payload: Mapping, kind: AnalysisPassKind) -> dict:
     models = payload.get('models', {})
     params = payload.get('llm_parameters', {})
     route = payload.get('route', {})
-    return dict(model=models.get('analysis_passes', {}).get(kind.value) or models.get('analysis')
+    dependencies = dict(
+        model=models.get('analysis_passes', {}).get(kind.value) or models.get('analysis')
         or params.get('analysis_model') or params.get('model', ''),
         provider=route.get('provider', params.get('provider', '')),
         base_url=route.get('base_url', ''),
-        temperature=params.get('temperature'), max_output_tokens=params.get('max_output_tokens'))
+        temperature=params.get('temperature'),
+        max_output_tokens=params.get('max_output_tokens'),
+    )
+    if params.get('reasoning_effort') is not None:
+        dependencies['reasoning_effort'] = params['reasoning_effort']
+    if params.get('reasoning_max_tokens') is not None:
+        dependencies['reasoning_max_tokens'] = params['reasoning_max_tokens']
+    return dependencies
 
 
 def _candidate_suggestion_key(candidate: Mapping) -> tuple[str, str, str]:

@@ -1210,5 +1210,132 @@ async def test_openrouter_base_url_includes_provider_require_parameters(
     assert _json(captured[0]).get("provider") == expected_provider_routing
 
 
+async def test_request_body_passes_reasoning_for_openrouter_and_openai() -> None:
+    captured_or: list[httpx.Request] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (captured_or.append(req), httpx.Response(200, json=completion(as_content(translation_payload()))))[1]
+        )
+    ) as http_or:
+        client_or = OpenAICompatibleLLMClient(
+            settings=settings(base_url="https://openrouter.ai/api/v1", reasoning_effort="low"),
+            http_client=http_or,
+        )
+        await client_or.generate(LLMRequest.for_translation(instructions="Translate.", input_text="b1: text"))
+    assert _json(captured_or[0]).get("reasoning") == {"effort": "low"}
+    assert "reasoning_effort" not in _json(captured_or[0])
+
+    captured_tokens: list[httpx.Request] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (captured_tokens.append(req), httpx.Response(200, json=completion(as_content(translation_payload()))))[1]
+        )
+    ) as http_tokens:
+        client_tokens = OpenAICompatibleLLMClient(
+            settings=settings(
+                base_url="https://openrouter.ai/api/v1",
+                max_output_tokens=16384,
+                reasoning_max_tokens=4096,
+            ),
+            http_client=http_tokens,
+        )
+        await client_tokens.generate(LLMRequest.for_translation(instructions="Translate.", input_text="b1: text"))
+    assert _json(captured_tokens[0]).get("reasoning") == {"max_tokens": 4096}
+
+    captured_oai: list[httpx.Request] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (captured_oai.append(req), httpx.Response(200, json=completion(as_content(translation_payload()))))[1]
+        )
+    ) as http_oai:
+        client_oai = OpenAICompatibleLLMClient(
+            settings=settings(base_url="https://api.openai.com/v1", reasoning_effort="medium"),
+            http_client=http_oai,
+        )
+        await client_oai.generate(LLMRequest.for_translation(instructions="Translate.", input_text="b1: text"))
+    assert _json(captured_oai[0]).get("reasoning_effort") == "medium"
+    assert "reasoning" not in _json(captured_oai[0])
+
+
+async def test_reasoning_max_tokens_rejects_non_openrouter_and_exceeding_request_cap() -> None:
+    from dataclasses import replace
+
+    non_or_client = client_over(
+        responding(completion(as_content(translation_payload()))),
+        base_url="https://api.openai.com/v1",
+        reasoning_max_tokens=4096,
+    )
+    with pytest.raises(LLMConfigurationError, match="OpenRouter"):
+        await non_or_client.generate(LLMRequest.for_translation(instructions="Translate.", input_text="b1: text"))
+
+    or_client = client_over(
+        responding(completion(as_content(translation_payload()))),
+        base_url="https://openrouter.ai/api/v1",
+        max_output_tokens=16384,
+        reasoning_max_tokens=4096,
+    )
+    capped_request = replace(
+        LLMRequest.for_translation(instructions="Translate.", input_text="b1: text"),
+        max_completion_tokens=4096,
+    )
+    with pytest.raises(LLMConfigurationError, match="меньше общего предела"):
+        await or_client.generate(capped_request)
+
+
+@pytest.mark.parametrize("empty_content", [None, "", "   "])
+async def test_empty_content_with_length_and_stop_finish_reasons(empty_content: str | None) -> None:
+    length_doc = {
+        "model": "test-model",
+        "choices": [{"message": {"role": "assistant", "content": empty_content}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 32768},
+    }
+    with pytest.raises(LLMResponseFormatError) as exc_len:
+        await client_over(responding(length_doc)).generate(
+            LLMRequest.for_translation(instructions="Translate.", input_text="b1: text")
+        )
+    assert exc_len.value.truncated is True
+    assert exc_len.value.violation is not None
+    assert exc_len.value.violation.rule_code == "provider_truncated"
+    assert "finish_reason=length" in str(exc_len.value)
+
+    stop_doc = {
+        "model": "test-model",
+        "choices": [{"message": {"role": "assistant", "content": empty_content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 800},
+    }
+    with pytest.raises(LLMResponseFormatError) as exc_stop:
+        await client_over(responding(stop_doc)).generate(
+            LLMRequest.for_translation(instructions="Translate.", input_text="b1: text")
+        )
+    assert exc_stop.value.truncated is False
+    assert "finish_reason=stop" in str(exc_stop.value)
+
+
+async def test_overall_asyncio_timeout_aborts_stalled_request_and_preserves_cancellation() -> None:
+    class _SlowHttp:
+        async def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            await asyncio.sleep(5)
+            raise AssertionError("should have timed out")
+
+    client = OpenAICompatibleLLMClient(
+        settings=settings(timeout_seconds=0.05),
+        http_client=_SlowHttp(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(LLMTransportError, match="не ответил"):
+        await client.generate(LLMRequest.for_translation(instructions="Translate.", input_text="b1: text"))
+
+    slow_client = OpenAICompatibleLLMClient(
+        settings=settings(timeout_seconds=5.0),
+        http_client=_SlowHttp(),  # type: ignore[arg-type]
+    )
+    task = asyncio.create_task(
+        slow_client.generate(LLMRequest.for_translation(instructions="Translate.", input_text="b1: text"))
+    )
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 
 

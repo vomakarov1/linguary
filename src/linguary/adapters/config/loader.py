@@ -100,6 +100,8 @@ _LLM_FIELDS: Mapping[str, Callable[[object, str], object]] = {
     "proxy_url": _as_str,
     "timeout_seconds": _as_float,
     "max_output_tokens": _as_int,
+    "reasoning_effort": _as_str,
+    "reasoning_max_tokens": _as_int,
     "temperature": _as_float,
     "max_attempts": _as_int,
     "max_fragment_blocks": _as_int,
