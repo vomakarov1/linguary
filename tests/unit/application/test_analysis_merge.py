@@ -2750,3 +2750,382 @@ def test_validate_content_plan_resolves_lexical_hint_and_notes_by_overlapping_se
     assert seg_exc.value.violation.block_ids == (b.id,)
 
 
+def test_normalize_a2_lifts_stoplist_in_read_as_is_segments_and_unbacked_glossary_only() -> None:
+    from linguary.application.analysis_merge import normalize_a2_dialogue_response
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse,
+    )
+    from linguary.domain import BlockSegment
+    from linguary.domain.content_plan import RequiredPoint
+
+    point = (RequiredPoint("p1", "Объяснить конструкцию."),)
+
+    # 1. Segmented READ_AS_IS block: simple seg stays READ_AS_IS, single reporting verb -> GLOSSARY_ONLY,
+    #    stoplist -> TRANSLATE; also single vocab seg with vocab difficulty -> GLOSSARY_ONLY.
+    seg_s1 = "He sat down. "
+    seg_s2 = "It winked. "
+    seg_s3 = "What did you do that for? "
+    seg_s4 = "She felt nervous."
+    seg_text = seg_s1 + seg_s2 + seg_s3 + seg_s4
+    seg_block = replace(
+        make_analysis_block(section_id=SECTION_ID, order=0, text=seg_text),
+        segments=(
+            BlockSegment(0, len(seg_s1), 0),
+            BlockSegment(len(seg_s1), len(seg_s1) + len(seg_s2), 1),
+            BlockSegment(len(seg_s1) + len(seg_s2), len(seg_s1) + len(seg_s2) + len(seg_s3), 2),
+            BlockSegment(len(seg_s1) + len(seg_s2) + len(seg_s3), len(seg_text), 3),
+        ),
+    )
+
+    # 2. Whole READ_AS_IS blocks covering each A2 stoplist detector + negative controls.
+    stoplist_read_as_is = (
+        "He has been here.",              # Present Perfect (been)
+        "We have seen it before.",        # Present Perfect (participle)
+        "She would stay.",                # would
+        "I know what you mean.",          # embedded what-clause
+        "Oh, great!",                     # sarcasm
+        "I don't got time.",              # nonstandard don't got
+        "He ain't leaving.",              # nonstandard ain't
+        "Her face went red.",             # state-change idiom went red
+        "It made him uneasy.",            # state-change idiom made ... uneasy
+        "She felt uneasy.",               # uneasy in _SHORT_B1_WORDS (no vocab diff -> TRANSLATE)
+    )
+    plain_read_as_is = (
+        "I have a cat.",                  # possessive have -> stays READ_AS_IS
+        "We have to go now.",             # have to -> stays READ_AS_IS
+        "What did you say?",              # direct Wh-question -> stays READ_AS_IS
+        "‘A what?’",                      # short question -> stays READ_AS_IS
+    )
+    # 3. GLOSSARY_ONLY blocks with nonlexical stoplist: unbacked -> TRANSLATE, backed -> stays GLOSSARY_ONLY.
+    glossary_unbacked = (
+        "He has gone home.",              # Present Perfect without grammar diff
+        "Yeah, right.",                   # sarcasm without idiom/speech_style diff
+        "He ain't here.",                 # nonstandard without speech_style diff
+        "It made Nick uneasy.",           # state-change idiom with only vocabulary diff
+    )
+    glossary_backed = (
+        "What is it for?",                # backed by grammar difficulty
+        "I don't got it.",                # backed by speech_style difficulty
+        "Her face went red.",             # backed by idiom difficulty
+    )
+
+    all_blocks = (
+        seg_block,
+        *(
+            make_analysis_block(section_id=SECTION_ID, order=i + 1, text=t)
+            for i, t in enumerate(stoplist_read_as_is)
+        ),
+        *(
+            make_analysis_block(section_id=SECTION_ID, order=20 + i, text=t)
+            for i, t in enumerate(plain_read_as_is)
+        ),
+        *(
+            make_analysis_block(section_id=SECTION_ID, order=40 + i, text=t)
+            for i, t in enumerate(glossary_unbacked)
+        ),
+        *(
+            make_analysis_block(section_id=SECTION_ID, order=60 + i, text=t)
+            for i, t in enumerate(glossary_backed)
+        ),
+    )
+    aliases = {f"b{i + 1}": b.id for i, b in enumerate(all_blocks)}
+
+    n_stop = len(stoplist_read_as_is)
+    n_plain = len(plain_read_as_is)
+    n_unbacked = len(glossary_unbacked)
+    n_backed = len(glossary_backed)
+
+    plan_items = [
+        TreatmentPlanItemResponse(
+            "b1",
+            BlockTreatment.READ_AS_IS,
+            (
+                SegmentTreatmentResponse(1, BlockTreatment.READ_AS_IS),
+                SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+                SegmentTreatmentResponse(3, BlockTreatment.READ_AS_IS),
+                SegmentTreatmentResponse(4, BlockTreatment.READ_AS_IS),
+            ),
+        )
+    ]
+    for i in range(n_stop + n_plain):
+        plan_items.append(TreatmentPlanItemResponse(f"b{2 + i}", BlockTreatment.READ_AS_IS))
+    for i in range(n_unbacked + n_backed):
+        plan_items.append(
+            TreatmentPlanItemResponse(
+                f"b{2 + n_stop + n_plain + i}", BlockTreatment.GLOSSARY_ONLY
+            )
+        )
+
+    unbacked_start = 2 + n_stop + n_plain
+    backed_start = unbacked_start + n_unbacked
+    difficulties = (
+        # Vocabulary difficulty on seg 4 ("nervous") -> seg 4 lifts to GLOSSARY_ONLY
+        QuotedDifficultyResponse(
+            "d-nervous",
+            (QuotedSourceAnchorResponse("b1", "nervous"),),
+            "b1",
+            "vocabulary",
+            "useful",
+            "lexical_hint",
+            point,
+        ),
+        # Only vocabulary difficulty on "It made Nick uneasy." -> still unbacked for idiom -> TRANSLATE
+        QuotedDifficultyResponse(
+            "d-unbacked-vocab",
+            (QuotedSourceAnchorResponse(f"b{unbacked_start + 3}", "uneasy"),),
+            f"b{unbacked_start + 3}",
+            "vocabulary",
+            "useful",
+            "lexical_hint",
+            point,
+        ),
+        # Backed GLOSSARY_ONLY difficulties (grammar, speech_style, idiom)
+        QuotedDifficultyResponse(
+            "d-backed-gram",
+            (QuotedSourceAnchorResponse(f"b{backed_start}", "What is it for?"),),
+            f"b{backed_start}",
+            "grammar",
+            "critical",
+            "explanation",
+            point,
+        ),
+        QuotedDifficultyResponse(
+            "d-backed-speech",
+            (QuotedSourceAnchorResponse(f"b{backed_start + 1}", "don't got"),),
+            f"b{backed_start + 1}",
+            "speech_style",
+            "useful",
+            "explanation",
+            point,
+        ),
+        QuotedDifficultyResponse(
+            "d-backed-idiom",
+            (QuotedSourceAnchorResponse(f"b{backed_start + 2}", "went red"),),
+            f"b{backed_start + 2}",
+            "idiom",
+            "useful",
+            "explanation",
+            point,
+        ),
+    )
+
+    normalized = normalize_a2_dialogue_response(
+        PedagogicalAnalysisResponse(
+            treatment_plan=tuple(plan_items),
+            difficulties=difficulties,
+        ),
+        all_blocks,
+        aliases,
+        reader_level="a2",
+        english_help=False,
+    )
+
+    # Segmented READ_AS_IS block: (READ_AS_IS, GLOSSARY_ONLY, TRANSLATE, GLOSSARY_ONLY)
+    assert normalized.treatment_plan[0].treatment is BlockTreatment.TRANSLATE
+    assert [s.treatment for s in normalized.treatment_plan[0].segments] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+    # Stoplist READ_AS_IS blocks -> all TRANSLATE
+    assert [
+        item.treatment for item in normalized.treatment_plan[1 : 1 + n_stop]
+    ] == [BlockTreatment.TRANSLATE] * n_stop
+    # Negative controls -> stay READ_AS_IS
+    assert [
+        item.treatment
+        for item in normalized.treatment_plan[1 + n_stop : 1 + n_stop + n_plain]
+    ] == [BlockTreatment.READ_AS_IS] * n_plain
+    # Unbacked GLOSSARY_ONLY -> all TRANSLATE
+    assert [
+        item.treatment
+        for item in normalized.treatment_plan[
+            1 + n_stop + n_plain : 1 + n_stop + n_plain + n_unbacked
+        ]
+    ] == [BlockTreatment.TRANSLATE] * n_unbacked
+    # Backed GLOSSARY_ONLY -> stay GLOSSARY_ONLY
+    assert [
+        item.treatment
+        for item in normalized.treatment_plan[1 + n_stop + n_plain + n_unbacked :]
+    ] == [BlockTreatment.GLOSSARY_ONLY] * n_backed
+    # Unbacked vocab hint on promoted whole GLOSSARY_ONLY block became explanation
+    help_by_id = {d.id: d.help_kind for d in normalized.difficulties}
+    assert help_by_id["d-unbacked-vocab"] == "explanation"
+
+
+def test_normalize_a2_preserves_lexical_hint_on_untouched_glossary_segment_and_guards_demotion() -> None:
+    from linguary.application.analysis_merge import (
+        normalize_a2_dialogue_response,
+        validate_content_plan,
+    )
+    from linguary.application.llm_dto import (
+        PedagogicalAnalysisResponse,
+        QuotedContentPlanResponse,
+        QuotedDifficultyResponse,
+        QuotedSourceAnchorResponse,
+        SegmentTreatmentResponse,
+    )
+    from linguary.domain import BlockSegment
+    from linguary.domain.content_plan import RequiredPoint
+
+    point = (RequiredPoint("p1", "Объяснить слово."),)
+
+    # Case 1: Already-TRANSLATE block (TRANSLATE, GLOSSARY_ONLY, READ_AS_IS -> seg 3 lifted to TRANSLATE).
+    # lexical_hint on untouched seg 2 MUST stay lexical_hint; hint on promoted seg 3 becomes explanation.
+    s1 = "He turned away. "
+    s2 = "She felt nervous. "
+    s3 = "He has gone home."
+    text1 = s1 + s2 + s3
+    b1 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=0, text=text1),
+        segments=(
+            BlockSegment(0, len(s1), 0),
+            BlockSegment(len(s1), len(s1) + len(s2), 1),
+            BlockSegment(len(s1) + len(s2), len(text1), 2),
+        ),
+    )
+
+    # Case 2: GLOSSARY_ONLY block (GLOSSARY_ONLY, READ_AS_IS -> seg 2 lifted only to GLOSSARY_ONLY).
+    # lexical_hint on untouched seg 1 MUST stay lexical_hint.
+    t1 = "She felt nervous. "
+    t2 = "It winked."
+    text2 = t1 + t2
+    b2 = replace(
+        make_analysis_block(section_id=SECTION_ID, order=1, text=text2),
+        segments=(
+            BlockSegment(0, len(t1), 0),
+            BlockSegment(len(t1), len(text2), 1),
+        ),
+    )
+
+    # Case 3: Demotion guard — short TRANSLATE replies hitting stoplist stay TRANSLATE; plain reply demotes.
+    guarded_texts = (
+        "He has gone.",
+        "She would go.",
+        "What is it for?",
+        "I know what it is.",
+        "Oh, great!",
+        "He ain't here.",
+        "Her face went red.",
+        "She felt uneasy.",
+        "He was nervous.",
+    )
+    guarded_blocks = tuple(
+        make_analysis_block(section_id=SECTION_ID, order=10 + i, text=t)
+        for i, t in enumerate(guarded_texts)
+    )
+    plain_reply = make_analysis_block(
+        section_id=SECTION_ID, order=30, text="‘Yes,’ he said."
+    )
+
+    blocks = (b1, b2, *guarded_blocks, plain_reply)
+    aliases = {f"b{i + 1}": b.id for i, b in enumerate(blocks)}
+
+    payload = PedagogicalAnalysisResponse(
+        treatment_plan=(
+            TreatmentPlanItemResponse(
+                "b1",
+                BlockTreatment.TRANSLATE,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.TRANSLATE),
+                    SegmentTreatmentResponse(2, BlockTreatment.GLOSSARY_ONLY),
+                    SegmentTreatmentResponse(3, BlockTreatment.GLOSSARY_ONLY),
+                ),
+            ),
+            TreatmentPlanItemResponse(
+                "b2",
+                BlockTreatment.GLOSSARY_ONLY,
+                (
+                    SegmentTreatmentResponse(1, BlockTreatment.GLOSSARY_ONLY),
+                    SegmentTreatmentResponse(2, BlockTreatment.READ_AS_IS),
+                ),
+            ),
+            *(
+                TreatmentPlanItemResponse(f"b{3 + i}", BlockTreatment.TRANSLATE)
+                for i in range(len(guarded_blocks))
+            ),
+            TreatmentPlanItemResponse(
+                f"b{3 + len(guarded_blocks)}", BlockTreatment.TRANSLATE
+            ),
+        ),
+        difficulties=(
+            QuotedDifficultyResponse(
+                "d-b1-untouched",
+                (QuotedSourceAnchorResponse("b1", "nervous"),),
+                "b1",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-b1-promoted",
+                (QuotedSourceAnchorResponse("b1", "gone"),),
+                "b1",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+            QuotedDifficultyResponse(
+                "d-b2-untouched",
+                (QuotedSourceAnchorResponse("b2", "nervous"),),
+                "b2",
+                "vocabulary",
+                "useful",
+                "lexical_hint",
+                point,
+            ),
+        ),
+    )
+
+    normalized = normalize_a2_dialogue_response(
+        payload, blocks, aliases, reader_level="a2", english_help=False
+    )
+
+    # b1: seg 3 lifted to TRANSLATE; untouched seg 2 keeps lexical_hint, promoted seg 3 becomes explanation
+    assert [s.treatment for s in normalized.treatment_plan[0].segments] == [
+        BlockTreatment.TRANSLATE,
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.TRANSLATE,
+    ]
+    # b2: seg 2 lifted only to GLOSSARY_ONLY; untouched seg 1 keeps lexical_hint
+    assert normalized.treatment_plan[1].treatment is BlockTreatment.GLOSSARY_ONLY
+    assert [s.treatment for s in normalized.treatment_plan[1].segments] == [
+        BlockTreatment.GLOSSARY_ONLY,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+    help_by_id = {d.id: d.help_kind for d in normalized.difficulties}
+    assert help_by_id == {
+        "d-b1-untouched": "lexical_hint",
+        "d-b1-promoted": "explanation",
+        "d-b2-untouched": "lexical_hint",
+    }
+
+    # Demotion guard: all guarded short replies keep TRANSLATE; plain reply demotes to READ_AS_IS
+    assert [
+        item.treatment
+        for item in normalized.treatment_plan[2 : 2 + len(guarded_blocks)]
+    ] == [BlockTreatment.TRANSLATE] * len(guarded_blocks)
+    assert normalized.treatment_plan[-1].treatment is BlockTreatment.READ_AS_IS
+
+    # Combined validation with P5.T1 accepts the preserved lexical_hint on b1 seg 2.
+    combined = ChapterAnalysisResponse(
+        translation_instructions="Keep voice.",
+        chapter_summary="Summary.",
+        treatment_plan=normalized.treatment_plan,
+        content_plan=QuotedContentPlanResponse(difficulties=normalized.difficulties),
+    )
+    texts = {b.id: b.text for b in blocks}
+    visible = {alias: texts[bid] for alias, bid in aliases.items()}
+    validated = validate_content_plan(
+        combined, aliases, texts, visible_texts_by_alias=visible, blocks=blocks
+    )
+    assert validated is not None
+
+
+

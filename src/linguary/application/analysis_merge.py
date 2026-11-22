@@ -3290,8 +3290,9 @@ _DIALECT_WORDS = frozenset({
 })
 _SHORT_B1_WORDS = frozenset({
     "winked", "groaned", "chuckled", "peered", "sniggered", "moaned", "sweetums",
-    "cannon", "budge", "lump", "shack", "shivered", "yeh", "yer", "ter", "summat",
-    "fer", "meself", "mighta", "dunno", "shan't", "blimey", "codswallop",
+    "cannon", "budge", "lump", "shack", "shivered", "uneasy", "nervous",
+    "yeh", "yer", "ter", "summat", "fer", "meself", "mighta", "dunno",
+    "shan't", "blimey", "codswallop",
 })
 _SHORT_B1_PHRASES = (
     ("fancy", "seeing", "you"),
@@ -3299,6 +3300,175 @@ _SHORT_B1_PHRASES = (
     ("suppose", "so"),
     ("kept", "what", "from"),
 )
+_A2_PRESENT_PERFECT_ADVERBS = (
+    r"(?:not|never|ever|already|just|still|really|always|often|only|almost|"
+    r"finally|barely|hardly|nearly|recently|yet)"
+)
+_A2_PRESENT_PERFECT_EXCLUDED_ED = (
+    r"(?!hundred\b|naked\b|wicked\b|sacred\b|crooked\b|ragged\b|jagged\b|"
+    r"rugged\b|wretched\b|beloved\b|pointed\b|colored\b|coloured\b|"
+    r"fried\b|baked\b|boiled\b|roasted\b|sliced\b|dried\b|smoked\b|"
+    r"salted\b|pickled\b|canned\b|bottled\b|chilled\b|scented\b|"
+    r"padded\b|lined\b|faded\b|cracked\b|rusted\b|stained\b|tangled\b|"
+    r"matted\b|curled\b|braided\b|bearded\b|winged\b|horned\b|clawed\b|"
+    r"fanged\b|scaled\b|feathered\b|armored\b|armoured\b|jeweled\b|"
+    r"beaded\b|carved\b|painted\b|printed\b|gilded\b|silvered\b)"
+)
+_A2_IRREGULAR_PARTICIPLES = (
+    r"been|done|gone|seen|taken|given|made|found|told|heard|known|kept|left|"
+    r"lost|met|felt|sent|spent|brought|bought|caught|taught|thought|written|"
+    r"spoken|broken|chosen|driven|eaten|fallen|forgotten|forgiven|frozen|"
+    r"hidden|ridden|risen|shaken|shown|stolen|sworn|thrown|woken|worn|begun|"
+    r"drunk|rung|sung|sunk|swum|become|come|held|paid|laid|stood|understood|"
+    r"slept|wept|swept|crept|dealt|meant|built|burnt|learnt|dreamt|lit|sat|"
+    r"won|hung|dug|stuck|struck|swung|fed|led|bled|bred|fled|grown|blown|"
+    r"flown|drawn|withdrawn|torn|born|borne|beaten|bitten|clung|flung|slid|"
+    r"spun|stung|wrung|gotten|said|had"
+)
+_A2_ACTIVE_CONTRACTION_PARTICIPLES = (
+    r"been|gone|done|seen|taken|given|written|spoken|eaten|forgotten|forgiven|"
+    r"left|made|told|heard|found|met|known|kept|sent|spent|brought|bought|"
+    r"caught|taught|thought|built|paid|stood|understood|won|grown|begun|"
+    r"become|come|had|slept|felt|lost|gotten"
+)
+_A2_PRESENT_PERFECT_RE = re.compile(
+    rf"(?:"
+    rf"\b(?:have|has|haven['’]t|hasn['’]t|(?:i|you|we|they|who|what|there)['’]ve)"
+    rf"\s+(?:{_A2_PRESENT_PERFECT_ADVERBS}\s+){{0,2}}"
+    rf"(?:{_A2_IRREGULAR_PARTICIPLES}|{_A2_PRESENT_PERFECT_EXCLUDED_ED}(?:died|lied|tied|[a-z]{{3,}}ed))\b"
+    rf"|\b(?:have|has|haven['’]t|hasn['’]t)\s+(?:i|you|we|they|he|she|it)\s+"
+    rf"(?:{_A2_PRESENT_PERFECT_ADVERBS}\s+){{0,2}}"
+    rf"(?:{_A2_IRREGULAR_PARTICIPLES}|{_A2_PRESENT_PERFECT_EXCLUDED_ED}(?:died|lied|tied|[a-z]{{3,}}ed))\b"
+    rf"|\b(?:he|she|it|that|there|who|what)['’]s\s+"
+    rf"(?:{_A2_PRESENT_PERFECT_ADVERBS}\s+){{0,2}}"
+    rf"(?:{_A2_ACTIVE_CONTRACTION_PARTICIPLES})\b"
+    rf")",
+    re.IGNORECASE,
+)
+_A2_WOULD_RE = re.compile(
+    r"(?:"
+    r"\b(?:would|wouldn['’]t)\b"
+    r"|\b(?:i|you|he|she|it|we|they|who|what|that|there)['’]d\s+"
+    r"(?:(?:not|never|always|probably|really|surely|definitely|almost|just|still)\s+)?"
+    r"(?:rather|better|like|love|prefer|be|have|go|come|say|tell|know|think|see|"
+    r"get|make|take|give|want|need|do|feel|look|seem|try|let|stay|leave|help|"
+    r"wait|keep|find|call|ask|hear|work|live|die|run|turn|start|stop|remember|"
+    r"forget|believe|understand|agree|care|mind|bet|swear|guess|hate)\b"
+    r")",
+    re.IGNORECASE,
+)
+_A2_WH_STRANDED_PREP_RE = re.compile(
+    r"\b(?:what|who|whom|which|where)(?:['’]s|['’]re|['’]d|['’]ll)?\b"
+    r"[^.!?]{0,80}?"
+    r"\b(?:for|about|with|from|to|at|of|into|onto|through|after|by|upon|in|on)\s*\?",
+    re.IGNORECASE,
+)
+_A2_EMBEDDED_WHAT_RE = re.compile(
+    r"\b(?:"
+    r"is|was|were|be|being|been|am|are"
+    r"|(?:that|it|this|here|there)['’]s"
+    r"|of|about|for|at|to|with|from|on|in|by|into|after|before|over|than|like"
+    r"|know|knew|known|knows|see|saw|seen|sees|hear|heard|hears"
+    r"|say|said|says|tell|told|tells|ask|asked|asks|wonder|wondered|wonders"
+    r"|remember|remembered|remembers|forget|forgot|forgotten|forgets"
+    r"|understand|understood|understands|believe|believed|believes"
+    r"|mean|meant|means|want|wanted|wants|need|needed|needs"
+    r"|care|cares|mind|minds|matter|matters|do|did|done|does"
+    r"|find|found|finds|show|showed|shown|shows|explain|explained|explains"
+    r"|guess|guessed|guesses|imagine|imagined|imagines"
+    r"|realize|realized|realise|realised|notice|noticed|watch|watched|look|looked"
+    r"|think|thought|thinks|feel|felt|feels|keep|kept|keeps"
+    r"|lose|lost|loses|get|got|gets|take|took|taken|takes"
+    r"|give|gave|given|gives|make|made|makes"
+    r"|me|him|her|us|them|you"
+    r")\s+what(?:['’]s|['’]d|['’]ll)?\s+(?!a\b|an\b|about\b)[a-z]",
+    re.IGNORECASE,
+)
+_A2_INITIAL_WHAT_CLAUSE_RE = re.compile(
+    r"^\s*[‘“\"']?what\s+"
+    r"(?:(?:i|you|he|she|it|we|they|this|that|there|i['’]ve|you['’]ve|we['’]ve|he['’]s|she['’]s)\b"
+    r"|happened\b|matters\b|comes\b|came\b|follows\b|followed\b|makes\b|made\b|seemed\b|looked\b)",
+    re.IGNORECASE,
+)
+_A2_SARCASM_RE = re.compile(
+    r"(?:"
+    r"\b(?:yeah,?\s+right"
+    r"|oh,?\s+(?:great|sure|really|brilliant|fantastic|terrific|wonderful|splendid|swell|fabulous)"
+    r"|just\s+(?:great|wonderful|perfect|what\s+(?:i|we)\s+needed)"
+    r"|how\s+(?:wonderful|lovely|helpful|clever|original|thoughtful|charming|convenient)"
+    r"|real\s+(?:nice|smart|funny|helpful|smooth|bright|genius)"
+    r"|very\s+funny"
+    r"|big\s+(?:deal|surprise|help)"
+    r"|what\s+a\s+surprise"
+    r"|no\s+kidding"
+    r"|you\s+don['’]t\s+say"
+    r"|fat\s+chance"
+    r"|good\s+luck\s+with\s+that"
+    r"|like\s+(?:i|he|she|we|they)\s+care"
+    r"|gee,?\s+thanks"
+    r"|lucky\s+(?:me|us|you)"
+    r"|nice\s+going"
+    r"|way\s+to\s+go"
+    r"|so\s+much\s+for"
+    r"|thanks\s+for\s+nothing"
+    r"|tell\s+me\s+about\s+it)\b"
+    r"|(?:^|[‘“\"'\s])as\s+if\s*[!.]"
+    r")",
+    re.IGNORECASE,
+)
+_A2_NONSTANDARD_SPEECH_RE = re.compile(
+    r"\b(?:"
+    r"ain['’]t"
+    r"|(?:don['’]t|doesn['’]t|didn['’]t)\s+got"
+    r"|(?:he|she|it)\s+don['’]t"
+    r"|(?:you|we|they)\s+was"
+    r"|gonna|wanna|gotta|lemme|gimme|outta|innit|shoulda|woulda|coulda"
+    r")\b",
+    re.IGNORECASE,
+)
+_A2_STATE_CHANGE_IDIOM_RE = re.compile(
+    r"\b(?:"
+    r"(?:go|goes|went|going|gone)\s+(?:red|pale|white|purple|pink|green|blue|gray|grey|"
+    r"dark|black|blank|numb|silent|quiet|still|stiff|rigid|cold|limp|weak|crazy|mad|"
+    r"wild|insane|blind|deaf|wrong|bad|sour|stale|missing|dead)"
+    r"|(?:turn|turns|turned|turning)\s+(?:red|pale|white|purple|pink|green|blue|gray|grey|"
+    r"crimson|scarlet|cold|sour|nasty|violent|fierce)"
+    r"|(?:grow|grows|grew|growing|grown)\s+(?:pale|dark|cold|quiet|silent|still|uneasy|"
+    r"nervous|tense|angry|fierce|weak|tired|faint|impatient|suspicious|restless)"
+    r"|(?:fall|falls|fell|falling|fallen)\s+(?:silent|quiet|still|asleep|ill|sick|short|flat|apart|prey)"
+    r"|(?:make|makes|made|making)\s+(?:me|him|her|us|them|you|it|everyone|everybody|"
+    r"anyone|someone|[a-z]+(?:\s+[a-z]+){0,2})\s+(?:uneasy|nervous|anxious|uncomfortable|"
+    r"sick|dizzy|furious|mad|angry|crazy|insane|jealous|suspicious|miserable|helpless|"
+    r"speechless|breathless|shiver|shudder|flinch|cringe|wince|tremble)"
+    r")\b",
+    re.IGNORECASE,
+)
+_A2_NONLEXICAL_BACKING_KINDS = frozenset({"grammar", "idiom", "speech_style"})
+
+
+@dataclass(frozen=True, slots=True)
+class _PromotedBlock:
+    owners: frozenset[str]
+    had_glossary: bool
+    block_text: str = ""
+    promoted_ranges: tuple[tuple[int, int], ...] | None = None
+
+
+def _has_a2_nonlexical_stoplist(text: str) -> bool:
+    if (
+        _A2_PRESENT_PERFECT_RE.search(text) is not None
+        or _A2_WOULD_RE.search(text) is not None
+        or _A2_WH_STRANDED_PREP_RE.search(text) is not None
+        or _A2_EMBEDDED_WHAT_RE.search(text) is not None
+        or _A2_SARCASM_RE.search(text) is not None
+        or _A2_NONSTANDARD_SPEECH_RE.search(text) is not None
+        or _A2_STATE_CHANGE_IDIOM_RE.search(text) is not None
+    ):
+        return True
+    if "?" not in text and _A2_INITIAL_WHAT_CLAUSE_RE.search(text) is not None:
+        return True
+    words = expression_words(text)
+    return any(word in _DIALECT_WORDS for word in words)
 _TRIVIAL_A2_ANCHORS = frozenset({
     ("sounding", "relieved"),
     ("cupboard",),
@@ -3409,7 +3579,7 @@ def normalize_a2_dialogue_response(
     difficulties = _response_difficulties(payload)
     covered_points = _covered_byr_points(payload)
     items: list[TreatmentPlanItemResponse] = []
-    promoted_blocks: list[tuple[frozenset[str], bool]] = []
+    promoted_blocks: list[_PromotedBlock] = []
     demoted_blocks: list[frozenset[str]] = []
     meaningful_heading_ids: set[str] = set()
     numbered_heading_ids: set[str] = set()
@@ -3421,12 +3591,8 @@ def normalize_a2_dialogue_response(
             items.append(item)
             continue
         updated = item
-        promoted = None
+        promoted: _PromotedBlock | None = None
         demoted = None
-        if block.type in _DIALOGUE_BLOCK_TYPES:
-            updated, promoted = _promote_dialogue_item(item, block, difficulties)
-        if block.type in _DEMOTABLE_BLOCK_TYPES:
-            updated, demoted = _demote_elementary_reply(item, updated, block, difficulties)
         owners = frozenset(part for part in (item.source_block_id, block.id) if part)
         if block.type is BlockType.HEADING and _is_meaningful_chapter_title(block.text):
             had_glossary = item.treatment is BlockTreatment.GLOSSARY_ONLY or any(
@@ -3435,7 +3601,7 @@ def normalize_a2_dialogue_response(
             updated = _force_block_treatment(updated, BlockTreatment.TRANSLATE)
             meaningful_heading_ids.update(owners)
             promoted = (
-                (owners, had_glossary)
+                _PromotedBlock(owners=owners, had_glossary=had_glossary)
                 if item.treatment is not BlockTreatment.TRANSLATE
                 else None
             )
@@ -3446,17 +3612,22 @@ def normalize_a2_dialogue_response(
             numbered_heading_ids.update(owners)
             promoted = None
             demoted = None
-        elif _is_short_b1_read_as_is(block, updated):
-            words = expression_words(block.text)
-            mode = (
-                BlockTreatment.GLOSSARY_ONLY
-                if _owns_vocabulary(difficulties, owners)
-                or _is_single_b1_reporting_verb_only(words)
-                else BlockTreatment.TRANSLATE
-            )
-            updated = _force_block_treatment(updated, mode)
-            promoted = (owners, False) if mode is BlockTreatment.TRANSLATE else None
-            demoted = owners if mode is BlockTreatment.GLOSSARY_ONLY else None
+        else:
+            if block.type in _DIALOGUE_BLOCK_TYPES:
+                updated, _ = _promote_dialogue_item(item, block, difficulties)
+            was_demoted = False
+            if block.type in _DEMOTABLE_BLOCK_TYPES:
+                after_demote, demoted = _demote_elementary_reply(item, updated, block, difficulties)
+                was_demoted = after_demote is not updated
+                updated = after_demote
+            if not was_demoted and block.type in _DIALOGUE_BLOCK_TYPES:
+                updated, stoplist_demoted = _promote_a2_stoplist_item(
+                    updated, block, difficulties, owners
+                )
+                if stoplist_demoted is not None:
+                    demoted = stoplist_demoted
+            if not was_demoted:
+                promoted = _compute_promoted_block(item, updated, block, owners)
         if updated is not item:
             changed = True
         items.append(updated)
@@ -3816,6 +3987,8 @@ def _elementary_reply_mode(text, difficulties, owners, *, sentence_count: int = 
     words = expression_words(text)
     if not words:
         return None
+    if _has_a2_nonlexical_stoplist(text):
+        return None
     if any(word in _SHORT_B1_WORDS for word in words) or any(
         _contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES
     ):
@@ -3872,24 +4045,297 @@ def _switch_demoted_hint(difficulty, demoted_blocks: Sequence[frozenset[str]]):
     return difficulty
 
 
+def _difficulty_hits_ranges(
+    difficulty,
+    owners: frozenset[str],
+    block_text: str,
+    ranges: tuple[tuple[int, int], ...],
+) -> bool:
+    for anchor in getattr(difficulty, "anchors", ()):
+        if getattr(anchor, "block_id", None) not in owners:
+            continue
+        if _anchor_hits_ranges(anchor, block_text, 0, ranges):
+            return True
+    return False
+
+
 def _switch_promoted_hint(
     difficulty,
-    promoted_blocks: Sequence[tuple[frozenset[str], bool]],
+    promoted_blocks: Sequence[_PromotedBlock],
     covered_points: Mapping[str, set[str]],
 ):
     if difficulty.help_kind != "lexical_hint":
         return difficulty
     required = {point.id for point in difficulty.required_points}
     byr_covered = bool(required) and required <= covered_points.get(difficulty.id, set())
-    for owners, had_glossary in promoted_blocks:
+    for promoted in promoted_blocks:
+        owners = promoted.owners
         if difficulty.owner_block_id not in owners and not any(
             getattr(anchor, "block_id", None) in owners for anchor in difficulty.anchors
         ):
             continue
-        if byr_covered and not had_glossary:
+        if promoted.promoted_ranges is not None and not _difficulty_hits_ranges(
+            difficulty, owners, promoted.block_text, promoted.promoted_ranges
+        ):
+            continue
+        if byr_covered and not promoted.had_glossary:
             continue
         return replace(difficulty, help_kind="explanation")
     return difficulty
+
+
+def _sentence_bounds_by_index(block: DocumentBlock) -> dict[int, tuple[int, int]]:
+    bounds: dict[int, tuple[int, int]] = {}
+    for span in block.segment_spans:
+        prev = bounds.get(span.sentence_index)
+        if prev is None:
+            bounds[span.sentence_index] = (span.start, span.end)
+        else:
+            bounds[span.sentence_index] = (min(prev[0], span.start), max(prev[1], span.end))
+    return bounds
+
+
+def _owns_vocabulary_in_range(
+    difficulties,
+    owners: frozenset[str],
+    block_text: str,
+    span_start: int,
+    span_end: int,
+    *,
+    whole_block: bool,
+) -> bool:
+    if whole_block:
+        return _owns_vocabulary(difficulties, owners)
+    ranges = ((span_start, span_end),)
+    return any(
+        difficulty.kind == "vocabulary"
+        and difficulty.owner_block_id in owners
+        and _difficulty_hits_ranges(difficulty, owners, block_text, ranges)
+        for difficulty in difficulties
+    )
+
+
+def _has_nonlexical_backing_difficulty(
+    difficulties,
+    owners: frozenset[str],
+    block_text: str,
+    span_start: int,
+    span_end: int,
+    *,
+    whole_block: bool,
+) -> bool:
+    ranges = ((span_start, span_end),)
+    for difficulty in difficulties:
+        if difficulty.owner_block_id not in owners:
+            continue
+        if difficulty.kind not in _A2_NONLEXICAL_BACKING_KINDS:
+            continue
+        if whole_block or _difficulty_hits_ranges(difficulty, owners, block_text, ranges):
+            return True
+    return False
+
+
+def _read_as_is_stoplist_mode(
+    text: str,
+    block_text: str,
+    span_start: int,
+    span_end: int,
+    difficulties,
+    owners: frozenset[str],
+    *,
+    whole_block: bool,
+) -> BlockTreatment | None:
+    if _has_a2_nonlexical_stoplist(text):
+        return BlockTreatment.TRANSLATE
+    words = expression_words(text)
+    if not words or len(words) > _SHORT_B1_WORD_LIMIT:
+        return None
+    if any(word in _SHORT_B1_WORDS for word in words) or any(
+        _contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES
+    ):
+        if _owns_vocabulary_in_range(
+            difficulties, owners, block_text, span_start, span_end, whole_block=whole_block
+        ) or _is_single_b1_reporting_verb_only(words):
+            return BlockTreatment.GLOSSARY_ONLY
+        return BlockTreatment.TRANSLATE
+    return None
+
+
+def _glossary_only_needs_stoplist_translation(
+    text: str,
+    block_text: str,
+    span_start: int,
+    span_end: int,
+    difficulties,
+    owners: frozenset[str],
+    *,
+    whole_block: bool,
+) -> bool:
+    if not _has_a2_nonlexical_stoplist(text):
+        return False
+    return not _has_nonlexical_backing_difficulty(
+        difficulties, owners, block_text, span_start, span_end, whole_block=whole_block
+    )
+
+
+def _promote_a2_stoplist_item(
+    item: TreatmentPlanItemResponse,
+    block: DocumentBlock,
+    difficulties,
+    owners: frozenset[str],
+) -> tuple[TreatmentPlanItemResponse, frozenset[str] | None]:
+    if item.segments:
+        spans = block.segment_spans
+        sentence_bounds = _sentence_bounds_by_index(block)
+        sentence_segments: dict[int, list[SegmentTreatmentResponse]] = {}
+        for segment in item.segments:
+            if 1 <= segment.index <= len(spans):
+                sentence_segments.setdefault(
+                    spans[segment.index - 1].sentence_index, []
+                ).append(segment)
+        lifted_sentences: dict[int, BlockTreatment] = {}
+        for sentence_index, segs in sentence_segments.items():
+            modes = tuple(seg.treatment for seg in segs)
+            if not modes:
+                continue
+            current_mode = strongest_treatment(modes)
+            if current_mode not in _LIGHT_DIALOGUE_TREATMENTS:
+                continue
+            s_start, s_end = sentence_bounds[sentence_index]
+            s_text = block.text[s_start:s_end]
+            target: BlockTreatment | None = None
+            if current_mode is BlockTreatment.READ_AS_IS:
+                target = _read_as_is_stoplist_mode(
+                    s_text,
+                    block.text,
+                    s_start,
+                    s_end,
+                    difficulties,
+                    owners,
+                    whole_block=(len(sentence_segments) == 1),
+                )
+            elif current_mode is BlockTreatment.GLOSSARY_ONLY:
+                if _glossary_only_needs_stoplist_translation(
+                    s_text,
+                    block.text,
+                    s_start,
+                    s_end,
+                    difficulties,
+                    owners,
+                    whole_block=(len(sentence_segments) == 1),
+                ):
+                    target = BlockTreatment.TRANSLATE
+            if target is not None and target is not current_mode:
+                lifted_sentences[sentence_index] = target
+        if not lifted_sentences:
+            return item, None
+        new_segments = tuple(
+            SegmentTreatmentResponse(
+                segment.index,
+                lifted_sentences[spans[segment.index - 1].sentence_index],
+            )
+            if 1 <= segment.index <= len(spans)
+            and spans[segment.index - 1].sentence_index in lifted_sentences
+            else segment
+            for segment in item.segments
+        )
+        strongest = strongest_treatment(segment.treatment for segment in new_segments)
+        updated = replace(item, treatment=strongest, segments=new_segments)
+        demoted = (
+            owners
+            if item.treatment is BlockTreatment.READ_AS_IS
+            and strongest is BlockTreatment.GLOSSARY_ONLY
+            and len(sentence_segments) == 1
+            else None
+        )
+        return updated, demoted
+
+    if item.treatment is BlockTreatment.READ_AS_IS:
+        sentence_bounds = _sentence_bounds_by_index(block)
+        slices = (
+            tuple(sentence_bounds.values())
+            if len(sentence_bounds) > 1
+            else ((0, len(block.text)),)
+        )
+        triggered: list[BlockTreatment] = []
+        if _has_a2_nonlexical_stoplist(block.text):
+            triggered.append(BlockTreatment.TRANSLATE)
+        else:
+            for s_start, s_end in slices:
+                mode = _read_as_is_stoplist_mode(
+                    block.text[s_start:s_end],
+                    block.text,
+                    s_start,
+                    s_end,
+                    difficulties,
+                    owners,
+                    whole_block=True,
+                )
+                if mode is not None:
+                    triggered.append(mode)
+        if not triggered:
+            return item, None
+        mode = strongest_treatment(triggered)
+        updated = _force_block_treatment(item, mode)
+        demoted = owners if mode is BlockTreatment.GLOSSARY_ONLY else None
+        return updated, demoted
+
+    if item.treatment is BlockTreatment.GLOSSARY_ONLY:
+        if _glossary_only_needs_stoplist_translation(
+            block.text,
+            block.text,
+            0,
+            len(block.text),
+            difficulties,
+            owners,
+            whole_block=True,
+        ):
+            return _force_block_treatment(item, BlockTreatment.TRANSLATE), None
+
+    return item, None
+
+
+def _compute_promoted_block(
+    original: TreatmentPlanItemResponse,
+    updated: TreatmentPlanItemResponse,
+    block: DocumentBlock,
+    owners: frozenset[str],
+) -> _PromotedBlock | None:
+    if updated.treatment is not BlockTreatment.TRANSLATE:
+        return None
+    if original.treatment is not BlockTreatment.TRANSLATE:
+        had_glossary = original.treatment is BlockTreatment.GLOSSARY_ONLY or any(
+            segment.treatment is BlockTreatment.GLOSSARY_ONLY
+            for segment in original.segments
+        )
+        return _PromotedBlock(
+            owners=owners,
+            had_glossary=had_glossary,
+            block_text=block.text,
+            promoted_ranges=None,
+        )
+    if not original.segments or not updated.segments:
+        return None
+    orig_by_index = {segment.index: segment.treatment for segment in original.segments}
+    spans = block.segment_spans
+    promoted_ranges: list[tuple[int, int]] = []
+    had_glossary = False
+    for segment in updated.segments:
+        prev = orig_by_index.get(segment.index)
+        if prev is not None and prev is not BlockTreatment.TRANSLATE and segment.treatment is BlockTreatment.TRANSLATE:
+            if prev is BlockTreatment.GLOSSARY_ONLY:
+                had_glossary = True
+            if 1 <= segment.index <= len(spans):
+                span = spans[segment.index - 1]
+                promoted_ranges.append((span.start, span.end))
+    if not promoted_ranges:
+        return None
+    return _PromotedBlock(
+        owners=owners,
+        had_glossary=had_glossary,
+        block_text=block.text,
+        promoted_ranges=tuple(promoted_ranges),
+    )
 
 
 def _is_meaningful_chapter_title(text: str) -> bool:
@@ -3904,20 +4350,6 @@ def _is_meaningful_chapter_title(text: str) -> bool:
     ):
         return False
     return True
-
-
-def _is_short_b1_read_as_is(block: DocumentBlock, item) -> bool:
-    """A short READ_AS_IS line whose words are on the closed B1+ list."""
-    if block.type not in _DIALOGUE_BLOCK_TYPES or item.treatment is not BlockTreatment.READ_AS_IS:
-        return False
-    if any(segment.treatment is not BlockTreatment.READ_AS_IS for segment in item.segments):
-        return False
-    words = expression_words(block.text)
-    if not words or len(words) > _SHORT_B1_WORD_LIMIT:
-        return False
-    if any(word in _SHORT_B1_WORDS for word in words):
-        return True
-    return any(_contains_phrase(words, phrase) for phrase in _SHORT_B1_PHRASES)
 
 
 def _is_single_b1_reporting_verb_only(words: tuple[str, ...]) -> bool:
