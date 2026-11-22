@@ -211,8 +211,14 @@ def _needs_refresh(response: BookDetailResponse) -> bool:
 
 
 def _is_stalled(response: BookDetailResponse) -> bool:
-    """Whether work on the book is stalled: no active tasks, but failed tasks exist."""
-    return bool(response.progress.failures) and not _has_active_tasks(response)
+    """Whether idle work should stop refreshing.
+
+    Failures stall import and analysis. Processing with nothing queued is stalled
+    too, even without a failed task, so the card does not refresh forever.
+    """
+    return not _has_active_tasks(response) and (
+        bool(response.progress.failures) or response.book.status == "PROCESSING"
+    )
 
 
 def _has_active_tasks(response: BookDetailResponse) -> bool:

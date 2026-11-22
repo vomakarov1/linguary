@@ -9,7 +9,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import ValidationError
 from linguary.application.book_overview import BookNotFoundError
+from linguary.application.use_cases.extend_recovery_limit import (
+    ExtendRecoveryLimitCommand,
+    ExtendRecoveryLimitError,
+    ExtendRecoveryLimitNotFoundError,
+)
 from linguary.application.use_cases.quality_review import StartQualityReview
+from linguary.application.use_cases.retry_task import is_task_retryable_for_recovery
 from linguary.domain.book_conditions import WorkStateError
 from linguary.web.dependencies import CurrentApplication
 from linguary.web.schemas import StartQualityReviewRequest, ExtendRecoveryLimitRequest, QualityReviewStateResponse
@@ -62,6 +68,9 @@ async def read_input(request, schema):
                     raw[key] = int(raw[key])
             if 'confirmed' in raw:
                 raw['confirmed'] = raw['confirmed'] in ('true', 'on', '1')
+            if 'acknowledge_unknown_outcome' in raw:
+                raw['acknowledge_unknown_outcome'] = raw['acknowledge_unknown_outcome'] in (
+                    'true', 'on', '1')
             if 'scope' in raw and raw['scope'] != 'all':
                 raw['scope'] = json.loads(raw['scope'])
         return schema.model_validate(raw)
@@ -119,22 +128,81 @@ async def start_review(request: Request, application: CurrentApplication, book_i
 
 @router.post('/books/{book_id}/recovery/{root_id}/limit')
 async def extend_limit(request: Request, application: CurrentApplication, book_id: str, root_id: str):
-    require_book(application, book_id)
     try:
         value = await read_input(request, ExtendRecoveryLimitRequest)
-        with application.unit_of_work.transaction() as tx:
-            root = tx.work.get_root(root_id)
-            if root is None or root.book_id != book_id:
-                raise HTTPException(404, detail={'reason_code': 'not_found'})
-            root = tx.work.extend_recovery_limit(root_id, **value.model_dump(exclude={'confirmed'}))
-    except WorkStateError as error:
-        return input_error_response(request, operation_error(error))
+        result = application.extend_recovery_limit(ExtendRecoveryLimitCommand(
+            book_id=book_id, root_id=root_id, additional_calls=value.additional_calls,
+            expected_generation=value.expected_generation,
+        ))
+    except ExtendRecoveryLimitNotFoundError as error:
+        return input_error_response(request, HTTPException(404, detail={'reason_code': error.reason_code}))
+    except ExtendRecoveryLimitError as error:
+        return input_error_response(request, HTTPException(409, detail={'reason_code': error.reason_code}))
     except HTTPException as error:
         return input_error_response(request, error)
     if wants_html(request):
         return RedirectResponse(f'/books/{book_id}', status_code=303)
-    return dict(root_id=root.id, generation=root.generation, calls_used=root.calls_used,
-        limit=root.manifest['policy']['max_calls'] + root.extra_calls)
+    return dict(root_id=result.root_id, generation=result.generation, calls_used=result.calls_used,
+        limit=result.limit)
+
+
+_RETRY_TASK_TYPES = frozenset({
+    'analyze_chapter',
+    'process_translation_unit',
+    'regenerate_block',
+    'chapter_correction',
+    'export_book',
+    'quality_review',
+})
+_RECOVERY_RETRY_TYPES = frozenset({'process_translation_unit', 'regenerate_block'})
+
+
+class _RetryWorkView:
+    """Expose ``get_binding`` so the recovery check can run on partial work fakes."""
+
+    def __init__(self, transaction):
+        self._transaction = transaction
+
+    def __getattr__(self, name):
+        return getattr(self._transaction, name)
+
+    @property
+    def work(self):
+        work = getattr(self._transaction, 'work', None)
+        if work is None or hasattr(work, 'get_binding'):
+            return work
+        return _UnboundWork(work)
+
+
+class _UnboundWork:
+    def __init__(self, work):
+        self._work = work
+
+    def __getattr__(self, name):
+        return getattr(self._work, name)
+
+    def get_binding(self, kind, entity_id):
+        return None
+
+
+def _retry_tasks(application, tasks, labels):
+    """Failed pipeline tasks an ordinary retry may resume, checked per task."""
+    candidates = [
+        task for task in tasks
+        if task.is_retryable and task.task_type.value in _RETRY_TASK_TYPES
+    ]
+    if any(task.task_type.value in _RECOVERY_RETRY_TYPES for task in candidates):
+        read = getattr(application.unit_of_work, 'read_transaction', application.unit_of_work.transaction)
+        with read() as tx:
+            view = _RetryWorkView(tx)
+            candidates = [
+                task for task in candidates
+                if is_task_retryable_for_recovery(view, task)[0]
+            ]
+    return [
+        dict(id=task.id, label=labels.task_type_label(task.task_type))
+        for task in candidates
+    ]
 
 
 def quality_page_context(request, application, book_id, *, tasks=None, overview=None):
@@ -213,15 +281,7 @@ def quality_page_context(request, application, book_id, *, tasks=None, overview=
             url=f'/books/{book_id}/diagnostics/{call.id}' if local_diagnostics else None,
             command=f'linguary diagnostics show {quote(book_id)} {quote(call.id)}'))
     return dict(base, forms=forms, scope_choices=[dict(value=key, title=title, selected=key == selected[0]) for key, _, title in scopes],
-        legacy=legacy, retry_tasks=[dict(id=task.id, label=labels.task_type_label(task.task_type)) for task in tasks
-            if task.is_retryable and task.task_type.value in (
-                'analyze_chapter',
-                'process_translation_unit',
-                'regenerate_block',
-                'chapter_correction',
-                'export_book',
-                'quality_review',
-            )],
+        legacy=legacy, retry_tasks=_retry_tasks(application, tasks, labels),
         diagnostics=diagnostics)
 
 

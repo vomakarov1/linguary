@@ -56,6 +56,7 @@ class _RestartRecoveryInput(BaseModel):
 
     expected_generation: int = Field(ge=0)
     confirmed: bool = False
+    acknowledge_unknown_outcome: bool = False
 
 
 async def _parse_initial_analysis_input(request: Request) -> _InitialAnalysisInput:
@@ -322,6 +323,7 @@ async def restart_recovery_root(
                 book_id=book_id,
                 root_id=root_id,
                 expected_generation=payload.expected_generation,
+                acknowledge_unknown_outcome=payload.acknowledge_unknown_outcome,
             )
         )
     except RestartTranslationConflict:

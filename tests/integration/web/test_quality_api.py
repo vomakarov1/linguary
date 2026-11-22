@@ -1,14 +1,22 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
 from decimal import Decimal
 from uuid import uuid4
 import pytest
-from web_scenario import store_book, start_run
+from web_scenario import continue_legacy, store_book, start_run
+from linguary.application.book_conditions import payload_digest
 from linguary.application.quality_budget import QualityRoute
+from linguary.application.recovery import NOTES_POLICY, RecoveryPolicy, root_manifest
+from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
+from linguary.application.use_cases.extend_recovery_limit import (
+    ExtendRecoveryLimit,
+    ExtendRecoveryLimitCommand,
+)
+from linguary.domain import BookStatus
 from linguary.domain.recovery import RecoveryRoot, RecoveryScope, CallAttempt
 
 
-def setup_review(client, app):
-    scenario = store_book(app)
+def setup_review(client, app, book_id=None):
+    scenario = store_book(app) if book_id is None else store_book(app, book_id=book_id)
     response = client.post(f'/books/{scenario.book_id}/conditions', json=dict(
         action='continue_legacy', expected_revision=0, settings_revision=0, confirmed=True))
     assert response.status_code == 201
@@ -84,8 +92,8 @@ def test_cross_origin_post_denied(configured_client, configured_application):
     assert configured_application.quality_review.get(scenario.book_id)['state'] == 'not-requested'
 
 
-def recovery_fixture(client, app, *, unknown=False):
-    scenario, _ = setup_review(client, app)
+def recovery_fixture(client, app, *, unknown=False, book_id=None):
+    scenario, _ = setup_review(client, app, book_id)
     start_run(app, scenario)
     with app.unit_of_work.transaction() as tx:
         conditions = tx.work.latest_conditions(scenario.book_id)
@@ -138,6 +146,159 @@ def test_invalid_explicit_parameters_never_enqueue(configured_client, configured
     assert response.status_code == 422
     with configured_application.unit_of_work.transaction() as tx:
         assert tx.tasks.list_for_book(scenario.book_id) == ()
+
+
+def test_stalled_processing_without_failed_tasks_stops_auto_refresh(
+    configured_client, configured_application,
+):
+    scenario = store_book(
+        configured_application, status=BookStatus.PROCESSING, book_id='stalled-processing',
+    )
+    detail = configured_client.get(f'/books/{scenario.book_id}')
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body['book']['status'] == 'PROCESSING'
+    assert body['progress']['failures'] == []
+    assert body['progress']['pending_tasks'] == 0
+    assert body['progress']['running_tasks'] == 0
+    page = configured_client.get(
+        f'/books/{scenario.book_id}', headers={'accept': 'text/html'},
+    )
+    assert page.status_code == 200, page.text
+    assert 'http-equiv="refresh"' not in page.text
+    assert 'страница обновится автоматически' not in page.text
+
+
+def restartable_unknown_root(app, *, book_id):
+    scenario = store_book(app, status=BookStatus.PROCESSING, book_id=book_id)
+    continue_legacy(app, book_id)
+    start_run(app, scenario)
+    ordered = tuple(scenario.block_ids(0))
+    with app.unit_of_work.transaction() as tx:
+        conditions = tx.work.latest_conditions(scenario.book_id)
+        run = tx.runs.active_for_book(scenario.book_id)
+        analysis = tx.analyses.get_for_section(scenario.book_id, scenario.section(0).id)
+        policy = RecoveryPolicy(**asdict(app.settings.recovery))
+        manifest = root_manifest(
+            book_id=scenario.book_id,
+            conditions_id=conditions.id,
+            glossary_sha=payload_digest(asdict(run.glossary_snapshot)),
+            analysis_sha=payload_digest(asdict(analysis)),
+            plan_sha=None,
+            ordered_blocks=ordered,
+            treatments=tuple('TRANSLATE' for _ in ordered),
+            boundaries=tuple((block_id,) for block_id in ordered),
+            atomic_intervals=tuple((block_id,) for block_id in ordered),
+            max_source_chars=4000,
+            policy=policy,
+            block_chars={block_id: 20 for block_id in ordered},
+        )
+        manifest.update(
+            notes_policy=NOTES_POLICY, active_run_id=run.id, historical_coverage=[],
+        )
+        root = RecoveryRoot(
+            str(uuid4()), scenario.book_id, conditions.id, str(uuid4()), manifest,
+            status='stopped', reason='unknown_outcome', operation_kind='translation',
+            policy_version=CURRENT_TRANSLATION_POLICY,
+        )
+        tx.work.add_root(root)
+        for block_id in ordered:
+            tx.work.add_scope(RecoveryScope(str(uuid4()), root.id, (block_id,)))
+    return scenario, root
+
+
+def test_web_restart_route_requires_separate_unknown_acknowledgement(
+    configured_client, configured_application,
+):
+    scenario, root = restartable_unknown_root(
+        configured_application, book_id='unknown-restart',
+    )
+    path = f'/books/{scenario.book_id}/recovery/{root.id}/restart'
+    denied = configured_client.post(path, json=dict(
+        expected_generation=root.generation, confirmed=True, acknowledge_unknown_outcome=False,
+    ))
+    assert denied.status_code == 409, denied.text
+    with configured_application.unit_of_work.transaction() as tx:
+        stored = tx.work.get_root(root.id)
+        assert stored.superseded_by is None and stored.reason == 'unknown_outcome'
+    allowed = configured_client.post(path, json=dict(
+        expected_generation=root.generation, confirmed=True, acknowledge_unknown_outcome=True,
+    ))
+    assert allowed.status_code == 202, allowed.text
+    assert allowed.json()['successor_root_id']
+
+    html_scenario, html_root = restartable_unknown_root(
+        configured_application, book_id='unknown-restart-html',
+    )
+    html_denied = configured_client.post(
+        f'/books/{html_scenario.book_id}/recovery/{html_root.id}/restart',
+        data=dict(
+            expected_generation=html_root.generation, confirmed='true',
+            acknowledge_unknown_outcome='false',
+        ),
+        headers={'accept': 'text/html'}, follow_redirects=False,
+    )
+    assert html_denied.status_code == 409, html_denied.text
+    html_allowed = configured_client.post(
+        f'/books/{html_scenario.book_id}/recovery/{html_root.id}/restart',
+        data=dict(
+            expected_generation=html_root.generation, confirmed='true',
+            acknowledge_unknown_outcome='true',
+        ),
+        headers={'accept': 'text/html'}, follow_redirects=False,
+    )
+    assert html_allowed.status_code == 303, html_allowed.text
+    assert html_allowed.headers['location'] == f'/books/{html_scenario.book_id}'
+
+
+def test_web_extend_limit_uses_application_use_case_and_preserves_reason_codes(
+    configured_client, configured_application, monkeypatch,
+):
+    scenario, root = recovery_fixture(configured_client, configured_application, book_id='limit-book')
+    unknown_scenario, unknown_root = recovery_fixture(
+        configured_client, configured_application, unknown=True, book_id='unknown-limit-book',
+    )
+    seen = []
+    use_case = configured_application.extend_recovery_limit
+    original = ExtendRecoveryLimit.__call__
+
+    def spy(self, command):
+        if self is use_case:
+            seen.append(command)
+        return original(self, command)
+
+    monkeypatch.setattr(ExtendRecoveryLimit, '__call__', spy)
+    payload = dict(additional_calls=2, expected_generation=0, confirmed=True)
+    missing = configured_client.post(f'/books/missing/recovery/{root.id}/limit', json=payload)
+    assert missing.status_code == 404, missing.text
+    assert missing.json()['detail']['reason_code'] == 'not_found'
+    store_book(configured_application, book_id='other')
+    foreign = configured_client.post(f'/books/other/recovery/{root.id}/limit', json=payload)
+    assert foreign.status_code == 404, foreign.text
+    assert foreign.json()['detail']['reason_code'] == 'not_found'
+    extended = configured_client.post(
+        f'/books/{scenario.book_id}/recovery/{root.id}/limit', json=payload,
+    )
+    assert extended.status_code == 200, extended.text
+    assert extended.json()['limit'] == 14 and extended.json()['generation'] == 1
+    stale = configured_client.post(
+        f'/books/{scenario.book_id}/recovery/{root.id}/limit', json=payload,
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()['detail']['reason_code'] == 'generation_conflict'
+    unknown = configured_client.post(
+        f'/books/{unknown_scenario.book_id}/recovery/{unknown_root.id}/limit', json=payload,
+    )
+    assert unknown.status_code == 409, unknown.text
+    assert unknown.json()['detail']['reason_code'] == 'unknown'
+    assert [type(command) for command in seen] == [ExtendRecoveryLimitCommand] * 5
+    assert [(command.book_id, command.root_id) for command in seen] == [
+        ('missing', root.id),
+        ('other', root.id),
+        (scenario.book_id, root.id),
+        (scenario.book_id, root.id),
+        (unknown_scenario.book_id, unknown_root.id),
+    ]
 
 
 def test_unproven_price_has_no_review_or_task(configured_client, configured_application):
