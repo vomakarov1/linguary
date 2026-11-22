@@ -183,7 +183,11 @@ class TranslationResultValidator:
         for block in payload.blocks:
             single = replace(payload, blocks=(block,))
             self._ensure_block(
-                paragraph_violation(single, unit=unit),
+                paragraph_violation(
+                    single,
+                    unit=unit,
+                    strict_line_preservation=validation_policy == "v2",
+                ),
                 expected,
                 block_id=block.source_block_id,
                 rule_code="paragraph_count_mismatch",

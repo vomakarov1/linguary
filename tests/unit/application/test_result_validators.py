@@ -64,6 +64,7 @@ def validate(
     unit: TranslationUnit,
     truncated: bool = False,
     checks: CheckSettings | None = None,
+    validation_policy: str = "v1",
 ) -> tuple[BlockProcessingResult, ...]:
     """Validates the model response against application thresholds."""
     return make_validator(checks).validate(
@@ -72,6 +73,7 @@ def validate(
         target_language=TARGET_LANGUAGE,
         note_id_factory=note_ids(),
         truncated=truncated,
+        validation_policy=validation_policy,
     )
 
 
@@ -81,10 +83,17 @@ def rejection(
     unit: TranslationUnit,
     truncated: bool = False,
     checks: CheckSettings | None = None,
+    validation_policy: str = "v1",
 ) -> ResultValidationError:
     """Rejection of the unit returned by validation."""
     with pytest.raises(ResultValidationError) as rejected:
-        validate(payload, unit=unit, truncated=truncated, checks=checks)
+        validate(
+            payload,
+            unit=unit,
+            truncated=truncated,
+            checks=checks,
+            validation_policy=validation_policy,
+        )
     return rejected.value
 
 
@@ -2286,6 +2295,162 @@ def test_candidate_correction_policy_helper_covers_v2_and_v3() -> None:
         assert accepted["policy_version"] == version
     with pytest.raises(WorkStateError):
         correction_policy({"correction": {"required": True, "policy_version": "chapter-correction-v9"}})
+
+
+_THREE_LINE_QUOTE = (
+    "The first line of the quote.\n"
+    "The second line of the quote.\n"
+    "The third line of the quote."
+)
+_THREE_LINE_QUOTE_FULL = (
+    "Первая строка цитаты.\nВторая строка цитаты.\nТретья строка цитаты."
+)
+_THREE_LINE_QUOTE_FIRST = "Первая строка цитаты."
+
+
+def test_strict_paragraphs_rejects_first_line_only_three_line_quote() -> None:
+    """A three-line quote translated as only its first line is rejected under v2."""
+    block = make_block(order=0, text=_THREE_LINE_QUOTE, type=BlockType.QUOTE)
+    unit = make_unit((block,))
+    dropped = make_response(
+        (make_block_result(block, translated_text=_THREE_LINE_QUOTE_FIRST),)
+    )
+
+    error = rejection(dropped, unit=unit, validation_policy="v2")
+
+    assert error.violation is not None
+    assert error.violation.rule_code == "paragraph_count_mismatch"
+    assert error.violation.block_ids == (block.id,)
+    message = str(error)
+    assert f"перевод блока {block.id} содержит 1 абзацев, а оригинал — 3" in message
+    assert "непустых строк (3)" in message
+    assert "не пропускай строки" in message
+    kept = make_response(
+        (make_block_result(block, translated_text=_THREE_LINE_QUOTE_FULL),)
+    )
+    assert (
+        validate(kept, unit=unit, validation_policy="v2")[0].translated_text
+        == _THREE_LINE_QUOTE_FULL
+    )
+
+
+def test_strict_paragraphs_preserves_dialogue_split_and_partial_segments() -> None:
+    """v2 still allows a dash split and checks only the TRANSLATE slices."""
+    source = '"Hello," he said. "How are you?"'
+    translation = "— Привет, — сказал он.\n— Как дела?"
+    block = make_block(order=0, text=source)
+    unit = make_unit((block,))
+    split = make_response((make_block_result(block, translated_text=translation),))
+    assert validate(split, unit=unit, validation_policy="v2")[0].translated_text == translation
+
+    unit_seg, block_seg = _segmented(
+        (
+            "Leave this sentence alone.",
+            " Translate the first line.\nTranslate the second line.",
+        ),
+        (BlockTreatment.READ_AS_IS, BlockTreatment.TRANSLATE),
+    )
+    kept_segment = "Переведи первую строку.\nПереведи вторую строку."
+    kept = _segmented_response(
+        block_seg,
+        ((2, kept_segment),),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    assert validate(kept, unit=unit_seg, validation_policy="v2")[0].segment_translations == (
+        None,
+        kept_segment,
+    )
+
+    dropped = _segmented_response(
+        block_seg,
+        ((2, "Переведи первую строку."),),
+        treatment=BlockTreatment.TRANSLATE,
+    )
+    message = str(rejection(dropped, unit=unit_seg, validation_policy="v2"))
+    assert "сегмента 2" in message
+    assert "содержит 1 абзацев, а оригинал — 2" in message
+    assert "не пропускай строки" in message
+    assert (
+        validate(dropped, unit=unit_seg, validation_policy="v1")[0].segment_translations[1]
+        == "Переведи первую строку."
+    )
+
+
+def test_strict_poem_rejects_blank_line_substitution() -> None:
+    """"L1\\nL2\\nL3" -> "С1\\n\\nС3" is rejected when validation_policy is v2."""
+    source = "L1\nL2\nL3"
+    substituted = "С1\n\nС3"
+    block = make_block(order=0, text=source, type=BlockType.POEM)
+    unit = make_unit((block,))
+    payload = make_response((make_block_result(block, translated_text=substituted),))
+
+    message = str(rejection(payload, unit=unit, validation_policy="v2"))
+
+    assert "непустых строк" in message
+    assert "содержит 2 непустых строк, а оригинал — 3" in message
+    assert validate(payload, unit=unit, validation_policy="v1")[0].translated_text == substituted
+
+    faithful = "С1\nС2\nС3"
+    kept = make_response((make_block_result(block, translated_text=faithful),))
+    assert validate(kept, unit=unit, validation_policy="v2")[0].translated_text == faithful
+
+    stanza_source = "L1\n\nL3"
+    stanza_translation = "С1\n\nС3"
+    stanza = make_block(order=1, text=stanza_source, type=BlockType.POEM)
+    stanza_unit = make_unit((stanza,))
+    stanza_payload = make_response(
+        (make_block_result(stanza, translated_text=stanza_translation),)
+    )
+    assert (
+        validate(stanza_payload, unit=stanza_unit, validation_policy="v2")[0].translated_text
+        == stanza_translation
+    )
+
+
+def test_legacy_v1_policy_allows_historical_line_count_decrease() -> None:
+    """Historical v1 still accepts a translation that drops non-empty lines."""
+    block = make_block(order=0, text=_THREE_LINE_QUOTE, type=BlockType.QUOTE)
+    unit = make_unit((block,))
+    payload = make_response(
+        (make_block_result(block, translated_text=_THREE_LINE_QUOTE_FIRST),)
+    )
+
+    assert validate(payload, unit=unit)[0].translated_text == _THREE_LINE_QUOTE_FIRST
+    assert (
+        validate(payload, unit=unit, validation_policy="v1")[0].translated_text
+        == _THREE_LINE_QUOTE_FIRST
+    )
+
+
+def test_truncation_ignores_trailing_footnote_markers() -> None:
+    """A trailing footnote marker does not hide terminal punctuation ("He left.[^1]")."""
+    from linguary.application.validators.truncation import _ends_with_punctuation
+
+    assert _ends_with_punctuation("He left.[^1]") is True
+    assert _ends_with_punctuation("He left.[^1][^2]") is True
+    assert _ends_with_punctuation("Он ушёл.[^1]") is True
+    assert _ends_with_punctuation("Он ушёл[^1]") is False
+
+    source = "See note 1. He left."
+    marker_at = source.index("1")
+    block = replace(
+        make_block(order=0, text=source),
+        inline_annotations=(
+            InlineAnnotation(
+                type=InlineAnnotationType.FOOTNOTE_REFERENCE,
+                start=marker_at,
+                end=marker_at + 1,
+                target="section-1.xhtml#fn1",
+            ),
+        ),
+    )
+    unit = make_unit((block,))
+    translation = "Он ушёл.[^1]"
+    payload = make_response((make_block_result(block, translated_text=translation),))
+    assert validate(payload, unit=unit)[0].translated_text == translation
+
+    unfinished = make_response((make_block_result(block, translated_text="Он ушёл[^1]"),))
+    assert "терминальной пунктуацией" in str(rejection(unfinished, unit=unit))
 
 
 

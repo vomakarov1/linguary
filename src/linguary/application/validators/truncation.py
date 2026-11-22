@@ -21,7 +21,12 @@ from collections.abc import Iterator, Mapping
 
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
 from linguary.application.validators.treatment import planned_segment_modes
-from linguary.domain import BlockTreatment, TranslationUnit, TranslationUnitItem
+from linguary.domain import (
+    BlockTreatment,
+    TranslationUnit,
+    TranslationUnitItem,
+    without_footnote_markers,
+)
 
 #: Punctuation marks that conclude a completed sentence.
 _TERMINAL_PUNCTUATION = frozenset(".!?…:;")
@@ -110,7 +115,7 @@ def _text_violation(
 
 def _ends_with_punctuation(text: str) -> bool:
     """Whether the text ends with a sentence-terminal punctuation mark."""
-    stripped = text.rstrip().rstrip(_TRAILING_CLOSERS).rstrip()
+    stripped = without_footnote_markers(text).rstrip().rstrip(_TRAILING_CLOSERS).rstrip()
     return bool(stripped) and stripped[-1] in _TERMINAL_PUNCTUATION
 
 

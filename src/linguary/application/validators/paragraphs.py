@@ -2,6 +2,8 @@
 
 A segmented block is checked on each translated slice. A poem compares the whole
 original with the joined translation via `split('\\n')`, blank lines included.
+Strict line preservation also rejects dropped non-empty lines, and in a poem a
+blank substituted for a text line.
 """
 
 from typing import overload
@@ -18,7 +20,13 @@ _SPEECH_MARKERS = ('"', '“', '”', '«', '»', "'", '‘', '’', '—', '–
 _DIALOGUE_DASHES = ('—', '–', '-')
 
 
-def _check_paragraphs(label: str, source_text: str, translated_text: str) -> str | None:
+def _check_paragraphs(
+    label: str,
+    source_text: str,
+    translated_text: str,
+    *,
+    strict_line_preservation: bool = False,
+) -> str | None:
     source_lines = [line.strip() for line in source_text.splitlines() if line.strip()]
     translated_lines = [line.strip() for line in translated_text.splitlines() if line.strip()]
     source_count = len(source_lines)
@@ -36,24 +44,52 @@ def _check_paragraphs(label: str, source_text: str, translated_text: str) -> str
             "окончание вынесены на новую строку, объедини собственную реплику "
             "или авторское окончание с остальным текстом блока, не удаляй их"
         )
+    if strict_line_preservation and translated_count < source_count:
+        return (
+            f"перевод {label} содержит {translated_count} "
+            f"абзацев, а оригинал — {source_count}: сохрани исходное число "
+            f"непустых строк ({source_count}) и весь текст своего блока; "
+            "не пропускай строки"
+        )
     return None
 
 
-def _poem_line_violation(block_id: str, source_text: str, translated_text: str) -> str | None:
+def _poem_line_violation(
+    block_id: str,
+    source_text: str,
+    translated_text: str,
+    *,
+    strict_line_preservation: bool = False,
+) -> str | None:
     """A poem must keep every line, including blank lines between stanzas."""
-    source_count = len(source_text.split("\n"))
-    translated_count = len(translated_text.split("\n"))
-    if source_count == translated_count:
+    source_lines = source_text.split("\n")
+    translated_lines = translated_text.split("\n")
+    source_count = len(source_lines)
+    translated_count = len(translated_lines)
+    if source_count != translated_count:
+        return (
+            f"перевод блока {block_id} содержит {translated_count} "
+            f"строк, а оригинал — {source_count}: сохрани исходное число "
+            f"строк ({source_count}), включая пустые строки строф"
+        )
+    if not strict_line_preservation:
+        return None
+    source_nonempty = sum(bool(line.strip()) for line in source_lines)
+    translated_nonempty = sum(bool(line.strip()) for line in translated_lines)
+    if source_nonempty == translated_nonempty:
         return None
     return (
-        f"перевод блока {block_id} содержит {translated_count} "
-        f"строк, а оригинал — {source_count}: сохрани исходное число "
-        f"строк ({source_count}), включая пустые строки строф"
+        f"перевод блока {block_id} содержит {translated_nonempty} "
+        f"непустых строк, а оригинал — {source_nonempty}: сохрани исходное число "
+        f"непустых строк ({source_nonempty}), не подменяя строки пустыми"
     )
 
 
 def _block_paragraph_violation(
-    block: BlockResultResponse, item: TranslationUnitItem
+    block: BlockResultResponse,
+    item: TranslationUnitItem,
+    *,
+    strict_line_preservation: bool = False,
 ) -> str | None:
     """Line-count check for one block. Poems use the whole text; other blocks use slices."""
     source = item.block
@@ -61,13 +97,21 @@ def _block_paragraph_violation(
         translated = joined_segment_translation(block)
         if translated is None:
             return None
-        return _poem_line_violation(block.source_block_id, source.text, translated)
+        return _poem_line_violation(
+            block.source_block_id,
+            source.text,
+            translated,
+            strict_line_preservation=strict_line_preservation,
+        )
     modes = planned_segment_modes(item)
     if not modes:
         if block.translated_text is None:
             return None
         return _check_paragraphs(
-            f"блока {block.source_block_id}", source.text, block.translated_text
+            f"блока {block.source_block_id}",
+            source.text,
+            block.translated_text,
+            strict_line_preservation=strict_line_preservation,
         )
     by_index = {segment.index: segment.translated_text for segment in block.segments}
     for index, (span, mode) in enumerate(
@@ -82,6 +126,7 @@ def _block_paragraph_violation(
             f"сегмента {index} блока {block.source_block_id}",
             source.text[span.start:span.end],
             text,
+            strict_line_preservation=strict_line_preservation,
         )
         if message is not None:
             return message
@@ -90,13 +135,20 @@ def _block_paragraph_violation(
 
 @overload
 def paragraph_violation(
-    target: str, *, source_text: str, translated_text: str
+    target: str,
+    *,
+    source_text: str,
+    translated_text: str,
+    strict_line_preservation: bool = False,
 ) -> Violation | None: ...
 
 
 @overload
 def paragraph_violation(
-    target: TranslationResultResponse, *, unit: TranslationUnit
+    target: TranslationResultResponse,
+    *,
+    unit: TranslationUnit,
+    strict_line_preservation: bool = False,
 ) -> str | None: ...
 
 
@@ -106,12 +158,24 @@ def paragraph_violation(
     source_text: str | None = None,
     translated_text: str | None = None,
     unit: TranslationUnit | None = None,
+    strict_line_preservation: bool = False,
 ) -> Violation | str | None:
-    """Reason for exceeding translated paragraph count, or `None`."""
+    """Reason the line count broke the contract, or `None`.
+
+    Extra non-empty lines are always rejected, except a dialogue split onto dash
+    lines. Fewer non-empty lines are rejected only when `strict_line_preservation`
+    is true. Poems always keep `split('\\n')` length; strict mode also keeps the
+    non-empty line count.
+    """
     if isinstance(target, str):
         if source_text is None or translated_text is None:
             return None
-        message = _check_paragraphs(f"блока {target}", source_text, translated_text)
+        message = _check_paragraphs(
+            f"блока {target}",
+            source_text,
+            translated_text,
+            strict_line_preservation=strict_line_preservation,
+        )
         if message is not None:
             return Violation(
                 rule_code="extra_paragraphs",
@@ -130,7 +194,9 @@ def paragraph_violation(
         item = items.get(block.source_block_id)
         if item is None:
             continue
-        message = _block_paragraph_violation(block, item)
+        message = _block_paragraph_violation(
+            block, item, strict_line_preservation=strict_line_preservation
+        )
         if message is not None:
             return message
     return None
