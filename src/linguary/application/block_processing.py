@@ -215,7 +215,7 @@ class TranslationCall:
             physical_context = None
             try:
                 if recovery is not None:
-                    from linguary.application.diagnostics import diagnostics_for
+                    from linguary.application.diagnostics import diagnostics_for, is_transient_lock_error
                     diagnostics_for(self._unit_of_work).ensure_available()
                     try:
                         with self._unit_of_work.transaction() as transaction:
@@ -233,7 +233,9 @@ class TranslationCall:
                                 policy_version=policy.version)
                     except RecoveryError:
                         raise
-                    except Exception:
+                    except Exception as error:
+                        if is_transient_lock_error(error):
+                            raise
                         diagnostics_for(self._unit_of_work).fail()
                     if physical_context is None:
                         raise RecoveryError('limit', recovery[0])

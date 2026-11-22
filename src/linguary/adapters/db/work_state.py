@@ -1586,7 +1586,12 @@ class SqlAlchemyWorkRepository:
         signature = local_failure_signature(violation, scope.ordered_blocks)
         outcome = {**thaw(attempt.outcome), 'failure_signature': signature,
                    'violation': violation.to_dict() if violation is not None else None}
-        state = 'failed' if attempt.state in {'sent', 'created'} else attempt.state
+        if attempt.state in {'sent', 'created'}:
+            state = 'failed'
+        elif attempt.state == 'validated':
+            state = 'rejected'
+        else:
+            state = attempt.state
         self._session.execute(update(LLMAttemptRow).where(LLMAttemptRow.id == attempt_id,
             LLMAttemptRow.state == attempt.state).values(state=state, outcome_json=outcome))
         self._session.execute(update(RecoveryScopeRow).where(RecoveryScopeRow.id == scope.id,

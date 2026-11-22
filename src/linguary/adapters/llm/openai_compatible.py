@@ -127,12 +127,6 @@ class OpenAICompatibleLLMClient(LLMClient):
         """Executes request and returns parsed structured response."""
         try:
             document = await self._post(_body(request, settings=self._settings))
-            _raise_embedded_gateway_error(
-                document,
-                provider=self._settings.provider,
-                api_key=self._settings.api_key,
-                secrets=self._proxy_secrets,
-            )
         except LLMContextCapacityError as error:
             error.provider = self._settings.provider
             error.model = self._safe(self._settings.model)
@@ -170,6 +164,13 @@ class OpenAICompatibleLLMClient(LLMClient):
                     violation=Violation('provider_content_filter', request.kind.value,
                                         safe_message='Провайдер остановил ответ фильтром содержимого'),
                 )
+            if finish_reason == "error":
+                raw_message_content = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(raw_message_content, str) or not raw_message_content.strip():
+                    raise LLMTransportError(
+                        f"провайдер {self._settings.provider} завершил генерацию с ошибкой (finish_reason=error)",
+                        outcome="unknown",
+                    )
             content = _content(
                 choice,
                 truncated=truncated,
@@ -237,8 +238,11 @@ class OpenAICompatibleLLMClient(LLMClient):
         """Sends request to provider and returns parsed JSON body on success."""
         if _is_openrouter_url(self._settings.base_url) and isinstance(self._http, httpx.AsyncClient):
             body = {**body, "provider": {"require_parameters": True}}
+        hard_timeout = self._settings.timeout_seconds + min(
+            0.5, max(0.05, self._settings.timeout_seconds * 0.2)
+        )
         try:
-            async with asyncio.timeout(self._settings.timeout_seconds):
+            async with asyncio.timeout(hard_timeout):
                 response = await self._http.post(
                     _endpoint(self._settings.base_url),
                     json=body,
@@ -262,7 +266,15 @@ class OpenAICompatibleLLMClient(LLMClient):
         _raise_for_status(
             response, provider=self._settings.provider, api_key=self._settings.api_key, secrets=self._proxy_secrets
         )
-        return _document(response, api_key=self._settings.api_key, secrets=self._proxy_secrets)
+        document = _document(response, api_key=self._settings.api_key, secrets=self._proxy_secrets)
+        _raise_embedded_gateway_error(
+            document,
+            provider=self._settings.provider,
+            api_key=self._settings.api_key,
+            secrets=self._proxy_secrets,
+            headers=response.headers,
+        )
+        return document
 
 
 def _connect_outcome(base_url: str, proxy_mode: str) -> TransportOutcome:
@@ -411,24 +423,47 @@ OpenAICompatibleLLMClient._raise_for_status = staticmethod(_raise_for_status)
 def _gateway_status(error: Any) -> int:
     """Numeric gateway code, or 400 so phrase and string overflow codes still match."""
     code = error.get("code") if isinstance(error, dict) else None
-    if isinstance(code, str) and code.strip().isdigit():
-        code = int(code.strip())
+    if isinstance(code, str):
+        stripped = code.strip()
+        if stripped.isascii() and stripped.isdigit():
+            code = int(stripped)
     if isinstance(code, int) and not isinstance(code, bool) and 400 <= code <= 599:
         return code
     return 400
 
 
 def _raise_embedded_gateway_error(
-    document: dict[str, Any], *, provider: str, api_key: str | None, secrets: tuple[str, ...]
+    document: dict[str, Any],
+    *,
+    provider: str,
+    api_key: str | None,
+    secrets: tuple[str, ...],
+    headers: httpx.Headers | dict[str, str] | None = None,
 ) -> None:
-    """HTTP 200 with an error object and no choices is classified by the gateway code."""
-    error = document.get("error")
+    """HTTP 200 with an error object and no valid choice content is classified by the gateway code."""
     choices = document.get("choices")
-    if (isinstance(choices, list) and choices) or not error:
+    first_choice = (
+        choices[0]
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict)
+        else None
+    )
+    error = document.get("error") or (first_choice.get("error") if first_choice is not None else None)
+    if not error:
+        return
+    has_valid_content = False
+    if first_choice is not None and _finish_reason(first_choice) != "error":
+        message = first_choice.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        has_valid_content = isinstance(content, str) and bool(content.strip())
+    if has_valid_content:
         return
     status = _gateway_status(error)
+    synth_doc = document if document.get("error") else {**document, "error": error}
     _raise_for_status(
-        httpx.Response(status, json=document), provider=provider, api_key=api_key, secrets=secrets
+        httpx.Response(status, json=synth_doc, headers=headers),
+        provider=provider,
+        api_key=api_key,
+        secrets=secrets,
     )
     raise LLMProviderError(f"провайдер {provider} отверг запрос: {status}")
 

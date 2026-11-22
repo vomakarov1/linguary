@@ -1320,8 +1320,9 @@ async def test_overall_asyncio_timeout_aborts_stalled_request_and_preserves_canc
         settings=settings(timeout_seconds=0.05),
         http_client=_SlowHttp(),  # type: ignore[arg-type]
     )
-    with pytest.raises(LLMTransportError, match="не ответил"):
+    with pytest.raises(LLMTransportError, match="не ответил") as exc:
         await client.generate(LLMRequest.for_translation(instructions="Translate.", input_text="b1: text"))
+    assert exc.value.outcome == "unknown"
 
     slow_client = OpenAICompatibleLLMClient(
         settings=settings(timeout_seconds=5.0),
@@ -1590,6 +1591,118 @@ async def test_retry_after_rejects_infinity(header: str) -> None:
         await client.aclose()
     assert caught.value.retry_after_seconds is None
     assert caught.value.outcome == "known_transient"
+
+
+async def test_real_httpx_pool_timeout_wins_over_hard_asyncio_timeout() -> None:
+    """Real httpx.PoolTimeout fires before the outer asyncio.timeout and classifies as not_sent (or unknown via plain HTTP proxy)."""
+    hold = asyncio.Event()
+    accepted = asyncio.Event()
+
+    async def handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        accepted.set()
+        try:
+            await reader.read(1024)
+            await hold.wait()
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle_conn, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}/v1"
+    try:
+        async with httpx.AsyncClient(limits=httpx.Limits(max_connections=1)) as http:
+            occupier = asyncio.create_task(http.get(f"http://127.0.0.1:{port}/hold", timeout=5.0))
+            await asyncio.wait_for(accepted.wait(), timeout=2.0)
+            direct_client = OpenAICompatibleLLMClient(
+                settings=settings(base_url=base_url, timeout_seconds=0.1, proxy_mode="direct"),
+                http_client=http,
+            )
+            with pytest.raises(LLMTransportError) as direct_err:
+                await direct_client.generate(_translation_request())
+            assert direct_err.value.outcome == "not_sent"
+
+            proxied_client = OpenAICompatibleLLMClient(
+                settings=settings(
+                    base_url=base_url,
+                    timeout_seconds=0.1,
+                    proxy_mode="custom",
+                    proxy_url="http://127.0.0.1:9",
+                ),
+                http_client=http,
+            )
+            with pytest.raises(LLMTransportError) as proxied_err:
+                await proxied_client.generate(_translation_request())
+            assert proxied_err.value.outcome == "unknown"
+
+            hold.set()
+            occupier.cancel()
+            await asyncio.gather(occupier, return_exceptions=True)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_embedded_gateway_errors_with_choices_retry_after_and_non_ascii_code() -> None:
+    """HTTP 200 with finish_reason='error', choices[0].error, Retry-After, or non-ASCII code is classified safely."""
+    bad_gw_doc = {
+        "choices": [{"finish_reason": "error", "message": {"content": ""}}],
+        "error": {"code": 502, "message": "upstream bad gateway"},
+    }
+    client = client_over(responding(bad_gw_doc))
+    try:
+        with pytest.raises(LLMTransportError) as bad_gw:
+            await client.generate(_translation_request())
+        assert bad_gw.value.outcome == "unknown"
+    finally:
+        await client.aclose()
+
+    finish_error_only = {
+        "choices": [{"finish_reason": "error", "message": {"content": ""}}],
+    }
+    client = client_over(responding(finish_error_only))
+    try:
+        with pytest.raises(LLMTransportError) as finish_err:
+            await client.generate(_translation_request())
+        assert finish_err.value.outcome == "unknown"
+    finally:
+        await client.aclose()
+
+    choice_overflow = {
+        "error": None,
+        "choices": [
+            {
+                "finish_reason": "error",
+                "message": {"content": ""},
+                "error": {"code": 400, "message": "This model's maximum context length is 128000"},
+            }
+        ],
+    }
+    client = client_over(responding(choice_overflow))
+    try:
+        with pytest.raises(LLMContextCapacityError):
+            await client.generate(_translation_request())
+    finally:
+        await client.aclose()
+
+    rate_limited_doc = {"error": {"code": 429, "message": "slow down"}}
+    client = client_over(
+        lambda req: httpx.Response(200, json=rate_limited_doc, headers={"Retry-After": "7"})
+    )
+    try:
+        with pytest.raises(LLMTransportError) as limited:
+            await client.generate(_translation_request())
+        assert limited.value.outcome == "known_transient"
+        assert limited.value.retry_after_seconds == 7.0
+    finally:
+        await client.aclose()
+
+    unicode_code_doc = {"error": {"code": "²", "message": "weird code"}}
+    client = client_over(responding(unicode_code_doc))
+    try:
+        with pytest.raises(LLMProviderError):
+            await client.generate(_translation_request())
+    finally:
+        await client.aclose()
 
 
 

@@ -10,9 +10,18 @@ from datetime import UTC, datetime
 import pytest
 
 from linguary.adapters.llm.logging import LoggingLLMClient
+from linguary.adapters.runtime.worker import TaskWorkerPool, WorkerSettings
+from linguary.application.block_processing import finalize_response, record_rejection
 from linguary.application.diagnostics import diagnostics_for
-from linguary.application.ports.llm import LLMRequest, LLMResponse
+from linguary.application.ports.llm import (
+    LLMConfigurationError,
+    LLMRequest,
+    LLMResponse,
+    LLMResponseFormatError,
+    LLMTransportError,
+)
 from linguary.application.ports.persistence import PersistenceError
+from linguary.application.reader_text import record_reader_warnings
 from linguary.domain import LLMCallLog, LLMCallStage
 
 _BUSY = PersistenceError("база данных занята после ограниченного повтора")
@@ -132,31 +141,146 @@ async def test_logging_client_records_cancelled_call_and_reraises() -> None:
     assert diagnostics_for(unit_of_work)._failed is False
 
 
-async def test_transient_sqlite_busy_does_not_permanently_poison_diagnostics() -> None:
-    """A temporary SQLite lock is re-raised and does not stop later diagnostic writes."""
+async def test_cancelled_call_propagates_cancellation_even_when_logging_fails() -> None:
+    """Logging failure inside CancelledError handler never masks cancellation."""
+    unit_of_work = _UnitOfWork()
+    unit_of_work.fail_transactions = 10
+    inner = _Inner([asyncio.CancelledError()])
+    client = _client(inner, unit_of_work)
+
+    with pytest.raises(asyncio.CancelledError):
+        await client.generate(_request())
+    assert inner.calls == 1
+    assert client._observation_failed is False
+    assert diagnostics_for(unit_of_work)._failed is False
+
+    unit_of_work_hard = _UnitOfWork()
+
+    def broken_observer(*_args: object) -> None:
+        raise RuntimeError("observer broken")
+
+    inner_hard = _Inner([asyncio.CancelledError()])
+    client_hard = LoggingLLMClient(
+        inner=inner_hard,
+        unit_of_work=unit_of_work_hard,
+        provider="fake",
+        model="fake",
+        clock=lambda: datetime(2026, 11, 22, tzinfo=UTC),
+        id_factory=lambda: "call-hard",
+        on_logged=broken_observer,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await client_hard.generate(_request())
+
+
+async def test_transient_sqlite_busy_does_not_overwrite_outcomes_or_poison_diagnostics() -> None:
+    """Transient SQLite busy in periodic_purge or _log preserves LLM outcomes and call_id=None safety."""
     unit_of_work = _UnitOfWork()
     unit_of_work.fail_transactions = 1
     inner = _Inner([_response(), _response()])
     client = _client(inner, unit_of_work)
 
-    with pytest.raises(PersistenceError, match="занята"):
-        await client.generate(_request())
+    # First call: periodic_purge hits transient busy -> skipped, inner call runs and succeeds.
+    first = await client.generate(_request())
     diagnostics = diagnostics_for(unit_of_work)
-    assert inner.calls == 0
+    assert inner.calls == 1
+    assert first.call_id is not None
+    assert diagnostics._last_cleanup is None
     assert client._observation_failed is False
     assert diagnostics._failed is False
 
-    unit_of_work.llm_calls.fail_updates = 1
-    with pytest.raises(PersistenceError, match="занята"):
-        await client.generate(_request())
+    # Persistent transient busy across all 3 _log retries -> response returned with call_id=None.
+    unit_of_work.llm_calls.fail_updates = 10
+    second = await client.generate(_request())
+    assert second.call_id is None
     assert client._observation_failed is False
     assert diagnostics._failed is False
-    diagnostics.ensure_available()
 
-    response = await client.generate(_request())
-    assert response.call_id is not None
-    assert client._observation_failed is False
-    assert diagnostics._failed is False
-    assert any(
-        entry.success and entry.id == response.call_id for entry in unit_of_work.llm_calls.entries
+    # Downstream helpers respect call_id=None without poisoning diagnostics.
+    finalize_response(unit_of_work, second, "accepted")
+    record_rejection(unit_of_work, second, None)
+    record_reader_warnings(
+        unit_of_work,
+        second,
+        [("translation", "I am sorry, as an AI language model")],
+        reader_level="b1",
     )
+    assert diagnostics._failed is False
+
+    # Transient busy during error logging never overwrites LLMTransportError or LLMResponseFormatError.
+    unit_of_work.fail_transactions = 20
+    not_sent = LLMTransportError("connect failed", outcome="not_sent")
+    rate_limited = LLMTransportError("429", outcome="known_transient", retry_after_seconds=12.0)
+    fmt_error = LLMResponseFormatError("bad json")
+    err_client = _client(_Inner([not_sent, rate_limited, fmt_error]), unit_of_work)
+
+    with pytest.raises(LLMTransportError) as caught_not_sent:
+        await err_client.generate(_request())
+    assert caught_not_sent.value is not_sent
+    assert caught_not_sent.value.outcome == "not_sent"
+
+    with pytest.raises(LLMTransportError) as caught_429:
+        await err_client.generate(_request())
+    assert caught_429.value is rate_limited
+    assert caught_429.value.outcome == "known_transient"
+    assert caught_429.value.retry_after_seconds == 12.0
+
+    with pytest.raises(LLMResponseFormatError) as caught_fmt:
+        await err_client.generate(_request())
+    assert caught_fmt.value is fmt_error
+    assert caught_fmt.value.call_id is None
+    assert diagnostics._failed is False
+
+
+def test_sqlalchemy_uow_translates_commit_operational_locked_error(tmp_path) -> None:
+    """OperationalError('database is locked') during commit translates into PersistenceError."""
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    from linguary.adapters.db import Base, SqlAlchemyUnitOfWork, create_database_engine
+
+    engine = create_database_engine(tmp_path / "lock.db")
+    Base.metadata.create_all(engine)
+    uow = SqlAlchemyUnitOfWork.for_engine(engine)
+    diagnostics = diagnostics_for(uow)
+    try:
+        with pytest.raises(PersistenceError, match="занята"):
+            with uow.transaction() as tx:
+                session = tx._active_session()
+
+                def fail_commit(_session):
+                    raise OperationalError("COMMIT", {}, Exception("database is locked"))
+
+                event.listen(session, "before_commit", fail_commit)
+        assert diagnostics._failed is False
+    finally:
+        engine.dispose()
+
+
+async def test_worker_pool_survives_transient_sqlite_busy() -> None:
+    """TaskWorkerPool.run_forever() keeps running after a transient SQLite lock error."""
+    calls = 0
+    done = asyncio.Event()
+
+    class _FlakyRunner:
+        async def run_next(self):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise _BUSY
+            if calls == 2:
+                done.set()
+                return object()
+            return None
+
+    pool = TaskWorkerPool(
+        _FlakyRunner(),  # type: ignore[arg-type]
+        WorkerSettings(concurrency=1, idle_delay_seconds=0.01),
+    )
+    task = asyncio.create_task(pool.run_forever())
+    try:
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+    finally:
+        pool.request_stop()
+        await asyncio.wait_for(task, timeout=2.0)
+    assert calls >= 2

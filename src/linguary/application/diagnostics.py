@@ -51,12 +51,15 @@ def bounded_body(body, *, max_bytes=64 * 1024, secrets=()):
                     'stored_bytes': len(result.encode('utf-8'))}
 
 
-def _is_transient_lock_error(error: BaseException) -> bool:
+def is_transient_lock_error(error: BaseException) -> bool:
     """A temporary SQLite writer lock surfaced as `PersistenceError`."""
     if not isinstance(error, PersistenceError):
         return False
     text = str(error).casefold()
     return 'занята' in text or 'locked' in text or 'busy' in text
+
+
+_is_transient_lock_error = is_transient_lock_error
 
 
 class Diagnostics:
@@ -86,7 +89,12 @@ class Diagnostics:
         current = now if now is not None else self.clock()
         if not self.needs_periodic_purge(current, min_interval_seconds=min_interval_seconds):
             return False
-        self.purge_expired(current)
+        try:
+            self.purge_expired(current)
+        except Exception as error:
+            if is_transient_lock_error(error):
+                return False
+            raise
         self._last_cleanup = current
         return True
 

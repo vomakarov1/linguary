@@ -16,9 +16,9 @@ from hashlib import sha256
 from uuid import uuid4
 
 from linguary.application.diagnostics import (
-    _is_transient_lock_error,
     bounded_body,
     diagnostics_for,
+    is_transient_lock_error,
 )
 from linguary.application.retry_policy import violation_of
 from linguary.application.ports.llm import (
@@ -36,7 +36,7 @@ from linguary.domain.llm_log import TokenPricing
 
 type Clock = Callable[[], datetime]
 type IdFactory = Callable[[], str]
-type LoggedObserver = Callable[[LLMCallLog, LLMRequest, LLMResponse | Exception], None]
+type LoggedObserver = Callable[[LLMCallLog, LLMRequest, LLMResponse | BaseException], None]
 
 
 @dataclass(slots=True)
@@ -72,21 +72,25 @@ class LoggingLLMClient(LLMClient):
         try:
             response = await self.inner.generate(request)
         except asyncio.CancelledError as error:
-            self._log(
-                request=request,
-                started_at=started_at,
-                provider=self.provider,
-                model=self.model,
-                success=False,
-                error=error,
-                outcome=error,
-            )
+            try:
+                await self._log(
+                    request=request,
+                    started_at=started_at,
+                    provider=self.provider,
+                    model=self.model,
+                    success=False,
+                    error=error,
+                    outcome=error,
+                    retry=False,
+                )
+            except Exception:
+                pass
             raise
         except LLMResponseFormatError as error:
             error.raw_content, error.body_meta = _bound_if_needed(
                 error.raw_content, error.body_meta, max_bytes=policy.max_body_bytes
             )
-            self._log(
+            await self._log(
                 request=request,
                 started_at=started_at,
                 provider=error.provider if error.provider is not None else self.provider,
@@ -101,7 +105,7 @@ class LoggingLLMClient(LLMClient):
             )
             raise
         except Exception as error:
-            self._log(
+            await self._log(
                 request=request,
                 started_at=started_at,
                 provider=self.provider,
@@ -115,7 +119,7 @@ class LoggingLLMClient(LLMClient):
         bounded_text, resolved_body_meta = _bound_if_needed(
             response.raw_content, response.body_meta, max_bytes=policy.max_body_bytes
         )
-        self._log(
+        persisted = await self._log(
             request=request,
             started_at=started_at,
             provider=response.provider,
@@ -130,7 +134,7 @@ class LoggingLLMClient(LLMClient):
         )
         return replace(
             response,
-            call_id=call_id,
+            call_id=call_id if persisted else None,
             raw_content=bounded_text,
             call_context=request.call_context,
             body_meta={**resolved_body_meta, 'debug_retained': self.debug_payloads},
@@ -144,7 +148,7 @@ class LoggingLLMClient(LLMClient):
             return provider_cost
         return self.pricing.cost_of(usage) if self.pricing is not None else None
 
-    def _log(
+    async def _log(
         self,
         *,
         request: LLMRequest[LLMPayload],
@@ -152,17 +156,18 @@ class LoggingLLMClient(LLMClient):
         provider: str,
         model: str,
         success: bool,
-        error: Exception | None = None,
+        error: BaseException | None = None,
         usage: TokenUsage | None = None,
         cost: Decimal | None = None,
         call_id: str | None = None,
         response_text: str | None = None,
         body_meta: dict[str, object] | None = None,
-        outcome: LLMResponse | Exception | None = None,
-    ) -> None:
+        outcome: LLMResponse | BaseException | None = None,
+        retry: bool = True,
+    ) -> bool:
         """Records a single log entry within a short transaction."""
         if request.book_id is None or request.stage is None:
-            return
+            return False
         diagnostics = diagnostics_for(self.unit_of_work)
         policy = diagnostics.policy
         if body_meta is not None:
@@ -206,42 +211,53 @@ class LoggingLLMClient(LLMClient):
             attempt_id=None if context is None else context.attempt_id,
             diagnostic_meta=metadata,
         )
-        finalize_error: Exception | None = None
-        try:
-            with self.unit_of_work.transaction() as transaction:
-                transaction.llm_calls.add(entry)
-                try:
-                    diagnostics.finalize_attempt(
-                        entry.attempt_id,
-                        'unknown' if success else ('rejected' if isinstance(error, LLMResponseFormatError) else 'unknown'),
-                        violation=None if error is None else violation_of(error, context=context),
-                        body=response_text,
-                        call_id=entry.id,
-                        body_meta=supplied_meta,
-                        retain_accepted=self.debug_payloads,
-                        transaction=transaction,
-                    )
-                except Exception as exc:
-                    finalize_error = exc
-            if finalize_error is not None:
-                raise finalize_error
-            if isinstance(error, LLMResponseFormatError):
-                error.call_id = entry.id
-                error.call_context = context
-        except PersistenceError as caught:
-            if _is_transient_lock_error(caught):
-                raise
-            self._observation_failed = True
-            diagnostics.fail()
-        except Exception:
-            self._observation_failed = True
-            diagnostics.fail()
+        max_attempts = 3 if retry else 1
+        persisted = False
+        for attempt_num in range(1, max_attempts + 1):
+            finalize_error: Exception | None = None
+            try:
+                with self.unit_of_work.transaction() as transaction:
+                    transaction.llm_calls.add(entry)
+                    try:
+                        diagnostics.finalize_attempt(
+                            entry.attempt_id,
+                            'unknown' if success else ('rejected' if isinstance(error, LLMResponseFormatError) else 'unknown'),
+                            violation=None if error is None else violation_of(error, context=context),
+                            body=response_text,
+                            call_id=entry.id,
+                            body_meta=supplied_meta,
+                            retain_accepted=self.debug_payloads,
+                            transaction=transaction,
+                        )
+                    except Exception as exc:
+                        if is_transient_lock_error(exc):
+                            raise
+                        finalize_error = exc
+                if finalize_error is not None:
+                    raise finalize_error
+                persisted = True
+                break
+            except PersistenceError as caught:
+                if is_transient_lock_error(caught):
+                    if attempt_num < max_attempts:
+                        await asyncio.sleep(0.01 * attempt_num)
+                        continue
+                    break
+                self._observation_failed = True
+                diagnostics.fail()
+            except Exception:
+                self._observation_failed = True
+                diagnostics.fail()
+        if persisted and isinstance(error, LLMResponseFormatError):
+            error.call_id = entry.id
+            error.call_context = context
         if self.on_logged is not None and outcome is not None:
             try:
                 self.on_logged(entry, request, outcome)
             except Exception:
                 self._observation_failed = True
                 raise LLMConfigurationError("Запись наблюдения недоступна; новые вызовы остановлены") from None
+        return persisted
 
     def _duration_ms(self, started_at: datetime) -> int:
         """Call duration in milliseconds."""
