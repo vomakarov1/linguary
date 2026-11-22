@@ -18,9 +18,13 @@ from typing import Any
 import pytest
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
-from linguary.adapters.config.settings import ReadingSettings
+from linguary.adapters.config.settings import CheckSettings, ReadingSettings, WorkerPoolSettings
 from linguary.adapters.llm import FakeLLMClient, FakeReply
-from linguary.application.book_conditions import payload_digest
+from linguary.application.book_conditions import (
+    A2_CONTENT_PLAN_V5_VERSIONS,
+    A2_CONTENT_PLAN_V6_VERSIONS,
+    payload_digest,
+)
 from linguary.application.context_builder import (
     _TRANSLATION_INSTRUCTIONS,
     snapshot_prompt_templates,
@@ -31,8 +35,11 @@ from linguary.application.ports.persistence import BookRecord
 from linguary.application.reader_text import _A2_NOTE_DISCIPLINE
 from linguary.application.use_cases.analyze_chapter import AnalyzeChapterCommand
 from linguary.composition import Application, build_application, drain_tasks
+from linguary.composition.book_runtime import effective_content_plan_profile
 from linguary.domain import (
     AnalysisPassKind,
+    BlockSegment,
+    BlockTreatment,
     BlockType,
     BookMetadata,
     BookStatus,
@@ -49,6 +56,8 @@ from linguary.domain import (
     TermStatus,
     TermVariant,
 )
+from linguary.domain.book_conditions import thaw
+from linguary.domain.name_translation import NameTranslationReviewReason
 
 BOOK_ID = "book-1"
 SECTION_ID = "section-1"
@@ -945,3 +954,910 @@ async def test_everlost_scene_location_separator_and_instruction_merge(
         )
     finally:
         await app.aclose()
+
+
+def _sentence_segments(sentences: Sequence[str]) -> tuple[str, tuple[BlockSegment, ...]]:
+    """Build continuous sentence-aligned BlockSegment spans for a multi-sentence paragraph."""
+    chunks: list[str] = []
+    spans: list[BlockSegment] = []
+    offset = 0
+    for idx, sentence in enumerate(sentences):
+        chunk = sentence if idx == len(sentences) - 1 else f"{sentence} "
+        chunks.append(chunk)
+        spans.append(BlockSegment(offset, offset + len(chunk), sentence_index=idx))
+        offset += len(chunk)
+    return "".join(chunks), tuple(spans)
+
+
+def _everlost_multi_section_document(*, book_id: str = BOOK_ID) -> CanonicalDocument:
+    """Four-section Everlost fixture: PART ONE / Afterlights -> Ch. 1 -> Ch. 2 -> Ch. 3."""
+    part_one = DocumentSection(
+        id="part-1",
+        document_id=book_id,
+        title="PART ONE: Afterlights",
+        order=0,
+        source_resource_path="part1.xhtml",
+        blocks=(
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="part-1",
+                type=BlockType.HEADING,
+                order=0,
+                text="PART ONE",
+                source_reference=SourceReference("part1.xhtml", "/body/h1[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="part-1",
+                type=BlockType.HEADING,
+                order=1,
+                text="Afterlights",
+                source_reference=SourceReference("part1.xhtml", "/body/h2[1]"),
+            ),
+        ),
+    )
+
+    ch1_long_text, ch1_long_spans = _sentence_segments(
+        (
+            "The road looked quiet.",
+            "A strange silver mist moved slowly across the street.",
+            "Allie felt uneasy near the trees.",
+            "She wondered what had happened to the highway after the crash.",
+        )
+    )
+    ch1 = DocumentSection(
+        id="ch-1",
+        document_id=book_id,
+        title="Chapter 1: Into the Light",
+        order=1,
+        source_resource_path="ch1.xhtml",
+        blocks=(
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-1",
+                type=BlockType.HEADING,
+                order=0,
+                text="Chapter 1",
+                source_reference=SourceReference("ch1.xhtml", "/body/h1[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-1",
+                type=BlockType.HEADING,
+                order=1,
+                text="Into the Light",
+                source_reference=SourceReference("ch1.xhtml", "/body/h2[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-1",
+                type=BlockType.PARAGRAPH,
+                order=2,
+                text="A girl woke up beside the wrecked silver car and looked around in silence.",
+                source_reference=SourceReference("ch1.xhtml", "/body/p[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-1",
+                type=BlockType.PARAGRAPH,
+                order=3,
+                text="“I have never seen mist like this before,” Alexandra whispered, shaking her cold hands.",
+                source_reference=SourceReference("ch1.xhtml", "/body/p[2]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-1",
+                type=BlockType.PARAGRAPH,
+                order=4,
+                text="“Call me Allie,” she told the boy who sat nearby on the curb.",
+                source_reference=SourceReference("ch1.xhtml", "/body/p[3]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-1",
+                type=BlockType.PARAGRAPH,
+                order=5,
+                text=ch1_long_text,
+                source_reference=SourceReference("ch1.xhtml", "/body/p[4]"),
+                segments=ch1_long_spans,
+            ),
+        ),
+    )
+
+    ch2 = DocumentSection(
+        id="ch-2",
+        document_id=book_id,
+        title="Chapter 2: The Boy Named Lief",
+        order=2,
+        source_resource_path="ch2.xhtml",
+        blocks=(
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-2",
+                type=BlockType.HEADING,
+                order=0,
+                text="Chapter 2",
+                source_reference=SourceReference("ch2.xhtml", "/body/h1[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-2",
+                type=BlockType.HEADING,
+                order=1,
+                text="The Boy Named Lief",
+                source_reference=SourceReference("ch2.xhtml", "/body/h2[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-2",
+                type=BlockType.PARAGRAPH,
+                order=2,
+                text="The forest felt cold and quiet as the two children walked along the mossy stones.",
+                source_reference=SourceReference("ch2.xhtml", "/body/p[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-2",
+                type=BlockType.PARAGRAPH,
+                order=3,
+                text="Allie stopped near a fallen tree and stared at a boy dressed in green.",
+                source_reference=SourceReference("ch2.xhtml", "/body/p[2]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-2",
+                type=BlockType.PARAGRAPH,
+                order=4,
+                text="“My name is Lief, like a green leaf on a tree,” the boy said softly.",
+                source_reference=SourceReference("ch2.xhtml", "/body/p[3]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-2",
+                type=BlockType.PARAGRAPH,
+                order=5,
+                text="“What are you waiting for?” he asked, and Allie turned pale.",
+                source_reference=SourceReference("ch2.xhtml", "/body/p[4]"),
+            ),
+        ),
+    )
+
+    ch3 = DocumentSection(
+        id="ch-3",
+        document_id=book_id,
+        title="Chapter 3: Shadows on the Path",
+        order=3,
+        source_resource_path="ch3.xhtml",
+        blocks=(
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-3",
+                type=BlockType.HEADING,
+                order=0,
+                text="Chapter 3",
+                source_reference=SourceReference("ch3.xhtml", "/body/h1[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-3",
+                type=BlockType.HEADING,
+                order=1,
+                text="Shadows on the Path",
+                source_reference=SourceReference("ch3.xhtml", "/body/h2[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-3",
+                type=BlockType.PARAGRAPH,
+                order=2,
+                text="Allie followed the boy down the misty trail toward the sunken streetlamp.",
+                source_reference=SourceReference("ch3.xhtml", "/body/p[1]"),
+            ),
+            DocumentBlock.create(
+                document_id=book_id,
+                section_id="ch-3",
+                type=BlockType.PARAGRAPH,
+                order=3,
+                text="“I ain't going back,” the boy said.",
+                source_reference=SourceReference("ch3.xhtml", "/body/p[2]"),
+            ),
+        ),
+    )
+
+    return CanonicalDocument(
+        id=book_id,
+        metadata=BookMetadata(title="Everlost", authors=("Neal Shusterman",)),
+        source_language="en",
+        target_language="ru",
+        sections=(part_one, ch1, ch2, ch3),
+    )
+
+
+class ScopedStagedFakeLLMClient(FakeLLMClient):
+    """Staged fake LLM client dispatching deterministic replies by `(scope_id, stage)`."""
+
+    supports_staged_analysis = True
+
+    def __init__(self, replies_by_key: dict[tuple[str | None, LLMCallStage], list[FakeReply]]) -> None:
+        super().__init__(replies=[])
+        self._queues = {key: list(items) for key, items in replies_by_key.items()}
+
+    async def generate[PayloadT: LLMPayload](
+        self, request: LLMRequest[PayloadT]
+    ) -> LLMResponse[PayloadT]:
+        key = (request.scope_id, request.stage)
+        queue = self._queues.get(key)
+        if not queue:
+            raise AssertionError(f"Unexpected LLM call for {key!r}")
+        step = queue.pop(0)
+        self.replies = [*self.replies, step]
+        response = await super().generate(request)
+        if isinstance(step, FakeReply) and response.raw_content is None:
+            return replace(response, raw_content=step.content)
+        return response
+
+
+def _make_multi_section_app(
+    root: Path,
+    llm_client: FakeLLMClient,
+    document: CanonicalDocument,
+    *,
+    concurrency: int = 1,
+    seed_first_chapter: bool = False,
+    max_attempts: int = 3,
+) -> Application:
+    """Build real SQLite-backed application populated with the multi-section Everlost document."""
+    settings = AppSettings(
+        llm=LLMSettings(
+            model="everlost-test",
+            api_key="synthetic-secret",
+            proxy_mode="direct",
+            max_attempts=max_attempts,
+        ),
+        checks=CheckSettings(seed_first_chapter=seed_first_chapter),
+        worker=WorkerPoolSettings(concurrency=concurrency),
+        reading=ReadingSettings(reader_level="a2", name_translation_strategy="meaning"),
+        storage=StorageSettings(data_root=str(root)),
+    )
+    app = build_application(
+        settings=settings,
+        llm_client=llm_client,
+        content_plan_profile="content-plan-v3",
+    )
+    source = app.paths.source_epub(document.id)
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"synthetic everlost multi-section epub")
+    with app.unit_of_work.transaction() as tx:
+        tx.books.add(
+            BookRecord(
+                id=document.id,
+                metadata=document.metadata,
+                source_language=document.source_language,
+                target_language=document.target_language,
+                status=BookStatus.IMPORTED,
+                source_epub_path=str(source),
+                created_at=CREATED_AT,
+            )
+        )
+        tx.documents.save(document)
+    return app
+
+
+async def test_everlost_part_divider_cross_chapter_glossary_segments_and_a2_validations_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """End-to-end PART ONE -> Ch. 1-3 regression covering dividers, cross-chapter glossary, segments, A2 guards, and conditions."""
+    document = _everlost_multi_section_document()
+    part_one, ch1, ch2, ch3 = document.ordered_sections
+    assert document.is_part_divider(part_one) is True
+    assert document.is_front_matter(part_one) is True
+    assert document.has_meaningful_part_title(part_one) is True
+
+    # Frozen baseline templates (legacy-v1 / B2) and _TRANSLATION_INSTRUCTIONS preserve exact SHA-256 digests.
+    assert sha256(_TRANSLATION_INSTRUCTIONS.encode("utf-8")).hexdigest() == _BASELINE_TRANSLATION_SHA256
+    assert (
+        payload_digest(
+            snapshot_prompt_templates(
+                source_language="en",
+                target_language="ru",
+                reader_level="b2",
+                pronunciation_help_enabled=True,
+            )
+        )
+        == _BASELINE_WITH_PRON_SHA256
+    )
+    assert (
+        payload_digest(
+            snapshot_prompt_templates(
+                source_language="en",
+                target_language="ru",
+                reader_level="b2",
+            )
+        )
+        == _BASELINE_DEFAULT_SHA256
+    )
+
+    afterlights_candidate = {
+        "source_text": "Afterlights",
+        "type": "fictional_concept",
+        "suggested_translation": "Послесветы",
+        "confidence": 0.92,
+        "model_flagged_review": False,
+        "note": "множественное число",
+        "description": "Дети, застрявшие между жизнью и смертью.",
+        "name_translation_assessment": _name_assessment(
+            applied_method="meaning",
+            opaque_name=False,
+            rationale="Прозрачное составное название after + lights.",
+        ),
+    }
+    part1_narrative_reply = FakeReply.of_payload(
+        _narrative_payload(
+            block_count=2,
+            chapter_summary="PART ONE: Afterlights",
+            scenes=[],
+            glossary_candidates=[afterlights_candidate],
+        )
+    )
+
+    # Ch. 1 narrative attempt 1 triggers all five narrative validations in one pass:
+    # - chapter_summary in Russian (narrative_summary_language)
+    # - scenes[].summary in English (scene_summary_language)
+    # - conflicting assessment: sound + creative_adaptation (name_assessment_conflict)
+    # - spoiler participant "Alexandra" on scene b1..b3 before first mention in b4 (spoiler_name_leak)
+    # - non-visual sound detail in visual_facts (non_visual_fact)
+    ch1_nar_attempt1 = FakeReply.of_payload(
+        _narrative_payload(
+            block_count=6,
+            chapter_summary="Александра просыпается в тумане возле разбитой машины.",
+            scenes=[
+                {
+                    "start_block_id": "b1",
+                    "end_block_id": "b3",
+                    "summary": "Alexandra wakes up beside the wrecked silver car in total silence.",
+                    "location": "У разбитой машины",
+                    "participants": ["Alexandra"],
+                    "visual_facts": [],
+                    "visual_assumptions": [],
+                    "continues_previous_scene": False,
+                },
+                {
+                    "start_block_id": "b4",
+                    "end_block_id": "b6",
+                    "summary": "Александра разговаривает с мальчиком и смотрит на туманную дорогу.",
+                    "location": "Туманная дорога",
+                    "participants": ["Alexandra", "the boy"],
+                    "visual_facts": [
+                        {
+                            "anchor": {"block_id": "b4", "quote": "Alexandra whispered"},
+                            "subject": "Alexandra",
+                            "detail": "Тихий шёпот голоса в серебристом тумане.",
+                        }
+                    ],
+                    "visual_assumptions": [],
+                    "continues_previous_scene": False,
+                },
+            ],
+            glossary_candidates=[
+                {
+                    "source_text": "Alexandra",
+                    "type": "person",
+                    "suggested_translation": "Александра",
+                    "confidence": 0.9,
+                    "model_flagged_review": True,
+                    "note": "женский род; краткая форма Allie -> Элли",
+                    "description": "Девочка, очнувшаяся после аварии; просит звать её Элли.",
+                    "name_translation_assessment": {
+                        "applied_method": "sound",
+                        "eligible_without_review": False,
+                        "review_reasons": ["creative_adaptation", "creative_adaptation"],
+                        "rationale": "Ошибочно указана противоречащая причина.",
+                        "opaque_name": True,
+                    },
+                }
+            ],
+        )
+    )
+
+    ch1_nar_summary = (
+        "Alexandra wakes up beside a wrecked silver car in the mist. "
+        "She asks a boy on the curb to call her Allie and wonders what happened after the crash."
+    )
+    # Ch. 1 narrative attempt 2 succeeds and tests review_reasons deduplication preserving order.
+    ch1_nar_attempt2 = FakeReply.of_payload(
+        _narrative_payload(
+            block_count=6,
+            chapter_summary=ch1_nar_summary,
+            scenes=[
+                {
+                    "start_block_id": "b1",
+                    "end_block_id": "b3",
+                    "summary": "Девушка приходит в себя возле разбитой серебристой машины и оглядывается.",
+                    "location": "У разбитой машины",
+                    "participants": ["the girl"],
+                    "visual_facts": [],
+                    "visual_assumptions": [],
+                    "continues_previous_scene": False,
+                },
+                {
+                    "start_block_id": "b4",
+                    "end_block_id": "b6",
+                    "summary": "Александра просит звать её Элли и всматривается в окутанную туманом дорогу.",
+                    "location": "Туманная дорога",
+                    "participants": ["Alexandra", "the boy"],
+                    "visual_facts": [
+                        {
+                            "anchor": {"block_id": "b4", "quote": "shaking her cold hands"},
+                            "subject": "Alexandra",
+                            "detail": "Дрожащие руки девушки в серебристом тумане.",
+                        }
+                    ],
+                    "visual_assumptions": [],
+                    "continues_previous_scene": False,
+                },
+            ],
+            glossary_candidates=[
+                {
+                    "source_text": "Alexandra",
+                    "type": "person",
+                    "suggested_translation": "Александра",
+                    "confidence": 0.94,
+                    "model_flagged_review": True,
+                    "note": "женский род; краткая форма Allie -> Элли",
+                    "description": "Девочка, очнувшаяся после аварии; просит звать её Элли.",
+                    "name_translation_assessment": {
+                        "applied_method": "sound",
+                        "eligible_without_review": False,
+                        "review_reasons": ["ambiguous", "other", "ambiguous"],
+                        "rationale": "Личное имя и краткая форма Allie требуют сверки.",
+                        "opaque_name": True,
+                    },
+                }
+            ],
+        )
+    )
+
+    ch1_a2_summary = (
+        "Alexandra wakes up near a broken car in the silver mist. "
+        "She meets a boy on the street and asks him to call her Allie."
+    )
+    ch1_ped_attempt1 = FakeReply.of_payload(
+        _pedagogical_payload(
+            block_count=6,
+            summary="Alexandra stays in the silver mist for a long time. She meets a boy on the street.",
+        )
+    )
+    ch1_ped_attempt2_payload = {
+        "treatment_plan": [
+            {"source_block_id": "b1", "treatment": "READ_AS_IS"},
+            {"source_block_id": "b2", "treatment": "TRANSLATE"},
+            {"source_block_id": "b3", "treatment": "TRANSLATE"},
+            # Present Perfect in b4 marked READ_AS_IS -> A2 stoplist promotes to TRANSLATE.
+            {"source_block_id": "b4", "treatment": "READ_AS_IS"},
+            {"source_block_id": "b5", "treatment": "READ_AS_IS"},
+            # Mixed 4-segment paragraph: seg1 READ_AS_IS, seg2 GLOSSARY_ONLY + lexical_hint,
+            # seg3 READ_AS_IS with "uneasy" -> promoted to TRANSLATE, seg4 TRANSLATE.
+            {
+                "source_block_id": "b6",
+                "treatment": "TRANSLATE",
+                "segments": [
+                    {"index": 1, "treatment": "READ_AS_IS"},
+                    {"index": 2, "treatment": "GLOSSARY_ONLY"},
+                    {"index": 3, "treatment": "READ_AS_IS"},
+                    {"index": 4, "treatment": "TRANSLATE"},
+                ],
+            },
+        ],
+        "before_you_read": [],
+        "difficulties": [
+            {
+                "id": "d-ch1-mist",
+                "anchors": [{"block_id": "b6", "quote": "silver mist"}],
+                "owner_block_id": "b6",
+                "kind": "vocabulary",
+                "priority": "useful",
+                "help_kind": "lexical_hint",
+                "required_points": [
+                    {"id": "p1", "description": "объяснить значение silver mist (серебристый туман)"}
+                ],
+            }
+        ],
+        "before_you_read_evidence": [],
+        "reader_chapter_summary": ch1_a2_summary,
+    }
+    ch1_ped_attempt2 = FakeReply.of_payload(ch1_ped_attempt2_payload)
+
+    # Ch. 2 narrative: lists Alexandra in scene b1..b3 BEFORE Allie appears in b4 ->
+    # allowed because Alexandra is in known_names from Ch. 1!
+    # Also extracts Lief with leaf etymology and opaque_name=False.
+    ch2_nar_summary = (
+        "Allie walks through the cold forest and meets a boy named Lief dressed in green. "
+        "Lief explains his name comes from leaf and asks what she is waiting for."
+    )
+    ch2_nar_reply = FakeReply.of_payload(
+        _narrative_payload(
+            block_count=6,
+            chapter_summary=ch2_nar_summary,
+            scenes=[
+                {
+                    "start_block_id": "b1",
+                    "end_block_id": "b3",
+                    "summary": "Дети идут по холодному тихому лесу вдоль мшистых камней.",
+                    "location": "Холодный лес",
+                    "participants": ["Alexandra"],
+                    "visual_facts": [],
+                    "visual_assumptions": [],
+                    "continues_previous_scene": False,
+                },
+                {
+                    "start_block_id": "b4",
+                    "end_block_id": "b6",
+                    "summary": "Элли встречает мальчика в зелёном по имени Лиф и бледнеет от его вопроса.",
+                    "location": "Лесная поляна",
+                    "participants": ["Alexandra", "Lief"],
+                    "visual_facts": [
+                        {
+                            "anchor": {"block_id": "b4", "quote": "a boy dressed in green"},
+                            "subject": "Lief",
+                            "detail": "Мальчик одет в зелёное.",
+                        }
+                    ],
+                    "visual_assumptions": [],
+                    "continues_previous_scene": False,
+                },
+            ],
+            glossary_candidates=[
+                {
+                    "source_text": "Lief",
+                    "type": "person",
+                    "suggested_translation": "Лиф",
+                    "confidence": 0.93,
+                    "model_flagged_review": False,
+                    "note": "мужской род",
+                    "description": "Мальчик в зелёном; имя обыгрывает слово leaf (зелёный лист).",
+                    "name_translation_assessment": _name_assessment(
+                        applied_method="meaning",
+                        opaque_name=False,
+                        rationale="В тексте явно обыгрывается этимология Lief / leaf.",
+                    ),
+                }
+            ],
+        )
+    )
+
+    ch2_a2_summary = (
+        "Allie walks in the cold forest and meets a boy in green. "
+        "His name is Lief, like a green leaf, and his question makes Allie pale."
+    )
+    ch2_ped_attempt1 = FakeReply.of_payload(
+        _pedagogical_payload(
+            block_count=6,
+            summary="A baker cooks warm bread in a sunny kitchen. He sells red apples at the market.",
+        )
+    )
+    ch2_ped_attempt2_payload = {
+        "treatment_plan": [
+            {"source_block_id": "b1", "treatment": "READ_AS_IS"},
+            {"source_block_id": "b2", "treatment": "TRANSLATE"},
+            {"source_block_id": "b3", "treatment": "TRANSLATE"},
+            {"source_block_id": "b4", "treatment": "TRANSLATE"},
+            {"source_block_id": "b5", "treatment": "TRANSLATE"},
+            # Stranded preposition + state-change idiom ("What are you waiting for?" / "turned pale")
+            # marked GLOSSARY_ONLY with only lexical_hint -> promoted to TRANSLATE and hint -> explanation.
+            {"source_block_id": "b6", "treatment": "GLOSSARY_ONLY"},
+        ],
+        "before_you_read": [],
+        "difficulties": [
+            {
+                "id": "d-ch2-mossy",
+                "anchors": [{"block_id": "b3", "quote": "mossy stones"}],
+                "owner_block_id": "b3",
+                "kind": "vocabulary",
+                "priority": "useful",
+                "help_kind": "explanation",
+                "required_points": [
+                    {"id": "p1", "description": "объяснить mossy stones (камни, покрытые мхом)"}
+                ],
+            },
+            {
+                "id": "d-ch2-pale",
+                "anchors": [{"block_id": "b6", "quote": "pale"}],
+                "owner_block_id": "b6",
+                "kind": "vocabulary",
+                "priority": "useful",
+                "help_kind": "lexical_hint",
+                "required_points": [
+                    {"id": "p1", "description": "объяснить pale (бледный)"}
+                ],
+            },
+        ],
+        "before_you_read_evidence": [],
+        "reader_chapter_summary": ch2_a2_summary,
+    }
+    ch2_ped_attempt2 = FakeReply.of_payload(ch2_ped_attempt2_payload)
+
+    # Ch. 3 narrative + pedagogical: neither Afterlights nor Lief appears in Ch. 3 text,
+    # yet both unconfirmed key candidates and Lief's leaf etymology + opaque_name=False are backfilled.
+    ch3_nar_summary = (
+        "Allie follows the boy along the misty trail toward a sunken streetlamp. "
+        "The boy refuses to go back into the dark woods."
+    )
+    ch3_nar_reply = FakeReply.of_payload(
+        _narrative_payload(
+            block_count=4,
+            chapter_summary=ch3_nar_summary,
+            scenes=[
+                {
+                    "start_block_id": "b1",
+                    "end_block_id": "b4",
+                    "summary": "Элли идёт за мальчиком по туманной тропе к фонарю, а он отказывается возвращаться в лес.",
+                    "location": "Туманная тропа",
+                    "participants": ["Alexandra", "Lief"],
+                    "visual_facts": [],
+                    "visual_assumptions": [],
+                    "continues_previous_scene": False,
+                }
+            ],
+        )
+    )
+    ch3_a2_summary = (
+        "Allie follows the boy down the misty trail to a sunken streetlamp. "
+        "The boy says he will not go back into the dark woods."
+    )
+    ch3_ped_attempt1 = FakeReply.of_payload(
+        _pedagogical_payload(
+            block_count=4,
+            summary=(
+                "Allie follows the boy carefully along the narrow misty trail through the quiet "
+                "cold forest toward the broken sunken streetlamp while the boy refuses to go back "
+                "into the dark shadows again."
+            ),
+        )
+    )
+    ch3_ped_attempt2 = FakeReply.of_payload(
+        {
+            "treatment_plan": [
+                {"source_block_id": "b1", "treatment": "READ_AS_IS"},
+                {"source_block_id": "b2", "treatment": "TRANSLATE"},
+                {"source_block_id": "b3", "treatment": "TRANSLATE"},
+                # Short 7-word dialogue with nonstandard "ain't": must stay TRANSLATE (not demoted to READ_AS_IS).
+                {"source_block_id": "b4", "treatment": "TRANSLATE"},
+            ],
+            "before_you_read": [],
+            "difficulties": [],
+            "before_you_read_evidence": [],
+            "reader_chapter_summary": ch3_a2_summary,
+        }
+    )
+
+    # 1. Sequential multi-section run: PART ONE -> Ch. 1 -> Ch. 2 -> Ch. 3.
+    seq_client = StagedFakeLLMClient.replying(
+        [
+            part1_narrative_reply,
+            ch1_nar_attempt1,
+            ch1_nar_attempt2,
+            ch1_ped_attempt1,
+            ch1_ped_attempt2,
+            ch2_nar_reply,
+            ch2_ped_attempt1,
+            ch2_ped_attempt2,
+            ch3_nar_reply,
+            ch3_ped_attempt1,
+            ch3_ped_attempt2,
+        ]
+    )
+    seq_app = _make_multi_section_app(tmp_path / "sequential", seq_client, document, concurrency=1)
+    try:
+        await seq_app.analysis.start(BOOK_ID)
+        completed = await drain_tasks(seq_app)
+        assert all(task.status is TaskStatus.SUCCEEDED for task in completed), [
+            (task.scope_id, task.last_error) for task in completed
+        ]
+
+        # Exact call trace: PART ONE gets narrative only (no pedagogical); Ch. 1-3 execute retries cleanly.
+        assert [(req.scope_id, req.stage) for req in seq_client.requests] == [
+            ("part-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+        ]
+
+        part1_nar_req = seq_client.requests[0]
+        ch1_nar_req1, ch1_nar_req2 = seq_client.requests[1], seq_client.requests[2]
+        ch1_ped_req2 = seq_client.requests[4]
+        ch2_nar_req = seq_client.requests[5]
+        ch2_ped_req1, ch2_ped_req2 = seq_client.requests[6], seq_client.requests[7]
+        ch3_nar_req = seq_client.requests[8]
+        ch3_ped_req1, ch3_ped_req2 = seq_client.requests[9], seq_client.requests[10]
+
+        # PART ONE divider receives dedicated part-divider instructions.
+        assert "разделитель части с содержательным подзаголовком" in part1_nar_req.instructions
+
+        # Ch. 1 receives unconfirmed Afterlights extracted from PART ONE even though absent in Ch. 1 text.
+        assert "Afterlights" in ch1_nar_req1.input_text
+        assert "Послесветы" in ch1_nar_req1.input_text
+        assert "непрозрачное=false" in ch1_nar_req1.input_text
+
+        # Ch. 1 narrative retry contains all five aggregated violation families.
+        ch1_nar_repair = ch1_nar_req2.repair_instructions[-1]
+        assert "пересказ главы должен быть на языке оригинала (en)" in ch1_nar_repair
+        assert "описание сцены должно быть на целевом языке (ru)" in ch1_nar_repair
+        assert "несогласованная оценка перевода имени" in ch1_nar_repair
+        assert "спойлер имени до первого упоминания в главе" in ch1_nar_repair
+        assert "визуальный факт содержит незрительное описание" in ch1_nar_repair
+
+        # Ch. 1/2/3 pedagogical retries carry exact A2 summary violation diagnostics.
+        assert "Present Simple с for + длительность" in ch1_ped_req2.repair_instructions[-1]
+        assert "не имеет общих значимых основ с narrative_summary" in ch2_ped_req2.repair_instructions[-1]
+        assert "не больше 26" in ch3_ped_req2.repair_instructions[-1]
+
+        # Ch. 2 narrative prompt receives Afterlights + Alexandra; Ch. 2 pedagogical receives Ch. 1 topics.
+        assert "Afterlights" in ch2_nar_req.input_text
+        assert "Alexandra" in ch2_nar_req.input_text
+        assert "краткая форма Allie -> Элли" in ch2_nar_req.input_text
+        assert "Уже объяснено в предыдущих главах" in ch2_ped_req1.input_text
+        assert "- silver mist" in ch2_ped_req1.input_text
+
+        # Ch. 3 narrative prompt receives backfilled Afterlights, Alexandra, and Lief/leaf etymology
+        # with непрозрачное=false even though neither Afterlights nor Lief appears in Ch. 3 text.
+        assert "Afterlights" in ch3_nar_req.input_text
+        assert "Alexandra" in ch3_nar_req.input_text
+        assert "Lief" in ch3_nar_req.input_text
+        assert "leaf" in ch3_nar_req.input_text
+        assert "непрозрачное=false" in ch3_nar_req.input_text
+
+        # Ch. 3 pedagogical prompt receives deduplicated prior_chapter_topics from both Ch. 1 and Ch. 2.
+        assert "Уже объяснено в предыдущих главах" in ch3_ped_req1.input_text
+        assert "- silver mist" in ch3_ped_req1.input_text
+        assert "- mossy stones" in ch3_ped_req1.input_text
+
+        # Check persisted SQLite analyses across all 4 sections.
+        with seq_app.unit_of_work.transaction() as tx:
+            analyses_by_section = {a.section_id: a for a in tx.analyses.list_for_book(BOOK_ID)}
+            assert set(analyses_by_section) == {"part-1", "ch-1", "ch-2", "ch-3"}
+
+            a_part1 = analyses_by_section["part-1"]
+            assert a_part1.scenes == ()
+            assert a_part1.before_you_read == ()
+            assert a_part1.chapter_summary == ""
+            assert [c.source_text for c in a_part1.glossary_candidates] == ["Afterlights"]
+
+            a_ch1 = analyses_by_section["ch-1"]
+            assert a_ch1.chapter_summary == ch1_a2_summary
+            alex_candidate = next(c for c in a_ch1.glossary_candidates if c.source_text == "Alexandra")
+            assert alex_candidate.name_translation_evidence is not None
+            alex_assessment = alex_candidate.name_translation_evidence.observations[0].assessment
+            assert alex_assessment is not None
+            assert alex_assessment.review_reasons == (
+                NameTranslationReviewReason.AMBIGUOUS,
+                NameTranslationReviewReason.OTHER,
+            )
+
+            ch1_blocks = textual_blocks(ch1)
+            ch1_plan = {item.block_id: item for item in a_ch1.treatment_plan.items}
+            # Present Perfect b4 promoted from READ_AS_IS -> TRANSLATE.
+            assert ch1_plan[ch1_blocks[3].id].treatment is BlockTreatment.TRANSLATE
+            # Mixed 4-segment paragraph b6: seg3 ("uneasy") promoted -> TRANSLATE; seg1 READ_AS_IS, seg2 GLOSSARY_ONLY.
+            b6_item = ch1_plan[ch1_blocks[5].id]
+            assert b6_item.treatment is BlockTreatment.TRANSLATE
+            assert b6_item.segment_treatments == (
+                BlockTreatment.READ_AS_IS,
+                BlockTreatment.GLOSSARY_ONLY,
+                BlockTreatment.TRANSLATE,
+                BlockTreatment.TRANSLATE,
+            )
+            # Difficulty on GLOSSARY_ONLY seg2 preserves help_kind="lexical_hint".
+            assert a_ch1.content_plan is not None
+            mist_diff = next(
+                d
+                for d in a_ch1.content_plan.difficulties
+                if any(anchor.quote == "silver mist" for anchor in d.anchors)
+            )
+            assert mist_diff.help_kind == "lexical_hint"
+
+            a_ch2 = analyses_by_section["ch-2"]
+            assert a_ch2.chapter_summary == ch2_a2_summary
+            assert "Alexandra" in a_ch2.scenes[0].participants
+            lief_candidate = next(c for c in a_ch2.glossary_candidates if c.source_text == "Lief")
+            assert "leaf" in lief_candidate.description
+            assert lief_candidate.name_translation_evidence is not None
+            assert lief_candidate.name_translation_evidence.observations[0].assessment.opaque_name is False
+            # Ch. 2 b6 promoted from GLOSSARY_ONLY -> TRANSLATE and lexical_hint -> explanation.
+            ch2_blocks = textual_blocks(ch2)
+            ch2_plan = {item.block_id: item for item in a_ch2.treatment_plan.items}
+            assert ch2_plan[ch2_blocks[5].id].treatment is BlockTreatment.TRANSLATE
+            assert a_ch2.content_plan is not None
+            pale_diff = next(
+                d
+                for d in a_ch2.content_plan.difficulties
+                if any(anchor.quote == "pale" for anchor in d.anchors)
+            )
+            assert pale_diff.help_kind == "explanation"
+
+            a_ch3 = analyses_by_section["ch-3"]
+            assert a_ch3.chapter_summary == ch3_a2_summary
+            ch3_blocks = textual_blocks(ch3)
+            ch3_plan = {item.block_id: item for item in a_ch3.treatment_plan.items}
+            # Demotion guard keeps short nonstandard "ain't" line in TRANSLATE.
+            assert ch3_plan[ch3_blocks[3].id].treatment is BlockTreatment.TRANSLATE
+
+        # Book conditions version bump (context_builder=4, prompts=6) + backward compatibility for v5 snapshots.
+        conditions = seq_app.book_conditions.require(BOOK_ID)
+        assert conditions.payload["profile"] == "content-plan-v3"
+        assert conditions.payload["versions"] == A2_CONTENT_PLAN_V6_VERSIONS
+        assert conditions.payload["versions"]["context_builder"] == 4
+        assert conditions.payload["versions"]["prompts"] == 6
+        assert effective_content_plan_profile(conditions) == "content-plan-v3"
+        seq_app.book_runtime.settings_for(conditions)
+
+        v5_payload = thaw(conditions.payload)
+        v5_payload["versions"] = dict(A2_CONTENT_PLAN_V5_VERSIONS)
+        v5_conditions = replace(conditions, payload=v5_payload)
+        assert effective_content_plan_profile(v5_conditions) == "content-plan-v3"
+        seq_app.book_runtime.settings_for(v5_conditions)
+    finally:
+        await seq_app.aclose()
+
+    # 2. Prewave parallel seeding (concurrency=2, seed_first_chapter=True):
+    # Wave 1 = PART ONE / Afterlights -> Wave 2 = Ch. 1 (seeded with Afterlights) -> Wave 3 = Ch. 2 & Ch. 3.
+    prewave_client = ScopedStagedFakeLLMClient(
+        {
+            ("part-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE): [part1_narrative_reply],
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE): [ch1_nar_attempt2],
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL): [ch1_ped_attempt2],
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE): [ch2_nar_reply],
+            ("ch-2", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL): [ch2_ped_attempt2],
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE): [ch3_nar_reply],
+            ("ch-3", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL): [ch3_ped_attempt2],
+        }
+    )
+    prewave_app = _make_multi_section_app(
+        tmp_path / "prewave",
+        prewave_client,
+        document,
+        concurrency=2,
+        seed_first_chapter=True,
+    )
+    try:
+        await prewave_app.analysis.start(BOOK_ID)
+        completed = await drain_tasks(prewave_app)
+        assert all(task.status is TaskStatus.SUCCEEDED for task in completed), [
+            (task.scope_id, task.last_error) for task in completed
+        ]
+
+        # Prewave order: PART ONE completes before Ch. 1; Ch. 1 completes before Ch. 2 & Ch. 3 start.
+        assert [(req.scope_id, req.stage) for req in prewave_client.requests[:3]] == [
+            ("part-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE),
+            ("ch-1", LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL),
+        ]
+        ch1_prewave_nar = prewave_client.requests[1]
+        assert "Afterlights" in ch1_prewave_nar.input_text
+        assert "Послесветы" in ch1_prewave_nar.input_text
+
+        wave3_nar = {
+            req.scope_id: req
+            for req in prewave_client.requests[3:]
+            if req.stage is LLMCallStage.CHAPTER_ANALYSIS_NARRATIVE
+        }
+        wave3_ped = {
+            req.scope_id: req
+            for req in prewave_client.requests[3:]
+            if req.stage is LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
+        }
+        assert set(wave3_nar) == {"ch-2", "ch-3"}
+        assert set(wave3_ped) == {"ch-2", "ch-3"}
+        for sid in ("ch-2", "ch-3"):
+            assert "Afterlights" in wave3_nar[sid].input_text
+            assert "Alexandra" in wave3_nar[sid].input_text
+            assert "Уже объяснено в предыдущих главах" in wave3_ped[sid].input_text
+            assert "- silver mist" in wave3_ped[sid].input_text
+    finally:
+        await prewave_app.aclose()
