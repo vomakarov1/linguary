@@ -1,9 +1,11 @@
 """Resolve pinned work using saved parameters and locally available credentials."""
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, replace
 from hashlib import sha256
 import os
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -11,7 +13,7 @@ from linguary.adapters.config.settings import LLMSettings, ReadingSettings, Chec
 from linguary.adapters.pronunciation.source import DisabledPronunciationSource, IpaDictPronunciationSource, SOURCE_VERSION
 from linguary.application.book_conditions import (
     A2_CONTENT_PLAN_VERSIONS, A2_CONTENT_PLAN_V5_VERSIONS, A2_CONTENT_PLAN_V6_VERSIONS,
-    ConditionsError, payload_digest,
+    A2_CONTENT_PLAN_V7_VERSIONS, ConditionsError, payload_digest,
 )
 from linguary.application.context_builder import snapshot_prompt_templates
 from linguary.domain import ProcessingTask, TaskStatus
@@ -34,6 +36,14 @@ def pronunciation_source_for(conditions, *, injected_source=None):
     return DisabledPronunciationSource()
 
 
+def check_settings_from_mapping(raw_checks: Mapping[str, Any]) -> CheckSettings:
+    """Build `CheckSettings` from a persisted payload mapping, ignoring unknown keys."""
+    allowed = {f.name for f in fields(CheckSettings)}
+    return CheckSettings(
+        **{key: value for key, value in raw_checks.items() if key in allowed}
+    )
+
+
 def effective_content_plan_profile(conditions):
     """Select the pinned internal plan without changing the reader's saved choice."""
     payload = conditions.payload
@@ -46,7 +56,11 @@ def effective_content_plan_profile(conditions):
               if isinstance(prompt_templates, dict) else None)
     expected_a2_versions = (
         (A2_CONTENT_PLAN_VERSIONS,) if marker is None
-        else (A2_CONTENT_PLAN_V5_VERSIONS, A2_CONTENT_PLAN_V6_VERSIONS)
+        else (
+            A2_CONTENT_PLAN_V5_VERSIONS,
+            A2_CONTENT_PLAN_V6_VERSIONS,
+            A2_CONTENT_PLAN_V7_VERSIONS,
+        )
         if type(marker) is int and marker == 5
         else ()
     )
@@ -98,10 +112,10 @@ def conditions_payload(book, settings, revision, profile):
         'processing': settings.llm.effective_processing_model}, 'route': route_snapshot(settings.llm),
         'llm_parameters': llm, 'checks': asdict(settings.checks), 'profile': profile,
         'recovery_policy': asdict(settings.recovery),
-        'versions': {'runtime': 1, 'context_builder': 4 if profile == 'content-plan-v3' else 1,
+        'versions': {'runtime': 1, 'context_builder': 5 if profile == 'content-plan-v3' else 1,
                      'validators': 3 if profile == 'content-plan-v3' else 1,
                      'schemas': {'legacy-v1': 1, 'content-plan-v2': 2, 'content-plan-v3': 5}[profile],
-                     'prompts': 6 if profile == 'content-plan-v3' else 1}, 'prompt_templates': templates,
+                     'prompts': 7 if profile == 'content-plan-v3' else 1}, 'prompt_templates': templates,
         'prompt_sha256': payload_digest(templates), 'settings_revision': revision}
 
 
@@ -388,12 +402,15 @@ class BookRuntimeResolver:
                      'validators': validators_version, 'schemas': 5, 'prompts': 5},
                     {'runtime': 1, 'context_builder': 4,
                      'validators': validators_version, 'schemas': 5, 'prompts': 6},
+                    {'runtime': 1, 'context_builder': 5,
+                     'validators': validators_version, 'schemas': 5, 'prompts': 7},
                 ))
             elif (payload.get('profile') == 'legacy-v1' and payload.get('reader_level') == 'a2'
                     and not payload.get('english_help', False)):
                 supported_versions.extend((
                     dict(A2_CONTENT_PLAN_V5_VERSIONS),
                     dict(A2_CONTENT_PLAN_V6_VERSIONS),
+                    dict(A2_CONTENT_PLAN_V7_VERSIONS),
                 ))
         else:
             supported_versions = [expected_versions]
@@ -423,13 +440,9 @@ class BookRuntimeResolver:
             'api_key': current.llm.api_key,
             'debug_llm_payloads': getattr(current.llm, 'debug_llm_payloads', False),
         })
-        raw_checks = thaw(payload['checks'])
-        check_field_names = {f.name for f in fields(CheckSettings)}
-        if 'seed_first_chapter' in raw_checks and 'seed_first_chapter' not in check_field_names:
-            raw_checks = {k: v for k, v in raw_checks.items() if k != 'seed_first_chapter'}
         return replace(current, llm=llm, reading=ReadingSettings(reader_level=payload['reader_level'],
                        name_translation_strategy=policy.strategy.value if policy is not None else 'sound'),
-                       checks=CheckSettings(**raw_checks),
+                       checks=check_settings_from_mapping(thaw(payload['checks'])),
                        recovery=RecoverySettings(**thaw(payload.get('recovery_policy', asdict(RecoverySettings())))))
 
     @asynccontextmanager

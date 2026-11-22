@@ -606,6 +606,7 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
         A2_CONTENT_PLAN_VERSIONS,
         A2_CONTENT_PLAN_V5_VERSIONS,
         A2_CONTENT_PLAN_V6_VERSIONS,
+        A2_CONTENT_PLAN_V7_VERSIONS,
         payload_digest,
     )
     from linguary.application.context_builder import snapshot_prompt_templates
@@ -620,10 +621,10 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
     v3_payload = conditions_payload(book, settings, 1, "content-plan-v3")
     assert v3_payload["versions"] == {
         "runtime": 1,
-        "context_builder": 4,
+        "context_builder": 5,
         "validators": 3,
         "schemas": 5,
-        "prompts": 6,
+        "prompts": 7,
     }
     assert v3_payload["prompt_templates"]["analysis_contract_version"] == 5
 
@@ -675,35 +676,36 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
         )
         _verify_conditions(tx, task, cond)
 
-    # 1. New v6 content-plan-v3 (b2 and a2)
+    # 1. New v7 content-plan-v3 (b2 and a2)
     check_compat(make_cond(v3_payload), expected_profile="content-plan-v3")
     v3_a2_settings = replace(settings, reading=ReadingSettings(reader_level="a2"))
     v3_a2_payload = conditions_payload(book, v3_a2_settings, 1, "content-plan-v3")
     v3_a2_payload["versions"]["validators"] = 4
     check_compat(make_cond(v3_a2_payload), expected_profile="content-plan-v3")
 
-    # 2. Historical v5 content-plan-v3 (b2 and a2)
-    v5_b2_payload = thaw(v3_payload)
-    v5_b2_payload["versions"] = {
-        "runtime": 1,
-        "context_builder": 3,
-        "validators": 3,
-        "schemas": 5,
-        "prompts": 5,
-    }
-    check_compat(make_cond(v5_b2_payload), expected_profile="content-plan-v3")
+    # 2. Historical v6 and v5 content-plan-v3 (b2 and a2)
+    for cb_ver, prompts_ver in ((4, 6), (3, 5)):
+        hist_b2_payload = thaw(v3_payload)
+        hist_b2_payload["versions"] = {
+            "runtime": 1,
+            "context_builder": cb_ver,
+            "validators": 3,
+            "schemas": 5,
+            "prompts": prompts_ver,
+        }
+        check_compat(make_cond(hist_b2_payload), expected_profile="content-plan-v3")
 
-    v5_a2_payload = thaw(v3_a2_payload)
-    v5_a2_payload["versions"] = {
-        "runtime": 1,
-        "context_builder": 3,
-        "validators": 4,
-        "schemas": 5,
-        "prompts": 5,
-    }
-    check_compat(make_cond(v5_a2_payload), expected_profile="content-plan-v3")
+        hist_a2_payload = thaw(v3_a2_payload)
+        hist_a2_payload["versions"] = {
+            "runtime": 1,
+            "context_builder": cb_ver,
+            "validators": 4,
+            "schemas": 5,
+            "prompts": prompts_ver,
+        }
+        check_compat(make_cond(hist_a2_payload), expected_profile="content-plan-v3")
 
-    # 3. A2 on legacy-v1: new v6, historical v5, historical v3
+    # 3. A2 on legacy-v1: new v7, historical v6, historical v5, historical v3
     legacy_a2_base = conditions_payload(book, v3_a2_settings, 1, "legacy-v1")
     a2_v5_templates = snapshot_prompt_templates(
         source_language="en",
@@ -714,7 +716,11 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
         name_translation_policy={"version": 1, "strategy": "sound"},
         analysis_contract_version=5,
     )
-    for a2_versions in (A2_CONTENT_PLAN_V5_VERSIONS, A2_CONTENT_PLAN_V6_VERSIONS):
+    for a2_versions in (
+        A2_CONTENT_PLAN_V5_VERSIONS,
+        A2_CONTENT_PLAN_V6_VERSIONS,
+        A2_CONTENT_PLAN_V7_VERSIONS,
+    ):
         a2_payload = thaw(legacy_a2_base)
         a2_payload["versions"] = dict(a2_versions)
         a2_payload["prompt_templates"] = a2_v5_templates
@@ -738,44 +744,43 @@ def test_new_conditions_increment_context_and_prompts_versions_keeping_legacy_v5
     # 4. B2 legacy-v1 remains untouched
     check_compat(make_cond(legacy_b2_payload), expected_profile="legacy-v1")
 
-    # 5. Mismatched mixed versions (e.g. context_builder=4 with prompts=5) are rejected
-    bad_payload = thaw(v3_payload)
-    bad_payload["versions"] = {
-        "runtime": 1,
-        "context_builder": 4,
-        "validators": 3,
-        "schemas": 5,
-        "prompts": 5,
-    }
-    bad_cond = make_cond(bad_payload)
-    resolver = BookRuntimeResolver(
-        _make_service(bad_cond),
-        SimpleNamespace(current=SimpleNamespace(settings=settings)),
-        None,
-    )
-    with pytest.raises(ConditionsError, match="conditions_unavailable"):
-        resolver.settings_for(bad_cond)
-    task = ProcessingTask(
-        id="task-bad",
-        book_id="book-1",
-        task_type=TaskType.PROCESS_TRANSLATION_UNIT,
-        scope_id="sec-1",
-        status=TaskStatus.PENDING,
-    )
-    tx = SimpleNamespace(
-        work=SimpleNamespace(
-            get_conditions=lambda cid: bad_cond if cid == bad_cond.id else None,
-            get_binding=lambda kind, eid: (
-                {"book_id": "book-1", "conditions_id": bad_cond.id, "payload_json": {}}
-                if (kind, eid) == ("task", task.id)
-                else None
+    # 5. Mismatched mixed versions (e.g. context_builder=4 with prompts=5 or 5 with 6) are rejected
+    for bad_versions in (
+        {"runtime": 1, "context_builder": 4, "validators": 3, "schemas": 5, "prompts": 5},
+        {"runtime": 1, "context_builder": 5, "validators": 3, "schemas": 5, "prompts": 6},
+        {"runtime": 1, "context_builder": 4, "validators": 3, "schemas": 5, "prompts": 7},
+    ):
+        bad_payload = thaw(v3_payload)
+        bad_payload["versions"] = bad_versions
+        bad_cond = make_cond(bad_payload)
+        resolver = BookRuntimeResolver(
+            _make_service(bad_cond),
+            SimpleNamespace(current=SimpleNamespace(settings=settings)),
+            None,
+        )
+        with pytest.raises(ConditionsError, match="conditions_unavailable"):
+            resolver.settings_for(bad_cond)
+        task = ProcessingTask(
+            id="task-bad",
+            book_id="book-1",
+            task_type=TaskType.PROCESS_TRANSLATION_UNIT,
+            scope_id="sec-1",
+            status=TaskStatus.PENDING,
+        )
+        tx = SimpleNamespace(
+            work=SimpleNamespace(
+                get_conditions=lambda cid, c=bad_cond: c if cid == c.id else None,
+                get_binding=lambda kind, eid, c=bad_cond, t=task: (
+                    {"book_id": "book-1", "conditions_id": c.id, "payload_json": {}}
+                    if (kind, eid) == ("task", t.id)
+                    else None
+                ),
+                latest_conditions=lambda bid, c=bad_cond: c if bid == "book-1" else None,
             ),
-            latest_conditions=lambda bid: bad_cond if bid == "book-1" else None,
-        ),
-        tasks=SimpleNamespace(get=lambda tid: task if tid == task.id else None),
-    )
-    with pytest.raises(RecoveryError, match="conditions_unavailable"):
-        _verify_conditions(tx, task, bad_cond)
+            tasks=SimpleNamespace(get=lambda tid, t=task: t if tid == t.id else None),
+        )
+        with pytest.raises(RecoveryError, match="conditions_unavailable"):
+            _verify_conditions(tx, task, bad_cond)
 
 
 def test_effective_content_plan_profile_rejects_mixed_invalid_versions_and_accepts_v5_v6():
@@ -783,6 +788,7 @@ def test_effective_content_plan_profile_rejects_mixed_invalid_versions_and_accep
     from linguary.application.book_conditions import (
         A2_CONTENT_PLAN_V5_VERSIONS,
         A2_CONTENT_PLAN_V6_VERSIONS,
+        A2_CONTENT_PLAN_V7_VERSIONS,
         payload_digest,
     )
     from linguary.application.context_builder import snapshot_prompt_templates
@@ -820,25 +826,64 @@ def test_effective_content_plan_profile_rejects_mixed_invalid_versions_and_accep
             created_at=datetime.now(UTC),
         )
 
-    # Valid v5 and v6 legacy-v1 A2 snapshots map to content-plan-v3.
+    # Valid v5, v6, and v7 legacy-v1 A2 snapshots map to content-plan-v3.
     assert effective_content_plan_profile(make_legacy_a2(A2_CONTENT_PLAN_V5_VERSIONS)) == "content-plan-v3"
     assert effective_content_plan_profile(make_legacy_a2(A2_CONTENT_PLAN_V6_VERSIONS)) == "content-plan-v3"
+    assert effective_content_plan_profile(make_legacy_a2(A2_CONTENT_PLAN_V7_VERSIONS)) == "content-plan-v3"
 
     # Mixed invalid versions (validators=4 with mismatched context_builder/prompts) are rejected.
     invalid_cases = (
         {"runtime": 1, "context_builder": 4, "validators": 4, "schemas": 5, "prompts": 5},
         {"runtime": 1, "context_builder": 3, "validators": 4, "schemas": 5, "prompts": 6},
+        {"runtime": 1, "context_builder": 5, "validators": 4, "schemas": 5, "prompts": 6},
+        {"runtime": 1, "context_builder": 4, "validators": 4, "schemas": 5, "prompts": 7},
     )
     for bad_versions in invalid_cases:
         with pytest.raises(ConditionsError, match="conditions_unavailable"):
             effective_content_plan_profile(make_legacy_a2(bad_versions))
 
-    # Wrong/missing analysis_contract_version marker with v5/v6 versions is also rejected.
+    # Wrong/missing analysis_contract_version marker with v5/v6/v7 versions is also rejected.
     for bad_marker in (None, 6):
         with pytest.raises(ConditionsError, match="conditions_unavailable"):
             effective_content_plan_profile(
-                make_legacy_a2(A2_CONTENT_PLAN_V6_VERSIONS, marker=bad_marker)
+                make_legacy_a2(A2_CONTENT_PLAN_V7_VERSIONS, marker=bad_marker)
             )
+
+
+def test_check_settings_from_mapping_filters_unknown_keys_and_defaults_sequential_analysis() -> None:
+    from linguary.composition.book_runtime import check_settings_from_mapping
+    from linguary.domain.book_conditions import thaw
+
+    legacy_checks = {
+        "glossary_confidence_threshold": 0.75,
+        "language_notes_per_chapter": 6,
+        "unknown_future_flag": True,
+        "obsolete_threshold": 42,
+    }
+    parsed = check_settings_from_mapping(legacy_checks)
+    assert parsed.glossary_confidence_threshold == 0.75
+    assert parsed.language_notes_per_chapter == 6
+    assert parsed.sequential_analysis is True
+
+    explicit_false = check_settings_from_mapping(
+        {"sequential_analysis": False, "extra_ignored": "value"}
+    )
+    assert explicit_false.sequential_analysis is False
+
+    settings = _make_settings()
+    conditions = _make_conditions(settings)
+    payload = thaw(conditions.payload)
+    payload["checks"].pop("sequential_analysis", None)
+    payload["checks"]["unknown_future_flag"] = True
+    old_cond = replace(conditions, payload=payload)
+
+    resolver = BookRuntimeResolver(
+        _make_service(old_cond),
+        SimpleNamespace(current=SimpleNamespace(settings=settings)),
+        None,
+    )
+    resolved = resolver.settings_for(old_cond)
+    assert resolved.checks.sequential_analysis is True
 
 
 

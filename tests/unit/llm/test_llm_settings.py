@@ -477,3 +477,40 @@ def test_default_effective_max_fragment_blocks_is_160(tmp_path: Path) -> None:
     assert LLMSettings().effective_max_fragment_blocks == 160
     settings = load_settings(environ={}, config_path=write_config(tmp_path, ""))
     assert settings.llm.effective_max_fragment_blocks == 160
+
+
+def test_sequential_analysis_defaults_true_and_loads_from_toml_and_env(tmp_path: Path) -> None:
+    assert CheckSettings().sequential_analysis is True
+    assert load_settings(environ={}, config_path=write_config(tmp_path, "")).checks.sequential_analysis is True
+
+    from_toml = load_settings(
+        environ={},
+        config_path=write_config(tmp_path, "[checks]\nsequential_analysis = false\n"),
+    )
+    assert from_toml.checks.sequential_analysis is False
+
+    env_disabled = load_settings(
+        environ={"LINGUARY_CHECKS_SEQUENTIAL_ANALYSIS": "false"},
+        config_path=write_config(tmp_path, ""),
+    )
+    assert env_disabled.checks.sequential_analysis is False
+
+    env_overrides_toml = load_settings(
+        environ={"LINGUARY_CHECKS_SEQUENTIAL_ANALYSIS": "true"},
+        config_path=write_config(tmp_path, "[checks]\nsequential_analysis = false\n"),
+    )
+    assert env_overrides_toml.checks.sequential_analysis is True
+
+
+@pytest.mark.parametrize("bad_value", ["false", "true", 1, 0, None])
+def test_invalid_sequential_analysis_is_rejected(bad_value: object) -> None:
+    with pytest.raises(SettingsError):
+        CheckSettings(sequential_analysis=bad_value)  # type: ignore[arg-type]
+
+
+def test_invalid_sequential_analysis_in_toml_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(SettingsError):
+        load_settings(
+            environ={},
+            config_path=write_config(tmp_path, "[checks]\nsequential_analysis = 'maybe'\n"),
+        )

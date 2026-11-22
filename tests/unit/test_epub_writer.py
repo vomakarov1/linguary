@@ -780,3 +780,249 @@ def test_has_meaningful_part_title_distinguishes_titled_and_bare_dividers() -> N
 def test_every_import_warning_kind_has_ui_label() -> None:
     """Every `ImportWarningKind` enum value is mapped to a Russian label."""
     assert set(IMPORT_WARNING_LABELS) == set(ImportWarningKind)
+
+
+def test_meaningful_part_divider_renders_layout_help_without_chapter_front_or_renumbering() -> None:
+    """Meaningful part dividers render layout hints/translations while keeping frontmatter semantics."""
+    from lxml import etree
+
+    from linguary.adapters.epub.writer import _ChapterRenderer, _EPUB_NAMESPACE, _XHTML_NAMESPACE
+    from linguary.application.layout.book import LayoutInputs, build_book_layout
+    from linguary.domain import (
+        BeforeYouReadEntry,
+        BlockProcessingResult,
+        BlockTreatment,
+        GlossaryHint,
+        LearningMaterial,
+    )
+
+    cover = DocumentSection(
+        id="sec-cover",
+        document_id="book-1",
+        title="Cover",
+        order=0,
+        source_resource_path="cover.xhtml",
+        blocks=(_block("sec-cover", "b-cov", "Everlost Cover", BlockType.PARAGRAPH, 0),),
+    )
+    title_page = DocumentSection(
+        id="sec-title",
+        document_id="book-1",
+        title="Title Page",
+        order=1,
+        source_resource_path="title.xhtml",
+        blocks=(_block("sec-title", "b-title", "Everlost", BlockType.HEADING, 0),),
+    )
+    part1_titled = DocumentSection(
+        id="sec-part1",
+        document_id="book-1",
+        title="PART ONE / Afterlights",
+        order=2,
+        source_resource_path="part1.xhtml",
+        blocks=(
+            _block("sec-part1", "b-p1-num", "PART ONE", BlockType.HEADING, 0),
+            _block("sec-part1", "b-p1-sub", "Afterlights", BlockType.HEADING, 1),
+        ),
+    )
+    bare_part = DocumentSection(
+        id="sec-part-bare",
+        document_id="book-1",
+        title="PART TWO",
+        order=3,
+        source_resource_path="part2-bare.xhtml",
+        blocks=(_block("sec-part-bare", "b-pb-num", "PART TWO", BlockType.HEADING, 0),),
+    )
+    ch1 = DocumentSection(
+        id="sec-ch1",
+        document_id="book-1",
+        title="Chapter 1",
+        order=4,
+        source_resource_path="ch1.xhtml",
+        blocks=(
+            _block("sec-ch1", "b-c1-h", "Chapter 1", BlockType.HEADING, 0),
+            _block("sec-ch1", "b-c1-p", "Nick woke up in a dark forest.", BlockType.PARAGRAPH, 1),
+        ),
+    )
+    part3_translated = DocumentSection(
+        id="sec-part3",
+        document_id="book-1",
+        title="PART THREE / The Land of Lost Things",
+        order=5,
+        source_resource_path="part3.xhtml",
+        blocks=(
+            _block("sec-part3", "b-p3-num", "PART THREE", BlockType.HEADING, 0),
+            _block("sec-part3", "b-p3-sub", "The Land of Lost Things", BlockType.HEADING, 1),
+        ),
+    )
+
+    doc = CanonicalDocument(
+        id="book-1",
+        metadata=BookMetadata(title="Everlost"),
+        source_language="en",
+        target_language="ru",
+        sections=(cover, title_page, part1_titled, bare_part, ch1, part3_translated),
+    )
+
+    results = {
+        "b-cov": BlockProcessingResult(
+            block_id="b-cov",
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Обложка Эверлоста",
+            glossary_hints=(GlossaryHint("Cover", "обложка", ""),),
+        ),
+        "b-title": BlockProcessingResult(
+            block_id="b-title",
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Эверлост",
+            glossary_hints=(GlossaryHint("Everlost", "Эверлост", ""),),
+        ),
+        "b-p1-num": BlockProcessingResult(
+            block_id="b-p1-num",
+            treatment=BlockTreatment.READ_AS_IS,
+        ),
+        "b-p1-sub": BlockProcessingResult(
+            block_id="b-p1-sub",
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint("Afterlights", "послесветы", "Дети, застрявшие между мирами."),),
+        ),
+        "b-pb-num": BlockProcessingResult(
+            block_id="b-pb-num",
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="ЧАСТЬ ВТОРАЯ",
+            glossary_hints=(GlossaryHint("PART TWO", "часть вторая", ""),),
+        ),
+        "b-c1-p": BlockProcessingResult(
+            block_id="b-c1-p",
+            treatment=BlockTreatment.GLOSSARY_ONLY,
+            glossary_hints=(GlossaryHint("woke up", "проснулся", ""),),
+        ),
+        "b-p3-num": BlockProcessingResult(
+            block_id="b-p3-num",
+            treatment=BlockTreatment.READ_AS_IS,
+        ),
+        "b-p3-sub": BlockProcessingResult(
+            block_id="b-p3-sub",
+            treatment=BlockTreatment.TRANSLATE,
+            translated_text="Страна потерянных вещей",
+        ),
+    }
+
+    layout = build_book_layout(
+        LayoutInputs(
+            document=doc,
+            results=results,
+            analyses=(),
+            concepts=(),
+            reader_level="a2",
+        )
+    )
+    learning_materials = {
+        "sec-part1": LearningMaterial(
+            section_id="sec-part1",
+            chapter_summary="Part one summary that must not become a recap.",
+            before_you_read=(BeforeYouReadEntry("Afterlights", "Should not render on divider."),),
+        ),
+        "sec-ch1": LearningMaterial(
+            section_id="sec-ch1",
+            chapter_summary="Nick wakes up in the forest.",
+            before_you_read=(),
+        ),
+        "sec-part3": LearningMaterial(
+            section_id="sec-part3",
+            chapter_summary="",
+            before_you_read=(BeforeYouReadEntry("Lost Things", "Should not render on divider."),),
+        ),
+    }
+
+    request = EpubWriteRequest(
+        document=doc,
+        target_path="output.epub",
+        layout=layout,
+        learning_materials=learning_materials,
+    )
+    opaque = _OpaqueSource(source_path=None)
+    warnings = _ExportWarnings()
+
+    chapters = {
+        chapter.section_id: chapter
+        for chapter in _render_chapters(request, opaque=opaque, warnings=warnings)
+    }
+
+    ns = {"x": _XHTML_NAMESPACE, "epub": _EPUB_NAMESPACE}
+
+    # 1. Meaningful part divider with glossary_hints ("PART ONE / Afterlights").
+    part1_root = chapters["sec-part1"].root
+    part1_section = part1_root.xpath(".//x:section", namespaces=ns)[0]
+    assert part1_section.get(f"{{{_EPUB_NAMESPACE}}}type") == "frontmatter"
+    part1_html = etree.tostring(part1_root, encoding="unicode")
+    assert "linguary-previously" not in part1_html
+    assert "linguary-before-you-read" not in part1_html
+    assert "lg-front" not in part1_html
+
+    part1_units = part1_section.xpath("./x:div[contains(@class, 'lg-unit')]", namespaces=ns)
+    assert len(part1_units) == 2
+    # "PART ONE" stays pure source without translation or notes.
+    assert "PART ONE" in "".join(part1_units[0].itertext())
+    assert part1_units[0].xpath(".//x:p[@class='lg-tr']", namespaces=ns) == []
+    assert part1_units[0].xpath(".//x:ol[@class='lg-notes']", namespaces=ns) == []
+    # "Afterlights" renders its glossary hint and marker link.
+    assert "Afterlights" in "".join(part1_units[1].itertext())
+    notes = part1_units[1].xpath(".//x:ol[@class='lg-notes']/x:li", namespaces=ns)
+    assert len(notes) == 1
+    assert notes[0].get("id") == "lg-n1"
+    assert "Afterlights" in "".join(notes[0].itertext())
+    assert "послесветы" in "".join(notes[0].itertext())
+    marker = part1_units[1].xpath(".//x:a[@class='lg-ref']", namespaces=ns)
+    assert len(marker) == 1
+    assert marker[0].get("href") == "#lg-n1"
+
+    # 2. Meaningful part divider with translation ("PART THREE / The Land of Lost Things").
+    part3_root = chapters["sec-part3"].root
+    part3_section = part3_root.xpath(".//x:section", namespaces=ns)[0]
+    assert part3_section.get(f"{{{_EPUB_NAMESPACE}}}type") == "frontmatter"
+    part3_html = etree.tostring(part3_root, encoding="unicode")
+    assert "linguary-previously" not in part3_html
+    assert "linguary-before-you-read" not in part3_html
+    part3_units = part3_section.xpath("./x:div[contains(@class, 'lg-unit')]", namespaces=ns)
+    assert len(part3_units) == 2
+    assert part3_units[0].xpath(".//x:p[@class='lg-tr']", namespaces=ns) == []
+    tr_nodes = part3_units[1].xpath(".//x:p[@class='lg-tr']", namespaces=ns)
+    assert len(tr_nodes) == 1
+    assert tr_nodes[0].text == "Страна потерянных вещей"
+
+    # 3. Story chapter 1 keeps number 1 (note id ln-ch01-001) and does not recap the part divider.
+    ch1_root = chapters["sec-ch1"].root
+    ch1_section = ch1_root.xpath(".//x:section", namespaces=ns)[0]
+    assert ch1_section.get(f"{{{_EPUB_NAMESPACE}}}type") == "chapter"
+    assert "linguary-previously" not in etree.tostring(ch1_root, encoding="unicode")
+    ch1_notes = ch1_section.xpath(".//x:ol[@class='lg-notes']/x:li", namespaces=ns)
+    assert len(ch1_notes) == 1
+    assert ch1_notes[0].get("id") == "ln-ch01-001"
+
+    # 4. Bare part divider ("PART TWO") stays source-only even when layout has results.
+    bare_root = chapters["sec-part-bare"].root
+    assert bare_root.xpath(".//x:p[@class='lg-tr']", namespaces=ns) == []
+    assert bare_root.xpath(".//x:ol[@class='lg-notes']", namespaces=ns) == []
+    assert "ЧАСТЬ ВТОРАЯ" not in etree.tostring(bare_root, encoding="unicode")
+
+    # 5. Ordinary front matter (cover and title page) stays source-only even when layout has results.
+    cover_root = chapters["sec-cover"].root
+    assert cover_root.xpath(".//x:p[@class='lg-tr']", namespaces=ns) == []
+    assert cover_root.xpath(".//x:ol[@class='lg-notes']", namespaces=ns) == []
+    assert "Обложка Эверлоста" not in etree.tostring(cover_root, encoding="unicode")
+
+    renderer = _ChapterRenderer(request=request, opaque=opaque, warnings=warnings)
+    rendered_title = renderer.render(title_page, number=0, previous=None, is_front_matter=True)
+    assert rendered_title.root.xpath(".//x:p[@class='lg-tr']", namespaces=ns) == []
+    assert rendered_title.root.xpath(".//x:ol[@class='lg-notes']", namespaces=ns) == []
+    assert "Эверлост" not in etree.tostring(rendered_title.root, encoding="unicode")
+
+    # 6. Meaningful part divider without layout falls back cleanly to source-only.
+    no_layout_request = EpubWriteRequest(document=doc, target_path="output.epub", layout=None)
+    no_layout_chapters = {
+        chapter.section_id: chapter
+        for chapter in _render_chapters(no_layout_request, opaque=opaque, warnings=warnings)
+    }
+    plain_part1 = no_layout_chapters["sec-part1"].root
+    assert plain_part1.xpath(".//x:p[@class='lg-tr']", namespaces=ns) == []
+    assert plain_part1.xpath(".//x:ol[@class='lg-notes']", namespaces=ns) == []
+    assert "Afterlights" in "".join(plain_part1.itertext())

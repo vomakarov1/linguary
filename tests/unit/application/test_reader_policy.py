@@ -523,3 +523,44 @@ def test_validate_a2_summary_allows_present_perfect_and_checks_factual_anchor():
         require_parallel_russian=True,
         narrative_summary=narrative_summary,
     )
+
+
+def test_validate_a2_summary_rejects_semicolon_in_monolingual_mode_only():
+    assert A2_SUMMARY_WARNING_MAX_WORDS == 22
+    assert A2_SUMMARY_HARD_MAX_SENTENCE_WORDS == 26
+
+    with pytest.raises(ReaderTextError, match='a2_summary_disallowed_semicolon') as exc_info:
+        validate_a2_summary(
+            "Nick wakes up in Everlost; Allie stands next to him.",
+            source_texts=("Nick woke up in the woods.",),
+            source_language="en",
+            language_detector=LANGUAGE_DETECTOR,
+        )
+    assert exc_info.value.reason_code == 'a2_summary_disallowed_semicolon'
+    assert 'точка с запятой' in (exc_info.value.detail or '')
+
+    # Two separate simple sentences without a semicolon pass.
+    validate_a2_summary(
+        "Nick wakes up in Everlost. Allie stands next to him.",
+        source_texts=("Nick woke up in the woods.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+    )
+
+    # Passive-like phrasing is not rejected by regex in validate_a2_summary.
+    validate_a2_summary(
+        "Nick and Allie are lost in the dark woods. They look for a road.",
+        source_texts=("Nick woke up in the woods.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+    )
+
+    # Legacy parallel Russian mode keeps previous behavior and does not reject semicolons.
+    validate_a2_summary(
+        "Nick wakes up in Everlost; Allie stands next to him.\n\n"
+        "Ник просыпается в Эверлосте; Элли стоит рядом с ним.",
+        source_texts=("Nick woke up in the woods.",),
+        source_language="en",
+        language_detector=LANGUAGE_DETECTOR,
+        require_parallel_russian=True,
+    )

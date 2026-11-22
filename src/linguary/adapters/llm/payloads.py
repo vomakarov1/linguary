@@ -457,6 +457,39 @@ def _format_loc(loc: tuple[int | str, ...]) -> str:
     return ".".join(parts)
 
 
+def _schema_hints(error: ValidationError) -> list[str]:
+    """Collect up to 5 unique schema hints without parentheses or raw model input."""
+    hints: list[str] = []
+    seen: set[str] = set()
+    for item in error.errors(include_input=False, include_context=True):
+        err_type = str(item["type"])
+        ctx = item.get("ctx") or {}
+        path = _format_loc(item["loc"])
+        prefix = f"{path}: " if path else ""
+        hint: str | None = None
+        if err_type in {"enum", "literal_error"}:
+            expected = ctx.get("expected")
+            if expected:
+                safe_expected = str(expected).replace("(", "[").replace(")", "]")
+                hint = f"{prefix}допустимые значения — {safe_expected}"
+        elif err_type in {"too_short", "list_too_short"}:
+            min_length = ctx.get("min_length", 1)
+            hint = f"{prefix}список не может быть пустым, минимум {min_length}"
+        elif err_type == "string_too_short":
+            min_length = ctx.get("min_length", 1)
+            hint = f"{prefix}строка не может быть пустой, минимум {min_length}"
+        if hint is None:
+            continue
+        hint = hint.replace("(", "[").replace(")", "]")
+        if hint in seen:
+            continue
+        seen.add(hint)
+        hints.append(hint)
+        if len(hints) == 5:
+            break
+    return hints
+
+
 def _format_error(
     kind: LLMResponseKind, *, error: ValidationError, truncated: bool
 ) -> str:
@@ -478,6 +511,13 @@ def _format_error(
             break
     violations = ", ".join(entries)
     reason = "обрыв ответа по лимиту токенов" if truncated else "ответ не оборван"
+    hints = _schema_hints(error)
+    if hints:
+        return (
+            f"ответ модели ({kind.value}) не соответствует схеме: "
+            f"{error.error_count()} нарушений ({violations}); "
+            f"подсказки схемы: {'; '.join(hints)}; {reason}"
+        )
     return (
         f"ответ модели ({kind.value}) не соответствует схеме: "
         f"{error.error_count()} нарушений ({violations}); {reason}"

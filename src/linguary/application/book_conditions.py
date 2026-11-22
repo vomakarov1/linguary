@@ -17,6 +17,7 @@ PRONUNCIATION_VERSIONS = {'selection_policy': 2, 'form_rules': 1,
 A2_CONTENT_PLAN_VERSIONS = {'runtime': 1, 'context_builder': 3, 'validators': 4, 'schemas': 3, 'prompts': 3}
 A2_CONTENT_PLAN_V5_VERSIONS = {'runtime': 1, 'context_builder': 3, 'validators': 4, 'schemas': 5, 'prompts': 5}
 A2_CONTENT_PLAN_V6_VERSIONS = {'runtime': 1, 'context_builder': 4, 'validators': 4, 'schemas': 5, 'prompts': 6}
+A2_CONTENT_PLAN_V7_VERSIONS = {'runtime': 1, 'context_builder': 5, 'validators': 4, 'schemas': 5, 'prompts': 7}
 
 
 class ConditionsError(LLMConfigurationError):
@@ -103,6 +104,7 @@ class BookConditionsService:
         pronunciation_variant=None,
         source_sha256: str | None = None,
         seed_first_chapter: bool | None = None,
+        sequential_analysis: bool | None = None,
     ):
         if settings_revision != self._settings_revision():
             raise ConditionsError('settings_revision_conflict')
@@ -114,10 +116,15 @@ class BookConditionsService:
                 raise ConditionsError('source_digest_mismatch')
         payload = self._snapshot_factory(book, settings_revision)
         payload.setdefault('checks', {}).setdefault('auto_approve_glossary', False)
+        payload.setdefault('checks', {}).setdefault('sequential_analysis', True)
         if seed_first_chapter is not None:
             if type(seed_first_chapter) is not bool:
                 raise ConditionsError('invalid_conditions_choice')
             payload.setdefault('checks', {})['seed_first_chapter'] = seed_first_chapter
+        if sequential_analysis is not None:
+            if type(sequential_analysis) is not bool:
+                raise ConditionsError('invalid_conditions_choice')
+            payload.setdefault('checks', {})['sequential_analysis'] = sequential_analysis
         from linguary.application.context_builder import snapshot_prompt_templates
         if continue_legacy:
             payload['staged_analysis'] = False
@@ -146,13 +153,13 @@ class BookConditionsService:
         payload['english_help'] = english_help
         if english_help:
             payload['profile'] = 'content-plan-v3'
-            payload['versions'] = {'runtime': 1, 'context_builder': 3 if continue_legacy else 4,
+            payload['versions'] = {'runtime': 1, 'context_builder': 3 if continue_legacy else 5,
                 'validators': 3, 'schemas': 4 if continue_legacy else 5,
-                'prompts': 4 if continue_legacy else 6}
+                'prompts': 4 if continue_legacy else 7}
         profile = payload.get('profile', 'legacy-v1')
         if payload['reader_level'] == 'a2' and not continue_legacy:
             if profile == 'legacy-v1' and not english_help:
-                payload['versions'] = dict(A2_CONTENT_PLAN_V6_VERSIONS)
+                payload['versions'] = dict(A2_CONTENT_PLAN_V7_VERSIONS)
             else:
                 payload['versions'] = {**payload['versions'], 'validators': 4}
         elif continue_legacy and not english_help:

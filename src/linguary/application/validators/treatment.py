@@ -13,8 +13,28 @@ it triggers if DTO rules ever diverge from the plan.
 
 from __future__ import annotations
 
+import re
+
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
 from linguary.domain import BlockTreatment, TranslationUnit, TranslationUnitItem
+
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+_HINT_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "but", "nor", "yet", "not",
+        "with", "from", "into", "onto", "upon", "than", "then",
+        "that", "this", "these", "those",
+        "you", "your", "yours", "she", "her", "hers", "him", "his",
+        "its", "our", "ours", "they", "them", "their", "theirs",
+        "who", "whom", "whose", "which", "what",
+        "are", "was", "were", "been", "being", "have", "has", "had",
+        "does", "did", "will", "would", "shall", "should", "can", "could",
+        "may", "might", "must",
+        "one", "ones", "some", "any", "all", "very", "too", "also",
+        "out", "off", "over", "under", "here", "there", "where", "when",
+        "something", "someone", "somebody", "anything", "anyone", "oneself",
+    }
+)
 
 
 def treatment_violation(
@@ -78,6 +98,93 @@ def joined_segment_translation(block: BlockResultResponse) -> str | None:
     return " ".join(parts)
 
 
+def _normalize_match_text(text: str) -> str:
+    cleaned = text.replace("’", "'").replace("‘", "'").lower()
+    return " ".join(cleaned.split())
+
+
+def _word_stems(word: str) -> set[str]:
+    stems = {word}
+    if len(word) > 4 and word.endswith(("ies", "ied")):
+        stems.add(word[:-3] + "y")
+        stems.add(word[:-3])
+    if len(word) > 5 and word.endswith("ily"):
+        stems.add(word[:-3] + "y")
+        stems.add(word[:-3])
+    if len(word) > 5 and word.endswith("ing"):
+        base = word[:-3]
+        stems.add(base)
+        stems.add(base + "e")
+        if len(base) >= 4 and base[-1] == base[-2]:
+            stems.add(base[:-1])
+    if len(word) > 4 and word.endswith("ed"):
+        base = word[:-2]
+        stems.add(base)
+        stems.add(word[:-1])
+        if len(base) >= 4 and base[-1] == base[-2]:
+            stems.add(base[:-1])
+    if len(word) > 4 and word.endswith(("es", "er")):
+        stems.add(word[:-2])
+        stems.add(word[:-1])
+    if len(word) > 5 and word.endswith("est"):
+        stems.add(word[:-3])
+        stems.add(word[:-2])
+    if len(word) > 4 and word.endswith("ly"):
+        stems.add(word[:-2])
+    if len(word) > 3 and word.endswith("s"):
+        stems.add(word[:-1])
+    if len(word) > 3 and word.endswith(("e", "y")):
+        stems.add(word[:-1])
+    return {stem for stem in stems if len(stem) >= 3}
+
+
+def _hint_matches_glossary_texts(original: str, glossary_texts: tuple[str, ...]) -> bool:
+    normalized_hint = _normalize_match_text(original).strip(".,;:!?\"'«»“”‘’()[]")
+    if not normalized_hint:
+        return False
+    candidates = [normalized_hint]
+    if normalized_hint.startswith("to ") and len(normalized_hint) > 3:
+        bare = normalized_hint[3:].strip()
+        if bare:
+            candidates.append(bare)
+    normalized_texts = tuple(_normalize_match_text(text) for text in glossary_texts)
+    text_words: set[str] = set()
+    for text in normalized_texts:
+        words = _WORD_RE.findall(text)
+        text_words.update(words)
+        for candidate in candidates:
+            if len(candidate) >= 3:
+                if re.search(rf"(?<!\w){re.escape(candidate)}", text):
+                    return True
+            elif candidate in words:
+                return True
+    content_text_words = {
+        word for word in text_words if len(word) >= 3 and word not in _HINT_STOPWORDS
+    }
+    if not content_text_words:
+        return False
+    text_stems: set[str] = set()
+    for word in content_text_words:
+        text_stems.update(_word_stems(word))
+    hint_words = [
+        word
+        for word in _WORD_RE.findall(candidates[-1])
+        if len(word) >= 3 and word not in _HINT_STOPWORDS
+    ]
+    for hint_word in hint_words:
+        if hint_word in content_text_words:
+            return True
+        if len(hint_word) >= 4 and any(
+            text_word.startswith(hint_word)
+            or (len(text_word) >= 4 and hint_word.startswith(text_word))
+            for text_word in content_text_words
+        ):
+            return True
+        if _word_stems(hint_word) & text_stems:
+            return True
+    return False
+
+
 def _block_content_violation(
     block: BlockResultResponse, *, item: TranslationUnitItem
 ) -> str | None:
@@ -90,6 +197,16 @@ def _block_content_violation(
                 "список segments недопустим"
             )
         return _legacy_content(block, planned=item.treatment)
+    return _segmented_content(block, item=item, modes=modes)
+
+
+def _segmented_content(
+    block: BlockResultResponse,
+    *,
+    item: TranslationUnitItem,
+    modes: tuple[BlockTreatment, ...],
+) -> str | None:
+    """Multi-segment content check against per-span planned treatments."""
     if block.translated_text is not None:
         return (
             f"для блока {block.source_block_id} с сегментами "
@@ -127,6 +244,20 @@ def _block_content_violation(
     if any(mode is BlockTreatment.GLOSSARY_ONLY for mode in modes):
         if not block.glossary_hints:
             return f"для блока {block.source_block_id} обязательны словарные подсказки"
+        if any(mode.requires_translation for mode in modes):
+            glossary_texts = tuple(
+                item.block.text[spans[i].start : spans[i].end]
+                for i, mode in enumerate(modes)
+                if mode is BlockTreatment.GLOSSARY_ONLY
+            )
+            if not any(
+                _hint_matches_glossary_texts(hint.original, glossary_texts)
+                for hint in block.glossary_hints
+            ):
+                return (
+                    f"для блока {block.source_block_id} ни одна словарная подсказка "
+                    "не относится к сегменту GLOSSARY_ONLY"
+                )
     elif (
         all(mode is BlockTreatment.READ_AS_IS for mode in modes)
         and block.glossary_hints

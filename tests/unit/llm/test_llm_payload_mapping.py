@@ -689,3 +689,72 @@ def test_format_error_handles_empty_loc_without_leading_colon() -> None:
     )
     assert "(model_type)" in formatted
     assert ": model_type" not in formatted
+    assert "подсказки схемы:" not in formatted
+
+
+def test_format_error_adds_schema_hints_for_enum_without_leaking_input() -> None:
+    data = narrative_payload()
+    data["glossary_candidates"][0]["name_translation_assessment"] = {
+        "applied_method": "sound",
+        "eligible_without_review": False,
+        "review_reasons": ["SECRET_INVALID_REASON"],
+        "rationale": "Причина проверки",
+        "opaque_name": False,
+    }
+
+    with pytest.raises(LLMResponseFormatError) as caught:
+        parse_payload(
+            LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE,
+            as_content(data),
+            name_translation_policy_version=1,
+        )
+
+    message = str(caught.value)
+    assert "glossary_candidates[0].name_translation_assessment.review_reasons[0]: enum" in message
+    assert "подсказки схемы:" in message
+    assert "допустимые значения —" in message
+    for reason in (
+        "ambiguous",
+        "wordplay",
+        "anagram",
+        "uncertain_etymology",
+        "creative_adaptation",
+        "personal_name_substitution",
+        "other",
+    ):
+        assert reason in message
+    assert "SECRET_INVALID_REASON" not in message
+    suffix = message.split("подсказки схемы:", 1)[1]
+    assert "(" not in suffix and ")" not in suffix
+    violations_part = message.split("(", 2)[2].rsplit(")", 1)[0]
+    assert violations_part == "glossary_candidates[0].name_translation_assessment.review_reasons[0]: enum"
+
+
+def test_format_error_adds_schema_hints_for_too_short_and_string_too_short() -> None:
+    data = narrative_payload()
+    data["context_facts"][0]["anchors"] = []
+
+    with pytest.raises(LLMResponseFormatError) as caught:
+        parse_payload(LLMResponseKind.CHAPTER_ANALYSIS_NARRATIVE, as_content(data))
+
+    message = str(caught.value)
+    assert "подсказки схемы:" in message
+    assert "context_facts[0].anchors: список не может быть пустым, минимум 1" in message
+    suffix = message.split("подсказки схемы:", 1)[1]
+    assert "(" not in suffix and ")" not in suffix
+    violations_part = message.split("(", 2)[2].rsplit(")", 1)[0]
+    assert "context_facts[0].anchors:" in violations_part
+    assert "подсказки схемы" not in violations_part
+
+    ped_data = pedagogical_payload() | {"reader_chapter_summary": ""}
+    with pytest.raises(LLMResponseFormatError) as ped_caught:
+        parse_payload(
+            LLMResponseKind.CHAPTER_ANALYSIS_PEDAGOGICAL,
+            as_content(ped_data),
+            contract_version=2,
+        )
+
+    ped_message = str(ped_caught.value)
+    assert "подсказки схемы: reader_chapter_summary: строка не может быть пустой, минимум 1" in ped_message
+    ped_suffix = ped_message.split("подсказки схемы:", 1)[1]
+    assert "(" not in ped_suffix and ")" not in ped_suffix

@@ -261,6 +261,14 @@ def validate_a2_summary(
                 'требуется ровно один абзац на языке оригинала без перевода на русский'
             ),
         )
+    if ';' in paragraph:
+        raise ReaderTextError(
+            'a2_summary_disallowed_semicolon',
+            detail=(
+                'точка с запятой «;» запрещена в пересказе A2: '
+                'разделите мысль на два отдельных коротких предложения'
+            ),
+        )
     sentences = _split_sentences(paragraph)
     sentence_count = len(sentences)
     if sentence_count > A2_SUMMARY_MAX_SENTENCES:
