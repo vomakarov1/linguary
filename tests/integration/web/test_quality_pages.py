@@ -94,7 +94,7 @@ def test_production_v3_env_is_explicit_before_http_analysis(settings, monkeypatc
 
 async def test_recovery_env_is_pinned_across_restart_and_actual_calls(tmp_path, monkeypatch):
     from linguary.application.use_cases.approve_glossary import StartProcessingCommand
-    from linguary.application.use_cases.retry_task import RetryTaskCommand
+    from linguary.application.use_cases.retry_task import RetryTaskCommand, RetryTaskError
     config = tmp_path / 'config.toml'
     config.write_text(f'[storage]\ndata_root={json.dumps(str(tmp_path / "data"))}\n[llm]\nmodel="fake"\napi_key="synthetic"\n')
     initial = load_settings(config_path=config, environ={'LINGUARY_RECOVERY_MAX_CALLS': '1', 'LINGUARY_RECOVERY_MAX_SCOPE_CALLS': '1'})
@@ -121,7 +121,8 @@ async def test_recovery_env_is_pinned_across_restart_and_actual_calls(tmp_path, 
     restarted_fake = FakeLLMClient()
     restarted = build_application(settings=changed, llm_client=restarted_fake)
     try:
-        restarted.retry_task(RetryTaskCommand(task.id))
+        with pytest.raises(RetryTaskError, match='продление лимита'):
+            restarted.retry_task(RetryTaskCommand(task.id))
         await drain_tasks(restarted)
         with restarted.unit_of_work.transaction() as tx:
             assert tx.work.get_root(root.id) == root
