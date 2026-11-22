@@ -219,6 +219,7 @@ _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS = """\
 Верни treatment_plan: source_block_id и treatment для каждого видимого b1..bN ровно один раз.
 Верни segments с режимом каждого сегмента, только если режим различается внутри блока, иначе [].
 Разные режимы внутри одного блока допустимы. Разные режимы внутри одного предложения запрещены.
+Если длинный блок содержит 4 и более сегментов ([bN.1]..[bN.k]) и в нём есть хотя бы 2 простых прозрачных предложения рядом со сложными предложениями, дроби блок через segments, оставляя простые предложения в READ_AS_IS или GLOSSARY_ONLY, а сложные в TRANSLATE (treatment блока равен сильнейшему режиму его сегментов). Пример заполненного элемента treatment_plan с segments: {{"source_block_id":"b7","treatment":"TRANSLATE","segments":[{{"index":1,"treatment":"READ_AS_IS"}},{{"index":2,"treatment":"TRANSLATE"}},{{"index":3,"treatment":"GLOSSARY_ONLY"}},{{"index":4,"treatment":"TRANSLATE"}}]}}.
 Верни difficulties, before_you_read и before_you_read_evidence (допустимы пустые списки).
 Каждая трудность: id, anchors [{{block_id, quote}}], owner_block_id, kind,
 priority, help_kind, required_points [{{id, description}}]. Копируй quote дословно,
@@ -229,11 +230,13 @@ speech_style — диалект, акцент, особенности речи; 
 В required_points трудности блока bK запрещено цитировать и разбирать фразы из более поздних блоков b(K+1)..bN.
 Бюджет заметок — верхний предел («не больше N»), а не норма, которую нужно заполнить. В блоках TRANSLATE планируй не больше 1–2 заметок на абзац.
 В блоках без перевода (GLOSSARY_ONLY, READ_AS_IS) проверяй каждое знаменательное слово выше уровня читателя (включая редкие значения знакомых слов и официальные титулы), но не добавляй подсказки на базовые слова A1 и прозрачные интернационализмы.
-Для reader_chapter_summary (Previously in Chapter...) используй строго простую лексику A2 (без редких слов уровня B2–C1) в Present Simple, стандартные английские кавычки вместо «ёлочек», строго по фактам главы без выдуманных деталей, одним абзацем без перевода на русский; естественно вплети 3–5 полезных общеязыковых слов главы в простой контекст.
+Для reader_chapter_summary (Previously in Chapter...) используй строго простую лексику A2 (без редких слов уровня B2–C1) в Present Simple, стандартные английские кавычки вместо «ёлочек», строго по фактам главы без выдуманных деталей, одним абзацем без перевода на русский; естественно вплети 3–5 полезных общеязыковых слов главы в простой контекст. Пиши короткими фразами (<= 12–15 слов на фразу); запрещена конструкция Present Simple + for + длительность (разбивай время отдельной фразой); чётко разграничивай эпиграф или цитату из вымышленной книги и прямую речь (реплики персонажей).
 parody — в required_points назвать исходный текст.
 Сначала ищи игру слов, смысловые связи и непрозрачную грамматику, затем лексику.
-lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR.
+Различай priority: ставь critical только когда без объяснения читатель неверно поймёт сюжет, логику, игру слов, сарказм, культурную отсылку или ключевую грамматическую конструкцию; ставь useful для вспомогательной лексики, оттенков значения и неосновных пояснений.
+lexical_hint допустим в GLOSSARY_ONLY или при полном покрытии всех аспектов в BYR. В блоках и сегментах GLOSSARY_ONLY для отдельного незнакомого слова или короткого выражения без грамматической ловушки выбирай help_kind="lexical_hint", а help_kind="explanation" оставляй для грамматики, идиом, игры слов и смысловых связей.
 Для TRANSLATE и READ_AS_IS используй explanation. Перевод и цитата не заменяют объяснение.
+В required_points и заметках для читателя уровня A2 запрещены названия грамматических времён (Past Perfect, Present Perfect, «прошедшее предшествующее время» и т. п.): объясняй смысл простыми словами — что произошло раньше другого события или как действие связано с моментом речи.
 cultural_reference — приоритетная трудность с help_kind="explanation", в том числе внутри блоков TRANSLATE. Пример: Bonfire Night — «Ночь костров», 5 ноября, костры и фейерверки.
 BYR: expression, explanation; объяснение на языке перевода, без указаний переводчику.
 Свидетельство BYR: difficulty_id, point_id, artifact_kind=before_you_read.explanation,
@@ -1040,6 +1043,7 @@ class ContextBuilder:
         language_notes_limit: int | None = None,
         cumulative_words_before: int = 0,
         prior_explained_topics: Sequence[str] = (),
+        prior_chapter_topics: Sequence[str] = (),
     ) -> ChapterAnalysisContext:
         """Source-bound pedagogical context with existing chapter and group budgets."""
         if fragment_count < 1 or fragment is not None and fragment.order >= fragment_count:
@@ -1081,6 +1085,15 @@ class ContextBuilder:
         extra_sections = [accepted]
         if self._reader_level == 'a2' and not self._english_help:
             extra_sections.append('\n\n' + _a2_progression_guidance(cumulative_words_before))
+        cleaned_chapter_topics = tuple(
+            dict.fromkeys(topic.strip() for topic in prior_chapter_topics if topic and topic.strip())
+        )
+        if cleaned_chapter_topics:
+            extra_sections.append(
+                '\n\nУже объяснено в предыдущих главах '
+                '(не планируй повторно без нового языкового аспекта):\n'
+                + '\n'.join(f'- {topic}' for topic in cleaned_chapter_topics)
+            )
         cleaned_topics = tuple(
             dict.fromkeys(topic.strip() for topic in prior_explained_topics if topic and topic.strip())
         )
@@ -1121,12 +1134,14 @@ class ContextBuilder:
         model_dependencies: Mapping[str, object] | None = None,
         max_fragment_blocks: int = DEFAULT_MAX_FRAGMENT_BLOCKS,
         cumulative_words_before: int = 0,
+        prior_chapter_topics: Sequence[str] = (),
     ) -> str:
         context = self.for_chapter_pedagogical_analysis(document, section,
             narrative_summary=narrative_summary, context_facts=context_facts,
             glossary_candidates=glossary_candidates,
             accumulated_candidates=accumulated_candidates, user_decisions=user_decisions,
-            cumulative_words_before=cumulative_words_before)
+            cumulative_words_before=cumulative_words_before,
+            prior_chapter_topics=prior_chapter_topics)
         return canonical_sha(dict(schema_version=1, narrative_output_sha256=narrative_output_sha256,
             source=[(b.id, b.text) for b in textual_blocks(section)],
             instructions=context.request.instructions, input=context.request.input_text,
@@ -2065,6 +2080,13 @@ def _reader_level_treatment_guidance(reader_level: str) -> str:
 «то, что» и отрыв предлога в конце придаточного или вопроса. Для каждой такой \
 конструкции выбирай TRANSLATE либо обеспечь отдельную ясную грамматическую заметку; \
 словарной подсказки без объяснения грамматики недостаточно.
+Явный стоп-лист A2 для безпереводных режимов (READ_AS_IS и GLOSSARY_ONLY без отдельного разбора): \
+не оставляй в READ_AS_IS лексику выше A2 (включая uneasy, nervous и другие небазовые прилагательные и глаголы), \
+а в READ_AS_IS или GLOSSARY_ONLY без языковой заметки — Present Perfect, модальный would, \
+отрыв предлога (например, «What...for?»), what-придаточные, сарказм и скрытую иронию, \
+ненормативную речь (например, «don't got»), идиомы изменения состояния \
+(turned pale, went cold, grew quiet, fell silent) и абзацы или сегменты, где > 3 слов выше A2. \
+Для таких блоков или их отдельных сегментов выбирай TRANSLATE либо добавляй ясную языковую заметку.
 Если встречается двойное отрицание вида «not saying ... isn’t ...», сохрани его \
 утвердительный смысл: это может быть признание качества персонажа или события, \
 а не отрицание этого качества. Объяснение такого выражения в Before You Read \
@@ -2226,23 +2248,25 @@ _WHOLE_CHAPTER_SUMMARY_A2 = """\
 5. chapter_summary — что произошло в этой главе.
 
 Пиши на языке оригинала книги ({source_language}). Ограничь chapter_summary и \
-reader_chapter_summary 3–5 короткими предложениями на всю главу. Только подтверждённые \
-текстом события самой этой главы: что случилось, с кем, что изменилось — не домысливай \
-деталей, которых нет в тексте. Предыдущие главы не пересказывай, о будущих не рассуждай, \
-текст не оценивай. Верни ровно один абзац на языке оригинала книги ({source_language}), \
-без перевода на русский, без подписей и без смешения языков."""
+reader_chapter_summary 3–5 короткими предложениями на всю главу (<= 12–15 слов на фразу). \
+Только подтверждённые текстом события самой этой главы: что случилось, с кем, что изменилось — \
+не домысливай деталей, которых нет в тексте. Не используй Present Simple + for + длительность \
+и чётко разграничивай эпиграф или вымышленную книгу и реплики персонажей. Предыдущие главы не \
+пересказывай, о будущих не рассуждай, текст не оценивай. Верни ровно один абзац на языке \
+оригинала книги ({source_language}), без перевода на русский, без подписей и без смешения языков."""
 
 _FRAGMENT_SUMMARY_A2 = """\
 5. chapter_summary — что произошло в главе от начала до конца этого фрагмента.
 
 Пиши на языке оригинала книги ({source_language}). Единый пересказ chapter_summary и \
 reader_chapter_summary с начала главы до текущего фрагмента сжимается в 3–5 коротких \
-предложений, а не дописывается абзацем к каждому фрагменту. Верни сводку всей главы \
-от начала до конца своего фрагмента, включая уже найденное в предыдущих частях, строго \
-по фактам текста без выдуманных деталей. Не рассуждай о том, что будет после, и не \
-оценивай текст. Верни ровно один абзац на языке оригинала книги ({source_language}), \
-без перевода на русский, без подписей и без смешения языков. Новые выражения \
-before_you_read не возвращай: список остаётся пустым."""
+предложений (<= 12–15 слов на фразу), а не дописывается абзацем к каждому фрагменту. Верни \
+сводку всей главы от начала до конца своего фрагмента, включая уже найденное в предыдущих \
+частях, строго по фактам текста без выдуманных деталей. Не используй Present Simple + for + \
+длительность и чётко разграничивай эпиграф или вымышленную книгу и реплики персонажей. Не \
+рассуждай о том, что будет после, и не оценивай текст. Верни ровно один абзац на языке \
+оригинала книги ({source_language}), без перевода на русский, без подписей и без смешения \
+языков. Новые выражения before_you_read не возвращай: список остаётся пустым."""
 
 
 _A2_BEFORE_YOU_READ_GUIDANCE = """\
@@ -2456,6 +2480,29 @@ Before You Read и подсказкой своего блока. Полный с
 Отвечай строго по схеме структурированного ответа, без пояснений вне её полей."""
 
 
+def _difficulty_segment_treatments(
+    difficulty: Difficulty,
+    plan_items: Mapping[str, TreatmentPlanItem],
+    blocks_by_id: Mapping[str, DocumentBlock],
+) -> frozenset[BlockTreatment]:
+    item = plan_items.get(difficulty.owner_block_id)
+    if item is None:
+        return frozenset()
+    if not item.segment_treatments:
+        return frozenset((item.treatment,))
+    block = blocks_by_id.get(difficulty.owner_block_id)
+    if block is None or len(block.segment_spans) != len(item.segment_treatments):
+        return frozenset((item.treatment,))
+    overlapping = {
+        mode
+        for anchor in difficulty.anchors
+        if anchor.block_id == difficulty.owner_block_id
+        for span, mode in zip(block.segment_spans, item.segment_treatments, strict=True)
+        if anchor.start < span.end and span.start < anchor.end
+    }
+    return frozenset(overlapping) if overlapping else frozenset((item.treatment,))
+
+
 def _scene_notes_budget(
     analysis: ChapterAnalysis, section: DocumentSection, unit: TranslationUnit, *, per_chapter: int,
 ) -> int:
@@ -2466,17 +2513,27 @@ def _scene_notes_budget(
     apportion the remainder by source length. Disjoint groups cannot receive more than
     the chapter allowance, even after atomic merges or recovery splits.
     """
+    blocks = textual_blocks(section)
+    blocks_by_id = {block.id: block for block in blocks}
+    plan_items = {item.block_id: item for item in analysis.treatment_plan.items}
     uncovered = _uncovered_difficulties(analysis)
+    modes_by_difficulty = {
+        difficulty.id: (
+            _difficulty_segment_treatments(difficulty, plan_items, blocks_by_id)
+            if difficulty.owner_block_id in plan_items
+            else frozenset((analysis.treatment_plan.treatment_for(difficulty.owner_block_id),))
+        )
+        for difficulty in uncovered
+    }
     owners = {
         difficulty.owner_block_id for difficulty in uncovered
         if difficulty.help_kind == "explanation"
-        and analysis.treatment_plan.treatment_for(difficulty.owner_block_id) is BlockTreatment.READ_AS_IS
+        and BlockTreatment.READ_AS_IS in modes_by_difficulty[difficulty.id]
     }
     chapter_limit = chapter_note_limit(section, per_chapter)
     if len(owners) > max(per_chapter, chapter_limit):
         raise ContextBuildError("обязательные объяснения превышают бюджет заметок главы")
     effective_per_chapter = max(len(owners), chapter_limit)
-    blocks = textual_blocks(section)
     if len(owners) < effective_per_chapter:
         extra_owners = {
             difficulty.owner_block_id for difficulty in uncovered
@@ -2485,8 +2542,7 @@ def _scene_notes_budget(
                 difficulty.help_kind == "explanation"
                 or (
                     difficulty.kind == "grammar"
-                    and analysis.treatment_plan.treatment_for(difficulty.owner_block_id)
-                    is BlockTreatment.GLOSSARY_ONLY
+                    and BlockTreatment.GLOSSARY_ONLY in modes_by_difficulty[difficulty.id]
                 )
             )
         }
@@ -3473,8 +3529,10 @@ def _pedagogical_instructions(source_language: str, target_language: str, reader
         instructions += (
             '\nВерни reader_chapter_summary: адаптируй полную сводку chapter_summary из раздела '
             '«Принятый повествовательный анализ» для уровня A2 — один абзац из 3–5 коротких '
-            'предложений на языке оригинала (без перевода на русский), строго по фактам всей '
-            'главы без выдуманных деталей и без усечения до отдельного фрагмента.'
+            'предложений (<= 12–15 слов на фразу) на языке оригинала (без перевода на русский), '
+            'строго по фактам всей главы без выдуманных деталей и без усечения до отдельного фрагмента. '
+            'Не используй Present Simple + for + длительность и чётко разграничивай эпиграф или '
+            'вымышленную книгу и реплики персонажей.'
         )
     else:
         instructions += '\nНе возвращай пересказ: принятая фактическая сводка уже сохранена.'

@@ -3228,3 +3228,289 @@ def test_narrative_instructions_require_declension_visual_only_facts_and_part_di
         assert "personal_name_substitution" in text
 
 
+def test_pedagogical_a2_instructions_include_segments_example_stoplist_and_tense_ban() -> None:
+    """A2 pedagogical and summary prompts include segment JSON example, stoplist, priority/channel/tense rules, and A2 recap template without duplicates."""
+    from linguary.application.context_builder import (
+        _FRAGMENT_SUMMARY_A2,
+        _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,
+        _WHOLE_CHAPTER_SUMMARY_A2,
+        _pedagogical_instructions,
+        _reader_level_treatment_guidance,
+    )
+    from linguary.application.reader_text import _A2_NOTE_DISCIPLINE, learner_instructions
+
+    section = make_analysis_section(
+        section_id="sec-a2-p4t2",
+        title="Chapter 1",
+        order=0,
+        texts=("First paragraph.",),
+    )
+    document = make_analysis_document((section,))
+    templates = snapshot_prompt_templates(
+        source_language="en",
+        target_language="ru",
+        reader_level="a2",
+        profile="content-plan-v3",
+    )
+    live_ctx = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+    ).for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Short summary.",
+    )
+    template_ctx = ContextBuilder(
+        content_plan_profile="content-plan-v3",
+        reader_level="a2",
+        prompt_templates=templates,
+    ).for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Short summary.",
+    )
+
+    ped_raw = _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS.format(
+        source_language="en", target_language="ru", reader_level="A2",
+    )
+    ped_a2 = _pedagogical_instructions("en", "ru", "a2", False)
+    a2_guidance = _reader_level_treatment_guidance("a2")
+
+    # 1. Segment JSON example and >=4 segments / >=2 simple sentences split rule (keeping _SEGMENT_RULE).
+    for text in (ped_raw, ped_a2, templates["pedagogical_analysis"], live_ctx.request.instructions):
+        assert _SEGMENT_RULE in text
+        assert "4 и более сегментов" in text
+        assert "2 простых" in text
+        assert '"segments":[{"index":1,"treatment":"READ_AS_IS"}' in text
+        # 3. critical vs useful, lexical_hint in GLOSSARY_ONLY, and tense-name ban.
+        assert "critical" in text and "useful" in text
+        assert 'help_kind="lexical_hint"' in text
+        assert "Past Perfect" in text
+        assert "Present Perfect" in text
+        assert "прошедшее предшествующее время" in text
+
+    # 2. Explicit A2 stoplist in _reader_level_treatment_guidance("a2") and live/template pedagogical A2 instructions.
+    stoplist_markers = (
+        "uneasy",
+        "nervous",
+        "Present Perfect",
+        "would",
+        "What...for?",
+        "what",
+        "сарказм",
+        "don't got",
+        "идиомы изменения состояния",
+        "> 3 слов выше A2",
+    )
+    for text in (a2_guidance, ped_a2, templates["pedagogical_analysis"], live_ctx.request.instructions):
+        for marker in stoplist_markers:
+            assert marker in text
+
+    # 4. A2 summary template across pedagogical instructions and whole/fragment A2 summaries.
+    summary_markers = (
+        "<= 12–15 слов на фразу",
+        "Present Simple + for + длительность",
+        "эпиграф",
+        "реплик",
+    )
+    for text in (
+        ped_raw,
+        ped_a2,
+        templates["pedagogical_analysis"],
+        live_ctx.request.instructions,
+        _WHOLE_CHAPTER_SUMMARY_A2.format(source_language="en"),
+        _FRAGMENT_SUMMARY_A2.format(source_language="en"),
+    ):
+        for marker in summary_markers:
+            assert marker in text
+
+    # No duplicate "might have been" or _A2_NOTE_DISCIPLINE after deduplication.
+    note_discipline_body = _A2_NOTE_DISCIPLINE.strip()
+    for text in (live_ctx.request.instructions, template_ctx.request.instructions):
+        assert text.count("might have been") == 1
+        assert text.count(note_discipline_body) == 1
+
+    # learner_instructions("a2") itself remains untouched (no new stoplist or segment JSON injected there).
+    learner_a2 = learner_instructions("a2")
+    assert '"segments":[{"index":1' not in learner_a2
+    assert "don't got" not in learner_a2
+
+
+def test_pedagogical_context_passes_prior_chapter_topics_and_segment_notes_budget() -> None:
+    """prior_chapter_topics has its own section and affects pedagogical_input_sha256; _scene_notes_budget uses segment_treatments."""
+    from dataclasses import replace
+
+    from linguary.application.context_builder import _scene_notes_budget
+    from linguary.domain import (
+        BlockSegment,
+        ChapterAnalysis,
+        CoverageStatus,
+        TreatmentPlanItem,
+    )
+    from linguary.domain.content_plan import ContentPlan, Difficulty, RequiredPoint, Scene, SourceAnchor
+
+    # Part A: prior_chapter_topics vs prior_explained_topics + SHA-256 sensitivity.
+    section = make_analysis_section(
+        section_id="sec-ch3",
+        title="Chapter 3",
+        order=2,
+        texts=("Nick wondered what the road was for.",),
+    )
+    document = make_analysis_document((section,))
+    builder = ContextBuilder(content_plan_profile="content-plan-v3", reader_level="a2")
+
+    ctx_both = builder.for_chapter_pedagogical_analysis(
+        document,
+        section,
+        narrative_summary="Nick walks along the road.",
+        prior_chapter_topics=("used to", "would", "used to", " "),
+        prior_explained_topics=("what ... for", "what ... for"),
+    )
+    input_text = ctx_both.request.input_text
+    assert "Уже объяснено в предыдущих главах" in input_text
+    assert "Уже объяснено в предыдущих фрагментах этой главы" in input_text
+    assert input_text.count("- used to") == 1
+    assert input_text.count("- would") == 1
+    assert input_text.count("- what ... for") == 1
+
+    sha_none = builder.pedagogical_input_sha256(
+        document,
+        section,
+        narrative_output_sha256="narr-sha",
+        narrative_summary="Nick walks along the road.",
+    )
+    sha_empty = builder.pedagogical_input_sha256(
+        document,
+        section,
+        narrative_output_sha256="narr-sha",
+        narrative_summary="Nick walks along the road.",
+        prior_chapter_topics=(),
+    )
+    sha_topics = builder.pedagogical_input_sha256(
+        document,
+        section,
+        narrative_output_sha256="narr-sha",
+        narrative_summary="Nick walks along the road.",
+        prior_chapter_topics=("used to", "would"),
+    )
+    assert sha_none == sha_empty
+    assert sha_topics != sha_none
+
+    # Part B: _scene_notes_budget honors overlapping READ_AS_IS segment in owners.
+    seg_text = "Complex clause needing translation. Simple echo here."
+    split_pos = seg_text.index("Simple")
+    b1 = make_analysis_block(section_id="sec-seg", order=0, text="First translate paragraph with many words. " * 4)
+    b2 = make_analysis_block(section_id="sec-seg", order=1, text="Second translate paragraph with many words. " * 4)
+    b3 = replace(
+        make_analysis_block(section_id="sec-seg", order=2, text=seg_text),
+        segments=(
+            BlockSegment(0, split_pos, 0),
+            BlockSegment(split_pos, len(seg_text), 1),
+        ),
+    )
+    seg_section = make_analysis_section(section_id="sec-seg", title="Chapter 4", blocks=(b1, b2, b3))
+    plan_read = TreatmentPlan(
+        section_id="sec-seg",
+        items=(
+            TreatmentPlanItem(b1.id, BlockTreatment.TRANSLATE),
+            TreatmentPlanItem(b2.id, BlockTreatment.TRANSLATE),
+            TreatmentPlanItem(
+                b3.id,
+                BlockTreatment.TRANSLATE,
+                segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.READ_AS_IS),
+                sentence_indexes=(0, 1),
+            ),
+        ),
+    )
+    # b1 and b2 have TRANSLATE explanations; b3 has an explanation overlapping its READ_AS_IS segment.
+    # With per_chapter=2, b3 must be reserved first in owners (READ_AS_IS), so unit([b3]) gets budget=1.
+    read_difficulties = (
+        Difficulty(
+            "d1",
+            (SourceAnchor(b1.id, 0, 5, "First"),),
+            b1.id,
+            "idiom",
+            "useful",
+            "explanation",
+            (RequiredPoint("p1", "Explain"),),
+        ),
+        Difficulty(
+            "d2",
+            (SourceAnchor(b2.id, 0, 6, "Second"),),
+            b2.id,
+            "idiom",
+            "useful",
+            "explanation",
+            (RequiredPoint("p2", "Explain"),),
+        ),
+        Difficulty(
+            "d3",
+            (SourceAnchor(b3.id, split_pos, split_pos + 11, "Simple echo"),),
+            b3.id,
+            "grammar",
+            "critical",
+            "explanation",
+            (RequiredPoint("p3", "Explain segment"),),
+        ),
+    )
+    read_analysis = ChapterAnalysis(
+        id="an-seg-read",
+        section_id="sec-seg",
+        coverage_status=CoverageStatus.COMPLETE,
+        treatment_plan=plan_read,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=read_difficulties),
+        scenes=(Scene("s1", 0, b1.id, b3.id, "Scene"),),
+    )
+    unit_b3 = TranslationUnit.of_blocks(id="u-b3", blocks=(b3,), plan=plan_read)
+    assert _scene_notes_budget(read_analysis, seg_section, unit_b3, per_chapter=2) == 1
+
+    # Part C: _scene_notes_budget honors overlapping GLOSSARY_ONLY segment on grammar in extra_owners.
+    gloss_text = "Hard opening clause here. What is it for?"
+    gloss_split = gloss_text.index("What")
+    g1 = replace(
+        make_analysis_block(section_id="sec-gloss", order=0, text=gloss_text),
+        segments=(
+            BlockSegment(0, gloss_split, 0),
+            BlockSegment(gloss_split, len(gloss_text), 1),
+        ),
+    )
+    g2 = make_analysis_block(section_id="sec-gloss", order=1, text="Very long plain filler text. " * 40)
+    gloss_section = make_analysis_section(section_id="sec-gloss", title="Chapter 5", blocks=(g1, g2))
+    plan_gloss = TreatmentPlan(
+        section_id="sec-gloss",
+        items=(
+            TreatmentPlanItem(
+                g1.id,
+                BlockTreatment.TRANSLATE,
+                segment_treatments=(BlockTreatment.TRANSLATE, BlockTreatment.GLOSSARY_ONLY),
+                sentence_indexes=(0, 1),
+            ),
+            TreatmentPlanItem(g2.id, BlockTreatment.TRANSLATE),
+        ),
+    )
+    gloss_difficulty = Difficulty(
+        "dg1",
+        (SourceAnchor(g1.id, gloss_split, len(gloss_text), "What is it for?"),),
+        g1.id,
+        "grammar",
+        "critical",
+        "lexical_hint",
+        (RequiredPoint("pg1", "Explain preposition stranding"),),
+    )
+    gloss_analysis = ChapterAnalysis(
+        id="an-seg-gloss",
+        section_id="sec-gloss",
+        coverage_status=CoverageStatus.COMPLETE,
+        treatment_plan=plan_gloss,
+        translation_instructions="Keep tone.",
+        chapter_summary="Summary.",
+        content_plan=ContentPlan(version=3, profile="content-plan-v3", difficulties=(gloss_difficulty,)),
+        scenes=(Scene("s1", 0, g1.id, g2.id, "Scene"),),
+    )
+    unit_g1 = TranslationUnit.of_blocks(id="u-g1", blocks=(g1,), plan=plan_gloss)
+    assert _scene_notes_budget(gloss_analysis, gloss_section, unit_g1, per_chapter=1) == 1
+
+
+
