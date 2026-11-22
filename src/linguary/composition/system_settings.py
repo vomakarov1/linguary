@@ -9,7 +9,7 @@ from linguary.adapters.config.system_settings import SystemSettingsUpdate, Syste
 from linguary.adapters.db.system_settings import SettingsRevisionConflict, SystemSettingsStore
 from linguary.adapters.llm.rate_limit import LLMRateLimiter
 from linguary.adapters.runtime import TaskWorkerPool
-from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings
+from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, await_detached
 
 
 class SettingsClosingError(SettingsError):
@@ -44,13 +44,13 @@ class SystemSettingsService:
         operation = self._accept(
             lambda: self._apply(update, expected_revision=expected_revision)
         )
-        await asyncio.shield(operation)
+        await await_detached(operation)
 
     async def reset(self, *, expected_revision: int) -> None:
         operation = self._accept(
             lambda: self._apply(None, expected_revision=expected_revision)
         )
-        await asyncio.shield(operation)
+        await await_detached(operation)
 
     def _accept(self, make_operation: Callable[[], Coroutine[None, None, None]]) -> asyncio.Task[None]:
         if self._closing:
@@ -157,7 +157,7 @@ class SystemSettingsService:
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._close())
             self._close_task.add_done_callback(self._collect_close)
-        await asyncio.shield(self._close_task)
+        await await_detached(self._close_task)
 
     async def _close(self) -> None:
         await self.drain()

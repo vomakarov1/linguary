@@ -13,7 +13,7 @@ A local application for adapting EPUB fiction books for language learners using 
 
 ## Requirements
 
-- Python 3.13+
+- Python 3.15+
 - [uv](https://docs.astral.sh/uv/) for dependency and environment management
 - Optional: Java and [EPUBCheck](https://www.w3.org/publishing/epubcheck/) for local EPUB validation (auto-detected in `~/.linguary/epubcheck`, Homebrew's `epubcheck` formula paths, and `/usr/share/java/epubcheck`; preinstalled in the Docker image)
 

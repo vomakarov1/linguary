@@ -45,7 +45,7 @@ from linguary.application.book_conditions import BookConditionsService, Conditio
 from linguary.application.ports.pronunciation import PronunciationSource
 from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, check_settings_from_mapping, conditions_payload, effective_content_plan_profile, pronunciation_source_for
 from linguary.composition.correction_runtime import CorrectionRuntimeResolver, correction_snapshot
-from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
+from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence, await_detached
 from linguary.composition.system_settings import SystemSettingsService
 from linguary.adapters.db.engine import create_database_engine
 from linguary.adapters.db.unit_of_work import SqlAlchemyUnitOfWork
@@ -240,7 +240,7 @@ class Application:
             task = asyncio.create_task(self._close())
             object.__setattr__(self, "_close_task", task)
             task.add_done_callback(self._collect_close)
-        await asyncio.shield(self._close_task)
+        await await_detached(self._close_task)
 
     async def _close(self) -> None:
         errors = []

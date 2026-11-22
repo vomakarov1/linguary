@@ -116,7 +116,7 @@ class RuntimeSettings:
             self._closing = True
             self._shutdown_task = asyncio.create_task(self._shutdown())
             self._shutdown_task.add_done_callback(self._collect_shutdown)
-        await asyncio.shield(self._shutdown_task)
+        await await_detached(self._shutdown_task)
 
     def _collect_shutdown(self, task: asyncio.Task[None]) -> None:
         if not task.cancelled():
@@ -134,6 +134,37 @@ class RuntimeSettings:
                 await self._changed.wait()
         if self._close_errors:
             raise SettingsError('Не удалось закрыть все клиенты модели') from None
+
+
+async def await_detached(task: asyncio.Task[None]) -> None:
+    """Await a task whose cancellation and errors are owned by its service.
+
+    Unlike `asyncio.shield`, cancelling the caller does not emit an unhandled
+    exception callback on the event loop in Python 3.15+ when the detached task
+    later fails, because the owning service collects exceptions via its done callback.
+    """
+    if task.done():
+        task.result()
+        return
+    waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def _finish(completed: asyncio.Task[None]) -> None:
+        if waiter.done():
+            return
+        if completed.cancelled():
+            waiter.cancel()
+        else:
+            error = completed.exception()
+            if error is not None:
+                waiter.set_exception(error)
+            else:
+                waiter.set_result(None)
+
+    task.add_done_callback(_finish)
+    try:
+        await waiter
+    finally:
+        task.remove_done_callback(_finish)
 
 
 class RuntimeSequence:

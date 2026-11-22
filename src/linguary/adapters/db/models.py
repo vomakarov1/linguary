@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Float,
     Integer,
     CheckConstraint,
     DateTime,
@@ -320,7 +321,7 @@ class GlossaryCandidateRow(Base):
     source_text: Mapped[str] = mapped_column(String)
     type: Mapped[str] = mapped_column(String)
     suggested_translation: Mapped[str] = mapped_column(String)
-    confidence: Mapped[float] = mapped_column()
+    confidence: Mapped[float] = mapped_column(Float)
     model_flagged_review: Mapped[bool] = mapped_column()
     requires_review: Mapped[bool] = mapped_column(index=True)
     note: Mapped[str] = mapped_column(Text, default="", server_default="")

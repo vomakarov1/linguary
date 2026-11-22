@@ -1,7 +1,7 @@
-FROM python:3.13-slim
+FROM python:3.15-slim
 
 # Install the uv dependency manager at a fixed version
-COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /uvx /bin/
 
 # EPUBCheck runs through Java. Install the JRE and the official archive
 # of the checking tool, with checksum verification.

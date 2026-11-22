@@ -3,7 +3,7 @@ name = "linguary"
 version = "0.1.0"
 description = "Local processing of literary EPUB files through an LLM: translation, vocabulary hints, and language notes"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.15"
 dependencies = [
     "fastapi>=0.116",
     "uvicorn[standard]>=0.35",
