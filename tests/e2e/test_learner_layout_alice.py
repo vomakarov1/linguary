@@ -258,6 +258,14 @@ def _poem_translation(text: str) -> str:
     return "\n".join(lines)
 
 
+def _plain_translation(text: str) -> str:
+    """One translated line per non-empty source line. Strict v2 rejects a short reply."""
+    count = sum(bool(line.strip()) for line in text.splitlines())
+    if count <= 1:
+        return "Фраза."
+    return "\n".join("Фраза." for _ in range(count))
+
+
 def _quote_for(block_id: str, targets: Targets) -> tuple[str, str] | None:
     if block_id == targets.poem_id:
         return targets.poem_quote, PARODY_NOTE
@@ -460,10 +468,18 @@ def _processing_payload(request, blocks, front_ids, notes_ids, targets: Targets)
                 "treatment": "TRANSLATE",
                 "translated_text": None,
                 "glossary_hints": [],
-                "segments": [{"index": index, "translated_text": "Фраза."} for index in indexes],
+                "segments": [
+                    {
+                        "index": index,
+                        "translated_text": _plain_translation(
+                            block.text[block.segments[index - 1].start:block.segments[index - 1].end]
+                        ),
+                    }
+                    for index in indexes
+                ],
             })
         else:
-            text = _poem_translation(block.text) if block.type is BlockType.POEM else "Фраза."
+            text = _poem_translation(block.text) if block.type is BlockType.POEM else _plain_translation(block.text)
             rows.append({
                 "source_block_id": alias,
                 "treatment": "TRANSLATE",

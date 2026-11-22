@@ -1285,6 +1285,37 @@ async def test_process_chapter_reuses_source_texts_and_defers_reconcile_until_co
                 prompt_hash="hash",
             )
 
+        def begin_local_acceptance(
+            self,
+            root_id: str,
+            scope_id: str,
+            *,
+            task_id: str,
+            run_id: str,
+            stage: str,
+            assigned_model: str,
+            prompt_hash: str,
+            policy_version: str,
+        ):
+            from linguary.domain.llm_log import CallContext
+
+            if root_id != root.id:
+                raise AssertionError(root_id)
+            return CallContext(
+                conditions_id="00000000-0000-4000-8000-000000000001",
+                stage=stage,
+                scope_id=scope_id,
+                ordered_block_ids=tuple(root.manifest["ordered_blocks"]),
+                attempt_id="00000000-0000-4000-8000-000000000002",
+                generation=1,
+                assigned_model=assigned_model,
+                prompt_hash=prompt_hash,
+                run_id=run_id,
+                task_id=task_id,
+                root_id="00000000-0000-4000-8000-000000000003",
+                policy_version=policy_version,
+            )
+
         def transition_attempt(self, attempt_id: str, state: str, **kwargs) -> None:
             return None
 

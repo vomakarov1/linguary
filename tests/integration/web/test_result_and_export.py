@@ -1553,8 +1553,19 @@ def test_analyze_initial_conditions_pause_resume_and_restart_routes_and_pending_
         f"/books/{restart_scenario.book_id}", headers={"accept": "text/html"}
     ).text
     assert f"/books/{restart_scenario.book_id}/recovery/{root.id}/restart" in limit_detail_html
-    # Retry forms are suppressed when recovery stopped due to limit
-    assert f"/tasks/" not in limit_detail_html
+    # A provider failure keeps its own retry. A limit stop is not an ordinary task retry.
+    limit_page = html.fromstring(limit_detail_html)
+    provider_retry = limit_page.xpath(
+        '//form[contains(@class, "failure") and @action="/tasks/task-failed/retry"]'
+    )
+    assert len(provider_retry) == 1
+    assert "Обработка главы: провайдер не ответил" in provider_retry[0].text_content()
+    assert provider_retry[0].xpath('.//button[normalize-space()="Повторить"]')
+    retry_actions = limit_page.xpath(
+        '//form[contains(@action, "/tasks/") and contains(@action, "/retry")]/@action'
+    )
+    assert set(retry_actions) == {"/tasks/task-failed/retry"}
+    assert f"/tasks/{root.id}/retry" not in limit_detail_html
 
     assert (
         client.post(

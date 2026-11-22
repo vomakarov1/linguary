@@ -890,7 +890,8 @@ async def run_worker(application: Application) -> None:
         if alone:
             await application.runner.recover_interrupted()
             lock.share()
-        await application.worker_pool.run_forever()
+        if not application.worker_pool.stop_requested:
+            await application.worker_pool.run_forever()
     finally:
         lock.leave()
 

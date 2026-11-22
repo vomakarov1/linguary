@@ -58,7 +58,7 @@ def test_v2_overlays_accuracy_rules_on_saved_templates(route):
     context = context_for((target,), (target,), route=route,
                           builder=ContextBuilder(prompt_templates={"translation": template, "regeneration": template}))
     assert context.request.instructions.startswith(template + "\n")
-    for rule in (CURRENT_TRANSLATION_POLICY, "идиом", "отрицания", "не добавляй", "полностью"):
+    for rule in ("Политика translation-context-v2", "идиом", "отрицания", "не добавляй", "полностью"):
         assert rule in context.request.instructions
     assert context.request.contract_version == 1
 
@@ -195,7 +195,8 @@ def test_v2_works_without_content_plan_v3(route, plan):
     context = context_for((target,), (target,), route=route, analysis=analysis,
                           builder=ContextBuilder(content_plan_profile="content-plan-v2"))
     assert context.request.contract_version == (1 if plan is None else 2)
-    assert CURRENT_TRANSLATION_POLICY in context.request.instructions
+    for rule in ("Политика translation-context-v2", "идиом", "отрицания", "не добавляй", "полностью"):
+        assert rule in context.request.instructions
     assert '"context_facts"' not in context.request.input_text
 
 
