@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from linguary.application.errors import ApplicationError
@@ -26,6 +27,19 @@ class RestartTranslationConflict(RestartTranslationError):
     """The root changed after the caller last read it."""
 
 
+_RESTARTABLE_STOPPED_REASONS = frozenset({
+    "limit",
+    "scope_limit",
+    "unknown_outcome",
+    "interrupted",
+    "unsafe_partition",
+    "output_truncated",
+    "context_capacity",
+    "provider_refusal",
+})
+_UNKNOWN_REASONS = frozenset({"unknown_outcome", "interrupted"})
+
+
 @dataclass(frozen=True, slots=True)
 class RestartTranslationCommand:
     """Restart one saved chapter root at the exact generation shown to the caller."""
@@ -33,6 +47,7 @@ class RestartTranslationCommand:
     book_id: str
     root_id: str
     expected_generation: int
+    acknowledge_unknown_outcome: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,13 +131,30 @@ class RestartTranslation:
             pending_ordered = tuple(block_id for block_id in ordered if block_id not in historical)
             if root.status == "complete" or not pending_ordered:
                 raise RestartTranslationError("все блоки уже приняты; используйте повторную генерацию")
-            if root.status == "stopped" and root.reason != "limit":
+            if root.status == "stopped" and root.reason not in _RESTARTABLE_STOPPED_REASONS:
                 raise RestartTranslationError("для этой области нельзя безопасно запустить перевод заново")
             if (not historical <= set(ordered) or len(leaf_blocks) != len(set(leaf_blocks))
                     or historical.intersection(leaf_blocks)
                     or historical | set(leaf_blocks) != set(ordered)):
                 raise RestartTranslationError("неполная область перевода")
             pending_scopes.sort(key=lambda scope: positions[scope.ordered_blocks[0]])
+            attempts = transaction.work.list_root_attempts(root.id)
+            had_unknown = root.reason in _UNKNOWN_REASONS or any(
+                attempt.state == "unknown" for attempt in attempts
+            )
+            if had_unknown and not command.acknowledge_unknown_outcome:
+                raise RestartTranslationError(
+                    "требуется явное подтверждение перезапуска после неизвестного исхода (возможна повторная оплата)"
+                )
+            audit = {
+                "schema_version": 1,
+                "predecessor_root_id": root.id,
+                "observed_generation": command.expected_generation,
+                "previous_reason": root.reason,
+                "had_unknown_outcome": had_unknown,
+                "acknowledged_duplicate_billing_risk": command.acknowledge_unknown_outcome,
+                "restarted_at": datetime.now(UTC).isoformat(),
+            }
 
             policy = self._recovery_policy()
             manifest = root_manifest(
@@ -156,6 +188,7 @@ class RestartTranslation:
                 manifest,
                 policy_version=CURRENT_TRANSLATION_POLICY,
                 operation_kind="translation",
+                compatibility=audit,
             )
             scopes = tuple(
                 RecoveryScope(str(uuid4()), successor_id, tuple(scope.ordered_blocks))

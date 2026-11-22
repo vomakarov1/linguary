@@ -107,6 +107,7 @@ from linguary.application.use_cases.regenerate_block import (
 from linguary.application.use_cases.register_book import RegisterBook
 from linguary.application.use_cases.reset_processing import ResetProcessing
 from linguary.application.use_cases.retry_task import RetryTask
+from linguary.application.use_cases.extend_recovery_limit import ExtendRecoveryLimit
 from linguary.application.use_cases.restart_translation import RestartTranslation
 from linguary.application.use_cases.pause_book import PauseBook, ResumeBook
 from linguary.application.validators import TranslationResultValidator
@@ -177,6 +178,7 @@ class Application:
     reset_processing: ResetProcessing
     retry_task: RetryTask
     restart_translation: RestartTranslation
+    extend_recovery_limit: ExtendRecoveryLimit
     analysis: RuntimeSequence
     processing: RuntimeSequence
     regeneration: RuntimeSequence
@@ -593,6 +595,7 @@ def build_application(
             queue=task_queue,
             recovery_policy=lambda: RecoveryPolicy(**asdict(runtime_settings.current.settings.recovery)),
         ),
+        extend_recovery_limit=ExtendRecoveryLimit(unit_of_work=unit_of_work),
         analysis=analysis,
         processing=processing,
         regeneration=regeneration,
