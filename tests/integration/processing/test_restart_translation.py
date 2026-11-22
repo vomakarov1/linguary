@@ -1,12 +1,15 @@
 """Explicitly restart only the unfinished part of a pinned chapter operation."""
 
 import asyncio
+from contextlib import contextmanager
 
 import pytest
 
-from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
+from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings, WorkerPoolSettings
+from linguary.adapters.db.work_state import SqlAlchemyWorkRepository
 from linguary.adapters.llm import FakeReply
 from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from linguary.application.block_processing import TranslationCall
 from linguary.application.ports.llm import LLMTransportError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.restart_translation import (
@@ -373,6 +376,296 @@ async def test_restart_translation_allows_accepted_scope_updated_by_chapter_corr
             scopes = transaction.work.list_scopes(successor.id)
             assert successor.manifest["historical_coverage"] == accepted.ordered_blocks
             assert [scope.ordered_blocks for scope in scopes] == [unfinished.ordered_blocks]
+    finally:
+        await app.aclose()
+
+
+def _split_chapter_app(tmp_path, fake, *, concurrency):
+    """Two short blocks become two roots; worker concurrency is also the root limit."""
+    return build_application(settings=AppSettings(
+        llm=LLMSettings(
+            model="pinned-model",
+            api_key="synthetic-secret",
+            proxy_mode="direct",
+            max_unit_source_chars=15,
+        ),
+        storage=StorageSettings(data_root=str(tmp_path / "data")),
+        worker=WorkerPoolSettings(concurrency=concurrency),
+    ), llm_client=fake, content_plan_profile="legacy-v1")
+
+
+def _queue_translation(fake, request):
+    steps = list(fake.replies)
+    index = len(fake.requests)
+    while len(steps) <= index:
+        steps.append(FakeReply.of_payload({"blocks": [], "language_notes": []}))
+    steps[index] = FakeReply.of_payload({
+        "blocks": [
+            {
+                "source_block_id": f"b{block_index}",
+                "treatment": "TRANSLATE",
+                "translated_text": "Кот был здесь.",
+                "glossary_hints": [],
+            }
+            for block_index, _block_id in enumerate(request.ordered_block_ids, start=1)
+        ],
+        "language_notes": [],
+    })
+    fake.replies = tuple(steps)
+
+
+async def test_restart_one_root_at_concurrency_2_keeps_sibling_running_and_saved(tmp_path):
+    both_entered = asyncio.Event()
+    restarted_returned = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+    gates = {}
+    seen = []
+    restarted = {"id": None}
+
+    class PausingClient(FakeLLMClient):
+        async def generate(self, request):
+            if request.stage != LLMCallStage.TRANSLATION_UNIT:
+                return await super().generate(request)
+            block_id = request.ordered_block_ids[0]
+            gate = asyncio.Event()
+            gates[block_id] = gate
+            seen.append(block_id)
+            if len(seen) == 2:
+                both_entered.set()
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                if block_id != restarted["id"]:
+                    sibling_cancelled.set()
+                raise
+            _queue_translation(self, request)
+            response = await super().generate(request)
+            if block_id == restarted["id"]:
+                restarted_returned.set()
+            return response
+
+    fake = PausingClient([analysis_reply(2)])
+    app = _split_chapter_app(tmp_path, fake, concurrency=2)
+    running = None
+    try:
+        document = store_imported(app, (("The cat sat.", "The dog ran."),))
+        await app.analysis.start("book-1")
+        analysis = await drain_tasks(app)
+        assert analysis[0].status is TaskStatus.SUCCEEDED, analysis[0].last_error
+        run = app.start_processing()(StartProcessingCommand("book-1"))
+        dispatcher = (await app.processing.start("book-1"))[0]
+        with app.unit_of_work.transaction() as transaction:
+            refs = transaction.work.get_binding("task", dispatcher.id)["payload_json"]["operation_refs"]
+            assert len(refs) == 2
+
+        running = asyncio.create_task(app.runner.run_next())
+        await asyncio.wait_for(both_entered.wait(), 5)
+        with app.unit_of_work.transaction() as transaction:
+            roots = [
+                transaction.work.get_root(ref["root_id"])
+                for ref in transaction.work.get_binding("task", dispatcher.id)["payload_json"]["operation_refs"]
+            ]
+        restarted_root = next(root for root in roots if seen[0] in root.manifest["ordered_blocks"])
+        sibling_root = next(root for root in roots if root.id != restarted_root.id)
+        sibling_block = seen[1]
+        restarted["id"] = seen[0]
+        successor = restart(app, restarted_root)
+        gates[seen[0]].set()
+        await asyncio.wait_for(restarted_returned.wait(), 5)
+        await asyncio.sleep(0)
+        if not sibling_cancelled.is_set() and not running.done():
+            gates[sibling_block].set()
+        completed = await asyncio.wait_for(running, 5)
+        assert not sibling_cancelled.is_set()
+        assert completed.id == dispatcher.id
+        assert completed.status is TaskStatus.SUCCEEDED, completed.last_error
+        with app.unit_of_work.transaction() as transaction:
+            assert transaction.work.get_root(sibling_root.id).status == "complete"
+            assert transaction.tasks.get(successor.task_id).status is TaskStatus.PENDING
+            binding = transaction.work.get_binding("result", f"{run.id}:{sibling_block}")
+            assert binding["payload_json"]["root_id"] == sibling_root.id
+            assert transaction.results.get(run.id, document.sections[0].blocks[0].id) is not None or (
+                transaction.results.get(run.id, document.sections[0].blocks[1].id) is not None
+            )
+            assert transaction.results.get(run.id, sibling_block) is not None
+    finally:
+        for gate in gates.values():
+            gate.set()
+        if running is not None and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        await app.aclose()
+
+
+async def test_restart_waiting_root_at_concurrency_1_does_not_fail_dispatcher(tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    entered_block = {}
+
+    class PausingClient(FakeLLMClient):
+        async def generate(self, request):
+            if request.stage == LLMCallStage.TRANSLATION_UNIT:
+                if not entered.is_set():
+                    entered_block["id"] = request.ordered_block_ids[0]
+                    entered.set()
+                    await release.wait()
+                _queue_translation(self, request)
+            return await super().generate(request)
+
+    fake = PausingClient([analysis_reply(2)])
+    app = _split_chapter_app(tmp_path, fake, concurrency=1)
+    running = None
+    try:
+        document = store_imported(app, (("The cat sat.", "The dog ran."),))
+        await app.analysis.start("book-1")
+        analysis = await drain_tasks(app)
+        assert analysis[0].status is TaskStatus.SUCCEEDED, analysis[0].last_error
+        run = app.start_processing()(StartProcessingCommand("book-1"))
+        dispatcher = (await app.processing.start("book-1"))[0]
+        running = asyncio.create_task(app.runner.run_next())
+        await asyncio.wait_for(entered.wait(), 5)
+        with app.unit_of_work.transaction() as transaction:
+            roots = [
+                transaction.work.get_root(ref["root_id"])
+                for ref in transaction.work.get_binding("task", dispatcher.id)["payload_json"]["operation_refs"]
+            ]
+            assert len(roots) == 2
+        running_root = next(root for root in roots if entered_block["id"] in root.manifest["ordered_blocks"])
+        waiting_root = next(root for root in roots if root.id != running_root.id)
+        successor = restart(app, waiting_root)
+        release.set()
+        completed = await asyncio.wait_for(running, 5)
+        assert completed.id == dispatcher.id
+        assert completed.status is TaskStatus.SUCCEEDED, completed.last_error
+        with app.unit_of_work.transaction() as transaction:
+            assert transaction.work.get_root(running_root.id).status == "complete"
+            assert transaction.work.get_root(waiting_root.id).superseded_by == successor.successor_root_id
+            assert transaction.tasks.get(successor.task_id).status is TaskStatus.PENDING
+            assert transaction.results.get(run.id, entered_block["id"]) is not None
+            waiting_block = waiting_root.manifest["ordered_blocks"][0]
+            assert transaction.results.get(run.id, waiting_block) is None
+            assert document.sections[0].blocks
+    finally:
+        release.set()
+        if running is not None and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        await app.aclose()
+
+
+async def test_local_read_as_is_commits_in_single_transaction(tmp_path):
+    fake = FakeLLMClient([FakeReply.of_payload(dict(
+        translation_instructions="Сохраняй смысл.",
+        chapter_summary="The cat sat.",
+        glossary_candidates=[],
+        treatment_plan=[dict(source_block_id="b1", treatment="READ_AS_IS")],
+        before_you_read=[],
+    ))])
+    app = make_app(tmp_path, fake)
+    depth = {"n": 0}
+    events = []
+    original_tx = app.unit_of_work.transaction
+    original_local = SqlAlchemyWorkRepository.begin_local_acceptance
+    original_recovery = SqlAlchemyWorkRepository.begin_recovery_attempt
+    original_save = TranslationCall.save
+
+    @contextmanager
+    def tracing_transaction():
+        depth["n"] += 1
+        try:
+            with original_tx() as transaction:
+                yield transaction
+        finally:
+            depth["n"] -= 1
+
+    def trace_local(self, *args, **kwargs):
+        events.append(("local", depth["n"]))
+        return original_local(self, *args, **kwargs)
+
+    def trace_recovery(self, *args, **kwargs):
+        events.append(("recovery", depth["n"]))
+        return original_recovery(self, *args, **kwargs)
+
+    def trace_save(self, *args, **kwargs):
+        events.append(("save", depth["n"], kwargs.get("transaction") is not None, kwargs.get("chapter_num")))
+        return original_save(self, *args, **kwargs)
+
+    try:
+        document = store_imported(app, (("The cat sat.",),))
+        await app.analysis.start("book-1")
+        analysis = await drain_tasks(app)
+        assert analysis[0].status is TaskStatus.SUCCEEDED, analysis[0].last_error
+        run = app.start_processing()(StartProcessingCommand("book-1"))
+        await app.processing.start("book-1")
+        app.unit_of_work.transaction = tracing_transaction
+        SqlAlchemyWorkRepository.begin_local_acceptance = trace_local
+        SqlAlchemyWorkRepository.begin_recovery_attempt = trace_recovery
+        TranslationCall.save = trace_save
+        completed = await drain_tasks(app)
+        assert completed[0].status is TaskStatus.SUCCEEDED, completed[0].last_error
+        acceptance = [event for event in events if event[0] in {"local", "recovery"}]
+        saves = [event for event in events if event[0] == "save"]
+        assert acceptance == [("local", saves[0][1] if saves else None)]
+        assert len(saves) == 1
+        assert saves[0][1] > 0 and saves[0][2] is True and saves[0][3] == 1
+        with app.unit_of_work.transaction() as transaction:
+            root, = transaction.work.list_roots("book-1", run_id=run.id)
+            attempts = transaction.work.list_root_attempts(root.id)
+            assert root.calls_used == 0
+            assert transaction.work.root_coverage_complete(root.id)
+            assert [attempt.state for attempt in attempts] == ["accepted"]
+            assert transaction.results.get(run.id, document.sections[0].blocks[0].id) is not None
+        assert not any(request.stage == LLMCallStage.TRANSLATION_UNIT for request in fake.requests)
+    finally:
+        app.unit_of_work.transaction = original_tx
+        SqlAlchemyWorkRepository.begin_local_acceptance = original_local
+        SqlAlchemyWorkRepository.begin_recovery_attempt = original_recovery
+        TranslationCall.save = original_save
+        await app.aclose()
+
+
+async def test_discarded_result_never_marks_incomplete_chapter_succeeded(tmp_path, monkeypatch):
+    fake = FakeLLMClient([
+        analysis_reply(1),
+        analysis_reply(1),
+        translation_reply(1),
+        translation_reply(1),
+    ])
+    app = make_app(tmp_path, fake)
+    original_save = TranslationCall.save
+    state = {"calls": 0}
+
+    def discard_first(self, *args, **kwargs):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return False
+        return original_save(self, *args, **kwargs)
+
+    try:
+        document = store_imported(app, (("The cat sat.",), ("The dog ran.",)))
+        await app.analysis.start("book-1")
+        analysis = await drain_tasks(app)
+        assert all(task.status is TaskStatus.SUCCEEDED for task in analysis), [task.last_error for task in analysis]
+        run = app.start_processing()(StartProcessingCommand("book-1"))
+        dispatchers = await app.processing.start("book-1")
+        assert len(dispatchers) == 2
+        monkeypatch.setattr(TranslationCall, "save", discard_first)
+        completed = await app.runner.run_next()
+        assert completed is not None
+        assert completed.status is TaskStatus.FAILED, completed.status
+        with app.unit_of_work.transaction() as transaction:
+            section = next(section for section in document.sections if section.id == completed.scope_id)
+            block_id = section.blocks[0].id
+            root = next(
+                root for root in transaction.work.list_roots("book-1", run_id=run.id)
+                if block_id in root.manifest["ordered_blocks"]
+            )
+            assert root.superseded_by is None
+            assert transaction.runs.get(run.id).status == "active"
+            assert not transaction.work.root_coverage_complete(root.id, update_state=False)
+            assert transaction.results.get(run.id, block_id) is None
+            other = next(task for task in dispatchers if task.id != completed.id)
+            assert transaction.tasks.get(other.id).status is TaskStatus.PENDING
     finally:
         await app.aclose()
 
