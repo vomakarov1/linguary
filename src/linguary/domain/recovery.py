@@ -1,7 +1,11 @@
 """Durable recovery and physical call identities."""
 from dataclasses import dataclass, replace
 from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any
 from linguary.domain.book_conditions import WorkSerialization, WorkStateError, freeze, identifier, nonnegative, thaw, version
+
+_DEFAULT_META: Mapping[str, Any] = MappingProxyType({'schema_version': 1})
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,8 +21,8 @@ class CallAttempt:
     root_id: str | None = None
     scope_id: str | None = None
     review_id: str | None = None
-    context: Mapping = None
-    outcome: Mapping = None
+    context: Mapping[str, Any] = _DEFAULT_META
+    outcome: Mapping[str, Any] = _DEFAULT_META
     schema_version: int = 1
 
     def __post_init__(self):

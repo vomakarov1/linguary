@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Form, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
@@ -393,7 +393,7 @@ async def choose_conditions(
 
     try:
         is_json = request.headers.get("content-type", "").split(";")[0].strip().lower() == "application/json"
-        raw = await request.json() if is_json else dict(await request.form())
+        raw: Any = await request.json() if is_json else dict[str, Any](await request.form())
         if not is_json and isinstance(raw, dict):
             if raw.get("pronunciation_variant") == "":
                 raw["pronunciation_variant"] = None

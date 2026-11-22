@@ -807,8 +807,6 @@ def test_reader_text_policy_preserves_dialogue_newlines() -> None:
 def test_resolve_response_evidence_algorithmically_binds_when_content_evidence_is_empty() -> None:
     """When LLM returns empty content_evidence, notes and hints are bound algorithmically (AC-008)."""
     from linguary.application.llm_dto import (
-        GlossaryHintResponse,
-        LanguageNoteResponse,
         TranslationResultResponse,
     )
     from linguary.application.validators.content_plan import resolve_response_evidence

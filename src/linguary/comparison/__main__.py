@@ -9,6 +9,7 @@ import time
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -154,7 +155,7 @@ def local_report(root, protected, protocol):
     root, protected = _safe_root(root, protected)
     cleanup_diagnostics(root, protected, all_rejected=True)
     manifest = ComparisonManifest.model_validate(_read(root / 'manifest.json'))
-    provenance = manifest.grouping.get('continuation_provenance', {})
+    provenance: Any = manifest.grouping.get('continuation_provenance', {})
     if provenance.get('kind') == 'late_sonnet_resume_v1':
         prepared = _read(root / 'prepared.json')
         if (manifest.protocol_hash != protocol.content_hash
@@ -164,15 +165,15 @@ def local_report(root, protected, protocol):
             path = (root / name).resolve()
             if not path.is_relative_to(root) or file_hash(path) != digest:
                 raise ProtocolError('Артефакт отчёта изменился')
+    outcomes: dict[str, Any]
     if (root / 'result.json').is_file():
         outcomes = _read(root / 'result.json')
         if provenance.get('kind') == 'late_sonnet_resume_v1' and outcomes.get('continuation_provenance') != provenance:
             raise ProtocolError('История результата расходится с подготовкой')
     else:
         outcomes = {'protocol_hash': protocol.content_hash, 'simulated': False, 'variants': [], 'violations': ['run_incomplete']}
-        provenance = manifest.grouping.get('continuation_provenance', {})
         if provenance.get('kind') == 'late_sonnet_resume_v1':
-            historical_time = manifest.grouping['historical_stage_wall_seconds']
+            historical_time: Any = manifest.grouping['historical_stage_wall_seconds']
             outcomes.update(continuation_provenance=provenance, variants=manifest.grouping['historical_variants'],
                 stage_wall_seconds=historical_time,
                 stage_wall_segments={stage: [{'origin': 'imported', 'seconds': seconds}] for stage, seconds in historical_time.items()},

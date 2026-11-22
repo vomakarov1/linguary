@@ -989,7 +989,7 @@ async def test_provider_truncated_indivisible_atomic_interval_does_not_trigger_r
     from linguary.application.block_processing import TranslationCall, _worded_for_the_model
     from linguary.application.context_builder import ContextBuilder
     from linguary.application.llm_dto import BlockResultResponse
-    from linguary.application.ports.llm import LLMResponse, LLMResponseFormatError
+    from linguary.application.ports.llm import LLMResponse
     from linguary.application.ports.persistence import BookRecord
     from linguary.application.recovery import RecoveryError, root_manifest
     from linguary.application.retry_policy import ResultValidationError, RetryPolicy

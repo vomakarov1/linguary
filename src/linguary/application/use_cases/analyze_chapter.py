@@ -32,7 +32,8 @@ import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
+from typing import Any, cast
 from uuid import uuid4
 
 from linguary.application.a2_core_vocab import non_core_a2_words
@@ -183,7 +184,7 @@ class AnalyzeChapter:
         max_concurrency: int = 1,
         seed_first_chapter: bool = False,
         sequential_analysis: bool = True,
-        max_output_tokens: int = 32_768,
+        max_output_tokens: int | None = 32_768,
         staged_analysis: bool = False,
     ) -> None:
         self._unit_of_work = unit_of_work
@@ -225,10 +226,12 @@ class AnalyzeChapter:
         token_concepts = self._loaded_concepts.set(None)
         token_plan = self._resolved_content_plan.set(None)
         token_staged_attempts = self._staged_attempt_ids.set(())
-        if hasattr(self._llm_client, "_attempts"):
-            token_attempts = self._llm_client._attempts.set(())
-        if hasattr(self._llm_client, "_responses"):
-            token_responses = self._llm_client._responses.set(())
+        attempts_var: Any = getattr(self._llm_client, "_attempts", None)
+        responses_var: Any = getattr(self._llm_client, "_responses", None)
+        if attempts_var is not None:
+            token_attempts = attempts_var.set(())
+        if responses_var is not None:
+            token_responses = responses_var.set(())
         try:
             document, accumulated, user_decisions, nonbinding_suggestions = self._load(command)
             concepts = self._loaded_concepts.get()
@@ -317,10 +320,14 @@ class AnalyzeChapter:
             self._staged_attempt_ids.reset(token_staged_attempts)
             self._resolved_content_plan.reset(token_plan)
             self._loaded_concepts.reset(token_concepts)
-            if token_attempts is not None:
-                self._llm_client._attempts.reset(token_attempts)
-            if token_responses is not None:
-                self._llm_client._responses.reset(token_responses)
+            if token_attempts is not None and attempts_var is not None:
+                attempts_var.reset(token_attempts)
+            if token_responses is not None and responses_var is not None:
+                responses_var.reset(token_responses)
+
+    @staticmethod
+    def _to_aliases(context: ChapterAnalysisContext, message: str) -> str:
+        return _to_aliases(context, message)
 
     def _part_divider_treatment_plan(
         self,
@@ -443,8 +450,9 @@ class AnalyzeChapter:
             with self._unit_of_work.transaction() as tx:
                 work = getattr(tx, 'work', None)
                 resolved_conditions = work.latest_conditions(command.book_id) if work else None
-        if resolved_conditions is not None and isinstance(getattr(resolved_conditions, 'payload', None), Mapping):
-            versions = resolved_conditions.payload.get('versions')
+        conditions_payload = getattr(resolved_conditions, 'payload', None)
+        if resolved_conditions is not None and isinstance(conditions_payload, Mapping):
+            versions = conditions_payload.get('versions')
             if isinstance(versions, Mapping):
                 prompts_version = versions.get('prompts')
                 if isinstance(prompts_version, int) and prompts_version < 7:
@@ -494,11 +502,14 @@ class AnalyzeChapter:
         previous_inputs: set[tuple[str, str, str]] = set()
         own_outputs: set[tuple[str, str, str]] = set()
         if previous_narrative is not None:
-            cached_narrative = self._verify_cached_pass(previous_narrative)
-            previous_inputs.update(tuple(item) for item in previous_narrative.payload.get('input_suggestions', ()))
-            own_outputs.update(_candidate_suggestion_key(item) for item in
-                previous_narrative.payload.get('response', {}).get('glossary_candidates', ()))
-            own_outputs.update(merged_glossary_suggestion_keys(cached_narrative.glossary_candidates))
+            verified_narrative = self._verify_cached_pass(previous_narrative)
+            if isinstance(verified_narrative, NarrativeAnalysisResponse):
+                cached_narrative = verified_narrative
+                prev_payload: Mapping[str, Any] = previous_narrative.payload
+                previous_inputs.update(tuple(item) for item in prev_payload.get('input_suggestions', ()))
+                own_outputs.update(_candidate_suggestion_key(item) for item in
+                    prev_payload.get('response', {}).get('glossary_candidates', ()))
+                own_outputs.update(merged_glossary_suggestion_keys(cached_narrative.glossary_candidates))
         for other_pass in book_narratives:
             if other_pass is None or (previous_narrative is not None and other_pass.id == previous_narrative.id):
                 continue
@@ -506,9 +517,11 @@ class AnalyzeChapter:
                 other_decoded = self._verify_cached_pass(other_pass)
             except AnalyzeChapterError:
                 continue
+            other_payload: Mapping[str, Any] = other_pass.payload
             own_outputs.update(_candidate_suggestion_key(item) for item in
-                other_pass.payload.get('response', {}).get('glossary_candidates', ()))
-            own_outputs.update(merged_glossary_suggestion_keys(other_decoded.glossary_candidates))
+                other_payload.get('response', {}).get('glossary_candidates', ()))
+            if isinstance(other_decoded, NarrativeAnalysisResponse):
+                own_outputs.update(merged_glossary_suggestion_keys(other_decoded.glossary_candidates))
         if own_outputs:
             own_outputs.update(merged_glossary_suggestion_keys(accumulated))
             suggestions = tuple(s for s in suggestions
@@ -647,6 +660,7 @@ class AnalyzeChapter:
                             pedagogical, expected_conditions_id)
         else:
             saved_pedagogical, pedagogical = cached_pedagogical
+            assert isinstance(pedagogical, PedagogicalAnalysisResponse)
             if saved_pedagogical.attempt_id is not None:
                 self._staged_attempt_ids.set((*self._staged_attempt_ids.get(), saved_pedagogical.attempt_id))
             analysis = self._assemble_staged(narrative, pedagogical, scenes, document, section,
@@ -867,6 +881,7 @@ class AnalyzeChapter:
                     accumulated, user_decisions, suggestions, fragment=fragment if total > 1 else None,
                     fragment_count=total, findings=previous)
             else:
+                assert narrative is not None
                 prior_topics = _prior_explained_topics(parts)
                 context = self._context_builder.for_chapter_pedagogical_analysis(document, section,
                     narrative_summary=narrative.chapter_summary,
@@ -910,42 +925,50 @@ class AnalyzeChapter:
                 if prior_part_names:
                     fragment_known_names = tuple(dict.fromkeys((*known_names, *prior_part_names)))
 
-            def validate(payload, *, from_cache: bool = False):
+            def validate(
+                payload,
+                *,
+                from_cache: bool = False,
+                _context=context,
+                _fragment=fragment,
+                _fragment_known_names=fragment_known_names,
+            ):
                 if is_narrative:
-                    _ensure_candidates_single_script(payload, context)
+                    _ensure_candidates_single_script(payload, _context)
                     enforce_v7 = not from_cache or self._should_enforce_v7_name_policy(command)
                     name_policy = self._name_translation_policy if enforce_v7 else None
-                    return validate_narrative_response(payload, context.block_ids_by_alias,
-                        {b.id: b.text for b in fragment.blocks}, context.visible_texts_by_alias,
-                        ordered_block_ids=fragment.block_ids,
+                    return validate_narrative_response(payload, _context.block_ids_by_alias,
+                        {b.id: b.text for b in _fragment.blocks}, _context.visible_texts_by_alias,
+                        ordered_block_ids=_fragment.block_ids,
                         is_notes_only=section.is_notes_only or document.is_front_matter(section),
                         mandatory_facts=glossary_context_constraints(concepts),
-                        blocks=fragment.blocks,
+                        blocks=_fragment.blocks,
                         source_language=document.source_language,
                         target_language=document.target_language,
                         language_detector=self._language_detector,
-                        known_names=fragment_known_names,
+                        known_names=_fragment_known_names,
                         name_translation_policy=name_policy,
                         enforce_strict_gender_subject=enforce_v7)
+                assert narrative is not None
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
                 if self._is_a2_reader():
                     validate_a2_summary(payload.reader_chapter_summary or '',
-                        source_texts=tuple(b.text for b in fragment.blocks), source_language=document.source_language,
+                        source_texts=tuple(b.text for b in _fragment.blocks), source_language=document.source_language,
                         language_detector=self._language_detector,
                         require_parallel_russian=self._a2_summary_requires_parallel_russian(),
                         narrative_summary=narrative.chapter_summary)
-                _ensure_plan_covers_chapter(combined, context)
-                resolved_plan = self._validate_pedagogical(combined, context, fragment.blocks)
+                _ensure_plan_covers_chapter(combined, _context)
+                resolved_plan = self._validate_pedagogical(combined, _context, _fragment.blocks)
                 # The first fragment has no prior parts, but segment indexes are still rejected here.
                 candidate_part = FragmentAnalysis.of_response(
                     combined,
                     order=len(parts),
-                    block_ids_by_alias=context.block_ids_by_alias,
-                    texts={b.id: b.text for b in fragment.blocks},
-                    visible_texts_by_alias=context.visible_texts_by_alias,
+                    block_ids_by_alias=_context.block_ids_by_alias,
+                    texts={b.id: b.text for b in _fragment.blocks},
+                    visible_texts_by_alias=_context.visible_texts_by_alias,
                     resolved_content_plan=resolved_plan,
-                    blocks=fragment.blocks,
+                    blocks=_fragment.blocks,
                 )
                 if parts:
                     expected_so_far = tuple(
@@ -1035,6 +1058,8 @@ class AnalyzeChapter:
             if is_narrative:
                 parts.append((payload, *resolved))
             else:
+                assert narrative is not None
+                assert isinstance(payload, PedagogicalAnalysisResponse)
                 combined = combine_staged_analysis_responses(
                     NarrativeAnalysisResponse(narrative.translation_instructions, narrative.chapter_summary), payload)
                 parts.append(FragmentAnalysis.of_response(combined, order=len(parts),
@@ -1085,10 +1110,11 @@ class AnalyzeChapter:
             except Exception as error:
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
-                    if hasattr(self._llm_client, 'reject_last'):
-                        self._llm_client.reject_last()
+                    reject_last = getattr(self._llm_client, 'reject_last', None)
+                    if callable(reject_last):
+                        reject_last()
                 if isinstance(error, LLMResponseFormatError) and error.truncated:
-                    error.analysis_attempts = attempts
+                    cast(Any, error).analysis_attempts = attempts
                     error.usage = _total_usage([*usages, error.usage] if response is None else usages)
                     raise
                 decision = self._retry_policy.decide(_worded_for_the_model(error, context),
@@ -1157,7 +1183,7 @@ class AnalyzeChapter:
             encoded['input_suggestions'] = input_suggestions
         with self._unit_of_work.transaction() as tx:
             work = getattr(tx, 'work', None)
-            if conditions_id is not None:
+            if conditions_id is not None and work is not None:
                 latest = work.latest_conditions(command.book_id)
                 if latest is None or latest.id != conditions_id:
                     raise ConditionsError('conditions_revision_conflict')
@@ -1368,7 +1394,7 @@ class AnalyzeChapter:
                     mid = len(fragment.blocks) // 2
                     left = ChapterFragment(order=0, blocks=tuple(fragment.blocks[:mid]))
                     right = ChapterFragment(order=0, blocks=tuple(fragment.blocks[mid:]))
-                    queue = [left, right] + queue
+                    queue = [left, right, *queue]
                     for idx, item in enumerate(queue):
                         queue[idx] = replace(item, order=len(analysed) + idx)
                     continue
@@ -1602,7 +1628,9 @@ class AnalyzeChapter:
         When attempts are exhausted, raises the original error: typing the error and
         transitioning the task to `failed` is the responsibility of the runner, not this loop.
         """
-        request: LLMRequest[ChapterAnalysisResponse] = context.request
+        request: LLMRequest[ChapterAnalysisResponse] = cast(
+            LLMRequest[ChapterAnalysisResponse], context.request
+        )
         resolved_concepts = (
             tuple(concepts) if concepts is not None else self._loaded_concepts.get()
         )
@@ -1695,8 +1723,11 @@ class AnalyzeChapter:
                         )
                         if request.contract_version in {3, 5}:
                             if resolved_concepts is None:
-                                with self._unit_of_work.transaction() as transaction:
-                                    resolved_concepts = tuple(transaction.glossary.list_for_book(request.book_id))
+                                if request.book_id is not None:
+                                    with self._unit_of_work.transaction() as transaction:
+                                        resolved_concepts = tuple(transaction.glossary.list_for_book(request.book_id))
+                                else:
+                                    resolved_concepts = ()
                             validate_fact_glossary(plan, glossary_context_constraints(resolved_concepts))
                         self._resolved_content_plan.set(plan)
                 except (ApplicationError, DomainError) as error:
@@ -1710,8 +1741,9 @@ class AnalyzeChapter:
             except Exception as error:
                 if response is not None:
                     record_rejection(self._unit_of_work, response, error)
-                    if hasattr(self._llm_client, 'reject_last'):
-                        self._llm_client.reject_last()
+                    reject_last = getattr(self._llm_client, 'reject_last', None)
+                    if callable(reject_last):
+                        reject_last()
                 decision = self._retry_policy.decide(
                     _worded_for_the_model(error, context),
                     attempts=attempts,
@@ -1826,10 +1858,12 @@ class AnalyzeChapter:
                 if conditions is None or conditions.id != conditions_id:
                     raise ConditionsError('conditions_revision_conflict')
                 book = transaction.books.get(book_id)
-                self._llm_client.service.verify_source(book, conditions)
+                client_service = getattr(self._llm_client, 'service', None)
+                if client_service is not None:
+                    client_service.verify_source(book, conditions)
                 if task_id is not None and transaction.tasks.get(task_id) is None:
                     raise ConditionsError('task_no_longer_active')
-                attempts = self._llm_client.attempts
+                attempts = getattr(self._llm_client, 'attempts', ())
                 staged_attempts = self._staged_attempt_ids.get()
                 attempt_id = (
                     attempts[-1]
@@ -2419,12 +2453,12 @@ def _distribute_quota(
     return shares
 
 
-def _iter_part_candidates(part: object) -> Sequence[GlossaryCandidateResponse]:
+def _iter_part_candidates(part: Any) -> Sequence[GlossaryCandidateResponse]:
     if isinstance(part, tuple) and part and hasattr(part[0], "glossary_candidates"):
-        return part[0].glossary_candidates
+        return cast(Sequence[GlossaryCandidateResponse], part[0].glossary_candidates)
     if hasattr(part, "glossary_candidates"):
-        return part.glossary_candidates
-    return part  # type: ignore[return-value]
+        return cast(Sequence[GlossaryCandidateResponse], part.glossary_candidates)
+    return cast(Sequence[GlossaryCandidateResponse], part)
 
 
 def _merge_fragment_candidates(
@@ -2802,9 +2836,6 @@ def _to_aliases(context: ChapterAnalysisContext, message: str) -> str:
         + r")(?![0-9A-Za-z_-])"
     )
     return pattern.sub(lambda match: mapping[match.group(0)], message)
-
-
-AnalyzeChapter._to_aliases = staticmethod(_to_aliases)  # type: ignore[attr-defined]
 
 
 def _worded_for_the_model(

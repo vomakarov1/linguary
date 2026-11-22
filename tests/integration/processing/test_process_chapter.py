@@ -410,9 +410,8 @@ async def test_process_chapter_executes_independent_roots_concurrently_within_li
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
     import asyncio
-    from linguary.application.ports.llm import LLMClient
 
-    scenario = store_processing_book(
+    store_processing_book(
         unit_of_work,
         chapters=((SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT, SOURCE_TEXT),),
     )
@@ -455,7 +454,6 @@ async def test_parallel_roots_isolate_contextvars_and_preserve_recovery_invarian
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
     import asyncio
-    from linguary.application.ports.llm import LLMClient
 
     scenario = store_processing_book(
         unit_of_work,

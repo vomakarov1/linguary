@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import unquote
 
-from lxml import etree
+from lxml import etree  # ty: ignore[missing-module-member]
 
 from linguary.domain import InlineAnnotation, InlineAnnotationType
 

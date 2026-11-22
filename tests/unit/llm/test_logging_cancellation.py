@@ -14,7 +14,6 @@ from linguary.adapters.runtime.worker import TaskWorkerPool, WorkerSettings
 from linguary.application.block_processing import finalize_response, record_rejection
 from linguary.application.diagnostics import diagnostics_for
 from linguary.application.ports.llm import (
-    LLMConfigurationError,
     LLMRequest,
     LLMResponse,
     LLMResponseFormatError,

@@ -21,7 +21,7 @@ def downgrade() -> None:
         ('block_results', 'content_evidence_json'),
     ):
         present = connection.execute(sa.text(
-            f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)'
+            f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)'  # noqa: S608
         )).scalar_one()
         if present:
             raise RuntimeError('нельзя удалить данные содержательного плана или свидетельств')

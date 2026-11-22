@@ -96,7 +96,7 @@ class SystemSettingsService:
                         self._store.reset, expected_revision=expected_revision
                     )
                 else:
-                    overrides = dict(
+                    overrides: dict[str, object] = dict(
                         proxy_mode=candidate.llm.proxy_mode,
                         provider=candidate.llm.provider,
                         model=candidate.llm.model,

@@ -328,7 +328,7 @@ def _give_up_without_automatic_retry(error: Exception) -> bool:
     return not any(isinstance(error, error_type) for error_type, _task_type in _ERROR_TYPES)
 
 
-def classify_error(error: Exception) -> TaskError:
+def classify_error(error: BaseException) -> TaskError:
     """Typed task error derived from use case exception (ALG-05).
 
     Unrecognized errors default to transient: the application cannot assume retrying
@@ -477,12 +477,13 @@ def _truncated_by_output_limit(error: Exception) -> bool:
     Resolved by configuring a higher output limit or submitting smaller chunks, so retries
     with the same request or repair prompt are useless here.
     """
+    violation = getattr(error, "violation", None)
     return (
         isinstance(error, LLMResponseFormatError) and error.truncated
     ) or (
         isinstance(error, ResultValidationError)
-        and getattr(error, "violation", None) is not None
-        and error.violation.rule_code == "provider_truncated"
+        and violation is not None
+        and violation.rule_code == "provider_truncated"
     )
 
 
@@ -493,7 +494,7 @@ def _expectation_of(error: Exception) -> ResultExpectation | None:
     return None
 
 
-def _task_error(error_type: ErrorType, error: Exception) -> TaskError:
+def _task_error(error_type: ErrorType, error: BaseException) -> TaskError:
     """Task error with concise message and technical detail."""
     return TaskError(
         type=error_type,

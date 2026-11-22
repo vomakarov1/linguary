@@ -461,7 +461,6 @@ async def test_narrative_attempt_is_accepted_even_if_second_pass_fails(stored_bo
     engine, uow, _ = stored_book
     conditions = install_conditions(uow)
     # Use a real conditions service and logging/provenance decorators, with deterministic source hashing.
-    from linguary.domain.book_conditions import BookConditions
     from dataclasses import replace
     from uuid import uuid4
     conditions = replace(conditions, id=str(uuid4()), revision=2,
@@ -4673,7 +4672,6 @@ async def test_staged_a2_vocab_known_names_excludes_terms_fictional_concepts_and
     import json
     from linguary.application.use_cases.analyze_chapter import (
         _a2_vocab_known_names_from_glossary,
-        _a2_vocab_known_names_with_narrative,
     )
     from linguary.domain import ConceptType, GlossaryCandidate, TermConcept, TermStatus, TermVariant
 

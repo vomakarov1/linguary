@@ -124,7 +124,7 @@ def downgrade():
     destination = context.get_revision_argument()
     if destination not in ('0006', '0007'):
         for table, column in (('chapter_analyses', 'content_plan_json'), ('block_results', 'content_evidence_json')):
-            if connection.execute(sa.text(f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)')).scalar_one():
+            if connection.execute(sa.text(f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)')).scalar_one():  # noqa: S608
                 raise RuntimeError('нельзя удалить данные содержательного плана или свидетельств')
     if connection.execute(sa.text("SELECT EXISTS (SELECT 1 FROM book_conditions)")).scalar_one():
         raise RuntimeError("нельзя удалить сохранённую работу книги")

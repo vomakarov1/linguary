@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from lxml import etree
+from lxml import etree  # ty: ignore[missing-module-member]
 
 from linguary.adapters.epub.pronunciation_notices import IPA_KEY_LINK_LABEL
-from linguary.adapters.epub.writer import _XHTML_NAMESPACE, _element, _sub, _xhtml_document
+from linguary.adapters.epub.writer import _XHTML_NAMESPACE, _sub, _xhtml_document
 from linguary.application.layout.ipa_reference import IpaSymbol
 from linguary.application.layout.review import ReviewEntry
 from linguary.application.layout.who_is_who import WhoEntry

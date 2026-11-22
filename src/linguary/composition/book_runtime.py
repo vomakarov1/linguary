@@ -17,12 +17,12 @@ from linguary.application.book_conditions import (
     A2_CONTENT_PLAN_V7_VERSIONS, ConditionsError, payload_digest,
 )
 from linguary.application.context_builder import snapshot_prompt_templates
+from linguary.application.diagnostics import diagnostics_for
 from linguary.domain import ProcessingTask, TaskStatus
 from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.recovery import CallAttempt
 from linguary.domain.llm_log import CallContext, LLMCallStage
 from linguary.domain.name_translation import NameTranslationPolicy
-from linguary.application.diagnostics import diagnostics_for
 from linguary.application.ports.llm import (
     LLMConfigurationError, LLMContextCapacityError, LLMProviderError, LLMResponseFormatError,
     LLMTransportError,
@@ -165,8 +165,14 @@ class BoundTaskQueue:
                 notify()
         return task
 
+    async def claim_next_pending(self):
+        return await self.queue.claim_next_pending()
+
     async def save(self, task):
         return await self.queue.save(task)
+
+    async def list_running(self):
+        return await self.queue.list_running()
 
 
 _CREATED_PROVENANCE_CLIENTS: ContextVar[list | None] = ContextVar(
@@ -178,8 +184,8 @@ class ProvenanceClient:
     """Persist the designated conditions and actual physical response separately."""
     def __init__(self, inner, service, conditions_id):
         self.inner, self.service, self.conditions_id = inner, service, conditions_id
-        self._attempts = ContextVar(f'book_attempts_{id(self)}', default=())
-        self._responses = ContextVar(f'book_responses_{id(self)}', default=())
+        self._attempts: ContextVar[tuple[str, ...]] = ContextVar(f'book_attempts_{id(self)}', default=())
+        self._responses: ContextVar[tuple[Any, ...]] = ContextVar(f'book_responses_{id(self)}', default=())
         bucket = _CREATED_PROVENANCE_CLIENTS.get()
         if bucket is not None:
             bucket.append(self)
@@ -427,7 +433,7 @@ def _collect_context_clients(generation, created=()) -> tuple:
 @dataclass(slots=True)
 class _CachedBookGeneration:
     fingerprint: tuple
-    generation: object
+    generation: Any
     book_id: str | None = None
     clients: tuple = ()
     active_leases: int = 0
@@ -522,7 +528,7 @@ class BookRuntimeResolver:
             raise ConditionsError('route_unavailable')
         if not current.llm.api_key:
             raise ConditionsError('route_unavailable')
-        llm = LLMSettings(**{
+        llm_kwargs: dict[str, Any] = {
             **thaw(payload['llm_parameters']),
             'staged_analysis': payload.get('staged_analysis', False),
             'narrative_analysis_model': payload['models'].get('analysis_passes', {}).get('narrative', ''),
@@ -531,7 +537,8 @@ class BookRuntimeResolver:
             'proxy_url': current.llm.proxy_url,
             'api_key': current.llm.api_key,
             'debug_llm_payloads': getattr(current.llm, 'debug_llm_payloads', False),
-        })
+        }
+        llm = LLMSettings(**llm_kwargs)
         return replace(current, llm=llm, reading=ReadingSettings(reader_level=payload['reader_level'],
                        name_translation_strategy=policy.strategy.value if policy is not None else 'sound'),
                        checks=check_settings_from_mapping(thaw(payload['checks'])),

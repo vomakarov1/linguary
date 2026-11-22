@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
-from lxml import etree
+from lxml import etree  # ty: ignore[missing-module-member]
 
 from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.writer import (

@@ -52,7 +52,7 @@ def load_pronunciation_source_notices() -> str:
 @dataclass(frozen=True, slots=True)
 class PronunciationNoticeBundle:
     text: str
-    entries: tuple[dict[str, str], ...]
+    entries: tuple[dict[str, str | None], ...]
 
     def provenance_json(self) -> bytes:
         return json.dumps({'schema_version': 1, 'entries': self.entries},

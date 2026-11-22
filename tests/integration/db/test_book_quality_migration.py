@@ -1,8 +1,7 @@
 import pytest
 from alembic import command
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from linguary.adapters.db.models import BookConditionsRow
 from persistence_factories import make_book
 
 

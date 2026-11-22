@@ -22,13 +22,17 @@ from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 from urllib.request import getproxies
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from linguary.adapters.config.settings import LLMSettings, proxy_secrets
-from linguary.adapters.llm.json_schema import cached_strict_json_schema, strict_json_schema
+from linguary.adapters.llm.json_schema import cached_strict_json_schema
 from linguary.adapters.llm.payloads import parse_payload, schema_for
+from linguary.application.correction_dto import (
+    ChapterCorrectionResponse,
+    ChapterCorrectionReviewResponse,
+)
 from linguary.application.ports.llm import (
     LLMClient,
     LLMConfigurationError,
@@ -114,8 +118,9 @@ class OpenAICompatibleLLMClient(LLMClient):
         self._proxy_secrets = tuple(secret for url in urls for secret in proxy_secrets(url))
         try:
             self._http = http_client if http_client is not None else httpx.AsyncClient(
-                timeout=settings.timeout_seconds, trust_env=settings.proxy_mode == 'auto',
-                **({'proxy': settings.proxy_url} if settings.proxy_mode == 'custom' else {}),
+                timeout=settings.timeout_seconds,
+                trust_env=settings.proxy_mode == 'auto',
+                proxy=settings.proxy_url if settings.proxy_mode == 'custom' else None,
             )
         except Exception:
             raise LLMConfigurationError('Не удалось подготовить соединение с провайдером') from None
@@ -178,14 +183,24 @@ class OpenAICompatibleLLMClient(LLMClient):
                 stage=request.kind.value,
             )
             payload = parse_payload(request.kind, content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=truncated)
-            if request.kind == LLMResponseKind.CHAPTER_CORRECTION and request.block_aliases:
+            if (
+                request.kind == LLMResponseKind.CHAPTER_CORRECTION
+                and request.block_aliases
+                and isinstance(payload, ChapterCorrectionResponse)
+            ):
                 payload = payload.with_resolved_block_ids(dict(request.block_aliases))
-            if request.kind == LLMResponseKind.CHAPTER_CORRECTION_REVIEW and request.correction_candidate_refs:
+            if (
+                request.kind == LLMResponseKind.CHAPTER_CORRECTION_REVIEW
+                and request.correction_candidate_refs
+                and isinstance(payload, ChapterCorrectionReviewResponse)
+            ):
                 payload = payload.with_resolved_proposal_shas(request.correction_candidate_refs)
             if request.kind in {LLMResponseKind.CHAPTER_CORRECTION, LLMResponseKind.CHAPTER_CORRECTION_REVIEW}:
                 try:
-                    payload.validate_coverage(request.correction_candidate_refs
-                        if request.kind == LLMResponseKind.CHAPTER_CORRECTION_REVIEW else request.ordered_block_ids)
+                    if isinstance(payload, ChapterCorrectionReviewResponse):
+                        payload.validate_coverage(request.correction_candidate_refs)
+                    elif isinstance(payload, ChapterCorrectionResponse):
+                        payload.validate_coverage(request.ordered_block_ids)
                 except LLMPayloadError:
                     raise LLMResponseFormatError(
                         'ответ исправления не покрывает переданные блоки',
@@ -209,7 +224,7 @@ class OpenAICompatibleLLMClient(LLMClient):
         safe_content, body_meta = bounded_body(content,
             secrets=(*self._proxy_secrets, self._settings.api_key))
         return LLMResponse(
-            payload=payload,  # type: ignore[arg-type]  # schema selected by request.kind
+            payload=cast(PayloadT, payload),
             provider=self._settings.provider,
             model=model,
             truncated=truncated,
@@ -222,6 +237,24 @@ class OpenAICompatibleLLMClient(LLMClient):
 
     def _safe(self, text: str) -> str:
         return safe_detail(text, api_key=self._settings.api_key, secrets=self._proxy_secrets)
+
+    @staticmethod
+    def _build_messages(request: LLMRequest[Any]) -> list[dict[str, str]]:
+        return _build_messages(request)
+
+    @staticmethod
+    def _build_request_body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
+        return _body(request, settings=settings)
+
+    @staticmethod
+    def _raise_for_status(
+        response: httpx.Response, *, provider: str, api_key: str | None, secrets: tuple[str, ...] = ()
+    ) -> None:
+        _raise_for_status(response, provider=provider, api_key=api_key, secrets=secrets)
+
+    @staticmethod
+    def _usage(document: dict[str, Any]) -> TokenUsage | None:
+        return _usage(document)
 
     async def aclose(self) -> None:
         """Closes underlying HTTP connections if created internally."""
@@ -330,9 +363,6 @@ def _build_messages(request: LLMRequest[Any]) -> list[dict[str, str]]:
     return messages
 
 
-OpenAICompatibleLLMClient._build_messages = staticmethod(_build_messages)
-
-
 def _is_openrouter_url(base_url: str) -> bool:
     """Whether the configured base URL targets OpenRouter."""
     try:
@@ -386,9 +416,6 @@ def _body(request: LLMRequest[Any], *, settings: LLMSettings) -> dict[str, Any]:
     return body
 
 
-OpenAICompatibleLLMClient._build_request_body = staticmethod(_body)
-
-
 def _raise_for_status(
     response: httpx.Response, *, provider: str, api_key: str | None, secrets: tuple[str, ...] = ()
 ) -> None:
@@ -415,9 +442,6 @@ def _raise_for_status(
             outcome=outcome,
         )
     raise LLMProviderError(f"провайдер {provider} отверг запрос: {detail}")
-
-
-OpenAICompatibleLLMClient._raise_for_status = staticmethod(_raise_for_status)
 
 
 def _gateway_status(error: Any) -> int:
@@ -532,7 +556,7 @@ def _document(response: httpx.Response, *, api_key: str | None, secrets: tuple[s
     """Successful response JSON body."""
     try:
         document = response.json()
-    except ValueError as error:
+    except ValueError:
         raise LLMResponseFormatError(
             "ответ провайдера не является JSON",
             raw_content=None,
@@ -641,9 +665,6 @@ def _usage(document: dict[str, Any]) -> TokenUsage | None:
         cached_prompt_tokens=cached,
         reasoning_tokens=reasoning,
     )
-
-
-OpenAICompatibleLLMClient._usage = staticmethod(_usage)
 
 
 def _cost(document: dict[str, Any]) -> Decimal | None:

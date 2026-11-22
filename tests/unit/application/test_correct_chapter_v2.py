@@ -267,9 +267,6 @@ async def test_review_group_persists_checks_for_unchanged_and_accepted_when_peer
         def advance_correction_input(self, run_id, block_id, **kwargs):
             pass
 
-        def correction_checks(self, run_id, section_id):
-            return tuple(saved_checks)
-
         def replace_correction_checks(self, run_id, section_id, checks):
             saved_checks.extend(checks)
 

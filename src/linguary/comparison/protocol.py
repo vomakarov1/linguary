@@ -210,7 +210,7 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
     criteria = {'accuracy', 'naturalness', 'author_voice', 'difficulty_detection', 'helpfulness'}
     if not criteria <= protocol.rubric.keys() or set(protocol.minimum_first_responses) != {'analysis', 'processing'} or any(v is None or v < 1 for v in protocol.minimum_first_responses.values()):
         raise ProtocolError('Не согласованы рубрика и минимумы наблюдений')
-    if any(protocol.schedule.count(v.id) != protocol.repeats for v in protocol.variants) or len(protocol.schedule) != 4 * protocol.repeats:
+    if protocol.repeats is None or any(protocol.schedule.count(v.id) != protocol.repeats for v in protocol.variants) or len(protocol.schedule) != 4 * protocol.repeats:
         raise ProtocolError('Расписание не соответствует равным повторам')
     if set(protocol.routes) != {LUNA, SONNET} or protocol.full_response_cache or not protocol.require_parameters:
         raise ProtocolError('Маршруты и политика кеша недопустимы')
@@ -219,9 +219,12 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
     required_checks = SAFE_SETTINGS['checks']
     if not required_generation <= protocol.generation.keys() or not required_splitting <= protocol.splitting.keys() or not required_checks <= protocol.checks.keys():
         raise ProtocolError('Не согласованы параметры генерации и локальные проверки')
-    if any(protocol.generation[k] < 1 for k in ('max_output_tokens', 'max_attempts')) or any(protocol.splitting[k] < 1 for k in required_splitting):
+    if (
+        any((v := protocol.generation[k]) is None or v < 1 for k in ('max_output_tokens', 'max_attempts'))
+        or any((v := protocol.splitting[k]) is None or v < 1 for k in required_splitting)
+    ):
         raise ProtocolError('Пределы генерации должны быть положительными')
-    if any(v < 0 or v > protocol.scale_max for v in protocol.rubric.values()):
+    if protocol.scale_max is None or any(v is None or v < 0 or v > protocol.scale_max for v in protocol.rubric.values()):
         raise ProtocolError('Минимумы качества вне принятой шкалы')
     # Different paths or chapter designations do not create independent observations.
     from linguary.adapters.epub import EbookLibEpubReader
@@ -249,7 +252,10 @@ def validate_for_live(protocol: ComparisonProtocol, approval: ProtocolApproval |
     if bounds.input_bound_method == "provider_context_limit":
         validate_context_envelope(bounds, protocol.routes, protocol.route_metadata, protocol.generation["max_output_tokens"])
     from decimal import Decimal
-    maximum = (Decimal(bounds.max_input_tokens) * Decimal(str(bounds.input_price_per_mtok)) + Decimal(protocol.generation['max_output_tokens']) * Decimal(str(bounds.output_price_per_mtok))) / Decimal(1000000)
+    max_output_tokens = protocol.generation['max_output_tokens']
+    if max_output_tokens is None or protocol.max_call_cost is None or protocol.budget is None:
+        raise ProtocolError('Не заданы пределы бюджета или вывода')
+    maximum = (Decimal(bounds.max_input_tokens) * Decimal(str(bounds.input_price_per_mtok)) + Decimal(max_output_tokens) * Decimal(str(bounds.output_price_per_mtok))) / Decimal(1000000)
     if maximum > Decimal(str(protocol.max_call_cost)):
         raise ProtocolError('Тарифные пределы превышают резерв вызова')
     if protocol.max_call_cost > protocol.budget:

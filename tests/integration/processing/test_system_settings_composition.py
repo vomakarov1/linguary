@@ -1,17 +1,16 @@
-from test_book_conditions import choose_legacy_fixture
 """Application build loads saved settings and preserves long-lived services."""
+
 from dataclasses import replace
-from pathlib import Path
 import traceback
 
 import pytest
 from sqlalchemy import inspect
+from test_book_conditions import choose_legacy_fixture
 
-from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings, WorkerPoolSettings
+from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.config.settings import SettingsError
 from linguary.adapters.config.system_settings import SystemSettingsUpdate, candidate_settings
 from linguary.adapters.db.engine import create_database_engine
-from linguary.adapters.db.system_settings import SystemSettingsStore
 from linguary.adapters.llm import FakeLLMClient
 from linguary.adapters.runtime import WorkerSettings
 from linguary.composition import build_application, drain_tasks
@@ -92,7 +91,7 @@ async def test_injected_llm_client_survives_reconfiguration(tmp_path):
     client = Injected()
     app = build_application(settings=settings(tmp_path), llm_client=client)
     try:
-        scenario = store_processing_book(app.unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT), (SOURCE_TEXT, SOURCE_TEXT)))
+        store_processing_book(app.unit_of_work, chapters=((SOURCE_TEXT, SOURCE_TEXT), (SOURCE_TEXT, SOURCE_TEXT)))
         choose_legacy_fixture(app)
         await app.processing.start(BOOK_ID)
         previous_runner, previous_queue, previous_pool = app.runner, app.task_queue, app.worker_pool

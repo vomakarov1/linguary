@@ -18,7 +18,6 @@ from uuid import uuid4
 import httpx
 import pytest
 from llm_payload_factories import analysis_payload, as_content, translation_payload
-from pydantic import ValidationError
 
 from linguary.adapters.config import LLMSettings
 from linguary.adapters.llm import OpenAICompatibleLLMClient, openai_compatible

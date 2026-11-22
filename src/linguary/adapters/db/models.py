@@ -74,7 +74,7 @@ class ContentObjectJSON(TypeDecorator[dict[str, Any]]):
             if raw is None:
                 return None
             try:
-                value = processor(raw)
+                value = processor(raw) if processor is not None else raw
             except (ValueError, TypeError):
                 raise ContentJSONError("повреждённый JSON содержательного плана или свидетельств") from None
             if type(value) is not dict:
@@ -168,7 +168,7 @@ class DocumentBlockRow(Base):
     __tablename__ = "document_blocks"
     # Do not fetch the server default of segments_json: an older schema has no such column,
     # and INSERT RETURNING would fail there.
-    __mapper_args__ = {"eager_defaults": False}
+    __mapper_args__ = {"eager_defaults": False}  # noqa: RUF012
     __table_args__ = (
         UniqueConstraint("section_id", "order"),
         Index("ix_document_blocks_book_id_section_id", "book_id", "section_id"),
@@ -555,8 +555,8 @@ __all__ = [
     "BlockResultRow",
     "BookRow",
     "ChapterAnalysisRow",
-    "CorrectionCheckRow",
     "CorrectionCandidateRow",
+    "CorrectionCheckRow",
     "CorrectionInputRow",
     "DecimalAsText",
     "DocumentBlockRow",

@@ -1,7 +1,11 @@
 """Optional review and monetary reservation state, in integer micro-USD."""
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Any
 from linguary.domain.book_conditions import WorkSerialization, WorkStateError, freeze, identifier, nonnegative, version
+
+_DEFAULT_PRICE: Mapping[str, Any] = MappingProxyType({'schema_version': 1})
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,7 +15,7 @@ class QualityReservation(WorkSerialization):
     estimate: int
     actual: int | None = None
     state: str = 'reserved'
-    price: Mapping = None
+    price: Mapping[str, Any] = _DEFAULT_PRICE
     schema_version: int = 1
 
     def __post_init__(self):

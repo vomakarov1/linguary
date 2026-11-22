@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 import math
 import threading
@@ -132,7 +132,7 @@ class LLMRateLimiter:
             self._wake_waiters_locked()
 
     @asynccontextmanager
-    async def concurrency_slot(self) -> AsyncIterator[None]:
+    async def concurrency_slot(self) -> AsyncGenerator[None]:
         await self.acquire_concurrency()
         try:
             yield
@@ -230,7 +230,10 @@ class LLMRateLimiter:
         """Sleep for ``delay`` unless ``wake`` fires first. Reaps the sleep task without swallowing cancellation."""
         if wake.done():
             return
-        sleep_task = asyncio.create_task(self._sleep(delay))
+        async def _run_sleep() -> None:
+            await self._sleep(delay)
+
+        sleep_task = asyncio.create_task(_run_sleep())
         try:
             await asyncio.wait(
                 {sleep_task, wake},

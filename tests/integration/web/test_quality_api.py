@@ -65,7 +65,7 @@ def test_review_errors_never_imply_success(configured_client, configured_applica
 
 def test_legacy_off_read_and_foreign_review_not_found(client, application, llm_client):
     one = store_book(application)
-    two = store_book(application, book_id='other')
+    store_book(application, book_id='other')
     path = f'/books/{one.book_id}/quality-review'
     response = client.get(path)
     assert response.status_code == 200 and response.json()['state'] == 'not-requested'

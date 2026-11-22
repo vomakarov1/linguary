@@ -139,7 +139,6 @@ class ChooseBookConditions:
         self.service, self.resolver = service, resolver
 
     def __call__(self, book_id, *, action, expected_revision, settings_revision, confirmed, english_help=False, reader_level=None, pronunciation_help_enabled=False, pronunciation_variant=None, seed_first_chapter=None):
-        from dataclasses import asdict
         from linguary.application.book_conditions import ConditionsError, BookConditionsService
         if confirmed is not True or action not in {'continue_legacy', 'reanalyze'}:
             raise ConditionsError('invalid_conditions_choice')

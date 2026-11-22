@@ -13,10 +13,11 @@ import tempfile
 from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from linguary.adapters.config import AppSettings, CheckSettings, LLMSettings, StorageSettings, WorkerPoolSettings
-from linguary.comparison.protocol import ComparisonProtocol, ContinuationBinding, LUNA, SONNET, file_hash, settings_projection, stable_hash, validate_input_bindings
+from linguary.comparison.protocol import ComparisonProtocol, ContinuationBinding, LUNA, file_hash, settings_projection, stable_hash, validate_input_bindings
 from linguary.comparison.llm import CallObservation
 from linguary.domain import ChapterAnalysis, LLMCallLog, TokenUsage
 
@@ -449,7 +450,7 @@ def _load_late_sonnet_continuation(workspace, recipe, *, materialize):
                                                        verified_copy=copies['luna'])
             initial_state = replace(initial_state, provenance=dict(initial_state.provenance,
                 binding_sha256=previous.continuation.sha256))
-            effective = dict(supplement['receipt'], actual_model=supplement['verified']['model'],
+            effective: dict[str, Any] = dict(supplement['receipt'], actual_model=supplement['verified']['model'],
                 model_identity_source='generation_metadata', metadata_status_code=200, metadata_check_reason='verified',
                 metadata_get_count=supplement['receipt']['metadata_get_count'] + 1)
             effective['cost'], effective['usage'] = Decimal(effective['cost']), TokenUsage(**effective['usage'])
@@ -704,6 +705,8 @@ def _inspect_partial_data(root, supplement, protocol, proof):
             analyses = SqlAlchemyChapterAnalysisRepository(session)
             for book_id, section_ids in selected.items():
                 document = documents.get(book_id)
+                if document is None:
+                    raise WorkspaceError('Документ книги отсутствует в снимке анализа')
                 for section_id in section_ids:
                     analysis = analyses.get_for_section(book_id, section_id)
                     if analysis is None:
@@ -854,7 +857,7 @@ def _validate_analysis(db, *, allow_rejected_diagnostics=False):
     if not db.execute('SELECT 1 FROM chapter_analyses LIMIT 1').fetchone():
         raise WorkspaceError('Нет завершённого анализа для заморозки')
     for table in ('processing_runs', 'block_results', 'language_notes'):
-        if db.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone():
+        if db.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone():  # noqa: S608
             raise WorkspaceError('Нельзя копировать прежние результаты обработки')
     if db.execute("SELECT 1 FROM processing_tasks WHERE status != 'succeeded' OR task_type NOT IN ('import_book', 'analyze_chapter') LIMIT 1").fetchone():
         raise WorkspaceError('Есть незавершённые задачи или прежняя очередь обработки')

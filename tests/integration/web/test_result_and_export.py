@@ -26,22 +26,6 @@ from web_scenario import (
 from linguary.application.book_overview import ResultBlockSummary
 from linguary.application.ports.persistence import ExportValidationStatus
 from linguary.composition import Application, drain_tasks
-from linguary.web.routes.export import download_filename
-
-
-def _plain_source(node) -> str:
-    """Reading-unit source with marker links removed and line breaks kept."""
-    parts: list[str] = []
-    if node.text:
-        parts.append(node.text)
-    for child in node:
-        if child.tag == "br":
-            parts.append("\n")
-        elif child.tag != "a" or "lg-ref" not in (child.get("class") or "").split():
-            parts.append(_plain_source(child))
-        if child.tail:
-            parts.append(child.tail)
-    return "".join(parts)
 from linguary.domain import (
     BlockProcessingResult,
     BlockSegment,
@@ -57,7 +41,23 @@ from linguary.domain import (
     TaskStatus,
     TaskType,
 )
+from linguary.web.routes.export import download_filename
 from linguary.web.schemas import ResultBlockResponse
+
+
+def _plain_source(node) -> str:
+    """Reading-unit source with marker links removed and line breaks kept."""
+    parts: list[str] = []
+    if node.text:
+        parts.append(node.text)
+    for child in node:
+        if child.tag == "br":
+            parts.append("\n")
+        elif child.tag != "a" or "lg-ref" not in (child.get("class") or "").split():
+            parts.append(_plain_source(child))
+        if child.tail:
+            parts.append(child.tail)
+    return "".join(parts)
 
 
 def test_result_exposes_blocks_warnings_and_epubcheck_status(
@@ -1866,7 +1866,7 @@ async def test_pause_lifecycle_restricts_inactive_statuses_clears_on_stage_end_a
 
     with application.unit_of_work.transaction() as tx:
         # Enable auto_approve_glossary + auto_start_processing on conditions for auto-transition test
-        auto_cond = application.book_conditions.create(
+        application.book_conditions.create(
             tx,
             tx.books.get(analysing_book.book_id),
             application.runtime_settings.revision,

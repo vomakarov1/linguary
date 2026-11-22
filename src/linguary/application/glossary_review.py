@@ -567,10 +567,10 @@ def _snapshot_entry(
 
 __all__ = [
     "REVIEW_TYPE_ORDER",
+    "GlossaryNotFoundError",
     "GlossaryReview",
     "GlossaryReviewError",
     "GlossaryReviewIncompleteError",
-    "GlossaryNotFoundError",
     "GlossaryReviewItem",
     "build_glossary_review",
     "candidates_with_decisions",

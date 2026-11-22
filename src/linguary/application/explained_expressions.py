@@ -53,7 +53,7 @@ def expression_words(text: str) -> tuple[str, ...]:
 class ExplainedExpressions:
     """Chapter `Before You Read` expressions prepared for comparison."""
 
-    __slots__ = ("_expressions", "_explanations")
+    __slots__ = ("_explanations", "_expressions")
 
     def __init__(
         self, expressions: Iterable[str], *,

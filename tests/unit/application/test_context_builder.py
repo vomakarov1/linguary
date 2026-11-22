@@ -665,7 +665,7 @@ def test_english_help_templates_pin_level_and_exact_plan_rules(level):
     rules = templates['english_help']
     assert level.upper() in rules
     analysis = templates['analysis']
-    fragment = templates['fragment']
+    assert 'fragment' in templates
     content_analysis = templates['content_analysis']
     normalized_content_analysis = ' '.join(content_analysis.split())
     processing = templates['english_help_processing']
@@ -1697,7 +1697,6 @@ def test_a2_context_disables_before_you_read_and_keeps_inline_notes() -> None:
 def test_pedagogical_instructions_prioritize_cultural_reference_bonfire_night() -> None:
     """Cultural references are priority explanations, and guessed person names stay out of the glossary."""
     from linguary.application.context_builder import (
-        _ANALYSIS_INSTRUCTIONS,
         _CONTENT_PLAN_ANALYSIS,
         _NARRATIVE_ANALYSIS_INSTRUCTIONS,
         _PEDAGOGICAL_ANALYSIS_INSTRUCTIONS,

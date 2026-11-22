@@ -1,6 +1,7 @@
 """Versioned internal pass DTOs with stable source references for durable reuse."""
 from collections.abc import Mapping
 from dataclasses import asdict
+from typing import Any
 
 from linguary.application.llm_dto import (
     BeforeYouReadEntryResponse, GlossaryCandidateResponse, HelpEvidenceResponse,
@@ -62,28 +63,32 @@ def decode_pass(payload: Mapping, *, narrative: bool) -> NarrativeAnalysisRespon
     if type(payload.get('schema_version')) is not int or payload.get('schema_version') != 1:
         raise ValueError('неизвестная версия сохранённого прохода анализа')
     body = thaw(payload['response'])
-    def anchor(value):
+    def anchor(value: Mapping[str, Any]) -> QuotedSourceAnchorResponse:
         return QuotedSourceAnchorResponse(**value)
+
+    def merged(base: Mapping[str, Any], **extra: Any) -> dict[str, Any]:
+        return {**base, **extra}
+
     if narrative:
         candidates = []
         for raw in body['glossary_candidates']:
             assessment = raw['name_translation_assessment']
-            candidates.append(GlossaryCandidateResponse(**{**raw, 'type': ConceptType(raw['type']),
-                'name_translation_assessment': NameTranslationAssessment(**assessment) if assessment else None}))
-        facts = tuple(QuotedContextFactResponse(**{**f,
-            'anchors': tuple(anchor(a) for a in f['anchors']), 'subject_anchor': anchor(f['subject_anchor'])})
+            candidates.append(GlossaryCandidateResponse(**merged(raw, type=ConceptType(raw['type']),
+                name_translation_assessment=NameTranslationAssessment(**assessment) if assessment else None)))
+        facts = tuple(QuotedContextFactResponse(**merged(f,
+            anchors=tuple(anchor(a) for a in f['anchors']), subject_anchor=anchor(f['subject_anchor'])))
             for f in body['context_facts'])
-        scenes = tuple(QuotedSceneResponse(**{**s, 'visual_facts': tuple(
-            QuotedSceneVisualFactResponse(**{**f, 'anchor': anchor(f['anchor'])}) for f in s['visual_facts'])})
+        scenes = tuple(QuotedSceneResponse(**merged(s, visual_facts=tuple(
+            QuotedSceneVisualFactResponse(**merged(f, anchor=anchor(f['anchor']))) for f in s['visual_facts'])))
             for s in body['scenes'])
         return NarrativeAnalysisResponse(body['translation_instructions'], body['chapter_summary'],
             tuple(candidates), facts, scenes)
     return PedagogicalAnalysisResponse(
         treatment_plan=tuple(_cached_plan_item(i) for i in body['treatment_plan']),
         before_you_read=tuple(BeforeYouReadEntryResponse(**e) for e in body['before_you_read']),
-        difficulties=tuple(QuotedDifficultyResponse(**{**d,
-            'anchors': tuple(anchor(a) for a in d['anchors']),
-            'required_points': tuple(RequiredPoint(**p) for p in d['required_points'])}) for d in body['difficulties']),
+        difficulties=tuple(QuotedDifficultyResponse(**merged(d,
+            anchors=tuple(anchor(a) for a in d['anchors']),
+            required_points=tuple(RequiredPoint(**p) for p in d['required_points']))) for d in body['difficulties']),
         before_you_read_evidence=tuple(HelpEvidenceResponse(**e) for e in body['before_you_read_evidence']),
         reader_chapter_summary=body['reader_chapter_summary'])
 

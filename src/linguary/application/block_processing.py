@@ -15,10 +15,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, replace, asdict
 from contextvars import ContextVar
 from hashlib import sha256
+from typing import Any
 
 from linguary.application.context_builder import TranslationContext
 from linguary.application.errors import ApplicationError
@@ -26,12 +27,12 @@ from linguary.application.explained_expressions import ExplainedExpressions
 from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import (
     LLMClient, LLMConfigurationError, LLMContextCapacityError, LLMProviderError,
-    LLMResponseFormatError, LLMTransportError,
+    LLMResponse, LLMResponseFormatError, LLMTransportError,
 )
 from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.ports.pronunciation import PronunciationSource, PronunciationVariant
 from linguary.application.validators.pronunciation import (
-    PronunciationSelection, PronunciationSkip, preserve_unavailable, resolve_pronunciation_anchor, verify_candidates,
+    PronunciationSelection, PronunciationSkip, preserve_unavailable, verify_candidates,
 )
 from linguary.application.retry_policy import (
     ResultValidationError, RetryPolicy, _ERROR_TYPES, classify_error, violation_of,
@@ -45,6 +46,7 @@ from linguary.application.validators.content_plan import resolve_content_coverag
 from linguary.domain.book_conditions import WorkStateError
 from linguary.domain.content_plan import ContentEvidence
 from linguary.domain import (
+    LLMCallStage,
     BlockProcessingResult,
     BookEvent,
     BookStatus,
@@ -52,6 +54,7 @@ from linguary.domain import (
     DocumentSection,
     ErrorType,
     GlossarySnapshot,
+    ProcessingTask,
     TaskStatus,
     TaskType,
     TokenUsage,
@@ -109,8 +112,12 @@ class TranslationCall:
         self._pronunciation_enabled = pronunciation_help_enabled
         self._pronunciation_variant = pronunciation_variant
         self._source_texts = source_texts
-        self._validated_response = ContextVar(f"validated_response_{id(self)}", default=None)
-        self._expected_bindings = ContextVar(f"expected_bindings_{id(self)}", default={})
+        self._validated_response: ContextVar[LLMResponse[Any] | None] = ContextVar(
+            f"validated_response_{id(self)}", default=None
+        )
+        self._expected_bindings: ContextVar[Mapping[str, Mapping[str, object] | None] | None] = ContextVar(
+            f"expected_bindings_{id(self)}", default=None
+        )
         self._accepted_call_ids: set[str] = set()
 
     async def request(
@@ -222,15 +229,20 @@ class TranslationCall:
                     try:
                         with self._unit_of_work.transaction() as transaction:
                             root = transaction.work.get_root(recovery[0])
-                            if root is None or root.policy_version != policy.version:
+                            if root is None or policy is None or root.policy_version != policy.version:
                                 raise RecoveryError('conditions_unavailable', recovery[0])
                             attempt_root_generation = getattr(root, 'generation', None)
                             checked_conditions_id = root.conditions_id
                             loaded_conditions = transaction.work.get_conditions(root.conditions_id)
                             if loaded_conditions is None:
                                 raise RecoveryError('conditions_unavailable', recovery[0])
+                            stage_value = (
+                                request.stage.value
+                                if request.stage is not None
+                                else LLMCallStage.TRANSLATION_UNIT.value
+                            )
                             physical_context = transaction.work.begin_recovery_attempt(*recovery,
-                                task_id=request.task_id, run_id=request.run_id, stage=request.stage.value,
+                                task_id=request.task_id, run_id=request.run_id, stage=stage_value,
                                 assigned_model=loaded_conditions.payload['models']['processing'],
                                 prompt_hash=sha256(request.instructions.encode()).hexdigest(),
                                 policy_version=policy.version)
@@ -257,7 +269,7 @@ class TranslationCall:
                         owns = transaction.work.owns_recovery_attempt(physical_context.attempt_id)
                     if not owns:
                         finalize_response(self._unit_of_work, response, 'stale')
-                        raise RecoveryError('interrupted', recovery[0])
+                        raise RecoveryError('interrupted', None if recovery is None else recovery[0])
                 if physical_context is not None and response.call_context != physical_context:
                     raise ConditionsError('conditions_unavailable')
                 mapped = context.to_block_ids(response.payload)
@@ -334,9 +346,15 @@ class TranslationCall:
                     from linguary.application.validators.content_plan import resolve_fragment_assistances
                     owners = tuple(r.block_id for r in results)
                     if resolved_source_texts is None:
-                        with self._unit_of_work.transaction() as transaction:
-                            document = transaction.documents.get(request.book_id)
-                        call_source_texts = {block.id: block.text for section in document.sections for block in section.blocks}
+                        document = None
+                        if request.book_id is not None:
+                            with self._unit_of_work.transaction() as transaction:
+                                document = transaction.documents.get(request.book_id)
+                        call_source_texts = (
+                            {block.id: block.text for section in document.sections for block in section.blocks}
+                            if document is not None
+                            else {item.block.id: item.block.text for item in unit.items}
+                        )
                         resolved_source_texts = call_source_texts
                     else:
                         call_source_texts = resolved_source_texts
@@ -354,8 +372,10 @@ class TranslationCall:
                         if resolved_source_texts is not None:
                             call_source_texts = resolved_source_texts
                         else:
-                            with self._unit_of_work.transaction() as transaction:
-                                document = transaction.documents.get(request.book_id)
+                            document = None
+                            if request.book_id is not None:
+                                with self._unit_of_work.transaction() as transaction:
+                                    document = transaction.documents.get(request.book_id)
                             call_source_texts = ({block.id: block.text for section in document.sections for block in section.blocks}
                                 if document is not None else {item.block.id: item.block.text for item in unit.items})
                             resolved_source_texts = call_source_texts
@@ -375,11 +395,8 @@ class TranslationCall:
                     results = tuple(explained.without_repeats(r) for r in results)
             except asyncio.CancelledError:
                 if recovery is not None and physical_context is not None and self._unit_of_work is not None:
-                    try:
-                        with self._unit_of_work.transaction() as transaction:
-                            _finalize_cancelled_attempt(transaction.work, physical_context)
-                    except Exception:
-                        pass
+                    with suppress(Exception), self._unit_of_work.transaction() as transaction:
+                        _finalize_cancelled_attempt(transaction.work, physical_context)
                 raise
             except Exception as error:
                 if isinstance(error, RecoveryError):
@@ -545,7 +562,7 @@ class TranslationCall:
             reason = 'candidate_contract_unavailable'
         elif self._pronunciation_source is None or not self._pronunciation_source.configured:
             reason = 'source_disabled'
-        if reason is not None:
+        if reason is not None or self._pronunciation_source is None:
             selection = PronunciationSelection(unavailable=True)
         else:
             selection = await verify_candidates(mapped.pronunciation_candidates,
@@ -572,7 +589,7 @@ class TranslationCall:
         context = None if response is None else response.call_context
         saved = False
         block_ids = tuple(result.block_id for result in results)
-        expected_bindings = self._expected_bindings.get()
+        expected_bindings = self._expected_bindings.get() or {}
         opened_here = transaction is None
         transaction_scope = nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
         with transaction_scope as transaction:
@@ -1086,11 +1103,12 @@ def _stop_or_pause_root(
         and getattr(root, "generation", None) != expected_generation
     ):
         return "interrupted"
+    root_reason = getattr(root, "reason", None)
     if (
         getattr(root, "status", None) == "stopped"
-        and getattr(root, "reason", None) in {"unknown_outcome", "interrupted"}
+        and root_reason in {"unknown_outcome", "interrupted"}
     ):
-        return getattr(root, "reason", None)
+        return root_reason
     count = work.scope_attempt_count(recovery[1])
     limit = root.manifest["policy"]["max_calls"] + root.extra_calls
     reason, pause = _terminal_reason(

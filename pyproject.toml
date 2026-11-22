@@ -31,6 +31,8 @@ dev = [
     "pytest>=8.4",
     "pytest-asyncio>=1.0",
     "pytest-cov>=7.1.0",
+    "ruff>=0.17.6",
+    "ty>=0.0.108",
 ]
 
 [tool.pytest.ini_options]
@@ -41,3 +43,31 @@ asyncio_mode = "auto"
 markers = [
     "slow: slow test (a real LLM, large EPUB files); excluded with -m \"not slow\"",
 ]
+
+[tool.ruff]
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "ASYNC", "S", "RUF"]
+ignore = [
+    "E501",    # Line length is not enforced globally
+    "RUF001",  # Cyrillic characters in Russian UI/analysis strings
+    "RUF002",  # Cyrillic characters in docstrings
+    "RUF003",  # Cyrillic characters in comments
+    "B008",    # FastAPI Depends() in default arguments
+    "S101",    # assert statements
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B", "ASYNC", "RUF"]
+# SHA-256 pinned in comparison/workspace.py for P14 -> P15 verification
+"src/linguary/comparison/late_metadata.py" = ["RUF021"]
+
+[tool.ty.src]
+include = ["src/linguary"]
+
+[[tool.ty.overrides]]
+include = ["src/linguary/comparison/late_metadata.py"]
+
+[tool.ty.overrides.rules]
+missing-union-attribute = "ignore"

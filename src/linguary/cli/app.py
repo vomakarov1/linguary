@@ -17,6 +17,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import uvicorn
@@ -394,7 +395,7 @@ def _resume(args: argparse.Namespace) -> int:
         asyncio.run(application.aclose())
 
 
-def _warn_if_book_paused(unit_of_work: object, book_id: str) -> None:
+def _warn_if_book_paused(unit_of_work: Any, book_id: str) -> None:
     open_tx = getattr(unit_of_work, "read_transaction", unit_of_work.transaction)
     with open_tx() as tx:
         is_book_paused = getattr(tx.work, "is_book_paused", None)

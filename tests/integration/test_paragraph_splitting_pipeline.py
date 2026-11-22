@@ -6,18 +6,10 @@ import itertools
 import sys
 from pathlib import Path
 
-_EPUB_TEST_DIR = Path(__file__).resolve().parent / "epub"
-if str(_EPUB_TEST_DIR) not in sys.path:
-    sys.path.insert(0, str(_EPUB_TEST_DIR))
-
-from epub_builder import build_epub, xhtml_document
-from export_pipeline import documents_of, elements, run_export
-
 from linguary.adapters.epub import verify_exported_epub
 from linguary.adapters.epub.splitting import segment_text
 from linguary.adapters.validation import EpubCheckValidator
 from linguary.application.ports.export_validation import (
-    ExportIssueSeverity,
     ExportValidationRequest,
 )
 from linguary.application.translation_units import plan_translation_units
@@ -29,6 +21,13 @@ from linguary.domain import (
     TreatmentPlan,
 )
 from linguary.domain.identifiers import build_block_id
+
+_EPUB_TEST_DIR = Path(__file__).resolve().parent / "epub"
+if str(_EPUB_TEST_DIR) not in sys.path:
+    sys.path.insert(0, str(_EPUB_TEST_DIR))
+
+from epub_builder import build_epub, xhtml_document  # noqa: E402
+from export_pipeline import documents_of, elements, run_export  # noqa: E402
 
 
 def _create_test_epub_with_composite_paragraphs(tmp_path: Path) -> Path:

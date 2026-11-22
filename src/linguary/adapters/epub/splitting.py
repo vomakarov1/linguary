@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from bisect import bisect_left
 from collections.abc import Sequence
+from itertools import pairwise
 from math import ceil
 
 from linguary.domain import BlockSegment
@@ -672,7 +673,7 @@ def _fit_clause_boundaries(
         node = parent[node]
     indices.reverse()
     chosen = [candidates[idx] for idx in indices]
-    return list(zip(chosen, chosen[1:]))
+    return list(pairwise(chosen))
 
 
 def _word_split_target(max_segment_chars: int) -> int:
@@ -708,7 +709,7 @@ def _fit_word_spans(
         return [(start, end)]
     boundaries = _word_boundary_indexes(text, start, end)
     edges = [start, *boundaries, end]
-    if any(right - left > max_segment_chars for left, right in zip(edges, edges[1:])):
+    if any(right - left > max_segment_chars for left, right in pairwise(edges)):
         return None
 
     target = _word_split_target(max_segment_chars)
@@ -734,7 +735,7 @@ def _fit_word_spans(
             for index in range(part_count)
         ):
             return None
-        return list(zip(chosen, chosen[1:]))
+        return list(pairwise(chosen))
 
     fitted: list[tuple[int, list[tuple[int, int]]]] = []
     for part_count in range(min_parts, max_parts + 1):
@@ -770,7 +771,7 @@ def _split_sentence(
         )
         if len(boundaries) < 3:
             continue
-        spans = list(zip(boundaries, boundaries[1:]))
+        spans = list(pairwise(boundaries))
         if all(span_end - span_start <= max_segment_chars for span_start, span_end in spans):
             return [
                 BlockSegment(span_start, span_end, sentence_index)
@@ -807,7 +808,7 @@ def _split_sentence(
     boundaries = _boundaries_respecting_protected(start, end, interior, protected)
     return [
         BlockSegment(span_start, span_end, sentence_index)
-        for span_start, span_end in zip(boundaries, boundaries[1:])
+        for span_start, span_end in pairwise(boundaries)
     ]
 
 
@@ -841,9 +842,7 @@ def segment_text(
         protected_ranges,
     )
     segments: list[BlockSegment] = []
-    for sentence_index, (start, end) in enumerate(
-        zip(sentence_boundaries, sentence_boundaries[1:])
-    ):
+    for sentence_index, (start, end) in enumerate(pairwise(sentence_boundaries)):
         segments.extend(
             _split_sentence(
                 text,

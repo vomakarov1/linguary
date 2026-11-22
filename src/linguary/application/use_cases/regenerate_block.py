@@ -180,6 +180,8 @@ class RegenerateBlock:
             blocks=(work.block,),
             plan=work.analysis.treatment_plan,
         )
+        if root.policy_version is None:
+            raise RecoveryError('conditions_unavailable', root.id)
         context = self._context_builder.for_block_regeneration(
             document=work.document,
             section=work.section,
@@ -247,7 +249,8 @@ class RegenerateBlock:
         self, work: _BlockWork, command: RegenerateBlockCommand, *, transaction=None
     ) -> RecoveryRoot:
         refs = None
-        context = lambda: nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
+        def context():
+            return nullcontext(transaction) if transaction is not None else self._unit_of_work.transaction()
         if command.root_id is not None:
             with context() as tx:
                 root = tx.work.get_root(command.root_id)
@@ -386,16 +389,19 @@ class BlockRegenerationSequence:
                         block_id=block_id,
                         successor_id=root.id,
                     )
+            policy_version = root.policy_version
+            if policy_version is None:
+                raise RecoveryError('conditions_unavailable', root.id)
             identity = TaskIdentity(book_id=book_id, task_type=TaskType.REGENERATE_BLOCK,
                                     scope_id=block_id, operation_id=root.id,
-                                    policy_version=root.policy_version)
+                                    policy_version=policy_version)
             task = ProcessingTask(id=_new_task_id(self._queue), book_id=book_id, task_type=identity.task_type,
                                   scope_id=block_id, operation_id=root.id,
-                                  policy_version=root.policy_version)
+                                  policy_version=policy_version)
             transaction.tasks.add(task)
             transaction.work.bind_operation_refs(
                 task.id, book_id=book_id, conditions_id=root.conditions_id,
-                operation_refs=({'root_id': root.id, 'policy_version': root.policy_version},)
+                operation_refs=({'root_id': root.id, 'policy_version': policy_version},)
             )
             if status is not book.status:
                 transaction.books.save(replace(book, status=status, export_validation_status=None))

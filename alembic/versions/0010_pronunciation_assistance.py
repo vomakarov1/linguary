@@ -28,7 +28,7 @@ def downgrade() -> None:
                                             ('block_results', 'content_evidence_json')))
     for table, column, message in checks:
         if connection.execute(sa.text(
-                f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)')).scalar_one():
+                f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)')).scalar_one():  # noqa: S608
             raise RuntimeError(message)
     if connection.dialect.name == 'sqlite' and connection.dialect.server_version_info < (3, 35, 0):
         raise RuntimeError('для безопасного отката произношений нужен SQLite 3.35 или новее')

@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from hashlib import sha256
 import json
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import delete, func, or_, select, update
@@ -863,7 +864,7 @@ class SqlAlchemyWorkRepository:
                     self.transition_attempt(row.id, 'unknown', expected_state='sent')
                 review_row = self._session.get(QualityReviewRow, row.review_id)
                 if review_row is not None:
-                    findings_data = dict(thaw(review_row.findings_json) or {'schema_version': 1, 'items': []})
+                    findings_data: dict[str, Any] = dict(thaw(review_row.findings_json) or {'schema_version': 1, 'items': []})
                     checked = list(dict.fromkeys(findings_data.get('checked') or ()))
                     checked_set = set(checked)
                     existing_missing = list(findings_data.get('missing') or ())
@@ -912,7 +913,7 @@ class SqlAlchemyWorkRepository:
         rows = self._session.scalars(query).all()
         status = 'expired' if before is not None else 'deleted'
         for row in rows:
-            meta = dict(row.diagnostic_meta_json or {'schema_version': 1})
+            meta: dict[str, Any] = dict(row.diagnostic_meta_json or {'schema_version': 1})
             meta.pop('input_text', None)
             meta['body_status'] = status
             if isinstance(meta.get('body_meta'), dict):
@@ -1570,7 +1571,7 @@ class SqlAlchemyWorkRepository:
         )).all()
         acknowledged_at = datetime.now(UTC).isoformat()
         for row in rows:
-            outcome = dict(row.outcome_json or {'schema_version': 1})
+            outcome: dict[str, Any] = dict(row.outcome_json or {'schema_version': 1})
             if outcome.get('acknowledged_duplicate_billing_risk') is True:
                 continue
             outcome.setdefault('schema_version', 1)
@@ -1987,7 +1988,7 @@ class SqlAlchemyWorkRepository:
                     continue
             elif task_types.get(row.task_id) != TaskType.CHAPTER_CORRECTION.value:
                 continue
-            outcome = dict(row.outcome_json or {'schema_version': 1})
+            outcome: dict[str, Any] = dict(row.outcome_json or {'schema_version': 1})
             outcome.setdefault('schema_version', 1)
             outcome['decision'] = 'interrupted'
             if row.state == 'created':

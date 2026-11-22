@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from hashlib import sha256
+from typing import Any
 from uuid import uuid4
 
 from linguary.adapters.config.settings import LLMSettings
@@ -108,9 +109,9 @@ def correction_snapshot(settings) -> CorrectionSnapshotV2:
 
 @dataclass(frozen=True, slots=True)
 class CorrectionRuntime:
-    llm_client: object
+    llm_client: Any
     snapshot: CorrectionSnapshot | CorrectionSnapshotV2
-    settings: object
+    settings: Any
     conditions_id: str
 
 
@@ -118,7 +119,7 @@ class CorrectionRuntime:
 class _CachedCorrectionRuntime:
     fingerprint: tuple
     runtime: CorrectionRuntime
-    configured: object
+    configured: Any
     book_id: str | None = None
     active_leases: int = 0
     retired: bool = False
@@ -328,8 +329,8 @@ class CorrectionProvenanceClient:
     def __init__(self, inner, service, run_id, conditions_id, snapshot):
         self.inner, self.service = inner, service
         self.run_id, self.conditions_id, self.snapshot = run_id, conditions_id, snapshot
-        self._attempts = ContextVar(f'correction_attempts_{id(self)}', default=())
-        self._responses = ContextVar(f'correction_responses_{id(self)}', default=())
+        self._attempts: ContextVar[tuple[str, ...]] = ContextVar(f'correction_attempts_{id(self)}', default=())
+        self._responses: ContextVar[tuple[Any, ...]] = ContextVar(f'correction_responses_{id(self)}', default=())
 
     @property
     def attempts(self):

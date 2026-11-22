@@ -23,6 +23,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import Any
 
 from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, HelpEvidence, RequiredPoint, Scene, SceneVisualFact, SourceAnchor, artifact_key
 from linguary.domain.llm_log import Violation
@@ -696,7 +697,7 @@ _RU_INSTRUCTION_SUFFIXES = tuple(
             "яй", "ай", "ей", "уй", "юй", "яя", "ая", "ея", "уя", "юя",
             "ыми", "ими", "ого", "его", "ому", "ему", "ых", "их",
             "ую", "юю", "ой", "ый", "ий", "ое", "ее", "ые", "ие", "ым", "им", "ом", "ем",
-            "иями", "ями", "ами", "иям", "иях", "ией", "ием", "ию", "ия", "ии",
+            "иями", "ями", "ами", "иям", "иях", "ией", "ию", "ия", "ии",
             "ов", "ев", "ам", "ям", "ах", "ях", "ью",
             "а", "я", "о", "е", "у", "ю", "ы", "и", "ь", "й",
         },
@@ -1199,14 +1200,18 @@ def _merged_candidates(
     )
 
 
-def _candidate_groups(candidates: Iterable[GlossaryCandidateResponse]) -> tuple[list[GlossaryCandidateResponse], ...]:
-    groups: dict[str, list[GlossaryCandidateResponse]] = {}
+def _candidate_groups[CandidateT: GlossaryCandidate | GlossaryCandidateResponse](
+    candidates: Iterable[CandidateT],
+) -> tuple[list[CandidateT], ...]:
+    groups: dict[str, list[CandidateT]] = {}
     for candidate in candidates:
         groups.setdefault(glossary_key(candidate.source_text), []).append(candidate)
     return tuple(groups.values())
 
 
-def _merged_candidate_suggestion(group: Sequence[GlossaryCandidateResponse]) -> tuple[str, str, str]:
+def _merged_candidate_suggestion(
+    group: Sequence[GlossaryCandidate | GlossaryCandidateResponse],
+) -> tuple[str, str, str]:
     leading = max(group, key=lambda candidate: candidate.confidence)
     source_text = spellings_by_preference(
         (candidate.source_text, candidate.confidence) for candidate in group
@@ -1217,7 +1222,7 @@ def _merged_candidate_suggestion(group: Sequence[GlossaryCandidateResponse]) -> 
     return source_text, leading.suggested_translation, note
 
 
-def merged_glossary_suggestion_keys(candidates: Iterable[GlossaryCandidateResponse]) -> frozenset[tuple[str, str, str]]:
+def merged_glossary_suggestion_keys(candidates: Iterable[GlossaryCandidate | GlossaryCandidateResponse]) -> frozenset[tuple[str, str, str]]:
     """Semantic output keys, using the same independent field selection as chapter persistence."""
     keys: set[tuple[str, str, str]] = set()
     for group in _candidate_groups(candidates):
@@ -1680,23 +1685,23 @@ __all__ = [
     "DEFAULT_MAX_FRAGMENT_WEIGHT",
     "MAX_BEFORE_YOU_READ",
     "TOKENS_PER_ANALYSED_BLOCK",
+    "AnalysisMergeError",
+    "ChapterFragment",
+    "FragmentAnalysis",
     "before_you_read_entries",
-    "deduplicate_book_before_you_read",
     "content_plan_from_response",
+    "deduplicate_book_before_you_read",
     "dominant_script",
     "find_quote_span",
+    "fragment_blocks_for",
     "glossary_context_constraints",
+    "merge_chapter_analysis",
+    "merged_glossary_suggestion_keys",
+    "plan_fragments",
     "sanitize_before_you_read_explanation",
     "select_staged_a2_summary",
     "validate_content_plan",
     "validate_fact_glossary",
-    "fragment_blocks_for",
-    "AnalysisMergeError",
-    "ChapterFragment",
-    "FragmentAnalysis",
-    "merge_chapter_analysis",
-    "merged_glossary_suggestion_keys",
-    "plan_fragments",
 ]
 
 
@@ -1726,19 +1731,19 @@ def _lenient_quote_pattern(quote: str) -> str:
     pattern_parts: list[str] = []
     for match in _QUOTE_LENIENT_TOKEN_RE.finditer(quote):
         kind = match.lastgroup
-        token = match.group(0)
+        part = match.group(0)
         if kind == "dash_sp":
             pattern_parts.append(r"\s*[-—–]\s*")
         elif kind == "ws":
             pattern_parts.append(r"\s+")
-        elif token in ("'", "’", "‘", "`"):
+        elif part in ("'", "’", "‘", "`"):
             pattern_parts.append(r"['’‘`]")
-        elif token in ('"', "“", "”", "«", "»"):
+        elif part in ('"', "“", "”", "«", "»"):
             pattern_parts.append(r'["“”«»]')
-        elif token == "-":
+        elif part == "-":
             pattern_parts.append(r"[-—–]")
         else:
-            pattern_parts.append(re.escape(token))
+            pattern_parts.append(re.escape(part))
     pattern = "".join(pattern_parts)
     pattern = re.sub(r"\b(she|he|it|that|there|what|who)(?:\\s\+is|\['’‘`\]s)\b", r"\1(?:\\s+is|['’‘`]s)", pattern, flags=re.I)
     pattern = re.sub(r"\b(I)(?:\\s\+am|\['’‘`\]m)\b", r"\1(?:\\s+am|['’‘`]m)", pattern, flags=re.I)
@@ -3606,29 +3611,33 @@ def content_plan_from_response(
         if missing_fact_details:
             return None
 
-    difficulties = []
-    ids = {}
-    difficulty_rows = (resolved_difficulties if is_quoted else
-                       [(difficulty, None, None) for difficulty in payload.content_plan.difficulties])
-    for difficulty, resolved_anchors, resolved_owner in difficulty_rows:
-        try:
-            if is_quoted:
-                mapped = Difficulty(
-                    id=difficulty.id,
-                    anchors=resolved_anchors,
-                    owner_block_id=resolved_owner,
-                    kind=difficulty.kind,
-                    priority=difficulty.priority,
-                    help_kind=difficulty.help_kind,
-                    required_points=difficulty.required_points,
-                )
-            else:
-                mapped_anchors = []
+    difficulties: list[Difficulty] = []
+    ids: dict[str, str] = {}
+    if is_quoted:
+        for difficulty, resolved_anchors, resolved_owner in resolved_difficulties:
+            mapped = Difficulty(
+                id=difficulty.id,
+                anchors=resolved_anchors,
+                owner_block_id=resolved_owner,
+                kind=difficulty.kind,
+                priority=difficulty.priority,
+                help_kind=difficulty.help_kind,
+                required_points=difficulty.required_points,
+            )
+            mapped = replace(mapped, id=mapped.canonical_id)
+            ids[difficulty.id] = mapped.id
+            difficulties.append(mapped)
+    else:
+        for difficulty in payload.content_plan.difficulties:
+            assert isinstance(difficulty, Difficulty)
+            try:
+                mapped_anchors: list[SourceAnchor] = []
                 for a in difficulty.anchors:
                     real_block_id = aliases[a.block_id]
                     if is_v3:
                         mapped_anchor = replace(a, block_id=real_block_id)
-                        mapped_anchor.validate(texts)
+                        if texts is not None:
+                            mapped_anchor.validate(texts)
                         mapped_anchors.append(mapped_anchor)
                     elif texts is not None and real_block_id in texts:
                         span = find_quote_span(texts[real_block_id], a.quote, estimated_start=a.start)
@@ -3646,11 +3655,11 @@ def content_plan_from_response(
                     anchors=tuple(mapped_anchors),
                     owner_block_id=aliases[difficulty.owner_block_id],
                 )
-        except KeyError as error:
-            raise AnalysisMergeError("привязка к невидимому блоку") from error
-        mapped = replace(mapped, id=mapped.canonical_id)
-        ids[difficulty.id] = mapped.id
-        difficulties.append(mapped)
+            except KeyError as error:
+                raise AnalysisMergeError("привязка к невидимому блоку") from error
+            mapped = replace(mapped, id=mapped.canonical_id)
+            ids[difficulty.id] = mapped.id
+            difficulties.append(mapped)
     evidence = []
     selected = before_you_read_entries(payload.before_you_read, strict=is_v3)
     if not payload.content_plan.before_you_read_evidence:
@@ -3738,24 +3747,41 @@ def content_plan_from_response(
             blocks=blocks,
             source_offsets=source_offsets,
         )
-        if is_quoted
+        if is_quoted and texts is not None and visible_texts_by_alias is not None
         else ()
     )
     mapped_facts: list[ContextFact] = []
-    fact_rows = (resolved_facts if is_quoted else
-                 [(fact, None, None) for fact in payload.content_plan.context_facts])
-    for fact, resolved_anchors, resolved_subject in fact_rows:
-        if is_quoted:
-            mapped = ContextFact(id=fact.id, kind=fact.kind, anchors=resolved_anchors,
-                subject_anchor=resolved_subject, value=fact.value, certainty=fact.certainty)
-        else:
+    if is_quoted:
+        for fact, resolved_anchors, resolved_subject in resolved_facts:
+            mapped_facts.append(
+                ContextFact(
+                    id=fact.id,
+                    kind=fact.kind,
+                    anchors=resolved_anchors,
+                    subject_anchor=resolved_subject,
+                    value=fact.value,
+                    certainty=fact.certainty,
+                )
+            )
+    else:
+        for fact in payload.content_plan.context_facts:
+            assert isinstance(fact, ContextFact)
             try:
-                mapped = replace(fact,
-                    anchors=tuple(replace(anchor, block_id=aliases[anchor.block_id]) for anchor in fact.anchors),
-                    subject_anchor=replace(fact.subject_anchor, block_id=aliases[fact.subject_anchor.block_id]))
+                mapped_facts.append(
+                    replace(
+                        fact,
+                        anchors=tuple(
+                            replace(anchor, block_id=aliases[anchor.block_id])
+                            for anchor in fact.anchors
+                        ),
+                        subject_anchor=replace(
+                            fact.subject_anchor,
+                            block_id=aliases[fact.subject_anchor.block_id],
+                        ),
+                    )
+                )
             except KeyError:
                 raise AnalysisMergeError('контекстная атрибуция ссылается на невидимый блок') from None
-        mapped_facts.append(mapped)
     facts = []
     for mapped in mapped_facts:
         mapped = _explicit_speaker_if_remark_names(
@@ -4431,12 +4457,12 @@ def _extract_gender(note: str | None) -> str | None:
     match = _GENDER_NOTE_PATTERN.search(note)
     if match is None:
         return None
-    token = match.group(1).casefold()
-    if token.startswith("мужск") or token == "male":
+    label = match.group(1).casefold()
+    if label.startswith("мужск") or label == "male":
         return "male"
-    if token.startswith("женск") or token == "female":
+    if label.startswith("женск") or label == "female":
         return "female"
-    if token.startswith("средн") or token == "neuter":
+    if label.startswith("средн") or label == "neuter":
         return "neuter"
     return None
 
@@ -6012,7 +6038,7 @@ def _promote_dialogue_item(item, block, difficulties):
 
 def _narrative_needs_translation(
     block: DocumentBlock,
-    difficulties: Sequence[object] = (),
+    difficulties: Sequence[Any] = (),
     owners: frozenset[str] = frozenset(),
 ) -> bool:
     if len(expression_words(block.text)) > _NARRATIVE_GLOSSARY_WORD_LIMIT:

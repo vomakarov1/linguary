@@ -2,7 +2,7 @@ from dataclasses import replace
 import asyncio
 import pytest
 from linguary.adapters.llm import FakeReply
-from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.recovery import RecoveryError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.reset_processing import ResetProcessingCommand
@@ -156,7 +156,6 @@ async def test_crash_after_commit_before_task_succeed_does_not_send_again(tmp_pa
     app = make_app(tmp_path, fake)
     try:
         doc, run, task = await prepare(app)
-        generation = app.runtime_settings.current
         original = app.task_queue.save
         async def crash(task):
             if task.task_type.value == 'process_translation_unit' and task.status == TaskStatus.SUCCEEDED:

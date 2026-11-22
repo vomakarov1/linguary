@@ -10,6 +10,7 @@ Failed uploads leave no trace: incomplete files are deleted.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Protocol
 
@@ -66,7 +67,7 @@ async def save_upload(
     Exceeding the limit aborts writing immediately rather than checking after completion:
     otherwise an arbitrarily large book could fill up the disk.
     """
-    target.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
     written = 0
     try:
         with target.open("wb") as file:
@@ -77,12 +78,12 @@ async def save_upload(
                         f"файл книги больше допустимых "
                         f"{max_bytes // (1024 * 1024)} МБ"
                     )
-                file.write(chunk)
+                await asyncio.to_thread(file.write, chunk)
     except BaseException:
-        target.unlink(missing_ok=True)
+        await asyncio.shield(asyncio.to_thread(target.unlink, missing_ok=True))
         raise
     if not written:
-        target.unlink(missing_ok=True)
+        await asyncio.to_thread(target.unlink, missing_ok=True)
         raise UploadRejectedError("загруженный файл книги пуст")
     return written
 

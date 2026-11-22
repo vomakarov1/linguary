@@ -33,7 +33,6 @@ from linguary.domain import (
     BookStatus,
     ChapterAnalysis,
     GlossarySnapshot,
-    ProcessingRun,
     TreatmentPlan,
 )
 from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2

@@ -3,8 +3,11 @@ from pathlib import Path
 
 import pytest
 
+from linguary.application.layout.book import build_layout_inputs
 from linguary.comparison.protocol import draft_protocol, file_hash
+from linguary.comparison.runner import _SelectedUnitOfWork
 from linguary.comparison.workspace import prepare_workspace, freeze_analysis, fork_processing, WorkspaceError
+from linguary.domain import BookStatus, SupportStatus
 
 
 def test_rejects_production_root_and_symlink_alias(tmp_path):
@@ -55,6 +58,27 @@ def test_rejects_completed_results(tmp_path):
         db.execute("INSERT INTO processing_runs(id,book_id,status,created_at,glossary_snapshot_json,llm_settings_json) VALUES ('run','book','completed','2026-10-11','[]','{}')")
     with pytest.raises(WorkspaceError):
         freeze_analysis(workspace)
+
+
+def test_reading_layout_loads_only_selected_chapters(tmp_path):
+    workspace = prepared(tmp_path)
+    with sqlite3.connect(workspace.database_path) as db:
+        db.execute("UPDATE books SET status=? WHERE id='book'", (BookStatus.IMPORTED.value,))
+        db.execute("UPDATE resources SET support_status=? WHERE book_id='book'", (SupportStatus.SUPPORTED.value,))
+        db.executemany(
+            'INSERT INTO sections(id,book_id,title,"order",source_resource_path) VALUES (?,?,?,?,?)',
+            [
+                ('chapter-2', 'book', 'Chapter 2', 1, 'chapter2.xhtml'),
+                ('chapter-3', 'book', 'Chapter 3', 2, 'chapter3.xhtml'),
+            ],
+        )
+    application = workspace.build_application()
+    try:
+        selected = _SelectedUnitOfWork(application.unit_of_work, {'book': {'chapter'}})
+        inputs = build_layout_inputs(selected, 'book')
+        assert tuple(section.id for section in inputs.document.ordered_sections) == ('chapter',)
+    finally:
+        application.dispose()
 
 
 def test_processing_forks_share_analysis_hash(tmp_path):

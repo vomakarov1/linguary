@@ -4,7 +4,7 @@ import json
 import pytest
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.llm import FakeReply
-from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.ports.llm import LLMResponseKind, LLMResponseFormatError, LLMTransportError
 from linguary.application.quality_budget import QualityRoute
 from linguary.application.use_cases.quality_review import StartQualityReview
@@ -325,7 +325,7 @@ async def test_quality_review_passes_previous_validation_error_into_repair_turn(
     app, fake, doc, run = await make_review_app(tmp_path)
     try:
         fake.mode = 'schema'
-        created = await app.quality_review.start(command(app))
+        await app.quality_review.start(command(app))
         finished = await drain_tasks(app)
         assert all(t.status == TaskStatus.SUCCEEDED for t in finished), [t.last_error for t in finished]
         review_requests = [r for r in fake.requests if r.kind == LLMResponseKind.QUALITY_REVIEW]

@@ -10,7 +10,7 @@ from linguary.application.ports.llm import (
 from linguary.application.use_cases.restart_translation import RestartTranslationCommand
 from linguary.composition import drain_tasks
 from linguary.domain import LLMCallStage, ProcessingTask, TaskStatus, TaskType
-from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from test_book_conditions import make_app, store_imported
 from test_recovery_commit import analysis_reply, prepare, translation_reply
 
@@ -191,10 +191,7 @@ async def test_drain_tasks_recovers_interrupted_when_alone_under_executor_lock(t
 
 async def test_provenance_send_gate_commits_cancel_and_stop_on_rejection(tmp_path):
     """Send-gate rejections by limit, scope_limit, conditions conflict, and interrupted commit cancellation/stop."""
-    import pytest
     from linguary.adapters.db.models import RecoveryRootRow
-    from linguary.application.book_conditions import ConditionsError
-    from linguary.application.recovery import RecoveryError
     from linguary.domain.recovery import CallAttempt
     from uuid import uuid4
 

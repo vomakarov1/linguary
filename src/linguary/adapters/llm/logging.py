@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -72,7 +73,7 @@ class LoggingLLMClient(LLMClient):
         try:
             response = await self.inner.generate(request)
         except asyncio.CancelledError as error:
-            try:
+            with suppress(Exception):
                 await self._log(
                     request=request,
                     started_at=started_at,
@@ -83,8 +84,6 @@ class LoggingLLMClient(LLMClient):
                     outcome=error,
                     retry=False,
                 )
-            except Exception:
-                pass
             raise
         except LLMResponseFormatError as error:
             error.raw_content, error.body_meta = _bound_if_needed(

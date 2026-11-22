@@ -4,7 +4,7 @@ from dataclasses import asdict
 from fastapi.testclient import TestClient
 import pytest
 
-from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
+from linguary.adapters.config import AppSettings, StorageSettings
 from linguary.composition import build_application
 from linguary.web import create_app
 from linguary.web.routes import system

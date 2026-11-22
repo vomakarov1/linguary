@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
+from typing import Any, ClassVar
 from uuid import UUID
 
 from linguary.domain.errors import DomainError
@@ -46,7 +47,7 @@ def thaw(value):
     return value
 
 
-def version(value: int) -> None:
+def version(value: object) -> None:
     if type(value) is not int or value != 1:
         raise UnsupportedWorkVersion('неподдерживаемая версия данных работы')
 
@@ -103,14 +104,16 @@ class BookConditions:
                 'reproducibility': self.reproducibility, 'schema_version': self.schema_version}
 
     @classmethod
-    def from_dict(cls, value):
+    def from_dict(cls, value: Mapping[str, Any]) -> "BookConditions":
         version(value.get('schema_version'))
-        return cls(**{**value, 'created_at': datetime.fromisoformat(value['created_at'])})
+        kwargs: dict[str, Any] = {**value, 'created_at': datetime.fromisoformat(value['created_at'])}
+        return cls(**kwargs)
 
 
 class WorkSerialization:
     """Versioned primitive representation shared by durable work entities."""
     __slots__ = ()
+    __dataclass_fields__: ClassVar[dict[str, Any]]
 
     def to_dict(self):
         return {name: thaw(getattr(self, name)) for name in self.__dataclass_fields__}

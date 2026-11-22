@@ -28,6 +28,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from typing import Any, cast
 from hashlib import sha256
 import threading
 from uuid import uuid4
@@ -353,7 +354,7 @@ class ProcessChapter:
                     for b_id in unit.block_ids
                 }
                 response = LLMResponse(
-                    raw_content="", payload=None, provider="local", model="local",
+                    raw_content="", payload=cast(Any, None), provider="local", model="local",
                     call_context=physical_context, call_id=None,
                 )
                 self._call._validated_response.set(response)
@@ -498,7 +499,7 @@ class ProcessChapter:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         failure = next((item for item in outcomes if item.error is not None and not item.superseded), None)
-        if failure is not None:
+        if failure is not None and failure.error is not None:
             raise failure.error
         root_results = tuple(item.result for item in outcomes)
 

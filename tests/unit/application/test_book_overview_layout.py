@@ -8,7 +8,6 @@ and a header that skips chapters, leave the layout unset.
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from datetime import UTC, datetime
 import json
 from types import SimpleNamespace
 

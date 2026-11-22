@@ -22,7 +22,7 @@ def downgrade() -> None:
     if context.get_revision_argument() not in ('0006', '0007'):
         for table, column in (('chapter_analyses', 'content_plan_json'), ('block_results', 'content_evidence_json')):
             if connection.execute(sa.text(
-                f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)'
+                f'SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)'  # noqa: S608
             )).scalar_one():
                 raise RuntimeError('нельзя удалить данные содержательного плана или свидетельств')
     if connection.dialect.name == 'sqlite' and connection.dialect.server_version_info < (3, 35, 0):

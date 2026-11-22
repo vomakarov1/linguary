@@ -172,7 +172,8 @@ async def test_claim_next_pending_skips_begin_immediate_when_queue_empty_or_paus
             begin_immediates.append(statement)
 
     wakeups: list[int] = []
-    callback = lambda: wakeups.append(1)
+    def callback() -> None:
+        wakeups.append(1)
 
     event.listen(engine, "before_cursor_execute", record_sql)
     try:

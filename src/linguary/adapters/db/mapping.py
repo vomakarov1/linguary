@@ -16,7 +16,7 @@ from dataclasses import asdict
 import json
 from linguary.domain.pronunciation import PronunciationAssistance, PronunciationEvidence
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from linguary.adapters.db.models import (
     BlockResultRow,
@@ -46,7 +46,9 @@ from linguary.domain.learning import FragmentAssistance
 from linguary.domain.name_translation import (
     NameTranslationAssessment,
     NameTranslationEvidence,
+    NameTranslationMethod,
     NameTranslationObservation,
+    NameTranslationReviewReason,
     NameTranslationStrategy,
 )
 from linguary.domain import (
@@ -161,7 +163,7 @@ def _segments_json(segments: tuple[BlockSegment, ...]) -> list[list[int]]:
 
 def _segments(payload: object) -> tuple[BlockSegment, ...]:
     """Restore stored spans. An empty list is the domain empty tuple."""
-    if not payload:
+    if not isinstance(payload, list) or not payload:
         return ()
     return tuple(
         BlockSegment(start=item[0], end=item[1], sentence_index=item[2]) for item in payload
@@ -389,7 +391,7 @@ def _segment_treatment_json(
 
 def _segment_treatments(payload: object) -> tuple[BlockTreatment, ...]:
     """Restore segment modes. NULL and an empty list are the domain empty tuple."""
-    if not payload:
+    if not isinstance(payload, list) or not payload:
         return ()
     return tuple(BlockTreatment(item) for item in payload)
 
@@ -572,7 +574,7 @@ def _segment_translation_json(
 
 def _segment_translations(payload: object) -> tuple[str | None, ...]:
     """Restore segment translations. NULL and an empty list are the domain empty tuple."""
-    if not payload:
+    if not isinstance(payload, list) or not payload:
         return ()
     return tuple(payload)
 
@@ -808,7 +810,7 @@ def _to_task_error(
 def _object(value: object, fields: set[str]) -> dict[str, Any]:
     if type(value) is not dict or set(value) != fields:
         raise ValueError("неверные поля объекта")
-    return value
+    return cast(dict[str, Any], value)
 
 
 def _string(value: object) -> str:
@@ -848,9 +850,12 @@ def _decode_name_translation_evidence(value: object) -> NameTranslationEvidence 
                 if type(assessment_data["eligible_without_review"]) is not bool or type(assessment_data.get("opaque_name", False)) is not bool:
                     raise ValueError("неверный признак пригодности")
                 assessment = NameTranslationAssessment(
-                    applied_method=_string(assessment_data["applied_method"]),
+                    applied_method=NameTranslationMethod(_string(assessment_data["applied_method"])),
                     eligible_without_review=assessment_data["eligible_without_review"],
-                    review_reasons=tuple(_string(reason) for reason in _array(assessment_data["review_reasons"])),
+                    review_reasons=tuple(
+                        NameTranslationReviewReason(_string(reason))
+                        for reason in _array(assessment_data["review_reasons"])
+                    ),
                     rationale=_string(assessment_data["rationale"]),
                     opaque_name=assessment_data.get("opaque_name", False),
                 )
@@ -1087,10 +1092,13 @@ def _decode_pronunciation(value: object) -> tuple[PronunciationAssistance, ...]:
                 evidence = _object(raw_evidence, legacy_fields)
             else:
                 evidence = _object(raw_evidence, evidence_fields)
+            variant = _string(data['variant'])
+            if variant not in ('uk', 'us'):
+                raise ValueError('неверный вариант произношения')
             result.append(PronunciationAssistance(
                 anchor=SourceAnchor(_string(anchor['block_id']), _integer(anchor['start']),
                                     _integer(anchor['end']), _string(anchor['quote'])),
-                form=_string(data['form']), ipa=_string(data['ipa']), variant=_string(data['variant']),
+                form=_string(data['form']), ipa=_string(data['ipa']), variant=variant,
                 hint_id=_string(data['hint_id']), evidence=PronunciationEvidence(**evidence),
             ))
         return tuple(result)

@@ -11,7 +11,6 @@ from lxml import html
 from web_scenario import (
     WebScenario,
     glossary_candidate,
-    glossary_candidate,
     hinted_result,
     start_run,
     store_book,

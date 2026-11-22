@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import re
+from typing import Any
 
 from linguary.application.ports.llm import LLMConfigurationError
 from linguary.application.ports.persistence import PersistenceError
@@ -10,9 +11,6 @@ from linguary.application.errors import ApplicationError
 
 class DiagnosticNotFoundError(ApplicationError):
     """Absent or foreign diagnostic call; contains no information about its owner."""
-
-
-from linguary.application.retry_policy import violation_of
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +119,7 @@ class Diagnostics:
         record = transaction.llm_calls.diagnostic_record(call_id=call_id, attempt_id=attempt_id)
         if record is None:
             raise LLMConfigurationError('метаданные вызова отсутствуют')
-        metadata = dict(record['metadata'] or {'schema_version': 1})
+        metadata: dict[str, Any] = dict(record['metadata'] or {'schema_version': 1})
         previous = metadata.get('decision')
         if previous in {'accepted', 'rejected', 'stale'}:
             if previous != decision:

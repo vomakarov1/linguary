@@ -3713,12 +3713,8 @@ def test_normalize_a2_promotes_b1_phrasal_verbs_and_quoted_subject_inversion() -
     from linguary.application.analysis_merge import normalize_a2_dialogue_response
     from linguary.application.llm_dto import (
         PedagogicalAnalysisResponse,
-        QuotedDifficultyResponse,
-        QuotedSourceAnchorResponse,
     )
-    from linguary.domain.content_plan import RequiredPoint
 
-    point = (RequiredPoint("p1", "Объяснить фразовый глагол."),)
     cases = [
         # B1 phrasal verbs across inflections (base, past, 3sg, -ing) -> GLOSSARY_ONLY
         ("“Calm down,” he said.", BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY),
@@ -3945,8 +3941,6 @@ def test_normalize_difficulty_kinds_and_non_lexical_validation() -> None:
         make_analysis_block(section_id=SECTION_ID, order=2, text="Stalagmite\u2019s got an \u201cm\u201d in it."),
     )
     aliases = {"b1": blocks[0].id, "b2": blocks[1].id, "b3": blocks[2].id}
-    texts = {b.id: b.text for b in blocks}
-    visible = {a: texts[bid] for a, bid in aliases.items()}
 
     payload = PedagogicalAnalysisResponse(
         treatment_plan=(

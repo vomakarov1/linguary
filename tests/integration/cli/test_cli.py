@@ -314,10 +314,9 @@ def test_cli_supports_pause_resume_restart_translation_and_warns_on_pending_corr
         ProcessingRun,
         ProcessingRunStatus,
         TreatmentPlan,
-        TreatmentPlanItem,
     )
     from linguary.domain.content_plan import canonical_sha
-    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2, CorrectionCandidate, CorrectionCheck
+    from linguary.domain.correction import CORRECTION_POLICY_VERSION_V2, CorrectionCandidate
     from linguary.domain.processing import GlossarySnapshot
     from linguary.domain.recovery import CallAttempt, RecoveryRoot, RecoveryScope
 

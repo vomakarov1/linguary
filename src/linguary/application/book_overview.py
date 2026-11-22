@@ -16,6 +16,7 @@ import statistics
 from decimal import Decimal
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from linguary.application.context_builder import textual_blocks
 from linguary.application.errors import ApplicationError
@@ -534,8 +535,8 @@ def _quality_projection(transaction, book, document, analyses, run, tasks, *, st
         or next((item['reason'] for item in root_summaries if item['reason']), None)
     )
     recovery = dict(covered=len(durable_coverage) if roots else len(result_ids & textual), total=len(textual),
-        calls_used=sum(item['calls_used'] for item in root_summaries),
-        limit=sum(item['limit'] for item in root_summaries),
+        calls_used=sum(int(item['calls_used']) for item in root_summaries),
+        limit=sum(int(item['limit']) for item in root_summaries),
         reason=recovery_reason,
         can_retry=any(item['can_retry'] for item in root_summaries),
         can_extend=any(item['can_extend'] for item in root_summaries),
@@ -608,7 +609,7 @@ def _call_statistics(calls):
         unknown_calls=unknown_cost)
     for name in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
         values = [getattr(call.usage, name, None) for call in calls]
-        result[name] = None if any(value is None for value in values) else sum(values)
+        result[name] = None if any(value is None for value in values) else sum(v for v in values if v is not None)
     return result
 
 
@@ -1035,13 +1036,13 @@ def book_result(
                 else ()
             )
         else:
-            ordered_sections = document.ordered_sections if document is not None else ()
+            ordered_sections: tuple[Any, ...] = document.ordered_sections if document is not None else ()
             selected_sections = tuple(
                 (number, section)
                 for number, section in enumerate(ordered_sections, start=1)
                 if any(block.id in requested_set for block in section.ordered_blocks)
             )
-            target_section_ids = {section.id for _, section in selected_sections}
+            target_section_ids: set[str] = {section.id for _, section in selected_sections}
             get_for_section = getattr(transaction.analyses, "get_for_section", None)
             if get_for_section is not None and not include_quality:
                 analyses = tuple(
@@ -1063,7 +1064,7 @@ def book_result(
                 for block in section.ordered_blocks
             )
             target_block_ids = set(target_block_ids_seq)
-            preceding_block_ids = tuple(
+            preceding_block_ids: tuple[str, ...] = tuple(
                 block.id
                 for number, section in enumerate(ordered_sections, start=1)
                 if number < max_target_number and section.id not in target_section_ids
@@ -1360,7 +1361,9 @@ def _correction_candidates_projection(transaction, book_id, run, *, document, an
     from linguary.domain.correction import correction_policy, is_candidate_correction_policy
 
     binding = None if run is None else transaction.work.get_binding('run', run.id)
-    policy = {} if binding is None else binding['payload_json'].get('correction', {})
+    if binding is None:
+        return ()
+    policy = binding['payload_json'].get('correction', {})
     if not is_candidate_correction_policy(policy.get('policy_version')):
         return ()
     pending = transaction.work.list_correction_candidates(
@@ -1534,7 +1537,7 @@ def _progress(
     processed_blocks: int,
     transaction=None,
     active_run=None,
-    preload: Mapping[str, object] | None = None,
+    preload: Mapping[str, Any] | None = None,
 ) -> BookProgress:
     """Assembles book progress from its plan, tasks, and stored results."""
     sections = document.ordered_sections if document is not None else ()
@@ -1569,7 +1572,7 @@ def _build_failures(
     *,
     transaction=None,
     active_run=None,
-    preload: Mapping[str, object] | None = None,
+    preload: Mapping[str, Any] | None = None,
 ) -> tuple[TaskFailure, ...]:
     if not failed_tasks:
         return ()

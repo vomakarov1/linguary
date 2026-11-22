@@ -180,28 +180,28 @@ class ExportBook:
         )
 
     def _load_validated_export_inputs(
-        self, transaction: object, book_id: str
+        self, transaction: UnitOfWork, book_id: str
     ) -> tuple[BookRecord, CanonicalDocument, tuple[BlockProcessingResult, ...], tuple[ChapterAnalysis, ...]]:
-        book = transaction.books.get(book_id)  # type: ignore[attr-defined]
+        book = transaction.books.get(book_id)
         if book is None:
             raise ExportBookNotFoundError(f"книги {book_id} нет в хранилище")
-        document = transaction.documents.get(book_id)  # type: ignore[attr-defined]
+        document = transaction.documents.get(book_id)
         if document is None or not document.sections:
             raise ExportBookError(
                 f"книга {book_id} не импортирована: экспортировать нечего"
             )
-        _ensure_ready(book, transaction.tasks.list_for_book(book_id))  # type: ignore[attr-defined]
-        run = transaction.runs.active_for_book(book_id)  # type: ignore[attr-defined]
+        _ensure_ready(book, transaction.tasks.list_for_book(book_id))
+        run = transaction.runs.active_for_book(book_id)
         if run is None:
             raise ExportBookError(
                 f"у книги {book_id} нет запуска обработки: полный экспорт "
                 f"собирать не из чего"
             )
         _ensure_recovery_complete(transaction, book_id, run.id)
-        results = tuple(transaction.results.list_for_run(run.id))  # type: ignore[attr-defined]
+        results = tuple(transaction.results.list_for_run(run.id))
         _ensure_result_coverage(document, results)
-        analyses = tuple(transaction.analyses.list_for_book(book_id))  # type: ignore[attr-defined]
-        conditions = transaction.work.latest_conditions(book_id)  # type: ignore[attr-defined]
+        analyses = tuple(transaction.analyses.list_for_book(book_id))
+        conditions = transaction.work.latest_conditions(book_id)
         _ensure_content_plans(
             document,
             analyses,
@@ -496,13 +496,13 @@ def _status_after_export(book: BookRecord, *, succeeded: bool) -> BookStatus:
 
 
 __all__ = [
+    "ExportArtifactNotFoundError",
     "ExportBook",
     "ExportBookCommand",
     "ExportBookError",
     "ExportBookNotFoundError",
     "ExportBookResult",
     "ExportBookSequence",
-    "ExportArtifactNotFoundError",
     "ExportMode",
     "ExportValidationRejectedError",
 ]
@@ -519,7 +519,7 @@ def _ensure_content_plans(document, analyses, results, *, english_help=False, va
 
 def _validate_content_plans(document, analyses, results, *, english_help=False, validators_version=1, reader_level=None):
     if (type(validators_version) is not int or validators_version not in (1, 3, 4)
-            or validators_version == 4 and reader_level != 'a2'):
+            or (validators_version == 4 and reader_level != 'a2')):
         raise ResultValidationError('неподдерживаемая версия проверки учебной помощи')
     a2_v4 = validators_version == 4
     sections = {s.id: s for s in document.sections}

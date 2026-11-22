@@ -43,6 +43,6 @@ TRANSLATION_POLICIES = MappingProxyType({
 
 def require_policy(version: str | None) -> TranslationPolicy:
     """Resolve an explicit version; absent or unsupported versions cannot resume work."""
-    if version not in TRANSLATION_POLICIES:
+    if version is None or version not in TRANSLATION_POLICIES:
         raise TranslationPolicyUnavailable("условия политики перевода недоступны")
     return TRANSLATION_POLICIES[version]

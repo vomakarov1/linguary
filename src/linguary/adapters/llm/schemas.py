@@ -242,17 +242,17 @@ class TranslationResultSchema(_ResponseModel):
 
 __all__ = [
     "BeforeYouReadEntrySchema",
-    "QuotedSceneVisualFactSchema",
-    "QuotedSceneSchema",
-    "NarrativeAnalysisSchema",
-    "NarrativeAnalysisWithNameAssessmentSchema",
-    "PedagogicalAnalysisSchema",
-    "PedagogicalAnalysisA2Schema",
     "BlockResultSchema",
     "ChapterAnalysisSchema",
     "GlossaryCandidateSchema",
     "GlossaryHintSchema",
     "LanguageNoteSchema",
+    "NarrativeAnalysisSchema",
+    "NarrativeAnalysisWithNameAssessmentSchema",
+    "PedagogicalAnalysisA2Schema",
+    "PedagogicalAnalysisSchema",
+    "QuotedSceneSchema",
+    "QuotedSceneVisualFactSchema",
     "SegmentTranslationSchema",
     "SegmentTreatmentSchema",
     "TextualTreatment",
@@ -357,8 +357,8 @@ class ContextFactSchema(_ResponseModel):
 
 
 class ContentPlanV3Schema(ContentPlanSchema):
-    version: Literal[3]
-    profile: Literal['content-plan-v3']
+    version: Literal[3]  # ty: ignore[incompatible-attribute-override]
+    profile: Literal['content-plan-v3']  # ty: ignore[incompatible-attribute-override]
     context_facts: list[ContextFactSchema]
 
 
@@ -381,13 +381,13 @@ class QuotedSourceAnchorSchema(_ResponseModel):
 
 
 class QuotedDifficultySchema(DifficultySchema):
-    anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)
+    anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)  # ty: ignore[incompatible-attribute-override]
 
 
 class QuotedContextFactSchema(ContextFactSchema):
     id: str = Field(default="")
-    anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)
-    subject_anchor: QuotedSourceAnchorSchema
+    anchors: list[QuotedSourceAnchorSchema] = Field(min_length=1)  # ty: ignore[incompatible-attribute-override]
+    subject_anchor: QuotedSourceAnchorSchema  # ty: ignore[incompatible-attribute-override]
 
     @model_validator(mode="before")
     @classmethod
@@ -407,8 +407,8 @@ class QuotedContextFactSchema(ContextFactSchema):
 class QuotedContentPlanSchema(ContentPlanV3Schema):
     version: Literal[3] = 3
     profile: Literal['content-plan-v3'] = 'content-plan-v3'
-    difficulties: list[QuotedDifficultySchema]
-    context_facts: list[QuotedContextFactSchema]
+    difficulties: list[QuotedDifficultySchema]  # ty: ignore[incompatible-attribute-override]
+    context_facts: list[QuotedContextFactSchema]  # ty: ignore[incompatible-attribute-override]
 
 
 class ChapterAnalysisV5Schema(ChapterAnalysisSchema):
@@ -466,19 +466,19 @@ class GlossaryCandidateWithNameAssessmentSchema(GlossaryCandidateSchema):
 
 
 class ChapterAnalysisWithNameAssessmentSchema(ChapterAnalysisSchema):
-    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]  # ty: ignore[incompatible-attribute-override]
 
 
 class ChapterAnalysisV2WithNameAssessmentSchema(ChapterAnalysisV2Schema):
-    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]  # ty: ignore[incompatible-attribute-override]
 
 
 class ChapterAnalysisV3WithNameAssessmentSchema(ChapterAnalysisV3Schema):
-    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]  # ty: ignore[incompatible-attribute-override]
 
 
 class ChapterAnalysisV5WithNameAssessmentSchema(ChapterAnalysisV5Schema):
-    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]  # ty: ignore[incompatible-attribute-override]
 
 
 class TranslationWithPronunciationSchema(_PronunciationCandidatesSchema, TranslationResultSchema):
@@ -523,7 +523,7 @@ class NarrativeAnalysisSchema(_ResponseModel):
 
 
 class NarrativeAnalysisWithNameAssessmentSchema(NarrativeAnalysisSchema):
-    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]
+    glossary_candidates: list[GlossaryCandidateWithNameAssessmentSchema]  # ty: ignore[incompatible-attribute-override]
 
 
 class PedagogicalAnalysisSchema(_ResponseModel):

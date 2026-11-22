@@ -238,11 +238,12 @@ class Application:
     async def aclose(self) -> None:
         """Waits for accepted changes before closing generations and database."""
         self.begin_close()
-        if self._close_task is None:
-            task = asyncio.create_task(self._close())
-            object.__setattr__(self, "_close_task", task)
-            task.add_done_callback(self._collect_close)
-        await await_detached(self._close_task)
+        close_task = self._close_task
+        if close_task is None:
+            close_task = asyncio.create_task(self._close())
+            object.__setattr__(self, "_close_task", close_task)
+            close_task.add_done_callback(self._collect_close)
+        await await_detached(close_task)
 
     async def _close(self) -> None:
         errors = []
@@ -363,10 +364,15 @@ def build_application(
                 policy = NameTranslationPolicy(**conditions.payload["name_translation_policy"])
             except (TypeError, ValueError):
                 raise ConditionsError("conditions_unavailable") from None
-        pronunciation = dict(pronunciation_source=pronunciation_source_for(conditions, injected_source=pronunciation_source),
-            pronunciation_help_enabled=bool(conditions and conditions.payload.get('pronunciation_help_enabled')
-                and conditions.payload.get('source_language') == 'en'),
-            pronunciation_variant=None if conditions is None else conditions.payload.get('pronunciation_variant'))
+        pronunciation_src = pronunciation_source_for(conditions, injected_source=pronunciation_source)
+        pronunciation_enabled = bool(
+            conditions
+            and conditions.payload.get('pronunciation_help_enabled')
+            and conditions.payload.get('source_language') == 'en'
+        )
+        pronunciation_variant = (
+            None if conditions is None else conditions.payload.get('pronunciation_variant')
+        )
         conditions_id = None if conditions is None else conditions.id
         queue = task_queue if conditions is None else BoundTaskQueue(task_queue, book_conditions, conditions.id, task_id_factory)
         configured_client = ConfiguredLLMClient(candidate.llm)
@@ -427,7 +433,9 @@ def build_application(
         else:
             processing_client = RateLimitedLLMClient(inner=processing_logged, limiter=rate_limiter)
         processing_seq = _processing_sequence(
-            **pronunciation,
+            pronunciation_source=pronunciation_src,
+            pronunciation_help_enabled=pronunciation_enabled,
+            pronunciation_variant=pronunciation_variant,
             settings=candidate, unit_of_work=unit_of_work,
             task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
             name_translation_policy=policy,
@@ -461,7 +469,9 @@ def build_application(
             ),
             processing=processing_seq,
             regeneration=_regeneration_sequence(
-                **pronunciation,
+                pronunciation_source=pronunciation_src,
+                pronunciation_help_enabled=pronunciation_enabled,
+                pronunciation_variant=pronunciation_variant,
                 settings=candidate, unit_of_work=unit_of_work,
                 task_queue=queue, model=processing_client, content_plan_profile=profile, prompt_templates=templates,
                 name_translation_policy=policy,
@@ -538,10 +548,13 @@ def build_application(
                 reconcile_correction()
         correction.reconcile()
 
-    def maintain_work():
-        diagnostics.ensure_available()
+    class _MaintainWork:
+        should_run = staticmethod(diagnostics.needs_periodic_purge)
 
-    maintain_work.should_run = diagnostics.needs_periodic_purge
+        def __call__(self) -> None:
+            diagnostics.ensure_available()
+
+    maintain_work = _MaintainWork()
 
     runner = TaskRunner(
         queue=task_queue,
@@ -669,7 +682,7 @@ def _analysis_sequence(
     *,
     settings: AppSettings,
     unit_of_work: SqlAlchemyUnitOfWork,
-    task_queue: SqliteTaskQueue,
+    task_queue: SqliteTaskQueue | BoundTaskQueue,
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
     prompt_templates=None,
@@ -708,7 +721,7 @@ def _processing_sequence(
     *,
     settings: AppSettings,
     unit_of_work: SqlAlchemyUnitOfWork,
-    task_queue: SqliteTaskQueue,
+    task_queue: SqliteTaskQueue | BoundTaskQueue,
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
     prompt_templates=None,
@@ -741,7 +754,7 @@ def _regeneration_sequence(
     *,
     settings: AppSettings,
     unit_of_work: SqlAlchemyUnitOfWork,
-    task_queue: SqliteTaskQueue,
+    task_queue: SqliteTaskQueue | BoundTaskQueue,
     model: LLMClient,
     content_plan_profile: str = "legacy-v1",
     prompt_templates=None,
@@ -814,9 +827,9 @@ def _handlers(
     paths: DataPaths,
     import_book: ImportBook,
     export_book: ExportBook,
-    analysis: ChapterAnalysisSequence,
-    processing: ChapterProcessingSequence,
-    regeneration: BlockRegenerationSequence,
+    analysis: ChapterAnalysisSequence | RuntimeSequence,
+    processing: ChapterProcessingSequence | RuntimeSequence,
+    regeneration: BlockRegenerationSequence | RuntimeSequence,
     correction: CorrectionSequence,
     quality_review: QualityReviewService,
 ) -> dict[TaskType, TaskHandler]:

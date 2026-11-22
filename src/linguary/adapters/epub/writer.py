@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from lxml import etree
+from lxml import etree  # ty: ignore[missing-module-member]
 
 from linguary.adapters.epub.inline import local_name
 from linguary.adapters.epub.resources import package_path
@@ -307,7 +307,7 @@ class EpubExportWriter(EpubWriter):
         with _OpaqueSource(request.source_epub_path) as opaque:
             chapters = _render_chapters(request, opaque=opaque, warnings=warnings)
         chapters = _insert_book_pages(chapters, request, pages)
-        if notices is not None:
+        if notices is not None and notices_href is not None and provenance_href is not None:
             chapters += (_pronunciation_notices_chapter(
                 notices,
                 href=notices_href,

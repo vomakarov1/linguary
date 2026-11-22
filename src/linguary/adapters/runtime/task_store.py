@@ -14,9 +14,11 @@ from __future__ import annotations
 from collections.abc import Callable
 import threading
 from time import sleep
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import Engine, exists, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -133,7 +135,7 @@ class SqliteTaskStore:
                         .values(status=claimed.status.value, attempts=claimed.attempts)
                     )
                     session.commit()
-                    return claimed if updated.rowcount == 1 else None
+                    return claimed if cast(CursorResult[Any], updated).rowcount == 1 else None
                 except OperationalError as error:
                     session.rollback()
                     message = str(error).lower()

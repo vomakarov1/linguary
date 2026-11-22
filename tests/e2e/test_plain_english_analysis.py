@@ -6,7 +6,7 @@ import pytest
 
 from test_content_plan_pipeline import BOOK, finish, import_story, make_app, run
 from linguary.adapters.llm import FakeReply
-from correction_e2e_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.adapters.llm.payloads import parse_payload
 from linguary.application.analysis_merge import AnalysisMergeError, validate_content_plan
 from linguary.application.ports.llm import LLMResponseKind

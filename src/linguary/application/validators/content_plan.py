@@ -207,7 +207,7 @@ def _checked_content_coverage(plan, results, before_you_read, evidence, *, owner
         if validators_version == 4:
             _validate_artifact_source(a, difficulty, source_texts)
         if item.artifact_kind.endswith('.translation'):
-            if (validators_version == 4 and difficulty.kind == 'grammar'
+            if ((validators_version == 4 and difficulty.kind == 'grammar')
                     or difficulty.help_kind != 'lexical_hint' or not _substance(item.body_excerpt)):
                 raise _validation_error(
                     f'перевод не покрывает объяснение ({item.difficulty_id}, {item.block_id})',

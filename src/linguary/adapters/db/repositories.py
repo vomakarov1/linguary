@@ -14,8 +14,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 import json
 import re
+from typing import Any, cast as typing_cast
 
 from sqlalchemy import JSON, LargeBinary, cast, delete, func, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert
 
@@ -159,7 +161,11 @@ class SqlAlchemyDocumentRepository:
                 ResourceRow.book_id == book_id, ResourceRow.stored_path.is_not(None)
             )
         ).all()
-        return {source_path: stored_path for source_path, stored_path in rows}
+        return {
+            source_path: stored_path
+            for source_path, stored_path in rows
+            if stored_path is not None
+        }
 
     def add_import_warnings(
         self, book_id: str, warnings: Sequence[BookImportWarning]
@@ -443,7 +449,7 @@ class SqlAlchemyProcessingRunRepository:
                 llm_settings_json=row.llm_settings_json,
             )
         )
-        if result.rowcount != 1:
+        if typing_cast(CursorResult[Any], result).rowcount != 1:
             raise PersistenceError(f"запуск обработки {run.id} отсутствует в хранилище")
         self._session.flush()
 
@@ -829,7 +835,7 @@ class SqlAlchemyTaskRepository:
                 error_detail=row.error_detail,
             )
         )
-        if result.rowcount != 1:
+        if typing_cast(CursorResult[Any], result).rowcount != 1:
             stored = self._session.execute(
                 select(
                     ProcessingTaskRow.book_id,
@@ -1038,7 +1044,7 @@ class SqlAlchemyLLMCallLogRepository:
         return len(rows)
 
     def _remove_body(self, row, status):
-        metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+        metadata: dict[str, Any] = dict(row.diagnostic_meta_json or {'schema_version': 1})
         metadata.pop('input_text', None)
         body_meta = dict(metadata.get('body_meta') or {})
         body_meta.update(body_status=status, stored_bytes=0)
@@ -1099,8 +1105,8 @@ class SqlAlchemyLLMCallLogRepository:
             return
 
         remove_reasons: dict[str, str] = {}
-        need_process: list[tuple[object, str, bool, list[object]]] = []
-        surviving_by_book: dict[str, list[list[object]]] = {}
+        need_process: list[tuple[Any, str, bool, list[Any]]] = []
+        surviving_by_book: dict[str, list[list[Any]]] = {}
         for item in projected:
             status = item.body_status
             if status in {'expired', 'deleted', 'disabled'} or (
@@ -1131,7 +1137,7 @@ class SqlAlchemyLLMCallLogRepository:
                 )
             else:
                 already_bounded = inp_bytes <= policy.max_body_bytes
-            slot: list[object] = [item.id, (resp_bytes if has_resp else 0) + inp_bytes]
+            slot: list[Any] = [item.id, (resp_bytes if has_resp else 0) + inp_bytes]
             surviving_by_book.setdefault(item.book_id, []).append(slot)
             if not already_bounded or item.expires_at != expires_at:
                 need_process.append((item, expires_at, already_bounded, slot))
@@ -1147,18 +1153,18 @@ class SqlAlchemyLLMCallLogRepository:
                 row = rows_by_id.get(item.id)
                 if row is None:
                     continue
-                metadata = dict(row.diagnostic_meta_json or {'schema_version': 1})
+                metadata: dict[str, Any] = dict(row.diagnostic_meta_json or {'schema_version': 1})
                 previous = dict(metadata.get('body_meta') or {})
-                if isinstance(metadata.get('input_text'), str):
-                    if len(metadata['input_text'].encode('utf-8')) > policy.max_body_bytes:
-                        metadata['input_text'], _ = bounded_body(
-                            metadata['input_text'], max_bytes=policy.max_body_bytes
+                input_text = metadata.get('input_text')
+                if isinstance(input_text, str):
+                    if len(input_text.encode('utf-8')) > policy.max_body_bytes:
+                        input_text, _ = bounded_body(
+                            input_text, max_bytes=policy.max_body_bytes
                         )
-                new_inp_bytes = (
-                    len(metadata['input_text'].encode('utf-8'))
-                    if isinstance(metadata.get('input_text'), str)
-                    else 0
-                )
+                        metadata['input_text'] = input_text
+                    new_inp_bytes = len(input_text.encode('utf-8'))
+                else:
+                    new_inp_bytes = 0
                 if row.response_text is not None:
                     if already_bounded:
                         metadata['body_meta'] = {**previous, 'expires_at': expires_at}

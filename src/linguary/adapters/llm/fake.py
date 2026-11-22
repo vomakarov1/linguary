@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import cast
 
 from linguary.adapters.llm.payloads import parse_payload
 from linguary.application.ports.llm import (
@@ -120,7 +121,7 @@ class FakeLLMClient(LLMClient):
             raise step
         payload = parse_payload(request.kind, step.content, contract_version=request.contract_version, name_translation_policy_version=request.name_translation_policy_version, pronunciation_candidates_version=request.pronunciation_candidates_version, truncated=step.truncated)
         return LLMResponse(
-            payload=payload,  # type: ignore[arg-type]  # schema selected by request.kind
+            payload=cast(PayloadT, payload),
             provider=self.provider,
             model=step.model,
             truncated=step.truncated,

@@ -166,7 +166,7 @@ class EpubCheckValidator(ExportValidator):
         try:
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.unlink(missing_ok=True)
-            return subprocess.run(
+            return subprocess.run(  # noqa: S603
                 tool.command(request, report_path=report_path),
                 capture_output=True,
                 text=True,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from linguary.adapters.config import AppSettings, CheckSettings, LLMSettings, StorageSettings
 from linguary.application.ports.llm import LLMConfigurationError

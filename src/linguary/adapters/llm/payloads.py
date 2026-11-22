@@ -261,7 +261,7 @@ def parse_payload(
             raw_content=content,
             violation=Violation('provider_truncated' if truncated else 'response_domain', kind.value, safe_message='Ответ не соответствует внутреннему контракту'),
         ) from None
-    if byr_evidence_items and getattr(result, "content_plan", None) is not None:
+    if byr_evidence_items and isinstance(result, ChapterAnalysisResponse) and result.content_plan is not None:
         evs = []
         for item in byr_evidence_items:
             try:
@@ -339,8 +339,9 @@ def _to_dto(validated: BaseModel) -> LLMPayload:
 
 def _chapter_analysis(schema: ChapterAnalysisSchema) -> ChapterAnalysisResponse:
     """Chapter analysis DTO."""
-    if isinstance(getattr(schema, 'content_plan', None), QuotedContentPlanSchema):
-        content_plan = _quoted_content_plan(schema.content_plan)
+    raw_content_plan = getattr(schema, 'content_plan', None)
+    if isinstance(raw_content_plan, QuotedContentPlanSchema):
+        content_plan = _quoted_content_plan(raw_content_plan)
     elif isinstance(schema, (ChapterAnalysisV2Schema, ChapterAnalysisV3Schema)):
         content_plan = _content_plan(schema.content_plan)
     else:

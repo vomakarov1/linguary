@@ -358,7 +358,7 @@ async def test_failed_regeneration_superseded_by_new_regeneration_reaches_ready_
     from linguary.application.ports.llm import LLMProviderError
     from linguary.composition import drain_tasks
     from linguary.domain import BookStatus
-    from correction_fakes import CorrectionAwareFakeLLMClient
+    from tests.correction_fakes import CorrectionAwareFakeLLMClient
     from test_book_conditions import make_app
     from test_recovery_commit import analysis_reply, prepare, translation_reply
 

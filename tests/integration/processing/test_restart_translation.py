@@ -8,7 +8,7 @@ import pytest
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings, WorkerPoolSettings
 from linguary.adapters.db.work_state import SqlAlchemyWorkRepository
 from linguary.adapters.llm import FakeReply
-from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.block_processing import TranslationCall
 from linguary.application.ports.llm import LLMTransportError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand

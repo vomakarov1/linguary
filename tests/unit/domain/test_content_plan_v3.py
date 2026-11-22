@@ -1,4 +1,4 @@
-from dataclasses import asdict, replace
+from dataclasses import replace
 import pytest
 from linguary.domain.content_plan import ContentPlan, ContentEvidence, ContextFact, SourceAnchor, Scene, SceneVisualFact
 from linguary.domain.errors import DomainError

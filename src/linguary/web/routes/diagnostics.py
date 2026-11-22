@@ -1,5 +1,5 @@
 """Diagnostic bodies require a real local peer, independently of public host settings."""
-from ipaddress import ip_address
+from ipaddress import IPv6Address, ip_address
 from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -13,7 +13,11 @@ _HEADERS = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'}
 def _loopback(value):
     try:
         address = ip_address(value)
-        return address.is_loopback or bool(getattr(address, 'ipv4_mapped', None) and address.ipv4_mapped.is_loopback)
+        return address.is_loopback or (
+            isinstance(address, IPv6Address)
+            and address.ipv4_mapped is not None
+            and address.ipv4_mapped.is_loopback
+        )
     except ValueError:
         return False
 
@@ -26,7 +30,7 @@ def require_local(request: Request):
     host = request.headers.get('host', '').lower()
     try:
         authority = urlsplit('//' + host)
-        authority.port  # Reject malformed ports/IPv6 authorities.
+        _ = authority.port  # Reject malformed ports/IPv6 authorities.
         allowed = allowed and not authority.username and not authority.password and not authority.path
         allowed = allowed and not authority.query and not authority.fragment and '@' not in host
         allowed = allowed and (authority.hostname == 'localhost' or _loopback(authority.hostname or ''))

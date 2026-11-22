@@ -26,7 +26,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from ebooklib import epub
-from lxml import etree
+from lxml import etree  # ty: ignore[missing-module-member]
 
 from linguary.adapters.epub.inline import (
     InlineContent,
@@ -1101,7 +1101,6 @@ def _structural_path(element: etree._Element) -> str:
 
 def _unique(values: Iterable[str | None]) -> tuple[str, ...]:
     """Non-empty values without duplicates, in order of appearance."""
-    return tuple(dict.fromkeys(value for value in values if value))
     return tuple(dict.fromkeys(value for value in values if value))
 
 

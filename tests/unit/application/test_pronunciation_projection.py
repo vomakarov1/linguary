@@ -1,5 +1,5 @@
 """One accepted book snapshot projects identically for every presentation."""
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
 import pytest
 

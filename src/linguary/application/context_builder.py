@@ -42,6 +42,7 @@ from dataclasses import asdict, field
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import MappingProxyType
+from typing import Any, cast
 
 from linguary.application.analysis_merge import (
     DEFAULT_MAX_FRAGMENT_BLOCKS,
@@ -71,7 +72,7 @@ from linguary.application.llm_dto import (
 )
 from linguary.application.ports.llm import LLMRequest, LLMResponseKind
 from linguary.application.translation_policy import LEGACY_TRANSLATION_POLICY, require_policy
-from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, artifact_key, canonical_sha
+from linguary.domain.content_plan import ContentPlan, ContextFact, Difficulty, canonical_sha
 from linguary.domain import BeforeYouReadEntry
 from linguary.application.retry_policy import (
     ExpectedBlock,
@@ -612,7 +613,7 @@ class TranslationContext(AliasedBlocksContext):
         before_you_read: tuple[BeforeYouReadEntry, ...] = (),
         input_without_optional_neighbours: str | _LazyTranslationInput | None = None,
         pure_read_as_is_aliases: Iterable[str] = frozenset(),
-        difficulty_ids_by_alias: Mapping[str, str] = (),
+        difficulty_ids_by_alias: Mapping[str, str] = MappingProxyType({}),
         *,
         _input_without_optional_neighbours: str | _LazyTranslationInput | None = None,
     ) -> None:
@@ -652,8 +653,12 @@ class TranslationContext(AliasedBlocksContext):
     @property
     def input_without_optional_neighbours(self) -> str | None:
         value = self._input_without_optional_neighbours
-        if isinstance(value, _LazyTranslationInput) or callable(value):
+        if isinstance(value, _LazyTranslationInput):
             resolved = value()
+            object.__setattr__(self, "_input_without_optional_neighbours", resolved)
+            return resolved
+        if callable(value):
+            resolved = cast(str | None, value())
             object.__setattr__(self, "_input_without_optional_neighbours", resolved)
             return resolved
         return value
@@ -883,7 +888,7 @@ def _matches_initials_in_text(
                 initials = tuple(ch.casefold() for ch in plain if ch.isalpha())
                 if not match.group("honorific") and initials and initials[0] in {"a", "i"}:
                     continue
-            if initials and all(g.startswith(init) for g, init in zip(given, initials)):
+            if initials and all(g.startswith(init) for g, init in zip(given, initials, strict=False)):
                 return True
 
     # Direction 2: initial-form term (Mr H. Potter / H. Potter) vs full-name text (Harry Potter).
@@ -896,11 +901,11 @@ def _matches_initials_in_text(
             candidate_given = [w for w in raw_given if w not in _GLOSSARY_STOP_WORDS]
             if len(candidate_given) < len(given):
                 continue
-            if all(cg.startswith(init) for cg, init in zip(candidate_given, given)):
+            if all(cg.startswith(init) for cg, init in zip(candidate_given, given, strict=False)):
                 return True
             if len(candidate_given) > len(given) and all(
                 cg.startswith(init)
-                for cg, init in zip(candidate_given[-len(given) :], given)
+                for cg, init in zip(candidate_given[-len(given) :], given, strict=True)
             ):
                 return True
 
@@ -976,11 +981,14 @@ class ContextBuilder:
         self._user_decisions = tuple(user_decisions)
         self._nonbinding_suggestions = tuple(nonbinding_suggestions)
         self._english_help = bool(self._prompt_templates.get("english_help"))
-        self._pronunciation_version = self._prompt_templates.get('pronunciation_candidates_version')
-        if self._pronunciation_version is not None and (
-                type(self._pronunciation_version) is not int or self._pronunciation_version != 1
+        raw_pronunciation_version = self._prompt_templates.get('pronunciation_candidates_version')
+        if raw_pronunciation_version is not None and (
+                type(raw_pronunciation_version) is not int or raw_pronunciation_version != 1
                 or not self._prompt_templates.get('pronunciation_processing')):
             raise ContextBuildError('неизвестный режим кандидатов произношения')
+        self._pronunciation_version: int | None = (
+            raw_pronunciation_version if isinstance(raw_pronunciation_version, int) else None
+        )
         if max_accumulated_candidates < 0:
             raise ContextBuildError(
                 "ограничение числа накопленных кандидатов не может быть отрицательным"
@@ -1010,7 +1018,7 @@ class ContextBuilder:
         findings: FragmentFindings | None = None,
     ) -> ChapterAnalysisContext:
         """Narrative source and glossary context, independent of reader settings."""
-        if fragment_count < 1 or fragment is not None and fragment.order >= fragment_count:
+        if fragment_count < 1 or (fragment is not None and fragment.order >= fragment_count):
             raise ContextBuildError('фрагмент не входит в указанное число частей главы')
         blocks = fragment.blocks if fragment is not None else textual_blocks(section)
         if not blocks:
@@ -1068,7 +1076,7 @@ class ContextBuilder:
         prior_chapter_topics: Sequence[str] = (),
     ) -> ChapterAnalysisContext:
         """Source-bound pedagogical context with existing chapter and group budgets."""
-        if fragment_count < 1 or fragment is not None and fragment.order >= fragment_count:
+        if fragment_count < 1 or (fragment is not None and fragment.order >= fragment_count):
             raise ContextBuildError('фрагмент не входит в указанное число частей главы')
         order = fragment.order if fragment else 0
         instructions = self._prompt_templates.get('pedagogical_analysis') or _with_name_policy(
@@ -1418,7 +1426,7 @@ class ContextBuilder:
         )
         a2_inline_notes = self._reader_level == "a2" and not self._english_help
         explained_block = "" if a2_inline_notes else _explained_expressions(analysis, section)
-        input_args = dict(
+        input_text = self._translation_input(
             document=document,
             section=section,
             unit=unit,
@@ -1431,8 +1439,8 @@ class ContextBuilder:
             regeneration=regeneration,
             segment_lines=segment_lines,
             explained_block=explained_block,
+            neighbours=neighbours,
         )
-        input_text = self._translation_input(**input_args, neighbours=neighbours)
         mandatory_input = (
             _LazyTranslationInput(
                 builder=self,
@@ -1900,7 +1908,7 @@ class ContextBuilder:
             suggestions = tuple(
                 s for s in raw_suggestions
                 if _matches_chapter_text(
-                    s.canonical_source_text if hasattr(s, "canonical_source_text") else s.source_text,
+                    s.canonical_source_text if isinstance(s, TermConcept) else s.source_text,
                     blocks_text,
                     word_stems,
                     normalized_blocks_text=normalized_blocks_text,
@@ -1944,15 +1952,15 @@ class ContextBuilder:
             parts.append("\n".join(limit_lines))
         return "\n\n".join(parts)
 
-    def _selected_candidates(
+    def _selected_candidates[CandidateT: GlossaryCandidate | GlossaryCandidateResponse](
         self,
-        candidates: Iterable[GlossaryCandidate],
+        candidates: Iterable[CandidateT],
         *,
         blocks: Sequence[DocumentBlock] | None = None,
         blocks_text: str | None = None,
         word_stems: set[str] | None = None,
         normalized_blocks_text: str | None = None,
-    ) -> tuple[GlossaryCandidate, ...]:
+    ) -> tuple[CandidateT, ...]:
         """Decisions from previous chapters that enter context.
 
         Duplicates of the same source text are collapsed, including obvious spelling
@@ -1960,7 +1968,7 @@ class ContextBuilder:
         it appeared in. When overflowing, earlier chapter decisions are retained: key characters
         and places appear early and recur, while a one-off term from the latest chapter adds little.
         """
-        filtered_candidates = candidates
+        filtered_candidates: Iterable[CandidateT] = candidates
         if blocks is not None or blocks_text is not None:
             if blocks_text is None:
                 blocks_text = " ".join(block.text for block in (blocks or ()))
@@ -1978,7 +1986,7 @@ class ContextBuilder:
                 )
             ]
 
-        selected: dict[str, GlossaryCandidate] = {}
+        selected: dict[str, CandidateT] = {}
         for candidate in filtered_candidates:
             if len(selected) >= self._max_accumulated_candidates:
                 break
@@ -3104,7 +3112,7 @@ def _chapter_header(
 
 
 def _known_decisions(
-    candidates: Sequence[GlossaryCandidate], *, target_language: str
+    candidates: Sequence[GlossaryCandidate | GlossaryCandidateResponse], *, target_language: str
 ) -> str:
     """Already accepted book decisions: candidates of prior chapters and user decisions."""
     if not candidates:
@@ -3117,7 +3125,7 @@ def _known_decisions(
     return "\n".join(lines)
 
 
-def _known_decision_line(candidate: GlossaryCandidate) -> str:
+def _known_decision_line(candidate: GlossaryCandidate | GlossaryCandidateResponse) -> str:
     """Accepted book decision line with its translation guidance."""
     line = (
         f"- {candidate.source_text} [{candidate.type}] -> "
@@ -3152,7 +3160,7 @@ def _fragment_findings_candidates(candidates: Sequence[GlossaryCandidateResponse
     return "\n".join(lines)
 
 
-def _name_policy(value: NameTranslationPolicy | Mapping[str, object] | None) -> NameTranslationPolicy | None:
+def _name_policy(value: object) -> NameTranslationPolicy | None:
     if value is None:
         return None
     if isinstance(value, NameTranslationPolicy):
@@ -3160,7 +3168,7 @@ def _name_policy(value: NameTranslationPolicy | Mapping[str, object] | None) -> 
     if not isinstance(value, Mapping):
         raise ContextBuildError('недопустимая политика передачи имён')
     try:
-        return NameTranslationPolicy(**value)
+        return NameTranslationPolicy(**cast(Mapping[str, Any], value))
     except (TypeError, ValueError):
         raise ContextBuildError('недопустимая политика передачи имён') from None
 
@@ -3654,7 +3662,7 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
     pronunciation_level = reader_level
     reader_level = reader_level or 'b2'
     languages = dict(source_language=source_language, target_language=target_language)
-    result = {
+    result: dict[str, Any] = {
         'analysis': chapter_analysis_instructions(**languages, reader_level=reader_level, english_help=english_help, validators_version=validators_version),
         'fragment': chapter_fragment_instructions(**languages, reader_level=reader_level, english_help=english_help, validators_version=validators_version),
         'translation': translation_unit_instructions(**languages),
@@ -3664,8 +3672,8 @@ def snapshot_prompt_templates(*, source_language, target_language, reader_level,
     }
     if analysis_contract_version is not None:
         result['analysis_contract_version'] = analysis_contract_version
-    if (profile == 'content-plan-v3' or profile == 'legacy-v1' and reader_level.strip().lower() == 'a2'
-            and validators_version == 4 and not english_help):
+    if (profile == 'content-plan-v3' or (profile == 'legacy-v1' and reader_level.strip().lower() == 'a2'
+            and validators_version == 4 and not english_help)):
         result.update(content_analysis=_CONTENT_PLAN_ANALYSIS_V3, content_processing=_CONTENT_PLAN_PROCESSING_V3,
                       learner_quality=learner_instructions(reader_level))
     if analysis_contract_version == 5:

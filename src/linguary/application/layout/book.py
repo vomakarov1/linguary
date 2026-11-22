@@ -652,6 +652,8 @@ def _speakers_for_block(
     }
     speakers: dict[tuple[int, int], str] = {}
     for fact in block_facts:
+        if fact.value is None:
+            continue
         name = _speaker_name(
             fact.value,
             concepts,

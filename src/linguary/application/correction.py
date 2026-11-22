@@ -1,23 +1,12 @@
 """Current correction coverage and transactional recovery of required chapter work."""
 
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, fields, replace
 from hashlib import sha256
 import json
 from uuid import uuid4
-
-_SCOPED_RECONCILE_SECTION_ID: ContextVar[str | None] = ContextVar('_SCOPED_RECONCILE_SECTION_ID', default=None)
-
-
-@contextmanager
-def _scoped_reconcile_section(section_id: str | None):
-    token = _SCOPED_RECONCILE_SECTION_ID.set(section_id)
-    try:
-        yield
-    finally:
-        _SCOPED_RECONCILE_SECTION_ID.reset(token)
 
 from linguary.application.context_builder import (
     _extract_word_stems,
@@ -33,6 +22,17 @@ from linguary.domain import (
 from linguary.domain.book_conditions import BookConditions, WorkStateError, thaw
 from linguary.domain.content_plan import canonical_sha
 from linguary.domain.correction import CorrectionCheck, correction_policy, correction_task_identity, is_candidate_correction_policy
+
+_SCOPED_RECONCILE_SECTION_ID: ContextVar[str | None] = ContextVar('_SCOPED_RECONCILE_SECTION_ID', default=None)
+
+
+@contextmanager
+def _scoped_reconcile_section(section_id: str | None):
+    token = _SCOPED_RECONCILE_SECTION_ID.set(section_id)
+    try:
+        yield
+    finally:
+        _SCOPED_RECONCILE_SECTION_ID.reset(token)
 
 
 def original_block_payload(block):
@@ -262,11 +262,14 @@ class CorrectionInputs:
             return False
         if not {block.id for block in self.blocks} <= self.results.keys():
             return False
-        if any(self.bindings[block.id] is None
-               or self.bindings[block.id]['book_id'] != self.document.id
-               or self.bindings[block.id]['conditions_id'] != self.conditions.id
-               or not self.bindings[block.id]['attempt_id']
-               or not self.bindings[block.id]['artifact_revision_id'] for block in self.blocks):
+        if any(
+            (binding := self.bindings[block.id]) is None
+            or binding['book_id'] != self.document.id
+            or binding['conditions_id'] != self.conditions.id
+            or not binding['attempt_id']
+            or not binding['artifact_revision_id']
+            for block in self.blocks
+        ):
             return False
         try:
             if self.analysis is not None:
@@ -446,10 +449,8 @@ def _is_pure_read_as_is(block: DocumentBlock, inputs: CorrectionInputs) -> bool:
         return False
     treatment = None
     if inputs.analysis is not None and inputs.analysis.treatment_plan is not None:
-        try:
+        with suppress(Exception):
             treatment = inputs.analysis.treatment_plan.treatment_for(block.id)
-        except Exception:
-            pass
     if treatment is None and block.id in inputs.results:
         treatment = inputs.results[block.id].treatment
     if treatment != BlockTreatment.READ_AS_IS:

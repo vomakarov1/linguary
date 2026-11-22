@@ -17,7 +17,7 @@ operations to fail with "transaction already opened".
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from itertools import count
@@ -63,7 +63,7 @@ class SqlAlchemyUnitOfWork:
         return cls(create_session_factory(engine))
 
     @contextmanager
-    def transaction(self) -> Iterator[SqlAlchemyUnitOfWork]:
+    def transaction(self) -> Generator[SqlAlchemyUnitOfWork]:
         """Open a transaction and make repositories accessible.
 
         Nested transactions within the same execution context remain prohibited: they would
@@ -102,7 +102,7 @@ class SqlAlchemyUnitOfWork:
             session.close()
 
     @contextmanager
-    def read_transaction(self) -> Iterator[SqlAlchemyUnitOfWork]:
+    def read_transaction(self) -> Generator[SqlAlchemyUnitOfWork]:
         """Open a read-only transaction without acquiring SQLite's writer lock."""
         if self._current.get() is not None:
             raise PersistenceError(

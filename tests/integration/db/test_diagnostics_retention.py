@@ -103,7 +103,6 @@ def test_periodic_purge_throttles_repeated_calls_while_purge_expired_runs_immedi
 def test_enforce_diagnostics_policy_evicts_by_byte_length_without_loading_untouched_bodies(
     unit_of_work,
 ):
-    from linguary.adapters.db.models import LLMCallLogRow
     from linguary.domain.book_conditions import BookConditions
     from persistence_factories import (
         BLOCK_ID,

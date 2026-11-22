@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable
 
 from linguary.application.context_builder import textual_blocks
 from linguary.domain import CanonicalDocument, glossary_key
 
 
-def mention_counter(document: CanonicalDocument) -> Callable[[Sequence[str]], int]:
+def mention_counter(document: CanonicalDocument) -> Callable[[Iterable[str]], int]:
     """Counts spelling occurrences on word boundaries without double-counting overlaps."""
     texts = tuple(
         glossary_key(block.text)
@@ -17,7 +17,7 @@ def mention_counter(document: CanonicalDocument) -> Callable[[Sequence[str]], in
         for block in textual_blocks(section)
     )
 
-    def count(spellings: Sequence[str]) -> int:
+    def count(spellings: Iterable[str]) -> int:
         normalized = {glossary_key(spelling) for spelling in spellings}
         patterns = tuple(
             re.compile(r"(?<!\w)" + re.escape(spelling) + r"(?!\w)")

@@ -579,7 +579,8 @@ async def continuation_origin(tmp_path, monkeypatch, request):
             'usage': {'cost': .01, 'prompt_tokens': 100, 'completion_tokens': 10,
                       'prompt_tokens_details': {'cached_tokens': 32}},
             'choices': [{'message': {'content': json.dumps(payload, ensure_ascii=False)}, 'finish_reason': 'stop'}]})
-    http_factory = lambda **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
+    def http_factory(**kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
     await execute(cli_args(tmp_path, value, '--prepare'))
     approval = tmp_path / 'approval.json'
     approval.write_text(ProtocolApproval(protocol_hash=value.content_hash, accepted=True, accepted_by='TEST ONLY', accepted_at='2026-10-14').model_dump_json())
@@ -862,7 +863,7 @@ async def test_changed_manifest_blocks_live(tmp_path, monkeypatch):
 
 
 async def test_negative_run_keeps_production_data_root_unchanged(tmp_path):
-    from linguary.comparison.__main__ import execute, parser
+    from linguary.comparison.__main__ import execute
     from linguary.comparison.workspace import WorkspaceError
     protected = tmp_path / 'production'
     protected.mkdir()
@@ -1004,7 +1005,7 @@ async def test_stop_keeps_receipts_and_partial_report(tmp_path):
 
 
 async def test_local_cleanup_removes_rejected_diagnostics_before_publication(tmp_path):
-    from linguary.comparison.__main__ import prepare, cleanup_diagnostics, local_report
+    from linguary.comparison.__main__ import prepare, local_report
     value = protocol()
     workspace = prepare(tmp_path / 'comparison', [tmp_path / 'production'], value)
     diagnostics = workspace.root / 'analysis' / 'diagnostics'

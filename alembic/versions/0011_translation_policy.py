@@ -64,14 +64,14 @@ def _refuse_earlier_data_loss(connection) -> None:
                                             ("block_results", "content_evidence_json")))
     for table, column, message in checks:
         if connection.execute(sa.text(
-            f"SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)"
+            f"SELECT EXISTS (SELECT 1 FROM {table} WHERE {column} IS NOT NULL)"  # noqa: S608
         )).scalar_one():
             raise RuntimeError(message)
     if target in ("0009", "0008", "0007"):
         return
     for table in ("book_conditions", "work_bindings", "artifact_revisions", "recovery_roots",
                   "recovery_scopes", "llm_attempts", "quality_reviews", "quality_reservations"):
-        if connection.execute(sa.text(f"SELECT EXISTS (SELECT 1 FROM {table})")).scalar_one():
+        if connection.execute(sa.text(f"SELECT EXISTS (SELECT 1 FROM {table})")).scalar_one():  # noqa: S608
             raise RuntimeError("нельзя удалить сохранённую работу книги")
     if connection.execute(sa.text(
         "SELECT EXISTS (SELECT 1 FROM llm_call_logs "

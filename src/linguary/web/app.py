@@ -19,7 +19,7 @@ is request origin: `Host`, `Origin`, and `Sec-Fetch-Site` are checked here by a 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request, Response, status
@@ -272,7 +272,7 @@ def _lifespan(
     """Process lifecycle: dependency assembly, worker, and closing connections."""
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         built = application or build_application()
         owns_application = application is None
         setattr(app.state, APPLICATION_STATE_ATTRIBUTE, built)

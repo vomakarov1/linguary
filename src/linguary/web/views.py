@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from fastapi import Request
@@ -25,13 +25,15 @@ STATIC_DIRECTORY = PACKAGE_ROOT / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATE_DIRECTORY))
 
+_template_globals = cast(dict[str, Any], templates.env.globals)
+
 #: Warning about transmitting book text to external provider is needed by screens that
 #: show nothing about LLM configuration themselves (PRD § 4.1, § 21.2), so it is
 #: available to any template rather than passed as a separate field in every response.
-templates.env.globals["external_llm_warning"] = labels.EXTERNAL_LLM_WARNING
+_template_globals["external_llm_warning"] = labels.EXTERNAL_LLM_WARNING
 
 #: Glossary concept types in Russian: type correction options on glossary screen.
-templates.env.globals["concept_types"] = tuple(
+_template_globals["concept_types"] = tuple(
     (concept_type.value, label)
     for concept_type, label in labels.CONCEPT_TYPE_LABELS.items()
 )

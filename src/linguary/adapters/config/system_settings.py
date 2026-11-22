@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from linguary.adapters.config.settings import (
@@ -67,7 +67,7 @@ class SystemSettingsUpdate:
     analysis_model: str | None = None
     processing_model: str | None = None
     correction_model: str | None = None
-    temperature: float | None | object = UNSET
+    temperature: float | object | None = UNSET
     timeout_seconds: float | None = None
     reader_level: str | None = None
     name_translation_strategy: str | None = None
@@ -106,7 +106,7 @@ class SystemSettingsUpdate:
                      and url.username is None and url.password is None
                      and '?' not in base_url and '#' not in base_url
                      and not any(char.isspace() for char in base_url))
-            url.port
+            _ = url.port
         except ValueError:
             valid = False
         if not valid:
@@ -218,6 +218,7 @@ def overlay_settings(initial: AppSettings, stored: StoredSystemSettings | None) 
         return initial
     if not isinstance(stored.overrides, dict) or not (BASE_OVERRIDE_FIELDS <= set(stored.overrides) <= ALLOWED_OVERRIDE_FIELDS):
         raise SystemSettingsValidationError('form', 'Сохранённые настройки имеют неверный формат')
-    update = SystemSettingsUpdate(**(dict(proxy_mode='auto') | stored.overrides), api_key=stored.api_key, proxy_url=stored.proxy_url)
+    raw_overrides: dict[str, Any] = dict(proxy_mode='auto') | stored.overrides
+    update = SystemSettingsUpdate(**raw_overrides, api_key=stored.api_key, proxy_url=stored.proxy_url)
     return candidate_settings(initial, update)
 

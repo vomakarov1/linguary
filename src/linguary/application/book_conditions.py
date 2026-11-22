@@ -171,8 +171,8 @@ class BookConditionsService:
                     'validators': 4 if payload['reader_level'] == 'a2' else 3,
                     'schemas': 5 if contract_v5 else 3, 'prompts': 5 if contract_v5 else 3}
         effective_v3 = (profile == 'content-plan-v3'
-                        or profile == 'legacy-v1' and payload['reader_level'] == 'a2'
-                        and not english_help)
+                        or (profile == 'legacy-v1' and payload['reader_level'] == 'a2'
+                        and not english_help))
         payload['staged_analysis'] = bool(
             payload.get('llm_parameters', {}).get('staged_analysis', False)
             and effective_v3

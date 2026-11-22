@@ -5,7 +5,6 @@ from linguary.adapters.epub.writer import (
     _ExportWarnings,
     _OpaqueSource,
     _exported_sections,
-    _previously_heading,
     _render_chapters,
     _split_leading_front_matter,
 )

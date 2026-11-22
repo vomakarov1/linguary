@@ -15,7 +15,7 @@ from test_content_plan_pipeline import import_story, analysis_payload, processin
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.config.settings import ReadingSettings
 from linguary.adapters.llm import FakeReply
-from correction_e2e_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
 from linguary.application.ports.llm import LLMResponseKind
 from linguary.application.recovery import dependency_intervals, local_failure_signature

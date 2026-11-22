@@ -70,7 +70,7 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
 
 #: Addresses where the server listens on all interfaces simultaneously. The application does not
 #: know the machine's network hostnames, so it cannot restrict host headers for them.
-_WILDCARD_HOSTS = ("0.0.0.0", "::", "*")
+_WILDCARD_HOSTS = ("0.0.0.0", "::", "*")  # noqa: S104
 
 #: Local Web UI port.
 DEFAULT_SERVER_PORT = 8000
@@ -98,16 +98,18 @@ def validate_proxy(mode: object, url: object) -> None:
         if url is not None:
             raise SettingsError('Адрес прокси допустим только для режима «Через прокси»')
         return
-    try:
-        parsed = urlsplit(url) if isinstance(url, str) else None
-        valid = (parsed is not None and parsed.scheme in ('http', 'https')
-                 and bool(parsed.hostname) and parsed.path in ('', '/')
-                 and '?' not in url and '#' not in url
-                 and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url))
-        if parsed is not None:
-            parsed.port
-    except ValueError:
+    if not isinstance(url, str):
         valid = False
+    else:
+        try:
+            parsed = urlsplit(url)
+            valid = (parsed.scheme in ('http', 'https')
+                     and bool(parsed.hostname) and parsed.path in ('', '/')
+                     and '?' not in url and '#' not in url
+                     and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url))
+            _ = parsed.port
+        except ValueError:
+            valid = False
     if not valid:
         raise SettingsError('Ожидается HTTP(S)-адрес прокси без пути, параметров и фрагмента')
 
@@ -532,11 +534,11 @@ __all__ = [
     "SUPPORTED_READER_LEVELS",
     "SUPPORTED_REASONING_EFFORTS",
     "AppSettings",
-    "DiagnosticsSettings",
-    "RecoverySettings",
     "CheckSettings",
+    "DiagnosticsSettings",
     "LLMSettings",
     "ReadingSettings",
+    "RecoverySettings",
     "ServerSettings",
     "SettingsError",
     "StorageSettings",

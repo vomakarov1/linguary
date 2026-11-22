@@ -6,7 +6,7 @@ import pytest
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.llm import FakeReply
-from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.llm_dto import PronunciationAnchorResponse, PronunciationCandidateResponse, PronunciationContextResponse
 from linguary.application.ports.pronunciation import InflectionRule, SourceLookupResult
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand

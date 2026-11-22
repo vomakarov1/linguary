@@ -526,7 +526,7 @@ def _is_story_chapter(section: DocumentSection) -> bool:
         for b in section.blocks
         if b.type is BlockType.HEADING and b.text.strip()
     ]
-    texts_to_check = [title_norm] + headings
+    texts_to_check = [title_norm, *headings]
     for text in texts_to_check:
         for pattern in _STORY_CHAPTER_PATTERNS:
             if pattern.search(text):

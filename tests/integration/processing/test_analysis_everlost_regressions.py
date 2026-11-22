@@ -15,7 +15,6 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-import pytest
 
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.config.settings import CheckSettings, ReadingSettings, WorkerPoolSettings

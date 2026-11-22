@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -60,7 +60,7 @@ class RuntimeSettings:
             raise SettingsError('Не удалось подготовить настройки') from None
 
     @contextmanager
-    def lease(self) -> Iterator[RuntimeGeneration]:
+    def lease(self) -> Generator[RuntimeGeneration]:
         if self._closing:
             raise SettingsError('Приложение завершает работу')
         state = self._states[id(self.current)]

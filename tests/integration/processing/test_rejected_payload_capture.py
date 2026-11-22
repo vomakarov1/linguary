@@ -1,19 +1,15 @@
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-import json
 
 import httpx
 import pytest
 from linguary.adapters.config import LLMSettings
 from linguary.adapters.llm.logging import LoggingLLMClient
 from linguary.adapters.llm.openai_compatible import OpenAICompatibleLLMClient
-from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
 from linguary.application.llm_rejections import record_rejection, finalize_response
 from linguary.application.ports.llm import LLMRequest, LLMResponseFormatError, LLMConfigurationError
 from linguary.application.retry_policy import ResultValidationError
 from linguary.domain import LLMCallStage, TaskStatus
-from processing_scenario import store_processing_book, translated_reply
+from processing_scenario import store_processing_book
 from test_book_conditions import make_app, store_imported, reply
 
 
@@ -98,7 +94,7 @@ async def test_missing_content_marks_unavailable(unit_of_work):
 
 async def test_result_correlates_to_accepted_attempt(tmp_path):
     from linguary.adapters.llm import FakeReply
-    from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+    from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
     from linguary.application.use_cases.approve_glossary import StartProcessingCommand
     fake = FakeLLMClient([
         FakeReply.of_payload({'treatment_plan': [{'source_block_id': 'b1', 'treatment': 'TRANSLATE'}],
@@ -195,7 +191,7 @@ async def test_body_failure_honestly_marks_unavailable(unit_of_work, monkeypatch
 async def test_late_result_does_not_replace_accepted_attempt(tmp_path):
     import asyncio
     from linguary.adapters.llm import FakeReply
-    from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+    from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
     from linguary.application.ports.llm import LLMResponseKind
     from linguary.application.use_cases.approve_glossary import StartProcessingCommand
     from linguary.composition import drain_tasks

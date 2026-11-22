@@ -7,7 +7,7 @@ from linguary.application.ports.llm import LLMTransportError
 from linguary.application.recovery import RecoveryError
 from linguary.composition import drain_tasks
 from linguary.domain import LLMCallStage, TaskStatus
-from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from processing_scenario import note_reply, translated_reply
 from test_book_conditions import make_app
 from test_recovery_commit import analysis_reply, prepare, translation_reply

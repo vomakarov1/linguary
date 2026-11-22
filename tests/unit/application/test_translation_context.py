@@ -2196,7 +2196,6 @@ def test_translation_context_to_aliases_prevents_prefix_collision_and_english_he
 
 
 def test_scene_note_budget_reserves_allowance_for_translate_explanation_and_regeneration() -> None:
-    from linguary.application.translation_units import plan_translation_units
     from linguary.domain.content_plan import (
         ContentPlan, Difficulty, RequiredPoint, Scene, SourceAnchor,
     )

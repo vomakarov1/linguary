@@ -2,6 +2,7 @@
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
+from itertools import pairwise
 import json
 from uuid import uuid4
 
@@ -61,10 +62,9 @@ def dependency_intervals(ordered_blocks, plan=None, *, indivisible=(), max_diffi
             edge = (difficulty.owner_block_id, *(a.block_id for a in difficulty.anchors))
             if not set(edge) <= positions.keys():
                 raise RecoveryError('unsafe_partition')
-            if edge:
-                indices = [positions[block] for block in edge]
-                if max(indices) - min(indices) <= max_difficulty_span:
-                    spans.append((min(indices), max(indices)))
+            indices = [positions[block] for block in edge]
+            if max(indices) - min(indices) <= max_difficulty_span:
+                spans.append((min(indices), max(indices)))
     merged = []
     for left, right in sorted(spans):
         if merged and left <= merged[-1][1]:
@@ -143,7 +143,8 @@ class Recovery:
         self.policy = policy or RecoveryPolicy()
 
     def prepare_roots(self, work, units, *, max_source_chars, validator, operation_refs=None, operation_kind="translation", transaction=None):
-        transaction_context = lambda: nullcontext(transaction) if transaction is not None else self.uow.transaction()
+        def transaction_context():
+            return nullcontext(transaction) if transaction is not None else self.uow.transaction()
         with transaction_context() as tx:
             conditions = tx.work.latest_conditions(work.document.id)
         if conditions is None:
@@ -168,11 +169,11 @@ class Recovery:
             if block.parent_id is not None:
                 structural.setdefault(('parent', block.parent_id), []).append(block.id)
         indivisible.extend(tuple(group) for group in structural.values())
-        for left, right in zip(ordered, ordered[1:]):
+        for left, right in pairwise(ordered):
             first, second = blocks[left], blocks[right]
             if ((first.parent_id is not None and first.parent_id == second.parent_id)
-                    or first.type == second.type and first.type in {
-                        BlockType.LIST_ITEM, BlockType.POEM, BlockType.QUOTE, BlockType.TABLE}):
+                    or (first.type == second.type and first.type in {
+                        BlockType.LIST_ITEM, BlockType.POEM, BlockType.QUOTE, BlockType.TABLE})):
                 indivisible.append((left, right))
         intervals = dependency_intervals(ordered, None if operation_kind == 'regeneration' else work.analysis.content_plan, indivisible=indivisible)
         boundaries = tuple(unit.block_ids for unit in units)
@@ -233,7 +234,8 @@ class Recovery:
                         if unresolved:
                             current.extend(unresolved)
                         elif current:
-                            pending.append(tuple(current)); current = []
+                            pending.append(tuple(current))
+                            current = []
                     if current:
                         pending.append(tuple(current))
                     if sum(scope.status != 'split' for scope in scopes) + len(pending) > root.manifest['policy']['max_leaves']:
@@ -352,7 +354,8 @@ class Recovery:
             depth, parent = 0, scope
             by_id = {item.id: item for item in scopes}
             while parent.parent_id is not None:
-                depth += 1; parent = by_id[parent.parent_id]
+                depth += 1
+                parent = by_id[parent.parent_id]
             policy = root.manifest['policy']
             leaves = sum(item.status != 'split' for item in scopes)
             if len(atoms) < 2 or depth >= policy['max_depth'] or leaves + 1 > policy['max_leaves']:

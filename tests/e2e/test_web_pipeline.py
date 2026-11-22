@@ -35,7 +35,7 @@ from linguary.adapters.config import (
     ServerSettings,
     StorageSettings,
 )
-from correction_e2e_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.adapters.validation import EpubCheckSettings, EpubCheckValidator
 from linguary.application.context_builder import textual_blocks
 from linguary.composition import Application, build_application, drain_tasks

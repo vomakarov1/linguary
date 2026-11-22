@@ -8,14 +8,14 @@ from hashlib import sha256
 import json
 import re
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from linguary.application.analysis_merge import find_quote_span
 from linguary.application.block_processing import chapter_number, complete_processing, note_id_factory
 from linguary.application.context_builder import _extract_word_stems, _matches_chapter_text
 from linguary.application.correction import (
-    correction_inputs, original_block_payload, reconcile_corrections, task_matches_inputs, unchecked_blocks,
+    correction_inputs, reconcile_corrections, task_matches_inputs, unchecked_blocks,
     current_correction_candidates, candidate_is_current, model_correction_blocks,
     correction_input_fingerprint, merge_corrected_segments, segments_for_correction_request,
     translation_covers_anchor,
@@ -340,7 +340,7 @@ def _difficulty_aliases(analysis: Any) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for idx, d in enumerate(difficulties, start=1):
         diff_id = d.get('id') if isinstance(d, Mapping) else getattr(d, 'id', None)
-        if _needs_plan_id_alias(diff_id, 'df-'):
+        if isinstance(diff_id, str) and _needs_plan_id_alias(diff_id, 'df-'):
             aliases[diff_id] = f'd{idx}'
     return aliases
 
@@ -358,7 +358,7 @@ def _fact_aliases(analysis: Any) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for idx, f in enumerate(facts, start=1):
         fact_id = f.get('id') if isinstance(f, Mapping) else getattr(f, 'id', None)
-        if _needs_plan_id_alias(fact_id, 'cf-'):
+        if isinstance(fact_id, str) and _needs_plan_id_alias(fact_id, 'cf-'):
             aliases[fact_id] = f'f{idx}'
     return aliases
 
@@ -385,13 +385,13 @@ def _inputs_fact_aliases(inputs: Any) -> Mapping[str, str]:
     return _fact_aliases(raw_analysis)
 
 
-def _alias_error_for_retry(
-    error: Exception | str,
+def _alias_error_for_retry[T: (Exception, str)](
+    error: T,
     block_aliases: Mapping[str, str] | None = None,
     difficulty_aliases: Mapping[str, str] | None = None,
     fact_aliases: Mapping[str, str] | None = None,
     candidate_aliases: Mapping[str, str] | None = None,
-) -> Exception | str:
+) -> T:
     replacements: dict[str, str] = {}
     for mapping in (block_aliases, difficulty_aliases, fact_aliases, candidate_aliases):
         if mapping:
@@ -410,7 +410,7 @@ def _alias_error_for_retry(
     else:
         message = raw_message
     if isinstance(error, str):
-        return message
+        return cast(T, message)
     expectation = getattr(error, 'expectation', None)
     new_expectation = expectation
     if expectation is not None and getattr(expectation, 'blocks', None):
@@ -434,9 +434,9 @@ def _alias_error_for_retry(
     if message != raw_message:
         copied.args = (message, *error.args[1:])
     if new_expectation is not expectation:
-        copied.expectation = new_expectation
+        cast(Any, copied).expectation = new_expectation
     if new_violation is not violation:
-        copied.violation = new_violation
+        cast(Any, copied).violation = new_violation
     return copied
 
 
@@ -720,7 +720,7 @@ class CorrectChapter:
         checked = 0
         while True:
             with self.uow.transaction() as tx:
-                inputs, task, _ = self._load(tx, command)
+                inputs, _task, _ = self._load(tx, command)
                 missing = unchecked_blocks(tx, inputs)
             if not missing:
                 return CorrectChapterResult(command.section_id, inputs.run.id, checked)

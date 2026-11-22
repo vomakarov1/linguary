@@ -93,9 +93,17 @@ class _SelectedUnitOfWork:
     def __init__(self, inner, selection):
         self.inner, self.selection = inner, selection
 
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
     @contextmanager
     def transaction(self):
         with self.inner.transaction() as transaction:
+            yield _Transaction(transaction, self.selection)
+
+    @contextmanager
+    def read_transaction(self):
+        with getattr(self.inner, "read_transaction", self.inner.transaction)() as transaction:
             yield _Transaction(transaction, self.selection)
 
 
@@ -418,7 +426,7 @@ async def _run_analysis(protocol, workspace, client_factory, result, budget, sim
         analyze = AnalyzeChapter(unit_of_work=selected_uow, llm_client=_model(application, inner, ledger), language_detector=Py3LangidDetector(), retry_policy=RetryPolicy(max_attempts=application.settings.llm.max_attempts), glossary_confidence_threshold=application.settings.checks.glossary_confidence_threshold, max_fragment_blocks=application.settings.llm.effective_max_fragment_blocks, context_builder=_FixedContext(fixed, ledger))
         async def analyze_task(task):
             await analyze(AnalyzeChapterCommand(task.book_id, task.scope_id, task.id))
-        for book_id, section_ids in selection.items():
+        for book_id in selection:
             _transition(selected_uow, book_id, BookEvent.ANALYSIS_STARTED)
             with selected_uow.transaction() as transaction:
                 document = transaction.documents.get(book_id)

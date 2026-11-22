@@ -24,7 +24,7 @@ import asyncio
 import inspect
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Protocol
+from typing import Protocol, cast
 
 from linguary.application.retry_policy import classify_error as classify_task_error
 from linguary.domain import (
@@ -148,8 +148,8 @@ class TaskRunner:
     async def _reload_task(self, task: ProcessingTask) -> ProcessingTask | None:
         """Reads current persisted task state without creating or mutating rows."""
         queue: object = self._queue
-        while hasattr(queue, "queue") and getattr(queue, "queue") is not None:
-            queue = getattr(queue, "queue")
+        while hasattr(queue, "queue") and queue.queue is not None:
+            queue = queue.queue
         for method_name, arg in (
             ("get", task.id),
             ("find_by_identity", task.identity),
@@ -165,7 +165,7 @@ class TaskRunner:
         if store is not None:
             find = getattr(store, "_find", None)
             if callable(find):
-                return await asyncio.to_thread(find, task.identity)
+                return cast(ProcessingTask | None, await asyncio.to_thread(find, task.identity))
         return None
 
     async def _save(self, task: ProcessingTask) -> ProcessingTask:

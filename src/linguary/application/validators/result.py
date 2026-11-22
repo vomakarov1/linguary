@@ -22,6 +22,7 @@ import inspect
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from typing import Any
 
 from linguary.application.llm_dto import (
     BlockResultResponse,
@@ -57,7 +58,7 @@ from linguary.application.validators.treatment import (
     planned_segment_modes,
     treatment_violation,
 )
-from linguary.application.validators.truncation import truncation_violation, truncation_diagnostic
+from linguary.application.validators.truncation import truncation_diagnostic
 from linguary.domain import (
     BlockProcessingResult,
     BlockTreatment,
@@ -720,12 +721,12 @@ def _unit_for_whole_translation(
     return replace(unit, items=tuple(items))
 
 
-def _service_message_violation(payload: TranslationResultResponse, **kwargs: object) -> str | None:
+def _service_message_violation(payload: TranslationResultResponse, **kwargs: Any) -> str | None:
     """Pass only the keywords the current service-message checker accepts."""
     parameters = inspect.signature(service_message_violation).parameters
     if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
         return service_message_violation(payload, **kwargs)
-    forwarded = {name: value for name, value in kwargs.items() if name in parameters}
+    forwarded: dict[str, Any] = {name: value for name, value in kwargs.items() if name in parameters}
     return service_message_violation(payload, **forwarded)
 
 

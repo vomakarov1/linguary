@@ -51,7 +51,7 @@ def _integer(value: object, *, form: bool) -> int | None:
 
 
 def _float(value: object, *, form: bool) -> float | None:
-    if type(value) in (int, float) and type(value) is not bool:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     if form and isinstance(value, str) and _FLOAT.fullmatch(value.strip()):
         try:
@@ -98,7 +98,7 @@ def _safe_url(value: str) -> str:
             return ''
         if '?' in value or '#' in value or any(char.isspace() for char in value):
             return ''
-        url.port
+        _ = url.port
     except ValueError:
         return ''
     return value
@@ -116,6 +116,19 @@ def _projection(values: Mapping[str, object], current_settings: AppSettings, *, 
     else:
         reader_level = current_settings.reading.reader_level
 
+    raw_proxy_mode = fields.get('proxy_mode')
+    proxy_mode = (
+        raw_proxy_mode
+        if isinstance(raw_proxy_mode, str) and raw_proxy_mode in ('auto', 'direct', 'custom')
+        else current_settings.llm.proxy_mode
+    )
+    raw_name_strategy = fields.get('name_translation_strategy')
+    name_translation_strategy = (
+        raw_name_strategy
+        if isinstance(raw_name_strategy, str) and raw_name_strategy in ('sound', 'meaning')
+        else current_settings.reading.name_translation_strategy
+    )
+
     return SafeSettingsFormValues(
         provider=provider if provider == 'openai_compatible' else '',
         model='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_text(fields.get('model'), secrets),
@@ -127,14 +140,10 @@ def _projection(values: Mapping[str, object], current_settings: AppSettings, *, 
         base_url='' if {'api_key', 'proxy_url'} & duplicate_fields else _safe_url(_safe_text(fields.get('base_url'), secrets)),
         requests_per_minute=_integer(fields.get('requests_per_minute'), form=form),
         concurrency=_integer(fields.get('concurrency'), form=form),
-        proxy_mode=fields.get('proxy_mode') if fields.get('proxy_mode') in ('auto', 'direct', 'custom') else current_settings.llm.proxy_mode,
+        proxy_mode=proxy_mode,
         expected_revision=revision if revision is not None and revision >= 0 else None,
         reader_level=reader_level,
-        name_translation_strategy=(
-            fields.get('name_translation_strategy')
-            if fields.get('name_translation_strategy') in ('sound', 'meaning')
-            else current_settings.reading.name_translation_strategy
-        ),
+        name_translation_strategy=name_translation_strategy,
     )
 
 
@@ -240,7 +249,7 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
     rate = None if raw_rate is None or (form and isinstance(raw_rate, str) and not raw_rate.strip()) else _integer(raw_rate, form=form)
     if raw_rate is not None and not (form and isinstance(raw_rate, str) and not raw_rate.strip()) and rate is None:
         errors['requests_per_minute'] = labels.SETTINGS_INTEGER_FIELD
-    temp: float | None | object = UNSET
+    temp: float | object | None = UNSET
     if 'temperature' in values:
         raw_temp = values['temperature']
         if raw_temp is None or (isinstance(raw_temp, str) and not raw_temp.strip()):
@@ -279,15 +288,18 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
             errors['name_translation_strategy'] = labels.SETTINGS_NAME_TRANSLATION_STRATEGY_FIELD
         else:
             name_translation_strategy = raw_strategy
-    if not errors:
+    update: SystemSettingsUpdate | None = None
+    if not errors and concurrency is not None:
+        raw_proxy_mode = values.get('proxy_mode')
+        raw_proxy_url = values.get('proxy_url')
         try:
             update = SystemSettingsUpdate(
                 **strings,
                 requests_per_minute=rate,
                 concurrency=concurrency,
-                api_key=posted_key,
-                proxy_mode=values.get('proxy_mode'),
-                proxy_url=values.get('proxy_url'),
+                api_key=posted_key if isinstance(posted_key, str) else None,
+                proxy_mode=raw_proxy_mode if isinstance(raw_proxy_mode, str) else None,
+                proxy_url=raw_proxy_url if isinstance(raw_proxy_url, str) else None,
                 temperature=temp,
                 timeout_seconds=timeout,
                 reader_level=reader_level,
@@ -295,7 +307,7 @@ async def read_settings_update(request: Request, *, current_settings: AppSetting
             )
         except SystemSettingsValidationError as error:
             errors[error.field] = error.message
-    if errors:
+    if errors or update is None or revision is None:
         raise SettingsInputError(field_errors=errors, form_values=_projection(values, current_settings, form=form))
     return update, revision
 
@@ -304,6 +316,6 @@ async def read_settings_reset(request: Request, *, current_settings: AppSettings
     values, form = await _read(request, current_settings, reset=True)
     errors = {}
     revision = _revision(values, form=form, errors=errors)
-    if errors:
+    if errors or revision is None:
         raise SettingsInputError(field_errors=errors, form_values=safe_form_values(current_settings))
     return revision

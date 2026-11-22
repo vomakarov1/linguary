@@ -266,10 +266,10 @@ def _evidence_value(current, path):
         raise LLMPayloadError('доказательство указывает на защищённое поле')
     allowed = {'glossary_hints': {'original', 'translation', 'note'},
                'language_notes': {'original_excerpt', 'translated_excerpt', 'note'}}
-    if (parts[0] == 'translated_text' and len(parts) != 1
+    if ((parts[0] == 'translated_text' and len(parts) != 1)
             or len(parts) > 3
-            or len(parts) > 1 and not parts[1].isdigit()
-            or len(parts) == 3 and parts[2] not in allowed.get(parts[0], set())):
+            or (len(parts) > 1 and not parts[1].isdigit())
+            or (len(parts) == 3 and parts[2] not in allowed.get(parts[0], set()))):
         raise LLMPayloadError('путь доказательства не является читательским полем')
     value = current
     for part in parts:
@@ -358,10 +358,10 @@ class CorrectionIssue:
 
 @dataclass(frozen=True, slots=True)
 class ProposedBlockResponse(CorrectedBlockResponse):
-    glossary_hints: tuple[GlossaryHintResponse, ...] | None = ()
-    language_notes: tuple[LanguageNoteResponse, ...] | None = ()
+    glossary_hints: tuple[GlossaryHintResponse, ...] | None = ()  # ty: ignore[incompatible-attribute-override]
+    language_notes: tuple[LanguageNoteResponse, ...] | None = ()  # ty: ignore[incompatible-attribute-override]
     issues: tuple[CorrectionIssue, ...] = ()
-    status: Literal['proposed'] = field(default='proposed', init=False)
+    status: Literal['proposed'] = field(default='proposed', init=False)  # ty: ignore[incompatible-attribute-override]
 
     def __post_init__(self):
         if not isinstance(self.block_id, str) or not self.block_id.strip():

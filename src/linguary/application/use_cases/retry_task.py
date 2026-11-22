@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.persistence import UnitOfWork
@@ -107,10 +108,10 @@ def evaluate_task_retryable(
     active_run,
     conditions,
     binding,
-    roots_by_id: Mapping[str, object],
-    scopes_by_root: Mapping[str, Sequence[object]] | None = None,
-    attempts_by_root: Mapping[str, Sequence[object]] | None = None,
-    task_attempts: Sequence[object] | None = None,
+    roots_by_id: Mapping[str, Any],
+    scopes_by_root: Mapping[str, Sequence[Any]] | None = None,
+    attempts_by_root: Mapping[str, Sequence[Any]] | None = None,
+    task_attempts: Sequence[Any] | None = None,
 ) -> tuple[bool, str | None, bool]:
     """Pure recovery-guard check returning ``(allowed, reason, requires_unknown_ack)``."""
     if task.task_type is TaskType.CHAPTER_CORRECTION:
@@ -220,7 +221,7 @@ def is_task_retryable_for_recovery(transaction, task) -> tuple[bool, str | None]
             if root is not None:
                 roots_by_id[root_id] = root
                 attempts_by_root[root.id] = work.list_root_attempts(root.id)
-                if scopes_by_root is not None:
+                if scopes_by_root is not None and callable(list_scopes):
                     scopes_by_root[root.id] = list_scopes(root.id)
     allowed, reason, _ = evaluate_task_retryable(
         task,

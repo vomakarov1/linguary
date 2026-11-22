@@ -22,7 +22,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError, OperationalError
-from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.adapters.config.settings import LLMSettings
 from linguary.adapters.db.engine import create_database_engine
 from linguary.adapters.db.models import Base, DocumentBlockRow

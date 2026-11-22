@@ -6,7 +6,7 @@ from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.config.settings import ReadingSettings
 from linguary.adapters.config.system_settings import SystemSettingsUpdate
 from linguary.adapters.llm import FakeReply
-from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from tests.correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
 from linguary.application.book_conditions import ConditionsError
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.application.use_cases.reset_processing import ChooseBookConditions, ResetProcessingCommand

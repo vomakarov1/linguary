@@ -57,7 +57,7 @@ async def get_system_config(
         confirmation = {
             "saved": labels.SETTINGS_SAVED,
             "reset": labels.SETTINGS_RESET,
-        }.get(request.query_params.get("result"))
+        }.get(request.query_params.get("result") or "")
         return _render_config(
             request, application, data=response,
             form_values=safe_form_values(application.settings, expected_revision=response.revision),
@@ -298,7 +298,9 @@ async def _change_config(request: Request, application, *, reset: bool):
             marker = "reset" if reset else "saved"
             return RedirectResponse(f"/system/config?result={marker}", status_code=303)
         return _config_response(application)
-    error_response = SettingsErrorResponse(code=code, message=message, field_errors=field_errors)
+    error_response = SettingsErrorResponse.model_validate(
+        {"code": code, "message": message, "field_errors": field_errors}
+    )
     if wants_html(request):
         return _render_config(
             request, application, form_values=form_values,

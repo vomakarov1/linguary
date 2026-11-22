@@ -423,7 +423,7 @@ class QualityReviewService:
                 stop_after_chunk = False
                 with self.uow.transaction() as tx:
                     current = tx.work.get_review(review.id)
-                    if current.state == 'stale' or after['manifest_sha'] != review.manifest['manifest_sha']:
+                    if current.state == 'stale' or after is None or after['manifest_sha'] != review.manifest['manifest_sha']:
                         tx.work.transition_attempt(attempt.id, 'rejected', expected_state='validated')
                         finalize_response(self.uow, response, 'stale', transaction=tx)
                         dedup_checked, dedup_missing = _stopped_coverage()

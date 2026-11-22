@@ -387,7 +387,7 @@ def test_reconcile_recovery_attempts_recovers_claimed_scope_with_rejected_attemp
 
 
 def test_reconcile_recovery_attempts_handles_claimed_edge_cases_and_correction_reconcile(unit_of_work):
-    from linguary.adapters.db.models import RecoveryRootRow, RecoveryScopeRow
+    from linguary.adapters.db.models import RecoveryRootRow
     from linguary.domain import ProcessingTask, TaskStatus, TaskType
     from linguary.domain.recovery import CallAttempt
 

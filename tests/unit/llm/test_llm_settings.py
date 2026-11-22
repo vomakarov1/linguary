@@ -12,7 +12,6 @@ from linguary.adapters.config import (
     DEFAULT_READER_LEVEL,
     LLMSettings,
     ReadingSettings,
-    SUPPORTED_READER_LEVELS,
     SettingsError,
     load_settings,
 )

@@ -1,7 +1,6 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 import pytest
-from sqlalchemy import text
 from linguary.domain.book_conditions import BookConditions, WorkStateError
 from linguary.domain.recovery import RecoveryRoot, RecoveryScope, CallAttempt
 from linguary.domain.quality_review import QualityReview, QualityReservation

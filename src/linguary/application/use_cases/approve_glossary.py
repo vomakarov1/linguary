@@ -517,9 +517,15 @@ class StartProcessing:
                 from dataclasses import asdict
                 from linguary.application.book_conditions import payload_digest
                 glossary = asdict(run.glossary_snapshot)
+                payload_dict: dict[str, object] = {
+                    'schema_version': 1,
+                    'glossary_snapshot': glossary,
+                    'glossary_sha256': payload_digest(glossary),
+                }
+                if self._correction_snapshot is not None:
+                    payload_dict['correction'] = self._correction_snapshot.to_payload()
                 transaction.work.bind('run', run.id, book_id=book.id, conditions_id=conditions.id,
-                    payload={'schema_version': 1, 'glossary_snapshot': glossary, 'glossary_sha256': payload_digest(glossary),
-                             'correction': self._correction_snapshot.to_payload()})
+                    payload=payload_dict)
             transaction.books.save(replace(book, status=started))
         return run
 

@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
@@ -16,7 +17,7 @@ import httpx
 from linguary.adapters.config import LLMSettings
 from linguary.adapters.config.settings import proxy_secrets
 from linguary.adapters.llm.openai_compatible import OpenAICompatibleLLMClient, safe_detail
-from linguary.application.ports.llm import LLMClient, LLMConfigurationError, LLMRequest, LLMResponse, LLMResponseFormatError, LLMResponseKind
+from linguary.application.ports.llm import LLMClient, LLMConfigurationError, LLMResponse, LLMResponseFormatError, LLMResponseKind
 from linguary.domain import TokenUsage
 from linguary.domain.llm_log import TokenPricing
 from linguary.comparison.protocol import CostBounds, RouteMetadata, ProtocolError, validate_context_envelope
@@ -279,7 +280,7 @@ class ReceiptHTTPClient:
         self.cost_bounds, self.route_metadata = cost_bounds, route_metadata
         self.max_output_tokens = None
 
-    async def _generation_model(self, url, headers, timeout, item, provider):
+    async def _generation_model(self, url, headers, request_timeout_cap, item, provider):
         endpoint = httpx.URL(url)
         if not item.generation_id or not endpoint.path.endswith('/chat/completions'):
             item.metadata_check_reason = 'invalid_lookup'
@@ -302,7 +303,7 @@ class ReceiptHTTPClient:
                     try:
                         async with asyncio.timeout(request_timeout):
                             response = await self.http.get(endpoint, params={'id': item.generation_id}, headers=headers,
-                                                           timeout=min(timeout, request_timeout) if timeout is not None else request_timeout,
+                                                           timeout=min(request_timeout_cap, request_timeout) if request_timeout_cap is not None else request_timeout,
                                                            follow_redirects=False)
                     except httpx.DecodingError:
                         item.metadata_check_reason = 'malformed_response'
@@ -337,7 +338,9 @@ class ReceiptHTTPClient:
             return None, 'malformed_response', False
         if data.get('id') is not None and data['id'] != item.generation_id:
             return None, 'id_mismatch', False
-        if data.get('model') is not None and data['model'] not in self.route_metadata.model_versions:
+        if data.get('model') is not None and (
+            self.route_metadata is None or data['model'] not in self.route_metadata.model_versions
+        ):
             return None, 'model_mismatch', False
         if data.get('provider_name') is not None and data['provider_name'] != provider:
             return None, 'provider_mismatch', False
@@ -460,7 +463,7 @@ class ObservedLLMClient:
         self._http = http_client
         receipt_http = ReceiptHTTPClient(http_client, ledger=ledger, model=self.model, route=route, pricing=pricing, temperature_policy=temperature_policy, cost_bounds=cost_bounds, route_metadata=route_metadata)
         receipt_http.max_output_tokens = settings.max_output_tokens
-        self.inner = OpenAICompatibleLLMClient(settings=settings, http_client=receipt_http)
+        self.inner = OpenAICompatibleLLMClient(settings=settings, http_client=cast(Any, receipt_http))
 
     async def generate(self, request):
         self.ledger.ensure_open()
