@@ -2123,25 +2123,130 @@ def _extract_block_spoiler_tokens(
 
 
 _LEADING_ROLE_ARTICLES = frozenset({"the", "a", "an"})
+_ROLE_PREPOSITIONS = frozenset(
+    {
+        "in",
+        "of",
+        "with",
+        "by",
+        "from",
+        "on",
+        "at",
+        "to",
+        "for",
+        "near",
+        "behind",
+        "в",
+        "из",
+        "с",
+        "у",
+        "на",
+        "от",
+        "за",
+    }
+)
+_NAME_PREFIX_TITLES = frozenset(
+    {
+        "mr",
+        "mrs",
+        "miss",
+        "ms",
+        "dr",
+        "professor",
+        "sir",
+        "madam",
+        "madame",
+        "lord",
+        "lady",
+        "uncle",
+        "aunt",
+        "мистер",
+        "миссис",
+        "мисс",
+        "профессор",
+        "дядя",
+        "тётя",
+        "тетя",
+        "сэр",
+        "лорд",
+        "мадам",
+        "леди",
+    }
+)
+_ANONYMOUS_PARTICIPANT_MODIFIERS = frozenset(
+    {
+        "unnamed",
+        "unknown",
+        "unidentified",
+        "anonymous",
+        "unseen",
+        "mysterious",
+        "someone",
+        "somebody",
+        "неназванный",
+        "неназванная",
+        "неназванное",
+        "неназванные",
+        "неизвестный",
+        "неизвестная",
+        "неизвестное",
+        "неизвестные",
+        "безымянный",
+        "безымянная",
+        "безымянные",
+        "незнакомый",
+        "незнакомая",
+        "незнакомые",
+        "неустановленный",
+        "неустановленная",
+        "неустановленные",
+    }
+)
 _GENERIC_ROLE_PARTICIPANTS = frozenset(
     {
+        "person",
+        "people",
+        "figure",
+        "secretary",
+        "crowd",
+        "passer",
+        "passers",
+        "passerby",
+        "passersby",
+        "customer",
+        "customers",
+        "shopper",
+        "shoppers",
+        "whisperer",
+        "whisperers",
         "boy",
+        "boys",
         "girl",
+        "girls",
         "man",
+        "men",
         "woman",
+        "women",
         "child",
+        "children",
         "kid",
+        "kids",
         "baby",
         "stranger",
+        "strangers",
         "driver",
+        "drivers",
         "giant",
         "guard",
+        "guards",
         "soldier",
         "officer",
         "clerk",
+        "clerks",
         "waiter",
         "waitress",
         "teacher",
+        "teachers",
         "doctor",
         "nurse",
         "captain",
@@ -2163,18 +2268,26 @@ _GENERIC_ROLE_PARTICIPANTS = frozenset(
         "priest",
         "monk",
         "witch",
+        "witches",
         "wizard",
+        "wizards",
         "ghost",
         "monster",
         "narrator",
         "speaker",
         "voice",
         "visitor",
+        "visitors",
         "guest",
+        "guests",
         "passenger",
+        "passengers",
         "neighbor",
+        "neighbors",
         "neighbour",
+        "neighbours",
         "friend",
+        "friends",
         "mother",
         "father",
         "brother",
@@ -2192,7 +2305,9 @@ _GENERIC_ROLE_PARTICIPANTS = frozenset(
         "chief",
         "leader",
         "student",
+        "students",
         "pupil",
+        "pupils",
         "lawyer",
         "judge",
         "policeman",
@@ -2211,21 +2326,30 @@ _GENERIC_ROLE_PARTICIPANTS = frozenset(
         "chef",
         "dog",
         "cat",
+        "cats",
         "horse",
         "bird",
         "wolf",
         "owl",
+        "owls",
         "rat",
         "toad",
         "мальчик",
         "девочка",
+        "девушка",
+        "юноша",
         "мужчина",
         "женщина",
+        "старик",
+        "старуха",
         "ребенок",
         "незнакомец",
         "незнакомка",
+        "незнакомцы",
         "водитель",
         "великан",
+        "волшебник",
+        "ведьма",
         "охранник",
         "стражник",
         "солдат",
@@ -2255,8 +2379,133 @@ _GENERIC_ROLE_PARTICIPANTS = frozenset(
         "сын",
         "дочь",
         "рассказчик",
+        "человек",
+        "люди",
+        "фигура",
+        "секретарь",
+        "прохожий",
+        "прохожие",
+        "толпа",
+        "кот",
+        "кошка",
+        "сова",
     }
 )
+
+
+def _matches_glossary_name(
+    name: str,
+    glossary_candidates: Sequence[GlossaryCandidateResponse],
+) -> bool:
+    key = glossary_key(name)
+    if not key:
+        return False
+    cleaned = re.sub(r"\([^)]*\)", " ", name).strip()
+    tokens = _SPOILER_TOKEN_RE.findall(cleaned)
+    has_any_upper = any(token[:1].isupper() for token in tokens)
+    has_non_leading_upper = any(token[:1].isupper() for token in tokens[1:])
+    has_proper_case = has_non_leading_upper if len(tokens) >= 2 else has_any_upper
+    last_base = _strip_possessive_token(tokens[-1]) if tokens else ""
+    name_stems = _spoiler_name_stems(name)
+    generic_tokens = _GENERIC_ROLE_PARTICIPANTS | _ANONYMOUS_PARTICIPANT_MODIFIERS
+    for candidate in glossary_candidates:
+        for form in (candidate.source_text, candidate.suggested_translation):
+            if form and glossary_key(form) == key:
+                return True
+        if not name_stems:
+            continue
+        if candidate.type is ConceptType.PERSON:
+            for form in (candidate.source_text, candidate.suggested_translation):
+                if not form:
+                    continue
+                form_stems = _spoiler_name_stems(form)
+                if not form_stems:
+                    continue
+                if not (form_stems <= generic_tokens) and form_stems <= name_stems:
+                    return True
+                if (
+                    not (name_stems <= generic_tokens)
+                    and (has_proper_case or last_base not in _GENERIC_ROLE_PARTICIPANTS)
+                    and name_stems <= form_stems
+                ):
+                    return True
+        else:
+            for form in (candidate.source_text, candidate.suggested_translation):
+                if not form:
+                    continue
+                form_stems = _spoiler_name_stems(form)
+                if len(form_stems) >= 2 and form_stems == name_stems:
+                    return True
+    return False
+
+
+def _role_head_base(bases: Sequence[str]) -> str:
+    for idx in range(1, len(bases)):
+        if bases[idx] in _ROLE_PREPOSITIONS:
+            return bases[idx - 1]
+    return bases[-1]
+
+
+def _is_non_name_role_label(
+    name: str,
+    *,
+    matches_glossary: bool,
+) -> bool:
+    """True for neutral descriptive/anonymous role labels that cannot be name spoilers."""
+    if matches_glossary:
+        return False
+    cleaned = re.sub(r"\([^)]*\)", " ", name).strip()
+    tokens = _SPOILER_TOKEN_RE.findall(cleaned)
+    if not tokens:
+        return True
+    bases = [_strip_possessive_token(token) for token in tokens]
+    first_base = bases[0]
+    has_any_upper = any(token[:1].isupper() for token in tokens)
+    has_non_leading_upper = any(token[:1].isupper() for token in tokens[1:])
+
+    if (
+        len(tokens) >= 2
+        and first_base in _NAME_PREFIX_TITLES
+        and bases[-1] not in _GENERIC_ROLE_PARTICIPANTS
+    ):
+        return False
+
+    if any(base in _ANONYMOUS_PARTICIPANT_MODIFIERS for base in bases):
+        remaining = [
+            base
+            for base in bases
+            if base not in _ANONYMOUS_PARTICIPANT_MODIFIERS
+            and base not in _LEADING_ROLE_ARTICLES
+            and base not in _ROLE_PREPOSITIONS
+        ]
+        if not remaining or all(base in _GENERIC_ROLE_PARTICIPANTS for base in remaining):
+            return True
+        if (
+            not has_non_leading_upper
+            and _role_head_base(remaining) in _GENERIC_ROLE_PARTICIPANTS
+        ):
+            return True
+
+    if (
+        len(tokens) >= 2
+        and first_base in _LEADING_ROLE_ARTICLES
+        and not has_non_leading_upper
+    ):
+        return True
+
+    if not has_any_upper and len(tokens) == 1:
+        return (
+            first_base in _GENERIC_ROLE_PARTICIPANTS
+            or first_base in _ANONYMOUS_PARTICIPANT_MODIFIERS
+        )
+
+    if len(tokens) >= 2 and not has_non_leading_upper:
+        if tokens[0][:1].isupper() and tokens[0].endswith(("'s", "’s")):
+            return False
+        if _role_head_base(bases) in _GENERIC_ROLE_PARTICIPANTS:
+            return True
+
+    return False
 
 
 def _prefers_capitalized_name_match(name: str) -> bool:
@@ -2264,7 +2513,10 @@ def _prefers_capitalized_name_match(name: str) -> bool:
     tokens = _SPOILER_TOKEN_RE.findall(cleaned)
     if not tokens:
         return False
-    if tokens[0].casefold() in _LEADING_ROLE_ARTICLES:
+    if (
+        tokens[0].casefold() in _LEADING_ROLE_ARTICLES
+        and not any(token[:1].isupper() for token in tokens[1:])
+    ):
         return False
     stems = _spoiler_name_stems(cleaned)
     if not stems:
@@ -2288,10 +2540,23 @@ def _first_name_block_index(
     block_tokens: Sequence[tuple[tuple[str, bool, str | None], ...]],
     glossary_candidates: Sequence[GlossaryCandidateResponse],
 ) -> int | None:
+    matches_glossary = _matches_glossary_name(name, glossary_candidates)
+    if _is_non_name_role_label(name, matches_glossary=matches_glossary):
+        return None
+    name_key = glossary_key(name)
+    name_stems = _spoiler_name_stems(name)
+    generic_tokens = _GENERIC_ROLE_PARTICIPANTS | _ANONYMOUS_PARTICIPANT_MODIFIERS
     forms: list[str] = [name]
     for candidate in glossary_candidates:
-        if candidate.source_text and candidate.suggested_translation and _same_spoiler_name(
-            name, candidate.suggested_translation
+        if not (candidate.source_text and candidate.suggested_translation):
+            continue
+        if glossary_key(candidate.suggested_translation) == name_key:
+            forms.append(candidate.source_text)
+        elif (
+            candidate.type is ConceptType.PERSON
+            and name_stems
+            and not (name_stems <= generic_tokens)
+            and _same_spoiler_name(name, candidate.suggested_translation)
         ):
             forms.append(candidate.source_text)
     stems: set[str] = set()
@@ -2299,10 +2564,27 @@ def _first_name_block_index(
     for form in forms:
         stems.update(_spoiler_name_stems(form))
         titles.update(_title_tokens(form))
+    non_anonymous_stems = stems - _ANONYMOUS_PARTICIPANT_MODIFIERS
+    if non_anonymous_stems:
+        stems = non_anonymous_stems
     if not stems:
         return None
     name_titles = frozenset(titles)
-    prefer_capitalized = any(_prefers_capitalized_name_match(form) for form in forms)
+    cleaned_name = re.sub(r"\([^)]*\)", " ", name).strip()
+    name_tokens = _SPOILER_TOKEN_RE.findall(cleaned_name)
+    all_lowercase = bool(name_tokens) and not any(
+        token[:1].isupper() for token in name_tokens
+    )
+    lowercase_non_glossary = all_lowercase and not matches_glossary
+    single_capitalized_generic = (
+        len(name_tokens) == 1
+        and name_tokens[0][:1].isupper()
+        and _strip_possessive_token(name_tokens[0]) in _GENERIC_ROLE_PARTICIPANTS
+        and not matches_glossary
+    )
+    prefer_capitalized = (all_lowercase and matches_glossary) or any(
+        _prefers_capitalized_name_match(form) for form in forms
+    )
 
     def scan(*, require_capitalized: bool) -> int | None:
         for idx, tokens in enumerate(block_tokens):
@@ -2320,6 +2602,12 @@ def _first_name_block_index(
                 return idx
         return None
 
+    if lowercase_non_glossary:
+        return scan(require_capitalized=True)
+    if single_capitalized_generic:
+        if scan(require_capitalized=True) is None:
+            return None
+        return scan(require_capitalized=False)
     if prefer_capitalized:
         found = scan(require_capitalized=True)
         if found is not None:

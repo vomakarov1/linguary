@@ -1062,6 +1062,169 @@ def test_validate_narrative_does_not_false_flag_lowercase_or_article_role_partic
         assert proper_exc.value.violation.rule_code == 'spoiler_name_leak'
 
 
+def test_validate_narrative_ignores_anonymous_and_descriptive_role_labels_in_spoiler_check():
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.domain import ConceptType
+
+    aliases = {'b1': 'id-1', 'b2': 'id-2'}
+    texts = {
+        'id-1': 'Mr Dursley walked straight into someone in the dark outside the door.',
+        'id-2': (
+            'Surely a sensible person, an old man, two men, cloaked people, '
+            'the boy, a tabby cat, whisperers, her mother, the king, a father, '
+            'and a passer-by can call Voldemort, Tom Riddle, Harry Potter, '
+            'and Professor McGonagall by name.'
+        ),
+    }
+    visible = {alias: texts[bid] for alias, bid in aliases.items()}
+    order = ('id-1', 'id-2')
+    glossary = (
+        GlossaryCandidateResponse(
+            source_text='The Boy Who Lived',
+            type=ConceptType.FICTIONAL_CONCEPT,
+            suggested_translation='Мальчик, который выжил',
+            confidence=0.95,
+            model_flagged_review=False,
+        ),
+        GlossaryCandidateResponse(
+            source_text='Old Man Marley',
+            type=ConceptType.PERSON,
+            suggested_translation='Старик Марли',
+            confidence=0.9,
+            model_flagged_review=False,
+        ),
+        GlossaryCandidateResponse(
+            source_text='Voldemort',
+            type=ConceptType.PERSON,
+            suggested_translation='Волдеморт',
+            confidence=0.98,
+            model_flagged_review=False,
+        ),
+        GlossaryCandidateResponse(
+            source_text='Harry',
+            type=ConceptType.PERSON,
+            suggested_translation='Гарри',
+            confidence=0.98,
+            model_flagged_review=False,
+        ),
+    )
+
+    for neutral_label in (
+        'unnamed person',
+        'Unnamed person',
+        'Unnamed Person',
+        'the unnamed person',
+        'The Unnamed Person',
+        'Unknown Man',
+        'unnamed father',
+        'cloaked people',
+        'Cloaked people',
+        'old man',
+        'Old man',
+        'Tiny old man',
+        'Two men',
+        'Tabby cat',
+        'Passer-by',
+        'the old king',
+        'her mother',
+        'the boy',
+        'The boy',
+        'person',
+        'Person',
+        'whisperers',
+        'Мальчик',
+        'неназванный человек',
+    ):
+        scenes = (
+            QuotedSceneResponse('b1', 'b1', 'Столкновение у двери.', participants=('Mr Dursley', neutral_label)),
+            QuotedSceneResponse('b2', 'b2', 'Разговор ночью.', participants=('Voldemort',)),
+        )
+        resolved, _ = validate_narrative_response(
+            NarrativeAnalysisResponse('Keep voice.', 'Summary.', glossary_candidates=glossary, scenes=scenes),
+            aliases, texts, visible, ordered_block_ids=order,
+        )
+        assert len(resolved) == 2
+
+    # Explicit context_facts with neutral anonymous label also pass.
+    neutral_fact = QuotedContextFactResponse(
+        'f-neutral', 'pronoun_referent',
+        (QuotedSourceAnchorResponse('b1', 'someone'),),
+        QuotedSourceAnchorResponse('b1', 'someone'),
+        'unnamed person', 'explicit',
+    )
+    validate_narrative_response(
+        NarrativeAnalysisResponse(
+            'Keep voice.', 'Summary.',
+            glossary_candidates=glossary,
+            context_facts=(neutral_fact,),
+            scenes=(
+                QuotedSceneResponse('b1', 'b1', 'Столкновение у двери.', participants=('Mr Dursley', 'unnamed person')),
+                QuotedSceneResponse('b2', 'b2', 'Разговор ночью.', participants=('Voldemort',)),
+            ),
+        ),
+        aliases, texts, visible, ordered_block_ids=order,
+    )
+
+    # Real spoiler names — capitalized, lowercase, prefixed, titled, or translated — are caught.
+    for spoiler_label in (
+        'Voldemort',
+        'voldemort',
+        'Unnamed Voldemort',
+        'The Dark Voldemort',
+        'the dark voldemort',
+        'harry potter',
+        'tom riddle',
+        'professor mcgonagall',
+        'Волдеморт',
+        'волдеморт',
+        'мальчик гарри',
+    ):
+        scenes = (
+            QuotedSceneResponse('b1', 'b1', 'Столкновение у двери.', participants=('Mr Dursley', spoiler_label)),
+            QuotedSceneResponse('b2', 'b2', 'Разговор ночью.', participants=('Voldemort',)),
+        )
+        with pytest.raises(AnalysisMergeError) as exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse('Keep voice.', 'Summary.', glossary_candidates=glossary, scenes=scenes),
+                aliases, texts, visible, ordered_block_ids=order,
+            )
+        assert exc.value.violation.rule_code == 'spoiler_name_leak', spoiler_label
+
+    # Lowercase multi-word and titled proper names without glossary_candidates are still caught.
+    for no_glossary_spoiler in ('voldemort', 'tom riddle', 'harry potter', 'professor mcgonagall'):
+        scenes_no_glossary = (
+            QuotedSceneResponse('b1', 'b1', 'Столкновение у двери.', participants=('Mr Dursley', no_glossary_spoiler)),
+            QuotedSceneResponse('b2', 'b2', 'Разговор ночью.', participants=('Voldemort',)),
+        )
+        with pytest.raises(AnalysisMergeError) as no_glossary_exc:
+            validate_narrative_response(
+                NarrativeAnalysisResponse('Keep voice.', 'Summary.', scenes=scenes_no_glossary),
+                aliases, texts, visible, ordered_block_ids=order,
+            )
+        assert no_glossary_exc.value.violation.rule_code == 'spoiler_name_leak', no_glossary_spoiler
+
+    # Explicit context_facts with lowercase spoiler name are also caught.
+    spoiler_fact = QuotedContextFactResponse(
+        'f-spoiler', 'pronoun_referent',
+        (QuotedSourceAnchorResponse('b1', 'someone'),),
+        QuotedSourceAnchorResponse('b1', 'someone'),
+        'tom riddle', 'explicit',
+    )
+    with pytest.raises(AnalysisMergeError) as fact_exc:
+        validate_narrative_response(
+            NarrativeAnalysisResponse(
+                'Keep voice.', 'Summary.',
+                context_facts=(spoiler_fact,),
+                scenes=(
+                    QuotedSceneResponse('b1', 'b1', 'Столкновение у двери.', participants=('Mr Dursley',)),
+                    QuotedSceneResponse('b2', 'b2', 'Разговор ночью.', participants=('Voldemort',)),
+                ),
+            ),
+            aliases, texts, visible, ordered_block_ids=order,
+        )
+    assert fact_exc.value.violation.rule_code == 'spoiler_name_leak'
+
+
 def test_validate_narrative_allows_short_part_divider_titles_with_real_langid_and_rejects_russian():
     from linguary.adapters.validation import Py3LangidDetector
 
