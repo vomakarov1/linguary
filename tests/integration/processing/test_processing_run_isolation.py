@@ -8,8 +8,12 @@ otherwise translations from a cancelled run would appear in the book.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import replace
+
+import pytest
+from sqlalchemy.exc import SAWarning
 
 from processing_scenario import (
     BOOK_ID,
@@ -93,6 +97,7 @@ def start_new_run(unit_of_work: SqlAlchemyUnitOfWork) -> Callable[[], None]:
     return restart
 
 
+@pytest.mark.filterwarnings('error::sqlalchemy.exc.SAWarning')
 async def test_result_of_a_cancelled_run_is_discarded(
     unit_of_work: SqlAlchemyUnitOfWork,
 ) -> None:
@@ -108,7 +113,10 @@ async def test_result_of_a_cancelled_run_is_discarded(
         unit_of_work, client, max_unit_source_chars=len(SOURCE_TEXT) * 2
     )
 
-    result = await process(command())
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always', SAWarning)
+        result = await process(command())
+    assert not any(issubclass(item.category, SAWarning) for item in caught)
 
     assert result.discarded
     assert (result.units, result.processed_units, result.saved_blocks) == (2, 1, 0)

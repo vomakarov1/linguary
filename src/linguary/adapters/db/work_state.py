@@ -1319,6 +1319,8 @@ class SqlAlchemyWorkRepository:
         if scope.status != 'pending':
             raise RecoveryError('interrupted', root_id)
         conditions = self.latest_conditions(root.book_id)
+        if run_id is None:
+            raise RecoveryError('conditions_unavailable', root_id)
         run = self._session.get(ProcessingRunRow, run_id)
         if (conditions is None or conditions.id != root.conditions_id or run is None
                 or run.book_id != root.book_id or run.status != 'active'
