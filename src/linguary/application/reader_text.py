@@ -35,6 +35,11 @@ _A2_DETERMINER_BEFORE = re.compile(
     r'\b(?:a|an|the|my|your|his|her|its|our|their|this|that|these|those)\s*$',
     re.IGNORECASE,
 )
+_A2_NOMINAL_VERB_FORMS = frozenset({'live', 'lives', 'stay', 'stays', 'work', 'works'})
+_A2_PREPOSITION_BEFORE = re.compile(
+    r'\b(?:at|in|on|for|from|of|with|without|into|after|before|during|about)\s*$',
+    re.IGNORECASE,
+)
 _A2_BASE_VERB_AUX_BEFORE = re.compile(
     r"(?:"
     r"(?:\b(?:have|has|had|will|would|did|haven't|hasn't|hadn't|won't|wouldn't|didn't"
@@ -61,7 +66,8 @@ _A2_COORDINATED_MODAL_BEFORE = re.compile(
 _A2_CLAUSE_BREAK_BETWEEN_VERB_AND_FOR = re.compile(
     r"(?:[;:]"
     r"|,\s*(?:and|but|or|so|yet|while|when|where|because|although|though)\b"
-    r"|\b(?:that|which|who|whom|whose|where|when|while|because|although|though|if|unless"
+    r"|\bthat\s+(?:i|you|he|she|it|we|they|there)\b"
+    r"|\b(?:which|who|whom|whose|where|when|while|because|although|though|if|unless"
     r"|have|has|had|will|would|did|wait|waits|waited|waiting|lived|stayed|worked|known)\b"
     r"|(?:'ve|'d|'ll)\b)",
     re.IGNORECASE,
@@ -142,7 +148,9 @@ def _has_ungrammatical_present_for(sentence: str) -> bool:
     for verb_match in _A2_PRESENT_SIMPLE_DURATION_VERB.finditer(normalized):
         verb = verb_match.group(1).casefold()
         prefix = normalized[:verb_match.start()]
-        if _A2_DETERMINER_BEFORE.search(prefix):
+        if _A2_DETERMINER_BEFORE.search(prefix) or (
+            verb in _A2_NOMINAL_VERB_FORMS and _A2_PREPOSITION_BEFORE.search(prefix)
+        ):
             continue
         is_base_verb = not verb.endswith('s')
         if is_base_verb and (

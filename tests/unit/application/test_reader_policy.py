@@ -389,12 +389,16 @@ def test_validate_a2_summary_rejects_excessive_sentence_length_and_present_simpl
     # Ungrammatical Present Simple + for <duration> within one sentence.
     ungrammatical_cases = (
         "Nick and Allie live in Everlost for a long time.",
+        "Nick and Allie live in that house for many years.",
         "Mary lives in the tall tower for many years.",
+        "Mary stays in that tower for centuries.",
         "They stay in the quiet forest for centuries.",
         "He stays in the dark village for months.",
         "We work at the small station for years.",
+        "He works at that shop for years.",
         "She works at the old museum for many years.",
         "They know this strange secret for a long time.",
+        "They know that secret for a long time.",
         "Allie knows the hidden path for years.",
         "He has arrived, and she lives in the tower for many years.",
         "Nick's friends live in Mary's house for many years.",
@@ -429,8 +433,12 @@ def test_validate_a2_summary_allows_present_perfect_and_checks_factual_anchor():
         "They wait near the river for years.",
         "Nick and Allie live in the forest. They waited there for many years.",
         "He knows that they lived there for many years.",
+        "He knows that she visited the city for many years.",
         "He works at the shop and waits for a long time.",
         "They lived their lives in peace for many years.",
+        "He was at work for a long time.",
+        "She looked for work for many years.",
+        "Without work for months, he left the town.",
     )
     for good_summary in grammatical_cases:
         validate_a2_summary(
