@@ -62,7 +62,7 @@ def test_single_pending_task_is_claimed_by_exactly_one_attempt(
 
         claimed = claim_together(task_store, workers, WORKERS)
 
-        assert [item.id for item in claimed] == [task.id], f"раунд {round_number}"
+        assert [item.id for item in claimed] == [task.id], f"round {round_number}"
         assert (claimed[0].status, claimed[0].attempts) == (TaskStatus.RUNNING, 1)
 
 

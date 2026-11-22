@@ -50,7 +50,7 @@ def test_upgrade_creates_schema_on_empty_database(
     finally:
         engine.dispose()
     assert set(EXPECTED_TABLES) <= tables, (
-        f"миграция не создала таблицы: {sorted(set(EXPECTED_TABLES) - tables)}"
+        f"migration did not create tables: {sorted(set(EXPECTED_TABLES) - tables)}"
     )
 
 
@@ -65,29 +65,29 @@ def test_migrated_schema_matches_models(alembic_config: Config, engine: Engine) 
     """Schema after migration matches ORM models: no discrepancies."""
     for table, index_name in CASCADE_BOOK_ID_INDEXES:
         names = {index["name"] for index in inspect(engine).get_indexes(table)}
-        assert index_name in names, f"в таблице {table} нет индекса {index_name}: {sorted(names)}"
+        assert index_name in names, f"table {table} is missing index {index_name}: {sorted(names)}"
 
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
         differences = compare_metadata(context, Base.metadata)
-    assert not differences, f"схема разошлась с моделями: {differences}"
+    assert not differences, f"schema diverged from models: {differences}"
 
     command.downgrade(alembic_config, "0014")
     for table, index_name in CASCADE_BOOK_ID_INDEXES:
         names = {index["name"] for index in inspect(engine).get_indexes(table)}
         assert (
             index_name not in names
-        ), f"после отката 0014 в таблице {table} остался индекс {index_name}"
+        ), f"after rollback of 0014, table {table} still has index {index_name}"
 
     command.upgrade(alembic_config, "head")
     for table, index_name in CASCADE_BOOK_ID_INDEXES:
         names = {index["name"] for index in inspect(engine).get_indexes(table)}
-        assert index_name in names, f"в таблице {table} нет индекса {index_name}: {sorted(names)}"
+        assert index_name in names, f"table {table} is missing index {index_name}: {sorted(names)}"
 
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
         differences = compare_metadata(context, Base.metadata)
-    assert not differences, f"схема разошлась с моделями после повтора 0015: {differences}"
+    assert not differences, f"schema diverged from models after repeating 0015: {differences}"
 
 
 def test_downgrade_removes_schema(alembic_config: Config, engine: Engine) -> None:
@@ -96,7 +96,7 @@ def test_downgrade_removes_schema(alembic_config: Config, engine: Engine) -> Non
 
     tables = set(inspect(engine).get_table_names())
     assert not set(EXPECTED_TABLES) & tables, (
-        f"после отката остались таблицы: {sorted(set(EXPECTED_TABLES) & tables)}"
+        f"tables remained after downgrade: {sorted(set(EXPECTED_TABLES) & tables)}"
     )
 
 
@@ -144,7 +144,7 @@ def test_migration_creates_required_index(
 ) -> None:
     """SQL-01 indexes are created by the migration under expected names."""
     names = {index["name"] for index in inspect(engine).get_indexes(table)}
-    assert index_name in names, f"в таблице {table} нет индекса {index_name}: {sorted(names)}"
+    assert index_name in names, f"table {table} is missing index {index_name}: {sorted(names)}"
 
 
 def test_upgrade_creates_system_settings(engine):

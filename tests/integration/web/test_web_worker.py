@@ -88,7 +88,7 @@ def test_uploaded_book_is_imported_without_any_further_request(
     def imported() -> dict[str, object] | None:
         detail = working_client.get(f"/books/{book_id}").json()
         failures = detail["progress"]["failures"]
-        assert not failures, f"задача импорта неуспешна: {failures}"
+        assert not failures, f"import task failed: {failures}"
         return detail if detail["book"]["status"] == BookStatus.IMPORTED.value else None
 
     assert wait_until(imported)["progress"]["total_sections"] > 0

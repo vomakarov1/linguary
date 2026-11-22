@@ -41,7 +41,7 @@ def source_module(source: str) -> SourceModule:
 def test_all_layer_packages_exist() -> None:
     """Package structure contains all application layers."""
     missing = [name for name in LAYER_PACKAGES if not (PACKAGE_ROOT / name / "__init__.py").is_file()]
-    assert not missing, f"нет пакетов слоёв: {', '.join(missing)}"
+    assert not missing, f"missing layer packages: {', '.join(missing)}"
 
 
 @pytest.mark.parametrize("rule", INNER_RULES, ids=lambda rule: rule.layer)
@@ -52,7 +52,7 @@ def test_inner_layer_has_modules_to_check(rule: LayerRule) -> None:
     to provide guarantees.
     """
     modules = iter_public_modules(rule.directory)
-    assert modules, f"слой {rule.layer} пуст, проверять импорты не на чем"
+    assert modules, f"layer {rule.layer} is empty, there are no imports to check"
 
 
 @pytest.mark.parametrize("rule", INNER_RULES, ids=lambda rule: rule.layer)
@@ -60,7 +60,7 @@ def test_inner_layer_dependencies(rule: LayerRule) -> None:
     """`domain` and `application` do not depend on outer layers or external technologies."""
     violations = check_layer(rule)
     assert not violations, (
-        f"нарушены границы слоя {rule.layer}:\n{format_violations(violations)}"
+        f"layer boundaries violated for {rule.layer}:\n{format_violations(violations)}"
     )
 
 
@@ -68,7 +68,7 @@ def test_adapters_do_not_depend_on_web_and_cli() -> None:
     """Adapters do not depend on Web layer or CLI: dependency points in the opposite direction."""
     violations = check_layer(ADAPTERS_RULE)
     assert not violations, (
-        f"нарушены границы слоя adapters:\n{format_violations(violations)}"
+        f"layer boundaries violated for adapters:\n{format_violations(violations)}"
     )
 
 
@@ -81,7 +81,7 @@ def test_outer_layer_dependencies(rule: LayerRule) -> None:
     """
     violations = check_layer(rule)
     assert not violations, (
-        f"нарушены границы слоя {rule.layer}:\n{format_violations(violations)}"
+        f"layer boundaries violated for {rule.layer}:\n{format_violations(violations)}"
     )
 
 
@@ -104,7 +104,7 @@ def test_outer_layer_dependencies(rule: LayerRule) -> None:
 def test_rules_detect_violation(source: str) -> None:
     """Rules actually catch forbidden code rather than staying silent on any input."""
     violations = check_module(source_module(source), DOMAIN_RULE)
-    assert violations, f"нарушение не обнаружено в исходнике:\n{source}"
+    assert violations, f"violation was not detected in the source:\n{source}"
 
 
 @pytest.mark.parametrize(
@@ -132,7 +132,7 @@ def test_outer_rules_detect_dependency_on_a_sibling_layer(
 
     violations = check_module(module, rule)
 
-    assert violations, f"нарушение не обнаружено в исходнике:\n{source}"
+    assert violations, f"violation was not detected in the source:\n{source}"
 
 
 @pytest.mark.parametrize(
@@ -146,4 +146,4 @@ def test_outer_rules_detect_dependency_on_a_sibling_layer(
 def test_rules_allow_permitted_imports(source: str) -> None:
     """Permitted imports are not treated as violations by the rules."""
     violations = check_module(source_module(source), DOMAIN_RULE)
-    assert not violations, f"ложное нарушение:\n{format_violations(violations)}"
+    assert not violations, f"false violation:\n{format_violations(violations)}"

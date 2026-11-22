@@ -40,7 +40,7 @@ def _omit_absent_anchor_offsets(response: dict) -> None:
 
 def encode_pass(payload: NarrativeAnalysisResponse | PedagogicalAnalysisResponse) -> dict:
     response = asdict(payload)
-    # Пустые новые поля не пишем: проход, сохранённый до них, остаётся той же контрольной суммы.
+    # Do not write empty new fields: a pass saved before them keeps the same checksum.
     for candidate in response.get('glossary_candidates', ()):
         if candidate.get('description') == '':
             candidate.pop('description', None)
