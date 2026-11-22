@@ -704,7 +704,13 @@ def complete_processing_in_transaction(transaction, *, book_id, finished_task_id
         return
     run = transaction.runs.active_for_book(book_id)
     roots = transaction.work.list_active_roots(book_id, run_id=run.id) if run is not None else ()
-    if any(not transaction.work.root_coverage_complete(root.id) for root in roots):
+    # A stopped regeneration is a finished side operation. It must not pin the book in
+    # PROCESSING after translation coverage is complete. A stopped translation root still blocks.
+    blocking = tuple(
+        root for root in roots
+        if not (getattr(root, 'operation_kind', 'translation') == 'regeneration' and root.status == 'stopped')
+    )
+    if any(not transaction.work.root_coverage_complete(root.id) for root in blocking):
         raise RecoveryError('unsafe_partition')
     if not correction_coverage_complete(transaction, book_id):
         return

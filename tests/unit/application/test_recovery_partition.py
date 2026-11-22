@@ -1287,7 +1287,7 @@ async def test_provider_truncated_indivisible_atomic_interval_does_not_trigger_r
         )
 
     assert not isinstance(exc_info.value, block_processing_module.RecoverySplit)
-    assert exc_info.value.reason == "unsafe_partition"
+    assert exc_info.value.reason == "output_truncated"
     assert isinstance(exc_info.value.original_error, ResultValidationError)
     assert generate_calls == 1
 
