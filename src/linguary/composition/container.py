@@ -43,7 +43,7 @@ from linguary.application.diagnostics import Diagnostics, DiagnosticsPolicy
 from linguary.application.recovery import RecoveryPolicy
 from linguary.application.book_conditions import BookConditionsService, ConditionsError
 from linguary.application.ports.pronunciation import PronunciationSource
-from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, conditions_payload, effective_content_plan_profile, pronunciation_source_for
+from linguary.composition.book_runtime import BookRuntimeResolver, BoundTaskQueue, ProvenanceClient, check_settings_from_mapping, conditions_payload, effective_content_plan_profile, pronunciation_source_for
 from linguary.composition.correction_runtime import CorrectionRuntimeResolver, correction_snapshot
 from linguary.composition.runtime_settings import RuntimeGeneration, RuntimeSettings, RuntimeSequence
 from linguary.composition.system_settings import SystemSettingsService
@@ -501,7 +501,7 @@ def build_application(
         runtime_resolver=CorrectionRuntimeResolver(book_conditions, runtime_settings,
             limiter=rate_limiter, on_logged=on_logged, injected_client=llm_client),
         validator_factory=lambda settings, conditions: _validator(replace(settings,
-            checks=type(settings.checks)(**thaw(conditions.payload['checks'])))))
+            checks=check_settings_from_mapping(thaw(conditions.payload['checks'])))))
     quality_settings = replace(app_settings.llm, temperature=None, max_output_tokens=None)
     quality_configured = ConfiguredLLMClient(quality_settings)
     quality_clients = {}
@@ -595,7 +595,7 @@ def build_application(
         correction=correction,
         resolve_correction_candidate=ResolveCorrectionCandidate(unit_of_work=unit_of_work,
             validator_factory=lambda conditions: _validator(replace(runtime_settings.current.settings,
-                checks=type(runtime_settings.current.settings.checks)(**thaw(conditions.payload['checks']))))),
+                checks=check_settings_from_mapping(thaw(conditions.payload['checks']))))),
         pause_book=PauseBook(unit_of_work=unit_of_work),
         resume_book=ResumeBook(unit_of_work=unit_of_work),
         quality_review=quality_review,
@@ -655,6 +655,7 @@ def _analysis_sequence(
         auto_start_processing=settings.checks.auto_start_processing,
         start_processing=start_processing,
         seed_first_chapter=settings.checks.seed_first_chapter,
+        sequential_analysis=settings.checks.sequential_analysis,
         analyze_chapter=AnalyzeChapter(
             unit_of_work=unit_of_work,
             llm_client=model,
@@ -667,6 +668,8 @@ def _analysis_sequence(
             conditions_id=conditions_id,
             max_concurrency=settings.worker.concurrency,
             seed_first_chapter=settings.checks.seed_first_chapter,
+            sequential_analysis=settings.checks.sequential_analysis,
+            max_output_tokens=settings.llm.max_output_tokens,
             staged_analysis=settings.llm.staged_analysis,
         ),
     )

@@ -752,6 +752,7 @@ async def test_chapter_analysis_sequence_enqueues_all_chapters_in_parallel() -> 
         unit_of_work=unit_of_work,  # type: ignore[arg-type]
         queue=queue,  # type: ignore[arg-type]
         analyze_chapter=analyze_chapter,
+        sequential_analysis=False,
     )
 
     first_task = await sequence.start(BOOK_ID)
@@ -805,11 +806,14 @@ async def test_chapter_analysis_sequence_auto_approve_glossary_success() -> None
     )
 
     tasks = await sequence._enqueue_all(BOOK_ID)
-    assert len(tasks) == 2
+    assert len(tasks) == 1
+    assert tasks[0].scope_id == "section-1"
     await sequence.run_task(tasks[0].start())
     assert unit_of_work.books.get(BOOK_ID).status is BookStatus.ANALYZING
+    assert len(queue.tasks) == 2
+    assert queue.tasks[1].scope_id == "section-2"
 
-    await sequence.run_task(tasks[1].start())
+    await sequence.run_task(queue.tasks[1].start())
     assert unit_of_work.books.get(BOOK_ID).status is BookStatus.READY_TO_PROCESS
     glossary_items = unit_of_work.glossary.list_for_book(BOOK_ID)
     assert len(glossary_items) == 1
@@ -871,8 +875,10 @@ async def test_chapter_analysis_sequence_auto_approve_glossary_skips_conflicts()
     )
 
     tasks = await sequence._enqueue_all(BOOK_ID)
+    assert len(tasks) == 1
     await sequence.run_task(tasks[0].start())
-    await sequence.run_task(tasks[1].start())
+    assert len(queue.tasks) == 2
+    await sequence.run_task(queue.tasks[1].start())
 
     assert unit_of_work.books.get(BOOK_ID).status is BookStatus.GLOSSARY_REVIEW
     glossary_items = unit_of_work.glossary.list_for_book(BOOK_ID)
@@ -1026,6 +1032,7 @@ async def test_parallel_batch_analysis_ignores_unfinished_peer_chapter_candidate
     unit_of_work.tasks = SimpleNamespace(list_for_book=lambda _: tasks)  # type: ignore[attr-defined]
     client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
     scenario, _ = make_analyze_chapter(unit_of_work, client)
+    scenario._sequential_analysis = False
 
     await scenario(
         AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-2", task_id="task-2")
@@ -1152,6 +1159,7 @@ async def test_auto_approve_glossary_computes_mention_counter_once(
         unit_of_work=unit_of_work,  # type: ignore[arg-type]
         queue=queue,  # type: ignore[arg-type]
         analyze_chapter=analyze_chapter,
+        sequential_analysis=False,
     )
 
     tasks = await sequence._enqueue_all(BOOK_ID)
@@ -1486,6 +1494,7 @@ async def test_parallel_analysis_keeps_last_chapter_in_parallel_batch_when_concu
     client = FakeLLMClient.always(analysis_reply(aliases=("b1",)))
     scenario, _ = make_analyze_chapter(unit_of_work, client)
     scenario._max_concurrency = 2
+    scenario._sequential_analysis = False
 
     await scenario(
         AnalyzeChapterCommand(book_id=BOOK_ID, section_id="section-3", task_id="task-3")
@@ -1978,7 +1987,7 @@ async def test_analyze_chapter_passes_cumulative_words_to_sha_and_pedagogical_pa
             r for r in ch1_client.requests if r.stage is LLMCallStage.CHAPTER_ANALYSIS_PEDAGOGICAL
         )
         assert "прочитано до этой главы: 0 слов" in ch1_ped_req.input_text
-        assert "78–85%" in ch1_ped_req.input_text
+        assert "70–82%" in ch1_ped_req.input_text
 
         # Chapter 2: strictly before = 12,000 words from Chapter 1 (neither front matter nor Chapter 3).
         sha_words_seen.clear()
@@ -2316,10 +2325,9 @@ async def test_meaningful_part_divider_extracts_candidates_in_prewave_and_mid_bo
         assert part1_res.analysis.chapter_summary == ""
         assert part1_res.analysis.translation_instructions == ""
         assert part1_res.analysis.before_you_read == ()
-        assert all(
-            item.treatment is BlockTreatment.READ_AS_IS
-            for item in part1_res.analysis.treatment_plan.items
-        )
+        assert [
+            item.treatment for item in part1_res.analysis.treatment_plan.items
+        ] == [BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY]
         with uow.transaction() as tx:
             assert tx.analyses.get_pass(BOOK_ID, "part-1", AnalysisPassKind.NARRATIVE) is not None
             assert tx.analyses.get_pass(BOOK_ID, "part-1", AnalysisPassKind.PEDAGOGICAL) is None
@@ -2366,15 +2374,17 @@ async def test_meaningful_part_divider_extracts_candidates_in_prewave_and_mid_bo
     assert single_res.analysis.chapter_summary == ""
     assert single_res.analysis.translation_instructions == ""
     assert single_res.analysis.before_you_read == ()
-    assert all(
-        item.treatment is BlockTreatment.READ_AS_IS
-        for item in single_res.analysis.treatment_plan.items
-    )
+    assert [
+        item.treatment for item in single_res.analysis.treatment_plan.items
+    ] == [BlockTreatment.READ_AS_IS, BlockTreatment.GLOSSARY_ONLY]
 
     # 3. Prewave under seed_first_chapter=True + parallel_batch:
     # Wave 0 = [part-1]; Wave 1 = [titlepage, part-bare, section-1]; Wave 2 = [part-2, section-2].
     uow_wave = FakeUnitOfWork(document=document, book=make_book_record())
-    conditions = SimpleNamespace(id="cond-prewave", payload={"checks": {"seed_first_chapter": True}})
+    conditions = SimpleNamespace(
+        id="cond-prewave",
+        payload={"checks": {"seed_first_chapter": True, "sequential_analysis": False}},
+    )
     uow_wave.work = SimpleNamespace(latest_conditions=lambda _: conditions)  # type: ignore[attr-defined]
     reply_part1 = analysis_reply(
         aliases=("b1", "b2"),
@@ -2428,6 +2438,7 @@ async def test_meaningful_part_divider_extracts_candidates_in_prewave_and_mid_bo
         queue=wave_queue,  # type: ignore[arg-type]
         analyze_chapter=wave_analyze,
         seed_first_chapter=True,
+        sequential_analysis=False,
     )
 
     await sequence.start(BOOK_ID)
@@ -2481,4 +2492,232 @@ async def test_meaningful_part_divider_extracts_candidates_in_prewave_and_mid_bo
     assert seq_client.call_count == 4
     assert "Послесветы" in seq_client.requests[1].input_text
     assert "Оборотни" in seq_client.requests[3].input_text
+
+
+async def test_part_divider_treatments_matrix_for_a2_b2_and_english_help() -> None:
+    """_analyze_part_divider assigns READ_AS_IS/GLOSSARY_ONLY/TRANSLATE per english_help, reader_level, word count, and candidates (P7.T2)."""
+    short_part = make_analysis_section(
+        section_id="part-short",
+        title="PART ONE",
+        order=0,
+        texts=("PART ONE", "Afterlights"),
+    )
+    long_part = make_analysis_section(
+        section_id="part-long",
+        title="PART TWO",
+        order=1,
+        texts=("PART TWO", "Mary, Queen of Snots"),
+    )
+    ch1 = make_analysis_section(
+        section_id="section-1",
+        title="Chapter 1",
+        order=2,
+        texts=("Story text.",),
+    )
+    document = make_analysis_document((short_part, long_part, ch1))
+
+    cand_reply = analysis_reply(
+        aliases=("b1", "b2"),
+        candidates=[
+            {
+                "source_text": "Afterlights",
+                "type": "term",
+                "suggested_translation": "Послесветы",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+    )
+    empty_reply = analysis_reply(aliases=("b1", "b2"), candidates=[])
+
+    # 1. english_help=True -> all READ_AS_IS even for A2 + candidates + >3 words.
+    from analysis_fakes import FakeLanguageDetector
+    from linguary.application.context_builder import snapshot_prompt_templates
+    from linguary.application.retry_policy import RetryPolicy
+    from linguary.application.use_cases.analyze_chapter import AnalyzeChapter
+
+    cand_reply_v3 = analysis_reply(
+        aliases=("b1", "b2"),
+        candidates=[
+            {
+                "source_text": "Afterlights",
+                "type": "term",
+                "suggested_translation": "Послесветы",
+                "confidence": 0.9,
+                "model_flagged_review": False,
+                "note": None,
+            }
+        ],
+        content_plan={"difficulties": [], "context_facts": [], "before_you_read_evidence": []},
+    )
+    uow_en = FakeUnitOfWork(document=document, book=make_book_record())
+    en_scenario = AnalyzeChapter(
+        unit_of_work=uow_en,  # type: ignore[arg-type]
+        llm_client=FakeLLMClient([cand_reply_v3, cand_reply_v3]),
+        language_detector=FakeLanguageDetector(),
+        retry_policy=RetryPolicy(max_attempts=1),
+        glossary_confidence_threshold=CONFIDENCE_THRESHOLD,
+        context_builder=ContextBuilder(
+            content_plan_profile="content-plan-v3",
+            reader_level="a2",
+            prompt_templates=snapshot_prompt_templates(
+                source_language="en",
+                target_language="ru",
+                reader_level="a2",
+                profile="content-plan-v3",
+                english_help=True,
+            ),
+        ),
+    )
+    en_short = await en_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-short"))
+    en_long = await en_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-long"))
+    assert [i.treatment for i in en_short.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+    ]
+    assert [i.treatment for i in en_long.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+    ]
+
+    # 2. A2 without english_help: <=3 words -> GLOSSARY_ONLY (even without candidates); >3 words -> TRANSLATE.
+    uow_a2 = FakeUnitOfWork(document=document, book=make_book_record())
+    a2_scenario, _ = make_analyze_chapter(
+        uow_a2, FakeLLMClient([empty_reply, empty_reply]), reader_level="a2"
+    )
+    a2_short = await a2_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-short"))
+    a2_long = await a2_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-long"))
+    assert [i.treatment for i in a2_short.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+    assert [i.treatment for i in a2_long.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.TRANSLATE,
+    ]
+
+    # 3. B2 without english_help: candidates -> GLOSSARY_ONLY; no candidates -> READ_AS_IS.
+    uow_b2 = FakeUnitOfWork(document=document, book=make_book_record())
+    b2_scenario, _ = make_analyze_chapter(
+        uow_b2, FakeLLMClient([cand_reply, empty_reply]), reader_level="b2"
+    )
+    b2_with_cand = await b2_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-short"))
+    b2_no_cand = await b2_scenario(AnalyzeChapterCommand(book_id=BOOK_ID, section_id="part-long"))
+    assert [i.treatment for i in b2_with_cand.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.GLOSSARY_ONLY,
+    ]
+    assert [i.treatment for i in b2_no_cand.analysis.treatment_plan.items] == [
+        BlockTreatment.READ_AS_IS,
+        BlockTreatment.READ_AS_IS,
+    ]
+
+
+async def test_single_pass_fragment_findings_merges_candidates_deterministically() -> None:
+    """_merge_fragment_candidates merges deterministically and _analyze_by_fragments passes candidates to later fragments."""
+    from linguary.application.llm_dto import GlossaryCandidateResponse
+    from linguary.application.use_cases.analyze_chapter import _merge_fragment_candidates
+    from linguary.domain.name_translation import NameTranslationAssessment, NameTranslationMethod
+
+    a_sound = NameTranslationAssessment(
+        opaque_name=True,
+        applied_method=NameTranslationMethod.SOUND,
+        eligible_without_review=True,
+        review_reasons=(),
+        rationale="Звуковая передача.",
+    )
+    a_meaning = NameTranslationAssessment(
+        opaque_name=False,
+        applied_method=NameTranslationMethod.MEANING,
+        eligible_without_review=True,
+        review_reasons=(),
+        rationale="Смысловая передача.",
+    )
+    part1_cands = (
+        GlossaryCandidateResponse(
+            source_text="Everlost",
+            type=ConceptType.PLACE,
+            suggested_translation="Эверлост",
+            confidence=0.8,
+            model_flagged_review=False,
+            note="короткая заметка",
+            description="Мир между жизнью и смертью.",
+            name_translation_assessment=a_sound,
+        ),
+        GlossaryCandidateResponse(
+            source_text="Nick",
+            type=ConceptType.PERSON,
+            suggested_translation="Ник",
+            confidence=0.95,
+            model_flagged_review=False,
+            note="мальчик",
+            description="Главный герой.",
+        ),
+    )
+    part2_cands = (
+        GlossaryCandidateResponse(
+            source_text="everlost",
+            type=ConceptType.PLACE,
+            suggested_translation="Вечноземье",
+            confidence=0.8,  # tie -> later fragment wins for translation & assessment
+            model_flagged_review=False,
+            note="",  # empty must not erase filled note
+            description="",  # empty must not erase filled description
+            name_translation_assessment=a_meaning,
+        ),
+        GlossaryCandidateResponse(
+            source_text="Nick",
+            type=ConceptType.PERSON,
+            suggested_translation="Николай",
+            confidence=0.6,  # lower confidence -> keeps Ник, but longer note survives
+            model_flagged_review=False,
+            note="мальчик с шоколадом на лице",
+            description="",
+        ),
+        GlossaryCandidateResponse(
+            source_text="Allie",
+            type=ConceptType.PERSON,
+            suggested_translation="Элли",
+            confidence=0.9,
+            model_flagged_review=False,
+        ),
+    )
+    merged = _merge_fragment_candidates((part1_cands, part2_cands))
+    assert [c.source_text.casefold() for c in merged] == ["everlost", "nick", "allie"]
+    assert merged[0].suggested_translation == "Вечноземье"
+    assert merged[0].name_translation_assessment == a_meaning
+    assert merged[0].note == "короткая заметка"
+    assert merged[0].description == "Мир между жизнью и смертью."
+    assert merged[1].suggested_translation == "Ник"
+    assert merged[1].note == "мальчик с шоколадом на лице"
+    assert merged[1].description == "Главный герой."
+
+    # End-to-end _analyze_by_fragments passes fragment 1 candidates to fragment 2 input.
+    section = make_analysis_section(texts=("Everlost appears here.", "Everlost returns here."))
+    uow = FakeUnitOfWork(document=make_analysis_document((section,)))
+    client = FakeLLMClient.replying(
+        (
+            analysis_reply(
+                aliases=("b1",),
+                candidates=[
+                    {
+                        "source_text": "Everlost",
+                        "type": "place",
+                        "suggested_translation": "Вечноземье",
+                        "confidence": 0.9,
+                        "model_flagged_review": False,
+                        "note": "мир между мирами",
+                    }
+                ],
+            ),
+            analysis_reply(aliases=("b1",), candidates=[]),
+        )
+    )
+    scenario, _ = make_analyze_chapter(uow, client, max_fragment_blocks=1)
+    await scenario(command())
+    assert len(client.requests) == 2
+    assert "Кандидаты глоссария из предыдущих частей этой главы:" in client.requests[1].input_text
+    assert "Everlost [place] -> Вечноземье" in client.requests[1].input_text
+
 
