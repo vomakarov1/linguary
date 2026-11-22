@@ -23,7 +23,7 @@ from linguary.application.correction import (
 from linguary.application.correction_dto import (
     ChapterCorrectionResponse, CorrectedBlockResponse, ChapterCorrectionV2Response,
     ChapterCorrectionReviewResponse, CorrectionSnapshotV2, ProposedBlockResponse,
-    proposed_block_from_payload,
+    proposed_block_from_payload, unchanged_reader_texts,
 )
 from linguary.application.llm_dto import BlockResultResponse, TranslationResultResponse
 from linguary.application.llm_rejections import finalize_response, record_rejection
@@ -49,7 +49,12 @@ from linguary.domain import (
 )
 from linguary.domain.book_conditions import WorkStateError, thaw
 from linguary.domain.content_plan import ContentEvidence, canonical_sha
-from linguary.domain.correction import CorrectionCheck, CorrectionCandidate, correction_task_identity
+from linguary.domain.correction import (
+    CORRECTION_POLICY_VERSION_V3,
+    CorrectionCandidate,
+    CorrectionCheck,
+    correction_task_identity,
+)
 from linguary.domain.llm_log import CallContext
 
 
@@ -872,7 +877,7 @@ class CorrectChapter:
                 response = None
         raise ResultValidationError('исчерпаны попытки исправления главы')
 
-    def _candidates(self, tx, inputs, response):
+    def _candidates(self, tx, inputs, response, *, allocate_from_db: bool = True):
         from linguary.application.use_cases.export_book import _validate_content_plans
         ids = response.block_ids
         all_results = tuple(inputs.results.values())
@@ -905,6 +910,11 @@ class CorrectChapter:
         )
         source_texts = {b.id: b.text for b in inputs.section.ordered_blocks}
         section_quote_fragments = None
+        validation_policy = (
+            'v2'
+            if getattr(inputs.snapshot, 'policy_version', None) == CORRECTION_POLICY_VERSION_V3
+            else 'v1'
+        )
         candidates = []
         for block in response.blocks:
             previous = inputs.results[block.block_id]
@@ -935,6 +945,9 @@ class CorrectChapter:
                 target_language=inputs.document.target_language,
                 note_id_factory=notes,
                 mandatory_glossary=mandatory_glossary,
+                validation_policy=validation_policy,
+                protected_quotes=section_quote_fragments,
+                excluded_service_texts={block.block_id: unchanged_reader_texts(previous)},
             )
             # Preserve identifiers of notes surviving a correction at the same source anchor.
             used = set()
@@ -1077,7 +1090,46 @@ class CorrectChapter:
                     or any(_same_quote(n.original_excerpt, q) for n in candidate.language_notes for q in quotes)
                 ):
                     raise ResultValidationError('исправление дублирует защищённую помощь к фрагменту')
-        return tuple(next(r for r in candidates if r.block_id == block_id) for block_id in ids)
+        chosen = tuple(next(r for r in candidates if r.block_id == block_id) for block_id in ids)
+        if not allocate_from_db:
+            return chosen
+        return _issue_correction_note_ids(tx, inputs, chosen)
+
+
+def _issue_correction_note_ids(tx, inputs, candidates):
+    """Replace temporary note ids after every check has passed."""
+    allocator = getattr(getattr(tx, "results", None), "allocate_note_ids", None)
+    if not callable(allocator):
+        return candidates
+    preserved = {
+        note.id
+        for result in inputs.results.values()
+        for note in result.language_notes
+    }
+    fresh_ids = [
+        note.id
+        for candidate in candidates
+        for note in candidate.language_notes
+        if note.id not in preserved
+    ]
+    if not fresh_ids:
+        return candidates
+    issued = allocator(
+        inputs.run.id,
+        chapter_number(inputs.document, inputs.section),
+        len(fresh_ids),
+    )
+    mapping = dict(zip(fresh_ids, issued, strict=True))
+    return tuple(
+        replace(
+            candidate,
+            language_notes=tuple(
+                note if note.id not in mapping else replace(note, id=mapping[note.id])
+                for note in candidate.language_notes
+            ),
+        )
+        for candidate in candidates
+    )
 
 
 def prepare_correction_candidates(tx, inputs, candidates, validator):
@@ -1085,7 +1137,7 @@ def prepare_correction_candidates(tx, inputs, candidates, validator):
     response = ChapterCorrectionV2Response(tuple(proposed_block_from_payload(thaw(c.payload['proposal']))
                                                for c in candidates))
     validated = CorrectChapter(unit_of_work=None, llm_client=None, snapshot=inputs.snapshot,
-                               validator=validator)._candidates(tx, inputs, response)
+                               validator=validator)._candidates(tx, inputs, response, allocate_from_db=False)
     results = []
     for candidate, result in zip(candidates, validated, strict=True):
         saved_notes = candidate.payload['result']['language_notes']

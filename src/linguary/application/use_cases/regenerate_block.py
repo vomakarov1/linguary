@@ -26,9 +26,9 @@ import asyncio
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
+import inspect
 from uuid import uuid4
 
-from linguary.application import recovery
 from linguary.application.block_processing import (
     BlockProcessingError,
     Sleep,
@@ -46,6 +46,7 @@ from linguary.application.ports.persistence import BookRecord, UnitOfWork
 from linguary.application.recovery import Recovery, RecoveryError, RecoverySplit
 from linguary.application.retry_policy import RetryPolicy
 from linguary.application.task_runner import TaskQueue
+from linguary.application.translation_policy import TRANSLATION_POLICIES
 from linguary.application.translation_units import DEFAULT_MAX_UNIT_SOURCE_CHARS
 from linguary.application.validators import TranslationResultValidator
 from linguary.domain import (
@@ -165,6 +166,36 @@ class RegenerateBlock:
         self._id_factory = id_factory or _new_id
         self._validator = validator
         self._recovery = Recovery(unit_of_work)
+        # save() learns chapter_num in a later change and allocates inside its
+        # transaction. Until that parameter exists, reserve the ids here.
+        original_save = self._call.save
+
+        def save(*, chapter_num: int, **kwargs):
+            if "chapter_num" in inspect.signature(original_save).parameters:
+                return original_save(chapter_num=chapter_num, **kwargs)
+            results = tuple(kwargs.get("results") or ())
+            notes = [note for result in results for note in result.language_notes]
+            if notes:
+                with self._unit_of_work.transaction() as transaction:
+                    issued = transaction.results.allocate_note_ids(
+                        kwargs["run_id"], chapter_num, len(notes)
+                    )
+                cursor = 0
+                rewritten = []
+                for result in results:
+                    count = len(result.language_notes)
+                    rewritten.append(replace(
+                        result,
+                        language_notes=tuple(
+                            replace(note, id=issued[cursor + offset])
+                            for offset, note in enumerate(result.language_notes)
+                        ),
+                    ))
+                    cursor += count
+                kwargs = {**kwargs, "results": tuple(rewritten)}
+            return original_save(**kwargs)
+
+        self._call.save = save
 
     async def __call__(self, command: RegenerateBlockCommand) -> RegenerateBlockResult:
         """One ALG-04 cycle for a single block (PRD § 13, § 19.3)."""
@@ -222,7 +253,10 @@ class RegenerateBlock:
             raise
         with _scoped_reconcile_section(work.section.id):
             saved = self._call.save(
-                book_id=work.document.id, run_id=work.run.id, results=call.results
+                book_id=work.document.id,
+                run_id=work.run.id,
+                results=call.results,
+                chapter_num=work.chapter_number,
             )
         return RegenerateBlockResult(
             block_id=work.block.id,
@@ -325,6 +359,42 @@ class RegenerateBlock:
         )
 
 
+def _supersede_stopped_regeneration_roots(
+    transaction, *, book_id: str, run_id: str | None, block_id: str, successor_id: str
+) -> None:
+    """Point stopped regeneration roots of this block at the new root.
+
+    The work port can transfer a root only by creating another successor.
+    The stopped row is already loaded, so the link is written on that row.
+    """
+    if run_id is None:
+        return
+    stopped_ids = {
+        root.id
+        for root in transaction.work.list_roots(book_id, run_id=run_id)
+        if root.id != successor_id
+        and root.superseded_by is None
+        and root.operation_kind == "regeneration"
+        and root.status == "stopped"
+        and tuple(root.manifest.get("ordered_blocks", ())) == (block_id,)
+    }
+    if not stopped_ids:
+        return
+    # The identity map holds rows weakly, so a flushed attribute write can
+    # disappear with the row. Update the loaded transaction directly.
+    session = transaction.work._session
+    session.flush()
+    connection = session.connection()
+    for root_id in stopped_ids:
+        connection.exec_driver_sql(
+            "UPDATE recovery_roots SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL",
+            (successor_id, root_id),
+        )
+    for row in list(session.identity_map.values()):
+        if getattr(row, "id", None) in stopped_ids and hasattr(row, "superseded_by"):
+            session.expire(row)
+
+
 class BlockRegenerationSequence:
     """Enqueues block regeneration tasks and returns the book to export readiness (PRD § 18, § 21.5)."""
 
@@ -355,7 +425,7 @@ class BlockRegenerationSequence:
             for existing in transaction.tasks.list_for_book(book_id):
                 if (existing.task_type is not TaskType.REGENERATE_BLOCK
                         or existing.scope_id != block_id or existing.status not in _ACTIVE_TASK_STATUSES
-                        or existing.policy_version != recovery.CURRENT_TRANSLATION_POLICY):
+                        or existing.policy_version not in TRANSLATION_POLICIES):
                     continue
                 root = transaction.work.get_root(existing.operation_id)
                 binding = transaction.work.get_binding('task', existing.id)
@@ -374,6 +444,13 @@ class BlockRegenerationSequence:
                     if len(scopes) == 1 and scopes[0].ordered_blocks == (block_id,):
                         return existing
             root = self._regenerate_block.prepare_operation(command, transaction=transaction)
+            _supersede_stopped_regeneration_roots(
+                transaction,
+                book_id=book_id,
+                run_id=None if run is None else run.id,
+                block_id=block_id,
+                successor_id=root.id,
+            )
             identity = TaskIdentity(book_id=book_id, task_type=TaskType.REGENERATE_BLOCK,
                                     scope_id=block_id, operation_id=root.id,
                                     policy_version=root.policy_version)
