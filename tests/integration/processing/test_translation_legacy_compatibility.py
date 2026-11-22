@@ -146,3 +146,36 @@ async def test_rootless_regeneration_only_adopts_proven_attempts(tmp_path, ambig
             assert actual.context == attempt.context
     finally:
         await app.aclose()
+
+
+async def test_unsupported_contract_marker_is_rejected_by_itself(tmp_path):
+    from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
+    from linguary.adapters.db.models import BookConditionsRow
+    from linguary.adapters.llm import FakeLLMClient
+    from linguary.composition import build_application
+    from linguary.domain.book_conditions import thaw
+
+    app = build_application(settings=AppSettings(
+        llm=LLMSettings(model='pinned-model', api_key='synthetic-secret', proxy_mode='direct'),
+        storage=StorageSettings(data_root=str(tmp_path / 'data'))), llm_client=FakeLLMClient(),
+        content_plan_profile='content-plan-v3')
+    try:
+        task, conditions, _ = setup_old(app)
+        payload = thaw(conditions.payload)
+        templates = dict(payload['prompt_templates'])
+        assert payload['profile'] == 'content-plan-v3'
+        assert isinstance(payload['prompt_templates'], dict)
+        templates['analysis_contract_version'] = 4
+        payload['prompt_templates'] = templates
+        payload['prompt_sha256'] = payload_digest(templates)
+        updated = replace(conditions, payload=payload)
+        with app.unit_of_work.transaction() as tx:
+            row = tx.work._session.get(BookConditionsRow, updated.id)
+            row.payload_json = thaw(updated.payload)
+        with app.unit_of_work.transaction() as tx:
+            stored = tx.work.get_conditions(updated.id)
+        assert stored == updated
+        with pytest.raises(RecoveryError, match='conditions_unavailable'):
+            ensure(app, task, stored)
+    finally:
+        await app.aclose()
