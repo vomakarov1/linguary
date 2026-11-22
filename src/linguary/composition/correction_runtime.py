@@ -17,7 +17,10 @@ from linguary.application.correction_dto import (
     ChapterCorrectionReviewResponse, parse_correction_snapshot,
 )
 from linguary.application.llm_dto import LLMPayloadError
-from linguary.application.ports.llm import LLMResponseFormatError, LLMResponseKind
+from linguary.application.ports.llm import (
+    LLMConfigurationError, LLMProviderError, LLMResponseFormatError, LLMResponseKind,
+    LLMTransportError,
+)
 from linguary.application.recovery import RecoveryError
 from linguary.composition.book_runtime import route_snapshot
 from linguary.composition.llm import ConfiguredLLMClient
@@ -405,6 +408,8 @@ class CorrectionProvenanceClient:
                     or context.generation != task.attempts
                     or context.prompt_hash != sha256(request.instructions.encode()).hexdigest()):
                 raise ConditionsError('correction_policy_unavailable')
+            if self._has_unacked_unknown(transaction, task.id):
+                raise RecoveryError('unknown_outcome')
             attempt = transaction.work.get_attempt(context.attempt_id)
             if attempt is None:
                 attempt = CallAttempt(
@@ -416,10 +421,27 @@ class CorrectionProvenanceClient:
                     or attempt.conditions_id != self.conditions_id or attempt.run_id != self.run_id
                     or attempt.task_id != task.id or thaw(attempt.context) != expected):
                 raise RecoveryError('interrupted')
-            transaction.work.transition_attempt(attempt.id, 'sent', expected_state='created')
         request = replace(request, call_context=context)
+        limiter = None
+        target = self.inner
+        if isinstance(self.inner, RateLimitedLLMClient):
+            limiter = self.inner._limiter
+            target = self.inner._inner
+        acquired = False
         try:
-            response = await self.inner.generate(request)
+            if limiter is not None:
+                await limiter.acquire_concurrency()
+                acquired = True
+                await limiter.acquire()
+            with self.service.uow.transaction() as transaction:
+                current = transaction.work.get_attempt(attempt.id)
+                if current is None or current.state != 'created':
+                    raise RecoveryError('interrupted')
+                task, binding = self._ownership(transaction, request)
+                if thaw(current.context) != self._attempt_context(context, task, binding):
+                    raise RecoveryError('interrupted')
+                transaction.work.transition_attempt(attempt.id, 'sent', expected_state='created')
+            response = await target.generate(request)
             expected_type = (ChapterCorrectionReviewResponse if reviewing else
                 ChapterCorrectionV2Response if isinstance(self.snapshot, CorrectionSnapshotV2) else ChapterCorrectionResponse)
             if response.truncated or type(response.payload) is not expected_type:
@@ -450,12 +472,54 @@ class CorrectionProvenanceClient:
                 transaction.work.transition_attempt(attempt.id, 'validated', expected_state='sent',
                     outcome={'schema_version': 1, 'provider': response.provider, 'model': response.model,
                              'call_id': response.call_id})
-        except BaseException:
-            with self.service.uow.transaction() as transaction:
-                current = transaction.work.get_attempt(attempt.id)
-                if current is not None and current.state == 'sent':
-                    transaction.work.transition_attempt(attempt.id, 'unknown', expected_state='sent')
+        except BaseException as error:
+            if (limiter is not None and isinstance(error, LLMTransportError)
+                    and error.retry_after_seconds is not None):
+                limiter.hold(error.retry_after_seconds)
+            self._settle_correction(attempt.id, error)
             raise
+        finally:
+            if acquired and limiter is not None:
+                limiter.release_concurrency()
         self._attempts.set((*self.attempts, attempt.id))
         self._responses.set((*self.responses, response))
         return response
+
+    def _has_unacked_unknown(self, transaction, task_id) -> bool:
+        listed = getattr(transaction.work, 'list_task_attempts', None)
+        if not callable(listed):
+            return False
+        for item in listed(task_id):
+            if item.state != 'unknown':
+                continue
+            outcome = thaw(item.outcome) if item.outcome else {}
+            if outcome.get('acknowledged_duplicate_billing_risk') is not True:
+                return True
+        return False
+
+    def _settle_correction(self, attempt_id, error) -> None:
+        with self.service.uow.transaction() as transaction:
+            current = transaction.work.get_attempt(attempt_id)
+            if current is None:
+                return
+            try:
+                if current.state == 'created':
+                    transaction.work.cancel_unsent_attempt(attempt_id)
+                    return
+                if current.state != 'sent':
+                    return
+                if isinstance(error, LLMTransportError):
+                    if error.outcome == 'not_sent':
+                        transaction.work.rollback_not_sent_attempt(attempt_id)
+                        return
+                    if error.outcome == 'known_transient':
+                        transaction.work.transition_attempt(attempt_id, 'failed', expected_state='sent')
+                        return
+                    transaction.work.transition_attempt(attempt_id, 'unknown', expected_state='sent')
+                    return
+                if isinstance(error, (LLMResponseFormatError, LLMProviderError, LLMConfigurationError)):
+                    transaction.work.transition_attempt(attempt_id, 'failed', expected_state='sent')
+                    return
+                transaction.work.transition_attempt(attempt_id, 'unknown', expected_state='sent')
+            except WorkStateError:
+                return

@@ -112,6 +112,13 @@
     </details>
   {% endfor %}
   {% for task in quality_ui.retry_tasks %}<form method="post" action="/tasks/{{ task.id }}/retry"><button type="submit">Повторить: {{ task.label }}</button></form>{% endfor %}
+  {% for task in quality_ui.unknown_retry_tasks|default([]) %}
+    <form method="post" action="/tasks/{{ task.id }}/retry">
+      <p>Повторный запуск может привести к повторной оплате этого запроса у провайдера.</p>
+      <label><input type="checkbox" name="acknowledge_unknown_outcome" value="true" required> Подтверждаю возможную повторную оплату запроса у провайдера</label>
+      <button type="submit">Повторить: {{ task.label }}</button>
+    </form>
+  {% endfor %}
   {% if quality_ui.forms and quality_ui.forms[0].routes %}
     <form method="get" action="{{ request.url.path }}">
       <label>Охват для оценки

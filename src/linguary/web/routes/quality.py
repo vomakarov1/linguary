@@ -155,6 +155,7 @@ _RETRY_TASK_TYPES = frozenset({
     'quality_review',
 })
 _RECOVERY_RETRY_TYPES = frozenset({'process_translation_unit', 'regenerate_block'})
+_GUARDED_RETRY_TYPES = _RECOVERY_RETRY_TYPES | {'chapter_correction'}
 
 
 class _RetryWorkView:
@@ -186,23 +187,28 @@ class _UnboundWork:
 
 
 def _retry_tasks(application, tasks, labels):
-    """Failed pipeline tasks an ordinary retry may resume, checked per task."""
+    """Ordinary retries, plus chapter-correction sends that still need an acknowledgement."""
     candidates = [
         task for task in tasks
         if task.is_retryable and task.task_type.value in _RETRY_TASK_TYPES
     ]
-    if any(task.task_type.value in _RECOVERY_RETRY_TYPES for task in candidates):
+    unknown_tasks = []
+    if any(task.task_type.value in _GUARDED_RETRY_TYPES for task in candidates):
         read = getattr(application.unit_of_work, 'read_transaction', application.unit_of_work.transaction)
         with read() as tx:
             view = _RetryWorkView(tx)
-            candidates = [
-                task for task in candidates
-                if is_task_retryable_for_recovery(view, task)[0]
-            ]
-    return [
-        dict(id=task.id, label=labels.task_type_label(task.task_type))
-        for task in candidates
-    ]
+            kept = []
+            for task in candidates:
+                if is_task_retryable_for_recovery(view, task)[0]:
+                    kept.append(task)
+                elif task.task_type.value == 'chapter_correction':
+                    unknown_tasks.append(task)
+            candidates = kept
+
+    def _row(task):
+        return dict(id=task.id, label=labels.task_type_label(task.task_type))
+
+    return [_row(task) for task in candidates], [_row(task) for task in unknown_tasks]
 
 
 def quality_page_context(request, application, book_id, *, tasks=None, overview=None):
@@ -214,7 +220,8 @@ def quality_page_context(request, application, book_id, *, tasks=None, overview=
     base = dict(forms=[], scope_choices=[], settings_revision=application.runtime_settings.revision, legacy=False,
         llm_ready=application.settings.llm.is_ready,
         review_labels=labels.QUALITY_REVIEW_LABELS, reason_labels=labels.QUALITY_REASON_LABELS, usd=usd_amount,
-        retry_tasks=[], diagnostics=[], diagnostic_list_command=f'linguary diagnostics list {quote(book_id)}')
+        retry_tasks=[], unknown_retry_tasks=[], diagnostics=[],
+        diagnostic_list_command=f'linguary diagnostics list {quote(book_id)}')
     if request.headers.get('x-linguary-fragment') == 'result-header':
         return base
     if overview is not None and getattr(overview, '_tasks', None) is not None:
@@ -280,8 +287,9 @@ def quality_page_context(request, application, book_id, *, tasks=None, overview=
         diagnostics.append(dict(status=labels.DIAGNOSTIC_BODY_LABELS.get(status, labels.DIAGNOSTIC_BODY_LABELS['unavailable']),
             url=f'/books/{book_id}/diagnostics/{call.id}' if local_diagnostics else None,
             command=f'linguary diagnostics show {quote(book_id)} {quote(call.id)}'))
+    retry_tasks, unknown_retry_tasks = _retry_tasks(application, tasks, labels)
     return dict(base, forms=forms, scope_choices=[dict(value=key, title=title, selected=key == selected[0]) for key, _, title in scopes],
-        legacy=legacy, retry_tasks=_retry_tasks(application, tasks, labels),
+        legacy=legacy, retry_tasks=retry_tasks, unknown_retry_tasks=unknown_retry_tasks,
         diagnostics=diagnostics)
 
 

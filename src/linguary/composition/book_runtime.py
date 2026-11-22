@@ -248,8 +248,7 @@ class ProvenanceClient:
         if rooted and error.outcome == 'not_sent':
             with self.service.uow.transaction() as transaction:
                 try:
-                    # Only a still-created row can be cancelled. A charged send stays sent.
-                    transaction.work.cancel_unsent_attempt(attempt_id)
+                    transaction.work.rollback_not_sent_attempt(attempt_id)
                 except WorkStateError:
                     return
             return

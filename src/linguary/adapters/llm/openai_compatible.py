@@ -162,7 +162,8 @@ class OpenAICompatibleLLMClient(LLMClient):
                     violation=Violation('provider_content_filter', request.kind.value,
                                         safe_message='Провайдер остановил ответ фильтром содержимого'),
                 )
-            if truncated and (message is None or message.get('content') is None):
+            content_value = None if message is None else message.get('content')
+            if truncated and not isinstance(content_value, str):
                 raise LLMResponseFormatError(
                     'ответ модели оборван по лимиту токенов', truncated=True,
                     violation=Violation('provider_truncated', request.kind.value,

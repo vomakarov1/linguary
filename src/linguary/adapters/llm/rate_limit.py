@@ -51,7 +51,7 @@ def _retrieve_task_exception(task: asyncio.Task[object]) -> None:
 
 
 class LLMRateLimiter:
-    """Shared request reservations, concurrency cap, and independent provider cool-down delay."""
+    """FIFO admission, a concurrency cap, and an independent provider cool-down."""
 
     def __init__(
         self,
@@ -201,17 +201,16 @@ class LLMRateLimiter:
                 with self._lock:
                     if self._head_wake is wake:
                         self._head_wake = None
-        except asyncio.CancelledError:
+        finally:
             with self._lock:
                 was_head = bool(self._pacing_waiters) and self._pacing_waiters[0] is ticket
                 try:
                     self._pacing_waiters.remove(ticket)
                 except ValueError:
-                    pass
+                    was_head = False
                 if was_head:
                     self._head_wake = None
                     self._signal_next_pacing_locked()
-            raise
 
     def _pacing_deadline_locked(self, now: float) -> float:
         if self._interval and self._last_admitted is not None:
@@ -233,35 +232,56 @@ class LLMRateLimiter:
             )
         finally:
             if not sleep_task.done():
-                sleep_task.cancel()
-            sleep_task.add_done_callback(_retrieve_task_exception)
+                try:
+                    sleep_task.cancel()
+                except RuntimeError:
+                    sleep_task = None
+            if sleep_task is not None:
+                try:
+                    sleep_task.add_done_callback(_retrieve_task_exception)
+                except RuntimeError:
+                    pass
         if sleep_task.done() and not sleep_task.cancelled():
             error = sleep_task.exception()
             if error is not None:
                 raise error
 
     def _signal_next_pacing_locked(self) -> None:
-        if self._pacing_waiters:
-            self._signal(self._pacing_waiters[0])
+        while self._pacing_waiters:
+            head = self._pacing_waiters[0]
+            if self._deliver(head):
+                return
+            self._pacing_waiters.popleft()
+            if (self._head_wake is not None and not self._head_wake.done()
+                    and self._head_wake.get_loop() is head.get_loop()):
+                self._head_wake = None
 
     def _wake_pacing_head_locked(self) -> None:
-        if self._head_wake is not None:
-            self._signal(self._head_wake)
-
-    def _signal(self, waiter: asyncio.Future[None]) -> None:
-        if waiter.done():
+        if self._head_wake is None:
             return
+        if self._deliver(self._head_wake):
+            return
+        wake = self._head_wake
+        self._head_wake = None
+        if self._pacing_waiters and self._pacing_waiters[0].get_loop() is wake.get_loop():
+            self._pacing_waiters.popleft()
+        self._signal_next_pacing_locked()
+
+    def _deliver(self, waiter: asyncio.Future[None]) -> bool:
+        if waiter.done():
+            return True
         try:
             running_loop = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
         if running_loop is waiter.get_loop():
             waiter.set_result(None)
-        else:
-            try:
-                waiter.get_loop().call_soon_threadsafe(self._resolve_waiter, waiter)
-            except RuntimeError:
-                return
+            return True
+        try:
+            waiter.get_loop().call_soon_threadsafe(self._resolve_waiter, waiter)
+        except RuntimeError:
+            return False
+        return True
 
     def hold(self, seconds: float) -> None:
         """Extend the provider cool-down. Ignore non-numeric, non-finite, and non-positive delays.

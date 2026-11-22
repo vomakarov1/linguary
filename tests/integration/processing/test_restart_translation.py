@@ -49,11 +49,12 @@ async def make_partial_root(tmp_path):
     return app, fake, document, run, task, root, accepted[0], unfinished[0]
 
 
-def restart(app, root):
+def restart(app, root, *, acknowledge=False):
     return app.restart_translation(RestartTranslationCommand(
         book_id=root.book_id,
         root_id=root.id,
         expected_generation=root.generation,
+        acknowledge_unknown_outcome=acknowledge,
     ))
 
 
@@ -156,7 +157,7 @@ async def test_concurrent_old_response_cannot_overwrite_successor(tmp_path):
         await asyncio.wait_for(entered.wait(), 5)
         with app.unit_of_work.transaction() as transaction:
             old_root, = transaction.work.list_roots("book-1", run_id=run.id)
-        result = restart(app, old_root)
+        result = restart(app, old_root, acknowledge=True)
         release.set()
         old_completed = await asyncio.wait_for(running, 5)
         assert old_completed is not None
@@ -237,7 +238,7 @@ async def test_restart_one_root_keeps_other_dispatch_roots_running(tmp_path):
 
         running = asyncio.create_task(app.runner.run_next())
         await asyncio.wait_for(entered.wait(), 5)
-        successor = restart(app, restarted_root)
+        successor = restart(app, restarted_root, acknowledge=True)
         release.set()
         completed_dispatcher = await asyncio.wait_for(running, 5)
         assert completed_dispatcher is not None
@@ -469,7 +470,7 @@ async def test_restart_one_root_at_concurrency_2_keeps_sibling_running_and_saved
         sibling_root = next(root for root in roots if root.id != restarted_root.id)
         sibling_block = seen[1]
         restarted["id"] = seen[0]
-        successor = restart(app, restarted_root)
+        successor = restart(app, restarted_root, acknowledge=True)
         gates[seen[0]].set()
         await asyncio.wait_for(restarted_returned.wait(), 5)
         await asyncio.sleep(0)

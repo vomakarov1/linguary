@@ -458,7 +458,7 @@ async def test_ac1_parallel_restart_isolation(tmp_path):
         sibling_root = next(root for root in roots if root.id != restarted_root.id)
         sibling_block = seen[1]
         restarted_block["id"] = seen[0]
-        successor = restart(app, restarted_root)
+        successor = restart(app, restarted_root, acknowledge=True)
         gates[seen[0]].set()
         await asyncio.wait_for(restarted_returned.wait(), 5)
         await asyncio.sleep(0)
@@ -673,6 +673,72 @@ async def test_ac2_max_attempts_1_manual_continue(tmp_path):
         await app.aclose()
 
 
+async def test_connect_error_after_send_does_not_spend_scope_budget(tmp_path):
+    """A completed ConnectError after the send mark rolls the charge back and stays continuable."""
+
+    class _ConnectThenTranslate(FakeLLMClient):
+        def __init__(self, replies):
+            super().__init__(replies)
+            self.connects_left = 3
+            self.gateway_calls = 0
+
+        async def generate(self, request):
+            if request.stage == LLMCallStage.TRANSLATION_UNIT and self.connects_left > 0:
+                self.connects_left -= 1
+                stub = _HttpStub(error=httpx.ConnectError("соединение закрыто"))
+                gateway = _gateway(stub)
+                self.gateway_calls += 1
+                try:
+                    await gateway.generate(LLMRequest(
+                        kind=LLMResponseKind.TRANSLATION_RESULT,
+                        instructions="probe",
+                        input_text="probe",
+                    ))
+                finally:
+                    await gateway.aclose()
+            return await super().generate(request)
+
+    fake = _ConnectThenTranslate([analysis_reply(2), translation_reply(2)])
+    app = make_app(tmp_path, fake)
+    try:
+        _doc, run, task = await prepare(app)
+        completed = await drain_tasks(app)
+        assert completed[0].status is TaskStatus.FAILED, completed[0].last_error
+        assert fake.gateway_calls == 3
+        with app.unit_of_work.transaction() as tx:
+            root, = tx.work.list_roots("book-1", run_id=run.id)
+            scopes = tx.work.list_scopes(root.id)
+            attempts = tx.work.list_root_attempts(root.id)
+            assert root.calls_used == 0
+            assert attempts
+            assert all(tx.work.scope_attempt_count(scope.id) == 0 for scope in scopes)
+            assert {item.state for item in attempts} == {"cancelled"}
+            assert root.status in {"pending", "running"}
+            assert root.reason not in {"scope_limit", "unknown_outcome"}
+            assert root.superseded_by is None
+            tx.work.reconcile_recovery_attempts()
+            stored = tx.work.get_root(root.id)
+            assert stored.reason != "unknown_outcome"
+            assert stored.status in {"pending", "running"}
+            assert all(item.state != "unknown" for item in tx.work.list_root_attempts(root.id))
+            root_id = root.id
+        fake.connects_left = 0
+        continued = app.retry_task(RetryTaskCommand(task_id=task.id))
+        assert continued.status is TaskStatus.PENDING
+        finished = await drain_tasks(app)
+        continued_task = next(item for item in finished if item.id == task.id)
+        assert continued_task.status is TaskStatus.SUCCEEDED, continued_task.last_error
+        with app.unit_of_work.transaction() as tx:
+            stored = tx.work.get_root(root_id)
+            assert stored.id == root_id
+            assert stored.superseded_by is None
+            assert stored.status == "complete"
+            assert stored.calls_used == 1
+            assert stored.reason != "unknown_outcome"
+    finally:
+        await app.aclose()
+
+
 async def test_ac3_unknown_outcome_explicit_restart_and_fencing(tmp_path):
     """Unknown sends are not retried, need an audited restart, and reject late writes of the old generation."""
     for status in (502, 504, 524):
@@ -783,6 +849,7 @@ async def test_ac3_unknown_outcome_explicit_restart_and_fencing(tmp_path):
             "linguary.application.use_cases.restart_translation", fromlist=["RestartTranslationCommand"],
         ).RestartTranslationCommand(
             book_id="book-1", root_id=root.id, expected_generation=root.generation,
+            acknowledge_unknown_outcome=True,
         ))
         _open_gate(limited_app, release)
         await asyncio.wait_for(worker, 5)

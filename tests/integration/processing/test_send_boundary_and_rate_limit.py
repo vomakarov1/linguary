@@ -95,7 +95,8 @@ async def test_restarted_root_waiting_in_rate_limiter_never_sends_http(tmp_path)
         assert attempt.state == 'created'
         assert root.calls_used == 0
         app.restart_translation(RestartTranslationCommand(
-            book_id='book-1', root_id=root.id, expected_generation=root.generation))
+            book_id='book-1', root_id=root.id, expected_generation=root.generation,
+            acknowledge_unknown_outcome=True))
         _open_gate(app, release)
         await asyncio.wait_for(worker, 5)
         assert _translation_requests(fake, attempt.id) == []

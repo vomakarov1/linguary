@@ -912,7 +912,7 @@ def _failure_outcome(error: Exception, *, state: str | None, saw_response: bool)
 
 
 def _record_recovery_failure(work, attempt_id, violation, outcome: str) -> bool:
-    """Record the failure. A charged `not_sent` is stored as a known failure."""
+    """Record the failure. A rolled-back `not_sent` is already cancelled."""
     attempt = _attempt(work, attempt_id)
     state = None if attempt is None else attempt.state
     if outcome == "not_sent":

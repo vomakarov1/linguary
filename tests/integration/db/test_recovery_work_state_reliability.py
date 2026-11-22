@@ -35,9 +35,10 @@ def _manifest(blocks=BLOCKS, *, max_calls=12, max_scope_calls=6):
     }
 
 
-def _plant(tx, conditions, blocks=BLOCKS, *, scope_blocks=None, status="pending"):
+def _plant(tx, conditions, blocks=BLOCKS, *, scope_blocks=None, status="pending", max_calls=12, max_scope_calls=6):
     root = RecoveryRoot(
-        uid(), "book-1", conditions.id, uid(), _manifest(blocks),
+        uid(), "book-1", conditions.id, uid(),
+        _manifest(blocks, max_calls=max_calls, max_scope_calls=max_scope_calls),
         policy_version=CURRENT, status=status,
     )
     scope = RecoveryScope(uid(), root.id, tuple(scope_blocks or blocks))
@@ -381,3 +382,61 @@ def test_reconcile_recovery_attempts_recovers_claimed_scope_with_rejected_attemp
         assert kept.outcome["marker"] == "keep"
         assert tx.work.get_root(stale_root.id).generation == stale_generation
         assert tx.work.get_root(stale_root.id).status == stale_status
+
+
+def test_rollback_not_sent_attempt_releases_only_a_matching_charge(unit_of_work):
+    conditions, _, _ = prepare(unit_of_work)
+    with unit_of_work.transaction() as tx:
+        root, scope, task = _plant(tx, conditions, scope_blocks=("block-1",))
+        charged = _begin(tx, root, scope, task)
+        generation = tx.work.get_root(root.id).generation
+        scope_generation = tx.work.get_scope(scope.id).generation
+        tx.work.mark_attempt_sent(charged.attempt_id, expected_root_generation=generation)
+        assert tx.work.get_root(root.id).calls_used == 1
+        tx.work.rollback_not_sent_attempt(charged.attempt_id)
+        released = tx.work.get_scope(scope.id)
+        stored = tx.work.get_root(root.id)
+        assert tx.work.get_attempt(charged.attempt_id).state == "cancelled"
+        assert stored.calls_used == 0
+        assert stored.generation == generation
+        assert (released.status, released.generation) == ("pending", scope_generation + 1)
+        tx.work.reconcile_recovery_attempts()
+        assert tx.work.get_attempt(charged.attempt_id).state == "cancelled"
+        reconciled = tx.work.get_root(root.id)
+        assert reconciled.reason != "unknown_outcome"
+        assert reconciled.calls_used == 0
+
+        mismatched, mismatched_scope, mismatched_task = _plant(tx, conditions, scope_blocks=("block-2",))
+        sent = _begin(tx, mismatched, mismatched_scope, mismatched_task)
+        live = tx.work.get_root(mismatched.id).generation
+        tx.work.mark_attempt_sent(sent.attempt_id, expected_root_generation=live)
+        tx.work.pause_root(mismatched.id, "transient_error", expected_generation=live)
+        charged_calls = tx.work.get_root(mismatched.id).calls_used
+        tx.work.rollback_not_sent_attempt(sent.attempt_id)
+        assert tx.work.get_attempt(sent.attempt_id).state == "cancelled"
+        assert tx.work.get_root(mismatched.id).calls_used == charged_calls == 1
+
+
+def test_begin_recovery_attempt_labels_scope_exhaustion_as_scope_limit(unit_of_work):
+    conditions, _, _ = prepare(unit_of_work)
+    with unit_of_work.transaction() as tx:
+        root, scope, task = _plant(
+            tx, conditions, scope_blocks=("block-1",), max_scope_calls=1, max_calls=12,
+        )
+        ctx = _begin(tx, root, scope, task)
+        generation = tx.work.get_root(root.id).generation
+        tx.work.mark_attempt_sent(ctx.attempt_id, expected_root_generation=generation)
+        tx.work.record_recovery_failure(ctx.attempt_id, LOCAL, outcome="known")
+        assert _begin(tx, tx.work.get_root(root.id), tx.work.get_scope(scope.id), task) is None
+        stopped = tx.work.get_root(root.id)
+        assert (stopped.status, stopped.reason) == ("stopped", "scope_limit")
+
+        limited, limited_scope, limited_task = _plant(
+            tx, conditions, scope_blocks=("block-2",), max_scope_calls=6, max_calls=1,
+        )
+        call = _begin(tx, limited, limited_scope, limited_task)
+        call_generation = tx.work.get_root(limited.id).generation
+        tx.work.mark_attempt_sent(call.attempt_id, expected_root_generation=call_generation)
+        tx.work.record_recovery_failure(call.attempt_id, LOCAL, outcome="known")
+        assert _begin(tx, tx.work.get_root(limited.id), tx.work.get_scope(limited_scope.id), limited_task) is None
+        assert tx.work.get_root(limited.id).reason == "limit"

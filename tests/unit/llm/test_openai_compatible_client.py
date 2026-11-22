@@ -1337,6 +1337,14 @@ async def test_length_truncation_preserved_on_null_content_and_dto_errors(
     assert dto_error.violation is not None
     assert dto_error.violation.rule_code == "provider_truncated"
 
+    non_string = await format_error_from(completion(
+        "",
+        choices=[{"message": {"role": "assistant", "content": ["part"]}, "finish_reason": "length"}],
+    ))
+    assert non_string.truncated is True
+    assert non_string.violation is not None
+    assert non_string.violation.rule_code == "provider_truncated"
+
 
 async def test_message_refusal_and_content_filter_detected_for_translation() -> None:
     content = as_content(translation_payload())

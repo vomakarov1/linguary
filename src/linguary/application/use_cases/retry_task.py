@@ -11,9 +11,10 @@ Retrying does not duplicate results: the task use case is idempotent by its
 `book_id + task_type + scope_id` key, and `TranslationUnit` results are saved in a single transaction
 as a whole (PRD § 17).
 
-An ordinary retry of a chapter translation or block regeneration does not clear an unknown
-outcome of a sent request and does not resume a root stopped on the call limit. Those need
-an explicit restart or a limit extension.
+An ordinary retry of a chapter translation, block regeneration, or chapter correction does
+not clear an unknown outcome of a sent request and does not resume a root stopped on the
+call limit. Translation and regeneration need an explicit restart or a limit extension.
+Chapter correction may send again only after an explicit duplicate-billing acknowledgement.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from dataclasses import dataclass
 from linguary.application.errors import ApplicationError
 from linguary.application.ports.persistence import UnitOfWork
 from linguary.domain import ProcessingTask, TaskStatus, TaskType
+from linguary.domain.book_conditions import thaw
 
 
 class RetryTaskError(ApplicationError):
@@ -39,6 +41,7 @@ class RetryTaskCommand:
     """Retry command: which task to return to the queue."""
 
     task_id: str
+    acknowledge_unknown_outcome: bool = False
 
 
 class RetryTask:
@@ -54,6 +57,13 @@ class RetryTask:
             if task is None:
                 raise TaskNotFoundError(f"задачи {command.task_id} нет в хранилище")
             _ensure_retryable(task)
+            if (
+                command.acknowledge_unknown_outcome
+                and task.task_type is TaskType.CHAPTER_CORRECTION
+            ):
+                acknowledge = getattr(transaction.work, "acknowledge_unknown_attempts", None)
+                if callable(acknowledge):
+                    acknowledge(task.id)
             allowed, reason = is_task_retryable_for_recovery(transaction, task)
             if not allowed:
                 raise RetryTaskError(
@@ -97,9 +107,13 @@ def is_task_retryable_for_recovery(transaction, task) -> tuple[bool, str | None]
     Translation and regeneration tasks with bound roots need an active run, current
     book conditions, and at least one root that is not superseded, still
     `pending` or `running`, free of `attempt.state == 'unknown'`, and inside its
-    call budget. Other tasks, and translation tasks without bound roots, keep the
-    existing retry rules. A refusal names an explicit restart or a limit extension.
+    call budget. Chapter correction with an unacknowledged unknown attempt needs
+    an explicit duplicate-billing acknowledgement before another send. Other tasks,
+    and translation tasks without bound roots, keep the existing retry rules.
+    A refusal names an explicit restart or a limit extension.
     """
+    if task.task_type is TaskType.CHAPTER_CORRECTION:
+        return _chapter_correction_ordinary_retry(transaction, task)
     if task.task_type not in _RECOVERY_TASKS:
         return True, None
     work = getattr(transaction, "work", None)
@@ -138,6 +152,27 @@ def is_task_retryable_for_recovery(transaction, task) -> tuple[bool, str | None]
     if not restart and not extend:
         restart = True
     return False, _refusal(task.id, restart=restart, extend=extend, unknown=unknown, stale=False)
+
+
+def _chapter_correction_ordinary_retry(transaction, task) -> tuple[bool, str | None]:
+    work = getattr(transaction, "work", None)
+    if work is None:
+        return True, None
+    listed = getattr(work, "list_task_attempts", None)
+    if not callable(listed):
+        return True, None
+    attempts = listed(task.id)
+    if any(
+        item.state == "unknown" and not _acknowledged_duplicate_billing(item)
+        for item in attempts
+    ):
+        return False, _refusal(task.id, restart=True, extend=False, unknown=True, stale=False)
+    return True, None
+
+
+def _acknowledged_duplicate_billing(attempt) -> bool:
+    outcome = thaw(getattr(attempt, "outcome", None) or {})
+    return outcome.get("acknowledged_duplicate_billing_risk") is True
 
 
 def _bound_root_ids(binding) -> tuple[str, ...]:

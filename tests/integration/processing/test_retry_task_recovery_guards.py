@@ -166,6 +166,49 @@ def test_retry_task_rejects_unknown_outcome_and_limit_stopped_roots(unit_of_work
         assert tx.tasks.get(unknown_task.id).status is TaskStatus.FAILED
         assert tx.work.get_root(limit_root.id) == limit_before
         assert tx.tasks.get(limit_task.id).status is TaskStatus.FAILED
+    with pytest.raises(RetryTaskError, match='явный перезапуск'):
+        RetryTask(unit_of_work=unit_of_work)(RetryTaskCommand(
+            task_id=unknown_task.id, acknowledge_unknown_outcome=True,
+        ))
+    with unit_of_work.transaction() as tx:
+        assert tx.tasks.get(unknown_task.id).status is TaskStatus.FAILED
+        assert tx.work.get_attempt(unknown_attempt.id).state == 'unknown'
+
+
+def test_chapter_correction_unknown_retry_requires_acknowledgement(unit_of_work):
+    from linguary.domain.book_conditions import thaw
+
+    run, conditions = _open_book(unit_of_work, 'book-correction')
+    with unit_of_work.transaction() as tx:
+        task = ProcessingTask(
+            str(uuid4()), conditions.book_id, TaskType.CHAPTER_CORRECTION, 'section-1',
+            status=TaskStatus.FAILED, attempts=1,
+            last_error=TaskError(ErrorType.TRANSIENT, 'временный сбой обработки', 'detail'),
+            operation_id=str(uuid4()), policy_version='chapter-correction-v1',
+        )
+        tx.tasks.add(task)
+        attempt = CallAttempt(
+            str(uuid4()), conditions.book_id, state='unknown', task_id=task.id, run_id=run.id,
+            conditions_id=conditions.id,
+        )
+        tx.work.add_attempt(attempt)
+        attempt_id = attempt.id
+
+    with pytest.raises(RetryTaskError, match='явный перезапуск'):
+        _retry(unit_of_work, task)
+    with unit_of_work.transaction() as tx:
+        assert tx.tasks.get(task.id).status is TaskStatus.FAILED
+        assert tx.work.get_attempt(attempt_id).state == 'unknown'
+
+    restarted = RetryTask(unit_of_work=unit_of_work)(RetryTaskCommand(
+        task_id=task.id, acknowledge_unknown_outcome=True,
+    ))
+    assert restarted.status is TaskStatus.PENDING
+    with unit_of_work.transaction() as tx:
+        stored = tx.work.get_attempt(attempt_id)
+        assert stored.state == 'unknown'
+        assert thaw(stored.outcome)['acknowledged_duplicate_billing_risk'] is True
+        assert tx.tasks.get(task.id).status is TaskStatus.PENDING
 
 
 def test_retry_task_allows_partial_chapter_when_one_root_retryable(unit_of_work):

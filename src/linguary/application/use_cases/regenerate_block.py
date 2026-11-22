@@ -26,7 +26,6 @@ import asyncio
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
-import inspect
 from uuid import uuid4
 
 from linguary.application.block_processing import (
@@ -166,36 +165,6 @@ class RegenerateBlock:
         self._id_factory = id_factory or _new_id
         self._validator = validator
         self._recovery = Recovery(unit_of_work)
-        # save() learns chapter_num in a later change and allocates inside its
-        # transaction. Until that parameter exists, reserve the ids here.
-        original_save = self._call.save
-
-        def save(*, chapter_num: int, **kwargs):
-            if "chapter_num" in inspect.signature(original_save).parameters:
-                return original_save(chapter_num=chapter_num, **kwargs)
-            results = tuple(kwargs.get("results") or ())
-            notes = [note for result in results for note in result.language_notes]
-            if notes:
-                with self._unit_of_work.transaction() as transaction:
-                    issued = transaction.results.allocate_note_ids(
-                        kwargs["run_id"], chapter_num, len(notes)
-                    )
-                cursor = 0
-                rewritten = []
-                for result in results:
-                    count = len(result.language_notes)
-                    rewritten.append(replace(
-                        result,
-                        language_notes=tuple(
-                            replace(note, id=issued[cursor + offset])
-                            for offset, note in enumerate(result.language_notes)
-                        ),
-                    ))
-                    cursor += count
-                kwargs = {**kwargs, "results": tuple(rewritten)}
-            return original_save(**kwargs)
-
-        self._call.save = save
 
     async def __call__(self, command: RegenerateBlockCommand) -> RegenerateBlockResult:
         """One ALG-04 cycle for a single block (PRD § 13, § 19.3)."""

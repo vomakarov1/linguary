@@ -1374,8 +1374,12 @@ class SqlAlchemyWorkRepository:
                 raise RecoveryError('conditions_unavailable', root_id)
         count = self.scope_attempt_count(scope_id)
         policy = root.manifest['policy']
-        if count >= policy['max_scope_calls'] or root.calls_used >= policy['max_calls'] + root.extra_calls:
+        if root.calls_used >= policy['max_calls'] + root.extra_calls:
             self.stop_root(root_id, 'limit')
+            return None
+        if count >= policy['max_scope_calls']:
+            # Scope exhaustion is not a call-limit extension.
+            self.stop_root(root_id, 'scope_limit')
             return None
         claimed = self.claim_scope(scope_id, expected_generation=scope.generation)
         ordinal = self._next_ordinal(root_id)
@@ -1494,6 +1498,60 @@ class SqlAlchemyWorkRepository:
                 RecoveryScopeRow.id == attempt.scope_id, RecoveryScopeRow.generation == attempt.generation,
                 RecoveryScopeRow.status == 'claimed',
             ).values(status='pending', generation=RecoveryScopeRow.generation + 1))
+        self._session.flush()
+
+    def rollback_not_sent_attempt(self, attempt_id):
+        attempt = self.get_attempt(attempt_id)
+        if attempt is None or attempt.state != 'sent':
+            raise WorkStateError('состояние попытки изменилось')
+        if attempt.root_id is not None:
+            root = self.get_root(attempt.root_id)
+            root_generation = (attempt.context or {}).get('root_generation')
+            if (root is not None and root.calls_used > 0
+                    and root.generation == root_generation):
+                self._session.execute(update(RecoveryRootRow).where(
+                    RecoveryRootRow.id == root.id,
+                    RecoveryRootRow.generation == root_generation,
+                    RecoveryRootRow.calls_used == root.calls_used,
+                    RecoveryRootRow.calls_used > 0,
+                ).values(calls_used=RecoveryRootRow.calls_used - 1))
+        changed = self._session.execute(update(LLMAttemptRow).where(
+            LLMAttemptRow.id == attempt_id, LLMAttemptRow.state == 'sent',
+        ).values(state='cancelled'))
+        if changed.rowcount != 1:
+            raise WorkStateError('состояние попытки изменилось')
+        if attempt.scope_id is not None:
+            self._session.execute(update(RecoveryScopeRow).where(
+                RecoveryScopeRow.id == attempt.scope_id,
+                RecoveryScopeRow.generation == attempt.generation,
+                RecoveryScopeRow.status == 'claimed',
+            ).values(status='pending', generation=RecoveryScopeRow.generation + 1))
+        if attempt.root_id is not None:
+            root_row = self._session.get(RecoveryRootRow, attempt.root_id)
+            if root_row is not None:
+                self._session.refresh(root_row)
+        attempt_row = self._session.get(LLMAttemptRow, attempt_id)
+        if attempt_row is not None:
+            self._session.refresh(attempt_row)
+        if attempt.scope_id is not None:
+            scope_row = self._session.get(RecoveryScopeRow, attempt.scope_id)
+            if scope_row is not None:
+                self._session.refresh(scope_row)
+        self._session.flush()
+
+    def acknowledge_unknown_attempts(self, task_id):
+        rows = self._session.scalars(select(LLMAttemptRow).where(
+            LLMAttemptRow.task_id == task_id, LLMAttemptRow.state == 'unknown',
+        )).all()
+        acknowledged_at = datetime.now(UTC).isoformat()
+        for row in rows:
+            outcome = dict(row.outcome_json or {'schema_version': 1})
+            if outcome.get('acknowledged_duplicate_billing_risk') is True:
+                continue
+            outcome.setdefault('schema_version', 1)
+            outcome['acknowledged_duplicate_billing_risk'] = True
+            outcome['acknowledged_at'] = acknowledged_at
+            row.outcome_json = outcome
         self._session.flush()
 
     def record_recovery_failure(self, attempt_id, violation, *, outcome="known"):

@@ -139,6 +139,13 @@ class RestartTranslation:
                 raise RestartTranslationError("неполная область перевода")
             pending_scopes.sort(key=lambda scope: positions[scope.ordered_blocks[0]])
             attempts = transaction.work.list_root_attempts(root.id)
+            in_flight = any(scope.status == "claimed" for scope in pending_scopes) or any(
+                attempt.state == "sent" for attempt in attempts
+            )
+            if in_flight and not command.acknowledge_unknown_outcome:
+                raise RestartTranslationError(
+                    "нельзя перезапустить перевод, пока запрос ещё выполняется"
+                )
             had_unknown = root.reason in _UNKNOWN_REASONS or any(
                 attempt.state == "unknown" for attempt in attempts
             )

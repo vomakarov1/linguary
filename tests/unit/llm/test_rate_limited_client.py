@@ -805,6 +805,7 @@ async def test_negative_monotonic_clock_and_closed_loop_wakeup():
     extra: asyncio.Task | None = None
     try:
         await asyncio.to_thread(queue_on_dead_loop)
+        dead.set_exception_handler(lambda *_args: None)
         dead.close()
         live = asyncio.create_task(capped.acquire_concurrency())
         await asyncio.sleep(0)
@@ -817,9 +818,8 @@ async def test_negative_monotonic_clock_and_closed_loop_wakeup():
         capped.release_concurrency()
         await asyncio.wait_for(extra, timeout=1)
     finally:
-        for task in parked:
-            task._log_destroy_pending = False  # type: ignore[attr-defined]
         if not dead.is_closed():
+            dead.set_exception_handler(lambda *_args: None)
             dead.close()
         for task in (live, extra):
             if task is not None and not task.done():
@@ -827,4 +827,70 @@ async def test_negative_monotonic_clock_and_closed_loop_wakeup():
         pending = [task for task in (live, extra) if task is not None]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_pacing_sleep_error_does_not_leave_a_dead_head():
+    """A non-cancel sleep failure drops the FIFO ticket and lets the next waiter admit."""
+    from linguary.adapters.llm.rate_limit import LLMRateLimiter
+
+    clock = ManualClock()
+    failed = False
+
+    async def sleep(seconds: float) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("sleep failed")
+        await clock.sleep(seconds)
+
+    limiter = LLMRateLimiter(60, clock=clock, sleep=sleep)
+    await limiter.acquire()
+    with pytest.raises(RuntimeError, match="sleep failed"):
+        await limiter.acquire()
+    await asyncio.wait_for(limiter.acquire(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_closed_pacing_loop_does_not_block_the_next_waiter():
+    """A pacing head whose loop is closed is dropped instead of stalling the queue."""
+    from linguary.adapters.llm.rate_limit import LLMRateLimiter
+
+    clock = ManualClock()
+    dead = asyncio.new_event_loop()
+
+    async def sleep(seconds: float) -> None:
+        if asyncio.get_running_loop() is dead:
+            await asyncio.Event().wait()
+        await clock.sleep(seconds)
+
+    limiter = LLMRateLimiter(60, clock=clock, sleep=sleep)
+    await limiter.acquire()
+    parked: list[asyncio.Task] = []
+
+    def queue_on_dead_loop() -> None:
+        async def queue_dead_waiter() -> None:
+            task = asyncio.create_task(limiter.acquire())
+            for _ in range(5):
+                await asyncio.sleep(0)
+            parked.append(task)
+
+        dead.run_until_complete(queue_dead_waiter())
+
+    live: asyncio.Task | None = None
+    try:
+        await asyncio.to_thread(queue_on_dead_loop)
+        assert parked and not parked[0].done()
+        dead.set_exception_handler(lambda *_args: None)
+        dead.close()
+        live = asyncio.create_task(limiter.acquire())
+        limiter.set_limit(60)
+        await asyncio.wait_for(live, timeout=1)
+    finally:
+        if not dead.is_closed():
+            dead.set_exception_handler(lambda *_args: None)
+            dead.close()
+        if live is not None and not live.done():
+            live.cancel()
+            await asyncio.gather(live, return_exceptions=True)
 

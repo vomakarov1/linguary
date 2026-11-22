@@ -169,7 +169,7 @@ def test_stalled_processing_without_failed_tasks_stops_auto_refresh(
     assert 'страница обновится автоматически' not in page.text
 
 
-def restartable_unknown_root(app, *, book_id):
+def restartable_unknown_root(app, *, book_id, reason='unknown_outcome'):
     scenario = store_book(app, status=BookStatus.PROCESSING, book_id=book_id)
     continue_legacy(app, book_id)
     start_run(app, scenario)
@@ -198,7 +198,7 @@ def restartable_unknown_root(app, *, book_id):
         )
         root = RecoveryRoot(
             str(uuid4()), scenario.book_id, conditions.id, str(uuid4()), manifest,
-            status='stopped', reason='unknown_outcome', operation_kind='translation',
+            status='stopped', reason=reason, operation_kind='translation',
             policy_version=CURRENT_TRANSLATION_POLICY,
         )
         tx.work.add_root(root)
@@ -249,6 +249,59 @@ def test_web_restart_route_requires_separate_unknown_acknowledgement(
     )
     assert html_allowed.status_code == 303, html_allowed.text
     assert html_allowed.headers['location'] == f'/books/{html_scenario.book_id}'
+
+
+def _plant_attempt(app, root, *, state, claim=False):
+    with app.unit_of_work.transaction() as tx:
+        scope = next(item for item in tx.work.list_scopes(root.id) if item.ordered_blocks)
+        if claim:
+            scope = tx.work.claim_scope(scope.id, expected_generation=scope.generation)
+        tx.work.add_attempt(CallAttempt(
+            str(uuid4()), root.book_id, state=state, generation=scope.generation,
+            conditions_id=root.conditions_id, root_id=root.id, scope_id=scope.id,
+            run_id=root.manifest['active_run_id'],
+        ))
+
+
+def test_web_restart_refuses_in_flight_send_without_acknowledgement(
+    configured_client, configured_application,
+):
+    sent_scenario, sent_root = restartable_unknown_root(
+        configured_application, book_id='inflight-sent', reason='limit',
+    )
+    _plant_attempt(configured_application, sent_root, state='sent')
+    sent_path = f'/books/{sent_scenario.book_id}/recovery/{sent_root.id}/restart'
+    denied = configured_client.post(sent_path, json=dict(
+        expected_generation=sent_root.generation, confirmed=True, acknowledge_unknown_outcome=False,
+    ))
+    assert denied.status_code == 409, denied.text
+    assert denied.json()['detail']['reason_code'] == 'state_conflict'
+    with configured_application.unit_of_work.transaction() as tx:
+        assert tx.work.get_root(sent_root.id).superseded_by is None
+    acknowledged = configured_client.post(sent_path, json=dict(
+        expected_generation=sent_root.generation, confirmed=True, acknowledge_unknown_outcome=True,
+    ))
+    assert acknowledged.status_code == 202, acknowledged.text
+    assert acknowledged.json()['successor_root_id']
+
+    claimed_scenario, claimed_root = restartable_unknown_root(
+        configured_application, book_id='inflight-claimed', reason='scope_limit',
+    )
+    _plant_attempt(configured_application, claimed_root, state='created', claim=True)
+    claimed_path = f'/books/{claimed_scenario.book_id}/recovery/{claimed_root.id}/restart'
+    claimed = configured_client.post(claimed_path, json=dict(
+        expected_generation=claimed_root.generation, confirmed=True,
+        acknowledge_unknown_outcome=False,
+    ))
+    assert claimed.status_code == 409, claimed.text
+    assert claimed.json()['detail']['reason_code'] == 'state_conflict'
+    with configured_application.unit_of_work.transaction() as tx:
+        assert tx.work.get_root(claimed_root.id).superseded_by is None
+    claimed_ack = configured_client.post(claimed_path, json=dict(
+        expected_generation=claimed_root.generation, confirmed=True,
+        acknowledge_unknown_outcome=True,
+    ))
+    assert claimed_ack.status_code == 202, claimed_ack.text
 
 
 def test_web_extend_limit_uses_application_use_case_and_preserves_reason_codes(
