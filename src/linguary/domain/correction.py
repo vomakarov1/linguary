@@ -10,6 +10,12 @@ from linguary.domain.tasks import TaskIdentity, TaskType
 
 CORRECTION_POLICY_VERSION = "chapter-correction-v1"
 CORRECTION_POLICY_VERSION_V2 = "chapter-correction-v2"
+CORRECTION_POLICY_VERSION_V3 = "chapter-correction-v3"
+
+
+def is_candidate_correction_policy(version: str | None) -> bool:
+    """Candidate review applies to chapter-correction v2 and v3, not legacy v1."""
+    return version in {CORRECTION_POLICY_VERSION_V2, CORRECTION_POLICY_VERSION_V3}
 
 
 def correction_policy(run_payload: Mapping) -> Mapping | None:
@@ -18,7 +24,11 @@ def correction_policy(run_payload: Mapping) -> Mapping | None:
         return None
     policy = run_payload["correction"]
     if (not isinstance(policy, Mapping) or policy.get("required") is not True
-            or policy.get("policy_version") not in {CORRECTION_POLICY_VERSION, CORRECTION_POLICY_VERSION_V2}):
+            or policy.get("policy_version") not in {
+                CORRECTION_POLICY_VERSION,
+                CORRECTION_POLICY_VERSION_V2,
+                CORRECTION_POLICY_VERSION_V3,
+            }):
         raise WorkStateError("неподдерживаемая политика исправления главы")
     return policy
 

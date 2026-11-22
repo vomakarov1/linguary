@@ -2196,5 +2196,97 @@ def test_result_validator_wires_dialogue_note_leak_glossary_warnings_and_spellin
     )
 
 
+def test_truncated_true_precedes_coverage_and_structure_violations() -> None:
+    """Provider truncation outranks a missing block, a wrong mode, and empty text."""
+    blocks = make_blocks(2)
+    unit = make_unit(blocks)
+    present = make_block_result(blocks[0])
+    payloads = (
+        make_response((present,)),
+        make_response((
+            present,
+            make_block_result(
+                blocks[1],
+                treatment=BlockTreatment.READ_AS_IS,
+                translated_text=None,
+            ),
+        )),
+        make_response((
+            present,
+            with_fields(make_block_result(blocks[1]), translated_text=""),
+        )),
+    )
+    for payload in payloads:
+        rejected = rejection(payload, unit=unit, truncated=True)
+        assert rejected.violation is not None
+        assert rejected.violation.rule_code == "provider_truncated"
+
+
+def test_translation_policy_v3_and_v2_legacy_coexist() -> None:
+    """Reliability v3 is current; legacy and context v2 stay executable at validation v1."""
+    from linguary.application.translation_policy import (
+        CURRENT_TRANSLATION_POLICY,
+        LEGACY_TRANSLATION_POLICY,
+        TRANSLATION_POLICIES,
+        require_policy,
+    )
+
+    assert CURRENT_TRANSLATION_POLICY == "translation-reliability-v3"
+    assert set(TRANSLATION_POLICIES) == {
+        LEGACY_TRANSLATION_POLICY,
+        "translation-context-v2",
+        CURRENT_TRANSLATION_POLICY,
+    }
+    legacy = require_policy(LEGACY_TRANSLATION_POLICY)
+    context_v2 = require_policy("translation-context-v2")
+    current = require_policy(CURRENT_TRANSLATION_POLICY)
+    assert legacy.validation_policy == "v1"
+    assert context_v2.validation_policy == "v1"
+    assert current.validation_policy == "v2"
+    assert (legacy.version, context_v2.version, current.version) == (
+        "translation-context-legacy-v1",
+        "translation-context-v2",
+        "translation-reliability-v3",
+    )
+    assert legacy.max_neighbour_chars is None
+    assert legacy.capacity_retries_without_neighbours == 0
+    assert context_v2.max_neighbour_chars == current.max_neighbour_chars == 8000
+    assert context_v2.neighbours_per_side == current.neighbours_per_side == 2
+    assert (
+        context_v2.capacity_retries_without_neighbours
+        == current.capacity_retries_without_neighbours
+        == 1
+    )
+
+
+def test_candidate_correction_policy_helper_covers_v2_and_v3() -> None:
+    """Candidate correction accepts chapter-correction v2 and v3, not legacy v1."""
+    from linguary.domain.book_conditions import WorkStateError
+    from linguary.domain.correction import (
+        CORRECTION_POLICY_VERSION,
+        CORRECTION_POLICY_VERSION_V2,
+        CORRECTION_POLICY_VERSION_V3,
+        correction_policy,
+        is_candidate_correction_policy,
+    )
+
+    assert CORRECTION_POLICY_VERSION_V3 == "chapter-correction-v3"
+    assert is_candidate_correction_policy(CORRECTION_POLICY_VERSION_V2) is True
+    assert is_candidate_correction_policy("chapter-correction-v3") is True
+    assert is_candidate_correction_policy(CORRECTION_POLICY_VERSION) is False
+    assert is_candidate_correction_policy(None) is False
+    assert is_candidate_correction_policy("") is False
+    for version in (
+        CORRECTION_POLICY_VERSION,
+        CORRECTION_POLICY_VERSION_V2,
+        CORRECTION_POLICY_VERSION_V3,
+    ):
+        accepted = correction_policy({"correction": {"required": True, "policy_version": version}})
+        assert accepted is not None
+        assert accepted["policy_version"] == version
+    with pytest.raises(WorkStateError):
+        correction_policy({"correction": {"required": True, "policy_version": "chapter-correction-v9"}})
+
+
 
 

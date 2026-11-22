@@ -23,7 +23,8 @@ def test_unknown_policy_fails_closed():
     with pytest.raises(TranslationPolicyUnavailable):
         require_policy("translation-context-future")
     assert set(TRANSLATION_POLICIES) == {
-        "translation-context-legacy-v1", "translation-context-v2"
+        "translation-context-legacy-v1", "translation-context-v2",
+        "translation-reliability-v3",
     }
     assert require_policy("translation-context-legacy-v1").version != CURRENT_TRANSLATION_POLICY
 

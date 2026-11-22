@@ -7,6 +7,7 @@ from pathlib import Path
 from linguary.adapters.config import AppSettings, LLMSettings, StorageSettings
 from linguary.adapters.llm import FakeReply
 from correction_fakes import CorrectionAwareFakeLLMClient as FakeLLMClient
+from linguary.application.translation_policy import CURRENT_TRANSLATION_POLICY
 from linguary.application.use_cases.approve_glossary import StartProcessingCommand
 from linguary.composition import build_application, drain_tasks
 from linguary.domain import LLMCallStage, TaskStatus
@@ -112,7 +113,7 @@ async def test_brief_cases_reach_both_translation_routes(tmp_path):
             assert standard_by_target[target].ordered_block_ids == (target,)
             assert repeated_by_target[target].ordered_block_ids == (target,)
             for request in (standard_by_target[target], repeated_by_target[target]):
-                assert request.call_context.policy_version == "translation-context-v2"
+                assert request.call_context.policy_version == CURRENT_TRANSLATION_POLICY
                 assert request.call_context.prompt_hash == hashlib.sha256(
                     request.instructions.encode()
                 ).hexdigest()
